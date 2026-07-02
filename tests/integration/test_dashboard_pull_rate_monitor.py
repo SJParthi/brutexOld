@@ -84,13 +84,21 @@ def test_update_throughput_stamps_freshness() -> None:
     assert state.rate_limit.last_update_monotonic > float("-inf")
 
 
-def _client(state: DashboardState) -> object:
-    """Build a FastAPI ``TestClient`` over the dashboard app bound to *state*."""
+def _client(state: DashboardState, *, pull_active: bool | None = None) -> object:
+    """Build a FastAPI ``TestClient`` over the dashboard app bound to *state*.
+
+    ``pull_active`` injects the ``/api/v1/pull/rate`` stall gate's pull-run
+    probe (DEC-RATE-STALL-PULL-GATE-001): ``None`` (default) keeps the
+    PRODUCTION wiring — the app's own ``BackgroundPullJob.running`` (False on a
+    fresh test app, i.e. "no pull running"); a bool pins the signal so the
+    mid-pull / just-finished transitions are driven deterministically.
+    """
     pytest.importorskip("fastapi")
     from brutex.dashboard.app import build_app
     from fastapi.testclient import TestClient
 
-    return TestClient(build_app(state))
+    probe = None if pull_active is None else (lambda: pull_active)
+    return TestClient(build_app(state, pull_active_probe=probe))
 
 
 class TestPullRateRoute:
@@ -130,7 +138,7 @@ class TestPullRateRoute:
             },
             {"effective_rps": 6.4, "latency_ms_p95": 200.0},
         )
-        with _client(state) as c:  # type: ignore[attr-defined]
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
             resp = c.get("/api/v1/pull/rate")
         body = resp.json()
         assert body["flow_state"] == "flowing"
@@ -156,7 +164,7 @@ class TestPullRateRoute:
             {"current_rps": 8.0, "recent_hits": 50, "recent_minute": 2, "ceiling_per_min": 500},
             {"effective_rps": 0.0, "latency_ms_p95": 9999.0},
         )
-        with _client(state) as c:  # type: ignore[attr-defined]
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
             resp = c.get("/api/v1/pull/rate")
         body = resp.json()
         assert body["flow_state"] == "stalled"
@@ -310,7 +318,7 @@ class TestFnoPhaseLiveness:
         # tick deterministically (what the background loop does on its cadence).
         assert sampler.sample_once() is True
 
-        with _client(state) as c:  # type: ignore[attr-defined]
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
             body = c.get("/api/v1/pull/rate").json()
         # LIVE during the F&O phase — never the blank/idle widget the bug produced.
         assert body["flow_state"] == "flowing"
@@ -358,7 +366,7 @@ class TestFnoPhaseLiveness:
         sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
         assert sampler.sample_once() is True
 
-        with _client(state) as c:  # type: ignore[attr-defined]
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
             body = c.get("/api/v1/pull/rate").json()
         assert body["flow_state"] == "flowing"
         assert body["active"] is True
@@ -395,7 +403,7 @@ class TestFnoPhaseLiveness:
         sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
         assert sampler.sample_once() is True
 
-        with _client(state) as c:  # type: ignore[attr-defined]
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
             body = c.get("/api/v1/pull/rate").json()
         assert body["active"] is True  # a tick landed → the pull is "active"
         assert body["flow_state"] == "stalled"  # measured completed-rate at floor → STALLED
@@ -420,7 +428,7 @@ class TestFnoPhaseLiveness:
         sampler = RatePanelSampler(session_rate=session, observer=make_rate_observer(state))
         assert sampler.sample_once() is True
 
-        with _client(state) as c:  # type: ignore[attr-defined]
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
             body = c.get("/api/v1/pull/rate").json()
         assert body["active"] is True  # a tick just landed → the pull is "active"
         assert body["flow_state"] == "stalled"  # but issuing NOTHING → honestly stalled
@@ -472,7 +480,7 @@ class TestMeasuredCountsAreRealEndToEnd:
 
         state = DashboardState()
         make_rate_observer(state)(snap, {"effective_rps": 5.0})
-        with _client(state) as c:  # type: ignore[attr-defined]
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
             body = c.get("/api/v1/pull/rate").json()
         # The route's measured metrics EQUAL the controller's real windowed issue counts —
         # provably real tracking, not a per-second figure multiplied up.
@@ -481,3 +489,58 @@ class TestMeasuredCountsAreRealEndToEnd:
         assert body["req_per_hour_measured"] == 5
         # The req/sec evidence count is the controller's trailing-1s count (a real subset).
         assert body["req_per_sec_count"] == snap["recent_1s"]
+
+
+class TestStallGateOnPullCompletion:
+    """DEC-RATE-STALL-PULL-GATE-001 — the operator's mislabel, pinned end to end.
+
+    A pull that just COMPLETED (fresh final tick, near-zero measured rate, the
+    background job no longer running) must read ``done`` — NEVER the red
+    ``PULL RATE stalled`` the widget showed right after an 80/80-complete pull.
+    """
+
+    def _completed_pull_state(self) -> DashboardState:
+        """A panel exactly as a just-finished pull leaves it: fresh tick, rate ~0."""
+        state = DashboardState()
+        make_rate_observer(state)(
+            {"current_rps": 8.0, "recent_hits": 0, "recent_minute": 4, "ceiling_per_min": 500},
+            {"effective_rps": 0.0, "latency_ms_p95": 250.0},
+        )
+        return state
+
+    def test_production_default_reads_done_after_completion(self) -> None:
+        """The PRODUCTION wiring (no injected probe): job not running → done."""
+        state = self._completed_pull_state()
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "done"
+        assert body["stalled"] is False
+        assert body["active"] is False
+        # History, not a live rate — zeroed (Golden Rule #1); staleness stays real.
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["req_per_min"] == 0
+        assert body["seconds_since_update"] is not None
+
+    def test_explicit_no_pull_probe_reads_done(self) -> None:
+        """An injected pull_active=False probe pins the gate deterministically."""
+        state = self._completed_pull_state()
+        with _client(state, pull_active=False) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "done"
+        assert body["stalled"] is False
+
+    def test_same_panel_mid_pull_still_reads_stalled(self) -> None:
+        """The SAME near-zero panel DURING an active pull keeps the honest red."""
+        state = self._completed_pull_state()
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "stalled"
+        assert body["stalled"] is True
+
+    def test_fresh_dashboard_stays_plain_idle(self) -> None:
+        """No tick ever + no pull → plain idle (done is reserved for a fresh tick)."""
+        state = DashboardState()
+        with _client(state) as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["stalled"] is False

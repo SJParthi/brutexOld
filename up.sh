@@ -85,15 +85,18 @@ auto-detected and recorded — you never type a path.
 
   --no-start           run every setup + self-check step, do not boot the server
   --print-lake-detect  internal: run only the lake detection (used by tests)
+  --link-logs          internal: run only the <repo>/logs symlink refresh (tests)
   -h, --help           this message
 EOF
 }
 
 PRINT_LAKE_DETECT=0
+LINK_LOGS_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-start) NO_START=1 ;;
     --print-lake-detect) PRINT_LAKE_DETECT=1 ;;
+    --link-logs) LINK_LOGS_ONLY=1 ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'up.sh: unknown flag %s (supported: --no-start, --help)\n' "$1" >&2; exit 1 ;;
   esac
@@ -186,6 +189,43 @@ resolve_log_file() {
   printf '%s/brutex.log' "$log_dir"
 }
 
+# Make the log visible INSIDE the project tree (DEC-LOGS-IN-PROJECT-001): create
+# or refresh an IDEMPOTENT symlink `<repo>/logs` → the resolved log DIRECTORY, so
+# clicking ▶ BruteX in IntelliJ shows the live log folder + file in the project
+# (the default log home ~/.brutex/logs is invisible to the IDE tree). Rules:
+#   * a fresh link is created (the log dir is mkdir'd first so it never dangles);
+#   * an existing symlink pointing elsewhere (a stale BRUTEX_LOG_DIR change) is
+#     REPOINTED; an already-correct one is left as-is (re-run = no-op);
+#   * a REAL directory/file named `logs` is NEVER clobbered — warn + leave it;
+#   * a failed ln/rm degrades to the plain path line — the boot NEVER breaks.
+# Prints ONE honest line either way. `<repo>/logs` is .gitignored. (`make run-raw`
+# needs no link — its LOG_DIR default ./.brutex-logs is already inside the repo.)
+link_repo_logs() {
+  log_file="$(resolve_log_file)"
+  log_dir="$(dirname "$log_file")"
+  link="$REPO_ROOT/logs"
+  mkdir -p "$log_dir" 2>/dev/null || true
+  if [ -L "$link" ]; then
+    if [ "$(readlink "$link")" != "$log_dir" ]; then
+      rm -f "$link" 2>/dev/null && ln -s "$log_dir" "$link" 2>/dev/null || {
+        printf 'logs → %s  (could not repoint the %s symlink)\n' "$log_file" "$link"
+        return 0
+      }
+    fi
+  elif [ -e "$link" ]; then
+    printf 'WARNING: %s exists and is NOT a symlink — left untouched (the log stays at %s)\n' \
+      "$link" "$log_file"
+    printf 'logs → %s\n' "$log_file"
+    return 0
+  else
+    ln -s "$log_dir" "$link" 2>/dev/null || {
+      printf 'logs → %s  (could not create the %s symlink)\n' "$log_file" "$link"
+      return 0
+    }
+  fi
+  printf 'logs → %s → %s\n' "$link" "$log_dir"
+}
+
 # Return 0 and print "<pid> <url>" when a live dashboard is found via the
 # service-discovery runtime file (brutex/config/runtime.py — PID + URLs written
 # on startup, PID-liveness is the staleness oracle). Return 1 otherwise.
@@ -208,14 +248,21 @@ if [ "$PRINT_LAKE_DETECT" -eq 1 ]; then
   exit 0
 fi
 
+# ── internal test hook — run ONLY the <repo>/logs symlink refresh ────────────
+if [ "$LINK_LOGS_ONLY" -eq 1 ]; then
+  link_repo_logs
+  exit 0
+fi
+
 # ── FAST PATH — re-run while a dashboard is up = no-op in under a second ─────
 # The dashboard URL + the rotating log-file location each get ONE clear line
 # (the running process printed its own on boot; this re-run exits before the
-# runtime prints anything, so the fast path repeats both for visibility).
+# runtime prints anything, so the fast path repeats both for visibility). The
+# <repo>/logs symlink is refreshed on EVERY path (DEC-LOGS-IN-PROJECT-001).
 if live="$(runtime_pid_alive)"; then
   printf 'already ready — BruteX dashboard is running (pid %s) at %s\n' \
     "${live%% *}" "${live#* }"
-  printf 'logs → %s\n' "$(resolve_log_file)"
+  link_repo_logs
   exit 0
 fi
 
@@ -464,9 +511,14 @@ fi
 if live="$(runtime_pid_alive)"; then
   printf 'already ready — BruteX dashboard is running (pid %s) at %s\n' \
     "${live%% *}" "${live#* }"
-  printf 'logs → %s\n' "$(resolve_log_file)"
+  link_repo_logs
   exit 0
 fi
+# In-project log visibility (DEC-LOGS-IN-PROJECT-001): refresh the <repo>/logs
+# symlink BEFORE the boot/no-start handoff so the IDE project tree shows the
+# live log folder the moment the dashboard starts (one honest mapping line;
+# the runtime itself then prints its own `[brutex] logs → <file>` on boot).
+link_repo_logs
 if [ "$NO_START" -eq 1 ]; then
   printf 'setup complete — start the dashboard with ./up.sh (or: %s -m brutex run) → %s\n' \
     "$VPY" "$DASHBOARD_URL"
