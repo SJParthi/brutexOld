@@ -1,0 +1,1220 @@
+{
+ "_meta": {
+  "decision": "DEC-GREEKS-ENGINE-PR2-001",
+  "generator": "tests/golden/generate_greeks_golden.py",
+  "reference": "mpmath dps=50 (erfc-based normal CDF + findroot IV inversion)",
+  "frozen_bits": "exact f64 bit patterns of the trading_core kernel on Linux x86_64 (CI reference platform)",
+  "tolerance": {
+   "rel": 1e-11,
+   "abs": 1e-12
+  },
+  "conventions": {
+   "model": "Black-76 on the forward, discount e^(-rT) (plan docs/GREEKS_ENGINE_PLAN.md section 2.2)",
+   "theta": "per calendar day, Act/365",
+   "vega": "per 1 vol-point (per 1% IV) = raw/100",
+   "rho": "per 1% rate = plan-form/100 (BSM-form K*T*df*N(d2))"
+  }
+ },
+ "cases": [
+  {
+   "id": "nifty_atm_call_30d",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.12,
+   "price": 320.79807165319954,
+   "reference_solve": {
+    "iv": 0.12,
+    "delta": 0.504161380804533,
+    "gamma": 0.0004907522587665488,
+    "theta": -5.288978785342721,
+    "vega": 26.730536045308916,
+    "rho": 9.47424195390684,
+    "price": 320.79807165319954,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.12,
+    "delta": 0.504161380804533,
+    "gamma": 0.0004907522587665488,
+    "theta": -5.288978785342721,
+    "vega": 26.730536045308916,
+    "rho": 9.47424195390684,
+    "price": 320.79807165319954,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fbeb851eb851eb6",
+    "delta": "3fe022170c4ec603",
+    "gamma": "3f4014ba736f8212",
+    "theta": "c01527ea0e01239d",
+    "vega": "403abb04690726a5",
+    "rho": "4022f2cfd764d791",
+    "price": "40740cc4e6c825e0",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fbeb851eb851eb8",
+    "delta": "3fe022170c4ec603",
+    "gamma": "3f4014ba736f8210",
+    "theta": "c01527ea0e01239f",
+    "vega": "403abb04690726a5",
+    "rho": "4022f2cfd764d791",
+    "price": "40740cc4e6c825e0",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_atm_put_30d",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.12,
+   "price": 320.79807165319954,
+   "reference_solve": {
+    "iv": 0.12,
+    "delta": -0.4905103990320564,
+    "gamma": 0.0004907522587665488,
+    "theta": -5.288978785342721,
+    "vega": 26.730536045308916,
+    "rho": -9.737911601840977,
+    "price": 320.79807165319954,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.12,
+    "delta": -0.4905103990320564,
+    "gamma": 0.0004907522587665488,
+    "theta": -5.288978785342721,
+    "vega": 26.730536045308916,
+    "rho": -9.737911601840977,
+    "price": 320.79807165319954,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fbeb851eb851eb6",
+    "delta": "bfdf6485ba8c32aa",
+    "gamma": "3f4014ba736f8212",
+    "theta": "c01527ea0e01239d",
+    "vega": "403abb04690726a5",
+    "rho": "c02379cf8caa7df1",
+    "price": "40740cc4e6c825e0",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fbeb851eb851eb8",
+    "delta": "bfdf6485ba8c32aa",
+    "gamma": "3f4014ba736f8210",
+    "theta": "c01527ea0e01239f",
+    "vega": "403abb04690726a5",
+    "rho": "c02379cf8caa7df1",
+    "price": "40740cc4e6c825e0",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_itm_call_30d",
+   "forward": 23500.0,
+   "strike": 23000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.14,
+   "price": 670.852993058045,
+   "reference_solve": {
+    "iv": 0.14000000000000004,
+    "delta": 0.7070699233667317,
+    "gamma": 0.0003604772870343403,
+    "theta": -5.225522347247752,
+    "vega": 22.90709707977536,
+    "rho": 13.105717977583684,
+    "price": 670.852993058045,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.14,
+    "delta": 0.7070699233667317,
+    "gamma": 0.00036047728703434036,
+    "theta": -5.22552234724775,
+    "vega": 22.90709707977536,
+    "rho": 13.105717977583684,
+    "price": 670.852993058045,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc1eb851eb851f6",
+    "delta": "3fe6a0511a9b0d01",
+    "gamma": "3f379fce28a4b615",
+    "theta": "c014e6ef5487c902",
+    "vega": "4036e83783a3eead",
+    "rho": "402a3620aab0a46e",
+    "price": "4084f6d2ee06404b",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc1eb851eb851ec",
+    "delta": "3fe6a0511a9b0d04",
+    "gamma": "3f379fce28a4b61f",
+    "theta": "c014e6ef5487c8f4",
+    "vega": "4036e83783a3eeaa",
+    "rho": "402a3620aab0a471",
+    "price": "4084f6d2ee06403b",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_otm_call_30d",
+   "forward": 23500.0,
+   "strike": 24000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.13,
+   "price": 157.1430584317392,
+   "reference_solve": {
+    "iv": 0.13,
+    "delta": 0.29088664846905543,
+    "gamma": 0.0003902730642580497,
+    "theta": -4.9616433807546,
+    "vega": 23.029051204722762,
+    "rho": 5.489336860759778,
+    "price": 157.1430584317392,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.13,
+    "delta": 0.29088664846905543,
+    "gamma": 0.0003902730642580497,
+    "theta": -4.9616433807546,
+    "vega": 23.029051204722762,
+    "rho": 5.489336860759778,
+    "price": 157.1430584317392,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc0a3d70a3d70a8",
+    "delta": "3fd29de30881210f",
+    "gamma": "3f3993b20c28d4b1",
+    "theta": "c013d8b90adb060d",
+    "vega": "4037076fe6563197",
+    "rho": "4015f514b8d6c326",
+    "price": "4063a493ef46b782",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc0a3d70a3d70a4",
+    "delta": "3fd29de30881210d",
+    "gamma": "3f3993b20c28d4b5",
+    "theta": "c013d8b90adb0606",
+    "vega": "4037076fe6563194",
+    "rho": "4015f514b8d6c324",
+    "price": "4063a493ef46b782",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_itm_put_30d",
+   "forward": 23500.0,
+   "strike": 24000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.13,
+   "price": 654.4789483500339,
+   "reference_solve": {
+    "iv": 0.13,
+    "delta": -0.7037851313675338,
+    "gamma": 0.00039027306425804963,
+    "theta": -4.873076715426685,
+    "vega": 23.029051204722762,
+    "rho": -14.13158591957842,
+    "price": 654.4789483500339,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.13,
+    "delta": -0.7037851313675338,
+    "gamma": 0.0003902730642580497,
+    "theta": -4.873076715426684,
+    "vega": 23.029051204722762,
+    "rho": -14.13158591957842,
+    "price": 654.4789483500339,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc0a3d70a3d70a8",
+    "delta": "bfe6856865544ed1",
+    "gamma": "3f3993b20c28d4b1",
+    "theta": "c0137e07d28ea07f",
+    "vega": "4037076fe6563197",
+    "rho": "c02c435f3aca6823",
+    "price": "408473d4e2df5f06",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc0a3d70a3d70a4",
+    "delta": "bfe6856865544ed2",
+    "gamma": "3f3993b20c28d4b5",
+    "theta": "c0137e07d28ea079",
+    "vega": "4037076fe6563194",
+    "rho": "c02c435f3aca6824",
+    "price": "408473d4e2df5ee6",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_otm_put_30d",
+   "forward": 23500.0,
+   "strike": 23000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.14,
+   "price": 173.51710313975025,
+   "reference_solve": {
+    "iv": 0.14,
+    "delta": -0.28760185646985764,
+    "gamma": 0.00036047728703434036,
+    "theta": -5.314089012575666,
+    "vega": 22.90709707977536,
+    "rho": -5.697666353573757,
+    "price": 173.51710313975025,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.14,
+    "delta": -0.28760185646985764,
+    "gamma": 0.00036047728703434036,
+    "theta": -5.314089012575666,
+    "vega": 22.90709707977536,
+    "rho": -5.697666353573757,
+    "price": 173.51710313975025,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc1eb851eb851f6",
+    "delta": "bfd268119df3a4ae",
+    "gamma": "3f379fce28a4b615",
+    "theta": "c01541a08cd42e90",
+    "vega": "4036e83783a3eead",
+    "rho": "c016ca690c7079c1",
+    "price": "4065b08c1be23c93",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc1eb851eb851ec",
+    "delta": "bfd268119df3a4a8",
+    "gamma": "3f379fce28a4b61f",
+    "theta": "c01541a08cd42e82",
+    "vega": "4036e83783a3eeaa",
+    "rho": "c016ca690c7079b8",
+    "price": "4065b08c1be23c73",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_deep_itm_call_30d",
+   "forward": 23500.0,
+   "strike": 20000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.18,
+   "price": 3481.6226482537077,
+   "reference_solve": {
+    "iv": 0.18000000000000652,
+    "delta": 0.993862240891952,
+    "gamma": 2.2854793405766435e-06,
+    "theta": 0.5639960150410619,
+    "vega": 0.18672992371235297,
+    "rho": 16.33490959948534,
+    "price": 3481.6226482537077,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.18,
+    "delta": 0.9938622408919523,
+    "gamma": 2.285479340575917e-06,
+    "theta": 0.5639960150410838,
+    "vega": 0.18672992371228686,
+    "rho": 16.334909599485346,
+    "price": 3481.6226482537077,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc70a3d70a3db19",
+    "delta": "3fefcdb82fab86ca",
+    "gamma": "3ec32c078e14c2d7",
+    "theta": "3fe20c415ef59c9a",
+    "vega": "3fc7e6c421c3da6a",
+    "rho": "403055bca2b0e7ea",
+    "price": "40ab333ecbc07d33",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc70a3d70a3d70a",
+    "delta": "3fefcdb82fab86d6",
+    "gamma": "3ec32c078e14a53f",
+    "theta": "3fe20c415ef59ff4",
+    "vega": "3fc7e6c421c3b14f",
+    "rho": "403055bca2b0e7f1",
+    "price": "40ab333ecbc07d23",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_deep_otm_put_30d",
+   "forward": 23500.0,
+   "strike": 20000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.22,
+   "price": 2.281188395997327,
+   "reference_solve": {
+    "iv": 0.22,
+    "delta": -0.00479512304511649,
+    "gamma": 9.39316100313797e-06,
+    "theta": -0.3435237077332805,
+    "vega": 0.9379907638982855,
+    "rho": -0.09449307941608343,
+    "price": 2.281188395997327,
+    "admissible": false
+   },
+   "reference_sigma": {
+    "iv": 0.22,
+    "delta": -0.0047951230451164905,
+    "gamma": 9.39316100313797e-06,
+    "theta": -0.34352370773328056,
+    "vega": 0.9379907638982856,
+    "rho": -0.09449307941608343,
+    "price": 2.281188395997327,
+    "admissible": false
+   },
+   "frozen_solve_bits": {
+    "iv": "3fcc28f5c28f5c2a",
+    "delta": "bf73a40d0a8b8e5b",
+    "gamma": "3ee3b2ea37d32069",
+    "theta": "bfd5fc4adc875de2",
+    "vega": "3fee040534dc951c",
+    "rho": "bfb830b2cdca584f",
+    "price": "40023fdfb3a695e8",
+    "admissible": false
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fcc28f5c28f5c29",
+    "delta": "bf73a40d0a8b8e5b",
+    "gamma": "3ee3b2ea37d32069",
+    "theta": "bfd5fc4adc875de2",
+    "vega": "3fee040534dc951c",
+    "rho": "bfb830b2cdca584f",
+    "price": "40023fdfb3a695e8",
+    "admissible": false
+   }
+  },
+  {
+   "id": "nifty_weekly_atm_call_2d",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 0.005479452054794521,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.15,
+   "price": 104.0592859748799,
+   "reference_solve": {
+    "iv": 0.15,
+    "delta": 0.5020359768788891,
+    "gamma": 0.0015283436108892877,
+    "theta": -25.996023113533518,
+    "vega": 6.93721445846802,
+    "rho": 0.6407554066125488,
+    "price": 104.0592859748799,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.15,
+    "delta": 0.5020359768788891,
+    "gamma": 0.0015283436108892874,
+    "theta": -25.996023113533518,
+    "vega": 6.93721445846802,
+    "rho": 0.6407554066125488,
+    "price": 104.0592859748799,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc3333333333334",
+    "delta": "3fe010adc0c38719",
+    "gamma": "3f590a5674da3c4a",
+    "theta": "c039fefb5eeaafc2",
+    "vega": "401bbfb525a1d580",
+    "rho": "3fe481117b845ac4",
+    "price": "405a03cb5766ce45",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc3333333333333",
+    "delta": "3fe010adc0c38719",
+    "gamma": "3f590a5674da3c4c",
+    "theta": "c039fefb5eeaafc1",
+    "vega": "401bbfb525a1d580",
+    "rho": "3fe481117b845ac4",
+    "price": "405a03cb5766ce45",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_weekly_otm_put_2d",
+   "forward": 23500.0,
+   "strike": 23300.0,
+   "t_years": 0.005479452054794521,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.17,
+   "price": 43.55834197390848,
+   "reference_solve": {
+    "iv": 0.16999999999999998,
+    "delta": -0.24642817653868593,
+    "gamma": 0.001066183496373197,
+    "theta": -23.302263934584964,
+    "vega": 5.484710799904475,
+    "rho": -0.3197052323634536,
+    "price": 43.55834197390848,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.17,
+    "delta": -0.24642817653868596,
+    "gamma": 0.001066183496373197,
+    "theta": -23.302263934584964,
+    "vega": 5.484710799904475,
+    "rho": -0.3197052323634536,
+    "price": 43.55834197390848,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc5c28f5c28f5b2",
+    "delta": "bfcf8af55f85f5f1",
+    "gamma": "3f5177e5cfe6bba3",
+    "theta": "c0374d612b51cd64",
+    "vega": "4015f05807266e46",
+    "rho": "bfd4760cef571c6f",
+    "price": "4045c777bff2f606",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc5c28f5c28f5c3",
+    "delta": "bfcf8af55f85f609",
+    "gamma": "3f5177e5cfe6bb9c",
+    "theta": "c0374d612b51cd7f",
+    "vega": "4015f05807266e4e",
+    "rho": "bfd4760cef571c7f",
+    "price": "4045c777bff2f586",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_expiry_minute_atm_call",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 2.061136478944698e-05,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.3,
+   "price": 12.768854617913437,
+   "reference_solve": {
+    "iv": 0.3,
+    "delta": 0.500271007888921,
+    "gamma": 0.012464271244128898,
+    "theta": -848.6353172057757,
+    "vega": 0.4256284214679052,
+    "rho": 0.0024205162005332395,
+    "price": 12.768854617913437,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.3,
+    "delta": 0.500271007888921,
+    "gamma": 0.012464271244128898,
+    "theta": -848.6353172057757,
+    "vega": 0.4256284214679052,
+    "rho": 0.0024205162005332395,
+    "price": 12.768854617913437,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fd3333333333334",
+    "delta": "3fe002385840a2ce",
+    "gamma": "3f8986de2ae563d8",
+    "theta": "c08a8515212feb24",
+    "vega": "3fdb3d7efd9cf9f7",
+    "rho": "3f63d430bd769b7f",
+    "price": "402989a74ffea078",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fd3333333333333",
+    "delta": "3fe002385840a2ce",
+    "gamma": "3f8986de2ae563d8",
+    "theta": "c08a8515212feb22",
+    "vega": "3fdb3d7efd9cf9f7",
+    "rho": "3f63d430bd769b7f",
+    "price": "402989a74ffea078",
+    "admissible": true
+   }
+  },
+  {
+   "id": "nifty_penny_otm_call_7d",
+   "forward": 23500.0,
+   "strike": 26500.0,
+   "t_years": 0.019178082191780823,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.35,
+   "price": 2.5847566146946543,
+   "reference_solve": {
+    "iv": 0.35,
+    "delta": 0.007044965017030387,
+    "gamma": 1.720268092505534e-05,
+    "theta": -1.5937480793091254,
+    "vega": 0.6376833513729161,
+    "rho": 0.03125488901366126,
+    "price": 2.5847566146946543,
+    "admissible": false
+   },
+   "reference_sigma": {
+    "iv": 0.35,
+    "delta": 0.007044965017030387,
+    "gamma": 1.720268092505534e-05,
+    "theta": -1.5937480793091257,
+    "vega": 0.6376833513729162,
+    "rho": 0.03125488901366127,
+    "price": 2.5847566146946543,
+    "admissible": false
+   },
+   "frozen_solve_bits": {
+    "iv": "3fd6666666666666",
+    "delta": "3f7cdb2e6598003d",
+    "gamma": "3ef209cf3b4bda4b",
+    "theta": "bff97ffdfc6b20c7",
+    "vega": "3fe467e6ea6b360f",
+    "rho": "3fa000a40c4ebcdf",
+    "price": "4004ad94e041df54",
+    "admissible": false
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fd6666666666666",
+    "delta": "3f7cdb2e6598003d",
+    "gamma": "3ef209cf3b4bda4b",
+    "theta": "bff97ffdfc6b20c7",
+    "vega": "3fe467e6ea6b360f",
+    "rho": "3fa000a40c4ebcdf",
+    "price": "4004ad94e041df54",
+    "admissible": false
+   }
+  },
+  {
+   "id": "banknifty_atm_call_30d",
+   "forward": 51000.0,
+   "strike": 51000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.14,
+   "price": 812.2189518341246,
+   "reference_solve": {
+    "iv": 0.13999999999999999,
+    "delta": 0.5052988208186292,
+    "gamma": 0.0001938161675310071,
+    "theta": -13.390523603459304,
+    "vega": 58.00785143403363,
+    "rho": 20.513441843766547,
+    "price": 812.2189518341246,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.14,
+    "delta": 0.5052988208186292,
+    "gamma": 0.00019381616753100708,
+    "theta": -13.390523603459306,
+    "vega": 58.00785143403363,
+    "rho": 20.513441843766547,
+    "price": 812.2189518341246,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc1eb851eb851e9",
+    "delta": "3fe02b686ec3f2b3",
+    "gamma": "3f29676433b3e0b0",
+    "theta": "c02ac7f2b5b258f5",
+    "vega": "404d0101469a3358",
+    "rho": "40348370ecb76011",
+    "price": "408961c069d1b7cd",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc1eb851eb851ec",
+    "delta": "3fe02b686ec3f2b3",
+    "gamma": "3f29676433b3e0ac",
+    "theta": "c02ac7f2b5b258fa",
+    "vega": "404d0101469a3358",
+    "rho": "40348370ecb76011",
+    "price": "408961c069d1b7cd",
+    "admissible": true
+   }
+  },
+  {
+   "id": "banknifty_otm_put_7d",
+   "forward": 51000.0,
+   "strike": 50000.0,
+   "t_years": 0.019178082191780823,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.16,
+   "price": 113.52663038944576,
+   "reference_solve": {
+    "iv": 0.16,
+    "delta": -0.1825589519070376,
+    "gamma": 0.0002341569155078845,
+    "theta": -21.337972946974197,
+    "vega": 18.688416265872014,
+    "rho": -1.8073488285900972,
+    "price": 113.52663038944576,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.16,
+    "delta": -0.1825589519070376,
+    "gamma": 0.0002341569155078845,
+    "theta": -21.337972946974197,
+    "vega": 18.688416265872014,
+    "rho": -1.8073488285900972,
+    "price": 113.52663038944576,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc47ae147ae1480",
+    "delta": "bfc75e177c04319e",
+    "gamma": "3f2eb10096a6710f",
+    "theta": "c035568565222fe4",
+    "vega": "4032b03c0c63f46d",
+    "rho": "bffceae69af4225b",
+    "price": "405c61b44ff2f049",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc47ae147ae147b",
+    "delta": "bfc75e177c043197",
+    "gamma": "3f2eb10096a67111",
+    "theta": "c035568565222fda",
+    "vega": "4032b03c0c63f468",
+    "rho": "bffceae69af4224e",
+    "price": "405c61b44ff2ef49",
+    "admissible": true
+   }
+  },
+  {
+   "id": "sensex_atm_put_30d",
+   "forward": 77000.0,
+   "strike": 77000.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.11,
+   "price": 963.5393859911381,
+   "reference_solve": {
+    "iv": 0.11,
+    "delta": -0.49107914065861197,
+    "gamma": 0.00016339481373785062,
+    "theta": -15.886069688639614,
+    "vega": 87.58723033289489,
+    "rho": -31.87120538359254,
+    "price": 963.5393859911381,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.11,
+    "delta": -0.49107914065861197,
+    "gamma": 0.0001633948137378506,
+    "theta": -15.886069688639614,
+    "vega": 87.58723033289489,
+    "rho": -31.87120538359254,
+    "price": 963.5393859911381,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fbc28f5c28f5c2a",
+    "delta": "bfdf6dd7343818f1",
+    "gamma": "3f256a9ec33f01c7",
+    "theta": "c02fc5aaed1d5e3c",
+    "vega": "4055e5952e88c02d",
+    "rho": "c03fdf0750e6a10e",
+    "price": "408e1c50a99a3f08",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fbc28f5c28f5c29",
+    "delta": "bfdf6dd7343818f1",
+    "gamma": "3f256a9ec33f01c7",
+    "theta": "c02fc5aaed1d5e3b",
+    "vega": "4055e5952e88c02d",
+    "rho": "c03fdf0750e6a10e",
+    "price": "408e1c50a99a3f08",
+    "admissible": true
+   }
+  },
+  {
+   "id": "sensex_itm_call_90d",
+   "forward": 77000.0,
+   "strike": 74000.0,
+   "t_years": 0.2465753424657534,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.12,
+   "price": 3620.775305829518,
+   "reference_solve": {
+    "iv": 0.11999999999999998,
+    "delta": 0.7449736483400251,
+    "gamma": 6.712687445630082e-05,
+    "theta": -7.206069379208808,
+    "vega": 117.76297472425208,
+    "rho": 132.5150028896361,
+    "price": 3620.775305829518,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.12,
+    "delta": 0.7449736483400251,
+    "gamma": 6.712687445630081e-05,
+    "theta": -7.2060693792088095,
+    "vega": 117.76297472425208,
+    "rho": 132.51500288963607,
+    "price": 3620.775305829518,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fbeb851eb851ebb",
+    "delta": "3fe7d6d2fa00121f",
+    "gamma": "3f1198ceec00fc4f",
+    "theta": "c01cd303d9f1a2ae",
+    "vega": "405d70d493f01597",
+    "rho": "4060907ae7570aa3",
+    "price": "40ac498cf4e2bc6c",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fbeb851eb851eb8",
+    "delta": "3fe7d6d2fa001220",
+    "gamma": "3f1198ceec00fc51",
+    "theta": "c01cd303d9f1a2ab",
+    "vega": "405d70d493f01597",
+    "rho": "4060907ae7570aa4",
+    "price": "40ac498cf4e2bc6c",
+    "admissible": true
+   }
+  },
+  {
+   "id": "stock_atm_call_30d",
+   "forward": 1500.0,
+   "strike": 1520.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.28,
+   "price": 38.79244448651631,
+   "reference_solve": {
+    "iv": 0.27999999999999997,
+    "delta": 0.4479160424325618,
+    "gamma": 0.003269947685107943,
+    "theta": -0.7832544573558822,
+    "vega": 1.6932057876312359,
+    "rho": 0.5203410568457476,
+    "price": 38.79244448651631,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.28,
+    "delta": 0.4479160424325618,
+    "gamma": 0.0032699476851079426,
+    "theta": -0.7832544573558822,
+    "vega": 1.6932057876312359,
+    "rho": 0.5203410568457476,
+    "price": 38.79244448651631,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fd1eb851eb851ee",
+    "delta": "3fdcaaa80c6680a3",
+    "gamma": "3f6ac993cbbfda47",
+    "theta": "bfe9106ba6d94590",
+    "vega": "3ffb175ef3b462a0",
+    "rho": "3fe0a6a249bd64df",
+    "price": "4043656ed228bde7",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fd1eb851eb851ec",
+    "delta": "3fdcaaa80c6680a2",
+    "gamma": "3f6ac993cbbfda4a",
+    "theta": "bfe9106ba6d9458d",
+    "vega": "3ffb175ef3b462a0",
+    "rho": "3fe0a6a249bd64df",
+    "price": "4043656ed228bdd7",
+    "admissible": true
+   }
+  },
+  {
+   "id": "stock_itm_put_30d",
+   "forward": 1500.0,
+   "strike": 1560.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.32,
+   "price": 90.52717927411526,
+   "reference_solve": {
+    "iv": 0.32,
+    "delta": -0.6451813372566871,
+    "gamma": 0.0026810592124132,
+    "theta": -0.8300650811429677,
+    "vega": 1.586599424332195,
+    "rho": -0.8698349467061472,
+    "price": 90.52717927411526,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.32,
+    "delta": -0.6451813372566871,
+    "gamma": 0.0026810592124132003,
+    "theta": -0.8300650811429676,
+    "vega": 1.586599424332195,
+    "rho": -0.8698349467061474,
+    "price": 90.52717927411526,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fd47ae147ae147b",
+    "delta": "bfe4a55354f0397d",
+    "gamma": "3f65f696b459bca6",
+    "theta": "bfea8fe4a521f0b2",
+    "vega": "3ff962b613f5bf4d",
+    "rho": "bfebd5b01920aa72",
+    "price": "4056a1bd4e235d15",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fd47ae147ae147b",
+    "delta": "bfe4a55354f0397d",
+    "gamma": "3f65f696b459bca6",
+    "theta": "bfea8fe4a521f0b2",
+    "vega": "3ff962b613f5bf4d",
+    "rho": "bfebd5b01920aa72",
+    "price": "4056a1bd4e235d15",
+    "admissible": true
+   }
+  },
+  {
+   "id": "long_dated_atm_call_1y",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 1.0,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 0.2,
+   "price": 1754.1044111026963,
+   "reference_solve": {
+    "iv": 0.2,
+    "delta": 0.5058551021376952,
+    "gamma": 7.914283335010249e-05,
+    "theta": -2.0825090620005664,
+    "vega": 87.41325943518821,
+    "rho": 101.33490489133142,
+    "price": 1754.1044111026963,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.2,
+    "delta": 0.5058551021376952,
+    "gamma": 7.914283335010249e-05,
+    "theta": -2.0825090620005664,
+    "vega": 87.41325943518821,
+    "rho": 101.33490489133142,
+    "price": 1754.1044111026963,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc999999999999a",
+    "delta": "3fe02ff70a0646c9",
+    "gamma": "3f14bf2f86182447",
+    "theta": "c000a8fa82d7541c",
+    "vega": "4055da72d7b3b965",
+    "rho": "4059556f14ece27d",
+    "price": "409b686aeabe7db6",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc999999999999a",
+    "delta": "3fe02ff70a0646c9",
+    "gamma": "3f14bf2f86182447",
+    "theta": "c000a8fa82d7541c",
+    "vega": "4055da72d7b3b965",
+    "rho": "4059556f14ece27d",
+    "price": "409b686aeabe7db6",
+    "admissible": true
+   }
+  },
+  {
+   "id": "high_vol_atm_call_30d",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": true,
+   "sigma_true": 1.5,
+   "price": 3979.4864556026714,
+   "reference_solve": {
+    "iv": 1.5,
+    "delta": 0.5820058145055855,
+    "gamma": 3.836871056370186e-05,
+    "theta": -64.60025709668692,
+    "vega": 26.12357310674509,
+    "rho": 7.970671385160483,
+    "price": 3979.4864556026714,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 1.5,
+    "delta": 0.5820058145055855,
+    "gamma": 3.836871056370186e-05,
+    "theta": -64.60025709668692,
+    "vega": 26.12357310674509,
+    "rho": 7.970671385160483,
+    "price": 3979.4864556026714,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3ff7ffffffffffff",
+    "delta": "3fe29fcaa86c4442",
+    "gamma": "3f041dc2db42afe4",
+    "theta": "c050266a9cbddd94",
+    "vega": "403a1fa27cb422a3",
+    "rho": "401fe1f7adf9b58e",
+    "price": "40af16f910b570d9",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3ff8000000000000",
+    "delta": "3fe29fcaa86c4442",
+    "gamma": "3f041dc2db42afe3",
+    "theta": "c050266a9cbddd95",
+    "vega": "403a1fa27cb422a3",
+    "rho": "401fe1f7adf9b58d",
+    "price": "40af16f910b570dd",
+    "admissible": true
+   }
+  },
+  {
+   "id": "low_vol_atm_put_30d",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.065,
+   "is_call": false,
+   "sigma_true": 0.05,
+   "price": 133.6713105154047,
+   "reference_solve": {
+    "iv": 0.049999999999999996,
+    "delta": -0.4944918194817967,
+    "gamma": 0.0011779494286562058,
+    "theta": -2.2040125473581798,
+    "vega": 26.733804327755735,
+    "rho": -9.661010193154214,
+    "price": 133.6713105154047,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.05,
+    "delta": -0.4944918194817967,
+    "gamma": 0.0011779494286562058,
+    "theta": -2.2040125473581798,
+    "vega": 26.733804327755735,
+    "rho": -9.661010193154214,
+    "price": 133.6713105154047,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fa999999999999a",
+    "delta": "bfdfa5c10434162a",
+    "gamma": "3f534cad916f5581",
+    "theta": "c001a1d15497042a",
+    "vega": "403abbda99b55fc8",
+    "rho": "c023526fed93d70a",
+    "price": "4060b57b6030a3f6",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fa999999999999a",
+    "delta": "bfdfa5c10434162a",
+    "gamma": "3f534cad916f5581",
+    "theta": "c001a1d15497042a",
+    "vega": "403abbda99b55fc8",
+    "rho": "c023526fed93d70a",
+    "price": "4060b57b6030a3f6",
+    "admissible": true
+   }
+  },
+  {
+   "id": "zero_rate_atm_call_30d",
+   "forward": 23500.0,
+   "strike": 23500.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.0,
+   "is_call": true,
+   "sigma_true": 0.12,
+   "price": 322.51651062816137,
+   "reference_solve": {
+    "iv": 0.12,
+    "delta": 0.5068620534176205,
+    "gamma": 0.0004933811019019485,
+    "theta": -5.374745033924733,
+    "vega": 26.87372516962366,
+    "rho": 9.524993214810344,
+    "price": 322.51651062816137,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.12,
+    "delta": 0.5068620534176205,
+    "gamma": 0.0004933811019019485,
+    "theta": -5.374745033924733,
+    "vega": 26.87372516962366,
+    "rho": 9.524993214810344,
+    "price": 322.51651062816137,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fbeb851eb851eb6",
+    "delta": "3fe03836c4e06300",
+    "gamma": "3f402ac7d93baa15",
+    "theta": "c0157fbd29842e37",
+    "vega": "403adfac73e539c6",
+    "rho": "40230ccbe92076f4",
+    "price": "40742843a0a60000",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fbeb851eb851eb8",
+    "delta": "3fe03836c4e06300",
+    "gamma": "3f402ac7d93baa14",
+    "theta": "c0157fbd29842e38",
+    "vega": "403adfac73e539c6",
+    "rho": "40230ccbe92076f4",
+    "price": "40742843a0a60000",
+    "admissible": true
+   }
+  },
+  {
+   "id": "zero_rate_otm_put_30d",
+   "forward": 23500.0,
+   "strike": 23200.0,
+   "t_years": 0.0821917808219178,
+   "rate": 0.0,
+   "is_call": false,
+   "sigma_true": 0.18,
+   "price": 345.47466712540046,
+   "reference_solve": {
+    "iv": 0.18,
+    "delta": -0.3917441705606648,
+    "gamma": 0.00031678199196024764,
+    "theta": -7.764586991706184,
+    "vega": 25.881956639020615,
+    "rho": -7.850517267370702,
+    "price": 345.47466712540046,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.18,
+    "delta": -0.3917441705606648,
+    "gamma": 0.00031678199196024764,
+    "theta": -7.764586991706185,
+    "vega": 25.881956639020615,
+    "rho": -7.850517267370702,
+    "price": 345.47466712540046,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc70a3d70a3d711",
+    "delta": "bfd91256243d3a9a",
+    "gamma": "3f34c2b84ba15da7",
+    "theta": "c01f0eefe4714cec",
+    "vega": "4039e1c7e9091568",
+    "rho": "c01f66edffa02971",
+    "price": "407597983c8e4140",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc70a3d70a3d70a",
+    "delta": "bfd91256243d3a98",
+    "gamma": "3f34c2b84ba15dad",
+    "theta": "c01f0eefe4714ce2",
+    "vega": "4039e1c7e9091568",
+    "rho": "c01f66edffa0296e",
+    "price": "407597983c8e4160",
+    "admissible": true
+   }
+  },
+  {
+   "id": "high_rate_itm_call_60d",
+   "forward": 23500.0,
+   "strike": 23100.0,
+   "t_years": 0.1643835616438356,
+   "rate": 0.09,
+   "is_call": true,
+   "sigma_true": 0.16,
+   "price": 811.7743639600486,
+   "reference_solve": {
+    "iv": 0.16,
+    "delta": 0.6077398097173822,
+    "gamma": 0.00024671922398106255,
+    "theta": -4.577942897865563,
+    "vega": 35.835798297479485,
+    "rho": 22.142648489422076,
+    "price": 811.7743639600486,
+    "admissible": true
+   },
+   "reference_sigma": {
+    "iv": 0.16,
+    "delta": 0.6077398097173822,
+    "gamma": 0.00024671922398106255,
+    "theta": -4.577942897865563,
+    "vega": 35.835798297479485,
+    "rho": 22.14264848942208,
+    "price": 811.7743639600486,
+    "admissible": true
+   },
+   "frozen_solve_bits": {
+    "iv": "3fc47ae147ae1482",
+    "delta": "3fe3729ac1e6d453",
+    "gamma": "3f302b42ff9023ff",
+    "theta": "c0124fd043552700",
+    "vega": "4041eafb7048dd0b",
+    "rho": "403624849c84e440",
+    "price": "40895e31e5bb5ced",
+    "admissible": true
+   },
+   "frozen_sigma_bits": {
+    "iv": "3fc47ae147ae147b",
+    "delta": "3fe3729ac1e6d454",
+    "gamma": "3f302b42ff902404",
+    "theta": "c0124fd0435526f9",
+    "vega": "4041eafb7048dd0a",
+    "rho": "403624849c84e443",
+    "price": "40895e31e5bb5cdd",
+    "admissible": true
+   }
+  }
+ ]
+}
