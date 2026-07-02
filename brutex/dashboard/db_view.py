@@ -36,7 +36,7 @@ import math
 import re
 import threading
 from collections.abc import Callable, Mapping
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Protocol
@@ -65,6 +65,7 @@ from brutex.data.partition import (
 )
 from brutex.data.session import format_ist_clock
 from brutex.data.spot_features import pct_change
+from brutex.data.spot_join import utc_instant
 from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
 from brutex.money import round_money
 
@@ -2033,15 +2034,11 @@ def _spot_derived_rows(
     return derived
 
 
-def _utc_instant(ts: datetime) -> datetime:
-    """Normalise a bar timestamp to a UTC-anchored instant for cross-series joining.
-
-    Both the option bars and the underlying spot bars are read from the SAME DuckDB
-    connection as ``TIMESTAMPTZ``, so they already compare equal at the same instant;
-    normalising to UTC makes the dict KEY representation identical too (belt-and-braces
-    against a tz-rendering difference). A naive datetime (defensive) is read as UTC.
-    """
-    return ts.astimezone(UTC) if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+# The instant normaliser for cross-series joining is the COMMON
+# :func:`brutex.data.spot_join.utc_instant` (lifted per plan §15.4 /
+# DEC-GREEKS-ENGINE-PR2B-001 so the /db moneyness join and the post-pull Greeks
+# enrichment share ONE join-key contract — CLAUDE.md §11 COMMON).
+_utc_instant = utc_instant
 
 
 def _underlying_spot_close_by_ts(

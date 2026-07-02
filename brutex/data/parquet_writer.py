@@ -61,13 +61,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import WriterError, parquet_read_skip_errors
-from brutex.data.models import CandleBar, CatalogEntry
+from brutex.data.models import GREEKS_OVERLAY_FIELDS, CandleBar, CatalogEntry, FnoGreeksBar
 from brutex.data.partition import (
     build_partition_path,
     partition_for_timestamp,
@@ -216,7 +216,33 @@ def _tick_round(bar: CandleBar) -> CandleBar:
     re-pull compares grid-vs-grid and stays bit-idempotent. Rounding is monotone,
     so ``low <= open, close <= high`` is preserved (no ``CandleBar`` violation).
     Volume / OI / timestamp are untouched.
+
+    A Greeks-enriched :class:`~brutex.data.models.FnoGreeksBar`
+    (`DEC-GREEKS-GENERATION-TIME-001`, plan §15.3) is snapped TYPE-PRESERVINGLY:
+    its OHLC plus ``spot_at_bar`` (the ONE overlay column that IS a price) ride
+    the same 2dp grid, while the Greeks / stamp fields pass through at FULL
+    precision (DEC-MONEY-2DP-001 forbids rounding statistical values).
     """
+    if isinstance(bar, FnoGreeksBar):
+        return FnoGreeksBar(
+            timestamp=bar.timestamp,
+            open=round_money(bar.open),
+            high=round_money(bar.high),
+            low=round_money(bar.low),
+            close=round_money(bar.close),
+            volume=bar.volume,
+            open_interest=bar.open_interest,
+            iv=bar.iv,
+            delta=bar.delta,
+            gamma=bar.gamma,
+            theta=bar.theta,
+            vega=bar.vega,
+            rho=bar.rho,
+            spot_at_bar=None if bar.spot_at_bar is None else round_money(bar.spot_at_bar),
+            t_years_used=bar.t_years_used,
+            rate_used=bar.rate_used,
+            greeks_provenance_id=bar.greeks_provenance_id,
+        )
     return CandleBar(
         timestamp=bar.timestamp,
         open=round_money(bar.open),
@@ -226,6 +252,29 @@ def _tick_round(bar: CandleBar) -> CandleBar:
         volume=bar.volume,
         open_interest=bar.open_interest,
     )
+
+
+def _overlay_values(bar: CandleBar) -> tuple[object, ...]:
+    """A bar's Greeks-overlay tuple in canonical field order (all-``None`` for a plain bar).
+
+    ``getattr(..., None)`` so a plain spot :class:`CandleBar` reads as the
+    all-``None`` overlay — the identity that keeps the legacy merge semantics
+    byte-unchanged (two plain bars always compare overlay-equal).
+    """
+    return tuple(getattr(bar, name, None) for name in GREEKS_OVERLAY_FIELDS)
+
+
+def _overlay_equal(a: CandleBar, b: CandleBar) -> bool:
+    """True when two bars carry an identical Greeks overlay.
+
+    Deliberately SEPARATE from :meth:`ParquetWriter._bar_values_equal` (which
+    stays OHLCV+OI-only — plan §15.3): a Greek difference at the same timestamp
+    must never trip the keep-first conflict machinery. In ``latest-wins`` mode
+    an overlay difference triggers an overwrite (the enrich-heal contract); in
+    ``keep-first`` mode the STORED overlay is kept silently (a vendor re-pull's
+    plain bar never strips a stored Greek).
+    """
+    return _overlay_values(a) == _overlay_values(b)
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +610,19 @@ class ParquetWriter:
                         conflicts.append(
                             BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar)
                         )
+                elif not _overlay_equal(prev, bar):
+                    # Identical OHLCV+OI but a DIFFERENT Greeks overlay
+                    # (DEC-GREEKS-GENERATION-TIME-001, plan §15.3): in
+                    # latest-wins mode the incoming overlay WINS (the enrich
+                    # pass stamping / correcting Greeks onto stored bars); in
+                    # keep-first mode the STORED overlay is kept SILENTLY —
+                    # never a BarConflict (a vendor re-pull's plain bar must
+                    # not strip a stored Greek; Greeks are a re-derivable
+                    # overlay, not vendor source truth — `_bar_values_equal`
+                    # stays OHLCV+OI-only by design).
+                    if merge_mode == "latest-wins":
+                        merged[bar.timestamp] = bar
+                        rewrite = True
             merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
         if added == 0 and not rewrite:
             # Every incoming bar is already stored identically or is a conflict
@@ -716,9 +778,15 @@ class ParquetWriter:
                 # timestamp / volume / open_interest pass through untouched. A value
                 # whose repr overflows precision-38 (unreachable for a price) raises a
                 # PolarsError here → fall back to the exact per-row reconstruction.
+                # An ENRICHED partition's `spot_at_bar` (the ONE overlay column that
+                # is a price — plan §15.3) rides the SAME snap; the Greeks columns
+                # pass through at FULL precision (DEC-MONEY-2DP-001).
+                snap_columns: list[str] = list(_PRICE_COLUMNS)
+                if "spot_at_bar" in df.columns:
+                    snap_columns.append("spot_at_bar")
                 snapped: pl.DataFrame | None
                 try:
-                    snapped = df.with_columns(*(_snap_price_expr(c) for c in _PRICE_COLUMNS))
+                    snapped = df.with_columns(*(_snap_price_expr(c) for c in snap_columns))
                 except pl.exceptions.PolarsError:
                     snapped = None
             except parquet_read_skip_errors() as exc:
@@ -739,20 +807,76 @@ class ParquetWriter:
         closes = snapped["close"].to_list()
         volumes = snapped["volume"].to_list()
         ois = snapped["open_interest"].to_list()
+        # SCHEMA-TOLERANT overlay read-back (DEC-GREEKS-GENERATION-TIME-001, plan
+        # §15.3 — "the single biggest correctness trap"): a LEGACY 7-column
+        # partition has NO overlay columns → plain CandleBars are rebuilt and the
+        # merge round-trip re-renders the byte-identical 7-column blob (no
+        # KeyError, NO migration). An ENRICHED partition (any overlay column
+        # present) rebuilds FnoGreeksBars, each ABSENT overlay column reading as
+        # a None-filled series — so its overlay survives every future merge.
+        overlay_lists = ParquetWriter._overlay_column_lists(snapped, len(timestamps))
         out: dict[datetime, CandleBar] = {}
-        for ts, op, hi, lo, cl, vol, oi in zip(
-            timestamps, opens, highs, lows, closes, volumes, ois, strict=True
-        ):
-            bar = CandleBar(
-                timestamp=ts,
-                open=op,
-                high=hi,
-                low=lo,
-                close=cl,
-                volume=int(vol),
-                open_interest=None if oi is None else int(oi),
-            )
-            out[bar.timestamp] = bar
+        try:
+            for idx, (ts, op, hi, lo, cl, vol, oi) in enumerate(
+                zip(timestamps, opens, highs, lows, closes, volumes, ois, strict=True)
+            ):
+                bar: CandleBar
+                if overlay_lists is None:
+                    bar = CandleBar(
+                        timestamp=ts,
+                        open=op,
+                        high=hi,
+                        low=lo,
+                        close=cl,
+                        volume=int(vol),
+                        open_interest=None if oi is None else int(oi),
+                    )
+                else:
+                    bar = FnoGreeksBar(
+                        timestamp=ts,
+                        open=op,
+                        high=hi,
+                        low=lo,
+                        close=cl,
+                        volume=int(vol),
+                        open_interest=None if oi is None else int(oi),
+                        iv=overlay_lists["iv"][idx],
+                        delta=overlay_lists["delta"][idx],
+                        gamma=overlay_lists["gamma"][idx],
+                        theta=overlay_lists["theta"][idx],
+                        vega=overlay_lists["vega"][idx],
+                        rho=overlay_lists["rho"][idx],
+                        spot_at_bar=overlay_lists["spot_at_bar"][idx],
+                        t_years_used=overlay_lists["t_years_used"][idx],
+                        rate_used=overlay_lists["rate_used"][idx],
+                        greeks_provenance_id=overlay_lists["greeks_provenance_id"][idx],
+                    )
+                out[bar.timestamp] = bar
+        except ValueError as exc:
+            # A parquet-readable but VALUE-corrupt partition (e.g. a NaN Greek —
+            # FnoGreeksBar's finite-or-None validation refuses it, mirroring the
+            # per-row path's contract): a quarantinable WriterError naming the
+            # path, never a raw mid-merge crash (GAP #1 semantics preserved).
+            raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
+        return out
+
+    @staticmethod
+    def _overlay_column_lists(df: pl.DataFrame, height: int) -> dict[str, list[Any]] | None:
+        """Extract the Greeks-overlay columns of a stored partition, tolerantly.
+
+        ``None`` when NO overlay column is physically present (a legacy /
+        plain partition — the caller rebuilds plain :class:`CandleBar` rows so
+        the merge round-trip stays byte-identical). Otherwise one list per
+        :data:`~brutex.data.models.GREEKS_OVERLAY_FIELDS` name, an ABSENT
+        column filled with ``None`` (never a ``KeyError`` — plan §15.3's
+        schema-tolerance requirement). ``spot_at_bar`` was already 2dp-snapped
+        to ``Decimal`` by the caller's vectorized snap.
+        """
+        if not any(name in df.columns for name in GREEKS_OVERLAY_FIELDS):
+            return None
+        out: dict[str, list[Any]] = {}
+        for name in GREEKS_OVERLAY_FIELDS:
+            out[name] = df[name].to_list() if name in df.columns else [None] * height
         return out
 
     @staticmethod
@@ -783,13 +907,27 @@ class ParquetWriter:
         closes = df["close"].to_list()  # type: ignore[index]
         volumes = df["volume"].to_list()  # type: ignore[index]
         ois = df["open_interest"].to_list()  # type: ignore[index]
+        columns: list[str] = list(df.columns)  # type: ignore[attr-defined]
+        overlay: dict[str, list[Any]] | None = None
+        if any(name in columns for name in GREEKS_OVERLAY_FIELDS):
+            # Schema-tolerant overlay extraction (mirrors `_overlay_column_lists`):
+            # an enriched partition landing on this fallback keeps its overlay.
+            overlay = {
+                name: (
+                    df[name].to_list()  # type: ignore[index]
+                    if name in columns
+                    else [None] * len(timestamps)
+                )
+                for name in GREEKS_OVERLAY_FIELDS
+            }
         out: dict[datetime, CandleBar] = {}
         try:
-            for ts, op, hi, lo, cl, vol, oi in zip(
-                timestamps, opens, highs, lows, closes, volumes, ois, strict=True
+            for idx, (ts, op, hi, lo, cl, vol, oi) in enumerate(
+                zip(timestamps, opens, highs, lows, closes, volumes, ois, strict=True)
             ):
-                bar = _tick_round(
-                    CandleBar(
+                base: CandleBar
+                if overlay is None:
+                    base = CandleBar(
                         timestamp=ts,
                         open=Decimal(str(op)),
                         high=Decimal(str(hi)),
@@ -798,7 +936,28 @@ class ParquetWriter:
                         volume=int(vol),
                         open_interest=None if oi is None else int(oi),
                     )
-                )
+                else:
+                    spot_raw = overlay["spot_at_bar"][idx]
+                    base = FnoGreeksBar(
+                        timestamp=ts,
+                        open=Decimal(str(op)),
+                        high=Decimal(str(hi)),
+                        low=Decimal(str(lo)),
+                        close=Decimal(str(cl)),
+                        volume=int(vol),
+                        open_interest=None if oi is None else int(oi),
+                        iv=overlay["iv"][idx],
+                        delta=overlay["delta"][idx],
+                        gamma=overlay["gamma"][idx],
+                        theta=overlay["theta"][idx],
+                        vega=overlay["vega"][idx],
+                        rho=overlay["rho"][idx],
+                        spot_at_bar=None if spot_raw is None else Decimal(str(spot_raw)),
+                        t_years_used=overlay["t_years_used"][idx],
+                        rate_used=overlay["rate_used"][idx],
+                        greeks_provenance_id=overlay["greeks_provenance_id"][idx],
+                    )
+                bar = _tick_round(base)
                 out[bar.timestamp] = bar
         except (InvalidOperation, ValueError) as exc:
             raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
@@ -846,7 +1005,7 @@ class ParquetWriter:
         import io
 
         with lake_write_guard():
-            rows = {
+            rows: dict[str, list[object]] = {
                 "timestamp": [b.timestamp for b in sorted_bars],
                 "open": [float(b.open) for b in sorted_bars],
                 "high": [float(b.high) for b in sorted_bars],
@@ -855,18 +1014,39 @@ class ParquetWriter:
                 "volume": [b.volume for b in sorted_bars],
                 "open_interest": [b.open_interest for b in sorted_bars],
             }
-            df = pl.DataFrame(
-                rows,
-                schema={
-                    "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
-                    "open": pl.Float64,
-                    "high": pl.Float64,
-                    "low": pl.Float64,
-                    "close": pl.Float64,
-                    "volume": pl.Int64,
-                    "open_interest": pl.Int64,
-                },
-            )
+            schema: dict[str, pl.DataType | type[pl.DataType]] = {
+                "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Int64,
+                "open_interest": pl.Int64,
+            }
+            # Greeks-enriched branch (DEC-GREEKS-GENERATION-TIME-001, plan §15.3):
+            # ONLY when the batch carries at least one FnoGreeksBar are the ten
+            # nullable overlay columns appended after `open_interest` — a plain
+            # spot / derived-1day batch still renders the byte-identical 7-column
+            # blob (legacy partitions untouched, NO migration). A plain CandleBar
+            # merged INTO an enriched partition reads its overlay as None via
+            # `getattr` (the schema-tolerant identity `_overlay_values` uses).
+            # `spot_at_bar` is the ONE snapped price; the Greeks stay FULL
+            # precision (never through `_snap_price_expr` / `_PRICE_COLUMNS`).
+            if any(isinstance(b, FnoGreeksBar) for b in sorted_bars):
+                for name in GREEKS_OVERLAY_FIELDS:
+                    if name == "greeks_provenance_id":
+                        rows[name] = [getattr(b, name, None) for b in sorted_bars]
+                        schema[name] = pl.Int32
+                    elif name == "spot_at_bar":
+                        rows[name] = [
+                            None if (v := getattr(b, name, None)) is None else float(v)
+                            for b in sorted_bars
+                        ]
+                        schema[name] = pl.Float64
+                    else:
+                        rows[name] = [getattr(b, name, None) for b in sorted_bars]
+                        schema[name] = pl.Float64
+            df = pl.DataFrame(rows, schema=schema)
 
             buffer: list[bytes] = []
 

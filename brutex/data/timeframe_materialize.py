@@ -358,7 +358,16 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
                 f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
                 "pull the 1-minute spot first, then derive timeframes"
             )
-        df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): an enriched
+        # OPTION contract's month files may mix the raw 7-column and the
+        # Greeks-enriched 17-column shape (plan §15.3); only the base
+        # OHLCV(+OI) columns are selected below, which every shape carries —
+        # byte-identical for a uniform tree.
+        df = pl.scan_parquet(
+            base.as_posix() + "/**/*.parquet",
+            missing_columns="insert",
+            extra_columns="ignore",
+        ).collect()
         return df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
 
     return _read

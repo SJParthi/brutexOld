@@ -998,6 +998,79 @@ def _derive_daily_from_minute(
     )
 
 
+def _enrich_greeks_from_minute(
+    *,
+    rebuilt: Sequence[_RebuiltContract],
+    windows: dict[str, tuple[date, date]],
+    lake_root: Path,
+) -> None:
+    """Post-pull Greeks enrichment over the just-written option 1-minute — best-effort.
+
+    ``greeks_enrich_after_pull`` (DEC-GREEKS-ENGINE-PR2B-001 /
+    `DEC-GREEKS-GENERATION-TIME-001`, plan §15.4): the F&O Greeks twin of
+    :func:`_derive_daily_from_minute`, run at the SAME post-drain seam (the
+    fetch lane has fully drained — the pass can never block or slow a fetch).
+    One :class:`~brutex.data.greeks_enrich.GreeksEnrichTarget` per resolved
+    contract window; FUT legs are skipped INSIDE the driver (never a bogus
+    Greek for a future); the risk-free source is the locked PR-1 seam
+    (:func:`~brutex.data.greeks_enrich.resolve_risk_free_source` — fixed 6.5%
+    default, ``BRUTEX_RISK_FREE_CSV`` override).
+
+    The WHOLE body is guarded (plan §15.4): any failure — a misconfigured rate
+    CSV, a missing wheel, an unexpected driver error — logs ONE
+    ``fno.greeks_enrich.error`` and returns; it can NEVER fail the pull. The
+    authoritative 1-minute candles are already durable in the lake; the Greeks
+    overlay is a re-derivable convenience layer the NEXT pull re-attempts
+    (stamp-driven, idempotent — Golden Rule #7/#10). Per-contract errors are
+    additionally quarantined inside the driver, so one bad contract never
+    sinks the pass.
+    """
+    try:
+        from brutex.data.greeks_enrich import (
+            GreeksEnrichTarget,
+            enrich_greeks_for_targets,
+            resolve_risk_free_source,
+        )
+
+        rate_source = resolve_risk_free_source()
+        targets: list[GreeksEnrichTarget] = []
+        for _row, contract in rebuilt:
+            window = windows.get(contract.symbol)
+            if window is None:
+                continue
+            try:
+                exchange = contract_exchange(contract)
+            except ValueError:
+                # Already surfaced by the daily derive's `contract_skipped` log.
+                continue
+            targets.append(
+                GreeksEnrichTarget(
+                    exchange=exchange,
+                    symbol=contract.symbol,
+                    start=window[0],
+                    end=window[1],
+                )
+            )
+        report = enrich_greeks_for_targets(
+            targets=targets, lake_root=lake_root, rate_source=rate_source
+        )
+        _LOG.info(
+            "fno.greeks_enrich.done",
+            enriched=report.enriched,
+            already_current=report.already_current,
+            futures_skipped=report.futures_skipped,
+            undecodable=report.undecodable,
+            no_bars=report.no_bars,
+            errored=report.errored,
+            bars_written=report.bars_written,
+            bars_solved=report.bars_solved,
+            bars_null=report.bars_null,
+            bars_reused=report.bars_reused,
+        )
+    except Exception as exc:
+        _LOG.error("fno.greeks_enrich.error", error=str(exc))
+
+
 def pull_contract_candles(
     contracts: Sequence[ContractRow],
     *,
@@ -1264,6 +1337,13 @@ def pull_contract_candles(
         _derive_daily_from_minute(
             rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root, now=now
         )
+        # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
+        # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
+        # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
+        # underlying spot — the F&O Greeks twin of the daily derive above, at the SAME
+        # post-drain seam. Best-effort: NEVER fails the pull (fully guarded inside);
+        # FUT legs never get Greeks; skipped on a dry-run (nothing was written).
+        _enrich_greeks_from_minute(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
 
     # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
     # "historically complete" once its 1-minute landed clean — the only vendor phase).

@@ -27,7 +27,7 @@ class TestDescriptorConstants:
     def test_table_segment_version(self) -> None:
         assert FNO_CANDLE_LAKE_TABLE == "fno_candles"
         assert FNO_CANDLE_LAKE_SEGMENT == "FNO"
-        assert FNO_CANDLE_LAKE_SCHEMA_VERSION == 2
+        assert FNO_CANDLE_LAKE_SCHEMA_VERSION == 3
 
     def test_path_template_is_the_canonical_bars_layout(self) -> None:
         rendered = FNO_CANDLE_LAKE_PATH_TEMPLATE.format(
@@ -98,7 +98,7 @@ class TestSchemaMetaMapping:
         meta = fno_candle_lake_schema_meta()
         assert meta["fno_candle_lake.table"] == "fno_candles"
         assert meta["fno_candle_lake.segment"] == "FNO"
-        assert meta["fno_candle_lake.schema_version"] == "2"
+        assert meta["fno_candle_lake.schema_version"] == "3"
         assert meta["fno_candle_lake.instrument_types"] == "CE,FUT,PE"
         assert meta["fno_candle_lake.columns"].split(",") == [c.name for c in FNO_CANDLE_COLUMNS]
         assert all(isinstance(v, str) for v in meta.values())
@@ -129,3 +129,31 @@ class TestRegistration:
             "SELECT COUNT(*) FROM schema_meta WHERE key LIKE 'fno_candle_lake%'"
         ).fetchone()
         assert count == len(fno_candle_lake_schema_meta())
+
+
+class TestStoredGreeksOverlayColumns:
+    """The ten Phase-2b stored overlay columns (DEC-GREEKS-ENGINE-PR2B-001, plan §15.3)."""
+
+    def test_overlay_columns_appended_after_open_interest(self) -> None:
+        from brutex.data.models import GREEKS_OVERLAY_FIELDS
+
+        names = [c.name for c in FNO_CANDLE_COLUMNS]
+        oi_idx = names.index("open_interest")
+        assert tuple(names[oi_idx + 1 : oi_idx + 1 + len(GREEKS_OVERLAY_FIELDS)]) == (
+            GREEKS_OVERLAY_FIELDS
+        )
+
+    def test_overlay_columns_are_nullable_bar_columns(self) -> None:
+        from brutex.data.models import GREEKS_OVERLAY_FIELDS
+
+        for name in GREEKS_OVERLAY_FIELDS:
+            col = next(c for c in FNO_CANDLE_COLUMNS if c.name == name)
+            assert col.source == "bar"  # PHYSICAL — written by the enrich pass
+            assert col.nullable is True  # legacy / FUT / unsolvable rows read NULL
+
+    def test_cheap_family_stays_derived(self) -> None:
+        # The COST-CLASS hybrid (ADR-0015 D10): moneyness/spot/intrinsic/
+        # time_value/days_to_expiry remain read-time derived, never stored.
+        for name in ("moneyness", "spot", "intrinsic", "time_value", "days_to_expiry"):
+            col = next(c for c in FNO_CANDLE_COLUMNS if c.name == name)
+            assert col.source == "derived"
