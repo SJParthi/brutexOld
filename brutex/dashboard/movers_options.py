@@ -273,6 +273,16 @@ class OptionMover:
         The single trader-facing string the screen shows — bucket + signed depth:
         ``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"`` · ``"ITM"`` / ``"OTM"`` (no grid) ·
         ``"—"`` (a future) · ``"?"`` (spot absent). DEC-FNO-MONEYNESS-001.
+    iv, delta
+        The contract's STORED per-bar Greeks as of the snapshot — the LAST kept
+        session bar's ``iv`` / ``delta`` overlay values written at generation
+        time by the Phase-2b enrichment (DEC-GREEKS-ENGINE-PR2B-001), read off
+        the SAME session frame as ltp/volume/oi (zero extra I/O, never
+        recomputed at render — DEC-GREEKS-ENGINE-PR3B-001). FULL precision
+        (statistical values, never money-rounded — CLAUDE.md §4). ``None`` when
+        the partition pre-dates the enrichment (legacy 7-column), when the
+        enrichment stamped an honest §15.8 NULL (no spot / no solution / …),
+        or for a never-enriched series — never a fabricated Greek.
     """
 
     underlying: str
@@ -293,6 +303,8 @@ class OptionMover:
     moneyness: Moneyness
     atm_offset: int | None
     moneyness_label: str
+    iv: float | None = None
+    delta: float | None = None
 
     @property
     def name(self) -> str:
@@ -417,6 +429,8 @@ def compute_option_mover(
     spot_ltp: Decimal | None,
     prev_oi: int | None,
     strike_step: Decimal | None = None,
+    iv: float | None = None,
+    delta: float | None = None,
 ) -> OptionMover:
     """Reduce one option contract's reads to an :class:`OptionMover` (pure).
 
@@ -451,6 +465,12 @@ def compute_option_mover(
         The contract's previous trading-day 1-day open interest, or ``None``.
     strike_step
         The ``(underlying, expiry)`` strike-grid step (rupees), or ``None``.
+    iv, delta
+        The last kept session bar's STORED Greeks overlay values
+        (DEC-GREEKS-ENGINE-PR3B-001 — sourced from the SAME session read, never
+        recomputed here), or ``None`` (legacy partition / stamped-NULL bar /
+        never-enriched). Passed through at FULL precision — a statistical
+        value, never money-rounded (CLAUDE.md §4).
 
     Returns
     -------
@@ -489,6 +509,8 @@ def compute_option_mover(
         moneyness=view.moneyness,
         atm_offset=view.atm_offset,
         moneyness_label=view.label,
+        iv=iv,
+        delta=delta,
     )
 
 
@@ -512,6 +534,11 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "moneyness": mover.moneyness_label,
         "moneyness_bucket": mover.moneyness.value,
         "atm_offset": mover.atm_offset,
+        # STORED Greeks as of the snapshot (DEC-GREEKS-ENGINE-PR3B-001) — full
+        # precision floats (never rounded — CLAUDE.md §4); null = honest NA
+        # (legacy partition / stamped-NULL bar), the screen renders "—".
+        "iv": mover.iv,
+        "delta": mover.delta,
     }
 
 
@@ -1057,7 +1084,11 @@ def compute_options_candidates(
             # `_read_future_session` returns the HLC3 turnover as its 3rd field for ANY
             # FNO contract (DEC-MOVERS-VWAP-VALUE-001); options uses it DIRECTLY so the
             # contract's session frame is read ONCE (DEC-MOVERS-OPTIONS-VALUE-DEDUP-001).
-            ltp, volume, value_paisa, oi = read
+            # The trailing iv/delta are the LAST kept bar's STORED Greeks overlay
+            # (DEC-GREEKS-ENGINE-PR3B-001) off that SAME single read — never a second
+            # I/O, never recomputed at render; None for a legacy pre-Greeks partition
+            # or a stamped-NULL bar (honest NA, Golden Rule #1).
+            ltp, volume, value_paisa, oi, iv, delta = read
             prev_close = _prev_day_close(
                 lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
             )
@@ -1096,6 +1127,8 @@ def compute_options_candidates(
                 spot_ltp=spot_ltp,
                 prev_oi=prev_oi,
                 strike_step=step_by_key.get((underlying, expiry)),
+                iv=iv,
+                delta=delta,
             )
         )
 
