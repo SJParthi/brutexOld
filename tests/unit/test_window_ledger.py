@@ -853,3 +853,41 @@ class TestStreakTotal:
         assert ledger.streak_total() == 1
         ledger.record(k, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)  # SUCCESS
         assert ledger.streak_total() == 0
+
+
+class TestRescueLedgerSurface:
+    """DEC-WINDOW-LEDGER-RESCUE-001 — the load-failed flag + prune tombstones."""
+
+    def test_load_failed_defaults_false(self) -> None:
+        assert WindowLedger().load_failed is False
+
+    def test_pruned_keys_empty_by_default(self) -> None:
+        assert WindowLedger().pruned_keys() == frozenset()
+
+    def test_prune_records_tombstones(self) -> None:
+        # Every pruned key is tombstoned so the merge-on-save can never resurrect
+        # it from the on-disk copy (the DEC-WINDOW-TRAILING-GC-001 GC stays won).
+        ledger = WindowLedger()
+        orphan = _tkey(end=date(2026, 6, 9))
+        ledger.record(orphan, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 1
+        assert ledger.pruned_keys() == frozenset(
+            {
+                (
+                    orphan.market,
+                    orphan.security_id,
+                    orphan.interval,
+                    orphan.start.isoformat(),
+                    orphan.end.isoformat(),
+                )
+            }
+        )
+
+    def test_no_prune_no_tombstones(self) -> None:
+        ledger = WindowLedger()
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.record(planned, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.pruned_keys() == frozenset()

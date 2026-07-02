@@ -349,12 +349,26 @@ def _complete_note(
         if prebuild_built is not None
         else ""
     )
+    # LOUD ledger-reload failure + VISIBLE settled-window skips
+    # (DEC-WINDOW-LEDGER-RESCUE-001): the /universe pipeline note is the operator's
+    # primary pull surface, so a lost cross-run memory is ANNOUNCED up front and the
+    # no-vendor-hit skip count (spot + F&O phases summed) is shown when non-zero.
+    ledger_failed = spot.ledger_load_failed or (hist is not None and hist.ledger_load_failed)
+    prefix = (
+        "window ledger reload FAILED — running full re-verify pull (no skip); "
+        if ledger_failed
+        else ""
+    )
+    skipped = spot.windows_skipped + (hist.windows_skipped if hist is not None else 0)
+    skipped_clause = (
+        f", skipped {skipped} already-pulled window(s) (no vendor hit)" if skipped else ""
+    )
     return (
-        f"pipeline complete — spot {spot.verdict.kind} "
+        f"{prefix}pipeline complete — spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
         f"contracts, historical {bars} bars over {contracts} contract(s)"
-        f"{_movers_note_clause(segment_movers_warmed)}{prebuild}"
+        f"{skipped_clause}{_movers_note_clause(segment_movers_warmed)}{prebuild}"
     )
 
 

@@ -211,6 +211,15 @@ class HistoricalPullReport:
     #: OPENED yet (``expiry − lookback`` on/after the envelope end — zero vendor calls,
     #: zero ledger rows; DEC-FNO-FAR-EXPIRY-WINDOW-001). Always 0 under explicit dates.
     contracts_not_yet_in_window: int = 0
+    #: Settled windows skipped WITHOUT a vendor hit (DEC-WINDOW-LEDGER-RESCUE-001) —
+    #: the 1-minute phase's FIRST pass's ledger skips (later until-clean rounds
+    #: re-skip the same settled windows by design). Rendered in the note as
+    #: "skipped N already-pulled window(s) (no vendor hit)".
+    windows_skipped: int = 0
+    #: True when the persisted window ledger EXISTED but failed to reload at pull
+    #: start (DEC-WINDOW-LEDGER-RESCUE-001) — the pull ran a full re-verify (no
+    #: skip); the note announces it loudly, never silent.
+    ledger_load_failed: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the ``pull-historical`` route + the live panel."""
@@ -222,9 +231,11 @@ class HistoricalPullReport:
             "contracts_not_yet_in_window": self.contracts_not_yet_in_window,
             "bars_appended": self.bars_appended,
             "windows": self.windows,
+            "windows_skipped": self.windows_skipped,
             "failed_pairs": self.failed_pairs,
             "still_failed_windows": self.still_failed_windows,
             "auth_aborted": self.auth_aborted,
+            "ledger_load_failed": self.ledger_load_failed,
             "phase1_clean": self.phase1_clean,
             "phase1_complete": list(self.phase1_complete),
             "start_dates": dict(self.start_dates),
@@ -466,6 +477,9 @@ class _PassResult:
     still_failed_windows: int
     auth_aborted: bool
     clean_symbols: frozenset[str]
+    #: Settled windows this pass skipped WITHOUT a vendor hit (the WindowLedger skip
+    #: authority engaging — DEC-WINDOW-LEDGER-RESCUE-001 visibility).
+    skipped_windows: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +509,15 @@ class _PhaseResult:
     #: ``bars_appended == 0``). Empty for the synchronous path / an empty selection.
     merged_pairs: dict[tuple[str, str], IngestReport]
     failure_symbols: frozenset[str]
+    #: The FIRST pass's settled-window skips (DEC-WINDOW-LEDGER-RESCUE-001): each
+    #: later until-clean round re-skips the same settled windows by design, so
+    #: summing passes would double-count the operator-meaningful number ("how many
+    #: already-pulled windows cost NO vendor hit this pull").
+    skipped_windows: int = 0
+    #: True when the persisted window ledger EXISTED but failed to reload at phase
+    #: start (DEC-WINDOW-LEDGER-RESCUE-001) — this phase ran a full re-verify
+    #: (no skip); folded into the report note, never silent.
+    ledger_load_failed: bool = False
 
 
 def _drain_fetch_pipeline_in_phase(pipeline: FetchPipeline | None) -> None:
@@ -588,6 +611,8 @@ def _build_note(
     still_failed_windows: int,
     auth_aborted: bool,
     contracts_not_yet_in_window: int = 0,
+    windows_skipped: int = 0,
+    ledger_load_failed: bool = False,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -602,36 +627,57 @@ def _build_note(
     any contract was skipped as not-yet-open the ratio carries the honest breakdown
     ("8/12 contract(s) (4 not yet in window)") so a skip is never mistaken for a
     failure. Zero (the default) renders byte-identically to before.
+
+    *windows_skipped* / *ledger_load_failed* (DEC-WINDOW-LEDGER-RESCUE-001, applied
+    UNIFORMLY to whichever base note is built): a positive skip count appends
+    "— skipped N already-pulled window(s) (no vendor hit)" so the operator SEES the
+    settled-window skip engaging; a failed ledger reload prepends "window ledger
+    reload FAILED — running full re-verify pull (no skip); " so a lost cross-run
+    memory is announced, never silent. The defaults render byte-identically to before.
     """
+    prefix = (
+        "window ledger reload FAILED — running full re-verify pull (no skip); "
+        if ledger_load_failed
+        else ""
+    )
+    suffix = (
+        f" — skipped {windows_skipped} already-pulled window(s) (no vendor hit)"
+        if windows_skipped
+        else ""
+    )
     if contracts_selected == 0:
-        return (
+        base = (
             "no contracts selected — pull expiries + contracts first (the registry is "
             "empty for this selection), then pick a contract / chain / underlying to pull"
         )
-    if dry_run:
-        return (
+    elif dry_run:
+        base = (
             "dry-run: set Groww credentials to download the selected contracts' OHLC "
             "(an expired contract's candles are real vendor data, never fabricated offline)"
         )
-    if auth_aborted:
-        return "auth token expired mid-pull — re-set Groww credentials and re-pull (idempotent)"
-    if failed_pairs:
-        return (
+    elif auth_aborted:
+        base = "auth token expired mid-pull — re-set Groww credentials and re-pull (idempotent)"
+    elif failed_pairs:
+        base = (
             f"pulled {windows} windows; {failed_pairs} contract/interval pair(s) quarantined — "
             "re-pull to retry the deferred windows (WindowLedger skips the done ones)"
         )
-    if still_failed_windows:
-        return (
+    elif still_failed_windows:
+        base = (
             f"pulled {windows} windows; {still_failed_windows} transient window(s) still "
             "failing after the re-pull rounds — re-pull to drain them (WindowLedger skips the done)"
         )
-    skipped_suffix = (
-        f" ({contracts_not_yet_in_window} not yet in window)" if contracts_not_yet_in_window else ""
-    )
-    return (
-        f"pulled {windows} windows across {contracts_completed}/{contracts_selected} contract(s)"
-        f"{skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
-    )
+    else:
+        skipped_suffix = (
+            f" ({contracts_not_yet_in_window} not yet in window)"
+            if contracts_not_yet_in_window
+            else ""
+        )
+        base = (
+            f"pulled {windows} windows across {contracts_completed}/{contracts_selected} "
+            f"contract(s){skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
+        )
+    return f"{prefix}{base}{suffix}"
 
 
 def _mark_complete(
@@ -694,6 +740,18 @@ def _run_phase(
     selected contract landed clean with no quarantine / still-failing / auth death.
     """
     ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
+    # LOUD reload failure (DEC-WINDOW-LEDGER-RESCUE-001): the persisted ledger existed
+    # but could not be read — the store already WARNed (window_ledger.load_failed);
+    # surface it on THIS phase's result too so the pull report/note announces
+    # "window ledger reload FAILED — running full re-verify pull (no skip)".
+    # Never crashes the pull; never silent.
+    ledger_load_failed = ledger is not None and ledger.load_failed
+    if ledger_load_failed:
+        _LOG.warning(
+            "historical.pull.ledger_reload_failed",
+            interval=interval,
+            note="window ledger reload FAILED — running full re-verify pull (no skip)",
+        )
     # Cold-start seed (DEC-FNO-LEDGER-LAKE-RECONCILE-001): on a fresh clone / lost /
     # orphaned ledger the F&O candle lake may already hold this contract chain's bars
     # while the ledger is empty, so once the ledger drives the skip a re-pull would
@@ -753,6 +811,7 @@ def _run_phase(
         pass_windows = 0
         pass_failed_pairs = 0
         pass_still_failed = 0
+        pass_skipped = 0
         pass_auth = False
         clean: set[str] = set()
         # FUTURES market BEFORE the OPTIONS market (futures-first), unknown markets LAST —
@@ -786,6 +845,7 @@ def _run_phase(
             pass_windows += report.windows
             pass_failed_pairs += report.failed_pairs
             pass_still_failed += report.still_failed_windows
+            pass_skipped += report.skipped_windows
             pass_auth = pass_auth or report.auth_aborted
             clean |= _clean_symbols(report)
             # Fold this bucket's per-pair reports + quarantines into the phase-wide merge so the
@@ -801,6 +861,7 @@ def _run_phase(
             still_failed_windows=pass_still_failed,
             auth_aborted=pass_auth,
             clean_symbols=frozenset(clean),
+            skipped_windows=pass_skipped,
         )
         passes.append(result)
         return result
@@ -869,6 +930,10 @@ def _run_phase(
         clean=barrier_clean,
         merged_pairs=merged_pairs,
         failure_symbols=frozenset(failure_symbols),
+        # The FIRST pass's skips — the operator-meaningful "no vendor hit" count
+        # (later until-clean rounds re-skip the same settled windows by design).
+        skipped_windows=passes[0].skipped_windows if passes else 0,
+        ledger_load_failed=ledger_load_failed,
     )
 
 
@@ -1413,6 +1478,8 @@ def pull_contract_candles(
         still_failed_windows=minute.still_failed_windows,
         auth_aborted=minute.auth_aborted,
         contracts_not_yet_in_window=contracts_not_yet_in_window,
+        windows_skipped=minute.skipped_windows,
+        ledger_load_failed=minute.ledger_load_failed,
     )
     return HistoricalPullReport(
         dry_run=dry_run,
@@ -1432,6 +1499,8 @@ def pull_contract_candles(
         minute_requested=True,
         minute_skipped=False,
         contracts_not_yet_in_window=contracts_not_yet_in_window,
+        windows_skipped=minute.skipped_windows,
+        ledger_load_failed=minute.ledger_load_failed,
     )
 
 

@@ -649,3 +649,74 @@ def test_to_dict_stopped_after_spot() -> None:
 def test_phase_constants_are_distinct_labels(phase: str) -> None:
     assert phase in {PHASE_SPOT, PHASE_METADATA, PHASE_PREBUILD}
     assert len({PHASE_SPOT, PHASE_METADATA, PHASE_PREBUILD}) == 3
+
+
+# --------------------------------------------------------------------------- #
+# DEC-WINDOW-LEDGER-RESCUE-001 — the /universe note: visible skips + loud reload failure
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_note_folds_skipped_windows() -> None:
+    # Spot 5 + F&O 7 settled-window skips → ONE combined clause on the /universe note.
+    from dataclasses import replace
+
+    spot = replace(_spot(), windows_skipped=5)
+    hist = replace(_historical_inner(), windows_skipped=7)
+    report = run_full_pipeline(
+        run_spot=_Spy(spot),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=hist)),
+    )
+    assert "skipped 12 already-pulled window(s) (no vendor hit)" in report.note
+
+
+def test_pipeline_note_zero_skips_renders_no_clause() -> None:
+    # Default (0 skips) is byte-identical to the pre-feature note — no clause.
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+    )
+    assert "already-pulled window(s)" not in report.note
+    assert "window ledger reload FAILED" not in report.note
+
+
+def test_pipeline_note_spot_only_skips_when_no_candle_subreport() -> None:
+    # A None candle sub-report contributes 0 — the spot count still shows alone.
+    from dataclasses import replace
+
+    spot = replace(_spot(), windows_skipped=3)
+    report = run_full_pipeline(
+        run_spot=_Spy(spot),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=None)),
+    )
+    assert "skipped 3 already-pulled window(s) (no vendor hit)" in report.note
+
+
+def test_pipeline_note_announces_spot_ledger_reload_failure() -> None:
+    from dataclasses import replace
+
+    spot = replace(_spot(), ledger_load_failed=True)
+    report = run_full_pipeline(
+        run_spot=_Spy(spot),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+    )
+    assert report.note.startswith(
+        "window ledger reload FAILED — running full re-verify pull (no skip); "
+    )
+
+
+def test_pipeline_note_announces_historical_ledger_reload_failure() -> None:
+    from dataclasses import replace
+
+    hist = replace(_historical_inner(), ledger_load_failed=True)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=hist)),
+    )
+    assert report.note.startswith(
+        "window ledger reload FAILED — running full re-verify pull (no skip); "
+    )
