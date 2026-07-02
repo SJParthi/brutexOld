@@ -59,7 +59,16 @@ single-digit ms per TF.
 
 Polars groupby is deterministic for sorted input. Caller MUST provide
 1m DataFrame sorted ascending by `ts_utc` (this function does NOT
-re-sort — `df.sort('ts_utc')` is the caller's responsibility).
+re-sort — `df.sort('ts_utc')` is the caller's responsibility) — and that
+contract is now ENFORCED, not assumed (DEC-RESAMPLER-INPUT-GUARD-001):
+`_validate_input` raises a typed
+:class:`~brutex.data.errors.ResampleInputError` on a null, duplicate, or
+out-of-order `ts_utc`, because a duplicate silently DOUBLE-COUNTS the
+bucket's volume (10+10+5 → 25) and can pollute high/low, and an unsorted
+input inverts the bucket's open/close (`first()`/`last()` trust order).
+The check is vectorized (one `diff()` pass — O(1) state per row, the
+polars twin of the feed resampler's `prev_ts` tracker) and raises BEFORE
+any aggregation, so no partial output is ever produced.
 
 No look-ahead — Polars buckets are computed from left-closed
 intervals, so bar at time T uses only rows [T, T+tf). Property P-06 holds.
@@ -72,6 +81,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import polars as pl
 
+from brutex.data.errors import ResampleInputError
 from brutex.data.timeframes import ALL_TF_MINUTES, is_intraday
 
 # Required schema for input 1m DataFrame.
@@ -90,7 +100,20 @@ OPEN_INTEREST_COLUMN: str = "open_interest"
 
 
 def _validate_input(df_1m) -> None:  # type: ignore[no-untyped-def]
-    """Validate input DataFrame schema and sort order."""
+    """Validate the input DataFrame's schema AND its ``ts_utc`` ordering contract.
+
+    Schema violations keep their historical ``TypeError`` / ``ValueError``
+    (back-compat); an ordering violation — a null, DUPLICATE, or OUT-OF-ORDER
+    ``ts_utc`` — raises the typed
+    :class:`~brutex.data.errors.ResampleInputError`
+    (DEC-RESAMPLER-INPUT-GUARD-001). Before this guard the docstring CLAIMED
+    sort-order validation the body never did: a duplicate timestamp silently
+    double-counted the bucket's volume and could pollute high/low, and an
+    unsorted input inverted the bucket's open/close. The check is one
+    vectorized ``diff()`` pass (O(1) state per row — the polars twin of the
+    feed resampler's ``prev_ts`` tracker) and runs BEFORE any aggregation, so
+    the resampler never emits partial output from bad input.
+    """
     import polars as pl
 
     if not isinstance(df_1m, pl.DataFrame):
@@ -108,6 +131,38 @@ def _validate_input(df_1m) -> None:  # type: ignore[no-untyped-def]
             f"ts_utc must be polars.Datetime, got {ts_dtype}. "
             f"Convert with `pl.col('ts_utc').cast(pl.Datetime)` first."
         )
+    ts = df_1m.get_column("ts_utc")
+    # A null timestamp cannot be bucketed (and poisons the diff check below).
+    if ts.null_count() > 0:
+        raise ResampleInputError(
+            f"ts_utc contains {ts.null_count()} null timestamp(s) — every 1m bar "
+            f"must carry a real ts_utc (a null cannot be bucketed)."
+        )
+    if len(ts) > 1:
+        # STRICTLY-INCREASING guard (DEC-RESAMPLER-INPUT-GUARD-001): one
+        # vectorized diff() pass — O(1) state per row, the polars twin of
+        # feed/resampler.py's prev_ts tracker. A duplicate ts double-counts
+        # the bucket's volume + pollutes high/low; an out-of-order ts inverts
+        # open/close (first()/last() + maintain_order=True trust input order).
+        # Raises BEFORE any aggregation — never a partial output.
+        import datetime as _dt
+
+        diffs = ts.diff().slice(1)
+        violations = diffs.filter(diffs <= _dt.timedelta(0))
+        if len(violations) > 0:
+            offender = df_1m.with_row_index("_row").filter(
+                pl.col("ts_utc").diff() <= _dt.timedelta(0)
+            )
+            row = int(offender.get_column("_row")[0])
+            raise ResampleInputError(
+                f"ts_utc must be STRICTLY increasing (sorted ascending, no "
+                f"duplicates); row {row} has ts_utc "
+                f"{ts[row]!r} <= previous {ts[row - 1]!r} "
+                f"({len(violations)} violation(s) total). A duplicate "
+                f"double-counts the bucket's volume; an out-of-order row "
+                f"inverts the bucket's open/close. Sort + de-duplicate the "
+                f"1m frame before resampling."
+            )
 
 
 def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped-def]
