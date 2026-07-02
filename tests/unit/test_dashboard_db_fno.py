@@ -93,6 +93,18 @@ class TestFnoCandleLakeSchema:
             "close",
             "volume",
             "open_interest",
+            # STORED Greeks overlay (DEC-GREEKS-ENGINE-PR2B-001, plan §15.3) — the ten
+            # nullable physical columns the post-pull enrichment writes for options.
+            "iv",
+            "delta",
+            "gamma",
+            "theta",
+            "vega",
+            "rho",
+            "spot_at_bar",
+            "t_years_used",
+            "rate_used",
+            "greeks_provenance_id",
             "exchange",
             "segment",
             "underlying",
