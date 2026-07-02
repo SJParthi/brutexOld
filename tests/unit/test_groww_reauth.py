@@ -965,3 +965,101 @@ class TestReadOnlyReauthReRead:
         new_gen = refresher.reauth(seen_generation=0)
         assert new_gen == 1
         assert len(built) == 2  # a real LOCAL re-mint happened (not a re-read)
+
+
+# --------------------------------------------------------------------------- #
+# DEC-REAUTH-COLDSTART-READONLY-001 — a read-only COLD START can NEVER mint (audit C-2)
+# --------------------------------------------------------------------------- #
+
+
+class TestReadOnlyColdStartNeverMints:
+    """A read-only COLD START with no readable token fails LOUD — the mint is UNREACHABLE.
+
+    THE AUDIT FINDING (C-2, MAJOR / auth risk): with the token store absent/unreachable,
+    ``_cold_start_sdks`` fell straight into ``_mint_and_cache_sdks``, which fired the REAL
+    Groww mint network call FIRST and only THEN hit the read-only store's fail-loud
+    ``store`` — the dangerous mint had ALREADY happened (a BruteX-side mint may invalidate
+    the token TickVault is actively using; vendor single-active-token behaviour UNVERIFIED).
+    Now the read-only check runs BEFORE any mint: the cold start bounded-retries the READ,
+    then raises the loud actionable error. These tests FAIL against the pre-fix code (the
+    mint spy fires and the error message is the store's write-block, not the cold-start
+    guidance).
+    """
+
+    def test_empty_store_fails_loud_and_never_mints(self) -> None:
+        """SSM miss on every read → bounded READ retries → loud GrowwAuthError, ZERO mints."""
+        minter = _NoMintFactory()
+        sleeps: list[float] = []
+        with _patched_sleep(sleeps), pytest.raises(GrowwAuthError) as ei:
+            _readonly_refresher({}, minter=minter)  # empty box ⇒ every read is a miss
+        assert minter.mints == 0  # THE regression teeth: the mint seam NEVER fired
+        assert not isinstance(ei.value, GrowwTokenIssuanceThrottled)
+        message = str(ei.value)
+        # Precise + actionable: names the resolved SSM parameter AND the operator fix.
+        assert "/tickvault/prod/groww/access-token" in message
+        assert "NEVER mints" in message
+        assert "deploy/aws_token_minter/deploy.sh" in message
+        # Bounded READ retry: attempts=3 reads ⇒ 2 back-offs slept between them.
+        assert sleeps == [1.0, 2.0]
+
+    def test_unreachable_store_fails_loud_and_never_mints(self) -> None:
+        """A RAISING load (unreachable SSM) degrades to a miss → same loud no-mint error."""
+        minter = _NoMintFactory()
+
+        def unreachable(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            raise ConnectionError("SSM unreachable")
+
+        sleeps: list[float] = []
+        with _patched_sleep(sleeps), pytest.raises(GrowwAuthError) as ei:
+            SdkRefresher(
+                _CREDS,
+                token_factory=minter,
+                totp_minter=lambda _s: "000000",
+                sdk_factory=_FakeSDK,
+                token_cache_load=unreachable,
+                token_cache_store=lambda *_a, **_k: True,
+                readonly_reread=_ssm_load({}),
+                clock=lambda: _NOW,
+            )
+        assert minter.mints == 0
+        assert "/tickvault/prod/groww/access-token" in str(ei.value)
+        assert sleeps == [1.0, 2.0]
+
+    def test_token_landing_mid_retry_recovers_without_mint(self) -> None:
+        """The Lambda mints between read attempts → the retry ADOPTS it, still ZERO mints."""
+        minter = _NoMintFactory()
+        box: dict[str, str] = {}
+        reads: list[int] = []
+        inner = _ssm_load(box)
+
+        def load(creds: GrowwCredentials, *, now_utc: datetime) -> CachedToken | None:
+            reads.append(1)
+            result = inner(creds, now_utc=now_utc)
+            box["tok"] = "LAMBDA-TOK"  # the Lambda's ~06:05 IST mint lands after read 1
+            return result
+
+        sleeps: list[float] = []
+        with _patched_sleep(sleeps):
+            refresher = SdkRefresher(
+                _CREDS,
+                token_factory=minter,
+                totp_minter=lambda _s: "000000",
+                sdk_factory=_FakeSDK,
+                token_cache_load=load,
+                token_cache_store=lambda *_a, **_k: True,
+                readonly_reread=inner,
+                clock=lambda: _NOW,
+            )
+        assert refresher.current_sdk().token == "LAMBDA-TOK"  # type: ignore[attr-defined]
+        assert minter.mints == 0  # recovered by RE-READING, never by minting
+        assert len(reads) == 2  # miss, then the freshly-landed token
+        assert sleeps == [1.0]  # exactly one back-off before the winning read
+
+    def test_error_names_env_overridden_param(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The loud error names the RESOLVED parameter (env override honoured), not a stale default."""
+        monkeypatch.setenv("BRUTEX_TOKEN_PARAM_ACCESS_TOKEN", "/custom/groww/token-param")
+        sleeps: list[float] = []
+        with _patched_sleep(sleeps), pytest.raises(GrowwAuthError) as ei:
+            _readonly_refresher({}, minter=_NoMintFactory())
+        assert "/custom/groww/token-param" in str(ei.value)
+        assert "/tickvault/prod/groww/access-token" not in str(ei.value)
