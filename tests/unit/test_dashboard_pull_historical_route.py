@@ -462,6 +462,98 @@ def test_resolve_historical_contracts_grammar(store: InstrumentStore) -> None:
         assert none == []
 
 
+def test_resolve_historical_contracts_alias_key_symmetry(store: InstrumentStore) -> None:
+    """Aliased/hyphenated spot names match the PRIMARY registry key the pull persisted.
+
+    DEC-PULL-FORENSIC-WAVE2-001 regression: the metadata pull persists a chain under
+    the PRIMARY F&O underlying form (``NIFTYJR`` → ``NIFTYNXT50``, ``BAJAJ-AUTO`` →
+    ``BAJAJAUTO``); the ``underlying=`` and ``kind=`` selection arms previously
+    filtered with the RAW spot name → zero rows → an honest-looking 400 despite a
+    fully-cached chain. Both arms now resolve every form; a contract persisted under
+    TWO key eras (legacy raw + primary) is returned ONCE (contract_symbol de-dup).
+    """
+    lake = _lake_root(store)
+    expiry = date(2024, 1, 25)
+    with RegistryStore.open(lake / "registry.duckdb") as registry:
+        # The chain as the CURRENT metadata pull persists it — under the PRIMARY form.
+        registry.upsert_contract(
+            "NSE",
+            "NIFTYNXT50",
+            expiry,
+            "NSE-NIFTYNXT50-25Jan24-60000-CE",
+            side="CE",
+            strike=60000.0,
+            run_id="r",
+            fetched_at=_FETCHED,
+        )
+        # The SAME contract also present under the LEGACY raw-key era → de-duped.
+        registry.upsert_contract(
+            "NSE",
+            "NIFTYJR",
+            expiry,
+            "NSE-NIFTYNXT50-25Jan24-60000-CE",
+            side="CE",
+            strike=60000.0,
+            run_id="r",
+            fetched_at=_FETCHED,
+        )
+        # A hyphenated stock's chain under its normalized primary form.
+        registry.upsert_contract(
+            "NSE",
+            "BAJAJAUTO",
+            expiry,
+            "NSE-BAJAJAUTO-25Jan24-FUT",
+            side="FUT",
+            strike=None,
+            run_id="r",
+            fetched_at=_FETCHED,
+        )
+
+        def _select_kind(kind: str) -> list[Instrument]:
+            assert kind == "index"
+            return [_index("NIFTYJR", 14)]
+
+        # underlying= with the RAW spot spelling finds the primary-key chain, ONCE.
+        by_alias = app_module._resolve_historical_contracts(
+            registry,
+            contract=None,
+            contracts=None,
+            underlying="NIFTYJR",
+            expiry_date=None,
+            kind=None,
+            all_cached=False,
+            select_kind=_select_kind,
+        )
+        assert [r.contract_symbol for r in by_alias] == ["NSE-NIFTYNXT50-25Jan24-60000-CE"]
+
+        # underlying= with the HYPHENATED spot spelling finds the normalized key.
+        by_hyphen = app_module._resolve_historical_contracts(
+            registry,
+            contract=None,
+            contracts=None,
+            underlying="BAJAJ-AUTO",
+            expiry_date=None,
+            kind=None,
+            all_cached=False,
+            select_kind=_select_kind,
+        )
+        assert [r.contract_symbol for r in by_hyphen] == ["NSE-BAJAJAUTO-25Jan24-FUT"]
+
+        # kind= over an aliased spot instrument matches the primary-key rows (and the
+        # legacy-key duplicate row — the registry holds two rows for two key eras).
+        by_kind = app_module._resolve_historical_contracts(
+            registry,
+            contract=None,
+            contracts=None,
+            underlying=None,
+            expiry_date=None,
+            kind="index",
+            all_cached=False,
+            select_kind=_select_kind,
+        )
+        assert {r.contract_symbol for r in by_kind} == {"NSE-NIFTYNXT50-25Jan24-60000-CE"}
+
+
 # ── one-click multi-select COMPOSITE (DEC-FNO-ONECLICK-HISTORICAL-001) ─────────
 
 
