@@ -22,9 +22,13 @@
 #               reason the Makefile `run` target builds both), so wheels-missing +
 #               cargo-absent is an HONEST hard stop with the rustup one-liner, not
 #               a silent skip.
-#   Step 4/6  — persist BRUTEX_LAKE_ROOT + BRUTEX_AUTO_RESUME_ON_BOOT=1 ONCE in
-#               ~/.brutex/.env (brutex loads that file at every boot via
-#               brutex/config/dotenv.py; an exported env var always wins). No
+#   Step 4/6  — ZERO-DECISION lake location: a persisted config is reused
+#               silently; else an EXISTING lake is auto-detected (the app
+#               default ~/.brutex/lake, or an environment-pointed path) and
+#               recorded permanently; else the default is created and recorded.
+#               The operator NEVER types a path. BRUTEX_AUTO_RESUME_ON_BOOT=1
+#               is persisted the same way — all in ~/.brutex/.env (brutex loads
+#               that file at every boot via brutex/config/dotenv.py). No
 #               per-session exports ever again.
 #   Step 5/6  — self-check chain, each line PASS or exact-cause+fix, never a stack
 #               trace: deps importable → AWS identity (sts get-caller-identity via
@@ -44,8 +48,11 @@
 # no arrays, no mapfile/readarray, no associative arrays, no ${var,,}.
 #
 # Flags:
-#   --no-start   do everything except booting the dashboard (CI / cron / tests)
-#   -h, --help   print usage
+#   --no-start           do everything except booting the dashboard (CI / cron)
+#   --print-lake-detect  run ONLY the zero-decision lake detection + recording,
+#                        print LAKE_DECISION=<source> <path> datasets=<n>, exit
+#                        (internal — exercised by tests/deploy hermetically)
+#   -h, --help           print usage
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -67,16 +74,20 @@ usage: ./up.sh [--no-start]
 One-command BruteX bootstrap (DEC-ONE-COMMAND-UP-001): from ANY state (fresh
 clone, stale checkout, half-broken venv) to a RUNNING dashboard ready to pull.
 Idempotent — re-run any time; when everything is already up it prints
-"already ready" and exits in seconds.
+"already ready" and exits in seconds. Zero decisions: the lake location is
+auto-detected and recorded — you never type a path.
 
-  --no-start   run every setup + self-check step but do not boot the dashboard
-  -h, --help   this message
+  --no-start           run every setup + self-check step, do not boot the server
+  --print-lake-detect  internal: run only the lake detection (used by tests)
+  -h, --help           this message
 EOF
 }
 
+PRINT_LAKE_DETECT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-start) NO_START=1 ;;
+    --print-lake-detect) PRINT_LAKE_DETECT=1 ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'up.sh: unknown flag %s (supported: --no-start, --help)\n' "$1" >&2; exit 1 ;;
   esac
@@ -94,6 +105,63 @@ failhard() {
   exit 1
 }
 
+# ── zero-decision lake detection (the operator NEVER types a path) ───────────
+# "Real data" = at least one Parquet partition under <root>/bars (the lake
+# layout bars/<exch>/<segment>/<symbol>/<interval>/<yyyy>/<mm>.parquet).
+lake_has_data() {
+  [ -d "$1/bars" ] || return 1
+  find "$1/bars" -name '*.parquet' -print 2>/dev/null | head -1 | grep -q .
+}
+
+# Datasets = (exchange, segment, symbol, interval) directories — depth 4 under
+# bars/ — the same definition the dashboard's /db discovery uses.
+lake_dataset_count() {
+  if [ -d "$1/bars" ]; then
+    find "$1/bars" -mindepth 4 -maxdepth 4 -type d 2>/dev/null | wc -l | tr -d ' '
+  else
+    printf '0'
+  fi
+}
+
+# Decide + permanently record the lake location with ZERO operator input.
+# Sets LAKE_ROOT / LAKE_SOURCE / LAKE_DATASETS. Order:
+#   1. a persisted config line       → reuse silently (an exported env var that
+#      differs wins for THIS run — brutex/config/dotenv.py real-env-wins — and
+#      is reported, never asked about);
+#   2. an EXISTING lake with real data → auto-detect (an environment-pointed
+#      path first, then the app default ~/.brutex/lake) and record it;
+#   3. an environment-pointed path (no data yet) → record it;
+#   4. nothing anywhere → create + record the app default ~/.brutex/lake.
+resolve_and_record_lake() {
+  persisted_lake="$(sed -n 's/^BRUTEX_LAKE_ROOT=//p' "$CONF" | head -1)"
+  if [ -n "$persisted_lake" ]; then
+    if [ -n "${BRUTEX_LAKE_ROOT:-}" ] && [ "${BRUTEX_LAKE_ROOT}" != "$persisted_lake" ]; then
+      LAKE_ROOT="${BRUTEX_LAKE_ROOT}"
+      LAKE_SOURCE="environment-override"
+    else
+      LAKE_ROOT="$persisted_lake"
+      LAKE_SOURCE="persisted"
+    fi
+  elif [ -n "${BRUTEX_LAKE_ROOT:-}" ] && lake_has_data "${BRUTEX_LAKE_ROOT}"; then
+    LAKE_ROOT="${BRUTEX_LAKE_ROOT}"
+    LAKE_SOURCE="auto-detected"
+  elif lake_has_data "$BRUTEX_HOME/lake"; then
+    LAKE_ROOT="$BRUTEX_HOME/lake"
+    LAKE_SOURCE="auto-detected"
+  elif [ -n "${BRUTEX_LAKE_ROOT:-}" ]; then
+    LAKE_ROOT="${BRUTEX_LAKE_ROOT}"
+    LAKE_SOURCE="from-environment"
+  else
+    LAKE_ROOT="$BRUTEX_HOME/lake"
+    LAKE_SOURCE="created"
+  fi
+  LAKE_DATASETS="$(lake_dataset_count "$LAKE_ROOT")"
+  # Record ONCE (presence-guarded) — never rewrite an existing operator line.
+  if ! grep -q '^BRUTEX_LAKE_ROOT=' "$CONF"; then
+    printf 'BRUTEX_LAKE_ROOT=%s\n' "$LAKE_ROOT" >> "$CONF"
+  fi
+}
+
 # Return 0 and print "<pid> <url>" when a live dashboard is found via the
 # service-discovery runtime file (brutex/config/runtime.py — PID + URLs written
 # on startup, PID-liveness is the staleness oracle). Return 1 otherwise.
@@ -106,6 +174,15 @@ runtime_pid_alive() {
   live_url="$(sed -n 's/.*"\(http:\/\/[^"]*\)".*/\1/p' "$rt" | head -1)"
   printf '%s %s\n' "$live_pid" "${live_url:-$DASHBOARD_URL}"
 }
+
+# ── internal test hook — run ONLY the zero-decision lake detection ───────────
+if [ "$PRINT_LAKE_DETECT" -eq 1 ]; then
+  mkdir -p "$BRUTEX_HOME" || { printf 'up.sh: cannot create %s\n' "$BRUTEX_HOME" >&2; exit 1; }
+  [ -f "$CONF" ] || : > "$CONF"
+  resolve_and_record_lake
+  printf 'LAKE_DECISION=%s %s datasets=%s\n' "$LAKE_SOURCE" "$LAKE_ROOT" "$LAKE_DATASETS"
+  exit 0
+fi
 
 # ── FAST PATH — re-run while a dashboard is up = no-op in under a second ─────
 if live="$(runtime_pid_alive)"; then
@@ -221,33 +298,37 @@ else
   pass "wheels built + importable"
 fi
 
-# ── Step 4/6 — persisted config (~/.brutex/.env — recorded ONCE) ─────────────
-say "Step 4/6 — persisted config ($CONF — loaded by brutex at every boot; no per-session exports)"
+# ── Step 4/6 — zero-decision lake + persisted config (recorded ONCE) ─────────
+say "Step 4/6 — lake location + persisted config ($CONF — loaded by brutex at every boot; nothing to type, ever)"
 mkdir -p "$BRUTEX_HOME" \
   || failhard "cannot create $BRUTEX_HOME — fix: check \$HOME permissions"
 [ -f "$CONF" ] || : > "$CONF"
 
-# Lake root: persisted value → current exported env → default ~/.brutex/lake.
-# brutex/config/dotenv.py loads $CONF at every CLI + dashboard boot and a real
-# exported env var always wins, so recording here is a one-time act.
-persisted_lake="$(sed -n 's/^BRUTEX_LAKE_ROOT=//p' "$CONF" | head -1)"
-if [ -n "$persisted_lake" ]; then
-  LAKE_ROOT="${BRUTEX_LAKE_ROOT:-$persisted_lake}"
-  if [ -n "${BRUTEX_LAKE_ROOT:-}" ] && [ "${BRUTEX_LAKE_ROOT}" != "$persisted_lake" ]; then
-    note "NOTE: exported BRUTEX_LAKE_ROOT=${BRUTEX_LAKE_ROOT} overrides the persisted ${persisted_lake} for THIS run (an exported env var always wins over $CONF)"
-  fi
-  pass "lake root (already persisted): $LAKE_ROOT"
-elif [ -n "${BRUTEX_LAKE_ROOT:-}" ]; then
-  LAKE_ROOT="$BRUTEX_LAKE_ROOT"
-  printf 'BRUTEX_LAKE_ROOT=%s\n' "$LAKE_ROOT" >> "$CONF"
-  pass "lake root recorded from \$BRUTEX_LAKE_ROOT: $LAKE_ROOT (persisted in $CONF — you never need to export it again)"
-else
-  LAKE_ROOT="$BRUTEX_HOME/lake"
-  printf 'BRUTEX_LAKE_ROOT=%s\n' "$LAKE_ROOT" >> "$CONF"
-  pass "lake root defaulted to $LAKE_ROOT (persisted in $CONF — change it any time by editing the BRUTEX_LAKE_ROOT= line there)"
-fi
+# The lake location is decided WITHOUT any operator input: persisted config →
+# an existing lake auto-detected (environment-pointed path, then the app
+# default ~/.brutex/lake) → environment-pointed path → create the default.
+# brutex/config/dotenv.py loads $CONF at every CLI + dashboard boot, so the
+# recording is a one-time act — no per-session exports ever again.
+resolve_and_record_lake
+case "$LAKE_SOURCE" in
+  persisted)
+    pass "lake: $LAKE_ROOT (persisted, $LAKE_DATASETS datasets)"
+    ;;
+  environment-override)
+    pass "lake: $LAKE_ROOT (this session's environment overrides the persisted location for this run, $LAKE_DATASETS datasets)"
+    ;;
+  auto-detected)
+    pass "lake: $LAKE_ROOT (auto-detected existing data, $LAKE_DATASETS datasets — recorded permanently, nothing to type)"
+    ;;
+  from-environment)
+    pass "lake: $LAKE_ROOT (recorded permanently from this session's environment — nothing to type)"
+    ;;
+  *)
+    pass "lake: $LAKE_ROOT (created — your market data will live here; recorded permanently, nothing to type)"
+    ;;
+esac
 mkdir -p "$LAKE_ROOT" 2>/dev/null \
-  || failhard "cannot create lake root $LAKE_ROOT — fix: check the disk mount/permissions, or point BRUTEX_LAKE_ROOT in $CONF at a writable disk"
+  || failhard "cannot create the lake directory $LAKE_ROOT — fix: check the disk mount/permissions, then re-run ./up.sh"
 
 # Auto-resume-on-boot: enable by default, ONCE. Honest wiring: the flag makes
 # the dashboard boot resume an interrupted pull ONLY when the durable window
@@ -340,9 +421,9 @@ esac
 probe="$LAKE_ROOT/.up-write-probe.$$"
 if ( : > "$probe" ) 2>/dev/null; then
   rm -f "$probe"
-  pass "lake root writable: $LAKE_ROOT"
+  pass "lake: $LAKE_ROOT ($LAKE_SOURCE, $LAKE_DATASETS datasets) — writable"
 else
-  failhard "lake root NOT writable: $LAKE_ROOT — fix: check the disk mount/permissions, or point BRUTEX_LAKE_ROOT in $CONF at a writable disk"
+  failhard "lake root NOT writable: $LAKE_ROOT — fix: check the disk mount/permissions, then re-run ./up.sh"
 fi
 
 # ── Step 6/6 — start the dashboard (reuse the existing one-click entry) ──────

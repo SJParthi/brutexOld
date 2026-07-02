@@ -124,8 +124,11 @@ lake are never touched); installs the runtime + pull extras
 (`boto3` / `growwapi` / `pyotp`) one PASS/FAIL line each; builds the
 `fno_math` + `trading_core` Rust kernels when missing (needs `cargo` once —
 they are required, `brutex.indicators.*` import `trading_core` at module top);
-records `BRUTEX_LAKE_ROOT` + `BRUTEX_AUTO_RESUME_ON_BOOT=1` **once** in
-`~/.brutex/.env` (loaded at every boot — no per-session exports ever again);
+decides the data-lake location with **zero input** (an existing lake is
+auto-detected and recorded permanently, else the default `~/.brutex/lake` is
+created — you never type a path) and enables auto-resume-on-boot, both
+recorded **once** in `~/.brutex/.env` (loaded at every boot — no per-session
+exports ever again);
 runs a self-check chain (deps → AWS identity → Groww daily token readable from
 AWS SSM, strictly read-only — **it never mints a token** — → lake root
 writable), each line PASS or the exact cause + fix; then boots the dashboard

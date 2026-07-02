@@ -8,9 +8,12 @@ bash-4-only construct (the operator's macOS ships bash 3.2), weaken a
 loud-failure path, mint a token, or stop persisting the config.
 
 They follow the proven ``tests/deploy`` pattern (see
-``test_deploy_remote_state_backend.py``): pure static assertions over the shell
-source — no shell step is executed against the machine, no network / AWS is
-touched. The single subprocess is ``bash -n`` (a parse-only syntax check).
+``test_deploy_remote_state_backend.py``): static assertions over the shell
+source — no setup step is executed against the machine, no network / AWS is
+touched. The only subprocesses are ``bash -n`` (a parse-only syntax check) and
+the hermetic ``--print-lake-detect`` hook, which runs ONLY the zero-decision
+lake-detection matrix against a tmp ``$HOME`` (no pip, no cargo, no network) —
+the operator-never-types-a-path guarantee is exercised for real.
 """
 
 from __future__ import annotations
@@ -181,23 +184,152 @@ def test_missing_cargo_with_missing_wheels_is_an_honest_hard_stop(up_text: str) 
 
 
 # --------------------------------------------------------------------------- #
-# Step 4 — config persisted ONCE (no per-session env exports ever again).
+# Step 4 — ZERO-DECISION lake detection + config persisted ONCE.
 # --------------------------------------------------------------------------- #
 def test_lake_root_persisted_once_in_brutex_env(up_text: str) -> None:
     """The lake root is recorded once in ``~/.brutex/.env`` behind a presence guard."""
     assert 'CONF="$BRUTEX_HOME/.env"' in up_text
     assert "sed -n 's/^BRUTEX_LAKE_ROOT=//p'" in up_text, "persisted value must be read first"
+    assert "grep -q '^BRUTEX_LAKE_ROOT='" in up_text, "presence guard before the append"
     assert "printf 'BRUTEX_LAKE_ROOT=%s\\n'" in up_text, "append the value when absent"
 
 
-def test_lake_root_precedence_persisted_env_default(up_text: str) -> None:
-    """Precedence: persisted value → exported ``BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``."""
-    persisted = up_text.index('if [ -n "$persisted_lake" ]; then')
-    env_branch = up_text.index('elif [ -n "${BRUTEX_LAKE_ROOT:-}" ]; then')
-    default = up_text.index('LAKE_ROOT="$BRUTEX_HOME/lake"')
-    assert persisted < env_branch < default
-    # `${BRUTEX_LAKE_ROOT:-...}` guards mean the script NEVER requires an export.
+def test_lake_detection_is_zero_decision(up_text: str) -> None:
+    """The lake is decided with ZERO operator input: persisted → auto-detect → create.
+
+    Branch order inside ``resolve_and_record_lake``: a persisted config line
+    first, then an EXISTING lake with real data (environment-pointed path, then
+    the app default ``~/.brutex/lake``), then an environment-pointed path, then
+    create-the-default. Never a prompt, never a required export.
+    """
+    assert "lake_has_data()" in up_text
+    assert "lake_dataset_count()" in up_text
+    assert "resolve_and_record_lake()" in up_text
+    body = up_text[up_text.index("resolve_and_record_lake()") :]
+    persisted = body.index('if [ -n "$persisted_lake" ]; then')
+    env_data = body.index('lake_has_data "${BRUTEX_LAKE_ROOT}"')
+    default_data = body.index('lake_has_data "$BRUTEX_HOME/lake"')
+    env_only = body.index('LAKE_SOURCE="from-environment"')
+    created = body.index('LAKE_SOURCE="created"')
+    assert persisted < env_data < default_data < env_only < created
+    # `${BRUTEX_LAKE_ROOT:-}` guards mean the script NEVER requires an export.
     assert "${BRUTEX_LAKE_ROOT:-" in up_text
+    # No interactive input anywhere — the operator never types a path (no
+    # `read` builtin at a command position on any executable line).
+    code = "\n".join(_executable_lines(up_text))
+    assert not re.search(r"(?m)^\s*read\b", code), "interactive `read` found"
+    assert not re.search(r"[;&|]\s*read\b", code), "interactive `read` found"
+
+
+def test_lake_messages_never_ask_for_a_path(up_text: str) -> None:
+    """No operator-facing line mentions the env var or asks for a path.
+
+    The env var name stays a MECHANISM (the persisted-file key + the read of an
+    already-exported value) — every printed ``pass``/``note``/``failhard`` line
+    describes the decision informatively instead of instructing the operator to
+    set anything.
+    """
+    for line in _executable_lines(up_text):
+        stripped = line.strip()
+        if stripped.startswith(("pass ", "note ", "failhard ", "degrade ")):
+            assert "BRUTEX_LAKE_ROOT" not in line, f"operator-facing env-var mention: {line!r}"
+
+
+def test_informative_lake_line_with_dataset_count(up_text: str) -> None:
+    """The lake line reads like ``lake: … (auto-detected, N datasets)`` — zero-decision."""
+    assert "auto-detected existing data, $LAKE_DATASETS datasets" in up_text
+    assert "lake: $LAKE_ROOT ($LAKE_SOURCE, $LAKE_DATASETS datasets)" in up_text
+
+
+# --------------------------------------------------------------------------- #
+# Step 4 — the detection MATRIX, executed hermetically (tmp HOME, no network).
+# --------------------------------------------------------------------------- #
+def _run_lake_detect(home: Path, env_lake: str | None = None) -> tuple[str, str, str]:
+    """Run ``up.sh --print-lake-detect`` with *home* as ``$HOME`` and parse the verdict.
+
+    Hermetic: only the detection + recording logic runs (no pip, no cargo, no
+    network); returns ``(source, path, dataset_count)``.
+    """
+    env: dict[str, str] = {k: v for k, v in os.environ.items() if k != "BRUTEX_LAKE_ROOT"}
+    env["HOME"] = str(home)
+    if env_lake is not None:
+        env["BRUTEX_LAKE_ROOT"] = env_lake
+    proc = subprocess.run(  # fixed argv, detection-only hook, no shell, no network
+        ["bash", str(_UP_SH), "--print-lake-detect"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, f"--print-lake-detect failed: {proc.stderr}"
+    line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("LAKE_DECISION="))
+    source, rest = line[len("LAKE_DECISION=") :].split(" ", 1)
+    path, count = rest.rsplit(" datasets=", 1)
+    return source, path, count
+
+
+def _seed_lake(root: Path) -> None:
+    """Create a minimal real-data lake: one Parquet partition under ``bars/``."""
+    partition = root / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024"
+    partition.mkdir(parents=True)
+    (partition / "01.parquet").touch()
+
+
+def test_matrix_nothing_anywhere_creates_default_then_persists(tmp_path: Path) -> None:
+    """No config, no env, no data → the app default is created + recorded; re-run reads it."""
+    source, path, count = _run_lake_detect(tmp_path)
+    assert source == "created"
+    assert path == str(tmp_path / ".brutex" / "lake")
+    assert count == "0"
+    conf = (tmp_path / ".brutex" / ".env").read_text(encoding="utf-8")
+    assert f"BRUTEX_LAKE_ROOT={path}\n" in conf
+    # Idempotent re-run: the persisted line wins, nothing is appended twice.
+    source2, path2, _ = _run_lake_detect(tmp_path)
+    assert (source2, path2) == ("persisted", path)
+    conf2 = (tmp_path / ".brutex" / ".env").read_text(encoding="utf-8")
+    assert conf2.count("BRUTEX_LAKE_ROOT=") == 1
+
+
+def test_matrix_existing_data_at_default_is_auto_detected(tmp_path: Path) -> None:
+    """Real data at the app default ``~/.brutex/lake`` → auto-detected + recorded."""
+    _seed_lake(tmp_path / ".brutex" / "lake")
+    source, path, count = _run_lake_detect(tmp_path)
+    assert source == "auto-detected"
+    assert path == str(tmp_path / ".brutex" / "lake")
+    assert count == "1"
+
+
+def test_matrix_env_pointed_existing_lake_wins_auto_detection(tmp_path: Path) -> None:
+    """An environment-pointed path WITH data is auto-detected and recorded permanently."""
+    external = tmp_path / "external-ssd"
+    _seed_lake(external)
+    source, path, count = _run_lake_detect(tmp_path, env_lake=str(external))
+    assert source == "auto-detected"
+    assert path == str(external)
+    assert count == "1"
+    conf = (tmp_path / ".brutex" / ".env").read_text(encoding="utf-8")
+    assert f"BRUTEX_LAKE_ROOT={external}\n" in conf
+
+
+def test_matrix_env_set_without_data_is_recorded(tmp_path: Path) -> None:
+    """An environment-pointed path with NO data yet is still recorded (data will live there)."""
+    new_disk = tmp_path / "new-disk"
+    source, path, count = _run_lake_detect(tmp_path, env_lake=str(new_disk))
+    assert source == "from-environment"
+    assert path == str(new_disk)
+    assert count == "0"
+
+
+def test_matrix_env_override_of_persisted_never_rewrites_config(tmp_path: Path) -> None:
+    """A persisted config + a differing exported env → env wins for the RUN, config untouched."""
+    _run_lake_detect(tmp_path)  # records the default
+    other = tmp_path / "other"
+    source, path, _ = _run_lake_detect(tmp_path, env_lake=str(other))
+    assert source == "environment-override"
+    assert path == str(other)
+    conf = (tmp_path / ".brutex" / ".env").read_text(encoding="utf-8")
+    assert conf.count("BRUTEX_LAKE_ROOT=") == 1
+    assert str(other) not in conf, "an env override must never rewrite the persisted line"
 
 
 def test_auto_resume_enabled_by_default_via_persisted_config(up_text: str) -> None:
