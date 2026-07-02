@@ -2339,18 +2339,27 @@ jobs:
           python ../../scripts/check_vocab_rust_parity.py
 
   # ─────────────────────────────────────────────────────────────────
-  # MAKE RUN SMOKE — cold-start `make run` path, the gate that catches
+  # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
   # "100% green but the app won't start" bugs (DEC-RUN-SMOKE-GATE-001).
   #
   # WHY THIS EXISTS: every OTHER job installs `.[dev,data,ui]` AND
   # `pip install ./rust/{fno-math,trading-core}`, so they hand-install
-  # everything `make run` builds itself. That masked two real cold-start
-  # crashes that shipped behind "100% green": `trading_core` not built
-  # (DEC-RUN-TRADING-CORE-BUILD-001 / #479) and `numpy` declared dev-only
-  # (DEC-RUN-NUMPY-CORE-001 / #480). This job reproduces the OPERATOR's
-  # exact `make run` environment — `.[data,ui]` ONLY (no [dev]) + the
+  # everything the turnkey run builds itself. That masked two real
+  # cold-start crashes that shipped behind "100% green": `trading_core`
+  # not built (DEC-RUN-TRADING-CORE-BUILD-001 / #479) and `numpy` declared
+  # dev-only (DEC-RUN-NUMPY-CORE-001 / #480). This job reproduces the
+  # RAW direct-entry environment — `.[data,ui]` ONLY (no [dev]) + the
   # kernels — and boots the app, so a broken cold start can NEVER again
   # pass as green. It is wired into ci-ok as a HARD gate.
+  #
+  # NOTE (DEC-ONE-ENTRY-UNIFY-001): `make run` now delegates to ./up.sh
+  # (the ONE operator entry: self-check → self-heal → start); the old
+  # direct body lives at `make run-raw`. This job deliberately does NOT
+  # invoke make at all — it reproduces the run-raw dependency set + boot
+  # step-by-step (CI has no AWS credentials, and this gate must pin the
+  # RUNTIME dependency-set invariant, not the bootstrap's self-checks) —
+  # so the `run` re-wiring cannot affect it. The job NAME is pinned by
+  # branch-protection-drift.yml and must not change.
   # ─────────────────────────────────────────────────────────────────
   run-smoke:
     name: make run smoke (cold-start boot)
@@ -3302,11 +3311,12 @@ jobs:
       - licenses
       - rust
       - rust-trading-core
-      # DEC-RUN-SMOKE-GATE-001: the cold-start `make run` boot gate — the
-      # ONLY job that walks the operator's real run path (.[data,ui] + the
-      # kernels, no [dev]) and boots the app. Hard gate so "100% green but
-      # the app won't start" (the #479 trading_core + #480 numpy crashes)
-      # can never recur silently.
+      # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
+      # dependency set — `make run` itself delegates to ./up.sh per
+      # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
+      # run path (.[data,ui] + the kernels, no [dev]) and boots the app.
+      # Hard gate so "100% green but the app won't start" (the #479
+      # trading_core + #480 numpy crashes) can never recur silently.
       - run-smoke
       - banned
       # DEC-CICD-GATE-HONESTY-001: the ledger-numbering validator,

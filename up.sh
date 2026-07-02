@@ -38,9 +38,15 @@
 #               starts; a live pull will fail until fixed); an unwritable lake
 #               root is a hard stop.
 #   Step 6/6  — hand off to the existing one-click entry
-#               `.venv/bin/python -m brutex run` (the same entry `make run`
-#               invokes — DEC-ONECLICK-RUN-001), which prints the URL, opens the
+#               `.venv/bin/python -m brutex run` (DEC-ONECLICK-RUN-001), which
+#               prints the URL + the rotating log-file location, opens the
 #               browser, and boots the dashboard at http://127.0.0.1:9080.
+#
+# THIS SCRIPT IS THE ONE ENTRY POINT (DEC-ONE-ENTRY-UNIFY-001): `make run`,
+# `./up.sh`, and the committed IntelliJ ▶ "BruteX" run configuration ALL
+# execute this same self-check → self-heal → start path — the operator never
+# chooses between entries. (`make run-raw` keeps the raw direct
+# `python -m brutex run` chain for CI reproduction / debugging.)
 #
 # Idempotent + re-run-safe: every step probes before it mutates, so a re-run with
 # everything ready reaches "already ready" / the dashboard in seconds — including
@@ -162,6 +168,24 @@ resolve_and_record_lake() {
   fi
 }
 
+# Print the rotating log-file path the runtime will use (or is using),
+# mirroring brutex/observability/logging.py resolve_log_file exactly:
+# $BRUTEX_LOG_FILE (full path) → $BRUTEX_LOG_DIR/brutex.log → the persisted
+# ~/.brutex/.env BRUTEX_LOG_DIR line (dotenv is loaded at every brutex boot)
+# → the default ~/.brutex/logs/brutex.log. Pure computation — never mkdirs.
+resolve_log_file() {
+  if [ -n "${BRUTEX_LOG_FILE:-}" ]; then
+    printf '%s' "$BRUTEX_LOG_FILE"
+    return 0
+  fi
+  log_dir="${BRUTEX_LOG_DIR:-}"
+  if [ -z "$log_dir" ] && [ -f "$CONF" ]; then
+    log_dir="$(sed -n 's/^BRUTEX_LOG_DIR=//p' "$CONF" | head -1)"
+  fi
+  [ -n "$log_dir" ] || log_dir="$BRUTEX_HOME/logs"
+  printf '%s/brutex.log' "$log_dir"
+}
+
 # Return 0 and print "<pid> <url>" when a live dashboard is found via the
 # service-discovery runtime file (brutex/config/runtime.py — PID + URLs written
 # on startup, PID-liveness is the staleness oracle). Return 1 otherwise.
@@ -185,9 +209,13 @@ if [ "$PRINT_LAKE_DETECT" -eq 1 ]; then
 fi
 
 # ── FAST PATH — re-run while a dashboard is up = no-op in under a second ─────
+# The dashboard URL + the rotating log-file location each get ONE clear line
+# (the running process printed its own on boot; this re-run exits before the
+# runtime prints anything, so the fast path repeats both for visibility).
 if live="$(runtime_pid_alive)"; then
   printf 'already ready — BruteX dashboard is running (pid %s) at %s\n' \
     "${live%% *}" "${live#* }"
+  printf 'logs → %s\n' "$(resolve_log_file)"
   exit 0
 fi
 
@@ -436,6 +464,7 @@ fi
 if live="$(runtime_pid_alive)"; then
   printf 'already ready — BruteX dashboard is running (pid %s) at %s\n' \
     "${live%% *}" "${live#* }"
+  printf 'logs → %s\n' "$(resolve_log_file)"
   exit 0
 fi
 if [ "$NO_START" -eq 1 ]; then
