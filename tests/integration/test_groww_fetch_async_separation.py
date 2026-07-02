@@ -1093,7 +1093,8 @@ class TestOptionTwin:
         assert pipeline.totals[1] == 2 * n_contracts
         assert {r.status for r in ledger.records()} == {"SUCCESS"}
         assert spill.reserved_bytes == 0
-        assert not list(spill.spill_dir.iterdir())
+        # The per-pull namespace dir is REMOVED at drain (DEC-FETCH-SPILL-ISOLATION-001).
+        assert not spill.spill_dir.exists()
 
 
 # ─────────────────────── isolation under a REAL pool runner ──────────────────────
@@ -1228,9 +1229,10 @@ class TestSustainedSlowDiskDoesNotBackPressure:
         assert ledger.count >= n_windows
         assert _spot_part(lake, year=2021, month=1).exists()
         assert _spot_part(lake, year=2021, month=6).exists()
-        # (d) CLEAN DRAIN — the spill bytes are released + the spill dir holds no straggler.
+        # (d) CLEAN DRAIN — the spill bytes are released + the per-pull spill dir is removed
+        # (DEC-FETCH-SPILL-ISOLATION-001: cleanup sweeps only its OWN namespace dir).
         assert spill.reserved_bytes == 0
-        assert not list(spill.spill_dir.iterdir())
+        assert not spill.spill_dir.exists()
 
     def test_regression_without_spill_the_fetch_lane_throttles_to_write_rate(
         self, tmp_path: Path
