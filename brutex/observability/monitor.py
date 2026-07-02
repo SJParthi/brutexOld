@@ -28,9 +28,15 @@ shutdown signal; the worker uses :meth:`Event.wait` with the poll
 interval so stop() returns within one tick rather than waiting for a
 full interval.
 
-Every iteration is wrapped in a broad try/except (OSError, ValueError,
-RuntimeError, custom AuditError) so a misbehaving callback never
-crashes the monitor. Errors are logged via stdlib ``logging.exception``.
+Every callback invocation is wrapped in ``except Exception`` so a
+misbehaving callback — INCLUDING one that raises a custom
+:exc:`~brutex.orchestrator.audit.AuditError` (which the replay oracle
+raises precisely when it detects a live-vs-audit dedup inconsistency)
+— never crashes the monitor daemon thread. Errors are logged via
+stdlib ``logging.exception``. (Before DEC-MONITOR-NEVER-DIE-001 the
+guards caught only ``(OSError, ValueError, RuntimeError)``, so the very
+``AuditError`` the oracle exists to raise escaped ``tick_once`` and
+killed the daemon thread with no restart + no alert.)
 
 ## Why caller-supplied callbacks (not a hard-coded Telegram dep)
 
@@ -170,14 +176,14 @@ class MonitorLoop:
         if self.sla_detector is not None:
             try:
                 self.sla_detector.check_once()
-            except (OSError, ValueError, RuntimeError):
+            except Exception:  # pylint: disable=broad-exception-caught
                 logger.exception(
                     "MonitorLoop.tick_once: SLA detector check_once raised; loop continues"
                 )
         if self.watchdog is not None:
             try:
                 self.watchdog.check_once()
-            except (OSError, ValueError, RuntimeError):
+            except Exception:  # pylint: disable=broad-exception-caught
                 logger.exception(
                     "MonitorLoop.tick_once: watchdog check_once raised; loop continues"
                 )
@@ -187,7 +193,7 @@ class MonitorLoop:
         ):
             try:
                 self.replay_check()
-            except (OSError, ValueError, RuntimeError) as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.exception(
                     "MonitorLoop.tick_once: replay_check raised %s; loop continues",
                     type(exc).__name__,
