@@ -44,6 +44,16 @@ python = ["dep:pyo3"]
 serde = ["dep:serde"]
 
 [dependencies]
+# Jäckel "Let's Be Rational" IV inversion + Cody-precision normal CDF/PDF for
+# the shared Black-76 Greeks kernel (DEC-GREEKS-ENGINE-PR2-001; plan
+# docs/GREEKS_ENGINE_PLAN.md §7 Proposed Decision #5 / §13 Open Decision #7 —
+# the "re-add the pinned jaeckel crate" sourcing). EXACT pin: the solver's
+# float path is part of the frozen greeks_golden.json bit-identity contract,
+# so a silent version bump must never move a bit. MIT-licensed, ZERO runtime
+# dependencies (pure Rust: Cody erf + LBR + rational cubic), so TickVault's
+# native link stays clean — the same crate the pre-DEC-P0-025 kernel used
+# (`a87bce43^:rust/fno-math/src/greeks/black_scholes.rs`).
+jaeckel = "=0.2.0"
 # Optional — only compiled when the `python` feature is enabled (Phase 2 binding).
 # abi3-py312 pins the stable-ABI floor to BruteX's Python 3.12 baseline.
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }

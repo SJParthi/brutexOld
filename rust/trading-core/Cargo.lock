@@ -146,6 +146,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jaeckel"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "992b6400cff100660bba63694e5b8e506e76ab7d29b3ec987e46c5b14def1079"
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -479,6 +485,7 @@ dependencies = [
 name = "trading-core"
 version = "0.3.0"
 dependencies = [
+ "jaeckel",
  "proptest",
  "pyo3",
  "serde",
