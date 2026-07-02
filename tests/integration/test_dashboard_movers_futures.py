@@ -45,7 +45,7 @@ from brutex.dashboard.movers_futures import (
     run_futures_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
-from brutex.data.models import CandleBar
+from brutex.data.models import CandleBar, FnoGreeksBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
@@ -180,9 +180,13 @@ class TestReadFutureSession:
             tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_NEAR_FUT, day=_DAY, cutoff_min=None
         )
         assert read is not None
-        ltp, volume, value_paisa, oi = read
+        ltp, volume, value_paisa, oi, iv, delta = read
         assert ltp == Decimal("20100.00")
         assert volume == 500
+        # A plain (never-enriched) frame carries no Greeks overlay → honest None
+        # (DEC-GREEKS-ENGINE-PR3B-001), never a fabricated value.
+        assert iv is None
+        assert delta is None
         # Zero-range seed bars → HLC3 == close: 20050×100 + 20100×400 = ₹1,00,45,000
         # → 1_004_500_000 paisa (DEC-MOVERS-VWAP-VALUE-001).
         assert value_paisa == 1_004_500_000
@@ -195,7 +199,8 @@ class TestReadFutureSession:
             tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_NEAR_FUT, day=_DAY, cutoff_min=555
         )
         assert read is not None
-        ltp, volume, value_paisa, oi = read
+        ltp, volume, value_paisa, oi, iv, delta = read
+        assert iv is None and delta is None  # plain frame → no overlay
         assert ltp == Decimal("20050.00")
         assert volume == 100
         assert value_paisa == 200_500_000  # only bar1: 20050×100 = ₹20,05,000 → 200_500_000 paisa
@@ -266,6 +271,102 @@ class TestReadFutureSession:
         # typical=(112+106+110)/3=109.3333…→round_money 109.33 → 109.33×20=₹2186.60 → 218660 paisa
         # (the OLD close×volume would give 110×20=2200 → 220000 — genuinely distinct).
         assert read[2] == 218660
+
+
+def _greeks_min_bar(
+    *,
+    hour: int,
+    minute: int,
+    close: str,
+    volume: int,
+    oi: int | None,
+    iv: float | None,
+    delta: float | None,
+    day: date = _DAY,
+) -> FnoGreeksBar:
+    """An ENRICHED option 1-minute bar (stored Greeks overlay) at ``HH:MM`` IST."""
+    c = Decimal(close)
+    total = hour * 60 + minute - (5 * 60 + 30)
+    return FnoGreeksBar(
+        timestamp=datetime(day.year, day.month, day.day, total // 60, total % 60, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=volume,
+        open_interest=oi,
+        iv=iv,
+        delta=delta,
+    )
+
+
+class TestSessionGreeksOverlay:
+    """The session reader's stored-Greeks extraction (DEC-GREEKS-ENGINE-PR3B-001):
+    the LAST kept bar's iv/delta off the SAME frame — zero extra I/O, schema-tolerant,
+    honest None for a legacy frame / a stamped-NULL bar, never backfilled."""
+
+    _OPT = "NSE-NIFTY-27Jun24-24000-CE"
+
+    def _seed_enriched(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=self._OPT,
+            interval="1minute",
+            bars=[
+                _greeks_min_bar(
+                    hour=9, minute=15, close="150", volume=100, oi=1050, iv=0.17, delta=0.58
+                ),
+                _greeks_min_bar(
+                    hour=9, minute=16, close="164", volume=400, oi=1100, iv=0.1812, delta=0.62
+                ),
+            ],
+        )
+
+    def test_enriched_frame_returns_last_bar_greeks(self, tmp_path: Path) -> None:
+        self._seed_enriched(tmp_path)
+        read = _read_future_session(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=self._OPT, day=_DAY, cutoff_min=None
+        )
+        assert read is not None
+        assert read[4] == 0.1812  # the LAST bar's stored iv — not the first's
+        assert read[5] == 0.62
+
+    def test_cutoff_selects_that_bars_greeks(self, tmp_path: Path) -> None:
+        """An intraday cutoff snapshots the AS-OF bar's Greeks — the same last-bar
+        rule LTP/OI use, so iv/delta always describe the shown snapshot instant."""
+        self._seed_enriched(tmp_path)
+        read = _read_future_session(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=self._OPT, day=_DAY, cutoff_min=555
+        )
+        assert read is not None
+        assert read[0] == Decimal("150.00")
+        assert read[4] == 0.17
+        assert read[5] == 0.58
+
+    def test_stamped_null_last_bar_reads_none_never_backfilled(self, tmp_path: Path) -> None:
+        """A §15.8 stamped-NULL LAST bar yields None even though an EARLIER bar has
+        solved Greeks — honest NA, never backfilled (Golden Rule #1)."""
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=self._OPT,
+            interval="1minute",
+            bars=[
+                _greeks_min_bar(
+                    hour=9, minute=15, close="150", volume=100, oi=1050, iv=0.17, delta=0.58
+                ),
+                _greeks_min_bar(
+                    hour=9, minute=16, close="164", volume=400, oi=1100, iv=None, delta=None
+                ),
+            ],
+        )
+        read = _read_future_session(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=self._OPT, day=_DAY, cutoff_min=None
+        )
+        assert read is not None
+        assert read[4] is None
+        assert read[5] is None
 
 
 # ── _underlying_spot_ltp (INDEX then CASH) ────────────────────────────────
