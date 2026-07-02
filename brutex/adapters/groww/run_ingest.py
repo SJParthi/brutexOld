@@ -592,7 +592,20 @@ def run_groww_spot_ingest(
             "total_bars": sum(report.bars_appended for report in pairs.values()),
         },
     )
-    return GrowwIngestReport(pairs=pairs, failures=tuple(failures))
+    run_report = GrowwIngestReport(pairs=pairs, failures=tuple(failures))
+    # VISIBLE settled-window skips (DEC-WINDOW-LEDGER-RESCUE-001): ONE INFO line per
+    # driver pass with the AGGREGATE count — the per-window skip stays DEBUG
+    # (ingest.py logs one per window, far too chatty at INFO for a universe pull),
+    # but the operator could previously never SEE the no-vendor-hit skip engaging at
+    # the default log level. Emitted unconditionally (0 is an honest "nothing was
+    # skippable"), on the controller thread, after the fan-out drain.
+    _LOG.info(
+        "ingest.windows_skipped_settled",
+        pull_id=pull_id,
+        windows_skipped_settled=run_report.skipped_windows,
+        pairs=len(pairs),
+    )
+    return run_report
 
 
 @dataclass(frozen=True, slots=True)

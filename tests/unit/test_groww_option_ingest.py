@@ -3105,6 +3105,129 @@ class TestReconcileFnoLedgerWithLake:
         assert ledger.is_skippable(_fetched_key(contract))
 
 
+# --- DEC-WINDOW-LEDGER-RESCUE-001: default-window rescue + live-edge + visible skips --
+
+
+class TestFnoDefaultWindowRescue:
+    """The enclosure off-by-one fix — the F&O rescue actually rescues.
+
+    A DEFAULT-window contract's ledger key ends at ``expiry + 1 day``
+    (fetch-EXCLUSIVE — ``contract_bounds.default_fno_minute_window``) while the lake
+    span's ``last_date`` is bar-INCLUSIVE (the last stored bar is ON expiry), so the
+    old ``end <= last_date`` enclosure was ``expiry + 1 <= expiry`` — ALWAYS false:
+    the rescue seeded 0 windows deterministically even over a maximally dense lake,
+    and a lost ledger re-downloaded the whole chain (~1,100 wasted calls).
+    """
+
+    def test_dense_lake_seeds_all_expired_default_window_contracts(self) -> None:
+        # REGRESSION (a) — FAILS-BEFORE: was deterministically 0 seeded.
+        contracts = [
+            _ce("NSE-NIFTY-02Jan25-28500-CE"),
+            _ce("NSE-NIFTY-02Jan25-28600-PE"),
+            _fut(),
+        ]
+        full_start, full_end = date(2020, 1, 1), date(2025, 6, 1)
+        windows: dict[str, tuple[date, date]] = {}
+        # A MAXIMALLY dense lake: bars from each window's first day THROUGH expiry —
+        # the last stored bar is ON expiry (bar-inclusive last_date == expiry).
+        spans: list[dict[str, object]] = []
+        for contract in contracts:
+            expiry = contract.expiry
+            assert expiry is not None
+            window = default_fno_minute_window(
+                expiry,
+                full_start=full_start,
+                full_end=full_end,
+                is_option=contract.contract_type in {"CE", "PE"},
+            )
+            assert window is not None
+            assert window[1] == expiry + timedelta(days=1)  # fetch-exclusive end
+            windows[contract.symbol] = window
+            spans.append(_fno_span(contract, first=window[0].isoformat(), last=expiry.isoformat()))
+        ledger = WindowLedger()
+        seeded = reconcile_fno_ledger_windows(
+            ledger,
+            spans,
+            contracts=contracts,
+            intervals=["1minute"],
+            start=full_start,
+            end=full_end,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            contract_windows=windows,
+            now=_FNO_NOW,
+            now_ist=lambda: _FNO_NOW,
+        )
+        assert seeded == len(contracts) == 3
+        for contract in contracts:
+            key = WindowKey(
+                market=GROWW_OPTION_COVERAGE_MARKET,
+                security_id=contract.symbol,
+                interval="1minute",
+                start=windows[contract.symbol][0],
+                end=windows[contract.symbol][1],
+            )
+            assert ledger.is_skippable(key)  # the rescue makes the re-pull skip
+
+    def test_live_edge_window_with_partial_today_bar_not_seeded(self) -> None:
+        # ADVERSARIAL over-skip pin: a window whose LAST COVERED day is the clamp
+        # clock's TODAY (end − 1 == today, the post-close today+1 clamp) is NEVER
+        # seeded — a mid-session partial store can put a bar on today without the
+        # session being complete, and a span-level check cannot tell partial from
+        # complete, so the live edge is conservatively left to the fetch. The span
+        # here even CLAIMS to cover the whole window — the guard still refuses.
+        contract = _ce()
+        clock = datetime(2025, 1, 2, 18, 0, tzinfo=UTC)  # clock: today=2025-01-02, post-close
+        window = (date(2024, 12, 3), date(2025, 1, 3))  # end − 1 == today
+        ledger = WindowLedger()
+        seeded = reconcile_fno_ledger_windows(
+            ledger,
+            [_fno_span(contract, first="2024-12-03", last="2025-01-03")],
+            contracts=[contract],
+            intervals=["1minute"],
+            start=window[0],
+            end=window[1],
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            now=clock,
+            now_ist=lambda: clock,
+        )
+        assert seeded == 0  # the live-edge day may be partial — left to the fetch
+        assert ledger.count == 0
+
+
+def test_run_driver_emits_windows_skipped_settled_info() -> None:
+    """DEC-WINDOW-LEDGER-RESCUE-001 — ONE aggregate INFO line per F&O driver pass."""
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
+    sink = _Sink()
+    ledger = WindowLedger()
+    settled = _ce()
+    fetched = _ce("NSE-NIFTY-02Jan25-28600-CE")
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id=settled.symbol,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    ledger.record(key, raw_bars=5, error_type=None, bars_appended=5, now=datetime.now(UTC))
+    with capture_logs() as logs:
+        report = run_groww_option_ingest(
+            _client(sdk),
+            sink,
+            contracts=[settled, fetched],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            now_ist=_now,
+        )
+    assert report.skipped_windows == 1
+    events = [e for e in logs if e["event"] == "option.ingest.windows_skipped_settled"]
+    assert len(events) == 1
+    assert events[0]["windows_skipped_settled"] == 1
+    assert events[0]["pairs"] == 2
+    assert events[0]["log_level"] == "info"
+
+
 class TestEmptyBreakerOptionSpine:
     """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the mass-empty breaker on the F&O spine."""
 

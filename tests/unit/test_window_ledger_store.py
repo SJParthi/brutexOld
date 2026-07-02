@@ -10,6 +10,9 @@ flush, and the begin/end dry-run rule.
 from __future__ import annotations
 
 import errno
+import fcntl
+import os
+import threading
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -18,25 +21,32 @@ from zoneinfo import ZoneInfo
 import pytest
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.partition_lock import partition_lock_path
 from brutex.data.window_ledger import (
     EMPTY_TERMINAL_THRESHOLD,
+    FAILED,
+    PLANNED,
     SKIPPED,
     SUCCESS,
     WindowLedger,
 )
 from brutex.data.window_ledger_store import (
+    LedgerRow,
     begin_pull_ledger,
     end_pull_ledger,
+    index_lake_spans,
     ledger_dir,
     ledger_path,
     load_or_migrate_window_ledger,
     load_window_ledger,
     make_live_ledger_flush,
     make_locked_flush,
+    merge_ledger_rows,
     plan_windows,
     reconcile_ledger_windows,
     reconcile_ledger_with_lake,
     save_window_ledger,
+    seed_enclosed_windows,
 )
 from brutex.data.window_status import WindowStatusLog
 from brutex.data.window_status_store import save_window_status
@@ -1115,3 +1125,370 @@ class TestReconcileSymbolWindows:
         )
         assert m_seeded == n_seeded
         assert with_map.to_rows() == without_map.to_rows()
+
+
+# --- DEC-WINDOW-LEDGER-RESCUE-001: fetch-exclusive enclosure + live-edge guard --------
+
+
+def _seed_one(
+    *,
+    last: str,
+    end: date,
+    first: str = "2020-01-01",
+    now: datetime = _NOW,
+    today: date | None = None,
+) -> int:
+    """Run the COMMON seed core over ONE candidate window against one 1day span."""
+    ledger = WindowLedger()
+    span_index = index_lake_spans([_span(interval="1day", first=first, last=last)])
+    key = WindowKey(market="spot", security_id="NIFTY", interval="1day", start=_START, end=end)
+    return seed_enclosed_windows(
+        ledger,
+        span_index,
+        [(key, ("NSE", "CASH", "NIFTY", "1day"))],
+        now=now,
+        today_ist=today,
+    )
+
+
+class TestSeedEnclosureBoundary:
+    """DEC-WINDOW-LEDGER-RESCUE-001 — the off-by-one fix + the live-edge guard.
+
+    A window key's ``end`` is fetch-EXCLUSIVE (the last requested bar is on
+    ``end − 1 day``) while a lake span's ``last_date`` is bar-INCLUSIVE, so the
+    enclosure test is ``(end − 1) <= last_date``. The prior ``end <= last_date``
+    form made the default-window F&O rescue DEAD CODE (``expiry + 1 <= expiry``
+    is always false). Boundary contract pinned exactly as specified:
+    ``end − 1 == last_date`` seeds; ``end − 1 == last_date + 1`` does not.
+    """
+
+    def test_end_minus_one_on_last_date_seeds(self) -> None:
+        # FAILS-BEFORE: the old rule required end <= last_date (2021-08-01 <= 2021-07-31).
+        assert _seed_one(last="2021-07-31", end=date(2021, 8, 1), today=date(2026, 6, 8)) == 1
+
+    def test_end_minus_one_past_last_date_does_not_seed(self) -> None:
+        # end − 1 == last_date + 1 → the last covered day is NOT stored → never seeded.
+        assert _seed_one(last="2021-07-30", end=date(2021, 8, 1), today=date(2026, 6, 8)) == 0
+
+    def test_live_edge_window_including_today_never_seeds(self) -> None:
+        # FAILS-BEFORE (over-skip): a window whose coverage INCLUDES the current IST
+        # day must NEVER seed — a mid-session partial store puts a bar on `today`
+        # (span last_date == today) without the session being complete, and the old
+        # rule would have seeded it settled (end <= last_date), masking the rest of
+        # the day forever.  end − 1 == today → guarded.
+        assert _seed_one(last="2021-08-02", end=date(2021, 8, 2), today=date(2021, 8, 1)) == 0
+
+    def test_live_edge_today_derived_from_now_ist(self) -> None:
+        # today_ist=None derives the IST calendar day from `now`: at 10:00 UTC the
+        # IST date equals the UTC date, so a window whose last covered day IS that
+        # date is guarded; one day later the same window seeds.
+        end = date(2021, 8, 1)  # last covered day = 2021-07-31
+        on_the_edge = datetime(2021, 7, 31, 10, 0, tzinfo=UTC)
+        past_the_edge = datetime(2021, 8, 1, 10, 0, tzinfo=UTC)
+        assert _seed_one(last="2021-07-31", end=end, now=on_the_edge) == 0
+        assert _seed_one(last="2021-07-31", end=end, now=past_the_edge) == 1
+
+    def test_empty_below_threshold_still_refetches_and_settles_at_three(
+        self, tmp_path: Path
+    ) -> None:
+        # PIN (no over-skip): the EMPTY-below-threshold behaviour is UNCHANGED by the
+        # enclosure fix + the merge-on-save — a genuine EMPTY window still re-fetches
+        # on every pull and settles SKIPPED only at the 3rd clean empty
+        # (EMPTY_TERMINAL_THRESHOLD), with the save→load round-trip (now a
+        # read-MERGE-write) preserving the streak exactly.
+        key = _key()
+        first = WindowLedger()
+        first.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY #1
+        save_window_ledger(first, tmp_path)
+        second = load_window_ledger(tmp_path)
+        assert second.is_skippable(key) is False  # still re-fetched
+        second.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY #2
+        save_window_ledger(second, tmp_path)
+        third = load_window_ledger(tmp_path)
+        assert third.is_skippable(key) is False  # still re-fetched
+        assert third.records()[0].empty_streak == 2
+        # The 3rd genuine empty settles SKIPPED — exactly EMPTY_TERMINAL_THRESHOLD.
+        assert EMPTY_TERMINAL_THRESHOLD == 3
+        assert third.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_NOW) == SKIPPED
+
+
+# --- DEC-WINDOW-LEDGER-RESCUE-001: merge_ledger_rows (the pure conflict core) ---------
+
+
+def _row(
+    security: str = "NIFTY",
+    *,
+    status: str = SUCCESS,
+    attempts: int = 1,
+    last_attempt: str | None = "2026-06-08T12:00:00+00:00",
+    bars: int = 5,
+) -> LedgerRow:
+    """One serialised ledger row (the exact 13-field ``to_rows`` shape)."""
+    return (
+        "dhan",
+        security,
+        "1minute",
+        "2021-01-01",
+        "2021-04-01",
+        status,
+        bars,
+        attempts,
+        None,
+        "2026-06-01T00:00:00+00:00",
+        last_attempt,
+        0,
+        1,
+    )
+
+
+class TestMergeLedgerRows:
+    """The per-key merge rule: settledness > newer timestamp > attempts > deterministic."""
+
+    def test_disjoint_rows_union_no_loss(self) -> None:
+        a, b = _row("NIFTY"), _row("SENSEX")
+        merged = merge_ledger_rows([a], [b])
+        assert merged == sorted([a, b], key=lambda r: r[:5])
+        # Order-independent: swapping memory/disk yields the SAME union.
+        assert merge_ledger_rows([b], [a]) == merged
+
+    def test_more_settled_status_wins_both_directions(self) -> None:
+        settled = _row(status=SUCCESS, attempts=1)
+        planned = _row(status=PLANNED, attempts=0, last_attempt=None)
+        assert merge_ledger_rows([planned], [settled]) == [settled]
+        assert merge_ledger_rows([settled], [planned]) == [settled]
+
+    def test_equal_rank_newer_timestamp_wins(self) -> None:
+        older = _row(last_attempt="2026-06-08T12:00:00+00:00", bars=1)
+        newer = _row(last_attempt="2026-06-08T13:00:00+00:00", bars=2)
+        assert merge_ledger_rows([older], [newer]) == [newer]
+        assert merge_ledger_rows([newer], [older]) == [newer]
+
+    def test_equal_rank_and_timestamp_higher_attempts_wins(self) -> None:
+        fewer = _row(attempts=1, bars=1)
+        more = _row(attempts=4, bars=2)
+        assert merge_ledger_rows([fewer], [more]) == [more]
+        assert merge_ledger_rows([more], [fewer]) == [more]
+
+    def test_full_tie_is_deterministic_regardless_of_side(self) -> None:
+        # Same rank / stamp / attempts, different payload → the lexicographically
+        # greater full row wins on EITHER side (writer-order independence).
+        low = _row(bars=5)
+        high = _row(bars=7)
+        assert merge_ledger_rows([low], [high]) == merge_ledger_rows([high], [low])
+
+    def test_identical_rows_collapse_to_one(self) -> None:
+        row = _row()
+        assert merge_ledger_rows([row], [row]) == [row]
+
+    def test_pruned_disk_only_row_is_dropped(self) -> None:
+        kept, pruned = _row("NIFTY"), _row("SENSEX")
+        pruned_key = (pruned[0], pruned[1], pruned[2], pruned[3], pruned[4])
+        merged = merge_ledger_rows([kept], [pruned], pruned_keys=frozenset({pruned_key}))
+        assert merged == [kept]
+
+    def test_pruned_key_recreated_in_memory_is_kept(self) -> None:
+        # A tombstone applies ONLY to disk-only rows — a key re-created in memory
+        # (a shrunk-range replan) always survives its own tombstone.
+        row = _row("NIFTY")
+        key = (row[0], row[1], row[2], row[3], row[4])
+        assert merge_ledger_rows([row], [row], pruned_keys=frozenset({key})) == [row]
+
+    def test_unknown_status_never_displaces_a_real_row(self) -> None:
+        weird = _row(status="WEIRD", attempts=99)
+        planned = _row(status=PLANNED, attempts=0, last_attempt=None)
+        assert merge_ledger_rows([weird], [planned]) == [planned]
+
+    def test_reopened_key_memory_demotion_wins_over_settled_disk(self) -> None:
+        # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × the merge-on-save: a deliberate
+        # reopen_skipped demotion (SKIPPED → FAILED in memory) must NOT be undone
+        # by the on-disk SKIPPED copy's more-settled rank — for a reopened key the
+        # in-memory row wins outright.
+        demoted = _row(status=FAILED, attempts=2)
+        settled = _row(status=SKIPPED, attempts=2)
+        key = (demoted[0], demoted[1], demoted[2], demoted[3], demoted[4])
+        # WITHOUT the tombstone the settled disk copy wins (the resurrect bug):
+        assert merge_ledger_rows([demoted], [settled]) == [settled]
+        # WITH the tombstone the deliberate demotion survives the merge:
+        assert merge_ledger_rows([demoted], [settled], reopened_keys=frozenset({key})) == [demoted]
+
+
+# --- DEC-WINDOW-LEDGER-RESCUE-001: cross-process-safe save (flock + read-merge-write) --
+
+
+class TestSaveMergeCrossProcess:
+    """Two concurrent savers on one lake never clobber each other's rows."""
+
+    def test_two_writer_sequence_no_row_loss(self, tmp_path: Path) -> None:
+        # FAILS-BEFORE: the simulated second-process sequence — A and B both load the
+        # (empty) ledger, A records+saves NIFTY, B records+saves SENSEX; the old
+        # whole-file replace made B's save CLOBBER A's row (last-writer-wins).
+        a = load_window_ledger(tmp_path)
+        b = load_window_ledger(tmp_path)
+        a.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(a, tmp_path)
+        b.record(_key("SENSEX"), raw_bars=3, error_type=None, bars_appended=3, now=_NOW)
+        save_window_ledger(b, tmp_path)
+        final = load_window_ledger(tmp_path)
+        assert final.is_skippable(_key("NIFTY")) is True  # A's row SURVIVES B's save
+        assert final.is_skippable(_key("SENSEX")) is True
+        assert final.count == 2
+
+    def test_threaded_savers_no_row_loss(self, tmp_path: Path) -> None:
+        # 8 interleaved savers, each with a distinct row: the flock serialises the
+        # read-merge-write so ALL 8 rows land (no lost update, any interleaving).
+        n = 8
+        barrier = threading.Barrier(n)
+        errors: list[Exception] = []
+
+        def _save_one(i: int) -> None:
+            ledger = WindowLedger()
+            ledger.record(_key(f"S{i}"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+            barrier.wait(timeout=10.0)
+            try:
+                save_window_ledger(ledger, tmp_path)
+            except Exception as exc:
+                # Any save failure (LakeWriteHalt / OSError / pyarrow) is an Exception
+                # subclass — captured here and surfaced to the main thread's
+                # ``errors == []`` assert (never BaseException; CodeQL py/catch-base-exception).
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_save_one, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30.0)
+        assert errors == []
+        final = load_window_ledger(tmp_path)
+        assert final.count == n
+        assert all(final.is_skippable(_key(f"S{i}")) for i in range(n))
+
+    def test_same_key_conflict_prefers_more_settled(self, tmp_path: Path) -> None:
+        # FAILS-BEFORE: A settles a window SUCCESS and saves; B (loaded before A's
+        # save) only PLANNED the same key and saves LAST — the old replace demoted
+        # the settled row back to PLANNED (a lost settle → a needless re-fetch).
+        a = load_window_ledger(tmp_path)
+        b = load_window_ledger(tmp_path)
+        a.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(a, tmp_path)
+        b.plan(_key("NIFTY"), now=_NOW)
+        save_window_ledger(b, tmp_path)
+        final = load_window_ledger(tmp_path)
+        assert final.count == 1
+        assert final.records()[0].status == SUCCESS  # the settled row wins the merge
+
+    def test_reopened_demotion_survives_the_merge_on_save(self, tmp_path: Path) -> None:
+        # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × DEC-WINDOW-LEDGER-RESCUE-001: the
+        # `brutex reopen-skipped` load→demote→save round-trip. FAILS-BEFORE the
+        # reopened-keys tombstone: the on-disk SKIPPED copy out-ranked the in-memory
+        # FAILED demotion in the merge and the re-open was silently undone.
+        seeded = WindowLedger(_threshold=1)
+        assert seeded.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW) == (
+            SKIPPED
+        )
+        save_window_ledger(seeded, tmp_path)
+        reopener = load_window_ledger(tmp_path)
+        assert reopener.reopen_skipped() == 1
+        save_window_ledger(reopener, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.count == 1
+        assert restored.records()[0].status == FAILED  # the demotion persisted
+        assert restored.is_skippable(_key()) is False  # the next pull re-fetches it
+
+    def test_save_lock_timeout_skips_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A peer wedged past the bounded deadline: the save is SKIPPED with a loud
+        # WARNING (never a crash mid-flush); after the peer releases, a retry lands.
+        monkeypatch.setenv("BRUTEX_PARTITION_LOCK_TIMEOUT_S", "0.05")
+        path = ledger_path(tmp_path)
+        lock_path = partition_lock_path(tmp_path, path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        try:
+            with capture_logs() as logs:
+                save_window_ledger(ledger, tmp_path)  # returns — never raises
+            assert any(log["event"] == "window_ledger.save_lock_timeout" for log in logs)
+            assert not path.exists()  # this save was skipped (in-memory state intact)
+        finally:
+            os.close(fd)  # releases the flock
+        save_window_ledger(ledger, tmp_path)  # the retry lands once the peer is gone
+        assert load_window_ledger(tmp_path).count == 1
+
+    def test_save_merges_over_corrupt_disk_file(self, tmp_path: Path) -> None:
+        # A corrupt on-disk ledger merges as EMPTY (never-raise) — the save self-heals
+        # the file with the in-memory rows.
+        path = ledger_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"corrupt")
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.count == 1 and restored.load_failed is False
+
+    def test_pruned_rows_never_resurrect_across_flushes(self, tmp_path: Path) -> None:
+        # DEC-WINDOW-TRAILING-GC-001 preserved: a superseded trailing row pruned at
+        # plan time must NOT resurrect from the disk copy on the next merge-save.
+        short_key = WindowKey(
+            market="spot",
+            security_id="NIFTY",
+            interval="1minute",
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 10),
+        )
+        first = WindowLedger()
+        first.record(short_key, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(first, tmp_path)  # the soon-superseded row is ON DISK
+        loaded = load_window_ledger(tmp_path)
+        plan_windows(
+            loaded,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1minute"],
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 20),
+            now=_NOW,
+            now_ist=datetime(2026, 6, 8, 17, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+        )
+        assert loaded.pruned_keys()  # the shorter-end row was pruned by the replan
+        save_window_ledger(loaded, tmp_path)
+        ends = {r.window_end for r in load_window_ledger(tmp_path).records()}
+        assert "2026-01-10" not in ends  # the orphan stayed dead — not resurrected
+
+
+# --- DEC-WINDOW-LEDGER-RESCUE-001: LOUD load failure ----------------------------------
+
+
+class TestLoadFailedFlag:
+    """A ledger that EXISTED but failed to reload is announced, never silent."""
+
+    def test_corrupt_file_sets_load_failed(self, tmp_path: Path) -> None:
+        path = ledger_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a parquet file at all")
+        assert load_window_ledger(tmp_path).load_failed is True
+
+    def test_wrong_shape_file_sets_load_failed(self, tmp_path: Path) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        path = ledger_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({"unexpected": [1, 2, 3]}), path)
+        assert load_window_ledger(tmp_path).load_failed is True
+
+    def test_missing_file_is_a_fresh_lake_not_a_failure(self, tmp_path: Path) -> None:
+        # An absent file is a genuinely fresh lake — honest to keep silent.
+        assert load_window_ledger(tmp_path).load_failed is False
+
+    def test_clean_load_is_not_flagged(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        assert load_window_ledger(tmp_path).load_failed is False
+
+    def test_migrate_path_is_not_flagged(self, tmp_path: Path) -> None:
+        # No parquet at all → the one-shot sidecar migration, not a reload failure.
+        assert load_or_migrate_window_ledger(tmp_path).load_failed is False

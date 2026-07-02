@@ -226,6 +226,30 @@ class WindowLedger:
     )
     _threshold: int = EMPTY_TERMINAL_THRESHOLD
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    #: LOUD reload-failure flag (DEC-WINDOW-LEDGER-RESCUE-001): set ``True`` by
+    #: :func:`~brutex.data.window_ledger_store.load_window_ledger` when the persisted
+    #: Parquet EXISTED but could not be read (corrupt / wrong-shape / IO error) and the
+    #: load degraded to this EMPTY ledger. The pull drivers thread it into the pull
+    #: report / note ("window ledger reload FAILED — running full re-verify pull (no
+    #: skip)") so a lost cross-run memory is ANNOUNCED, never silent (Golden Rule #10).
+    #: A missing file (a genuine fresh lake) does NOT set it. Never serialised.
+    load_failed: bool = False
+    #: Keys :meth:`prune_superseded` deleted during THIS process's lifetime
+    #: (DEC-WINDOW-LEDGER-RESCUE-001). The merge-on-save
+    #: (:func:`~brutex.data.window_ledger_store.save_window_ledger`) folds the ON-DISK
+    #: ledger back in so a concurrent writer's rows are never clobbered — but a row this
+    #: ledger DELIBERATELY pruned must not resurrect from the disk copy on every flush
+    #: (that would defeat the DEC-WINDOW-TRAILING-GC-001 orphan GC). Tombstones apply
+    #: only to disk-ONLY rows; a key later re-created in memory always wins. Never
+    #: serialised (per-pull lifetime is exactly the window between load and save).
+    #: Cross-process caveat: a key concurrently RE-PLANNED by ANOTHER process's plan
+    #: can be transiently dropped by THIS process's tombstone at merge time; the drop
+    #: self-heals — the other process re-writes the row on its next flush (its own
+    #: in-memory copy always wins its own merge), or a future pull simply re-plans it,
+    #: and the keep-first sink makes any resulting re-fetch idempotent.
+    _pruned: set[tuple[str, str, str, str, str]] = field(
+        default_factory=set, repr=False, compare=False
+    )
     #: Windows NEWLY settled ``SKIPPED`` by THIS ledger instance (DEC-EMPTY-WINDOW-
     #: CIRCUIT-BREAKER-001 — honest-verdict requirement). A ledger instance is loaded
     #: fresh per pull (``begin_pull_ledger``), so this counts the CURRENT pull's
@@ -234,6 +258,20 @@ class WindowLedger:
     #: :meth:`settle_known_gap`) — a re-record of an already-``SKIPPED`` row never
     #: double-counts. NOT serialised (a per-run tally, not history).
     _settled_skipped_count: int = field(default=0, repr=False)
+    #: Keys :meth:`reopen_skipped` DELIBERATELY demoted ``SKIPPED`` → ``FAILED`` during
+    #: THIS process's lifetime (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × the
+    #: DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save). The merge-on-save's same-key
+    #: conflict rule prefers the MORE-SETTLED status, so without this tombstone the
+    #: on-disk ``SKIPPED`` copy (rank 3) would beat the reopened ``FAILED`` row
+    #: (rank 1) on the very next save and SILENTLY UNDO the operator's re-open —
+    #: exactly the resurrect-from-disk class the ``_pruned`` tombstones close for the
+    #: orphan GC. For a key in this set the IN-MEMORY row wins the merge outright.
+    #: Never serialised (per-instance lifetime — the window between load and save;
+    #: the ``brutex reopen-skipped`` CLI runs under the account-wide pull
+    #: single-flight lock, so no concurrent pull is mid-flight while it saves).
+    _reopened: set[tuple[str, str, str, str, str]] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -590,7 +628,10 @@ class WindowLedger:
         ``bars`` / ``attempts`` / ``first_seen_at`` / ``last_attempt_at`` are
         preserved (no fetch happened here); the stored lake bars are untouched (the
         idempotent keep-first sink absorbs the re-fetch) — re-opening is always
-        DATA-SAFE.
+        DATA-SAFE. Each re-opened key is tombstoned in :meth:`reopened_keys` so the
+        DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save cannot resurrect the on-disk
+        ``SKIPPED`` copy (its more-settled rank would otherwise silently undo the
+        demotion on the very next flush).
 
         *market* / *security_id* filter the selection (``None`` = any); *limit*
         bounds it to the FIRST *limit* rows in the deterministic
@@ -631,7 +672,23 @@ class WindowLedger:
                     empty_streak=0,
                     in_pull_fetches=row.in_pull_fetches,
                 )
+            self._reopened.update(doomed)
         return len(doomed)
+
+    def reopened_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
+        """The keys :meth:`reopen_skipped` demoted this process — thread-safe snapshot.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × DEC-WINDOW-LEDGER-RESCUE-001.
+        Consumed by the merge-on-save
+        (:func:`~brutex.data.window_ledger_store.save_window_ledger`) so a
+        DELIBERATELY re-opened row's on-disk ``SKIPPED`` copy is not resurrected by
+        the more-settled-status conflict rule (which would silently undo the
+        operator's ``brutex reopen-skipped``); for these keys the in-memory row wins
+        the merge outright. The twin of :meth:`pruned_keys`. O(reopened) copy under
+        the lock.
+        """
+        with self._lock:
+            return frozenset(self._reopened)
 
     def prune_superseded(
         self, planned_tiles: Mapping[tuple[str, str, str], Mapping[str, str]]
@@ -696,7 +753,24 @@ class WindowLedger:
                     doomed.append(wk)
             for stale in doomed:
                 del self._by_window[stale]
+            # Tombstone the pruned keys (DEC-WINDOW-LEDGER-RESCUE-001) so the
+            # merge-on-save never resurrects them from the on-disk copy — pruning
+            # would otherwise be undone by the very next flush's read-merge-write.
+            self._pruned.update(doomed)
         return len(doomed)
+
+    def pruned_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
+        """The keys :meth:`prune_superseded` deleted this process — thread-safe snapshot.
+
+        DEC-WINDOW-LEDGER-RESCUE-001. Consumed by the merge-on-save
+        (:func:`~brutex.data.window_ledger_store.save_window_ledger`) so a
+        DELIBERATELY-pruned row on the on-disk ledger is dropped instead of
+        resurrected, while a concurrent writer's genuinely-new rows are kept. A key
+        later re-created in memory is unaffected (the tombstone applies only to
+        disk-ONLY rows). O(pruned) copy under the lock.
+        """
+        with self._lock:
+            return frozenset(self._pruned)
 
     @property
     def count(self) -> int:

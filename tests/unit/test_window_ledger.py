@@ -1029,6 +1029,18 @@ class TestReopenSkipped:
         restored = WindowLedger.from_rows(ledger.to_rows())
         assert restored.to_rows() == ledger.to_rows()
 
+    def test_reopened_keys_tombstone_the_demotions(self) -> None:
+        # The merge-on-save feed (DEC-WINDOW-LEDGER-RESCUE-001 interplay): every
+        # demoted key is snapshot in reopened_keys() so the on-disk SKIPPED copy's
+        # more-settled merge rank cannot resurrect it; untouched rows never appear.
+        ledger = self._settled()
+        assert ledger.reopened_keys() == frozenset()
+        assert ledger.reopen_skipped(security_id="NIFTY") == 1
+        reopened = ledger.reopened_keys()
+        assert len(reopened) == 1
+        (key,) = reopened
+        assert key[1] == "NIFTY"  # only the demoted key — BANKNIFTY stays settled
+
     def test_reopened_window_can_resettle_honestly(self) -> None:
         # A re-opened window that is STILL genuinely empty on the next pull re-settles
         # through the normal machinery (here: the old-gap fast-settle) — bounded, not
@@ -1086,3 +1098,41 @@ class TestIsExpectedEmptyRecheck:
         ledger = WindowLedger()
         ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
         assert not ledger.is_expected_empty_recheck(_key())
+
+
+class TestRescueLedgerSurface:
+    """DEC-WINDOW-LEDGER-RESCUE-001 — the load-failed flag + prune tombstones."""
+
+    def test_load_failed_defaults_false(self) -> None:
+        assert WindowLedger().load_failed is False
+
+    def test_pruned_keys_empty_by_default(self) -> None:
+        assert WindowLedger().pruned_keys() == frozenset()
+
+    def test_prune_records_tombstones(self) -> None:
+        # Every pruned key is tombstoned so the merge-on-save can never resurrect
+        # it from the on-disk copy (the DEC-WINDOW-TRAILING-GC-001 GC stays won).
+        ledger = WindowLedger()
+        orphan = _tkey(end=date(2026, 6, 9))
+        ledger.record(orphan, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 1
+        assert ledger.pruned_keys() == frozenset(
+            {
+                (
+                    orphan.market,
+                    orphan.security_id,
+                    orphan.interval,
+                    orphan.start.isoformat(),
+                    orphan.end.isoformat(),
+                )
+            }
+        )
+
+    def test_no_prune_no_tombstones(self) -> None:
+        ledger = WindowLedger()
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.record(planned, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.pruned_keys() == frozenset()

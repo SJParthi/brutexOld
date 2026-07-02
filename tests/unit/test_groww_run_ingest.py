@@ -1040,6 +1040,34 @@ def test_with_retry_threads_symbol_windows(monkeypatch: pytest.MonkeyPatch) -> N
     assert seen == [bound]
 
 
+def test_windows_skipped_settled_info_emitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEC-WINDOW-LEDGER-RESCUE-001 — ONE aggregate INFO line per driver pass.
+
+    The per-window skip stays DEBUG (far too chatty at INFO for a universe pull);
+    this single line is what lets an operator SEE the settled-window skip engaging
+    at the default log level ("skipped N already-pulled windows, no vendor hit").
+    """
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):  # type: ignore[no-untyped-def]
+        return IngestReport(windows=1, bars_appended=0, transient_failures=0, skipped_windows=1)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with capture_logs() as logs:
+        report = run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BANKNIFTY", token=2)],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+        )
+    assert report.skipped_windows == 2
+    (info,) = _events(logs, "ingest.windows_skipped_settled")
+    assert info["windows_skipped_settled"] == 2
+    assert info["pairs"] == 2
+    assert info["log_level"] == "info"
+
+
 class TestEmptyBreakerRunner:
     """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — per-pass breaker wiring on the spot runner."""
 

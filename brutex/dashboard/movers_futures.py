@@ -720,7 +720,7 @@ def _read_future_session(
     symbol: str,
     day: date_cls,
     cutoff_min: int | None,
-) -> tuple[Decimal, int, int, int | None] | None:
+) -> tuple[Decimal, int, int, int | None, float | None, float | None] | None:
     """Read *day*'s raw 1-minute bars for one series, preserving open interest.
 
     Reads ``<lake>/bars/<exchange>/<segment>/<symbol>/1minute/**/*.parquet`` with
@@ -759,9 +759,16 @@ def _read_future_session(
 
     Returns
     -------
-    tuple[Decimal, int, int, int | None] | None
-        ``(ltp, volume, value_paisa, oi)`` for the kept bars, or ``None`` when there
-        are none.
+    tuple[Decimal, int, int, int | None, float | None, float | None] | None
+        ``(ltp, volume, value_paisa, oi, iv, delta)`` for the kept bars, or
+        ``None`` when there are none. ``iv`` / ``delta`` are the LAST kept bar's
+        STORED Greeks overlay values (DEC-GREEKS-ENGINE-PR3B-001 — read from the
+        SAME frame, zero extra I/O, never recomputed at render): the Phase-2b
+        enrichment (DEC-GREEKS-ENGINE-PR2B-001) writes them only for OPTION
+        contracts, so a future / spot / legacy pre-Greeks partition (whose frame
+        lacks the columns) and a stamped-NULL bar (plan §15.8 honest NA) both
+        read ``None`` — never a fabricated Greek (Golden Rule #1), and never
+        backfilled from an earlier bar (the same as-of last-bar rule LTP/OI use).
     """
     import polars as pl
 
@@ -806,7 +813,30 @@ def _read_future_session(
     )
     raw_oi = last.get_column("open_interest")[0]
     oi = None if raw_oi is None else int(raw_oi)
-    return ltp, volume, value_paisa, oi
+    # Stored Greeks overlay, LAST kept bar (DEC-GREEKS-ENGINE-PR3B-001): read off
+    # the SAME frame — zero extra I/O. Schema-tolerant: a legacy pre-Greeks /
+    # spot / futures frame lacks the columns → None; a stamped-NULL last bar
+    # (§15.8) stays None — honest NA, never backfilled (Golden Rule #1).
+    iv = _last_bar_overlay(last, "iv")
+    delta = _last_bar_overlay(last, "delta")
+    return ltp, volume, value_paisa, oi, iv, delta
+
+
+def _last_bar_overlay(last: Any, column: str) -> float | None:
+    """Return the single-row frame *last*'s stored overlay *column* as a float, or ``None``.
+
+    The tolerant per-column extractor for the session snapshot's Greeks cells
+    (DEC-GREEKS-ENGINE-PR3B-001): ``None`` when the frame does not carry the
+    column at all (a legacy pre-Greeks partition / a never-enriched future or
+    spot series) OR when the stored cell is NULL (a plan-§15.8 stamped-NA bar) —
+    an honest absent value in both cases, never a fabricated Greek (Golden
+    Rule #1). *last* is a one-row polars frame (typed ``Any`` — polars is a
+    lazy function-local import in this module).
+    """
+    if column not in last.columns:
+        return None
+    raw = last.get_column(column)[0]
+    return None if raw is None else float(raw)
 
 
 def _prev_day_oi(
@@ -1029,7 +1059,11 @@ def compute_futures_candidates(
             if read is None:  # no session bar on the selected day/time → skip, never faked.
                 skipped += 1
                 continue
-            ltp, volume, value_paisa, oi = read
+            # Futures take only the price/volume/OI slice — FUT legs are never
+            # Greeks-enriched (DEC-GREEKS-ENGINE-PR2B-001), so the trailing
+            # iv/delta of the shared read are always None here (options consume
+            # them — DEC-GREEKS-ENGINE-PR3B-001).
+            ltp, volume, value_paisa, oi = read[:4]
             prev_close = _prev_day_close(
                 lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
             )

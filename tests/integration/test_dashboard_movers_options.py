@@ -43,7 +43,7 @@ from brutex.dashboard.movers_options import (
     run_options_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
-from brutex.data.models import CandleBar
+from brutex.data.models import CandleBar, FnoGreeksBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
@@ -935,3 +935,148 @@ class TestCalendarDrivenTiersEndToEnd:
         )
         # 21-Jul is the calendar Far weekly, but no candles → honest empty.
         assert cands.calendar_only_expiry is True
+
+
+# ── stored Greeks on the options screen (DEC-GREEKS-ENGINE-PR3B-001) ───────
+
+
+def _greeks_min_bar(
+    *,
+    hour: int,
+    minute: int,
+    close: str,
+    volume: int,
+    oi: int | None,
+    iv: float | None,
+    delta: float | None,
+    day: date = _DAY,
+) -> FnoGreeksBar:
+    """An ENRICHED option 1-minute bar (stored Greeks overlay) at ``HH:MM`` IST."""
+    c = Decimal(close)
+    total = hour * 60 + minute - (5 * 60 + 30)
+    return FnoGreeksBar(
+        timestamp=datetime(day.year, day.month, day.day, total // 60, total % 60, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=volume,
+        open_interest=oi,
+        iv=iv,
+        delta=delta,
+    )
+
+
+class TestOptionsGreeksEndToEnd:
+    """The stored per-bar Greeks overlay (Phase-2b, DEC-GREEKS-ENGINE-PR2B-001)
+    reaches the options movers rows as-of the snapshot (DEC-GREEKS-ENGINE-PR3B-001):
+    sourced from the SAME session read as ltp/volume/oi (never recomputed at
+    render), schema-tolerant — an enriched CE shows its last kept bar's iv/delta
+    while a legacy pre-Greeks PE in the SAME lake honestly reads None."""
+
+    def _seed_mixed_lake(self, tmp_path: Path) -> None:
+        """The standard CE/PE lake, but the CE's 1-minute partition is ENRICHED."""
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1minute",
+            bars=[
+                _greeks_min_bar(
+                    hour=9, minute=15, close="150", volume=100, oi=1050, iv=0.17, delta=0.58
+                ),
+                _greeks_min_bar(
+                    hour=9, minute=16, close="164", volume=400, oi=1100, iv=0.1812, delta=0.62
+                ),
+            ],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1day",
+            bars=[_day_bar(day=date(2024, 6, 12), close="100", oi=1000)],
+        )
+        # The PE partition stays LEGACY (plain CandleBar, 7 columns — pre-Greeks).
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_PE,
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, close="85", volume=50, oi=950),
+                _min_bar(hour=9, minute=16, close="80", volume=150, oi=900),
+            ],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_PE,
+            interval="1day",
+            bars=[_day_bar(day=date(2024, 6, 12), close="90", oi=1200)],
+        )
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, close="23600.00", volume=50, oi=None),
+                _min_bar(hour=9, minute=16, close="23622.90", volume=50, oi=None),
+            ],
+        )
+
+    def test_candidates_carry_stored_greeks_and_legacy_reads_none(self, tmp_path: Path) -> None:
+        self._seed_mixed_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
+        )
+        by_symbol = {m.symbol: m for m in cands.movers}
+        ce, pe = by_symbol[_CE], by_symbol[_PE]
+        # The LAST kept session bar's STORED values, full precision — not the first's.
+        assert ce.iv == 0.1812
+        assert ce.delta == 0.62
+        # A legacy pre-Greeks partition honestly reads None — never fabricated.
+        assert pe.iv is None
+        assert pe.delta is None
+
+    def test_intraday_cutoff_snapshots_that_bars_greeks(self, tmp_path: Path) -> None:
+        """The 09:15 cutoff shows the AS-OF bar's Greeks (0.17/0.58), the same
+        last-kept-bar rule the LTP/OI snapshot uses."""
+        self._seed_mixed_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path, interval="1minute", date="2024-06-13", time="09:15"
+        )
+        ce = next(m for m in cands.movers if m.symbol == _CE)
+        assert ce.ltp == Decimal("150.00")
+        assert ce.iv == 0.17
+        assert ce.delta == 0.58
+
+    def test_options_api_rows_carry_iv_and_delta(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """End-to-end through the real route: the payload rows carry full-precision
+        float iv/delta for the enriched CE and honest nulls for the legacy PE."""
+        self._seed_mixed_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13", "top_n": 5},
+        ).json()
+        rows = {row["name"]: row for row in body["highest_oi"]}
+        ce_row = rows["NIFTY 27-Jun-2024 24000 CE"]
+        pe_row = rows["NIFTY 27-Jun-2024 24000 PE"]
+        assert ce_row["iv"] == 0.1812
+        assert ce_row["delta"] == 0.62
+        assert pe_row["iv"] is None
+        assert pe_row["delta"] is None
+
+    def test_movers_template_offers_iv_and_delta_columns(self) -> None:
+        """The options table config carries the IV + Delta columns (num4 = 4dp
+        DISPLAY-only formatting; the payload floats stay full precision)."""
+        from brutex.dashboard.app import _render_movers_html
+
+        html = _render_movers_html()
+        assert '["IV","iv","num4"]' in html
+        assert '["Delta","delta","num4"]' in html
+        assert 'type === "num4"' in html  # the 4dp display formatter exists

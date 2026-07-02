@@ -717,6 +717,16 @@ class BulkSpotReport:
     between-round brake (DEC-AUTO-RESUME-QUOTA-001) OR a mid-round
     ``DailyQuotaExceeded`` (DEC-SPOT-QUOTA-MIDROUND-001) — drives the loud
     ``quota_exhausted`` verdict (resume after the IST-midnight reset)."""
+    windows_skipped: int = 0
+    """Settled windows skipped WITHOUT a vendor hit (DEC-WINDOW-LEDGER-RESCUE-001) —
+    each phase's FIRST pass's ledger skips summed (later until-clean rounds re-skip
+    the same settled windows by design, so summing passes would double-count). The
+    /universe surface renders it as "skipped N already-pulled windows (no vendor
+    hit)" so the operator SEES the skip engaging."""
+    ledger_load_failed: bool = False
+    """True when the persisted window ledger EXISTED but failed to reload at pull
+    start (DEC-WINDOW-LEDGER-RESCUE-001) — the pull ran a full re-verify (no skip),
+    announced loudly in the log + the pipeline note, never silent."""
     mass_empty_cause: str | None = None
     """The mass-empty circuit-breaker halt message (DEC-EMPTY-WINDOW-CIRCUIT-
     BREAKER-001) when the pull HALTED on a suspected soft-throttle [R2] /
@@ -789,6 +799,8 @@ class BulkSpotReport:
             "total_completed": self.total_completed,
             "total_failed": self.total_failed,
             "total_no_data": self.total_no_data,
+            "windows_skipped": self.windows_skipped,
+            "ledger_load_failed": self.ledger_load_failed,
             "verdict": self.verdict.to_dict(),
             "symbols": [
                 {
@@ -1486,6 +1498,18 @@ def pull_all_spot(
         # the fetched keys (no bounding, no phantom rows). Persisted to
         # <lake>/window_ledger/ — the single source /coverage/windows surfaces.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        # LOUD reload failure (DEC-WINDOW-LEDGER-RESCUE-001): the persisted ledger
+        # existed but could not be read — the store already WARNed
+        # (window_ledger.load_failed); surface it on the PULL report too so the
+        # /universe response says "window ledger reload FAILED — running full
+        # re-verify pull (no skip)". Never crashes the pull; never silent.
+        ledger_reload_failed = ledger is not None and ledger.load_failed
+        if ledger_reload_failed:
+            _LOG.warning(
+                "universe.pull_all.ledger_reload_failed",
+                pull_id=pid,
+                note="window ledger reload FAILED — running full re-verify pull (no skip)",
+            )
         if ledger is not None and daily_requested:
             plan_windows(
                 ledger,
@@ -1978,6 +2002,10 @@ def pull_all_spot(
             auth_cause=final_auth_cause,
             still_failed_windows=final_still_failed,
             quota_exhausted=final_quota_exhausted,
+            # Each phase's FIRST pass's settled-window skips (until-clean rounds
+            # re-skip the same windows by design — summing passes would double-count).
+            windows_skipped=sum(pr.skipped_windows for pr in phase_reports),
+            ledger_load_failed=ledger_reload_failed,
             mass_empty_cause=final_mass_empty_cause,
             # Honest-verdict settle tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the
             # per-pull ledger instance counted every window THIS pull newly settled
@@ -1993,6 +2021,7 @@ def pull_all_spot(
             instruments=bulk.total_symbols,
             completed=bulk.total_completed,
             failed=bulk.total_failed,
+            windows_skipped=bulk.windows_skipped,
             dry_run=dry_run,
             verdict=verdict.kind,
             pending_windows=verdict.pending_windows,
