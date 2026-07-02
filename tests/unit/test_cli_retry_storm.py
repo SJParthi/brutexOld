@@ -632,9 +632,10 @@ def test_cmd_fetch_live_inspect_reports_failures(
     assert callable(seen["pace"])
     assert callable(seen["on_rate_limit"])
     assert callable(seen["on_success"])
-    # The live CLI pull paces at the operator-DIRECTED 5 r/s ceiling (lowered 8 → 5
-    # on 2026-06-22). ``pace`` is the controller's bound method, so its ``__self__`` is
-    # the RateController — assert it started at the 5 r/s ceiling.
+    # The live CLI pull paces at the operator-DIRECTED 8 r/s ceiling (raised 5 → 8
+    # on 2026-06-24, DEC-GROWW-RATE-CEILING-8-002). ``pace`` is the controller's bound
+    # method, so its ``__self__`` is the RateController — assert it started at the
+    # 8 r/s ceiling.
     from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
 
     # ``__self__`` exists on the bound method at runtime; pyright only sees a
@@ -642,6 +643,82 @@ def test_cmd_fetch_live_inspect_reports_failures(
     controller = getattr(seen["pace"], "__self__")  # noqa: B009
     assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 8.0
     assert controller.snapshot()["ceiling_per_min"] == 500
+
+
+def test_cmd_fetch_live_wires_timeout_ladder_into_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI live pull threads the controller's OWN ``on_timeout`` into the
+    ingest engine, so a 5xx/timeout storm steps the AIMD ladder DOWN.
+
+    Regression for forensic-audit finding #16: the CLI bound only
+    ``pace`` / ``on_rate_limit`` / ``on_success`` and never wired ``on_timeout``,
+    so ``RateController.on_timeout`` was DEAD on the ``brutex fetch`` path (the
+    dashboard's ``_live_rate_runtime`` wires the full hook quad). FAILS unfixed:
+    the ``on_timeout`` kwarg reaches the ingest as ``None``. Verified here by
+    driving the captured hook through a simulated timeout storm and observing
+    the controller's measured step-down — never by re-reading prose.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
+    from brutex.adapters.rate_common import STEP_DOWN_TIMEOUT_HITS
+
+    monkeypatch.setattr(
+        cli, "_resolve_brute_force_instruments", lambda lake: [FakeInstrument("NIFTY")]
+    )
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    result = _FakeIngestResult(
+        report=_FakeIngestReport(
+            windows=1,
+            bars_appended=1,
+            failed_pairs=0,
+            transient_failures=0,
+            still_failed_windows=0,
+        ),
+        retry=None,
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_ingest(adapter_arg: Any, sink_arg: Any, **kwargs: Any) -> _FakeIngestResult:
+        """Capture the hook wiring the CLI threaded in; return a clean report."""
+        seen.update(kwargs)
+        return result
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=True,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_OK
+    on_timeout = seen["on_timeout"]
+    assert callable(on_timeout)  # FAILS unfixed: the CLI threads None
+    # The hook is the SAME controller's bound method the pace hook rides — one
+    # shared AIMD ladder, exactly like the dashboard wiring (CLAUDE.md §11 COMMON).
+    controller = getattr(seen["pace"], "__self__")  # noqa: B009
+    assert getattr(on_timeout, "__self__") is controller  # noqa: B009
+    # Cheap #17 guard: the CLI-wired ceiling IS the single source-of-truth
+    # constant (DEC-GROWW-RATE-CEILING-8-002) — the controller starts there.
+    assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING
+    # Drive a sustained timeout storm through the captured hook: once
+    # STEP_DOWN_TIMEOUT_HITS stalls land inside the rolling window the ladder
+    # steps the live rate DOWN 1 r/s (the behaviour finding #16 said was dead).
+    for _ in range(STEP_DOWN_TIMEOUT_HITS):
+        on_timeout()
+    assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING - 1.0
 
 
 def test_cmd_fetch_live_persisting_pull_succeeds(

@@ -1354,3 +1354,197 @@ def test_first_nonempty_over_forms_helper() -> None:
     calls.clear()
     assert mp._first_nonempty_over_forms(("X", "Y"), _fetch, is_empty=lambda r: not r) == []
     assert calls == ["X", "Y"]
+
+
+# ── Phase-2 failure → re-run re-pull (DEC-PHASE2-REGISTRY-REBUILD-001) ────────
+
+
+def test_phase2_failure_then_rerun_repulls_contracts(tmp_path: Path) -> None:
+    """THE re-pull regression (forensic-audit BLOCKER #4): failed contracts are re-pulled.
+
+    Run 1 (a PAST year): Phase 1 discovers + persists the expiry — the cell settles
+    ``expiries_only`` — and Phase 2's contract fetch RAISES, so zero contracts persist.
+    Run 2: the settled past-year cell is skipped by the Phase-1 incremental skip, so the
+    in-memory discoveries carry no expiry for it; before the fix ``contract_jobs_from``
+    (in-memory only) rebuilt NO job — the failed contracts had NO re-pull path and the
+    year's contracts were lost forever. After the fix the Phase-2 worklist is rebuilt
+    from the REGISTRY's persisted expiries too, so run 2 re-pulls exactly the failed
+    contracts while STILL making zero expiry calls (the Phase-1 skip is preserved).
+    """
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+
+    # Run 1 — the expiry lands, the contract job raises.
+    sdk1 = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2024): ["2024-06-27"]},
+        raise_contract_for=frozenset({("NSE", "NIFTY", "2024-06-27")}),
+    )
+    report1 = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2024],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk1),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-one",
+    )
+    assert report1.contract_failures == 1
+    assert registry.count_expiries() == 1
+    assert registry.count_contracts() == 0
+    # The cell settled expiries_only — exactly the state that trapped the year.
+    assert coverage.list_coverage()[0].status == STATUS_EXPIRIES_ONLY
+
+    # Run 2 — the vendor recovers; the settled cell is skipped but the job is rebuilt.
+    sdk2 = _FakeSDK(
+        contracts={("NSE", "NIFTY", "2024-06-27"): ["NSE-NIFTY-27Jun24-24000-CE"]},
+    )
+    report2 = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2024],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk2),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-two",
+    )
+    # Phase 1 stays skipped (the incremental skip is intact) …
+    assert report2.expiry_cells == 0
+    assert report2.cells_skipped == 1
+    assert sdk2.calls.count("get_expiries") == 0
+    # … yet the failed contracts ARE re-pulled via the registry-rebuilt job.
+    assert report2.contract_jobs == 1
+    assert report2.contracts_persisted == 1
+    assert sdk2.calls.count("get_contracts") == 1
+    assert registry.count_contracts() == 1
+
+    # Run 3 — converged: the contracts are captured + expired, nothing re-pulls.
+    sdk3 = _FakeSDK()
+    report3 = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2024],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk3),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-three",
+    )
+    assert report3.contract_jobs == 0
+    assert sdk3.calls == []
+    registry.close()
+
+
+def test_registry_expiry_outside_grid_never_rebuilt(tmp_path: Path) -> None:
+    """A persisted expiry for an underlying OUTSIDE this run's grid is never rebuilt.
+
+    The registry may hold other underlyings' chains (an earlier whole-universe pull);
+    a selected-symbols pull must not resurrect their jobs — the rebuilt worklist is
+    restricted to this run's (exchange, underlying) grid (scope stays the selection).
+    """
+    sdk = _FakeSDK()  # NIFTY's chain is empty; BANKNIFTY is not in this run at all
+    registry = _registry(tmp_path)
+    registry.upsert_expiry("NSE", "BANKNIFTY", date(2024, 6, 27), run_id="old", fetched_at=_NOW)
+
+    report = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    # BANKNIFTY's persisted expiry rebuilt NO job — no contract call ever issued.
+    assert report.contract_jobs == 0
+    assert sdk.calls.count("get_contracts") == 0
+    registry.close()
+
+
+def test_persisted_and_rediscovered_expiry_fetched_once(tmp_path: Path) -> None:
+    """A current-year expiry both persisted (run 1) and re-discovered → ONE fetch.
+
+    The union must de-dup: the registry row and this run's in-memory discovery name
+    the SAME (exchange, underlying, expiry), so exactly one Phase-2 job runs.
+    """
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"]},
+    )
+    registry = _registry(tmp_path)
+    registry.upsert_expiry("NSE", "NIFTY", date(2026, 6, 25), run_id="old", fetched_at=_NOW)
+
+    report = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    assert report.contract_jobs == 1
+    assert sdk.calls.count("get_contracts") == 1
+    registry.close()
+
+
+def test_progress_counts_registry_rebuilt_jobs_when_all_cells_skipped(tmp_path: Path) -> None:
+    """All cells skipped + one registry-rebuilt job → the bar reads 1/1, never 1/0.
+
+    With zero Phase-1 cells the boundary rescale never fires, so the up-front seed
+    must size ``total`` to the rebuilt Phase-2 worklist — the denominator can never
+    read 0 while a rebuilt contract job ticks the bar.
+    """
+    sdk = _FakeSDK(
+        contracts={("NSE", "NIFTY", "2024-06-27"): ["NSE-NIFTY-27Jun24-24000-CE"]},
+    )
+    registry = _registry(tmp_path)
+    registry.upsert_expiry("NSE", "NIFTY", date(2024, 6, 27), run_id="old", fetched_at=_NOW)
+    # The past-year cell is already settled expiries_only → skipped in Phase 1.
+    coverage = _CoverageSink(
+        seed=[
+            CoverageRecord(
+                exch_id="NSE",
+                underlying_symbol="NIFTY",
+                year=2024,
+                expiries_pulled=1,
+                contracts_pulled=0,
+                status=STATUS_EXPIRIES_ONLY,
+                last_run_id="old",
+                last_fetched_at=_NOW,
+            )
+        ]
+    )
+    collector = _ProgressCollector()
+
+    report = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2024],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        on_progress=collector,
+        now=_NOW,
+        today=_TODAY,
+    )
+
+    assert report.expiry_cells == 0
+    assert report.contract_jobs == 1
+    # Exactly one tick — the rebuilt contract job — with an honest 1/1 denominator.
+    assert collector.calls == [(1, 1, "NSE-NIFTY 2024-06-27 contracts")]
+    registry.close()
