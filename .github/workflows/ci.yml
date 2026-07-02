@@ -1234,7 +1234,8 @@ jobs:
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
-          # 21c · brutex.data.tf_resampler (36 stmts, 14 branches)
+          # 21c · brutex.data.tf_resampler (48 stmts, 20 branches —
+          #       grew with the DEC-RESAMPLER-INPUT-GUARD-001 input guard)
           #       Closes 94.74→100% via 1 surgical test
           #       (`test_non_dataframe_input_raises_typeerror` covers line
           #       77 TypeError for non-polars.DataFrame input).
@@ -2004,8 +2005,16 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - name: Install deps
-        run: pip install -e ".[dev]"
+      - name: Install deps (dev + data — the lake benches need polars/duckdb)
+        # DEC-RESAMPLER-INPUT-GUARD-001 audit finding: `.[dev]` alone made every
+        # polars/duckdb bench `importorskip` SILENTLY — the lake-write O(1)
+        # gates (test_parquet_write_o1.py, test_db_candle_query_o1.py,
+        # test_catalog_reconcile_o1.py, test_write_latency.py, …) NEVER ran in
+        # CI, so a linear-scan regression on those hot paths could not fail
+        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute; the
+        # fno_math/trading_core wheels the remaining skips need are built by
+        # the steps below, so no bench silently skips for a missing extra.
+        run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable

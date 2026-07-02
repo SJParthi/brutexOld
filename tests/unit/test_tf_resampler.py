@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import polars as pl
 import pytest
+from brutex.data.errors import ResampleInputError
 from brutex.data.tf_resampler import (
     REQUIRED_COLUMNS,
     resample_1m_to_tf,
@@ -358,3 +359,158 @@ class TestCompletenessLaws:
                 0, named=True
             )
             assert d2_first["open"] == day2["open"][0], f"tf={tf}: day-1 data leaked"
+
+
+# --------------------------------------------------------------------------- #
+# Input monotonicity guard — DEC-RESAMPLER-INPUT-GUARD-001. Mirrors the feed
+# resampler's raise-on-non-monotonic suite (tests/unit/test_feed_resampler.py,
+# DEC-RESAMPLER-MONOTONIC-GUARD-001): before the guard, a duplicate ts_utc
+# silently DOUBLE-COUNTED the bucket's volume (10+10+5 → 25) and polluted
+# high/low, and an unsorted input inverted the bucket's open/close.
+# --------------------------------------------------------------------------- #
+_G_OPEN = datetime(2026, 1, 5, 3, 45, tzinfo=UTC)  # 09:15 IST session open
+
+
+def _df_at(offsets_minutes: list[int], volumes: list[int] | None = None) -> pl.DataFrame:
+    """A minimal OHLCV frame whose rows sit at the given minute offsets."""
+    n = len(offsets_minutes)
+    vols = volumes if volumes is not None else [10] * n
+    closes = [100.0 + i for i in range(n)]
+    return pl.DataFrame(
+        {
+            "ts_utc": [_G_OPEN + timedelta(minutes=m) for m in offsets_minutes],
+            "open": closes,
+            "high": [c + 0.5 for c in closes],
+            "low": [c - 0.5 for c in closes],
+            "close": closes,
+            "volume": vols,
+        },
+        schema={
+            "ts_utc": pl.Datetime,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+    ).with_columns(pl.col("ts_utc").dt.replace_time_zone(None))
+
+
+class TestInputMonotonicGuard:
+    def test_exact_duplicate_raises_typed_error(self) -> None:
+        """FAILED ON MAIN: a duplicate ts landed in the same bucket silently."""
+        with pytest.raises(ResampleInputError, match="STRICTLY increasing"):
+            resample_1m_to_tf(_df_at([0, 0, 1]), 5)
+
+    def test_duplicate_does_not_double_count_volume(self) -> None:
+        """The verifier's exact repro: dup volumes 10+10+5 must never read 25."""
+        dup = _df_at([0, 0, 1], volumes=[10, 10, 5])
+        with pytest.raises(ResampleInputError):
+            resample_1m_to_tf(dup, 5)
+        # Sanity floor: the SAME volumes de-collided to distinct minutes
+        # aggregate to exactly 25 in ONE bucket — the value the duplicate
+        # frame would have FAKED without the guard.
+        clean = _df_at([0, 1, 2], volumes=[10, 10, 5])
+        out = resample_1m_to_tf(clean, 5)
+        assert out.get_column("volume").to_list() == [25]
+
+    def test_duplicate_across_bucket_boundary_raises(self) -> None:
+        """A dup pair straddling two 5m buckets still trips the guard."""
+        with pytest.raises(ResampleInputError, match="STRICTLY increasing"):
+            resample_1m_to_tf(_df_at([3, 4, 4, 5]), 5)
+
+    def test_mid_stream_out_of_order_raises(self) -> None:
+        """FAILED ON MAIN: [t0,t1,t2,t1,t4] inverted the bucket's open/close."""
+        with pytest.raises(ResampleInputError, match="STRICTLY increasing"):
+            resample_1m_to_tf(_df_at([0, 1, 2, 1, 4]), 5)
+
+    def test_strictly_decreasing_raises(self) -> None:
+        with pytest.raises(ResampleInputError, match="STRICTLY increasing"):
+            resample_1m_to_tf(_df_at([4, 3, 2, 1, 0]), 5)
+
+    def test_unsorted_input_would_invert_open_close_proof(self) -> None:
+        """Anti-illusion proof: sorted vs reversed input disagree on open/close.
+
+        Documents WHY the guard exists — run the reversed frame through a
+        guard-free clone of the aggregation and show the open/close invert.
+        """
+        clean = _df_at([0, 1, 2])
+        out = resample_1m_to_tf(clean, 5)
+        assert out.get_column("open").to_list() == [100.0]
+        assert out.get_column("close").to_list() == [102.0]
+        with pytest.raises(ResampleInputError):
+            resample_1m_to_tf(clean.reverse(), 5)
+
+    def test_no_partial_output_guard_runs_before_aggregation(self) -> None:
+        """The guard raises for EVERY target TF — including the 1m identity
+        path and the daily path — before any aggregation output exists."""
+        dup = _df_at([0, 0])
+        for tf in (1, 5, 375):
+            with pytest.raises(ResampleInputError):
+                resample_1m_to_tf(dup, tf)
+
+    def test_resample_all_21_tfs_propagates_guard(self) -> None:
+        with pytest.raises(ResampleInputError):
+            resample_all_21_tfs(_df_at([1, 0]))
+
+    def test_null_timestamp_raises_typed_error(self) -> None:
+        df = _df_at([0, 1, 2]).with_columns(
+            pl.when(pl.int_range(pl.len()) == 1)
+            .then(None)
+            .otherwise(pl.col("ts_utc"))
+            .alias("ts_utc")
+        )
+        with pytest.raises(ResampleInputError, match="null timestamp"):
+            resample_1m_to_tf(df, 5)
+
+    def test_error_names_the_offending_row_and_both_timestamps(self) -> None:
+        try:
+            resample_1m_to_tf(_df_at([0, 1, 2, 1, 4]), 5)
+        except ResampleInputError as exc:
+            msg = str(exc)
+            assert "row 3" in msg
+            assert "1 violation(s) total" in msg
+        else:  # pragma: no cover - the guard must raise
+            raise AssertionError("guard did not fire")
+
+    def test_single_row_and_sorted_inputs_unaffected(self) -> None:
+        """Back-compat: a 1-row frame and a clean sorted frame stay byte-identical."""
+        one = _df_at([0])
+        assert resample_1m_to_tf(one, 5).get_column("volume").to_list() == [10]
+        clean = _df_at([0, 1, 2, 3, 4])
+        assert resample_1m_to_tf(clean, 5).height == 1
+
+    def test_typed_error_is_a_data_lake_error(self) -> None:
+        """Callers with broad DataLakeError handling absorb the new error."""
+        from brutex.data.errors import DataLakeError
+
+        assert issubclass(ResampleInputError, DataLakeError)
+
+
+class TestOpenInterestCarryLastStemMatched:
+    """OI carry-last coverage INSIDE the module's stem-matched suite.
+
+    The CI touched-module discovery gate (DEC-CICD-GATE-HONESTY-001,
+    scripts/ci/coverage_gate_discovery.py) gates a touched module at 100%
+    under its STEM-MATCHED test files only — `test_fno_resample.py` (which
+    historically covered the `has_oi` aggregation branch per
+    DEC-FNO-TF-DERIVE-OI-001) does not stem-match `tf_resampler`, so the
+    branch must also be exercised HERE (caught live on this PR's first CI
+    run: 97.06%, line 249 missed under the stem set).
+    """
+
+    def test_oi_column_carried_as_last_snapshot_never_summed(self) -> None:
+        df = _df_at([0, 1, 2, 5, 6], volumes=[10, 10, 10, 10, 10]).with_columns(
+            pl.Series("open_interest", [100, 200, 300, 400, None], dtype=pl.Int64)
+        )
+        out = resample_1m_to_tf(df, 5)
+        # Bucket 1 = minutes 0-2 → LAST bar's OI (300), never 100+200+300.
+        # Bucket 2 = minutes 5-6 → last bar's OI is null → preserved null.
+        assert out.get_column("open_interest").to_list() == [300, None]
+        # Volume stays the summed FLOW — proving OI is the snapshot exception.
+        assert out.get_column("volume").to_list() == [30, 20]
+
+    def test_spot_frame_without_oi_stays_six_columns(self) -> None:
+        out = resample_1m_to_tf(_df_at([0, 1, 2]), 5)
+        assert "open_interest" not in out.columns
+        assert list(out.columns) == list(REQUIRED_COLUMNS)

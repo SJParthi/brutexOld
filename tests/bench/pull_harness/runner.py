@@ -239,6 +239,17 @@ def run_pull_harness(scenario: PullScenario, *, lake_root: Path) -> PullHarnessR
         pace=_paced,
         on_rate_limit=_on_rate_limit,
         on_success=controller.on_success,
+        # HERMETIC token hooks (DEC-RESAMPLER-INPUT-GUARD-001 gap-2 fallout):
+        # with BOTH cache hooks explicitly injected, `_resolve_token_cache_hooks`
+        # takes the explicit-hook path and NEVER resolves the AWS Parameter
+        # Store backend — without these, `resolve_token_store()` imports boto3
+        # and the harness fails in any environment lacking the [token-broker]
+        # extra (the CI bench job installs `.[dev,data]` only, so this bench
+        # would go RED the moment the [data] fix made it actually execute).
+        # A `None` load = cache miss → the injected fake token_factory mints
+        # "HARNESS-TOKEN"; the store hook is a no-op success. Offline-pure.
+        token_cache_load=lambda **_kw: None,
+        token_cache_store=lambda *_a, **_kw: True,
     )
     meter = pool.meter
     adapter = GrowwMarketAdapter(client=pool, index=index)
