@@ -8,6 +8,9 @@ the same relocation discipline as the sibling doctor-live/R1 PRs). The fakes
 are imported from the single-admission suite (COMMON, no copy).
 """
 
+# Shared single-admission fakes imported cross-test-module — sanctioned.
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from brutex.adapters.groww.client import GrowwClient, client_self_paces

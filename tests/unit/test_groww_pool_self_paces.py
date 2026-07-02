@@ -7,6 +7,9 @@ gate scopes these tests to the module they cover (moved out of the combined
 single-admission suite (COMMON, no copy).
 """
 
+# Shared single-admission fakes imported cross-test-module — sanctioned.
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from typing import Any

@@ -9,6 +9,9 @@ Moved out of the combined ``test_groww_single_admission.py``; the fakes are
 imported from it (COMMON, no copy).
 """
 
+# Shared single-admission fakes imported cross-test-module — sanctioned.
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from datetime import date
