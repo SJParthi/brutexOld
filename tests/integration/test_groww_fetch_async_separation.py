@@ -343,22 +343,40 @@ class TestTailTransientAsync:
 
 class TestIsolationProof:
     def test_stalled_consumer_does_not_slow_the_fetch(self, tmp_path: Path) -> None:
-        """The fetch keeps issuing at full rate while each consumer tail SLEEPS 60 ms.
+        """The producer issues EVERY fetch and RETURNS while ALL consumer tails are still stalled.
 
-        The producer must NOT block on the tail: across many windows the fetch issue intervals
-        stay ~constant (set by the producer's own work), NOT inflated by the 60 ms-per-window
-        consumer sleep. We measure the wall time the PRODUCER spends issuing N fetches and
-        assert it is far below N × tail_sleep (which is what a synchronous tail would cost).
+        The producer must NOT block on the tail. DE-FLAKE
+        (DEC-DEFLAKE-ISOLATION-PROOF-TEST-001): the original proof measured the WALL TIME the
+        producer spent issuing N fetches and asserted it beat ``0.5 × N × tail_sleep``. That is
+        a TIMER race — the producer's own (tiny) per-window work is coverage-traced and shares
+        the GIL with the consumer threads' real Parquet appends, so a busy CI runner inflated
+        ~6 ms of producer work past the 0.39 s bound (observed: 0.440 s) with the isolation
+        fully intact. Never a real coupling — the bound, not the pipeline, failed.
+
+        The deterministic replacement proves a STRICTLY STRONGER claim by explicit
+        synchronization (the file's DEC-DEFLAKE-HUNG-WRITE-TEST-001 pattern): every consumer
+        tail is GATED on an Event (fully wedged, not merely slow), and the test asserts the
+        producer issued ALL fetches and ``ingest_spot`` RETURNED while ZERO tails had
+        completed. A synchronous (coupled) tail could never do that — it would wedge on the
+        first gated append and ``ingest_spot`` would never return (the 20 s watchdog fails
+        LOUDLY, never hanging the suite). No wall-clock ratio remains, only the generous
+        watchdog bound.
         """
         lake = tmp_path / "lake"
-        tail_sleep = 0.06
         n_windows = 12
 
-        # A sink that SLEEPS on every append (the deliberately-stalled consumer work).
-        class _SlowSink(ParquetBarSink):
+        gate = threading.Event()  # released only AFTER the producer has been proven done
+        completed_appends: list[int] = []
+        lock = threading.Lock()
+
+        # A sink whose every append is WEDGED on the gate (the deliberately-stalled consumer).
+        class _GatedSink(ParquetBarSink):
             def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
-                time.sleep(tail_sleep)
-                return super().append(**kw)  # type: ignore[arg-type]
+                gate.wait(timeout=60.0)
+                result = super().append(**kw)  # type: ignore[arg-type]
+                with lock:
+                    completed_appends.append(1)
+                return result
 
         fetch_timestamps: list[float] = []
 
@@ -379,34 +397,53 @@ class TestIsolationProof:
                 return [_bar(ts)]
 
         # A queue big enough that the producer is NOT back-pressured for this small N — the
-        # whole point is the producer races ahead of the slow consumers.
+        # whole point is the producer races ahead of the wedged consumers.
         pipeline = FetchPipeline(workers=2, queue_maxsize=n_windows + 4)
-        producer_start = time.monotonic()
-        ingest_spot(
-            _TimedAdapter(),  # type: ignore[arg-type]
-            _SlowSink(writer=ParquetWriter(lake_root=lake), catalog=None),
-            instrument=_inst(),
-            interval="1minute",
-            start=date(2021, 1, 1),
-            end=date(2022, 1, 1),  # ~12 monthly tiles
-            now_ist=_now,
-            fetch_pipeline=pipeline,
-        )
-        producer_elapsed = time.monotonic() - producer_start
+
+        done = threading.Event()
+        error: list[Exception] = []
+
+        def _run() -> None:
+            try:
+                ingest_spot(
+                    _TimedAdapter(),  # type: ignore[arg-type]
+                    _GatedSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+                    instrument=_inst(),
+                    interval="1minute",
+                    start=date(2021, 1, 1),
+                    end=date(2022, 1, 1),  # ~12 monthly tiles
+                    now_ist=_now,
+                    fetch_pipeline=pipeline,
+                )
+            except Exception as exc:  # surface ANY worker-thread raise to the test, never swallow
+                error.append(exc)
+            finally:
+                done.set()
+
+        runner = threading.Thread(target=_run, name="isolation-producer", daemon=True)
+        runner.start()
         try:
-            assert len(fetch_timestamps) >= n_windows
-            # The synchronous path would cost AT LEAST n_windows × tail_sleep just on tails.
-            synchronous_floor = len(fetch_timestamps) * tail_sleep
-            # The PRODUCER finished issuing all fetches in WELL under that floor — the slow
-            # consumer never blocked the fetch lane (isolation). Generous 0.5× margin to stay
-            # robust on a busy CI box while still proving the decouple (sync would be ≥ 1.0×).
-            assert producer_elapsed < 0.5 * synchronous_floor, (
-                f"producer took {producer_elapsed:.3f}s issuing "
-                f"{len(fetch_timestamps)} fetches — not isolated from the "
-                f"{synchronous_floor:.3f}s of consumer tails"
+            # ISOLATION PROOF: the producer finished issuing ALL windows while every consumer
+            # tail was still wedged on the gate. If the fetch lane were coupled to the tail
+            # (synchronous, or blocked on tail completion), ingest_spot could never return
+            # while the gate is held and this watchdog would fail loudly.
+            assert done.wait(timeout=20.0), (
+                "ingest_spot did NOT return while the consumer tails were stalled — the fetch "
+                "lane is COUPLED to the tail (the isolation the pipeline must provide)"
             )
+            assert not error, f"producer raised unexpectedly: {error[0]!r}"
+            assert len(fetch_timestamps) >= n_windows
+            # ZERO tails completed when the producer finished — the fetches were issued at the
+            # producer's own rate, provably independent of the (fully wedged) consumer tails.
+            with lock:
+                assert not completed_appends, (
+                    f"{len(completed_appends)} consumer tail(s) completed before the producer "
+                    "finished — the gate leaked; the isolation proof is unsound"
+                )
         finally:
-            pipeline.drain()
+            gate.set()  # release the consumers so they process + the pipeline drains cleanly
+            runner.join(timeout=10.0)
+        pipeline.drain()
         # And the data still landed durably after drain.
         assert _spot_part(lake, year=2021, month=1).exists()
 
