@@ -3382,17 +3382,43 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             cache=cache,
             watchdog=watchdog,
         )
-        result = run_supervised_grid(
-            grid,
-            bars_for=_bars_for,
-            store_for=make_store_for(out_root, grid),
-            dedup=dedup,
-            ingest_audit=ingest_audit,
-            guards=guards,
-            on_tuple=_on_tuple,
-            on_progress=_on_progress,
-            watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+        # Multi-core sweep (DEC-MULTICORE-SWEEP-PHASE1-001) — DEFAULT-OFF
+        # (BRUTEX_SWEEP_WORKERS=1 → the sequential path below, byte-for-byte
+        # unchanged). ``workers > 1`` dispatches the parallel driver on the
+        # PRODUCTION digest path (``run_one_tuple`` always supplies a tuple digest
+        # → ``bypass_dedup`` is always True); ``workers > 1`` on the legacy
+        # no-digest path is HARD-REFUSED (this path is always the digest path, so
+        # the guard is a belt-and-braces flag check, not a real limit).
+        from brutex.engine.sweep_parallel import (
+            refuse_parallel_on_legacy_path,
+            resolve_sweep_workers,
+            run_parallel_grid,
         )
+
+        workers = resolve_sweep_workers()
+        refuse_parallel_on_legacy_path(workers, digest_path=True)
+        if workers > 1:
+            print(f"[brutex] sweep-all: parallel mode — {workers} workers (digest path)")
+            result = run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out_root,
+                ingest_audit=ingest_audit,
+                guards=guards,
+                workers=workers,
+            )
+        else:
+            result = run_supervised_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=make_store_for(out_root, grid),
+                dedup=dedup,
+                ingest_audit=ingest_audit,
+                guards=guards,
+                on_tuple=_on_tuple,
+                on_progress=_on_progress,
+                watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+            )
         # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
         # Runs INSIDE the open audit with-block on this single thread (review
         # F10): the per-mask STAGE_3_REFINE_* triples land on the SAME ingest

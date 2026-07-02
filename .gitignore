@@ -106,11 +106,22 @@ Cargo.lock
 **/mutants-verify.out/
 # proptest persists failure seeds here; the only ones generated so far were
 # induced by cargo-mutants mutants (not real failures), so they are scratch.
+# The seeds live in a directory literally named `proptest-regressions/`, so the
+# glob must match the DIRECTORY — the old `**/*.proptest-regressions` (a trailing
+# `.proptest-regressions` suffix) never matched the real dir and left it untracked.
+**/proptest-regressions/
+# Retained (below) for back-compat: still ignores any dot-suffixed
+# `*.proptest-regressions` path; the directory glob above is the effective rule.
 **/*.proptest-regressions
 # ...but the fno-math extension crate IS an application artifact: track its
 # lockfile for reproducibility (Golden Rule #4) + the security-audit
 # Cargo.lock trigger (DEC-RUST-RAYON-SUPERMASK-001, first new-crate PR).
 !rust/fno-math/Cargo.lock
+
+# Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
+# scratch, built wheels, and disposable test lakes created by Claude Code agents.
+# NEVER a tracked source artifact; ignoring it keeps the tree clean between runs.
+scratchpad/
 
 # Claude Code transient state — isolated background-agent worktrees (auto-cleaned)
 .claude/worktrees/

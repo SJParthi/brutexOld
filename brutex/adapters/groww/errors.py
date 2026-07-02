@@ -92,6 +92,26 @@ class GrowwTokenIssuanceThrottled(GrowwAuthError):
     """
 
 
+class GrowwTokenStillStaleError(GrowwAuthError):
+    """A read-only broker RE-READ returned the SAME dead token — RETRYABLE, NOT terminal.
+
+    On a read-only host (``BRUTEX_TOKEN_BROKER_READONLY``) BruteX never mints: when the
+    shared daily token is rejected mid-run, the reauth path RE-READS the shared
+    Parameter-Store SecureString to adopt the Lambda's freshly-minted token instead of
+    minting locally (DEC-BROKER-READONLY-REAUTH-REREAD-001). But if the re-read returns the
+    SAME token that just failed auth — the Lambda has not minted the new one yet (e.g.
+    reauth fired at 05:59 IST, just before the ~06:05 mint) — or an SSM miss, adopting it
+    would loop the dead token. This error is raised INSTEAD, mirroring
+    :class:`GrowwTokenIssuanceThrottled` / the reauth-deadline transient
+    (DEC-GROWW-REAUTH-DEADLINE-001): a :class:`GrowwAuthError` SUBCLASS (so every
+    ``except GrowwAuthError`` site + :func:`is_auth_failure` keep matching it) that
+    :func:`is_retryable` returns ``True`` for, so the caller's bounded retry / quarantine
+    path re-pulls that window LATER (when the Lambda's fresh token is present) rather than
+    crashing the process into a manual restart. A read that returns a NEW token is adopted
+    immediately (no error), so this NEVER fires on the healthy rotation path.
+    """
+
+
 class GrowwNotFoundError(GrowwError):
     """Unknown instrument / endpoint (terminal)."""
 
@@ -411,10 +431,13 @@ def is_retryable(exc: GrowwError) -> bool:
     upstream blip — DEC-GROWW-SERVER-ERROR-RETRY-001) + transient network / DNS
     failure (a host connectivity blip — DEC-GROWW-NETWORK-ERROR-RETRY-001) + a
     THROTTLED token-issuance mint (a transient issuance rate-limit, NOT a bad
-    credential — DEC-GROWW-TOKEN-DISK-CACHE-001; the ONLY auth-family error that is
-    retryable, so the cold-start mint backs off + reuses the cache instead of dying).
-    Terminal: bad-request, not-found, a NON-throttled auth failure (needs re-auth),
-    feed (out of scope), and any bare :class:`GrowwError`.
+    credential — DEC-GROWW-TOKEN-DISK-CACHE-001) + a read-only broker RE-READ that
+    still holds the SAME dead token (the Lambda has not minted the fresh one yet —
+    DEC-BROKER-READONLY-REAUTH-REREAD-001; the only TWO auth-family errors that are
+    retryable, so the cold-start mint backs off + reuses the cache and the read-only
+    reauth re-pulls later instead of dying).
+    Terminal: bad-request, not-found, a NON-throttled / non-still-stale auth failure
+    (needs re-auth), feed (out of scope), and any bare :class:`GrowwError`.
     """
     return isinstance(
         exc,
@@ -425,6 +448,7 @@ def is_retryable(exc: GrowwError) -> bool:
             GrowwServerError,
             GrowwNetworkError,
             GrowwTokenIssuanceThrottled,
+            GrowwTokenStillStaleError,
         ),
     )
 
@@ -441,6 +465,7 @@ __all__ = [
     "GrowwServerError",
     "GrowwTimeoutError",
     "GrowwTokenIssuanceThrottled",
+    "GrowwTokenStillStaleError",
     "from_groww_exception",
     "is_auth_failure",
     "is_rate_limit",

@@ -28,8 +28,11 @@ from brutex.orchestrator.audit import (
     AuditError,
     AuditFieldError,
     AuditPayloadError,
+    AuditSink,
     AuditWriteError,
     AuditWriter,
+    BufferedAuditCollector,
+    BufferedAuditRecord,
     read_entries,
     verify_chain,
 )
@@ -1239,3 +1242,76 @@ class TestNonFinitePayloadTamper:
         with pytest.raises(AuditChainCorruption) as exc_info:
             verify_chain(audit_path)
         assert exc_info.value.seq == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# BufferedAuditCollector / BufferedAuditRecord / AuditSink seam
+# (DEC-MULTICORE-SWEEP-PHASE1-001) — a parallel-sweep worker BUFFERS its
+# `SWEEP_*` audit lines as plain data instead of hashing them (it has no view
+# of the global chain position); the parent's single writer-actor replays the
+# buffered records into the REAL hash chain in canonical enumeration order.
+# These tests live HERE (not only in test_engine_sweep_parallel.py) so the
+# strict per-module `--cov=brutex.orchestrator.audit` gate measures the
+# collector's __init__ / append / records at 100% (its lines are in audit.py).
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestBufferedAuditCollector:
+    """The worker-side buffering :class:`AuditSink` used by the parallel sweep."""
+
+    def test_new_collector_has_no_records(self) -> None:
+        """A fresh collector starts empty (covers ``__init__``)."""
+        collector = BufferedAuditCollector()
+        assert collector.records == ()
+
+    def test_append_buffers_records_in_order(self) -> None:
+        """``append`` buffers each line as a :class:`BufferedAuditRecord`, in order."""
+        collector = BufferedAuditCollector()
+        collector.append(action="SWEEP_START", subject="s1", payload={"x": 1})
+        collector.append(action="SWEEP_COMPLETE", subject="s2")
+        records = collector.records
+        assert [r.action for r in records] == ["SWEEP_START", "SWEEP_COMPLETE"]
+        assert [r.subject for r in records] == ["s1", "s2"]
+        assert records[0].payload == {"x": 1}
+        # A None payload is normalised to an empty dict — never None on the record.
+        assert records[1].payload == {}
+
+    def test_append_copies_the_payload(self) -> None:
+        """The buffered payload is a COPY — a later caller mutation cannot leak in."""
+        collector = BufferedAuditCollector()
+        payload = {"k": "v"}
+        collector.append(action="SWEEP_FLUSH", subject="s", payload=payload)
+        payload["k"] = "MUTATED"
+        assert collector.records[0].payload == {"k": "v"}
+
+    def test_append_returns_the_buffered_record(self) -> None:
+        """``append`` returns the buffered record (the runner ignores it)."""
+        collector = BufferedAuditCollector()
+        record = collector.append(action="SWEEP_START", subject="s", payload={"a": 1}, ts_utc=42.0)
+        assert isinstance(record, BufferedAuditRecord)
+        assert record.action == "SWEEP_START"
+        assert record.subject == "s"
+        assert record.payload == {"a": 1}
+        # ts_utc is accepted for AuditSink signature parity but never stored — the
+        # parent's real AuditWriter stamps a chain-correct timestamp at replay time.
+        assert not hasattr(record, "ts_utc")
+
+    def test_records_is_an_immutable_snapshot(self) -> None:
+        """``records`` returns a tuple SNAPSHOT — a later append never grows it."""
+        collector = BufferedAuditCollector()
+        collector.append(action="A", subject="s")
+        snapshot = collector.records
+        assert isinstance(snapshot, tuple)
+        collector.append(action="B", subject="s")
+        assert len(snapshot) == 1  # the earlier snapshot did not mutate
+        assert len(collector.records) == 2
+
+    def test_collector_satisfies_audit_sink_protocol(self) -> None:
+        """A collector structurally satisfies the :class:`AuditSink` runtime Protocol."""
+        assert isinstance(BufferedAuditCollector(), AuditSink)
+
+    def test_real_writer_also_satisfies_audit_sink(self, audit_path: Path) -> None:
+        """The real :class:`AuditWriter` also satisfies :class:`AuditSink` (the seam
+        is a pure widening — either impl is accepted by the shared runner)."""
+        with AuditWriter.open(audit_path) as writer:
+            assert isinstance(writer, AuditSink)

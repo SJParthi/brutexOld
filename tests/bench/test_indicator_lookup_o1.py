@@ -11,9 +11,17 @@ labelled value (``PivotLevels.get("R2")`` / ``FibLevels.get("62", direction)``,
 
 Both lookups must stay latency-independent of how many trading days of levels
 are loaded. The gate is the standard ratio ``mean_ns(N_big) /
-mean_ns(N_small) ≤ ceiling`` routed through
-:func:`tests.bench._o1_tiers.ratio_ceiling` — 5× robust on the shared GHA
-runner, tightened to the strict 1.1× M4-Pro tier (DEC-O1-STRICT-TIER-001).
+mean_ns(N_small) ≤ ceiling`` — 5× robust on the shared GHA runner. On the
+M4-Pro strict tier the day-map value lookups (pivot / fib) route through
+:func:`tests.bench._o1_tiers.cache_tier_ceiling` (the DEC-O1-CACHE-TIER-001
+measured 3× cache allowance) because the ``N_BIG`` map (100K days of ``Pivot`` /
+``Fib`` level objects) SPILLS the CPU cache into DRAM — the per-lookup cost is
+bounded by a CONSTANT memory-tier factor (~2.5–2.7× measured, a cache-cliff not
+an O(n) regression), exactly the allowance the throughput canary routes its
+1M-elem dict lookups through (DEC-O1-BENCH-GATE-COMPLETE-001). The VWAP
+``update`` running-sum path keeps the raw 1.1× via :func:`ratio_ceiling`: its
+state is a fixed-size object, so it does NOT cross a cache tier as the session
+deepens. A genuine O(n) regression in either still blows well past the ceiling.
 
 Honest envelope (Golden Rule #10): the per-call cost of ``.get`` includes
 building a CONSTANT-SIZE label map (11 pivot / 12 fib entries) — that is a
@@ -31,7 +39,7 @@ from datetime import date
 from brutex.indicators.fib_levels import FibDirection, FibLevels
 from brutex.indicators.pivots import PivotLevels
 
-from tests.bench._o1_tiers import ratio_ceiling
+from tests.bench._o1_tiers import cache_tier_ceiling, ratio_ceiling
 
 #: Number of trading days of precomputed levels for the small vs big tiers.
 N_SMALL = 1_000
@@ -143,7 +151,7 @@ def test_pivot_value_lookup_is_o1_in_days_loaded() -> None:
     t_big = _time_pivot_lookup(_make_pivot_days(N_BIG))
     ratio = t_big / max(t_small, 1.0)
 
-    assert ratio < ratio_ceiling(5.0), (
+    assert ratio < cache_tier_ceiling(5.0), (
         f"pivot value-lookup latency ratio {ratio:.2f}× ({N_BIG} vs {N_SMALL} "
         f"days) exceeds the CI ceiling — the indicator lookup may have "
         f"regressed away from O(1). t_small={t_small:.1f}ns, t_big={t_big:.1f}ns."
@@ -156,7 +164,7 @@ def test_fib_value_lookup_is_o1_in_days_loaded() -> None:
     t_big = _time_fib_lookup(_make_fib_days(N_BIG))
     ratio = t_big / max(t_small, 1.0)
 
-    assert ratio < ratio_ceiling(5.0), (
+    assert ratio < cache_tier_ceiling(5.0), (
         f"fib value-lookup latency ratio {ratio:.2f}× ({N_BIG} vs {N_SMALL} "
         f"days) exceeds the CI ceiling — the indicator lookup may have "
         f"regressed away from O(1). t_small={t_small:.1f}ns, t_big={t_big:.1f}ns."

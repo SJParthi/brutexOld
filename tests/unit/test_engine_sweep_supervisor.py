@@ -59,6 +59,8 @@ from brutex.engine.sweep_supervisor import (
     read_progress,
     run_supervised_grid,
     tuple_cache_key,
+    tuple_cache_params,
+    tuple_label,
 )
 from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.orchestrator.audit import AuditWriter
@@ -231,6 +233,55 @@ class TestIdentity:
         grid_b = _grid(top_k=top_k_b, min_hits=min_hits_b)
         tuple_a = next(iter_sweep_tuples(grid_a))
         assert tuple_cache_key(tuple_a, grid_a) != tuple_cache_key(tuple_a, grid_b)
+
+
+class TestParallelReexports:
+    """The PUBLIC re-exports the parallel driver uses (DEC-MULTICORE-SWEEP-PHASE1-001).
+
+    ``tuple_label`` / ``tuple_cache_params`` are the ONE-source-of-truth seams so
+    :mod:`brutex.engine.sweep_parallel` emits byte-identical progress/audit labels
+    and gates the ``SweepCache`` with the byte-identical key WITHOUT importing the
+    private ``_tuple_label`` / ``_tuple_cache_params``. These focused unit tests
+    scope those re-exports' coverage to sweep_supervisor's OWN per-module gate (the
+    parallel suite is not scoped for this module by the touched-module gate).
+    """
+
+    def test_tuple_label_format(self) -> None:
+        grid = _grid()
+        tuple_ = next(iter_sweep_tuples(grid))
+        assert tuple_label(tuple_) == "NIFTY/1minute/bull/k=1/sl=80/tp=50"
+
+    def test_tuple_cache_params_carries_full_identity(self) -> None:
+        grid = _grid()
+        tuple_ = next(iter_sweep_tuples(grid))
+        params = tuple_cache_params(tuple_, grid)
+        assert isinstance(params, dict)
+        assert params["k"] == tuple_.k
+        assert params["sl_paisa"] == tuple_.sl_paisa
+        assert params["tp_paisa"] == tuple_.tp_paisa
+        assert params["condition_bits"] == sorted(set(grid.condition_bits))
+        assert params["top_k"] == grid.top_k
+        assert params["min_hits"] == grid.min_hits
+
+    def test_tuple_cache_params_reproduces_the_cache_key(self) -> None:
+        """The public params dict rebuilds the byte-identical SweepCache key.
+
+        Proves the re-export is the SAME identity the private path uses — feeding
+        it into ``combo_digest`` with the public ``tuple_label`` direction leg
+        reproduces ``tuple_cache_key`` exactly (no silent divergence).
+        """
+        from brutex.engine.sweep_cache import combo_digest
+
+        grid = _grid()
+        tuple_ = next(iter_sweep_tuples(grid))
+        rebuilt = combo_digest(
+            tuple_.k,
+            tuple_.instrument,
+            tuple_.tf.label,
+            "bull",
+            tuple_cache_params(tuple_, grid),
+        )
+        assert rebuilt == tuple_cache_key(tuple_, grid)
 
 
 # ────── _drive_watchdog ──────

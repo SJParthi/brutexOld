@@ -197,3 +197,73 @@ class TestOutputContent:
         # Non-increasing (descending).
         for prev, curr in pairwise(printed_nums):
             assert prev >= curr, f"decisions not in descending order: {printed_nums}"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# UTF-8 truncation safety (regression: a multi-byte char at the `head -c 80`
+# boundary must NOT emit invalid UTF-8 and break a text-mode consumer).
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestHeadCommitUtf8Truncation:
+    """Regression for the `LAST_COMMIT` truncation bug.
+
+    The hook prints ``git log -1 --format='%h %s'`` truncated to 80 bytes.
+    A commit subject whose multi-byte UTF-8 character (e.g. the ``→`` arrow
+    ``\\xe2\\x86\\x92`` a ledger-renumber commit used) straddles the byte-80
+    boundary would leave a severed lead byte, so the hook stream failed to
+    decode as UTF-8 and every text-mode (`text=True`) subprocess assertion
+    raised ``UnicodeDecodeError`` — breaking CI on that branch. The fix drops
+    the orphaned partial sequence (`iconv -c`), so the output is always valid
+    UTF-8 regardless of the commit subject.
+    """
+
+    @staticmethod
+    def _init_repo_with_boundary_arrow_subject(root: Path) -> None:
+        """Create a git repo whose HEAD subject places ``→`` at byte 79.
+
+        The subject is ``pad… →`` where ``pad`` is sized so the 3-byte arrow
+        begins at byte offset 79 (`git log` prepends ``<hash> ``, 9 bytes) —
+        exactly the boundary `head -c 80` severs mid-character.
+        """
+        env = os.environ.copy()
+        env.update(
+            {
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            }
+        )
+
+        def _git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=str(root), env=env, check=True, capture_output=True)
+
+        _git("init", "-q")
+        # `git log -1 --format='%h %s'` = "<7-hex> " (8 bytes) + subject. Place
+        # the arrow's first byte at absolute offset 79 → 71 subject bytes before
+        # it, so `head -c 80` keeps only the arrow's lead byte `\xe2`.
+        subject = ("x" * 71) + "→" + "tail"
+        (root / "f.txt").write_text("x", encoding="utf-8")
+        _git("add", "f.txt")
+        _git("commit", "-q", "-m", subject)
+
+    def test_boundary_arrow_subject_yields_valid_utf8(self, tmp_path: Path) -> None:
+        self._init_repo_with_boundary_arrow_subject(tmp_path)
+        # Capture RAW BYTES (text=False) so a truncated multi-byte sequence
+        # would survive to be inspected rather than raising in the decoder.
+        completed = subprocess.run(
+            [str(HOOK_PATH)],
+            cwd=str(tmp_path),
+            env={**os.environ, "CLAUDE_REPO_ROOT": str(tmp_path)},
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert completed.returncode == 0
+        # The whole stderr stream MUST decode as UTF-8 (the bug left a severed
+        # `\xe2` here). This is the assertion that fails pre-fix, passes post.
+        completed.stderr.decode("utf-8")
+        # And the HEAD line is still populated (truncation kept the prefix).
+        text = completed.stderr.decode("utf-8")
+        assert "HEAD:" in text

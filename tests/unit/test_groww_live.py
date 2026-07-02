@@ -28,7 +28,15 @@ _CREDS = GrowwCredentials(api_key="fake_key", totp_secret="fake_secret")
 
 
 class _EphemeralTokenStore:
-    """A no-cache token store: ``load`` always misses ⇒ the refresher mints via its factory."""
+    """A no-cache token store: ``load`` always misses ⇒ the refresher mints via its factory.
+
+    ``readonly`` is ``False`` so the resolver keeps the LOCAL-mint reauth path (no read-only
+    re-read hook wired), exactly the mint→SDK→client composition these tests exercise.
+    """
+
+    @property
+    def readonly(self) -> bool:
+        return False
 
     def load(self, creds: object, *, now_utc: datetime) -> CachedToken | None:
         return None
