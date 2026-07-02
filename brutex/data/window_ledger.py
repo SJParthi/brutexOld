@@ -232,6 +232,11 @@ class WindowLedger:
     #: (that would defeat the DEC-WINDOW-TRAILING-GC-001 orphan GC). Tombstones apply
     #: only to disk-ONLY rows; a key later re-created in memory always wins. Never
     #: serialised (per-pull lifetime is exactly the window between load and save).
+    #: Cross-process caveat: a key concurrently RE-PLANNED by ANOTHER process's plan
+    #: can be transiently dropped by THIS process's tombstone at merge time; the drop
+    #: self-heals — the other process re-writes the row on its next flush (its own
+    #: in-memory copy always wins its own merge), or a future pull simply re-plans it,
+    #: and the keep-first sink makes any resulting re-fetch idempotent.
     _pruned: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )

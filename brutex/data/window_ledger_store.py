@@ -726,6 +726,23 @@ def seed_enclosed_windows(
     F&O rescue deterministically seeded 0 windows even over a maximally dense lake.
     Boundary: ``end − 1 == last_date`` seeds; ``end − 1 == last_date + 1`` does not.
 
+    **Honesty — this fix GROWS the span-masking surface from ~zero to live (Golden
+    Rule #10):** pre-fix the rescue was largely DEAD, not merely boundary-drifted —
+    the F&O reconcile seeded 0 windows EVER, and on a DEFAULT (floor → today) spot
+    pull the daily whole-range window and the trailing sub-daily window were equally
+    dead (their exclusive ``end`` sits at today while the storable ``last_date`` is
+    at most yesterday); only interior sub-daily tiles (and historical sub-range
+    pulls) ever seeded. Now that the rescue is LIVE, remember it is a SPAN test, not
+    a DENSITY test: a window inside the lake's ``[first_date, last_date]`` seeds
+    ``SUCCESS`` even if it has an INTERIOR HOLE, and on a lost ledger that window is
+    then auto-skipped. The compensating, operator-visible signal is the /completeness
+    scoreboard (density-based — it reads the LAKE, not the ledger); the fetch-time
+    interior-gap detector (DEC-INTERIOR-GAP-DETECT-001, MIGRATION.md #1031) does NOT
+    compensate here — it never sees a seeded window (skipped before any fetch). The
+    load-bearing safety stands: seeding is strictly ONLY-IF-ABSENT
+    (:meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success`), so a
+    ``FAILED`` / ``EMPTY`` / ``PLANNED`` row is never masked.
+
     **Live-edge guard:** a window whose coverage INCLUDES the current IST day
     (``end − 1 >= today_ist``) is NEVER seeded — the day's session data may still be
     partial (a mid-session store puts a bar on ``today`` without completing it), and a
