@@ -1029,6 +1029,18 @@ class TestReopenSkipped:
         restored = WindowLedger.from_rows(ledger.to_rows())
         assert restored.to_rows() == ledger.to_rows()
 
+    def test_lake_seed_never_resurrects_a_reopened_row(self) -> None:
+        # Wave-3 ordering (DEC-PULL-FORENSIC-WAVE3-001 #7) runs the cold-start lake
+        # seed BEFORE plan_windows — but seed_lake_success is ABSENT-ONLY, and a
+        # deliberately re-opened key always HAS a row (the FAILED demotion), so the
+        # seed can never flip it back to a settled SUCCESS behind the operator.
+        ledger = self._settled()
+        assert ledger.reopen_skipped(security_id="NIFTY") == 1
+        assert ledger.seed_lake_success(_key("NIFTY"), bars=42, now=_LATER) is False
+        rec = next(r for r in ledger.records() if r.security_id == "NIFTY")
+        assert rec.status == FAILED  # the demotion stands — the next pull re-fetches
+        assert not ledger.is_skippable(_key("NIFTY"))
+
     def test_reopened_keys_tombstone_the_demotions(self) -> None:
         # The merge-on-save feed (DEC-WINDOW-LEDGER-RESCUE-001 interplay): every
         # demoted key is snapshot in reopened_keys() so the on-disk SKIPPED copy's

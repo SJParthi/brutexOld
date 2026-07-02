@@ -20,16 +20,20 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
+import polars as pl
 import pytest
 from brutex.adapters.groww.errors import GrowwAuthError, GrowwBadRequestError
+from brutex.adapters.groww.fetch_pipeline import RawFetchResult
 from brutex.adapters.ingest_common import (
     SETTLED_SKIPPED_OPERATOR_THRESHOLD,
     SyntheticSpotAdapter,
+    synthetic_spot_bars,
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.pull_controller import (
@@ -2229,6 +2233,289 @@ class TestEmitPullPoolSize:
         failed = [e for e in logs if e.get("event") == "pull.pool_size_emit_failed"]
         assert len(failed) == 1
         assert failed[0]["pull_id"] == "pull-boom"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Forensic-audit #7 — cold-start lake reconcile BEFORE plan (absent-only seed)
+# Forensic-audit #15 — the 1-day derive runs AFTER the pipeline/consumer drains
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class _CountingAdapter(SyntheticSpotAdapter):
+    """Counts every ``fetch_ohlcv`` call — proves a lake-seeded window is never re-fetched."""
+
+    calls: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Record the call, then return the parent's synthetic bars (no zero-arg super —
+        ``dataclass(slots=True)`` recreates the class, breaking the implicit cell)."""
+        del exchange, end
+        self.calls.append((symbol, interval, start.isoformat()))
+        return synthetic_spot_bars(start, count=self.bars_per_window)
+
+
+def _seed_lake_bars(lake_root: Path, inst: Instrument, interval: str, days: Sequence[date]) -> None:
+    """Write real lake bars for *days* so the stored span ENCLOSES the pull's window."""
+    sink = _real_sink(lake_root)
+    for day in days:
+        sink.append(
+            exchange=inst.exch_id.value,
+            segment=inst.segment.value,
+            symbol=inst.symbol_name,
+            interval=interval,
+            bars=synthetic_spot_bars(day),
+        )
+
+
+#: The cold-start window: an explicit past range (no live clamp) whose single
+#: 30-day 1-minute tile / 180-day 1-day tile is (2024-01-01, 2024-01-06).
+_COLD_DAYS = [date(2024, 1, 1) + timedelta(days=n) for n in range(6)]
+
+
+class TestColdStartLakeReconcile:
+    """Forensic-audit #7: ``reconcile_ledger_with_lake`` must run BEFORE ``plan_windows``.
+
+    The cold-start seed (``WindowLedger.seed_lake_success``) is ABSENT-ONLY — it never
+    overwrites an existing row, a ``PLANNED`` one included — so planning first made the
+    seed a permanent no-op: on a lost/corrupt ledger over a fully-populated lake EVERY
+    window was re-fetched. These regressions pin the fixed order at all four call sites
+    (``pull_all_spot`` + ``pull_candles``, minute + dormant daily blocks): an enclosed
+    window is seeded (settled rows > 0) and the vendor is never asked again (0 fetches).
+    """
+
+    def test_pull_all_spot_cold_start_minute_seeded_not_refetched(self, tmp_path: Path) -> None:
+        inst = _index("13")
+        _seed_lake_bars(tmp_path, inst, "1minute", _COLD_DAYS)
+        adapter = _CountingAdapter()
+        pull_all_spot(
+            [inst],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            adapter_factory=lambda _root, _insts: (adapter, _real_sink(_root)),
+        )
+        # The lake encloses the whole tiling → the seed settles every window BEFORE the
+        # plan, so the pull SKIPS them all — zero vendor fetches on a cold start.
+        assert adapter.calls == []
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        prog = load_window_ledger(tmp_path).progress_counts()
+        assert prog.total > 0  # the seed created rows (seed count > 0)
+        assert prog.settled == prog.total  # every one settled WITHOUT a fetch
+
+    def test_pull_all_spot_cold_start_daily_seeded_not_refetched(self, tmp_path: Path) -> None:
+        # The dormant daily block (a defensive caller injecting intervals=("1day",)).
+        inst = _index("13")
+        _seed_lake_bars(tmp_path, inst, "1day", _COLD_DAYS)
+        adapter = _CountingAdapter()
+        pull_all_spot(
+            [inst],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            intervals=("1day",),
+            adapter_factory=lambda _root, _insts: (adapter, _real_sink(_root)),
+        )
+        assert adapter.calls == []
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        prog = load_window_ledger(tmp_path).progress_counts()
+        assert prog.total > 0
+        assert prog.settled == prog.total
+
+    def test_pull_candles_cold_start_minute_seeded_not_refetched(self, tmp_path: Path) -> None:
+        inst = _index("13")
+        _seed_lake_bars(tmp_path, inst, "1minute", _COLD_DAYS)
+        adapter = _CountingAdapter()
+        pull_candles(
+            inst,
+            lake_root=tmp_path,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (adapter, _real_sink(_root)),
+        )
+        assert adapter.calls == []
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        prog = load_window_ledger(tmp_path).progress_counts()
+        assert prog.total > 0
+        assert prog.settled == prog.total
+
+    def test_pull_candles_cold_start_daily_seeded_not_refetched(self, tmp_path: Path) -> None:
+        inst = _index("13")
+        _seed_lake_bars(tmp_path, inst, "1day", _COLD_DAYS)
+        adapter = _CountingAdapter()
+        pull_candles(
+            inst,
+            lake_root=tmp_path,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            dry_run=False,
+            intervals=("1day",),
+            adapter_factory=lambda _root, _inst: (adapter, _real_sink(_root)),
+        )
+        assert adapter.calls == []
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        prog = load_window_ledger(tmp_path).progress_counts()
+        assert prog.total > 0
+        assert prog.settled == prog.total
+
+
+class _DeferredPipeline:
+    """A ``FetchPipeline`` stand-in that defers EVERY submitted tail until ``drain()``.
+
+    The deterministic twin of the real (default-ON) async pool's worst-case timing:
+    the producer's ``submit`` only queues, so NO bar reaches the lake until ``drain``
+    runs the queued tails — exactly the window forensic-audit #15 exploits (a pre-drain
+    resample derived the 1-day anchor from an INCOMPLETE 1-minute lake).
+    """
+
+    def __init__(self) -> None:
+        self.pending: list[RawFetchResult] = []
+        self.drain_count = 0
+
+    def submit(self, result: RawFetchResult) -> None:
+        """Queue the tail — never process it on the producer's clock."""
+        self.pending.append(result)
+
+    def fold_totals(
+        self, *, bars_appended: int, conflicts: int, series_key: tuple[str, str]
+    ) -> None:
+        """Accept the tail's totals (unused — the test asserts on the lake itself)."""
+
+    def fold_tail_transient(self, series_key: tuple[str, str]) -> None:
+        """Accept a deferred-window tally (unused)."""
+
+    def per_series_totals(self) -> dict[tuple[str, str], object]:
+        """No folded totals — the producer reports stand (the lake is the oracle)."""
+        return {}
+
+    def drain(self) -> None:
+        """Run every queued tail NOW — the durable writes land here, not before."""
+        self.drain_count += 1
+        pending, self.pending = self.pending, []
+        for result in pending:
+            result.tail.process(result.tail)
+
+
+class TestDailyDeriveAfterDrain:
+    """Forensic-audit #15: the 1-day derive runs AFTER both drains, success-path only."""
+
+    def _spy_order(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Spy the two drain helpers + the resample; return the shared order log."""
+        order: list[str] = []
+        monkeypatch.setattr(
+            "brutex.dashboard.pull_controller._drain_fetch_pipeline",
+            lambda _p: order.append("fetch_pipeline"),
+        )
+        monkeypatch.setattr(
+            "brutex.dashboard.pull_controller._drain_write_consumer",
+            lambda _c: order.append("write_consumer"),
+        )
+        monkeypatch.setattr(
+            "brutex.dashboard.pull_controller._resample_daily_after_pull",
+            lambda **_kw: order.append("resample"),
+        )
+        return order
+
+    def test_pull_all_spot_resample_runs_after_both_drains(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = self._spy_order(monkeypatch)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+        # The pipeline is ON by default, so a pre-drain resample read an INCOMPLETE
+        # 1-minute lake — the derive must follow BOTH drains (forensic-audit #15).
+        assert order == ["fetch_pipeline", "write_consumer", "resample"]
+
+    def test_pull_candles_resample_runs_after_both_drains(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = self._spy_order(monkeypatch)
+        pull_candles(
+            _index("13"),
+            lake_root=tmp_path,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+        assert order == ["fetch_pipeline", "write_consumer", "resample"]
+
+    def test_resample_skipped_when_a_phase_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Failure path preserved: the drains still run; the resample does NOT; the error propagates."""
+        order = self._spy_order(monkeypatch)
+
+        def _boom(*_args: object, **_kwargs: object) -> int:
+            raise RuntimeError("planner boom")
+
+        # Raise INSIDE the try (the minute block's plan) — deterministic phase error.
+        monkeypatch.setattr("brutex.dashboard.pull_controller.plan_windows", _boom)
+        with pytest.raises(RuntimeError, match="planner boom"):
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2024-01-01",
+                to_date="2024-01-05",
+                adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
+            )
+        assert order == ["fetch_pipeline", "write_consumer"]  # drains ran; NO resample
+
+    def test_pipeline_on_daily_derived_from_all_drained_minute_bars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end #15: the derived 1-day reflects ALL drained 1-minute bars.
+
+        With the deferred pipeline NO 1-minute bar is durable until the drain, so a
+        pre-drain resample (the defect) derives NOTHING; the fixed post-drain resample
+        derives exactly one midnight-IST daily bar per stored 1-minute session date.
+        """
+        pipeline = _DeferredPipeline()
+        monkeypatch.setattr(
+            "brutex.dashboard.pull_controller._build_fetch_pipeline",
+            lambda **_kw: pipeline,
+        )
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert pipeline.drain_count >= 1
+        assert pipeline.pending == []  # every queued tail was drained durably
+        minute_files = sorted(tmp_path.glob("bars/*/*/*/1minute/*/*.parquet"))
+        assert minute_files  # the drained tails DID land 1-minute bars
+        minute = pl.concat([pl.read_parquet(f) for f in minute_files])
+        expected_days = minute.get_column("timestamp").dt.date().n_unique()
+        assert expected_days > 0
+        daily_files = sorted(tmp_path.glob("bars/*/*/*/1day/*/*.parquet"))
+        assert daily_files, "1-day partition missing — resample ran before the drains"
+        daily = pl.concat([pl.read_parquet(f) for f in daily_files])
+        # One derived daily bar per stored 1-minute session date — the POST-drain count.
+        assert daily.height == expected_days
 
 
 # ────────────────────────────────────────────────────────────────────────
