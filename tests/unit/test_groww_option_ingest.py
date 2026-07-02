@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,6 +30,7 @@ from brutex.adapters.groww.constants import (
     GROWW_OPTION_COVERAGE_MARKET,
     OPTION_SEGMENT,
 )
+from brutex.adapters.groww.contract_bounds import default_fno_minute_window
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
     SUSPECTED_PARTIAL_WINDOW_EVENT,
@@ -2074,6 +2075,65 @@ def test_plan_contract_windows_futures_namespace() -> None:
     )
     rec = ledger.records()[0]
     assert rec.market == GROWW_FUTURE_COVERAGE_MARKET and rec.status == PLANNED
+
+
+def _now_far() -> datetime:
+    """A frozen clock AFTER the stable-start test's simulated envelopes (clamp = no-op)."""
+    return datetime(2026, 7, 10, 8, 0, tzinfo=UTC)
+
+
+def test_plan_contract_windows_open_far_contract_stable_start_converges() -> None:
+    """DEC-FNO-FAR-EXPIRY-WINDOW-001: once OPEN, 5 daily default pulls converge to ONE row.
+
+    The strict-window law fixes the start at ``expiry − lookback`` forever, so a
+    daily pull moves ONLY the end — the EXISTING trailing-END rule
+    (DEC-WINDOW-TRAILING-GC-001) collects yesterday's row with NO new GC mechanism
+    (the hostile-review 5-pull repro, re-run under the stable-start semantics: no
+    moving anchor exists, so no orphan class exists).
+    """
+    contract = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2026, 7, 15),
+        symbol="NSE-NIFTY-15Jul26-28500-CE",
+        contract_type="CE",
+        strike=28500.0,
+    )
+    ledger = WindowLedger()
+    full_start = date(2020, 1, 1)
+    for offset in range(5):
+        full_end = date(2026, 7, 1) + timedelta(days=offset)  # the advancing prev-day
+        window = default_fno_minute_window(
+            contract.expiry, full_start=full_start, full_end=full_end, is_option=True
+        )
+        assert window is not None  # opens 2026-06-15 — inside every simulated envelope
+        assert window[0] == date(2026, 6, 15)  # expiry−30d: the start NEVER moves
+        plan_contract_windows(
+            ledger,
+            contracts=[contract],
+            intervals=("1minute",),
+            start=full_start,
+            end=full_end,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            contract_windows={contract.symbol: window},
+            now_ist=_now_far,
+        )
+        ledger.record(
+            WindowKey(
+                market=GROWW_OPTION_COVERAGE_MARKET,
+                security_id=contract.symbol,
+                interval="1minute",
+                start=window[0],
+                end=window[1],
+            ),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=datetime.now(UTC),
+        )
+    assert ledger.count == 1  # the end-rule alone collects the dailies — no orphans
+    record = ledger.records()[0]
+    assert (record.window_start, record.window_end) == ("2026-06-15", "2026-07-05")
+    assert record.status == "SUCCESS"
 
 
 def test_run_option_ingest_pre_plans_quarantined_contract_stays_planned() -> None:

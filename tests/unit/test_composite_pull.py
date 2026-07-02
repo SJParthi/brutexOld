@@ -461,6 +461,74 @@ def test_to_dict_all_reference_only_has_null_sub_reports(tmp_path: Path) -> None
     assert payload["skipped_count"] == 1
 
 
+def test_composite_note_counts_not_yet_in_window(tmp_path: Path) -> None:
+    """DEC-FNO-FAR-EXPIRY-WINDOW-001 display honesty on the composite note.
+
+    A DEFAULT-dates pull (no from/to → envelope ends 2026-06-13) over a chain with
+    three near legs (expiry 2024-01-25) plus ONE far Sep-2026 CE (opens 2026-08-30,
+    not yet in window → strict-law skip): the note's completed/selected ratio carries
+    the honest "(1 not yet in window)" breakdown so the skip never reads as a
+    failure — and the far leg is never candle-fetched.
+    """
+    sdk = _FakeSDK(
+        expiries={
+            ("NSE", "NIFTY", 2024): ["2024-01-25"],
+            ("NSE", "NIFTY", 2026): ["2026-09-29"],
+        },
+        contracts={
+            ("NSE", "NIFTY", "2024-01-25"): [
+                "NSE-NIFTY-25Jan24-21000-CE",
+                "NSE-NIFTY-25Jan24-21000-PE",
+                "NSE-NIFTY-25Jan24-FUT",
+            ],
+            ("NSE", "NIFTY", "2026-09-29"): ["NSE-NIFTY-29Sep26-21000-CE"],
+        },
+    )
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    lake_root = tmp_path / "lake"
+    lake_root.mkdir()
+    report = pull_historical_for_underlyings(
+        [_instrument("NIFTY", 13)],
+        reference_only_ids=frozenset(),
+        registry=registry,
+        coverage_store=coverage,
+        lake_root=lake_root,
+        dry_run=False,
+        intervals=("1day",),
+        years=[2024, 2026],
+        from_date=None,
+        to_date=None,
+        now=_NOW,
+        today=_TODAY,
+        metadata_client_factory=_metadata_factory(sdk),
+        historical_client_factory=_historical_factory(sdk, sink),
+        metadata_run_parallel=_sync,
+        historical_run_parallel=_sync,
+        until_clean=False,
+    )
+    assert report.historical is not None
+    assert report.historical.contracts_not_yet_in_window == 1
+    assert "3/4 contract(s) (1 not yet in window)" in report.note
+    assert "NSE-NIFTY-29Sep26-21000-CE" not in sdk.candle_symbols  # never fetched
+
+
+def test_composite_note_without_skips_has_no_breakdown(tmp_path: Path) -> None:
+    """No strict-law skips → the composite note stays byte-identical (no breakdown)."""
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    report = _run(
+        [_instrument("NIFTY", 13)], sdk=sdk, sink=sink, registry=registry, coverage=coverage
+    )
+    assert report.historical is not None
+    assert report.historical.contracts_not_yet_in_window == 0
+    assert "not yet in window" not in report.note
+    assert "3/3 contract(s)" in report.note
+
+
 # ── the module exposes exactly its public surface ──────────────────────────────
 
 

@@ -1619,7 +1619,12 @@ def ingest_underlying_options(
     *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is forwarded verbatim to
     :func:`run_groww_option_ingest` — an OPTIONAL ``{symbol: (start, end)}`` map
     bounding each contract's heavy sub-daily pull to its real listing→expiry window
-    (``None`` = the full-range, pre-feature behaviour). *run_parallel*
+    (``None`` = the full-range, pre-feature behaviour). **WARNING
+    (DEC-FNO-FAR-EXPIRY-WINDOW-001):** ``contract_windows=None`` BYPASSES the strict
+    default-window law — any future caller MUST pass windows resolved via
+    :func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window` (skipping
+    a ``None``/not-yet-open contract) or it re-introduces the full-range over-pull the
+    law forbids. *run_parallel*
     (DEC-GROWW-OPTION-POOL-001) is forwarded verbatim too — the outer cross-contract
     concurrency primitive (``None`` = the byte-identical serial default).
 
@@ -1692,6 +1697,11 @@ def ingest_underlying_futures(
     *contract_windows* (DEC-DERIV-MINUTE-BOUNDS-001) is forwarded verbatim to
     :func:`run_groww_option_ingest` — the same OPTIONAL per-contract minute-bounds
     map :func:`ingest_underlying_options` accepts (``None`` = full-range behaviour).
+    **WARNING (DEC-FNO-FAR-EXPIRY-WINDOW-001):** ``contract_windows=None`` BYPASSES
+    the strict default-window law — any future caller MUST pass windows resolved via
+    :func:`~brutex.adapters.groww.contract_bounds.default_fno_minute_window` (skipping
+    a ``None``/not-yet-open contract) or it re-introduces the full-range over-pull the
+    law forbids.
     *run_parallel* (DEC-GROWW-OPTION-POOL-001) is forwarded verbatim too — the outer
     cross-contract concurrency primitive (``None`` = the byte-identical serial default).
 
