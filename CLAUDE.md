@@ -237,7 +237,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/stoic-maxwell-km8gfe` (**DEC-FETCH-PER-WINDOW-GATE-HONESTY-001, MIGRATION.md #1132** — the
+- **Active branch:** `claude/lake-heal-ba917m` (**DEC-LAKE-HEAL-001, MIGRATION.md #1149** — the
+  lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
+  UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
+  + a fully AUTOMATIC keep-FIRST healer (`brutex/data/lake_heal.py`, default AUTO-ON, escape
+  hatch `BRUTEX_LAKE_HEAL=observe`): quarantine-COPY to `<lake>/.quarantine/<ts>/` → rewrite
+  THROUGH the normal write path (NEW public `ParquetWriter.heal_partition` — locks/P9/overlay/
+  raw_hash rotation all reused) → hash-chained audit JSONL + one Telegram alert per batch;
+  detection at L1 (free reconcile piggyback on `ReconcileResult.findings`, healed at the
+  `cascade_wire` reconcile chokepoint), L2 (post-pull, pulled-symbols × span-months, wired
+  BEFORE the daily derive in `pull_controller` + `historical_pull`; `LakeWriteHalt` re-raises
+  into the pull-halt handling), L3 (one-time content-token-stamped startup sweep, throttled
+  daemon, boot can never crash); derived recall = 1day re-derive (latest-wins) + intraday-TF
+  DELETE-and-rebuild (keep-first would keep poison); census surfaces: `brutex lake
+  audit-unique` (exit 0/1/2), a bounded doctor check, a `/universe` chip — each answering
+  whether the ENGINE's index data (NIFTY/BANKNIFTY/SENSEX) carries dupes. HONEST: scan is
+  O(files) NOT O(1) (bench-pinned); options tree = census + `(side,ts)` dup heal only
+  (foreign/overlap heal a named follow-up); STRICTLY row-removing/row-reassigning, never
+  value-editing; the CLI `brutex fetch` path has no L2 seam (covered by L1/L3/census, a named
+  follow-up). All new modules + every touched module 100% line+branch; the #1067 pin suites
+  pass unmodified. ENGINE UNCHANGED, F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
+  Prior merged: **DEC-FETCH-PER-WINDOW-GATE-HONESTY-001, MIGRATION.md #1132** — the
   fetch-per-window CI bench gate (`tests/bench/test_fetch_per_window_guarantee.py`, #1026) now measures the PRODUCTION
   quantity instead of a flattering lab quantity: a verified forensic audit of a real production pull measured `2.59`
   vendor fetches per `(contract, interval)` window while the gate read `1.198` and PASSED — because its replay range
@@ -1368,7 +1388,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/stoic-maxwell-km8gfe`
+- **Active feature branch:** `claude/lake-heal-ba917m`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
