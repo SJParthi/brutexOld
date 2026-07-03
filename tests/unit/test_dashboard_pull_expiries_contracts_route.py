@@ -442,7 +442,7 @@ def test_metadata_progress_sync_maps_onto_sync_from_ledger() -> None:
             *,
             completed: int,
             total: int,
-            bars: int,
+            bars: int | None,
             failed: int = 0,
             current: str = "",
         ) -> None:
@@ -458,4 +458,9 @@ def test_metadata_progress_sync_maps_onto_sync_from_ledger() -> None:
 
     app_module._metadata_progress_sync(cast(BackgroundPullJob, _SpyJob()), 3, 7, "NIFTY/2024")
 
-    assert calls == [{"completed": 3, "total": 7, "bars": 0, "failed": 0, "current": "NIFTY/2024"}]
+    # bars=None PRESERVES the cumulative tally an earlier phase streamed — the metadata
+    # pull has no bar concept, so it must never wipe the display to "0 BARS"
+    # (DEC-PIPELINE-STALL-HEARTBEAT-001, the frozen-counter fix).
+    assert calls == [
+        {"completed": 3, "total": 7, "bars": None, "failed": 0, "current": "NIFTY/2024"}
+    ]
