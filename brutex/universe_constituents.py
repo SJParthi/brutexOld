@@ -51,8 +51,16 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
+import structlog
+
 from brutex.dashboard.nse_constituents import ConstituentRow
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+#: Resolver logger — makes a silent duplicate-key collapse LOUD: when two NSE
+#: cash-equity rows share an ISIN / ticker (a stale or dual listing), the
+#: deterministic lowest-``security_id`` winner is kept but BOTH candidate rows are
+#: named at WARNING, so the dropped listing is visible in /logs (Golden Rule #1).
+_LOG = structlog.get_logger("brutex.universe_constituents")
 
 
 @dataclass(frozen=True)
@@ -114,13 +122,46 @@ def _nse_cash_equities(instruments: Iterable[Instrument]) -> Iterator[Instrument
             yield ins
 
 
+def _keep_lower_security_id(
+    current: Instrument,
+    incoming: Instrument,
+    *,
+    key: str,
+    key_kind: str,
+) -> Instrument:
+    """Resolve a duplicate-key collision: keep the lower ``security_id``, WARN naming both.
+
+    The winner is deterministic (lowest ``security_id``, order-independent — a
+    stale listing usually carries the higher id) so the same inputs always produce
+    the same mapping (Golden Rule #7). The WARNING makes the otherwise-silent
+    collapse visible, naming BOTH the kept and the dropped candidate (Golden
+    Rule #1).
+    """
+    if incoming.security_id < current.security_id:
+        kept, dropped = incoming, current
+    else:
+        kept, dropped = current, incoming
+    _LOG.warning(
+        "universe_constituents.duplicate_key_collapsed",
+        key_kind=key_kind,
+        key=key,
+        kept_security_id=kept.security_id,
+        kept_symbol=kept.symbol_name,
+        dropped_security_id=dropped.security_id,
+        dropped_symbol=dropped.symbol_name,
+    )
+    return kept
+
+
 def _index_by_keys(
     instruments: Iterable[Instrument],
 ) -> tuple[dict[str, Instrument], dict[str, Instrument]]:
     """Build ``{isin → instrument}`` + ``{ticker → instrument}`` over NSE cash equities.
 
     Built once for O(1) per-constituent resolution. On a key collision the row
-    with the **lowest ``security_id``** wins (deterministic, order-independent).
+    with the **lowest ``security_id``** wins (deterministic, order-independent) and
+    the collapse is logged at WARNING naming both candidate rows
+    (:func:`_keep_lower_security_id`).
     """
     by_isin: dict[str, Instrument] = {}
     by_ticker: dict[str, Instrument] = {}
@@ -128,13 +169,19 @@ def _index_by_keys(
         if ins.isin:
             key = ins.isin.strip().upper()
             current = by_isin.get(key)
-            if current is None or ins.security_id < current.security_id:
+            if current is None:
                 by_isin[key] = ins
+            else:
+                by_isin[key] = _keep_lower_security_id(current, ins, key=key, key_kind="isin")
         ticker = ins.symbol_name.strip().upper()
         if ticker:
             current_t = by_ticker.get(ticker)
-            if current_t is None or ins.security_id < current_t.security_id:
+            if current_t is None:
                 by_ticker[ticker] = ins
+            else:
+                by_ticker[ticker] = _keep_lower_security_id(
+                    current_t, ins, key=ticker, key_kind="ticker"
+                )
     return by_isin, by_ticker
 
 
@@ -276,7 +323,12 @@ def held_members(
     """
     instruments = list(instruments)
     report = resolve_constituents(constituents, instruments)
-    name_by_id = {inst.security_id: inst.symbol_name for inst in instruments}
+    # Key the name lookup over ONLY the NSE cash equities — the SAME partition every
+    # ``report.matched`` security_id was resolved from. Keying over ALL instruments
+    # would let a cross-segment row sharing a numeric ``security_id`` (e.g. an INDEX
+    # and a CASH equity both id 13) last-win and return the WRONG name (Golden
+    # Rule #1); the partition guarantees the matched cash-equity name.
+    name_by_id = {inst.security_id: inst.symbol_name for inst in _nse_cash_equities(instruments)}
     held_upper = {symbol.upper() for symbol in held_symbols}
     members: list[str] = []
     seen: set[str] = set()

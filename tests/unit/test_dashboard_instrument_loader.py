@@ -278,6 +278,9 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
     # No live NTM constituent CSV → an honest no-admission note (not a crash).
     assert result["ntm"]["admitted"] is False
     assert "constituent CSV available" in result["ntm"]["reason"]
+    # A clean master → ZERO write-boundary identity collisions on the report
+    # (DEC-MAPPING-COLLISION-HONESTY-001).
+    assert result["security_id_collisions"] == 0
     # Master-integrity audit (DEC-INSTRUMENT-MASTER-INTEGRITY-001) ran END-TO-END against the
     # full leg-bearing universe BEFORE the lean discard — it SAW the WIPRO CE leg (legs > 0)
     # and resolved it to its WIPRO spot, so the verdict is green. This pins the
@@ -305,6 +308,55 @@ def test_default_run_id_factory(tmp_path: Path) -> None:
     )
     assert result["parsed"] == 4
     assert result["total"] == 3
+
+
+def test_load_report_carries_security_id_collisions(tmp_path: Path) -> None:
+    """A DISTINCT-name identity collision surfaces on the LOADER report.
+
+    Two NSE IDX rows share the numeric ``exchange_token`` ``7777`` — the same
+    ``(security_id, exch_id, segment)`` store identity — under DIFFERENT
+    trading_symbols. The store's write-boundary dedup drops one (last-wins +
+    a per-drop WARNING) and the count now rides the load report END-TO-END:
+    ``UpsertResult.security_id_collisions`` → ``result["security_id_collisions"]``
+    + the ``universe.load.groww`` counts line (fail-before: the loader DISCARDED
+    the UpsertResult, so the count was write-only —
+    DEC-MAPPING-COLLISION-HONESTY-001 review fold).
+    """
+    collide_a = _row(
+        exchange="NSE",
+        exchange_token="7777",
+        trading_symbol="COLLIDEA",
+        groww_symbol="NSE-COLLIDEA",
+        name="Collide A",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    collide_b = _row(
+        exchange="NSE",
+        exchange_token="7777",  # SAME numeric token → same store identity …
+        trading_symbol="COLLIDEB",  # … DIFFERENT symbol_name → a counted collision
+        groww_symbol="NSE-COLLIDEB",
+        name="Collide B",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    store = _store(tmp_path)
+    with capture_logs() as logs:
+        result = load_instrument_master(
+            store,
+            http_get=lambda _url: _csv([collide_a, collide_b]),
+            run_id_factory=lambda: "test-collide",
+            constituent_opener=_empty_opener,
+            constituent_cache_dir=tmp_path / "cache",
+        )
+    # The LOADER report carries the collision count (was write-only before).
+    assert result["security_id_collisions"] == 1
+    # The store's per-drop WARNING still fires (the diagnostic payload) …
+    assert len(_events(logs, "instrument_store.security_id_collision")) == 1
+    # … and the aggregate rides the loader's counts log line too.
+    groww_events = _events(logs, "universe.load.groww")
+    assert len(groww_events) == 1
+    assert groww_events[0]["security_id_collisions"] == 1
 
 
 def test_malformed_header_raises(tmp_path: Path) -> None:
@@ -339,6 +391,7 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
         "legs_dropped": 0,
         "filtered": 0,
         "quarantined": 0,
+        "security_id_collisions": 0,
         "index_count": 0,
         "stock_count": 0,
         "total": 0,
