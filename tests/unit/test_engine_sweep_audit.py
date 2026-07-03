@@ -9,15 +9,22 @@
   resume-missing / already-exists raise), ``append`` (payload present + empty,
   explicit + default ts, closed-writer raise, disk-write OSError), the
   context-manager + raw-constructor ``__enter__`` paths, idempotent ``close``;
-* ``_read_entries`` (missing file, blank-line skip, malformed line) +
-  ``read_entries`` wrapper;
+* :func:`iter_entries` — the O(1)-memory streaming primitive
+  (DEC-SWEEP-SCALE-OPERABILITY-001: eager missing-file raise, laziness, torn-tail +
+  blank-line skip, malformed-committed-line raise) — plus the ``_read_entries``
+  / ``read_entries`` list wrappers over it (missing file, blank-line skip,
+  malformed line);
 * :func:`verify_chain` (empty, happy, seq-out-of-order, prev-hash break,
-  entry-hash tamper) — plus a hypothesis property that any honest chain verifies
-  and any single-byte tamper is caught, and a frozen golden hash.
+  entry-hash tamper) — now STREAMING: a no-list-materialisation proof, a
+  comparative tracemalloc bounded-peak oracle, and mid-stream tamper/torn-tail
+  checks — plus a hypothesis property that any honest chain verifies and any
+  single-byte tamper is caught, and a frozen golden hash.
 """
 
 from __future__ import annotations
 
+import gc
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -31,6 +38,7 @@ from brutex.engine.sweep_audit import (
     SweepAuditError,
     SweepAuditWriteError,
     SweepAuditWriter,
+    iter_entries,
     read_entries,
     verify_chain,
 )
@@ -521,3 +529,128 @@ def test_sweep_tailread_resume_continues_valid_chain(tmp_path: Path) -> None:
         rec = log.append(action="COMBO_DONE", subject="s:5", payload={"i": 5})
     assert rec.seq == 5
     assert verify_chain(path) == 6
+
+
+# ── iter_entries — the O(1)-memory streaming primitive ──────────────────────
+# DEC-SWEEP-SCALE-OPERABILITY-001: verify_chain / read_entries no longer materialise
+# the whole log — iter_entries streams one committed entry at a time with the
+# EXACT torn-tail discriminator (DEC-AUDIT-TORN-TAIL-001) the list readers used.
+
+
+def test_iter_entries_missing_file_raises_eagerly(tmp_path: Path) -> None:
+    """The missing-file raise fires at CALL time, before any iteration."""
+    with pytest.raises(SweepAuditError, match="not found"):
+        iter_entries(tmp_path / "nope.jsonl")
+
+
+def test_iter_entries_is_lazy_and_matches_read_entries(tmp_path: Path) -> None:
+    """iter_entries returns a lazy iterator whose items equal read_entries."""
+    p = tmp_path / "a.jsonl"
+    _sweep_clean_chain(p, 5)
+    it = iter_entries(p)
+    assert not isinstance(it, list)
+    assert iter(it) is it  # a genuine one-shot iterator, not a container
+    assert list(it) == read_entries(p)
+
+
+def test_iter_entries_skips_torn_tail_and_blank_lines(tmp_path: Path) -> None:
+    """A blank committed line and an unterminated torn tail are both skipped."""
+    p = tmp_path / "a.jsonl"
+    _sweep_clean_chain(p, 1)
+    _append_raw(p, "\n")  # blank committed filler
+    _append_raw(p, '{"seq": 1, "prev_hash": "ab')  # torn tail (no newline)
+    assert [e.seq for e in iter_entries(p)] == [0]
+
+
+def test_iter_entries_malformed_committed_line_raises_with_line_no(tmp_path: Path) -> None:
+    """A malformed NEWLINE-TERMINATED line is real corruption — raise with path:line."""
+    p = tmp_path / "a.jsonl"
+    _sweep_clean_chain(p, 1)
+    _append_raw(p, "{not json}\n")
+    with pytest.raises(SweepAuditError, match=r":2:"):
+        list(iter_entries(p))
+
+
+def test_read_with_tail_empty_file_is_not_torn(tmp_path: Path) -> None:
+    """_read_entries_with_torn_tail (via _has_torn_tail) on an empty file."""
+    p = tmp_path / "empty.jsonl"
+    p.touch()
+    assert _sweep_read_with_tail(p) == ([], False)
+
+
+def test_verify_chain_streams_without_list_materialisation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verify_chain never routes through the list-building readers (O(1) RAM).
+
+    Poison every list-materialising reader in the module; the streaming
+    verify must still succeed — deterministic proof that the whole-file
+    ``entries = _read_entries(path)`` load is gone (DEC-SWEEP-SCALE-OPERABILITY-001).
+    """
+    p = tmp_path / "a.jsonl"
+    _sweep_clean_chain(p, 50)
+
+    def _boom(_path: Path) -> object:
+        raise AssertionError("verify_chain materialised the whole log")
+
+    monkeypatch.setattr(_sweep_mod, "read_entries", _boom)
+    monkeypatch.setattr(_sweep_mod, "_read_entries", _boom)
+    monkeypatch.setattr(_sweep_mod, "_read_entries_with_torn_tail", _boom)
+    assert verify_chain(p) == 50
+
+
+def test_verify_chain_streaming_peak_memory_is_bounded(tmp_path: Path) -> None:
+    """The streaming verify's peak heap sits FAR below the materialised list's.
+
+    Comparative tracemalloc oracle (platform-independent — both sides measured
+    in the same run over the same file): ``read_entries`` must hold all N
+    entries at once (its list contract), while ``verify_chain`` holds ONE
+    entry at a time, so its peak must be a small fraction of the list peak.
+    """
+    p = tmp_path / "big.jsonl"
+    pad = "x" * 120
+    with SweepAuditWriter.open(p) as w:
+        for i in range(2000):
+            w.append(
+                action="COMBO_DONE",
+                subject=f"combo:{i}",
+                payload={"i": i, "pad": pad},
+                ts_utc=float(i),
+            )
+
+    gc.collect()
+    tracemalloc.start()
+    entries = read_entries(p)  # the deliberate O(N) list contract (unchanged)
+    _, list_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert len(entries) == 2000
+    del entries
+    gc.collect()
+
+    tracemalloc.start()
+    assert verify_chain(p) == 2000  # the streaming path
+    _, stream_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert stream_peak < list_peak / 5
+
+
+def test_verify_chain_skips_torn_tail_counts_committed_only(tmp_path: Path) -> None:
+    """A torn final line is excluded from the streamed verify count."""
+    p = tmp_path / "a.jsonl"
+    _sweep_clean_chain(p, 2)
+    _append_raw(p, '{"seq": 2, "prev_hash": "abc", "ts')
+    assert verify_chain(p) == 2
+
+
+def test_verify_chain_streaming_tamper_detected_mid_file(tmp_path: Path) -> None:
+    """A payload tamper deep inside a streamed log still breaks at its seq."""
+    p = tmp_path / "a.jsonl"
+    _sweep_clean_chain(p, 100)
+    entries = read_entries(p)
+    tampered = replace(entries[40], payload={"i": 999}, entry_hash=entries[40].entry_hash)
+    _write_lines(p, [*entries[:40], tampered, *entries[41:]])
+    with pytest.raises(SweepAuditChainCorruption) as ei:
+        verify_chain(p)
+    assert ei.value.seq == 40
+    assert "content tampered" in ei.value.reason
