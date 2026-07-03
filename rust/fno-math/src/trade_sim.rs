@@ -570,8 +570,9 @@ impl ResidentSweepSim {
         // [-MAX_PRICE_PAISA, MAX_PRICE_PAISA] so the walker's raw i64 add/sub
         // is provably panic-free (see the ceiling's derivation doc). One-time
         // O(N_bars) scan at construction — NOT on the hot loop. `is_forced`
-        // (bool) and `bar_bits` (u64, only `&`-compared against masks) do no
-        // arithmetic and need no bound.
+        // (bool), `bar_bits` (u64, only `&`-compared against masks) and
+        // `session_idx` (i64 day ordinal, only `==`-compared for the R2-OC-2
+        // same-session entry gate) do no arithmetic and need no bound.
         check_price_column("open", &open)?;
         check_price_column("high", &high)?;
         check_price_column("low", &low)?;
@@ -1472,6 +1473,7 @@ mod tests {
         // extremes, so every clause of the guard is exercised.
         let ok = || vec![100i64, 100];
         let okf = || vec![false; 2];
+        let oks = || vec![0i64; 2];
         let okb = || vec![0u64; 2];
         for bad in [i64::MAX, i64::MIN, C + 1, -C - 1] {
             let bad_col = vec![100i64, bad];
@@ -1482,7 +1484,7 @@ mod tests {
                     2 => (ok(), ok(), bad_col.clone(), ok()),
                     _ => (ok(), ok(), ok(), bad_col.clone()),
                 };
-                let err = ResidentSweepSim::build(o, h, l, c, okf(), okb())
+                let err = ResidentSweepSim::build(o, h, l, c, okf(), oks(), okb())
                     .map(|_| ()) // () is Debug; ResidentSweepSim is not
                     .expect_err("out-of-range price must be rejected at build");
                 assert!(
@@ -1504,6 +1506,7 @@ mod tests {
             vec![C, -C],
             vec![C, -C],
             vec![false, false],
+            vec![0, 0],
             vec![0, 0],
         )
         .expect("exact-ceiling prices must build");
