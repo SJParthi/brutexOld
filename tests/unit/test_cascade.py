@@ -10,19 +10,29 @@ edge guards (empty pool, duplicate id, unequal-length pool matrix).
 from __future__ import annotations
 
 import math
+import random
 import statistics
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 from brutex.metrics.cascade import (
+    _COMPOSITE_WEIGHTS,
     CandidateInput,
     CascadeConfig,
     CascadeReport,
     DsrTrialStats,
     FilterStage,
+    _measured_lockbox_sharpe,
     _zscore_clamped,
     run_stage4_cascade,
+)
+from brutex.metrics.lockbox import (
+    LOCKBOX_DEFAULT_MIN_TRADES,
+    LOCKBOX_DEFAULT_WINDOW_DAYS,
+    LockboxResult,
+    LockboxStatus,
+    lockbox_evaluation,
 )
 from brutex.metrics.pbo import pbo_probability
 
@@ -305,6 +315,329 @@ def test_zscore_clamped_helper() -> None:
     # A lone outlier among many zeros clamps to +3.0 (z ~ 4.5 before clamping).
     z = _zscore_clamped([0.0] * 20 + [1.0])
     assert max(z) == 3.0
+
+
+# ── Trade-evidence lockbox count gate (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F2) ──
+
+
+def test_lockbox_evidence_makes_insufficient_n_reachable_on_bar_series() -> None:
+    # THE F2 regression (fails before the change): the candidate's 40-element
+    # per-bar lockbox series clears min_trades=4 by BAR count, so the legacy
+    # count gate could never fire; with only 2 TRUE trades of evidence the
+    # candidate is now honestly rejected INSUFFICIENT_N at the lockbox stage.
+    cfg = _pass_config()
+    without_evidence = run_stage4_cascade([_candidate("x", seed=1)], cfg)
+    (v0,) = without_evidence.verdicts
+    assert v0.rejected_at is not FilterStage.LOCKBOX  # bars counted — unreachable before
+    with_evidence = run_stage4_cascade([_candidate("x", seed=1, lockbox_trade_days=(36, 38))], cfg)
+    (v1,) = with_evidence.verdicts
+    assert v1.rejected_at is FilterStage.LOCKBOX
+    assert LockboxStatus.INSUFFICIENT_N.value in v1.detail
+
+
+def test_lockbox_evidence_window_extension_driven_by_trade_count() -> None:
+    # 4 trades, only 2 in the 5-day default window ⇒ the window extends back
+    # to the 4th-most-recent TRADE's day and the candidate still passes.
+    cfg = _pass_config()
+    rep = run_stage4_cascade([_candidate("x", seed=1, lockbox_trade_days=(10, 20, 36, 38))], cfg)
+    (v,) = rep.verdicts
+    assert v.passed is True
+
+
+def test_lockbox_empty_trade_evidence_rejects_insufficient_n() -> None:
+    # A zero-trade candidate (evidence ()) reaches filter #8 legally and is
+    # rejected INSUFFICIENT_N — never a crash (review A2).
+    cfg = _pass_config(run_hard_gates=False, dsr_min=-1.0)
+    rep = run_stage4_cascade([_candidate("x", seed=1, total_trades=0, lockbox_trade_days=())], cfg)
+    (v,) = rep.verdicts
+    assert v.rejected_at is FilterStage.LOCKBOX
+    assert LockboxStatus.INSUFFICIENT_N.value in v.detail
+
+
+def test_lockbox_trade_days_equal_to_bar_days_matches_legacy() -> None:
+    # Evidence == the lockbox day axis itself ⇒ the count source is the same
+    # array the legacy mode counted ⇒ identical verdicts (the None-path pin).
+    cfg = _pass_config()
+    legacy = run_stage4_cascade([_candidate("x", seed=1)], cfg)
+    explicit = run_stage4_cascade(
+        [_candidate("x", seed=1, lockbox_trade_days=tuple(range(40)))], cfg
+    )
+    assert legacy.verdicts == explicit.verdicts
+    assert legacy.survivor_ids == explicit.survivor_ids
+
+
+def test_lockbox_evidence_outside_days_span_is_isolated_rejection() -> None:
+    # Misaligned evidence (outside the lockbox_days span) is a per-candidate
+    # LOCKBOX rejection, never a sweep crash (review A4 / edge 11).
+    cfg = _pass_config()
+    rep = run_stage4_cascade([_candidate("x", seed=1, lockbox_trade_days=(36, 999))], cfg)
+    (v,) = rep.verdicts
+    assert v.rejected_at is FilterStage.LOCKBOX
+    assert "could not be evaluated" in v.detail
+
+
+def test_candidate_input_rejects_unsorted_trade_days() -> None:
+    with pytest.raises(ValueError, match="lockbox_trade_days must be non-decreasing"):
+        _candidate("x", lockbox_trade_days=(5, 1))
+
+
+def test_cascade_config_lockbox_defaults_are_the_lockbox_constants() -> None:
+    # CLAUDE.md §11 COMMON: the config's lockbox defaults REFERENCE the lockbox
+    # module's public constants (kills a literal-drift mutation) and the values
+    # are byte-identical to the pre-repoint literals (manifest bytes unchanged).
+    cfg = CascadeConfig(seed=1)
+    assert cfg.lockbox_min_trades == LOCKBOX_DEFAULT_MIN_TRADES == 500
+    assert cfg.lockbox_default_window_days == LOCKBOX_DEFAULT_WINDOW_DAYS == 182
+
+
+# ── Composite lockbox term reads the MEASURED lockbox Sharpe (R2-SR-F5) ──
+
+
+def test_composite_weights_pinned() -> None:
+    # The missing direct pin (mirrors TestCompositeWeightPins, which pins only
+    # the RANKING weights): exact keys, exact values, summing to 1.0.
+    assert _COMPOSITE_WEIGHTS == {
+        "sharpe_ratio": 0.25,
+        "sortino_ratio": 0.20,
+        "calmar_ratio": 0.15,
+        "profit_factor_excess": 0.15,
+        "recovery_factor": 0.10,
+        "win_quality": 0.10,
+        "lockbox_sharpe": 0.05,
+    }
+    assert math.fsum(_COMPOSITE_WEIGHTS.values()) == 1.0
+
+
+def test_composite_uses_measured_lockbox_sharpe_not_training() -> None:
+    # THE F5 regression (kills a revert of the raw-source swap): training
+    # Sharpe ordering is the REVERSE of the measured lockbox-window Sharpe
+    # ordering; every other raw column is identical across the pair, so the
+    # ranking is decided by the lockbox term alone. The OLD code (feeding
+    # c.training_sharpe) ranked "lowmeasured" first; the fix ranks by the
+    # MEASURED filter-#8 value.
+    cfg = _pass_config()
+    lb_hi, days = _good_lockbox(101)
+    # A uniform -0.1 shift lowers the mean while keeping the dispersion
+    # identical ⇒ a strictly lower Sharpe series.
+    lb_lo = tuple(r - 0.1 for r in lb_hi)
+    measured_hi = lockbox_evaluation(
+        lb_hi,
+        days,
+        training_sharpe=0.0,
+        training_max_drawdown=5.0,
+        min_trades=4,
+        default_window_days=5,
+    ).lockbox_sharpe
+    measured_lo = lockbox_evaluation(
+        lb_lo,
+        days,
+        training_sharpe=0.0,
+        training_max_drawdown=5.0,
+        min_trades=4,
+        default_window_days=5,
+    ).lockbox_sharpe
+    assert measured_hi is not None and measured_lo is not None
+    assert measured_hi > measured_lo  # fixture sanity
+    shared = _strong_returns(7)
+    cands = [
+        # HIGHER measured lockbox Sharpe, LOWER training Sharpe...
+        _candidate(
+            "himeasured",
+            seed=1,
+            returns=shared,
+            lockbox_returns=lb_hi,
+            lockbox_days=days,
+            training_sharpe=0.1,
+        ),
+        # ...vs LOWER measured lockbox Sharpe, HIGHER training Sharpe.
+        _candidate(
+            "lowmeasured",
+            seed=2,
+            returns=shared,
+            lockbox_returns=lb_lo,
+            lockbox_days=days,
+            training_sharpe=0.2,
+        ),
+    ]
+    rep = run_stage4_cascade(cands, cfg)
+    assert rep.n_survived == 2
+    assert rep.survivor_ids == ("himeasured", "lowmeasured")
+    scores = {v.candidate_id: v.composite_score for v in rep.verdicts}
+    assert scores["himeasured"] is not None and scores["lowmeasured"] is not None
+    assert scores["himeasured"] > scores["lowmeasured"]
+    assert all(math.isfinite(s) for s in scores.values() if s is not None)
+
+
+def test_measured_lockbox_sharpe_helper() -> None:
+    # Float passthrough + LOUD ValueError on a hand-built inconsistent result
+    # (passed=True with lockbox_sharpe=None is unreachable via
+    # lockbox_evaluation — LockboxResult has no cross-field validation, so the
+    # helper is the only guard; the ONLY route to the defensive branch).
+    ok = LockboxResult(
+        status=LockboxStatus.PASS,
+        passed=True,
+        n_trades=10,
+        lockbox_sharpe=1.25,
+        lockbox_max_drawdown=0.1,
+        training_sharpe=1.0,
+        training_max_drawdown=0.2,
+        window_start_day=0,
+        extended=False,
+        sharpe_gate_passed=True,
+        mdd_gate_passed=True,
+        count_gate_passed=True,
+        min_trades=4,
+    )
+    assert _measured_lockbox_sharpe(ok) == 1.25
+    bad = LockboxResult(
+        status=LockboxStatus.PASS,
+        passed=True,
+        n_trades=10,
+        lockbox_sharpe=None,
+        lockbox_max_drawdown=0.1,
+        training_sharpe=1.0,
+        training_max_drawdown=0.2,
+        window_start_day=0,
+        extended=False,
+        sharpe_gate_passed=True,
+        mdd_gate_passed=True,
+        count_gate_passed=True,
+        min_trades=4,
+    )
+    with pytest.raises(ValueError, match="must carry a measured lockbox_sharpe"):
+        _measured_lockbox_sharpe(bad)
+
+
+def test_lone_survivor_composite_is_exactly_zero() -> None:
+    # The single-survivor invariance envelope (review A6): with one survivor
+    # every z column is [0.0], so the composite stays EXACTLY 0.0 pre- and
+    # post-F5 — protects every 0/1-survivor wire pin from silent drift.
+    rep = run_stage4_cascade([_candidate("solo", seed=1)], _pass_config())
+    (v,) = rep.verdicts
+    assert v.passed is True
+    assert v.composite_score == 0.0
+
+
+def test_lockbox_passer_rejected_at_mc_does_not_pollute_z_pool() -> None:
+    # A #8-passer later rejected at #9 leaves an unused map entry (the map is
+    # a SUPERSET of the survivors): no KeyError, and the lone remaining
+    # survivor's composite is exactly 0.0 (a leaked second entry in the z pool
+    # would produce ±0.05-scale nonzero scores).
+    def always_beats(positions: npt.NDArray[np.intp]) -> float:
+        return 1.0e9
+
+    rep = run_stage4_cascade(
+        [_candidate("keep", seed=1), _candidate("mcdead", seed=2, mc_evaluate=always_beats)],
+        _pass_config(),
+    )
+    by = {v.candidate_id: v for v in rep.verdicts}
+    assert by["mcdead"].rejected_at is FilterStage.MONTE_CARLO
+    assert by["keep"].passed is True
+    assert by["keep"].composite_score == 0.0
+
+
+# ── Deterministic survivor tie-break (R2-SR-F6, mirrors DEC-RANKING-TIEBREAK-001) ──
+
+
+def test_tied_survivors_order_by_candidate_id_permutation_invariant() -> None:
+    # FULL-tie fixture: three candidates identical in every scalar AND every
+    # series (distinct ids only) ⇒ every raw z column is zero-variance ⇒ all
+    # composites exactly 0.0 ⇒ the id tie-break alone orders them. Shuffled
+    # input yields the IDENTICAL ascending-id survivor tuple (fails before F6:
+    # sorted() is stable, so tied scores followed input order).
+    cfg = _pass_config()
+    shared_returns = _strong_returns(11)
+    lb, days = _good_lockbox(12)
+
+    def clone(cid: str) -> CandidateInput:
+        return _candidate(
+            cid, seed=99, returns=shared_returns, lockbox_returns=lb, lockbox_days=days
+        )
+
+    ids = ["alpha", "beta", "gamma"]
+    orderings: set[tuple[str, ...]] = set()
+    for shuffle_seed in (0, 1, 2):
+        shuffled = [clone(cid) for cid in ids]
+        random.Random(shuffle_seed).shuffle(shuffled)
+        rep = run_stage4_cascade(shuffled, cfg)
+        assert rep.n_survived == 3
+        scores = [v.composite_score for v in rep.verdicts]
+        # Genuine full tie: every survivor scores IDENTICALLY. (The exact
+        # value need not be 0.0 — statistics.pstdev can report a ~1e-16
+        # pseudo-dispersion on an all-equal float column, mapping the whole
+        # column to a uniform ±1 z; identical across candidates either way.)
+        assert len(set(scores)) == 1
+        orderings.add(rep.survivor_ids)
+    assert orderings == {("alpha", "beta", "gamma")}
+
+
+def test_distinct_scores_ignore_the_id_tie_break() -> None:
+    # Non-tie regression: with distinct composites the order is purely
+    # score-descending — the id key is inert ("zeta" outranks "alpha").
+    cfg = _pass_config()
+    lb_hi, days = _good_lockbox(101)
+    lb_lo = tuple(r - 0.1 for r in lb_hi)  # strictly lower Sharpe series
+    shared = _strong_returns(7)
+    rep = run_stage4_cascade(
+        [
+            _candidate("alpha", seed=1, returns=shared, lockbox_returns=lb_lo, lockbox_days=days),
+            _candidate("zeta", seed=2, returns=shared, lockbox_returns=lb_hi, lockbox_days=days),
+        ],
+        cfg,
+    )
+    assert rep.survivor_ids == ("zeta", "alpha")
+
+
+# ── Provisional pool-N passes (R2-SR-F4) ──
+
+
+def test_pool_fallback_survivors_are_provisional() -> None:
+    # No trial_stats ⇒ dsr_n_source == "pool" ⇒ every PASS is provisional and
+    # provisional_pass_ids is the survivor tuple itself (run-level stamp).
+    rep = run_stage4_cascade([_candidate("a", seed=1), _candidate("b", seed=2)], _pass_config())
+    assert rep.dsr_n_source == "pool"
+    for v in rep.verdicts:
+        assert v.passed is True
+        assert v.provisional is True
+    assert rep.provisional_pass_ids == rep.survivor_ids
+
+
+def test_leaderboard_sourced_survivors_are_not_provisional() -> None:
+    stats = DsrTrialStats(n_trials=5, sharpe_variance=0.01, n_finite=5)
+    rep = run_stage4_cascade([_candidate("a", seed=1)], _pass_config(), trial_stats=stats)
+    (v,) = rep.verdicts
+    assert v.passed is True
+    assert rep.dsr_n_source == "leaderboard"
+    assert v.provisional is False
+    assert rep.provisional_pass_ids == ()
+
+
+def test_rejected_verdict_provisional_stays_false_under_pool_fallback() -> None:
+    # Pass-scoped flag (review A6/F4-A6): a pool-N REJECTION is a-fortiori
+    # safe under the true larger N, so it is never flagged. Also kills the
+    # `provisional: bool = False` default mutant.
+    rep = run_stage4_cascade([_candidate("x", seed=1, profit_factor=1.0)], _pass_config())
+    (v,) = rep.verdicts
+    assert v.passed is False
+    assert v.provisional is False
+    assert rep.provisional_pass_ids == ()
+
+
+def test_single_candidate_pool_fallback_pass_is_provisional() -> None:
+    # The most important case (review edge 3): a lone-candidate pool has
+    # n_trials=1 / V=0 — an essentially undeflated PSR — yet can pass; the
+    # pass MUST read provisional.
+    rep = run_stage4_cascade([_candidate("solo", seed=1)], _pass_config())
+    (v,) = rep.verdicts
+    assert v.passed is True
+    assert rep.dsr_n_trials == 1
+    assert v.provisional is True
+    assert rep.provisional_pass_ids == ("solo",)
+
+
+def test_empty_report_provisional_pass_ids_empty() -> None:
+    rep = CascadeReport(verdicts=(), survivor_ids=(), n_input=0, n_survived=0, stage_survivors={})
+    assert rep.provisional_pass_ids == ()
 
 
 # ── DSR deflation source (ADR-0008 / DEC-TRIAL-STATS-CONSUME-001) ──

@@ -125,12 +125,39 @@ class RankedCombo:
     #: 6th overfit gate ran for this leaderboard, else ``None`` (legacy ranking, or
     #: a pool that could not be deflated). Exposed for leaderboard transparency —
     #: the selection-bias-corrected confidence behind this combo's overfit survival.
+    #: HONEST SCOPE (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F3): this figure is
+    #: **TUPLE-scoped** — deflated against ``N = len(candidates)`` of ONE grid
+    #: cell's rank-time pool (see :attr:`dsr_n_scope` /
+    #: :func:`_overfit_gate`), NOT the per-(instrument, tf) leaderboard N the
+    #: Stage-4 cascade uses. The under-count materially inflates the value
+    #: (measured effect: DSR 0.230 at ``n_trials=1e3`` vs 0.003 at ``1e7``),
+    #: so the persisted figure is superseded by the Stage-4 cascade's
+    #: leaderboard-N DSR GATE (filter #2), whose N/V provenance is stamped
+    #: run-level on the ``CascadeReport`` (``dsr_n_source``/``dsr_n_trials``).
+    #: The in-sweep gate DIRECTION is deliberately unchanged — lenient-safe
+    #: (an inflated DSR only ever lets MORE combos through to the stricter
+    #: cascade gate, never fewer).
     #: ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): mutmut's
     #: ``float | None`` → ``float & None`` annotation flip is provably equivalent
     #: (PEP 563 ``from __future__ import annotations`` — field annotations are
     #: never evaluated). The pragma is line-scoped, so the ``None`` default it
     #: also skips is pinned by ``test_deflated_sharpe_defaults_to_none`` instead.
     deflated_sharpe: float | None = None  # pragma: no mutate
+
+    @property
+    def dsr_n_scope(self) -> str | None:
+        """The trial-population scope of :attr:`deflated_sharpe` — always ``"tuple"``.
+
+        ``"tuple"`` when a Deflated Sharpe is present (it is ALWAYS the
+        tuple-scoped ``N = len(candidates)`` figure — :func:`rank_combos` is
+        the only site that sets it non-``None``), else ``None`` (no DSR: the
+        gate was inactive, abstained, or a Stage-3 refined row). A read-only
+        property, not a stored field, so the scope stamp can never drift from
+        the value it describes (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F3 — the
+        transparency companion of the ``dsr@tupleN`` leaderboard label,
+        ADR-0008 condition 7).
+        """
+        return "tuple" if self.deflated_sharpe is not None else None
 
     @property
     def risk_efficiency(self) -> float:
