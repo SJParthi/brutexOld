@@ -474,6 +474,91 @@ class TestSymbolFiltering:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Per-symbol monotonic feed-integrity assert — DEC-LAKE-READ-UNIQUE-001
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _DuplicateBarFeed:
+    """A feed double yielding a DUPLICATE bar for one symbol.
+
+    Duck-types the runner's feed surface (``interval`` / iteration /
+    ``ensure_no_lookahead``) so a duplicate can reach the runner directly —
+    the real ``Catalog.get_bars`` gate collapses duplicates upstream, so this
+    simulates a wiring regression that bypasses it.
+    """
+
+    interval = "1minute"
+
+    def __init__(self, events: list[FeedEvent]) -> None:
+        self._events = events
+
+    def __iter__(self) -> Any:
+        return iter(self._events)
+
+    def ensure_no_lookahead(self, ts: datetime) -> None:
+        del ts
+
+
+class TestMonotonicFeedAssert:
+    """Fails-before: on unfixed main the runner consumed a duplicate/backwards
+    bar silently (updating state twice — the double-counted bar the engine
+    audit measured)."""
+
+    def test_duplicate_bar_for_same_symbol_raises(self) -> None:
+        events = [
+            FeedEvent(symbol="NSE-A", bar=_bar(1, minute=15)),
+            FeedEvent(symbol="NSE-A", bar=_bar(1, minute=15)),  # exact duplicate
+        ]
+        runner = StrategyRunner(
+            strategy=_QuietStrategy(),
+            feed=_DuplicateBarFeed(events),  # type: ignore[arg-type]
+        )
+        with pytest.raises(StrategyContractError, match="non-increasing"):
+            runner.run()
+
+    def test_backwards_bar_for_same_symbol_raises(self) -> None:
+        events = [
+            FeedEvent(symbol="NSE-A", bar=_bar(1, minute=16)),
+            FeedEvent(symbol="NSE-A", bar=_bar(1, minute=15)),  # goes backwards
+        ]
+        runner = StrategyRunner(
+            strategy=_QuietStrategy(),
+            feed=_DuplicateBarFeed(events),  # type: ignore[arg-type]
+        )
+        with pytest.raises(StrategyContractError, match="non-increasing"):
+            runner.run()
+
+    def test_shared_timestamp_across_symbols_is_legal(self, tmp_path: Path) -> None:
+        """Two SYMBOLS on one timestamp is the normal interleaved merge — no raise."""
+        lake_root = tmp_path / "lake"
+        catalog_path = tmp_path / "catalog.duckdb"
+        writer = ParquetWriter(lake_root=lake_root)
+        with Catalog.open(catalog_path) as cat:
+            sink = ParquetBarSink(writer=writer, catalog=cat)
+            for symbol in ("NSE-A", "NSE-B"):
+                sink.append(
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol=symbol,
+                    interval="1minute",
+                    bars=[_bar(1, minute=15 + i) for i in range(2)],
+                )
+        with Catalog.open(catalog_path) as cat:
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NSE-A", "NSE-B"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+            result = StrategyRunner(strategy=_AlwaysBuyStrategy(), feed=feed).run()
+        assert result.bars_observed == 2  # only NSE-A is in scope; no false trip
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Runtime look-ahead barrier — DEC-LOOKAHEAD-BARRIER-001 (Property P-06)
 # ────────────────────────────────────────────────────────────────────────
 

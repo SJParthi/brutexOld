@@ -63,6 +63,7 @@ import structlog
 
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
 from brutex.data.spot_daily_resample import ist_span_partition_files
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
@@ -760,6 +761,10 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
             )
         frames.append(df.select(*base_columns, *GREEKS_OVERLAY_FIELDS))
     merged = pl.concat(frames)
+    # Keep-FIRST read dedup BEFORE the sort (DEC-LAKE-READ-UNIQUE-001): a
+    # poisoned-era duplicated 1-minute row would otherwise be enriched twice and
+    # re-written; the first stored row wins, warned, never silent.
+    merged, _dropped = dedup_bars_frame(merged, source=f"greeks_enrich:{target.symbol}")
     ist_date = (pl.col("timestamp") + pl.duration(hours=5, minutes=30)).dt.date()
     bounded = (
         merged.with_columns(ist_date.alias("_ist_date"))

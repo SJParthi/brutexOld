@@ -131,6 +131,125 @@ class TestLoadTree:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Snapshot-mismatch quarantine (DEC-LAKE-READ-UNIQUE-001)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _write_audit_context(root: Path, snapshot_hash: str) -> None:
+    """Record a SWEEP_START context under <root>/audit/sweep-all.jsonl."""
+    from brutex.orchestrator.audit import AuditWriter
+
+    path = root / "audit" / "sweep-all.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with AuditWriter.open(path) as audit:
+        audit.append(
+            action="SWEEP_START",
+            subject="tuple",
+            payload={
+                "data_snapshot_hash": snapshot_hash,
+                "indicator_version": "v1",
+                "code_commit_sha": "c1",
+            },
+        )
+
+
+class _capture_logs:
+    """Context manager capturing structlog events into a list (configure/restore)."""
+
+    def __init__(self) -> None:
+        import structlog
+
+        self._structlog = structlog
+        self._cap = structlog.testing.LogCapture()
+        self._saved: dict[str, object] | None = None
+
+    def __enter__(self) -> list[dict[str, object]]:
+        self._saved = self._structlog.get_config()
+        self._structlog.configure(processors=[self._cap])
+        return self._cap.entries  # type: ignore[return-value]
+
+    def __exit__(self, *_exc: object) -> None:
+        assert self._saved is not None
+        self._structlog.configure(**self._saved)  # type: ignore[arg-type]
+
+
+class TestSnapshotQuarantine:
+    """Poisoned-era result files cannot co-rank with clean ones (the seam).
+
+    Fails-before: on unfixed main ``discover_result_files`` /
+    ``load_results_tree`` had no ``current_snapshot_hash`` parameter at all —
+    a healed lake's stale results co-ranked silently in ``brutex report``,
+    the leaderboard, and Stage-3 survivor selection.
+    """
+
+    def test_default_none_is_legacy_byte_identical(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        _write_audit_context(tmp_path, "old-hash")
+        # No current context supplied → legacy behaviour even though the
+        # recorded context exists and would mismatch anything.
+        assert len(discover_result_files(tmp_path)) == 2
+        assert len(load_results_tree(tmp_path)) == 3
+
+    def test_mismatch_quarantines_all_files_with_one_warning(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        _write_audit_context(tmp_path, "old-poisoned-era-hash")
+        with _capture_logs() as logs:
+            files = discover_result_files(tmp_path, current_snapshot_hash="new-clean-hash")
+        assert files == []
+        events = [e for e in logs if e["event"] == "results.snapshot_mismatch_quarantined"]
+        assert len(events) == 1
+        assert events[0]["count"] == 2
+        assert events[0]["recorded"] == "old-poisoned-era-hash"
+        assert events[0]["current"] == "new-clean-hash"
+        paths = events[0]["paths"]
+        assert isinstance(paths, list) and len(paths) == 2
+        assert all(p.endswith(".parquet") for p in paths)
+
+    def test_matching_hash_keeps_all_files(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        _write_audit_context(tmp_path, "same-hash")
+        with _capture_logs() as logs:
+            files = discover_result_files(tmp_path, current_snapshot_hash="same-hash")
+        assert len(files) == 2
+        assert [e for e in logs if e["event"] == "results.snapshot_mismatch_quarantined"] == []
+
+    def test_no_recorded_context_keeps_legacy_behaviour(self, tmp_path: Path) -> None:
+        # No audit chain → the recorded hash is underivable → conservative keep
+        # (documented honest envelope — never quarantine on a guess).
+        _write_tree(tmp_path)
+        files = discover_result_files(tmp_path, current_snapshot_hash="whatever")
+        assert len(files) == 2
+
+    def test_unreadable_audit_keeps_legacy_behaviour(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        audit = tmp_path / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True, exist_ok=True)
+        audit.write_text("{not json at all\n", encoding="utf-8")
+        files = discover_result_files(tmp_path, current_snapshot_hash="whatever")
+        assert len(files) == 2
+
+    def test_empty_tree_with_context_stays_empty(self, tmp_path: Path) -> None:
+        _write_audit_context(tmp_path, "old")
+        assert discover_result_files(tmp_path, current_snapshot_hash="new") == []
+
+    def test_load_results_tree_threads_the_quarantine(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        _write_audit_context(tmp_path, "old-hash")
+        store = load_results_tree(tmp_path, current_snapshot_hash="new-hash")
+        assert len(store) == 0
+
+    def test_stage3_survivors_thread_the_quarantine(self, tmp_path: Path) -> None:
+        from brutex.engine.stage3_select import select_stage3_survivors
+
+        _write_tree(tmp_path)
+        _write_audit_context(tmp_path, "old-hash")
+        assert select_stage3_survivors(tmp_path, current_snapshot_hash="new-hash") == {}
+        # And the matching hash yields the normal selection.
+        survivors = select_stage3_survivors(tmp_path, current_snapshot_hash="old-hash")
+        assert sum(len(rows) for rows in survivors.values()) == 3
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # render_leaderboard
 # ──────────────────────────────────────────────────────────────────────────
 
