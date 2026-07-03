@@ -208,6 +208,7 @@ from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
+from brutex.doctor_autorun import LiveProofAutorun
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
 from brutex.orchestrator.pipeline import (
@@ -907,6 +908,7 @@ def build_app(
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
+    liveproof: LiveProofAutorun | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -978,6 +980,20 @@ def build_app(
         (the default) wires the production probe — this app's own
         ``BackgroundPullJob.running``. Injected so tests drive the mid-pull /
         just-finished transitions deterministically.
+    liveproof
+        Optional :class:`~brutex.doctor_autorun.LiveProofAutorun` — the
+        zero-command auto-run of the Mac live-proof kit
+        (DEC-DOCTOR-LIVE-AUTORUN-001). When supplied, ``GET
+        /api/v1/liveproof`` serves its status (the persistent banner's data
+        source), a REAL pull admitted by the loud-refusal gate triggers the
+        one-time expensive probes (``on_real_pull``), and a credentials
+        refusal mirrors its fix text onto the banner
+        (``note_credentials_refusal`` — the banner and the 503 always
+        agree). When ``None`` (the default — unit tests / bare apps) the
+        route reports ``present: false`` and the pull gates behave exactly
+        as before; ``build_app`` itself never STARTS a preflight (the
+        launcher seam in ``cli.cmd_dashboard`` does), so constructing an app
+        stays side-effect-free.
 
     Returns
     -------
@@ -1910,6 +1926,17 @@ def build_app(
             # Stamp the RED refusal verdict so the /universe banner shows the
             # fix text too — needs_operator semantics, not just a 503 body.
             _last_pull_verdict["verdict"] = refusal.to_dict()
+            if liveproof is not None:
+                # Mirror the SAME relayed fix text onto the persistent
+                # live-proof banner (DEC-DOCTOR-LIVE-AUTORUN-001): the banner
+                # and this 503 must agree even when credentials broke AFTER
+                # the startup preflight ran. Belt (hostile-review MAJOR-1):
+                # a holder bug must never mask the 503 with a 500 — the
+                # refusal itself outranks its banner mirror.
+                try:
+                    liveproof.note_credentials_refusal(verdict_message(refusal))
+                except Exception as exc:  # pylint: disable=broad-exception-caught  # belt
+                    _LOG.warning("liveproof.refusal_mirror_failed", route=route, error=str(exc))
             _LOG.error(
                 "universe.pull.refused_no_credentials",
                 route=route,
@@ -1918,7 +1945,21 @@ def build_app(
             raise HTTPException(status_code=503, detail=verdict_message(refusal))
         if dry_run_requested:
             _LOG.info("universe.pull.synthetic_dry_run_requested", route=route)
-        return dry_run_requested
+            return True
+        if liveproof is not None:
+            # A REAL pull was admitted — the zero-command trigger for the
+            # ONE-TIME expensive probes (VIX / 2020 depth / bhavcopy).
+            # Single-flight + cached-verdict guarded inside; O(1) here, never
+            # blocks or touches the pull job (DEC-DOCTOR-LIVE-AUTORUN-001).
+            # Belt (hostile-review MAJOR-1): the trigger must be UNABLE to
+            # raise into the admitted pull — the holder already converts a
+            # spawn failure into an honest error verdict; this guard covers
+            # any residual holder bug. The pull always proceeds.
+            try:
+                liveproof.on_real_pull()
+            except Exception as exc:  # pylint: disable=broad-exception-caught  # belt
+                _LOG.warning("liveproof.probe_trigger_failed", route=route, error=str(exc))
+        return False
 
     @app.post("/api/v1/universe/pull-all")
     async def api_universe_pull_all(
@@ -3252,6 +3293,24 @@ def build_app(
         if raw is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **banner_for(raw).to_dict()})
+
+    @app.get("/api/v1/liveproof")
+    async def api_liveproof() -> JSONResponse:
+        """GET /api/v1/liveproof — the zero-command live-proof autorun status.
+
+        DEC-DOCTOR-LIVE-AUTORUN-001: the data source for the persistent
+        ``bx-liveproof.js`` status element on every dashboard page. Returns
+        the injected :class:`~brutex.doctor_autorun.LiveProofAutorun`'s O(1)
+        lock-guarded snapshot — ``enabled`` plus the ``preflight`` /
+        ``probes`` blocks (``state`` + the last verdict with the kit's
+        VERBATIM diagnostic lines), or ``{"present": false}`` when no autorun
+        is wired (a bare/test app). Read-only: this route never starts a kit
+        run (startup + the pull gate are the only triggers), so polling it
+        costs nothing (Golden Rule #10 — display, not action).
+        """
+        if liveproof is None:
+            return JSONResponse({"present": False})
+        return JSONResponse({"present": True, **liveproof.status()})
 
     @app.get("/api/v1/coverage/counters")
     async def api_coverage_counters() -> JSONResponse:
