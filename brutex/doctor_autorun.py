@@ -127,9 +127,21 @@ _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 PREFLIGHT_STAGES: Final[frozenset[int]] = frozenset({0, 1, 2, 3, 4})
 
 #: The one-time expensive probes + their prerequisites: creds (1) → token (3)
-#: → spot-1m (5) → depth (6) + VIX (7) + bhavcopy (8). ≤ ~10 vendor calls,
-#: all inside the kit's default 40-call budget.
+#: → spot-1m (5) → depth (6) + VIX (7) + bhavcopy (8). ≤ ~10 vendor calls on
+#: the clean path; a FAILING stage-6 boundary probe additionally AUTO-BISECTS
+#: the true 1-minute floor for that symbol only (~14 calls per failing symbol,
+#: hard-capped per symbol by ``DEPTH_PROBE_MAX_CALLS`` = 20 inside the kit's
+#: ``DEPTH_BISECT_BUDGET`` = 60 extension — the run budget is 40 + 60, honest
+#: and transcript-logged; a PASSing symbol costs exactly 1 call, never a
+#: bisect). Zero-command law: the operator is never told to run
+#: ``--depth-bisect`` (DEC-DOCTOR-KIT-HONESTY-001).
 PROBE_STAGES: Final[frozenset[int]] = frozenset({1, 3, 5, 6, 7, 8})
+
+#: The kit's stage id for the 2020 1-minute depth probe (stage 6) — the ONE
+#: stage whose failure triggers the automatic bounded bisect, so
+#: :func:`run_kit_stages` grants the bisect budget ONLY to runs that include
+#: it (a preflight run keeps the plain default budget).
+DEPTH_STAGE_ID: Final[int] = 6
 
 #: Stage names whose genuine PASS/WARN is REQUIRED before a preflight verdict
 #: may read better than ``fail`` — ``token`` is the stage whose authenticated
@@ -638,7 +650,18 @@ def run_kit_stages(
     deps = (build_real_deps if deps_factory is None else deps_factory)()
     if controller_factory is not None:
         deps.controller_factory = controller_factory
-    options = KitOptions(lake_root=lake_root, stages=stages, keep_going=True)
+    options = KitOptions(
+        lake_root=lake_root,
+        stages=stages,
+        keep_going=True,
+        # ZERO-COMMAND law (DEC-DOCTOR-KIT-HONESTY-001): when the depth stage
+        # runs, a FAILing boundary probe auto-bisects the true floor for that
+        # symbol only (bounded; a passing symbol costs 1 call) and reports it
+        # as an advisory WARN naming the floor — never a FAIL instructing the
+        # operator to run --depth-bisect. Runs without stage 6 (the preflight)
+        # keep the plain default call budget.
+        auto_bisect=DEPTH_STAGE_ID in stages,
+    )
     return run_live_doctor(deps, options)
 
 
@@ -955,6 +978,7 @@ __all__ = [
     "AUTORUN_PROBE_CEILING_PER_MIN",
     "AUTORUN_PROBE_CEILING_RPS",
     "AUTORUN_WARN_RECHECK_DAYS",
+    "DEPTH_STAGE_ID",
     "HEADLINES",
     "KIND_ERROR",
     "KIND_FAIL",

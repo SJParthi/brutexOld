@@ -531,3 +531,68 @@ class TestIstSpanPartitionFiles:
         # No ``1minute`` tree at all → honest empty (a clean no-op, never an error).
         base = tmp_path / "1minute"
         assert ist_span_partition_files(base, date(2025, 3, 1), date(2025, 4, 1)) == []
+
+
+# ── the prebuild live-edge divergence, PINNED (DEC-DOCTOR-KIT-HONESTY-001, fix 4) ──
+
+
+class TestPrebuildLiveEdgeDivergencePinned:
+    """The operator's 122-vs-123 prebuild gap is DELIBERATE, not an off-by-one.
+
+    Forensics (log 23c543ba): the prebuild wrote 122 ADANIENT ``1day`` bars
+    while every one of the 20 intraday TFs derived 123 sessions from the SAME
+    1-minute data. Root (span arithmetic, pinned here): the daily derive runs
+    with ``before = run-day IST`` (``materialize_lake_timeframes`` →
+    ``fill_daily_from_minute``) and :func:`resample_1m_to_daily` DROPS any
+    session whose IST date is ``>= before`` — the no-look-ahead
+    forming-session guard — while the intraday materialisation
+    (:func:`brutex.data.tf_resampler.resample_1m_to_tf`) has no such guard.
+    So when the stored 1-minute contains the run day's own session, EXACTLY
+    ONE session (the live edge) is absent from the ``1day`` partition. The
+    guard is whole-day-granular (even a post-close run excludes the run day)
+    and SELF-HEALS on the next pipeline run (latest-wins derived ``1day``).
+    The 2025/12-partition observation is the midnight-IST stamping, also
+    deliberate: an IST date-D daily bar stamps (D−1) 18:30 UTC, so the IST
+    2026-01-01 session's bar lives in the DECEMBER UTC month partition.
+    NO behaviour change — these tests pin the documented, intended semantics.
+    """
+
+    def test_daily_excludes_exactly_the_run_day_session_intraday_keeps_it(self) -> None:
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        frame = _frame(
+            (date(2026, 7, 1), 100.0),
+            (date(2026, 7, 2), 110.0),
+            (date(2026, 7, 3), 120.0),  # the run day's own (live-edge) session
+        )
+        run_day = date(2026, 7, 3)
+        daily = resample_1m_to_daily(frame, before=run_day)
+        daily_days = [bar.timestamp.astimezone(_IST).date() for bar in daily]
+        assert daily_days == [date(2026, 7, 1), date(2026, 7, 2)]
+        intraday = resample_1m_to_tf(frame, 60)
+        intraday_days = sorted(
+            {(ts + timedelta(hours=5, minutes=30)).date() for ts in intraday["ts_utc"].to_list()}
+        )
+        assert intraday_days == [date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)]
+        # The pinned divergence: EXACTLY one session — the live edge — differs.
+        assert len(intraday_days) - len(daily_days) == 1
+
+    def test_daily_bar_for_first_ist_session_of_month_lands_in_prior_utc_month(self) -> None:
+        # The refuter's 2025/12 observation: the IST 2026-01-01 session's daily
+        # bar stamps 2025-12-31T18:30Z (midnight-IST labeling) → the DECEMBER
+        # UTC month partition. Shifted, never missing.
+        frame = _frame((date(2026, 1, 1), 100.0))
+        (bar,) = resample_1m_to_daily(frame, before=date(2026, 1, 2))
+        assert bar.timestamp == datetime(2025, 12, 31, 18, 30, tzinfo=UTC)
+        assert (bar.timestamp.year, bar.timestamp.month) == (2025, 12)
+        assert bar.timestamp.astimezone(_IST).date() == date(2026, 1, 1)
+
+    def test_post_close_run_day_still_excluded_and_next_day_run_writes_it(self) -> None:
+        # Whole-day-granular guard: even a run AFTER the 15:30 close on D
+        # excludes D's session (the code cannot cheaply prove the session
+        # closed); the NEXT day's pipeline run (before = D+1) derives it —
+        # the self-healing arm (latest-wins derived 1day partition).
+        frame = _frame((date(2026, 7, 3), 120.0))
+        assert resample_1m_to_daily(frame, before=date(2026, 7, 3)) == []
+        bars = resample_1m_to_daily(frame, before=date(2026, 7, 4))
+        assert [bar.timestamp.astimezone(_IST).date() for bar in bars] == [date(2026, 7, 3)]

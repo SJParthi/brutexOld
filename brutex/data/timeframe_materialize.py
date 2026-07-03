@@ -338,6 +338,19 @@ def materialize_lake_timeframes(
     partitions are keep-first idempotent and the derived daily is latest-wins
     (a re-derivation of identical data is a silent no-op) — CLAUDE.md §2 Rule 7.
 
+    DELIBERATE live-edge divergence (DEC-DOCTOR-KIT-HONESTY-001 fix-4 verdict,
+    pinned by ``TestPrebuildLiveEdgeDivergencePinned``): the intraday TFs carry
+    the RUN DAY's own session when the stored 1-minute contains it, while the
+    derived ``1day`` EXCLUDES it (``ist_date >= before`` — the forming-session
+    guard above), so such a prebuild run writes exactly ONE fewer daily session
+    than the intraday TFs (the operator's 122-vs-123 ADANIENT observation).
+    The guard is whole-day-granular — even a post-close run excludes the run
+    day (the code cannot cheaply prove the session closed) — and SELF-HEALS on
+    the next pipeline run via the latest-wins derived ``1day``. Partition-row
+    counting note: midnight-IST stamping places an IST date-D daily bar in the
+    UTC month of D−1 (a Jan-1 bar lives in the December partition) — shifted,
+    never missing.
+
     Cost: one O(bars) partition read + one O(bars) resample per timeframe —
     NOT an O(1)-total claim (Golden Rule #10). Returns the per-TF written
     counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;

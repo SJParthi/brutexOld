@@ -74,7 +74,7 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.groww.errors import GrowwAuthError, GrowwError
 from brutex.adapters.groww.http_timeout import REQUEST_METHOD_NAMES
-from brutex.adapters.groww.instrument_loader import load_index
+from brutex.adapters.groww.instrument_loader import GrowwInstrumentFetchError, load_index
 from brutex.adapters.groww.instruments import InstrumentIndex
 from brutex.adapters.groww.live import (
     build_live_client,
@@ -399,6 +399,20 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "located ({detail}). Do NOT run a backfill; re-run with --depth-bisect to locate the "
         "real floor first."
     ),
+    "depth.autobisect_floor": (
+        "WARN depth[R6]: 1-minute depth floor for {symbol}: {floor} — the configured floor "
+        "{expected} has NO data at the boundary; the kit AUTO-BISECTED the true floor "
+        "({calls} calls, no operator command needed). A {expected}→today backfill would burn "
+        "quota on the pre-{floor} windows and settle them SKIPPED; set GROWW_HISTORY_FLOOR to "
+        "the probed floor per index (or fix the settle machinery first) and record the floor "
+        "in lake metadata."
+    ),
+    "depth.autobisect_absent": (
+        "FAIL depth[R6]: {symbol} 1m returned NO data anywhere in [{expected} → today] — the "
+        "automatic bounded bisect already ran ({detail}). No operator command is needed (the "
+        "autorun re-probes on the next real pull); do NOT run a backfill until the vendor "
+        "serves 1-minute data for this symbol."
+    ),
     "depth.error": "FAIL depth: {detail}",
     # ── stage 7 · VIX probe (ADR-0009 HARD-GATE) ───────────────────────
     "vix.pass": (
@@ -435,6 +449,13 @@ DIAGNOSTICS: Final[dict[str, str]] = {
     "bhavcopy.unreachable": (
         "WARN bhavcopy: NSE archive unreachable/unparseable ({error}) — external dependency, "
         "not a Groww fault; re-run later. (Cross-check skipped, NOT passed.)"
+    ),
+    "bhavcopy.wiring": (
+        "FAIL bhavcopy: kit wiring: URL blocked by local allowlist ({error}) — the stage-8 NSE "
+        "snapshot fetch was routed through a getter whose OWN allowlist rejects the NSE archive "
+        "host. This is a kit-internal wiring bug (KitDeps.nse_http_get must be the "
+        "NSE-allowlisted brutex.data.bhavcopy.urllib_http_get_nse, never the Groww "
+        "instrument-master shim), NOT an external NSE outage. The cross-check did not run."
     ),
     "bhavcopy.unmapped": (
         "WARN bhavcopy: {symbol} has no NSE indices-archive mapping (BSE indexes live in a "
@@ -724,8 +745,15 @@ class KitDeps:
     real_token_factory: Callable[[str, str], str]
     real_totp_minter: Callable[[str], str]
     controller_factory: Callable[[], RateController]
-    # stages 4 + 8 — keyless HTTP
+    # stage 4 — keyless HTTP against the Groww instrument-master host
     http_get: Callable[[str], str]
+    # stage 8 — keyless HTTP against the NSE archive hosts. MUST be the
+    # NSE-allowlisted getter (:func:`brutex.data.bhavcopy.urllib_http_get_nse`),
+    # NEVER the Groww instrument-master shim: that shim's SSRF allowlist admits
+    # only growwapi-assets.groww.in, so routing the bhavcopy fetch through it
+    # blocks archives.nseindia.com on OUR OWN allowlist and the stage would
+    # mislabel the kit bug as an "external dependency" (DEC-DOCTOR-KIT-HONESTY-001).
+    nse_http_get: Callable[[str], str]
     # stage 5 — probe day
     probe_day: Callable[[], date]
 
@@ -739,6 +767,13 @@ class KitOptions:
     stages: frozenset[int] | None = None
     keep_going: bool = False
     depth_bisect: bool = False
+    #: The ZERO-COMMAND autorun mode (DEC-DOCTOR-KIT-HONESTY-001): an EMPTY
+    #: stage-6 boundary window automatically runs the SAME bounded bisect
+    #: ``--depth-bisect`` would (spent ONLY on the failing symbol — a boundary
+    #: hit returns after 1 call) and a FOUND floor renders as an advisory WARN
+    #: naming the floor, never a FAIL instructing the operator to type a
+    #: command. Manual ``--depth-bisect`` behaviour is byte-unchanged.
+    auto_bisect: bool = False
     rate_probe: bool = False
     against_lake: bool = False
     json_output: bool = False
@@ -1545,17 +1580,28 @@ def stage_spot1m(deps: KitDeps, ctx: KitContext) -> StageOutcome:
 
 
 def stage_depth(deps: KitDeps, ctx: KitContext) -> StageOutcome:
-    """Stage 6 — the resurrected depth probe per brute-force index (R6; ADR-0009 §3.1)."""
+    """Stage 6 — the resurrected depth probe per brute-force index (R6; ADR-0009 §3.1).
+
+    ZERO-COMMAND law (DEC-DOCTOR-KIT-HONESTY-001): with ``options.auto_bisect``
+    (the autorun's mode) an EMPTY boundary window automatically runs the SAME
+    bounded bisect ``--depth-bisect`` would — :func:`probe_depth` spends the
+    extra calls ONLY on a failing symbol (a boundary hit returns after exactly
+    1 call, so a PASSing symbol is never bisected) — and a FOUND floor renders
+    as an advisory WARN naming the floor instead of a FAIL instructing the
+    operator to type a command. Manual ``--depth-bisect`` is byte-unchanged.
+    """
     if ctx.client is None:
         return _skip(6, "depth", "stage 3 did not run — no live client")
     today = deps.now_utc().date()
     from brutex.adapters.groww.probe import DEPTH_PROBE_MAX_CALLS
 
+    bisect_enabled = ctx.options.depth_bisect or ctx.options.auto_bisect
+    advisory = ctx.options.auto_bisect and not ctx.options.depth_bisect
     lines: list[str] = []
     details: list[str] = []
     status = STATUS_PASS
     for symbol in sorted(BRUTE_FORCE_INDEX_SYMBOLS):
-        per_symbol_cap = DEPTH_PROBE_MAX_CALLS if ctx.options.depth_bisect else 1
+        per_symbol_cap = DEPTH_PROBE_MAX_CALLS if bisect_enabled else 1
         allowance = min(per_symbol_cap, ctx.budget.remaining)
         if allowance < 1:
             ctx.budget.spend(label=f"depth.{symbol}")  # raises CallBudgetExceeded
@@ -1564,7 +1610,7 @@ def stage_depth(deps: KitDeps, ctx: KitContext) -> StageOutcome:
             symbol=symbol,
             exchange=symbol.split("-", 1)[0],
             today=today,
-            bisect=ctx.options.depth_bisect,
+            bisect=bisect_enabled,
             max_calls=allowance,
         )
         ctx.budget.spend(result.calls_used, label=f"depth.{symbol}")
@@ -1576,25 +1622,44 @@ def stage_depth(deps: KitDeps, ctx: KitContext) -> StageOutcome:
             probed_floor=result.probed_floor.isoformat() if result.probed_floor else None,
             boundary_has_data=result.boundary_has_data,
             calls_used=result.calls_used,
+            auto_bisect=ctx.options.auto_bisect,
         )
         if result.verdict == VERDICT_OK and result.boundary_has_data:
             details.append(f"{symbol} 1m starts at the boundary (first_ts={result.first_ts})")
         elif result.verdict == VERDICT_OK:
-            status = STATUS_FAIL
             floor_text = result.probed_floor.isoformat() if result.probed_floor is not None else "?"
-            lines.append(
-                render_diagnostic(
-                    "depth.shallow",
-                    symbol=symbol,
-                    floor=floor_text,
-                    expected=EARLIEST_HISTORY.isoformat(),
+            if advisory:
+                # The autorun already located the floor itself — an advisory
+                # WARN naming it, never a FAIL telling the operator to type a
+                # command (the zero-command law).
+                status = _worst(status, STATUS_WARN)
+                lines.append(
+                    render_diagnostic(
+                        "depth.autobisect_floor",
+                        symbol=symbol,
+                        floor=floor_text,
+                        expected=EARLIEST_HISTORY.isoformat(),
+                        calls=result.calls_used,
+                    )
                 )
-            )
+            else:
+                status = STATUS_FAIL
+                lines.append(
+                    render_diagnostic(
+                        "depth.shallow",
+                        symbol=symbol,
+                        floor=floor_text,
+                        expected=EARLIEST_HISTORY.isoformat(),
+                    )
+                )
         elif result.verdict == VERDICT_ABSENT:
             status = STATUS_FAIL
             lines.append(
                 render_diagnostic(
-                    "depth.unknown",
+                    # Under auto_bisect the bounded bisect ALREADY ran — the
+                    # no-data-anywhere verdict must not prescribe a manual
+                    # --depth-bisect re-run (the zero-command law).
+                    "depth.autobisect_absent" if advisory else "depth.unknown",
                     symbol=symbol,
                     expected=EARLIEST_HISTORY.isoformat(),
                     detail=result.detail,
@@ -1747,8 +1812,30 @@ def stage_bhavcopy(deps: KitDeps, ctx: KitContext) -> StageOutcome:
             lines=(render_diagnostic("bhavcopy.no_daily_bar", day=ctx.probe_day.isoformat()),),
         )
     try:
-        official_rows = fetch_index_bhavcopy(deps.http_get, ctx.probe_day)
+        official_rows = fetch_index_bhavcopy(deps.nse_http_get, ctx.probe_day)
+    except GrowwInstrumentFetchError as exc:
+        # KIT WIRING BUG (DEC-DOCTOR-KIT-HONESTY-001): the injected getter's OWN
+        # Groww allowlist refused the NSE URL — a mis-wired nse_http_get, never
+        # an NSE outage. Rendered as an internal kit bug, NOT "external
+        # dependency" (the mislabel the operator's red-banner report caught).
+        ctx.transcript.event("bhavcopy", ok=False, wiring_error=str(exc))
+        return StageOutcome(
+            stage=8,
+            name="bhavcopy",
+            status=STATUS_FAIL,
+            lines=(render_diagnostic("bhavcopy.wiring", error=str(exc)),),
+        )
     except BhavcopyError as exc:
+        if "non-allowlisted" in str(exc):
+            # The same wiring-bug class raised by an allowlist copy inside the
+            # getter itself — still OUR configuration, never an NSE fault.
+            ctx.transcript.event("bhavcopy", ok=False, wiring_error=str(exc))
+            return StageOutcome(
+                stage=8,
+                name="bhavcopy",
+                status=STATUS_FAIL,
+                lines=(render_diagnostic("bhavcopy.wiring", error=str(exc)),),
+            )
         ctx.transcript.event("bhavcopy", ok=False, error=str(exc))
         return StageOutcome(
             stage=8,
@@ -2225,9 +2312,17 @@ STAGES: Final[tuple[tuple[int, str, StageFn], ...]] = (
 
 
 def compute_call_budget(options: KitOptions) -> int:
-    """The run's hard vendor-call cap (spec §2.3): 40 + 60 (bisect) + 480 (rate)."""
+    """The run's hard vendor-call cap (spec §2.3): 40 + 60 (bisect) + 480 (rate).
+
+    ``auto_bisect`` (the autorun's zero-command mode) grants the SAME
+    :data:`DEPTH_BISECT_BUDGET` extension as the manual ``--depth-bisect`` —
+    the budget must honestly cover the bisect the run MAY perform (a full
+    bisect is ~14 calls per failing symbol, capped at
+    :data:`~brutex.adapters.groww.probe.DEPTH_PROBE_MAX_CALLS` = 20); the two
+    flags together never double-grant it.
+    """
     limit = DEFAULT_CALL_BUDGET
-    if options.depth_bisect:
+    if options.depth_bisect or options.auto_bisect:
         limit += DEPTH_BISECT_BUDGET
     if options.rate_probe:
         limit += RATE_PROBE_BUDGET
@@ -2277,6 +2372,7 @@ def run_live_doctor(
         stages=sorted(options.stages) if options.stages is not None else "all",
         keep_going=options.keep_going,
         depth_bisect=options.depth_bisect,
+        auto_bisect=options.auto_bisect,
         rate_probe=options.rate_probe,
         against_lake=options.against_lake,
         mint_anyway=options.mint_anyway,
@@ -2349,6 +2445,7 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
     from brutex.adapters.groww.live import installed_growwapi_version
     from brutex.adapters.groww.reauth import _real_sdk_factory
     from brutex.calendars.nse import is_trading_day
+    from brutex.data.bhavcopy import urllib_http_get_nse
 
     def _git(*args: str) -> str | None:
         try:
@@ -2430,6 +2527,7 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         real_totp_minter=_real_totp,
         controller_factory=_controller,
         http_get=urllib_http_get,
+        nse_http_get=urllib_http_get_nse,
         probe_day=_probe_day,
     )
 

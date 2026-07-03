@@ -25,7 +25,11 @@
  * never a fake green. Broken credentials on a REAL pull attempt (or after
  * live-proof history) arrive as kind "fail", so the red banner opens with
  * the refusal text — grey never papers over a broken live pipe. The pill
- * dot shows the WORST of the preflight and probes verdicts (worstClass).
+ * dot shows the WORST of the preflight and probes verdicts (worstClass),
+ * and the pill HEADLINE is likewise ONE flow-scoped worst-of line
+ * ("live-proof — preflight: PASS · probes: FAIL — depth[R6]",
+ * DEC-DOCTOR-KIT-HONESTY-001) so a mixed run can never read as a
+ * contradictory PASS-then-FAIL toast sequence.
  * When the autorun is not wired (present:false) or disabled via the
  * BRUTEX_AUTORUN_LIVEPROOF=0 escape hatch, the widget renders NOTHING (no
  * invented state). A fetch error leaves the last render in place — the
@@ -79,6 +83,78 @@
 
   function worstClass(a, b) {
     return (KIND_RANK[b] || 0) > (KIND_RANK[a] || 0) ? b : a;
+  }
+
+  // UNIFIED HEADLINE (DEC-DOCTOR-KIT-HONESTY-001): the pill's headline TEXT is
+  // one flow-scoped worst-of line ("live-proof — preflight: PASS · probes:
+  // FAIL — depth[R6]") so the two flows sharing one pill can never read as a
+  // contradictory PASS-then-FAIL toast sequence. The pill DOT already renders
+  // worst-of via worstClass — this fixes the TEXT/labels only. textContent
+  // rendering throughout (CodeQL XSS gate: no markup sink, ever).
+  var KIND_LABEL = {
+    pass: "PASS",
+    warn: "PASS w/ warnings",
+    fail: "FAIL",
+    error: "ERROR",
+    not_applicable: "N/A (no credentials)",
+  };
+
+  function failingStageLabels(verdict) {
+    // "depth[R6]"-style pointers derived from the verdict's own FAIL lines
+    // (the golden catalog's "FAIL <stage>[<register>]:" prefix); a verdict
+    // whose lines carry no such prefix falls back to its FAILed stage names.
+    // Pointers only — the diagnosis wording stays the kit's catalog verbatim.
+    var labels = [];
+    var seen = {};
+    (verdict.lines || []).forEach(function (line) {
+      var m = /^FAIL ([a-z0-9-]+)(\[[^\]]+\])?:/.exec(line);
+      if (m && !seen[m[1]]) {
+        seen[m[1]] = true;
+        labels.push(m[1] + (m[2] || ""));
+      }
+    });
+    if (!labels.length) {
+      (verdict.stages || []).forEach(function (s) {
+        if (s.status === "FAIL" && !seen[s.name]) {
+          seen[s.name] = true;
+          labels.push(s.name);
+        }
+      });
+    }
+    return labels.join(",");
+  }
+
+  function flowStatus(block, pendingText) {
+    // One flow's SHORT status label for the unified headline, honest per
+    // state (verdict kind > running > pending — mirrors verdictSummary).
+    var verdict = block && block.verdict;
+    var state = block && block.state;
+    if (verdict) {
+      var label = KIND_LABEL[verdict.kind] || verdict.kind;
+      if (verdict.kind === "fail" || verdict.kind === "error") {
+        var stages = failingStageLabels(verdict);
+        if (stages) {
+          label += " — " + stages;
+        }
+      }
+      if (state === "running") {
+        label += " (re-checking…)";
+      }
+      return label;
+    }
+    if (state === "running") {
+      return "checking…";
+    }
+    return pendingText;
+  }
+
+  function unifiedHeadline(data) {
+    return (
+      "live-proof — preflight: " +
+      flowStatus(data.preflight, "not yet run") +
+      " · probes: " +
+      flowStatus(data.probes, "pending")
+    );
   }
 
   function injectStyles() {
@@ -411,7 +487,9 @@
     }
     var text = document.getElementById("bxlpText");
     if (text) {
-      text.textContent = pre.text;
+      // The unified flow-scoped worst-of headline (never preflight-only —
+      // a mixed run must not read as a contradictory PASS-then-FAIL toast).
+      text.textContent = unifiedHeadline(data);
     }
     var probes = verdictSummary(
       data.probes,

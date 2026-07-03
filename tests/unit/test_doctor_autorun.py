@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from brutex.config.credentials_types import CredentialsError, GrowwFileCredentia
 from tests.unit.test_doctor_live import (
     _BHAVCOPY_DRIFTED,
     _SECRET,
+    _depth_handler,
     make_deps,
 )
 
@@ -1099,6 +1100,70 @@ def test_e2e_probes_green_over_benign_fakes(tmp_path: Path) -> None:
     ]
 
 
+def test_e2e_probes_auto_bisect_failing_depth_is_warn_naming_the_floor(tmp_path: Path) -> None:
+    """DEC-DOCTOR-KIT-HONESTY-001 fix 1 (zero-command law), end-to-end: a
+    Groww clean-empty at the 2020 boundary for ONE index makes the autorun
+    bisect the true floor ITSELF (bounded — the failing symbol only) and the
+    probes verdict reads an advisory ``warn`` naming the found floor — never
+    a red FAIL banner instructing the operator to run ``--depth-bisect``.
+    FAILS before the fix (the autorun ran ``depth_bisect=False`` → kind
+    ``fail`` + the "re-run with --depth-bisect" instruction)."""
+    shallow = _depth_handler(date(2021, 6, 14))
+    counts: dict[str, int] = {}
+
+    def _deps() -> dl.KitDeps:
+        deps, box = make_deps(tmp_path)
+
+        def _sensex_only_shallow(kwargs: dict[str, object]) -> Mapping[str, object]:
+            symbol = str(kwargs.get("groww_symbol"))
+            counts[symbol] = counts.get(symbol, 0) + 1
+            if symbol == "BSE-SENSEX":
+                return shallow(kwargs)
+            from tests.unit.test_doctor_live import default_handler
+
+            return default_handler(kwargs)
+
+        box["handler"] = _sensex_only_shallow
+        return deps
+
+    holder = _e2e_holder(tmp_path, _deps)
+    assert holder.on_real_pull() is True
+    verdict = holder.status()["probes"]["verdict"]
+    # An advisory WARN ("PASS with warnings" pill), never a fail/error banner.
+    assert verdict["kind"] == da.KIND_WARN
+    assert any(
+        "1-minute depth floor for BSE-SENSEX: 2021-06-14" in line for line in verdict["lines"]
+    )
+    assert all("--depth-bisect" not in line for line in verdict["lines"])
+    depth_rows = [row for row in verdict["stages"] if row["name"] == "depth"]
+    assert depth_rows == [{"stage": 6, "name": "depth", "status": dl.STATUS_WARN}]
+    # The bisect spent calls ONLY on the failing symbol (bounded ≤ 20); the
+    # passing indexes cost one boundary call each inside stage 6.
+    assert counts["BSE-SENSEX"] <= 20
+
+
+def test_run_kit_stages_grants_auto_bisect_only_to_depth_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bisect budget extension is scoped to runs that include stage 6
+    (:data:`da.DEPTH_STAGE_ID`): the probes run carries ``auto_bisect``
+    (budget 40 + 60 = 100, logged via the run.start transcript), the
+    preflight keeps the plain 40 — the honest call-budget split."""
+    captured: dict[str, object] = {}
+
+    def _capturing_run(deps: dl.KitDeps, options: dl.KitOptions) -> dl.KitReport:
+        captured["auto_bisect"] = options.auto_bisect
+        captured["budget"] = dl.compute_call_budget(options)
+        return dl.run_live_doctor(deps, options, transcript_sink=lambda _line: None)
+
+    deps, _box = make_deps(tmp_path)
+    monkeypatch.setattr(da, "run_live_doctor", _capturing_run)
+    da.run_kit_stages(da.PROBE_STAGES, lake_root=tmp_path / "lake", deps_factory=lambda: deps)
+    assert captured == {"auto_bisect": True, "budget": 100}
+    da.run_kit_stages(da.PREFLIGHT_STAGES, lake_root=tmp_path / "lake", deps_factory=lambda: deps)
+    assert captured == {"auto_bisect": False, "budget": 40}
+
+
 @pytest.mark.parametrize(
     ("override_key", "override_value", "expected_code"),
     [
@@ -1236,7 +1301,10 @@ def test_e2e_probes_bhavcopy_mismatch_is_fail(tmp_path: Path) -> None:
         return _master_csv()
 
     def _deps() -> dl.KitDeps:
-        return make_deps(tmp_path, http_get=_http_drifted)[0]
+        # The NSE-archive getter is the stage-8 seam (KitDeps.nse_http_get,
+        # DEC-DOCTOR-KIT-HONESTY-001) — the Groww http_get shim never serves
+        # the bhavcopy snapshot.
+        return make_deps(tmp_path, nse_http_get=_http_drifted)[0]
 
     holder = _e2e_holder(tmp_path, _deps)
     holder.on_real_pull()
