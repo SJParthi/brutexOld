@@ -304,6 +304,14 @@ class PipelinePullReport:
         The prebuild's failing symbol names (capped at 10 by the producer —
         :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`); empty when
         the phase did not run or had no failures.
+    prebuild_crashed
+        The error TYPE NAME (e.g. ``"ValueError"``) when the guarded prebuild
+        CRASHED whole-run instead of completing
+        (:attr:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome.crashed`);
+        ``None`` when the phase completed (even with per-symbol failures) or
+        did not run. The note renders ``", prebuild CRASHED (ErrorType)"``
+        instead of the benign "pre-built for 0 symbol(s)" clause, so a crash
+        is never mistakable for "ran, built 0" (Golden Rule #1).
     quarantined_symbols
         The deduped, sorted names of symbols a phase QUARANTINED per-symbol
         without stopping the chain (:func:`derive_quarantined_symbols` — spot
@@ -327,6 +335,7 @@ class PipelinePullReport:
     prebuild_built: int | None = None
     prebuild_total_bars: int | None = None
     prebuild_failed: tuple[str, ...] = ()
+    prebuild_crashed: str | None = None
     quarantined_symbols: tuple[str, ...] = ()
     quarantined_count: int = 0
 
@@ -358,6 +367,7 @@ class PipelinePullReport:
             "prebuild_built": self.prebuild_built,
             "prebuild_total_bars": self.prebuild_total_bars,
             "prebuild_failed": list(self.prebuild_failed),
+            "prebuild_crashed": self.prebuild_crashed,
             "quarantined_symbols": list(self.quarantined_symbols),
             "quarantined_count": self.quarantined_count,
             "spot": self.spot.to_dict() if self.spot is not None else None,
@@ -410,15 +420,21 @@ _NOTE_FAILURE_NAMES = 3
 def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     """Build the ``, timeframes pre-built …`` note clause from the prebuild outcome.
 
-    Empty when the prebuild phase did not run (``None``). Otherwise names the
-    built-symbol + bar counts, and — when the phase had failures — appends an
-    honest ``, prebuild failures: A, B (+K more)`` clause naming up to
-    :data:`_NOTE_FAILURE_NAMES` symbols with the TRUE remainder count
-    (``failed_count`` — the producer caps :attr:`PrebuildOutcome.failed` at 10
-    names, so the remainder uses the uncapped total; Golden Rule #1).
+    Empty when the prebuild phase did not run (``None``). A guarded whole-run
+    CRASH (:attr:`PrebuildOutcome.crashed` set) renders the honest
+    ``, prebuild CRASHED (ErrorType)`` — never the benign "pre-built for 0
+    symbol(s)" a crash would otherwise masquerade as (Golden Rule #1).
+    Otherwise names the built-symbol + bar counts, and — when the phase had
+    failures — appends an honest ``, prebuild failures: A, B (+K more)``
+    clause naming up to :data:`_NOTE_FAILURE_NAMES` symbols with the TRUE
+    remainder count (``failed_count`` — the producer caps
+    :attr:`PrebuildOutcome.failed` at 10 names, so the remainder uses the
+    uncapped total; Golden Rule #1).
     """
     if prebuild is None:
         return ""
+    if prebuild.crashed is not None:
+        return f", prebuild CRASHED ({prebuild.crashed})"
     clause = (
         f", timeframes pre-built for {prebuild.symbols_built} symbol(s) "
         f"({prebuild.total_bars} bars)"
@@ -538,8 +554,11 @@ def run_full_pipeline(
     ``run_prebuild`` is injected it fires ONLY when :func:`historical_phase_ok`
     passes (a completed-with-failures fetch leaves ``prebuild_built = None``),
     and its :class:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome` is
-    folded into the report (built symbols, total bars, capped failure names —
-    an ``ok=False`` outcome is still recorded honestly, never hidden). ONLY
+    folded into the report (built symbols, total bars, capped failure names,
+    the ``crashed`` error-type marker — an ``ok=False`` outcome is still
+    recorded honestly, never hidden, and a guarded whole-run crash reads
+    ``", prebuild CRASHED (ErrorType)"`` in the note, never a benign
+    "pre-built for 0 symbol(s)"). ONLY
     AFTER the prebuild do the movers warmers fire — movers read the DERIVED
     timeframes, which the prebuild alone writes now, so warming earlier would
     read stale/absent partitions. This SUPERSEDES the early spot-segment warm
@@ -556,7 +575,11 @@ def run_full_pipeline(
     affects the pull's own success (``stopped_after`` / ``ok``) — both are
     post-success stages over the just-filled lake, and the route binds
     ``run_prebuild`` crash-guarded
-    (:func:`~brutex.dashboard.pipeline_prebuild.run_pipeline_prebuild_guarded`).
+    (:func:`~brutex.dashboard.pipeline_prebuild.run_pipeline_prebuild_guarded`;
+    a pull-wide GLOBAL STOP — disk-full/OOM ``LakeWriteHalt``, quota — is the
+    deliberate exception: the guard RE-RAISES it, so it propagates out of this
+    sequencer BEFORE any movers warm and reaches the job layer's CRITICAL
+    pull-halt alert).
 
     The sequencer itself is O(1) — the phase calls + the gate checks; the WORK
     it triggers is the real multi-hour vendor fill + the O(symbols × bars)
@@ -675,6 +698,7 @@ def run_full_pipeline(
         prebuild_built=prebuild.symbols_built if prebuild is not None else None,
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),
+        prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         quarantined_symbols=quarantined,
         quarantined_count=quarantined_count,
     )

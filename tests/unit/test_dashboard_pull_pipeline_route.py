@@ -656,6 +656,42 @@ def test_pull_pipeline_dry_run_does_not_gate(
         assert gate.snapshot().runs == 0  # begin() was never called
 
 
+def test_pull_pipeline_prebuild_global_stop_fails_job_alerts_and_releases_gate(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """END-TO-END F1 wiring pin (DEC-PIPELINE-AUTOPREBUILD-001 hostile-review
+    fold): a disk-full ``LakeWriteHalt`` inside the REAL guarded prebuild
+    RE-RAISES through ``run_full_pipeline`` (no movers warm ever fires), the
+    job settles ``error`` naming the halt, the CRITICAL pull-halt alert fires
+    exactly once, and the movers gate is STILL released (``last_ok=False``) —
+    the halt is loud, and movers are never wedged shut behind it."""
+    from brutex.data.errors import LakeWriteHalt
+
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+
+    def _halting_materialize(*args: Any, **kwargs: Any) -> Any:
+        raise LakeWriteHalt("disk_full")
+
+    monkeypatch.setattr(app_module, "materialize_lake_timeframes", _halting_materialize)
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    gate = PrebuildGate()
+    with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+        assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+        snap = _wait_for_job(client)
+        assert snap["state"] == "error"  # the halt FAILS the job — never a fake "done"
+        assert "LakeWriteHalt" in snap["detail"]
+        assert len(halts) == 1  # the CRITICAL Telegram pull-halt alert fired once
+        assert isinstance(halts[0], LakeWriteHalt)
+        gate_snap = gate.snapshot()
+        assert gate_snap.blocking is False  # the _work finally still released the gate
+        assert gate_snap.last_ok is False  # honest provenance: the prebuild never succeeded
+        # /movers serves the normal (non-gated) payload again — never stuck.
+        body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+        assert "gated" not in body
+
+
 # ── quarantined symbols surface in the finish detail (chunk 3 headline honesty) ──
 
 

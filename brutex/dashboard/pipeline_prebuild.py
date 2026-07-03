@@ -16,13 +16,18 @@ Honest envelope (Golden Rule #10):
 * materialising the options chain costs **~2-3× the options 1-minute lake**
   once all 19 intraday + ``1day`` partitions exist — operator-accepted by the
   decree (supersedes the earlier options-on-demand design);
-* per-symbol failures are quarantined + named (never a stage abort); only a
+* per-symbol failures are quarantined + named (never a stage abort); a
   global-stop error (disk-full :class:`~brutex.data.errors.LakeWriteHalt`, a
-  genuine bug) escapes :func:`run_pipeline_prebuild` — and even that is caught
-  by :func:`run_pipeline_prebuild_guarded` at the route seam so a prebuild
-  crash can never kill the already-successful fetch job (it returns an
-  ``ok=False`` outcome after a LOUD ``pipeline.prebuild.failed`` log, never a
-  silent zero).
+  quota stop) escapes :func:`run_pipeline_prebuild` AND
+  :func:`run_pipeline_prebuild_guarded` — the guard RE-RAISES exactly the
+  pull-wide halt set (the job layer's COMMON
+  :func:`~brutex.dashboard.pull_jobs.is_pull_halt` predicate) so
+  ``BackgroundPullJob._run`` fires the CRITICAL Telegram pull-halt alert
+  instead of the halt hiding behind a benign "built 0"; every OTHER
+  unexpected error (a cascade-build fault, a genuine bug) is caught at the
+  route seam so it can never kill the already-successful fetch job — an
+  honest ``ok=False`` outcome carrying ``crashed=<ErrorType>`` after a LOUD
+  ``pipeline.prebuild.failed`` log, never a silent zero.
 
 Pure composition — the actual lake materialise is ONE injected callable
 (``PrebuildTarget -> MaterializeResult``, bound by the route to
@@ -103,6 +108,13 @@ class PrebuildOutcome:
         ``True`` iff the run completed with ZERO failures. ``False`` for any
         per-symbol failure AND for a guarded whole-run crash
         (:func:`run_pipeline_prebuild_guarded`) — never a silent zero.
+    crashed
+        ``None`` for a run that COMPLETED (even with per-symbol failures);
+        the escaping error's type name (e.g. ``"ValueError"``) when the
+        WHOLE run crashed inside :func:`run_pipeline_prebuild_guarded` — so
+        "ran, built 0" and "CRASHED before building anything" are honestly
+        distinguishable in the pipeline note (Golden Rule #1). A pull-wide
+        global-stop never sets this — it RE-RAISES out of the guard instead.
     """
 
     symbols_built: int
@@ -110,6 +122,7 @@ class PrebuildOutcome:
     failed: tuple[str, ...]
     failed_count: int
     ok: bool
+    crashed: str | None = None
 
 
 def run_pipeline_prebuild(
@@ -244,13 +257,22 @@ def run_pipeline_prebuild_guarded(
 ) -> PrebuildOutcome:
     """Crash-guarded :func:`run_pipeline_prebuild` for the route seam.
 
-    The fetch already succeeded when the prebuild runs, so NOTHING here may
-    kill the job — an unexpected error (a cascade-build fault, a global-stop
-    :class:`~brutex.data.errors.LakeWriteHalt`, a genuine bug) is caught, logged
-    LOUDLY (``pipeline.prebuild.failed`` with the error type + repr) and turned
-    into an honest ``ok=False`` outcome — never a silent zero, never a crashed
-    job. ``cascade_or_error`` is a zero-arg builder (not a value) so a cascade
-    discovery fault is ALSO inside the guard.
+    The fetch already succeeded when the prebuild runs, so no ORDINARY error
+    here may kill the job — an unexpected NON-halt error (a cascade-build
+    fault, a genuine bug) is caught, logged LOUDLY (``pipeline.prebuild.failed``
+    with the error type + repr) and turned into an honest ``ok=False`` outcome
+    carrying ``crashed=<ErrorType>`` — never a silent zero, never mistakable
+    for "ran, built 0". ``cascade_or_error`` is a zero-arg builder (not a
+    value) so a cascade discovery fault is ALSO inside the guard.
+
+    A pull-wide GLOBAL STOP is the deliberate exception: a disk-full/OOM
+    :class:`~brutex.data.errors.LakeWriteHalt` or a quota stop RE-RAISES —
+    gated on the job layer's COMMON
+    :func:`~brutex.dashboard.pull_jobs.is_pull_halt` predicate (ONE source of
+    truth, no second tuple) — so it reaches ``BackgroundPullJob._run``'s halt
+    handling and the CRITICAL Telegram pull-halt alert fires
+    (DEC-TELEGRAM-PULL-HALT-DASHBOARD-001); swallowing it here would silence
+    the alert behind a benign "built 0" headline (Golden Rule #1).
     """
     try:
         cascade = cascade_or_error()
@@ -262,12 +284,28 @@ def run_pipeline_prebuild_guarded(
             source=source,
         )
     except Exception as exc:  # pylint: disable=broad-except - the route seam must never crash the job
+        # Imported inside the handler (mirrors is_pull_halt's own lazy-import
+        # discipline): the predicate only runs on this rare crash path.
+        from brutex.dashboard.pull_jobs import is_pull_halt
+
+        if is_pull_halt(exc):
+            # A pull-wide global stop (disk-full/OOM LakeWriteHalt, quota) must
+            # reach the job layer's halt handling — the CRITICAL Telegram alert
+            # fires there; NEVER swallow it into a benign ok=False outcome.
+            raise
         _LOG.error(
             "pipeline.prebuild.failed",
             error_type=type(exc).__name__,
             error=repr(exc),
         )
-        return PrebuildOutcome(symbols_built=0, total_bars=0, failed=(), failed_count=0, ok=False)
+        return PrebuildOutcome(
+            symbols_built=0,
+            total_bars=0,
+            failed=(),
+            failed_count=0,
+            ok=False,
+            crashed=type(exc).__name__,
+        )
 
 
 __all__ = [

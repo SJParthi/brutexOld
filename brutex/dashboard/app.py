@@ -2954,10 +2954,18 @@ def build_app(
                 composition + quarantine control flow is the 100%-tested pure
                 ``run_pipeline_prebuild_guarded`` — this binding is a thin seam.
 
-                Crash-guarded INSIDE the pure helper: an unexpected prebuild
-                failure logs ``pipeline.prebuild.failed`` LOUDLY and returns an
-                honest ``ok=False`` outcome — it can never kill the already-
-                successful fetch job, and never a silent zero.
+                Crash-guarded INSIDE the pure helper: an unexpected NON-halt
+                prebuild failure logs ``pipeline.prebuild.failed`` LOUDLY and
+                returns an honest ``ok=False`` outcome carrying
+                ``crashed=<ErrorType>`` — it can never kill the already-
+                successful fetch job, and never a silent zero. A pull-wide
+                GLOBAL STOP (disk-full/OOM ``LakeWriteHalt``, quota) RE-RAISES
+                out of the guard (``pull_jobs.is_pull_halt`` — the ONE common
+                predicate) and propagates to ``BackgroundPullJob._run``, which
+                fires the CRITICAL Telegram pull-halt alert; the movers warm
+                never runs after it (the raise precedes the warm stage inside
+                ``run_full_pipeline``) and the ``finally`` below still releases
+                the movers gate with ``prebuild_ok=False``.
                 """
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
@@ -2971,18 +2979,25 @@ def build_app(
                     )
 
                 nonlocal prebuild_ok
-                outcome = run_pipeline_prebuild_guarded(
-                    instruments=targets,
-                    cascade_or_error=lambda: build_fno_cascade(list_fno_candle_datasets(lake_root)),
-                    materialize=_materialize,
-                    source="pipeline",
-                )
-                # New derived partitions are on disk (even a partial run may have
-                # written some) — bump the write generation so the movers warm that
-                # FOLLOWS the prebuild (and the /db + coverage caches) reads fresh.
-                _summary_cache.mark_dirty()
+                try:
+                    outcome = run_pipeline_prebuild_guarded(
+                        instruments=targets,
+                        cascade_or_error=lambda: build_fno_cascade(
+                            list_fno_candle_datasets(lake_root)
+                        ),
+                        materialize=_materialize,
+                        source="pipeline",
+                    )
+                finally:
+                    # New derived partitions may be on disk (even a partial run —
+                    # or one the guard re-raised a global-stop out of — may have
+                    # written some) — bump the write generation so the movers warm
+                    # that FOLLOWS the prebuild (and the /db + coverage caches)
+                    # reads fresh.
+                    _summary_cache.mark_dirty()
                 # The gate-release flag (chunk 2): the finally below releases the
-                # movers gate with the prebuild's honest success verdict.
+                # movers gate with the prebuild's honest success verdict (a
+                # re-raised global stop skips this line, leaving ok=False).
                 prebuild_ok = outcome.ok
                 return outcome
 

@@ -38,6 +38,7 @@ def _outcome(
     failed: tuple[str, ...] = (),
     failed_count: int | None = None,
     ok: bool | None = None,
+    crashed: str | None = None,
 ) -> PrebuildOutcome:
     """Build a :class:`PrebuildOutcome` (the run_prebuild contract's REAL dataclass)."""
     count = len(failed) if failed_count is None else failed_count
@@ -47,6 +48,7 @@ def _outcome(
         failed=failed,
         failed_count=count,
         ok=(count == 0) if ok is None else ok,
+        crashed=crashed,
     )
 
 
@@ -563,6 +565,28 @@ def test_pipeline_prebuilds_timeframes_on_clean_run() -> None:
     assert payload["prebuild_built"] == 4
     assert payload["prebuild_total_bars"] == 1234
     assert payload["prebuild_failed"] == []
+    assert payload["prebuild_crashed"] is None  # completed run — never a crash marker
+
+
+def test_pipeline_prebuild_crash_marker_renders_crashed_note_not_built_zero() -> None:
+    """A guarded whole-run prebuild CRASH (hostile-review F2) reads
+    ``", prebuild CRASHED (ErrorType)"`` — NEVER the benign "pre-built for 0
+    symbol(s)" clause — and warms nothing (ok=False fails the warm gate)."""
+    warmed: list[str] = []
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        warm_spot_movers=lambda: warmed.append("spot") or 0,
+        run_prebuild=_Spy(_outcome(symbols_built=0, total_bars=0, ok=False, crashed="ValueError")),
+    )
+    assert ", prebuild CRASHED (ValueError)" in report.note
+    assert "pre-built for" not in report.note  # never the benign built-0 clause
+    assert report.prebuild_crashed == "ValueError"
+    assert report.prebuild_built == 0  # the raw counts still recorded honestly
+    assert warmed == []  # a crashed prebuild warms NOTHING
+    assert report.movers_warmed is None
+    assert report.to_dict()["prebuild_crashed"] == "ValueError"
 
 
 def test_pipeline_prebuild_zero_is_honest_not_none() -> None:

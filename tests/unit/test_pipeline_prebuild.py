@@ -6,10 +6,12 @@ target-shaped injected-materialiser seam (``include_daily`` is the ROUTE's
 binding — here the seam is a pure fake), the outcome rollup (built symbols /
 total bars / capped failure names / true failed_count / ok), the LOUD
 structured logs (``pipeline.prebuild.started`` / ``.phase_done`` / ``.done`` /
-``.failed``), the crash guard (``run_pipeline_prebuild_guarded`` returns an
-honest ``ok=False`` outcome, never a crashed job, never a silent zero), and
-the global-stop boundary (a ``LakeWriteHalt`` PROPAGATES out of the unguarded
-composer).
+``.failed``), the crash guard (``run_pipeline_prebuild_guarded`` turns a
+NON-halt crash into an honest ``ok=False`` outcome carrying
+``crashed=<ErrorType>`` — never a silent zero), and the global-stop boundary
+(a ``LakeWriteHalt`` / quota stop PROPAGATES out of the unguarded composer
+AND RE-RAISES out of the guard — ``pull_jobs.is_pull_halt`` — so the job
+layer's CRITICAL pull-halt alert can fire).
 
 Pure — a fake ``materialize`` keyed by target symbol; the REAL cascade builder
 over an in-memory dataset list. No lake / DuckDB / FastAPI.
@@ -239,7 +241,7 @@ def test_guarded_prebuild_catches_cascade_fault_loudly() -> None:
             materialize=_FakeMaterializer(),
         )
     assert outcome == PrebuildOutcome(
-        symbols_built=0, total_bars=0, failed=(), failed_count=0, ok=False
+        symbols_built=0, total_bars=0, failed=(), failed_count=0, ok=False, crashed="RuntimeError"
     )
     failed = [e for e in logs if e["event"] == "pipeline.prebuild.failed"]
     assert len(failed) == 1
@@ -247,22 +249,75 @@ def test_guarded_prebuild_catches_cascade_fault_loudly() -> None:
     assert "cascade discovery exploded" in failed[0]["error"]
 
 
-def test_guarded_prebuild_catches_global_stop_after_successful_fetch() -> None:
-    """Even a LakeWriteHalt is caught AT THE ROUTE SEAM (the fetch already
-    succeeded — nothing here may kill the job) and reported ok=False, loudly."""
+def test_guarded_prebuild_crash_marker_distinguishes_crash_from_built_zero() -> None:
+    """A swallowed NON-halt crash carries ``crashed=<ErrorType>`` — honestly
+    distinguishable from "ran, built 0" (whose ``crashed`` stays None)."""
+
+    def _bad_cascade() -> FnoCascadeIndex:
+        raise ValueError("bad dataset row")
+
+    crashed_outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=_bad_cascade,
+        materialize=_FakeMaterializer(),
+    )
+    assert crashed_outcome.crashed == "ValueError"
+    assert crashed_outcome.ok is False
+    # The contrast: a run that COMPLETED with zero built keeps crashed=None.
+    ran_zero = run_pipeline_prebuild_guarded(
+        instruments=[], cascade_or_error=_cascade, materialize=_FakeMaterializer()
+    )
+    assert ran_zero.crashed is None
+    assert ran_zero.ok is True
+
+
+def test_guarded_prebuild_reraises_lake_write_halt_from_materialize() -> None:
+    """A disk-full LakeWriteHalt during a materialise RE-RAISES out of the
+    GUARDED runner (hostile-review F1): it must reach BackgroundPullJob._run's
+    halt handling so the CRITICAL Telegram pull-halt alert fires — swallowing
+    it would hide the halt behind a benign "built 0". No misleading
+    ``pipeline.prebuild.failed`` log is emitted on this path."""
     from brutex.data.errors import LakeWriteHalt
 
     mat = _FakeMaterializer(fail={"NSE-NIFTY": LakeWriteHalt("disk_full")})
-    with capture_logs() as logs:
-        outcome = run_pipeline_prebuild_guarded(
+    with capture_logs() as logs, pytest.raises(LakeWriteHalt, match="disk_full"):
+        run_pipeline_prebuild_guarded(
             instruments=[_spot("NSE-NIFTY")],
             cascade_or_error=_cascade,
             materialize=mat,
         )
-    assert outcome.ok is False
-    assert outcome.symbols_built == 0
-    failed = [e for e in logs if e["event"] == "pipeline.prebuild.failed"]
-    assert failed and failed[0]["error_type"] == "LakeWriteHalt"
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.failed"]
+
+
+def _global_stop_errors() -> list[Exception]:
+    """The pull-wide halt set — the SAME classes ``pull_jobs.is_pull_halt`` matches."""
+    from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+
+    return [
+        LakeWriteHalt("disk_full"),
+        DailyQuotaExceeded("daily quota hit"),
+        QuotaInvariantError("quota state corrupt"),
+        MassEmptySettleHalt("mass-empty breaker tripped"),
+    ]
+
+
+@pytest.mark.parametrize("halt", _global_stop_errors(), ids=lambda e: type(e).__name__)
+def test_guarded_prebuild_reraises_every_global_stop_class(halt: Exception) -> None:
+    """EVERY member of the job layer's ``is_pull_halt`` set re-raises out of the
+    guard (one COMMON predicate — no second tuple that could drift), even when
+    raised by the cascade builder itself."""
+
+    def _halting_cascade() -> FnoCascadeIndex:
+        raise halt
+
+    with pytest.raises(type(halt)):
+        run_pipeline_prebuild_guarded(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade_or_error=_halting_cascade,
+            materialize=_FakeMaterializer(),
+        )
 
 
 def test_guarded_prebuild_threads_segment_and_source() -> None:

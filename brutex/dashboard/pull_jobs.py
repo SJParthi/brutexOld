@@ -137,7 +137,7 @@ def _finish_detail(result: object) -> str:
     return "done"
 
 
-def _is_pull_halt(exc: BaseException) -> bool:
+def is_pull_halt(exc: BaseException) -> bool:
     """True iff *exc* is a pull-wide global-stop (halts every window), not a per-symbol failure.
 
     Mirrors the ingest spines' ``_GLOBAL_STOP_ERRORS`` set (DEC-LAKE-WRITE-HALT-001 /
@@ -145,6 +145,14 @@ def _is_pull_halt(exc: BaseException) -> bool:
     :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
     part of the heavy PyO3 chain), and this check only runs on the rare
     worker-exception path.
+
+    PUBLIC — the ONE COMMON global-stop predicate for the dashboard job layer
+    (CLAUDE.md §11, no second hardcoded tuple):
+    :func:`~brutex.dashboard.pipeline_prebuild.run_pipeline_prebuild_guarded`
+    consults it so a global-stop raised during the prebuild stage RE-RAISES out
+    of the guard and reaches :meth:`BackgroundPullJob._run`'s halt handling
+    (the CRITICAL Telegram alert below) instead of being swallowed into a
+    benign "built 0" outcome.
     """
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.data.errors import LakeWriteHalt
@@ -476,7 +484,7 @@ class BackgroundPullJob:
             result = work(self._on_progress)
         except Exception as exc:  # report ANY failure to the live feed, never crash the thread
             self._progress.fail(f"{type(exc).__name__}: {exc}")
-            if _is_pull_halt(exc):
+            if is_pull_halt(exc):
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, or a quota
                 # stop) halts EVERY remaining window, unlike a per-symbol failure —
                 # fire a best-effort CRITICAL Telegram alert so the operator knows the
@@ -621,4 +629,5 @@ __all__ = [
     "Spawner",
     "SuccessHook",
     "WatchdogFactory",
+    "is_pull_halt",
 ]

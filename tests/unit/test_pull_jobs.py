@@ -178,6 +178,44 @@ def test_generic_worker_error_does_not_fire_pull_halt_alert(
     assert halts == []  # a generic worker error NEVER fires the pull-halt alert
 
 
+def test_prebuild_global_stop_escapes_guard_and_fires_halt_alert_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """END-TO-END F1 pin (DEC-PIPELINE-AUTOPREBUILD-001 hostile-review fold): a
+    LakeWriteHalt raised INSIDE the guarded prebuild RE-RAISES (``is_pull_halt``,
+    the ONE common predicate) out of the work callable, the job fails, and the
+    CRITICAL pull-halt alert fires exactly once — the halt is never swallowed
+    into a benign "built 0" outcome."""
+    from typing import NoReturn
+
+    from brutex.dashboard.pipeline_prebuild import PrebuildTarget, run_pipeline_prebuild_guarded
+    from brutex.data.errors import LakeWriteHalt
+
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+
+    def _halting_cascade() -> NoReturn:
+        raise LakeWriteHalt("disk_full")
+
+    def _never_materialize(_target: PrebuildTarget) -> NoReturn:
+        raise AssertionError("materialize must never be called — the cascade halts first")
+
+    def work(_on_progress: ProgressHook) -> object:
+        return run_pipeline_prebuild_guarded(
+            instruments=[],
+            cascade_or_error=_halting_cascade,
+            materialize=_never_materialize,
+        )
+
+    assert job.start(work, total=1) is True
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR  # the job FAILED — never a fake "done"
+    assert "LakeWriteHalt" in snap.detail
+    assert len(halts) == 1  # the CRITICAL halt alert fired exactly once
+    assert isinstance(halts[0], LakeWriteHalt)
+
+
 def test_failed_unit_flag_is_forwarded() -> None:
     job = _job()
     job.start(lambda on_progress: on_progress("BAD 1minute", 0, True, False), total=1)

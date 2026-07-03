@@ -1802,7 +1802,7 @@ def pull_all_spot(
                 # flush + the outer finally); every un-settled window stays retryable. Map to
                 # the loud needs-operator ``mass_empty_halt`` verdict (naming the counts +
                 # candidate causes) instead of a generic job error. Because the halt is
-                # CAUGHT here (it never escapes to the job layer's ``_is_pull_halt``
+                # CAUGHT here (it never escapes to the job layer's ``is_pull_halt``
                 # escaping-exception path), the CRITICAL Telegram pull-halt alert is fired
                 # HERE — parity with the F&O route and the CLI ``_pull_halt_errors`` set
                 # (DEC-TELEGRAM-PULL-HALT-001; minor M-3). Best-effort by construction —
