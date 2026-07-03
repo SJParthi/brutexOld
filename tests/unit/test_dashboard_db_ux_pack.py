@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 import pytest
+from brutex.dashboard import db_view
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _IST_DATE_EXPR,
@@ -40,12 +41,17 @@ from brutex.dashboard.db_view import (
     _fno_stored_ist_span_resilient,
     _iso_date_or_none,
     _today_ist_iso,
+    candle_count_key,
+    candle_span_key,
     list_fno_candle_datasets,
+    option_candle_count_key,
+    option_candle_span_key,
     query_candles,
     query_option_candles,
     resolve_applied_range,
 )
 from brutex.dashboard.fno_cascade import build_expiry_counts, build_fno_cascade
+from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
 from brutex.data.models import CandleBar, OptionBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
@@ -850,3 +856,144 @@ def test_build_expiry_counts_unknown_underlying_is_empty(tmp_path: Path) -> None
     )
     idx = _cascade(tmp_path)
     assert build_expiry_counts(idx, "NOPE", {"2025-01-02": 3}) == []  # type: ignore[arg-type]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Feature 2 — stored-life SPAN memoised behind the count cache (the
+# hostile-review MAJOR: a prev/next paging click must be an O(1) hit,
+# never a re-run of the MIN/MAX partition scan)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def test_span_cache_keys_are_collision_free() -> None:
+    span = candle_span_key("NSE", "FNO", "NSE-NIFTY-30Jan25-24000-CE", "1minute")
+    optspan = option_candle_span_key(_OPT_SERIES)
+    count = candle_count_key("NSE", "FNO", "NSE-NIFTY-30Jan25-24000-CE", "1minute", None, None)
+    optcount = option_candle_count_key(_OPT_SERIES, None, None)
+    assert span == "span|NSE|FNO|NSE-NIFTY-30Jan25-24000-CE|1minute"
+    assert optspan == f"optspan|{_OPT_SERIES}"
+    # All four key families share ONE injected cache instance — no collisions:
+    # a spot/F&O count key opens with a validated exchange token (NSE/BSE),
+    # an option count key with "opt|", the span keys with "span|"/"optspan|".
+    assert len({span, optspan, count, optcount}) == 4
+    assert count.startswith("NSE|")
+    assert optcount.startswith("opt|")
+
+
+def test_query_candles_fno_span_memoised_across_paging(
+    monkeypatch: pytest.MonkeyPatch, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+) -> None:
+    # THE MAJOR (fails-before): every default-bounded paging click re-ran the
+    # MIN/MAX stored-life scan. With the cache injected, the scan runs ONCE per
+    # (coords, generation) — offset paging + a sort flip are all O(1) hits.
+    _write_fno_1min(
+        tmp_path,
+        [datetime(2025, 1, 2, 3, 45, tzinfo=UTC), datetime(2025, 1, 6, 3, 45, tzinfo=UTC)],
+        symbol="NSE-NIFTY-30Jan25-24000-CE",
+    )
+    calls = {"n": 0}
+    real_span = db_view._fno_stored_ist_span_resilient
+
+    def _counting_span(*args: object, **kwargs: object) -> tuple[str | None, str | None]:
+        calls["n"] += 1
+        return real_span(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(db_view, "_fno_stored_ist_span_resilient", _counting_span)
+    cache = MoversSnapshotCache()
+
+    def _page(offset: int, descending: bool = False, generation: int = 7) -> dict:
+        return query_candles(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jan25-24000-CE",
+            interval="1minute",
+            limit=1,
+            offset=offset,
+            descending=descending,
+            count_cache=cache,
+            generation=generation,
+        )
+
+    first = _page(0)
+    second = _page(1)
+    flipped = _page(0, descending=True)
+    assert calls["n"] == 1  # ONE scan across three default-bounded clicks
+    expected = {"start": "2025-01-02", "end": "2025-01-06"}
+    assert first["applied_range"] == second["applied_range"] == expected
+    assert flipped["applied_range"] == expected
+    # A pull bumps the generation → the span is re-scanned (never stale).
+    bumped = _page(0, generation=8)
+    assert calls["n"] == 2
+    assert bumped["applied_range"] == expected
+
+
+class _SpanCountingConn:
+    """A delegating DuckDB-connection proxy counting MIN/MAX span scans."""
+
+    def __init__(self, inner: duckdb.DuckDBPyConnection) -> None:
+        self._inner = inner
+        self.span_scans = 0
+
+    def execute(self, sql: str, params: list[object] | None = None) -> object:
+        if "MIN(" in sql:
+            self.span_scans += 1
+        return self._inner.execute(sql, params)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+def test_query_option_candles_span_memoised_across_paging(
+    conn: duckdb.DuckDBPyConnection, tmp_path: Path
+) -> None:
+    # The expired-options twin of the F&O span memo: paging a default-bounded
+    # series runs the MIN/MAX scan once; a generation bump re-scans.
+    _write_options(
+        tmp_path,
+        [datetime(2024, 3, 1, 4, 0, tzinfo=UTC), datetime(2024, 3, 2, 4, 0, tzinfo=UTC)],
+    )
+    counting = _SpanCountingConn(conn)
+    cache = MoversSnapshotCache()
+
+    def _page(offset: int, generation: int = 3) -> dict:
+        return query_option_candles(
+            counting,
+            tmp_path,
+            series=_OPT_SERIES,
+            limit=1,
+            offset=offset,
+            count_cache=cache,
+            generation=generation,
+        )
+
+    first = _page(0)
+    second = _page(1)
+    assert counting.span_scans == 1  # ONE scan across two default-bounded clicks
+    expected = {"start": "2024-03-01", "end": "2024-03-02"}
+    assert first["applied_range"] == second["applied_range"] == expected
+    bumped = _page(0, generation=4)
+    assert counting.span_scans == 2
+    assert bumped["applied_range"] == expected
+
+
+def test_query_option_candles_explicit_bounds_skip_span_scan_with_cache(
+    conn: duckdb.DuckDBPyConnection, tmp_path: Path
+) -> None:
+    # An explicit range needs NO stored-life scan even with a cache injected —
+    # the chip echoes the explicit bounds.
+    _write_options(tmp_path, [datetime(2024, 3, 1, 4, 0, tzinfo=UTC)])
+    counting = _SpanCountingConn(conn)
+    out = query_option_candles(
+        counting,
+        tmp_path,
+        series=_OPT_SERIES,
+        start="2024-03-01",
+        end="2024-03-01",
+        limit=50,
+        count_cache=MoversSnapshotCache(),
+        generation=1,
+    )
+    assert counting.span_scans == 0
+    assert out["applied_range"] == {"start": "2024-03-01", "end": "2024-03-01"}

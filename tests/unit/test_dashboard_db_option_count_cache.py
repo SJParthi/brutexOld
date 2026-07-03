@@ -268,7 +268,10 @@ def test_distinct_series_cached_independently(conn: Any, tmp_path: Path) -> None
     second = _opt(conn, tmp_path, series=other_series, limit=1, count_cache=cache, generation=0)
     assert first["total"] == 2
     assert second["total"] == 3
-    assert cache.size() == 2  # one entry per series.
+    # TWO entries per series: the count ("opt|…") PLUS the default-range
+    # stored-life span ("optspan|…") — the span memo added by DEC-DB-UX-PACK-001
+    # (the hostile-review MAJOR: paging must never re-run the MIN/MAX scan).
+    assert cache.size() == 4
 
 
 def test_empty_series_never_touches_the_cache(conn: Any, tmp_path: Path) -> None:

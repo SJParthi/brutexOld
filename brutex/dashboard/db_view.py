@@ -39,7 +39,7 @@ from collections.abc import Callable, Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -82,6 +82,12 @@ from brutex.money import round_money
 #: same structlog stream the operator reads on ``/logs``
 #: (DEC-COVERAGE-PARQUET-RESILIENT-001).
 _LOG = structlog.get_logger("brutex.dashboard.db_view")
+
+#: Memoised-value type for the generation-stamped candle cache
+#: (:class:`CandleCountCache`): the SAME injected instance serves both the page
+#: ``total`` (an ``int``) and the paging-invariant stored-life span (a
+#: ``(start, end)`` tuple) — DEC-DB-UX-PACK-001.
+_T = TypeVar("_T")
 
 #: The ONLY tables the viewer may touch — the real DuckDB tables created by
 #: :meth:`brutex.data.instrument_store.InstrumentStore.open`. A
@@ -1503,17 +1509,22 @@ def list_option_series(
 
 
 class CandleCountCache(Protocol):
-    """The minimal generation-stamped cache contract ``query_candles`` needs.
+    """The minimal generation-stamped cache contract the candle readers need.
 
     Structural (``Protocol``) so :mod:`brutex.dashboard.db_view` never hard-imports
     a concrete cache class — the dashboard injects the COMMON generation-stamped LRU
     (:class:`brutex.dashboard.movers_cache.MoversSnapshotCache`, reused as the generic
     cache per CLAUDE.md §11, DEC-DB-CANDLE-COUNT-CACHE-001) which satisfies this.
+    Generic over the memoised value so the ONE injected instance serves both the
+    paging-invariant page ``total`` (an ``int``) and the paging-invariant F&O
+    stored-life span (a ``(start, end)`` tuple — the DEC-DB-UX-PACK-001 applied-range
+    chip, memoised under :func:`candle_span_key` / :func:`option_candle_span_key` so
+    a prev/next paging click never re-runs the MIN/MAX partition scan).
     A ``compute`` that raises propagates cleanly and nothing is cached.
     """
 
-    def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], int]) -> int:
-        """Return *key*'s cached count for *generation*, running *compute* on a miss."""
+    def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], _T]) -> _T:
+        """Return *key*'s cached value for *generation*, running *compute* on a miss."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -1532,6 +1543,36 @@ def candle_count_key(
     identically to an explicit open lower bound).
     """
     return f"{exchange}|{segment}|{symbol}|{interval}|{start or ''}|{end or ''}"
+
+
+def candle_span_key(exchange: str, segment: str, symbol: str, interval: str) -> str:
+    """Build the stable cache key for an F&O partition's STORED-LIFE span.
+
+    The span (earliest → latest stored bar IST date — the DEC-DB-UX-PACK-001
+    Feature 2 applied-range default) is a property of the PARTITION alone: it is
+    invariant to the date bounds AND to ``limit`` / ``offset`` / ``descending`` /
+    ``columns``, so every default-bounded page of the same coordinates shares ONE
+    cached span — a prev/next paging click is an O(1) hit instead of re-running
+    the ``MIN``/``MAX`` scan per click (the DEC-LAKE-READ-O1-AUDIT-001 / Golden
+    Rule #5 paging discipline; the hostile-review MAJOR on this pack). The
+    ``span|`` prefix namespaces the key away from every other key sharing the
+    injected cache instance: a spot count key opens with a validated exchange
+    token (``NSE``/``BSE``, never ``span``), an option count key with ``opt|``,
+    an option span key with ``optspan|`` — collision-free by construction.
+    """
+    return f"span|{exchange}|{segment}|{symbol}|{interval}"
+
+
+def option_candle_span_key(series: str) -> str:
+    """Build the stable cache key for an expired-option series' STORED-LIFE span.
+
+    The expired-options twin of :func:`candle_span_key`: the series' full stored
+    life is invariant to bounds / paging / sort / columns, so one cached span
+    serves every default-bounded page of the series. The ``optspan|`` prefix is
+    collision-free against ``opt|`` count keys, ``span|`` F&O span keys, and
+    exchange-opening spot count keys (see :func:`candle_span_key`).
+    """
+    return f"optspan|{series}"
 
 
 def query_candles(
@@ -1588,8 +1629,11 @@ def query_candles(
         by. When supplied, the O(files) Parquet-footer ``COUNT(*)`` is memoised per
         ``(coords, start, end)`` so a prev/next paging click within one dataset is
         an O(1) hit; a pull bumps *generation* → recompute (never a stale total).
-        ``None`` (the default) keeps the function pure — the COUNT runs inline,
-        behaviour-identical to before.
+        The SAME cache also memoises the F&O default-range STORED-LIFE span under
+        :func:`candle_span_key` (coords-only — the span is bound/paging-invariant),
+        so the applied-range chip (DEC-DB-UX-PACK-001 Feature 2) never re-runs its
+        MIN/MAX scan on a paging click. ``None`` (the default) keeps the function
+        pure — the COUNT and the span run inline, behaviour-identical to before.
 
     Returns
     -------
@@ -1784,14 +1828,31 @@ def query_candles(
         [*rendered_row, *extra] for rendered_row, extra in zip(rendered, extra_cells, strict=True)
     ]
     # Resolve the honest applied-range chip metadata (DEC-DB-UX-PACK-001 Feature 2).
-    # SPOT reports [2020-01-01, today]; an F&O contract reports its FULL STORED LIFE,
-    # read once (resilient MIN/MAX over the IST-date span) ONLY when a bound is blank —
-    # an explicit range needs no scan. This is REPORTING metadata; the WHERE above uses
-    # the raw bounds, so the row set / total are byte-unchanged.
+    # SPOT reports [2020-01-01, today]; an F&O contract reports its FULL STORED LIFE
+    # (resilient MIN/MAX over the IST-date span) ONLY when a bound is blank — an
+    # explicit range needs no scan. The span is paging-invariant (a property of the
+    # partition alone), so it is memoised behind the SAME generation-stamped cache
+    # as the COUNT (candle_span_key — the hostile-review MAJOR: without this, every
+    # prev/next paging click re-ran the MIN/MAX column scan, the exact O(files)-per-
+    # click read DEC-LAKE-READ-O1-AUDIT-001 exists to prevent). A pull bumps the
+    # generation → re-scan (never stale); no injected cache (the pure default) runs
+    # the scan inline, once per query. This is REPORTING metadata; the WHERE above
+    # uses the raw bounds, so the row set / total are byte-unchanged.
     if is_fno and (start is None or end is None):
-        stored_start_ist, stored_end_ist = _fno_stored_ist_span_resilient(
-            conn, base, source=source, skip_source=skip_source
-        )
+
+        def _stored_life() -> tuple[str | None, str | None]:
+            return _fno_stored_ist_span_resilient(
+                conn, base, source=source, skip_source=skip_source
+            )
+
+        if count_cache is None:
+            stored_start_ist, stored_end_ist = _stored_life()
+        else:
+            stored_start_ist, stored_end_ist = count_cache.get_or_compute(
+                candle_span_key(exchange, segment, symbol, interval),
+                generation=generation,
+                compute=_stored_life,
+            )
     else:
         stored_start_ist, stored_end_ist = (None, None)
     applied_range = resolve_applied_range(
@@ -2584,7 +2645,10 @@ def query_option_candles(
         on. When supplied, the ``COUNT(*)`` over the whole series glob is memoised
         per ``(series, start, end)`` (paging-invariant) so a prev/next click is an
         O(1) hit; a pull bumps *generation* → recompute (never a stale total).
-        The expired-options twin of the spot :func:`query_candles` count cache.
+        The SAME cache also memoises the default-range STORED-LIFE span under
+        :func:`option_candle_span_key` (series-only key), so the applied-range chip
+        (DEC-DB-UX-PACK-001 Feature 2) never re-runs its MIN/MAX scan on a paging
+        click. The expired-options twin of the spot :func:`query_candles` cache.
 
     Returns
     -------
@@ -2685,7 +2749,10 @@ def query_option_candles(
         """The series' full-stored-life IST-date span (DEC-DB-UX-PACK-001 Feature 2).
 
         One ``MIN``/``MAX`` over the IST-date expression, read ONLY when a bound is
-        blank (an explicit range needs no scan). Reached only AFTER the page's own
+        blank (an explicit range needs no scan) and memoised per series behind the
+        injected generation-stamped cache (``option_candle_span_key`` — the
+        hostile-review MAJOR: the span is paging-invariant, so a prev/next click
+        must be an O(1) hit, never a re-scan). Reached only AFTER the page's own
         reads above have already scanned the SAME glob, so the files are readable
         here; a readable-but-empty series yields ``(None, None)`` (``_iso_date_or_none``
         maps each ``NULL`` through). Genuine corruption surfaces on the page read
@@ -2698,9 +2765,17 @@ def query_option_candles(
         ).fetchone()
         return (_iso_date_or_none(row[0]), _iso_date_or_none(row[1]))
 
-    stored_start_ist, stored_end_ist = (
-        _stored_span() if (start is None or end is None) else (None, None)
-    )
+    if start is None or end is None:
+        if count_cache is None:
+            stored_start_ist, stored_end_ist = _stored_span()
+        else:
+            stored_start_ist, stored_end_ist = count_cache.get_or_compute(
+                option_candle_span_key(series),
+                generation=generation,
+                compute=_stored_span,
+            )
+    else:
+        stored_start_ist, stored_end_ist = (None, None)
     return {
         "series": series,
         "interval": "1minute",
