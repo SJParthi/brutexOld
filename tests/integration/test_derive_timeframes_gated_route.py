@@ -301,13 +301,6 @@ def test_poisoned_symbol_returns_gated_verdict_not_500(
     from brutex.data.errors import ResampleInputError
 
     monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    store.upsert_many(
-        [_index("NSE-NIFTY", 1), _index("NSE-BANKNIFTY", 2)],
-        snapshot_date=date(2024, 1, 2),
-        run_id="r1",
-        csv_source_sha256="0" * 64,
-    )
 
     def _poisoned_materialize(
         *,
@@ -324,7 +317,13 @@ def test_poisoned_symbol_returns_gated_verdict_not_500(
 
     monkeypatch.setattr(app_module, "materialize_lake_timeframes", _poisoned_materialize)
     monkeypatch.setattr(app_module, "list_fno_candle_datasets", lambda _root: [])
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_index("NSE-NIFTY", 1), _index("NSE-BANKNIFTY", 2)],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r1",
+            csv_source_sha256="0" * 64,
+        )
         with TestClient(
             build_app(DashboardState(), instrument_store=store),
             raise_server_exceptions=False,
@@ -333,8 +332,6 @@ def test_poisoned_symbol_returns_gated_verdict_not_500(
                 "/api/v1/universe/derive-timeframes",
                 params={"symbols": "NSE-NIFTY,NSE-BANKNIFTY"},
             )
-    finally:
-        store.close()
 
     assert resp.status_code == 200  # was a 500 before the quarantine widening
     body = resp.json()
