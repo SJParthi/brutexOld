@@ -95,7 +95,7 @@ def test_gate_thread_safety_smoke() -> None:
     # release leaves the gate idle.
     gate = PrebuildGate()
     begins_per_thread = 50
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def _hammer() -> None:
         try:
@@ -103,7 +103,7 @@ def test_gate_thread_safety_smoke() -> None:
                 gate.begin()
                 assert gate.snapshot().runs >= 1
                 gate.release(True)
-        except BaseException as exc:
+        except Exception as exc:  # collect for the main-thread assert below
             errors.append(exc)
 
     threads = [threading.Thread(target=_hammer) for _ in range(16)]
