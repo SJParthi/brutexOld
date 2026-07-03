@@ -85,11 +85,6 @@ __all__ = [
     "stamp_bar",
 ]
 
-#: Whole minutes in an hour — module constant (no magic number, CLAUDE.md §4).
-_MINUTES_PER_HOUR: int = 60
-#: Seconds in a minute — module constant.
-_SECONDS_PER_MINUTE: int = 60
-
 
 def _ist_datetime(ts: datetime) -> datetime:
     """Convert a tz-aware bar timestamp to IST.
@@ -140,7 +135,7 @@ def minute_of_session(ts: datetime, *, session_open: time = SESSION_OPEN_IST) ->
     """
     ist = _ist_datetime(ts)
     bar_seconds = _seconds_of_day(ist.hour, ist.minute, ist.second)
-    open_seconds = _seconds_of_day(session_open.hour, session_open.minute, session_open.second)
+    open_seconds = _session_open_seconds(session_open)
     # Shared Rust derivation: floor-division toward the open (a pre-open bar
     # floors to a negative minute — honest, not clamped), bit-identical to the
     # TickVault-native path.
@@ -148,8 +143,33 @@ def minute_of_session(ts: datetime, *, session_open: time = SESSION_OPEN_IST) ->
 
 
 def _seconds_of_day(hour: int, minute: int, second: int) -> int:
-    """Seconds-since-IST-midnight for a wall-clock time. One COMMON helper."""
-    return hour * _MINUTES_PER_HOUR * _SECONDS_PER_MINUTE + minute * _SECONDS_PER_MINUTE + second
+    """Seconds-since-IST-midnight for a wall-clock time. One COMMON helper.
+
+    Delegates to the shared Rust ``trading_core.seconds_of_day``
+    (DEC-TOD-SECONDS-RUST-SEAM-001) — the SAME derivation the vocabulary
+    evaluator + Stage-1A VWAP feed consume, so the eval path holds NO inline
+    ``h*3600`` arithmetic and the value is bit-identical to the
+    TickVault-native path by construction.
+    """
+    return int(trading_core.seconds_of_day(hour, minute, second))
+
+
+#: The regular 09:15 IST session open as seconds-since-midnight, derived ONCE
+#: at import so the default-session paths do not re-derive a constant per call.
+_REGULAR_OPEN_SECONDS: int = _seconds_of_day(
+    SESSION_OPEN_IST.hour, SESSION_OPEN_IST.minute, SESSION_OPEN_IST.second
+)
+
+
+def _session_open_seconds(session_open: time) -> int:
+    """Seconds-since-midnight for a session open — hoisted for the regular open.
+
+    The regular 09:15 open (the overwhelmingly common case) returns the
+    module constant; a Muhurat / half-day open keeps the dynamic derivation.
+    """
+    if session_open == SESSION_OPEN_IST:
+        return _REGULAR_OPEN_SECONDS
+    return _seconds_of_day(session_open.hour, session_open.minute, session_open.second)
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +268,7 @@ def stamp_bar(
     # bit-identical to the TickVault-native path (DEC-NIFTY-ROLL-METADATA-001).
     # The Python side supplies only the IST civil components + the
     # shared-calendar session open (BruteX-resident data).
-    open_seconds = _seconds_of_day(session_open.hour, session_open.minute, session_open.second)
+    open_seconds = _session_open_seconds(session_open)
     _tod_seconds, weekday, minute, is_expiry_day = trading_core.derive_bar_metadata(
         trade_date.toordinal(),
         ist.hour,
