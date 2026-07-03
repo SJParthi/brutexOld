@@ -46,6 +46,7 @@ from brutex.dashboard.db_view import (
     phase_window_progress,
     sample_rows,
     table_summary,
+    window_status_label,
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.data.fetch_coverage import WindowKey
@@ -350,7 +351,8 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
     assert by_symbol["NIFTY"]["first_seen_at"] == _WINDOW_NOW.astimezone(IST).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
-    # The legacy field names are preserved so the existing UI keeps working.
+    # The legacy field names are preserved so the existing UI keeps working
+    # (+ the DEC-PIPELINE-AUTOPREBUILD-001 chunk-3 `status_label` honesty field).
     assert set(by_symbol["NIFTY"]) == {
         "market",
         "symbol",
@@ -358,6 +360,7 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
         "window_start",
         "window_end",
         "status",
+        "status_label",
         "bars",
         "attempts",
         "empty_streak",
@@ -1313,3 +1316,125 @@ class TestPhaseProgressPayload:
         rows = phase_progress_payload(duckdb.connect(), ledger_path(tmp_path), current_phase="spot")
         assert [r["phase"] for r in rows] == list(WINDOW_PHASES)
         assert all(r["total"] == 0 and r["done"] == 0 for r in rows)
+
+
+# ── window_status_label — empty-vs-failed honesty (DEC-PIPELINE-AUTOPREBUILD-001 c3) ──
+
+
+class TestWindowStatusLabel:
+    """The ONE common label function both payload paths share via ``_window_row``."""
+
+    def test_empty_streak_one(self) -> None:
+        assert window_status_label("EMPTY", 1) == "vendor confirmed no trades (1 clean attempt(s))"
+
+    def test_empty_streak_two(self) -> None:
+        assert window_status_label("EMPTY", 2) == "vendor confirmed no trades (2 clean attempt(s))"
+
+    def test_empty_streak_three(self) -> None:
+        assert window_status_label("EMPTY", 3) == "vendor confirmed no trades (3 clean attempt(s))"
+
+    def test_empty_streak_zero_floors_to_one(self) -> None:
+        # A legacy record with no streak column still had the ONE clean attempt
+        # that classified it EMPTY — the floor keeps the label honest, never "0".
+        assert window_status_label("EMPTY", 0) == "vendor confirmed no trades (1 clean attempt(s))"
+
+    def test_skipped_reads_settled(self) -> None:
+        assert window_status_label("SKIPPED", 3) == (
+            "vendor confirmed no trades (3 clean attempt(s) — settled)"
+        )
+
+    def test_skipped_streak_floors_to_one(self) -> None:
+        # A fast-settled old-gap SKIPPED may carry a sub-threshold streak.
+        assert window_status_label("SKIPPED", 0) == (
+            "vendor confirmed no trades (1 clean attempt(s) — settled)"
+        )
+
+    def test_failed_reads_will_repull(self) -> None:
+        assert window_status_label("FAILED", 0) == "FAILED (will re-pull)"
+
+    def test_success_is_the_bare_status(self) -> None:
+        assert window_status_label("SUCCESS", 0) == "SUCCESS"
+
+    def test_planned_is_the_bare_status(self) -> None:
+        assert window_status_label("PLANNED", 0) == "PLANNED"
+
+    def test_unknown_status_degrades_to_itself(self) -> None:
+        assert window_status_label("WEIRD", 5) == "WEIRD"
+
+
+class TestWindowPayloadStatusLabels:
+    """Both payload paths carry the label — via the SHARED ``_window_row`` projection."""
+
+    def test_fast_and_legacy_paths_emit_identical_labels(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        fast = build_window_payload(tmp_path, conn=duckdb.connect())
+        legacy = build_window_payload(tmp_path)
+        fast_labels = {w["symbol"]: w["status_label"] for w in fast["windows"]}
+        legacy_labels = {w["symbol"]: w["status_label"] for w in legacy["windows"]}
+        assert fast_labels == legacy_labels
+        # The honest spellings, per status (the mixed ledger's known rows).
+        assert fast_labels["BANKNIFTY"] == "FAILED (will re-pull)"  # errored fetch
+        assert fast_labels["INFY"] == "vendor confirmed no trades (1 clean attempt(s))"
+        assert fast_labels["NIFTY"] == "SUCCESS"
+
+    def test_planned_row_label_via_explicit_status_filter(self, tmp_path: Path) -> None:
+        _save_mixed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), status="PLANNED")
+        (row,) = payload["windows"]
+        assert row["symbol"] == "SENSEX"
+        assert row["status_label"] == "PLANNED"
+
+    def test_terminally_settled_empty_reads_settled(self, tmp_path: Path) -> None:
+        # Three genuine clean EMPTYs promote the window to SKIPPED (R1 threshold);
+        # its label then reads "… — settled" with the true streak count.
+        from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
+
+        ledger = WindowLedger()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                _window_key("TATASTEEL"),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_WINDOW_NOW,
+            )
+        save_window_ledger(ledger, tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        (row,) = payload["windows"]
+        assert row["status"] == "SKIPPED"
+        assert row["status_label"] == ("vendor confirmed no trades (3 clean attempt(s) — settled)")
+
+    def test_legacy_status_log_rows_carry_labels(self, tmp_path: Path) -> None:
+        # The pre-ledger window_status.json fallback has NO empty_streak field —
+        # the label floors at 1 clean attempt (getattr keeps ONE row shape).
+        log = WindowStatusLog()
+        log.record(
+            _window_key("WIPRO"), raw_bars=0, error_type=None, bars_appended=0, now=_WINDOW_NOW
+        )
+        save_window_status(log, tmp_path)
+        payload = build_window_payload(tmp_path)
+        assert payload["source"] == "status_log"
+        (row,) = payload["windows"]
+        assert row["status_label"] == "vendor confirmed no trades (1 clean attempt(s))"
+
+
+def test_fetch_windows_template_renders_status_label() -> None:
+    """The /coverage/windows page renders the server's honesty label.
+
+    String-presence pins: the row builder reads ``r.status_label``, renders it
+    through the page's ``esc()`` escaping convention, and — when the label is
+    present — REPLACES the legacy x/3 streak span (the label carries the same
+    clean-attempt count; never printed twice). The legacy streak widget survives
+    as the fallback for an older payload.
+    """
+    template = (
+        Path(__file__).resolve().parents[2]
+        / "brutex"
+        / "dashboard"
+        / "templates"
+        / "fetch_windows.html"
+    ).read_text(encoding="utf-8")
+    assert "r.status_label" in template
+    assert "esc(label)" in template  # escaped, never raw interpolation
+    assert "label && label !== v" in template  # replace-not-double-print guard
+    assert "r.empty_streak" in template  # the legacy fallback widget is kept

@@ -217,6 +217,8 @@ def _run(
     reference_only_ids: frozenset[int] = frozenset(),
     intervals: Sequence[str] = ("1day",),
     lake_root: Path | None = None,
+    scope_start: date | None = None,
+    scope_end: date | None = None,
 ) -> CompositePullReport:
     if lake_root is None:
         # Each test gets its OWN lake (so the persisted WindowLedger never bleeds across
@@ -243,6 +245,8 @@ def _run(
         metadata_run_parallel=_sync,
         historical_run_parallel=_sync,
         until_clean=False,
+        scope_start=scope_start,
+        scope_end=scope_end,
     )
 
 
@@ -588,3 +592,94 @@ def test_composite_note_without_skips_has_no_breakdown(tmp_path: Path) -> None:
 
 def test_public_surface() -> None:
     assert set(cp.__all__) == {"CompositePullReport", "pull_historical_for_underlyings"}
+
+
+# ── expiry-level date scoping (DEC-FNO-EXPIRY-SCOPE-001) ────────────────────────
+
+
+def test_scope_threaded_to_candle_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``scope_start`` / ``scope_end`` reach ``pull_contract_candles`` verbatim.
+
+    A capture spy on the candle spine proves the composite threads the expiry
+    scope through unchanged (and that the default is ``None`` / ``None`` — the
+    byte-identical unscoped pull).
+    """
+    captured: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> object:
+        captured.append(dict(kwargs))
+        return _clean_historical_report()
+
+    def _clean_historical_report() -> object:
+        from brutex.dashboard.historical_pull import HistoricalPullReport
+
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1day",),
+            contracts_selected=0,
+            contracts_completed=0,
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="spy",
+            phase1_clean=True,
+            phase1_complete=(),
+            start_dates={},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    monkeypatch.setattr(cp, "pull_contract_candles", _spy)
+    sdk = _nifty_sdk()
+    registry = _registry(tmp_path)
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=sdk,
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+        scope_start=date(2024, 1, 1),
+        scope_end=date(2024, 1, 25),
+    )
+    assert len(captured) == 1
+    assert captured[0]["scope_start"] == date(2024, 1, 1)
+    assert captured[0]["scope_end"] == date(2024, 1, 25)
+    # And the DEFAULT threads None/None (regression pin — unscoped by default).
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_nifty_sdk(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+    )
+    assert captured[1]["scope_start"] is None
+    assert captured[1]["scope_end"] is None
+
+
+def test_composite_note_names_out_of_scope_expiries(tmp_path: Path) -> None:
+    """An all-out-of-scope chain is NAMED in the composite note, never silent.
+
+    The enumerated NIFTY chain (expiry 2024-01-25) with ``scope_end=2024-01-20``
+    is entirely out of scope: zero candles pulled, and the note carries
+    ", 1 expiries out of scope skipped".
+    """
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    report = _run(
+        [_instrument("NIFTY", 13)],
+        sdk=sdk,
+        sink=sink,
+        registry=registry,
+        coverage=_CoverageSink(),
+        scope_start=date(2024, 1, 1),
+        scope_end=date(2024, 1, 20),  # the 2024-01-25 chain is OUT
+    )
+    assert sdk.candle_symbols == []  # zero vendor candle calls
+    assert report.historical is not None
+    assert report.historical.expiries_out_of_scope == 1
+    assert report.historical.contracts_out_of_scope == 3
+    assert ", 1 expiries out of scope skipped" in report.note
+    assert "then pulled 0/0 contract(s) (0 bar(s))" in report.note
