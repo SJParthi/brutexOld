@@ -285,7 +285,10 @@ hostile-review pass._
   `finally` — clean run, early stop AND a raised phase all release; a dry-run never gates; the gate is PROCESS-LOCAL).
   Spot movers read the prebuilt partitions STORED-FIRST (NEW `movers_stored_read.read_stored_day_frame`, month-bounded;
   BYTE-EQUALITY vs the 1-minute resample PINNED; honest `stored_reads`/`resampled_reads` provenance in the payload;
-  graceful 1-minute fallback). Completion honesty: the pipeline headline NAMES quarantined symbols
+  graceful 1-minute fallback; under the merged unified as-of semantic of DEC-HARDENING-LEFTOVERS-001 #1149 the stored
+  FULL-bucket read serves ONLY a whole-day or bucket-final-aligned as-of cutoff [`_stored_serves_cutoff`] — a
+  MID-bucket as-of always takes the 1-minute resample, the only source that can build the partial forming bucket
+  honestly, never a leak of minutes past the as-of instant). Completion honesty: the pipeline headline NAMES quarantined symbols
   (`derive_quarantined_symbols` — spot failures + historical `start_dates − phase1_complete` folded to underlyings;
   capped 10 names + the TRUE count, `"N symbol(s) quarantined: A, B (+K more)"`; the job finish detail = the note,
   500-char cap) and `/coverage/windows` labels empty-vs-failed via ONE `db_view.window_status_label` ("vendor confirmed
@@ -309,6 +312,28 @@ hostile-review pass._
   default no-dates pull is byte-identical + 10 permutations (a–j) pinned end-to-end. Both: ENGINE UNCHANGED
   (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no vocab/rate/scope change; NEW + touched modules ALL 100%
   line+branch; ruff/ruff-format/`mypy --strict`/`pyright` clean.
+  Prior merged: **DEC-HARDENING-LEFTOVERS-001, MIGRATION.md #1149** — the
+  hardening-leftovers pack, four areas, read-side dashboard + test + comment surfaces ONLY: (1) **cross-process lake
+  cache invalidation** — a CLI `brutex fetch` into the same lake now refreshes every generation-keyed dashboard cache
+  on the next poll, no restart: NEW COMMON `brutex/dashboard/lake_revision.py` derives an O(1) content token from ONE
+  `os.stat` of the durable window-ledger Parquet (every production pull — dashboard AND CLI — checkpoints it,
+  DEC-CLI-LEDGER-CHECKPOINT-001 #884), and `SummaryCache` gains a `revision_probe` seam (baseline-no-bump on first
+  observation, bump-once on a token change, `None` = no signal) wired in `build_app`; HONEST: the token moves only when
+  a writer touches the ledger — an out-of-band raw-Parquet write that bypasses it is NOT detected (the write-time lake
+  manifest stays the named future work, #867/#1025). (2) **movers as-of unification** — the SPOT intraday snapshot
+  leaked bars PAST the as-of minute (it cut on the RESAMPLED bucket-open minute, so an as-of 10:00 TF=5m read included
+  10:01–10:04); all three tabs now cut the RAW 1-minute frame at the as-of IST minute via ONE COMMON
+  `movers_snapshot.filter_to_ist_minute` (spot cuts BEFORE resampling — an intended, operator-visible spot change
+  pinned by a regression; futures is a byte-identical refactor onto the helper; options rides the futures reader),
+  killing the copy-pasted Int32 minute-of-day expression (§11 COMMON). (3) **flaky bench guard** — the two
+  write-consumer A/B wall-clock timing tests are env-gated behind the sibling `BRUTEX_M4PRO_ABS=1` whole-test skipif
+  (shared-GHA GIL noise flipped their cross-arm median comparisons); the deterministic byte-parity/settle/thread-leak
+  oracles stay unguarded. (4) **NSE 2026 calendar honesty, comments only** — the "2026-02-01 Sunday Budget session
+  missing" claim is REFUTED (already a verified `SPECIAL_WEEKEND_TRADING_SESSIONS` entry); the vendor-observed
+  Jan-2026 drift (20 vendor sessions vs our derived 21) implies ONE additional Jan-2026 holiday whose date is
+  UNVERIFIED and deliberately NOT fabricated — closable only by the official NSE 2026 circular or a live vendor probe.
+  All five touched `brutex/` modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright` clean; ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-FETCH-PER-WINDOW-GATE-HONESTY-001, MIGRATION.md #1132** — the
   fetch-per-window CI bench gate (`tests/bench/test_fetch_per_window_guarantee.py`, #1026) now measures the PRODUCTION
   quantity instead of a flattering lab quantity: a verified forensic audit of a real production pull measured `2.59`

@@ -1,15 +1,17 @@
-"""A dup-poisoned symbol on ``/movers`` is SKIPPED + counted, never a 500 (DEC-LAKE-WRITE-UNIQUE-001).
+"""A dup-poisoned symbol on ``/movers`` is HEALED at read, never a 500.
 
-Blast-radius hardening for the write-side uniqueness invariant: a 1-minute
-partition poisoned with duplicate timestamps (written before the invariant
-landed) makes the canonical resampler's input tripwire raise
-:class:`~brutex.data.errors.ResampleInputError`
-(DEC-RESAMPLER-INPUT-GUARD-001). That error was NOT in
+History: DEC-LAKE-WRITE-UNIQUE-001 first bounded the blast radius by adding
+the resampler tripwire's :class:`~brutex.data.errors.ResampleInputError`
+(DEC-RESAMPLER-INPUT-GUARD-001) to
 :func:`~brutex.dashboard.movers_resilient.movers_read_skip_errors`, so ONE
-poisoned symbol 500'd the whole ``/movers`` page on every open. Now it is a
-member of the COMMON skip set: the poisoned symbol is skipped (logged +
-counted in the screen's ``skipped`` tally) and every healthy symbol still
-ranks — mirroring the corrupt-Parquet skip of DEC-MOVERS-CORRUPT-SKIP-001.
+poisoned symbol was SKIPPED (counted) instead of 500ing the page. Dup-train
+PR-2 (DEC-LAKE-READ-UNIQUE-001) then wired the keep-FIRST read gate into the
+movers day readers, so a duplicate-only poison is now COLLAPSED before the
+tripwire ever sees it — the symbol RANKS with its real bars + one aggregated
+``lake.read.duplicates_dropped`` WARNING. The tripwire's skip-set membership
+stays pinned here as the guard for any poisoned path that bypasses the day
+readers, and the corrupt-Parquet skip of DEC-MOVERS-CORRUPT-SKIP-001 is
+unchanged.
 
 Also pins the set's honest boundary: :class:`~brutex.data.errors.LakeWriteHalt`
 (a sibling ``DataLakeError`` — a pull-wide stop) is NOT in the skip set, so a
@@ -154,9 +156,16 @@ class TestSkipSetMembership:
 
 
 class TestPoisonedSymbolSkippedNot500:
-    def test_compute_skips_and_counts_the_poisoned_symbol(self, tmp_path: Path) -> None:
-        """FAILS on unfixed main: ResampleInputError propagated out of the loop
-        (the whole-screen 500) instead of a counted skip."""
+    def test_compute_heals_the_poisoned_symbol_keep_first(self, tmp_path: Path) -> None:
+        """The dup-poisoned symbol now RANKS with its deduped bars + a WARNING.
+
+        DEC-LAKE-READ-UNIQUE-001 supersedes the whole-symbol skip for a
+        duplicate-only poison: the read gate collapses the duplicate keep-FIRST
+        BEFORE the resampler tripwire, so the symbol serves its REAL bars
+        (warned, never silent) instead of vanishing from the screen. The
+        tripwire + skip set remain the guard for a genuinely CORRUPT file.
+        (Before the read gate this same fixture pinned skipped == 1.)
+        """
         from structlog.testing import capture_logs
 
         _seed_good_and_poisoned(tmp_path)
@@ -164,14 +173,16 @@ class TestPoisonedSymbolSkippedNot500:
             result = compute_spot_candidates(
                 lake_root=tmp_path, interval="5minute", date="2024-06-13", time=None, exchange=None
             )
-        # NIFTY still ranks; the poisoned SENSEX is skipped — the screen did NOT 500.
-        assert {s.instrument.symbol for s in result.snapshots} == {"NIFTY"}
-        assert result.skipped == 1
-        skips = [e for e in logs if e["event"] == "movers.parquet_skip"]
-        assert len(skips) == 1
-        assert skips[0]["source"] == "spot"
-        assert skips[0]["symbol"] == "SENSEX"
-        assert "STRICTLY increasing" in str(skips[0]["error"])
+        # BOTH symbols rank — the duplicate was healed at read, nothing skipped.
+        assert {s.instrument.symbol for s in result.snapshots} == {"NIFTY", "SENSEX"}
+        assert result.skipped == 0
+        # ONE aggregated warning PER READ (the screen makes several bounded reads
+        # of the same poisoned month — session + prev-day probes), every one
+        # naming the poisoned SENSEX partition, never a per-row storm.
+        dedups = [e for e in logs if e["event"] == "lake.read.duplicates_dropped"]
+        assert dedups, "the collapse must be warned, never silent"
+        assert all("SENSEX" in str(e["source"]) for e in dedups)
+        assert all(e["dropped"] == 1 for e in dedups)
 
     def test_movers_route_returns_200_with_poisoned_symbol(
         self, store: InstrumentStore, tmp_path: Path
@@ -193,5 +204,7 @@ class TestPoisonedSymbolSkippedNot500:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert {r["symbol"] for r in body["volume"]} == {"NIFTY"}
-        assert body["skipped_count"] == 1
+        # The poisoned SENSEX is healed at read (keep-FIRST) and ranks alongside
+        # NIFTY — no skip, no 500 (DEC-LAKE-READ-UNIQUE-001).
+        assert {r["symbol"] for r in body["volume"]} == {"NIFTY", "SENSEX"}
+        assert body["skipped_count"] == 0

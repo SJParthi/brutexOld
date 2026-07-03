@@ -118,10 +118,18 @@ def read_day_month_frame(base: Path, day: date_cls) -> pl.DataFrame | None:
     """
     import polars as pl
 
+    from brutex.data.lake_read import dedup_bars_frame
+
     path = day_month_file(base, day)
     if path is None:
         return None
-    return pl.read_parquet(path.as_posix())
+    # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): every /movers session/day
+    # reader flows through here — a poisoned-era duplicated month file would
+    # otherwise double-count session volume/turnover. Keep-FIRST, warned.
+    frame, _dropped = dedup_bars_frame(
+        pl.read_parquet(path.as_posix()), source=f"lake_day:{path.as_posix()}"
+    )
+    return frame
 
 
 def read_day_intraday_frame(base: Path, day: date_cls, *, symbol: str) -> pl.DataFrame | None:
@@ -161,7 +169,15 @@ def read_day_intraday_frame(base: Path, day: date_cls, *, symbol: str) -> pl.Dat
         # path) to stay byte-equivalent — the caller's IST-day filter is unchanged.
         import polars as pl
 
+        from brutex.data.lake_read import dedup_bars_frame
+
         if not (base.is_dir() and any(base.rglob("*.parquet"))):
             return None
-        return pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        # SAME keep-FIRST read gate as the month-bounded path
+        # (DEC-LAKE-READ-UNIQUE-001) — warned, never silent.
+        frame, _dropped = dedup_bars_frame(
+            pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+            source=f"lake_day:{base.as_posix()}",
+        )
+        return frame
     return read_day_month_frame(base, day)

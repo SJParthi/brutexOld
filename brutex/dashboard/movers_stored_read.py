@@ -23,6 +23,16 @@ isolation therefore yields byte-identical buckets to materialising the whole
 series and filtering to that day; the equality is pinned by
 ``tests/integration/test_movers_stored_read.py``.
 
+The stored partitions hold FULL buckets, so under the unified raw-1m as-of
+semantic (DEC-HARDENING-LEFTOVERS-001 —
+:func:`~brutex.dashboard.movers_snapshot.filter_to_ist_minute` cuts the
+1-minute frame BEFORE resampling, making the final bucket a PARTIAL aggregate
+of only the elapsed minutes) the stored read is consulted only for a whole-day
+read or a bucket-final-aligned as-of cutoff
+(``movers_snapshot._stored_serves_cutoff``); a mid-bucket as-of always takes
+the 1-minute resample fallback — the only source that can build the partial
+forming bucket honestly.
+
 ## Honest scope — SPOT only (the futures/options envelope)
 
 The FUTURES + OPTIONS movers session reads are deliberately NOT switched to

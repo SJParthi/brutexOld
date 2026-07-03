@@ -67,6 +67,7 @@ __all__ = [
     "build_snapshot_payload",
     "compute_snapshot",
     "compute_spot_candidates",
+    "filter_to_ist_minute",
     "interval_minutes",
     "normalize_min_volume",
     "parse_snapshot_date",
@@ -563,6 +564,40 @@ def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
     )
 
 
+def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -> pl.DataFrame:
+    """Keep only *frame*'s rows whose IST minute-of-day is ``≤ cutoff_min``.
+
+    THE one COMMON as-of cutoff filter for every ``/movers`` tab
+    (DEC-HARDENING-LEFTOVERS-001 — kills the copy-pasted Int32 minute-of-day
+    expression that lived in BOTH the spot and the futures session readers,
+    CLAUDE.md §11 COMMON). The **unified as-of semantic** it owns: keep every
+    RAW 1-minute bar whose IST minute-of-day is ``≤ cutoff_min``; intraday
+    buckets are then formed only from ELAPSED minutes — a partially-elapsed
+    bucket honestly reflects only the data up to the as-of instant, never a
+    forming-bucket leak of minutes PAST it (Golden Rule #1: an "as of 13:45"
+    snapshot must never include data after 13:45).
+
+    Parameters
+    ----------
+    frame
+        A polars frame of raw 1-minute bars carrying a tz-aware UTC timestamp
+        column named *ts_col* (``"ts_utc"`` in the spot reader, ``"timestamp"``
+        in the futures/options reader).
+    cutoff_min
+        Inclusive IST minute-of-day cutoff (e.g. ``13*60+45`` for 13:45).
+    ts_col
+        The timestamp column name to convert + compare on.
+    """
+    import polars as pl
+
+    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
+    # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
+    # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
+    # wraps to a negative Int8); the cast gives the true minute-of-day.
+    minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
+    return frame.filter(minute_of_day <= cutoff_min)
+
+
 def _read_session_bars(
     lake_root: Path,
     *,
@@ -573,7 +608,7 @@ def _read_session_bars(
     minutes: int,
     cutoff_min: int | None,
 ) -> list[CandleBar]:
-    """Read *day*'s 1-minute bars, resample to *minutes*, slice to ``≤ cutoff_min``.
+    """Read *day*'s 1-minute bars, cut at ``≤ cutoff_min``, resample to *minutes*.
 
     Reads *day*'s bars via :func:`~brutex.data.lake_day_glob.read_day_intraday_frame`
     — ONLY ``1minute/<yyyy>/<mm>.parquet`` for a SESSION-FILTERED symbol (an IST
@@ -584,12 +619,22 @@ def _read_session_bars(
     back to the whole partition there to stay byte-equivalent (its full-day series
     can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
-    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11),
-    then :func:`~brutex.data.tf_resampler.resample_1m_to_tf` buckets to the chosen
-    timeframe (1minute → no-op, 1day → the single session bar). For an intraday
-    timeframe the bars are kept up to (and including) the bar whose IST
-    open-minute ``≤ cutoff_min``. Empty when the symbol has no 1-minute bars on
-    *day* (the caller reports it skipped, never fabricated — Golden Rule #1).
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
+
+    **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
+    the ``cutoff_min`` filter is applied to the RAW 1-minute frame **BEFORE**
+    resampling, via the COMMON :func:`filter_to_ist_minute` — the same instant
+    the futures/options session reader cuts at. Previously the cut was applied
+    AFTER resampling on the resampled bucket-OPEN minute, so the final kept
+    bucket leaked bars PAST the as-of minute (e.g. cutoff 10:00, TF=5m: the
+    10:00 bucket included 10:01–10:04). Now the last bucket aggregates only the
+    elapsed minutes ``≤ cutoff_min``, so LTP / volume / value end exactly at the
+    as-of instant.
+
+    :func:`~brutex.data.tf_resampler.resample_1m_to_tf` then buckets the kept
+    minutes to the chosen timeframe (1minute → no-op). Empty when the symbol has
+    no 1-minute bars on *day*, or none at/before the cutoff (the caller reports
+    it skipped, never fabricated — Golden Rule #1).
     """
     import polars as pl
 
@@ -607,33 +652,37 @@ def _read_session_bars(
     )
     ist_date = pl.col("ts_utc").dt.convert_time_zone(_IST).dt.date()
     day_df = df.filter(ist_date == day).sort("ts_utc")
+    if cutoff_min is not None:
+        day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
     if day_df.is_empty():
         return []
-    res = _filter_to_cutoff(resample_1m_to_tf(day_df, minutes).sort("ts_utc"), cutoff_min)
-    if res.is_empty():
-        return []
+    res = resample_1m_to_tf(day_df, minutes).sort("ts_utc")
     return [_row_to_bar(row) for row in res.iter_rows(named=True)]
 
 
-def _filter_to_cutoff(res: pl.DataFrame, cutoff_min: int | None) -> pl.DataFrame:
-    """Keep the bars whose IST bucket-start minute-of-day is ``<= cutoff_min``.
+def _stored_serves_cutoff(minutes: int, cutoff_min: int | None) -> bool:
+    """``True`` iff the stored *minutes*-bucket partition can serve *cutoff_min* exactly.
 
-    The ONE cutoff filter (CLAUDE.md §11 COMMON) shared by the on-the-fly
-    resample path (:func:`_read_session_bars`) AND the stored-partition path
-    (:func:`_read_intraday_bars`) so the two can never drift — the equality
-    contract of the stored-first read (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2).
-    ``cutoff_min=None`` (whole day / daily) returns *res* unchanged.
+    The stored partitions hold FULL resampled buckets, while the unified as-of
+    semantic (DEC-HARDENING-LEFTOVERS-001 — :func:`filter_to_ist_minute` on the
+    RAW 1-minute frame BEFORE resampling) makes the final bucket a PARTIAL
+    aggregate of only the elapsed minutes. A stored read is therefore byte-equal
+    to the resample path only when every kept bucket is fully elapsed at the
+    cutoff:
+
+    * ``cutoff_min is None`` — the whole-day read (every bucket final), or
+    * the cutoff sits on a bucket's FINAL minute of the 09:15-anchored grid
+      (``(cutoff_min - _SESSION_OPEN_MIN + 1) % minutes == 0`` — e.g. 09:19 /
+      09:24 for 5-minute; every minute for 1-minute).
+
+    A MID-bucket as-of must aggregate a partial forming bucket, which only the
+    1-minute base can build — the caller falls back to the on-the-fly resample
+    (honest ``resampled_reads`` provenance, never a forming-bucket leak of
+    minutes past the as-of instant — Golden Rule #1).
     """
-    import polars as pl
-
     if cutoff_min is None:
-        return res
-    ist = pl.col("ts_utc").dt.convert_time_zone(_IST)
-    # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-    # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
-    # wraps to a negative Int8); the cast gives the true minute-of-day.
-    minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
-    return res.filter(minute_of_day <= cutoff_min)
+        return True
+    return (cutoff_min - _SESSION_OPEN_MIN + 1) % minutes == 0
 
 
 def _read_intraday_bars(
@@ -657,27 +706,41 @@ def _read_intraday_bars(
     When the stored partition yields rows for *day* they are used directly (no
     resample — ``from_stored=True``); when it is absent/empty for the day, the
     read FALLS BACK to the on-the-fly 1-minute resample
-    (:func:`_read_session_bars`, byte-identical to the pre-chunk-2 behaviour —
-    ``from_stored=False``) so a CLI-only or never-prebuilt lake keeps working —
-    the fallback is stated openly, never hidden (Golden Rule #10).
+    (:func:`_read_session_bars`, byte-identical behaviour — ``from_stored=False``)
+    so a CLI-only or never-prebuilt lake keeps working — the fallback is stated
+    openly, never hidden (Golden Rule #10).
 
-    The two paths return IDENTICAL bars for the same coordinate: the prebuild
-    wrote the stored partition with the SAME fixed-arithmetic session-anchored
-    resampler the fallback runs (see :mod:`brutex.dashboard.movers_stored_read`
-    — the equality contract, integration-pinned). Both apply the SAME
-    :func:`_filter_to_cutoff`.
+    **The equality contract under the unified as-of semantic
+    (DEC-HARDENING-LEFTOVERS-001):** the two paths return IDENTICAL bars for the
+    same coordinate — the prebuild wrote the stored partition with the SAME
+    fixed-arithmetic session-anchored resampler the fallback runs (see
+    :mod:`brutex.dashboard.movers_stored_read`, integration-pinned). The stored
+    partition holds FULL buckets, so it is consulted only when it can reproduce
+    the raw-1m as-of cut exactly (:func:`_stored_serves_cutoff` — whole-day, or
+    a bucket-final-aligned cutoff, filtered on the bucket-open minute via the
+    COMMON :func:`filter_to_ist_minute`); a MID-bucket as-of always takes the
+    1-minute resample fallback, the only source that can aggregate the partial
+    forming bucket honestly (never a leak of minutes past the as-of instant).
     """
-    stored = read_stored_day_frame(
-        lake_root,
-        exchange=exchange,
-        segment=segment,
-        symbol=symbol,
-        interval=interval,
-        day=day,
-    )
-    if stored is not None:
-        res = _filter_to_cutoff(stored, cutoff_min)
-        return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
+    if _stored_serves_cutoff(minutes, cutoff_min):
+        stored = read_stored_day_frame(
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            day=day,
+        )
+        if stored is not None:
+            # A bucket-final-aligned cutoff keeps exactly the fully-elapsed
+            # buckets when cut on the bucket-OPEN minute (open ≤ cutoff ⇒ the
+            # bucket's last minute ≤ cutoff, by alignment).
+            res = (
+                stored
+                if cutoff_min is None
+                else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
+            )
+            return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
     return (
         _read_session_bars(
             lake_root,
@@ -705,10 +768,18 @@ def _read_daily_partition(
     """
     import polars as pl
 
+    from brutex.data.lake_read import dedup_bars_frame
+
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return None
-    return pl.read_parquet(base.as_posix() + "/**/*.parquet")
+    # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): a poisoned-era duplicated
+    # 1-day partition would otherwise double-serve a day — warned, never silent.
+    frame, _dropped = dedup_bars_frame(
+        pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+        source=f"movers_daily:{exchange}/{segment}/{symbol}",
+    )
+    return frame
 
 
 def _read_daily_bars(

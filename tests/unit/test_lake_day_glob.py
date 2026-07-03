@@ -29,11 +29,22 @@ from brutex.data.lake_day_glob import (
 
 
 def _seed_month(base: Path, *, year: int, month: int, rows: int = 3) -> Path:
-    """Write a tiny ``<base>/<yyyy>/<mm>.parquet`` and return its path."""
+    """Write a tiny ``<base>/<yyyy>/<mm>.parquet`` and return its path.
+
+    Carries the canonical ``timestamp`` column every real month partition has
+    (the read gate dedups on it, DEC-LAKE-READ-UNIQUE-001) — one distinct
+    minute per row so nothing collapses in these bounded-read tests.
+    """
+    from datetime import UTC, datetime
+
     target = base / f"{year:04d}" / f"{month:02d}.parquet"
     target.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(
-        {"close": [float(i) for i in range(rows)], "volume": list(range(rows))}
+        {
+            "timestamp": [datetime(year, month, 3, 4, i, tzinfo=UTC) for i in range(rows)],
+            "close": [float(i) for i in range(rows)],
+            "volume": list(range(rows)),
+        }
     ).write_parquet(target)
     return target
 
@@ -72,7 +83,7 @@ class TestReadDayMonthFrame:
         frame = read_day_month_frame(base, date(2024, 6, 13))
         assert frame is not None
         assert frame.height == 5
-        assert set(frame.columns) == {"close", "volume"}
+        assert set(frame.columns) == {"timestamp", "close", "volume"}
 
     def test_returns_none_when_month_absent(self, tmp_path: Path) -> None:
         base = tmp_path / "1minute"
@@ -126,3 +137,55 @@ class TestReadDayIntradayFrame:
             read_day_intraday_frame(tmp_path / "1minute", date(2026, 7, 1), symbol="GIFTNIFTY")
             is None
         )
+
+
+class TestPoisonedMonthDedup:
+    """A physically-duplicated month file collapses keep-FIRST + warns.
+
+    Fails-before: on unfixed main both readers returned the duplicated rows
+    verbatim (double-counted movers session volume) with NO warning
+    (DEC-LAKE-READ-UNIQUE-001).
+    """
+
+    def _seed_poisoned(self, base: Path, *, year: int, month: int) -> None:
+        from datetime import UTC, datetime
+
+        target = base / f"{year:04d}" / f"{month:02d}.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        t0 = datetime(year, month, 3, 4, 0, tzinfo=UTC)
+        pl.DataFrame(
+            {
+                # The first instant appears TWICE with CONFLICTING closes.
+                "timestamp": [t0, t0, datetime(year, month, 3, 4, 1, tzinfo=UTC)],
+                "close": [1.0, 99.0, 2.0],
+                "volume": [10, 999, 20],
+            }
+        ).write_parquet(target)
+
+    def test_month_bounded_read_collapses_keep_first(self, tmp_path: Path) -> None:
+        import structlog
+
+        base = tmp_path / "1minute"
+        self._seed_poisoned(base, year=2026, month=7)
+        cap = structlog.testing.LogCapture()
+        saved = structlog.get_config()
+        try:
+            structlog.configure(processors=[cap])
+            frame = read_day_month_frame(base, date(2026, 7, 1))
+        finally:
+            structlog.configure(**saved)
+        assert frame is not None
+        assert frame.height == 2
+        assert frame.get_column("close").to_list() == [1.0, 2.0]  # keep-FIRST won
+        events = [e for e in cap.entries if e["event"] == "lake.read.duplicates_dropped"]
+        assert len(events) == 1
+        assert events[0]["dropped"] == 1
+        assert events[0]["conflict_count"] == 1
+
+    def test_exempt_whole_partition_read_collapses_keep_first(self, tmp_path: Path) -> None:
+        base = tmp_path / "1minute"
+        self._seed_poisoned(base, year=2026, month=7)
+        frame = read_day_intraday_frame(base, date(2026, 7, 1), symbol="GIFTNIFTY")
+        assert frame is not None
+        assert frame.height == 2
+        assert frame.get_column("close").to_list() == [1.0, 2.0]

@@ -108,6 +108,7 @@ from brutex.dashboard.fno_underlying import (
     resolve_fno_index_aliases,
 )
 from brutex.dashboard.historical_pull import pull_contract_candles
+from brutex.dashboard.lake_revision import lake_revision
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
@@ -1071,7 +1072,17 @@ def build_app(
     # `store`, never a pre-built conn). The summary cache + incremental coverage
     # counters are owned by this app instance (no module-global mutable state —
     # CLAUDE.md §4) and injected into the routes / the background pull job below.
-    _summary_cache = summary_cache if summary_cache is not None else SummaryCache()
+    # DEC-HARDENING-LEFTOVERS-001: the production cache carries the cross-process
+    # lake-revision probe (an O(1) stat of the window-ledger Parquet, which every
+    # production pull — dashboard AND CLI — checkpoints), so a CLI `brutex fetch`
+    # into the same lake bumps the generation on the next read instead of leaving
+    # every generation-keyed cache stale until restart. An INJECTED cache (tests /
+    # legacy callers) is used as-is — byte-identical to the pre-probe behaviour.
+    _summary_cache = (
+        summary_cache
+        if summary_cache is not None
+        else SummaryCache(revision_probe=_lake_revision_probe_or_none(instrument_store))
+    )
     # The /movers point-in-time snapshot cache (DEC-MOVERS-O1-LATENCY-001): caches
     # the expensive, top_n-independent candidate set per snapshot coordinate so a
     # sub-filter / top_n / re-selection is an O(1) hit + a cheap re-rank, never a
@@ -5340,6 +5351,33 @@ def _metadata_progress_sync(
     fail a test, not pass CI green) instead of being pragma-hidden.
     """
     job.sync_from_ledger(completed=completed, total=total, bars=0, failed=0, current=current)
+
+
+def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | None] | None:
+    """Build the cross-process lake-revision probe for the summary cache, or ``None``.
+
+    DEC-HARDENING-LEFTOVERS-001. The lake root is derived the same way every
+    other route does it — the wired :class:`~brutex.data.instrument_store.InstrumentStore`'s
+    on-disk parent directory. When no store (or a path-less store) is wired
+    there is no lake to watch, so ``None`` disables the probe and the
+    :class:`~brutex.dashboard.summary_cache.SummaryCache` behaves byte-identically
+    to the pre-probe cache (the tests/legacy contract).
+
+    The returned probe is a zero-arg closure over
+    :func:`brutex.dashboard.lake_revision.lake_revision` — one O(1) ``os.stat``
+    of the window-ledger Parquet per call, never raising (every ``OSError`` maps
+    to ``None`` = "no signal" inside ``lake_revision``).
+    """
+    store_path = getattr(instrument_store, "path", None)
+    if not isinstance(store_path, Path):
+        return None
+    lake_root = store_path.parent
+
+    def _probe() -> str | None:
+        """One O(1) window-ledger stat token for the wired lake root."""
+        return lake_revision(lake_root)
+
+    return _probe
 
 
 def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:

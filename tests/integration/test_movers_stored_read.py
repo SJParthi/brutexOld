@@ -135,21 +135,56 @@ class TestSpotStoredReadEquality:
     def test_spot_stored_read_equals_on_the_fly_resample(self, tmp_path: Path) -> None:
         """The equality contract: prebuilt partitions were written by the SAME
         resampler, so the stored-first read yields byte-identical candidates —
-        only the provenance counts flip (resampled → stored)."""
+        only the provenance counts flip (resampled → stored). The as-of 09:19
+        sits on the 5-minute grid's bucket-FINAL minute (09:15–09:19), so every
+        kept bucket is fully elapsed and the stored FULL-bucket read reproduces
+        the unified raw-1m as-of cut exactly (DEC-HARDENING-LEFTOVERS-001)."""
         _seed_spot(tmp_path, "NIFTY", 20000)
         before = compute_spot_candidates(
-            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:20"
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
         )
         assert before.snapshots, "seed must produce a snapshot"
         assert (before.stored_reads, before.resampled_reads) == (0, 1)
 
         _materialize_spot(tmp_path, "NIFTY")
         after = compute_spot_candidates(
-            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:20"
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
         )
         assert after.snapshots == before.snapshots  # byte-identical metrics
         assert after.skipped == before.skipped
         assert (after.stored_reads, after.resampled_reads) == (1, 0)
+
+    def test_spot_partially_elapsed_bucket_falls_back_to_resample(self, tmp_path: Path) -> None:
+        """A MID-bucket as-of cannot be served from stored FULL buckets — the
+        read honestly bypasses the stored partition and falls back to the
+        1-minute resample, whose final bucket aggregates ONLY the elapsed
+        minutes (the unified as-of semantic, DEC-HARDENING-LEFTOVERS-001 —
+        never a forming-bucket leak of minutes past the as-of instant)."""
+        from brutex.dashboard.movers_snapshot import _read_intraday_bars
+
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        _materialize_spot(tmp_path, "NIFTY")
+        bars, from_stored = _read_intraday_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="5minute",
+            day=_DAY,
+            minutes=5,
+            cutoff_min=9 * 60 + 22,  # as of 09:22 IST — inside the 09:20 bucket
+        )
+        assert from_stored is False  # stored partition present, honestly bypassed
+        assert len(bars) == 2
+        # The partial 09:20 bucket ends at the as-of instant: 09:20–09:22 only
+        # (a stored/leaking read would close the bucket at 09:24 → 20095).
+        assert bars[-1].close == Decimal("20075")
+        assert bars[-1].volume == 105 + 106 + 107
+        # And the payload provenance reports the resample fallback honestly.
+        cands = compute_spot_candidates(
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:22"
+        )
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
 
     def test_spot_stored_read_equality_whole_day_no_cutoff(self, tmp_path: Path) -> None:
         # The cutoff-free intraday permutation (time=None ⇒ whole session).
@@ -167,11 +202,12 @@ class TestSpotStoredReadEquality:
     def test_spot_mixed_provenance_counts_per_symbol(self, tmp_path: Path) -> None:
         # Only NIFTY is prebuilt → NIFTY serves stored, BANKNIFTY falls back to
         # the resample — the counts expose the mixed provenance honestly.
+        # (09:19 = bucket-final-aligned, so the stored read is eligible.)
         _seed_spot(tmp_path, "NIFTY", 20000)
         _seed_spot(tmp_path, "BANKNIFTY", 45000)
         _materialize_spot(tmp_path, "NIFTY")
         cands = compute_spot_candidates(
-            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:20"
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
         )
         assert len(cands.snapshots) == 2
         assert (cands.stored_reads, cands.resampled_reads) == (1, 1)
