@@ -85,9 +85,9 @@ def _probes_pass_report() -> dl.KitReport:
         run_id="lp-probes",
         transcript_path=Path("/tmp/t.jsonl"),
         outcomes=(
-            dl.StageOutcome(stage=6, name="depth", status=dl.STATUS_PASS, lines=("ok",)),
+            # Post-decree autorun probes carry no depth/bhavcopy stages
+            # (DEC-DOCTOR-KIT-HONESTY-001 amendment, operator decree 2026-07-03).
             dl.StageOutcome(stage=7, name="vix", status=dl.STATUS_PASS, lines=("ok",)),
-            dl.StageOutcome(stage=8, name="bhavcopy", status=dl.STATUS_PASS, lines=("ok",)),
         ),
     )
 

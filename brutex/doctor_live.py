@@ -767,12 +767,15 @@ class KitOptions:
     stages: frozenset[int] | None = None
     keep_going: bool = False
     depth_bisect: bool = False
-    #: The ZERO-COMMAND autorun mode (DEC-DOCTOR-KIT-HONESTY-001): an EMPTY
+    #: The ZERO-COMMAND bisect mode (DEC-DOCTOR-KIT-HONESTY-001): an EMPTY
     #: stage-6 boundary window automatically runs the SAME bounded bisect
     #: ``--depth-bisect`` would (spent ONLY on the failing symbol — a boundary
     #: hit returns after 1 call) and a FOUND floor renders as an advisory WARN
     #: naming the floor, never a FAIL instructing the operator to type a
-    #: command. Manual ``--depth-bisect`` behaviour is byte-unchanged.
+    #: command. Manual ``--depth-bisect`` behaviour is byte-unchanged. Since
+    #: the 2026-07-03 operator decree the dashboard AUTORUN no longer runs
+    #: stage 6 at all, so this flag fires only for an explicit stage-6
+    #: selection (``run_kit_stages`` sets it iff the run includes stage 6).
     auto_bisect: bool = False
     rate_probe: bool = False
     against_lake: bool = False
@@ -2314,12 +2317,15 @@ STAGES: Final[tuple[tuple[int, str, StageFn], ...]] = (
 def compute_call_budget(options: KitOptions) -> int:
     """The run's hard vendor-call cap (spec §2.3): 40 + 60 (bisect) + 480 (rate).
 
-    ``auto_bisect`` (the autorun's zero-command mode) grants the SAME
-    :data:`DEPTH_BISECT_BUDGET` extension as the manual ``--depth-bisect`` —
-    the budget must honestly cover the bisect the run MAY perform (a full
-    bisect is ~14 calls per failing symbol, capped at
-    :data:`~brutex.adapters.groww.probe.DEPTH_PROBE_MAX_CALLS` = 20); the two
-    flags together never double-grant it.
+    ``auto_bisect`` grants the SAME :data:`DEPTH_BISECT_BUDGET` extension as
+    the manual ``--depth-bisect`` — the budget must honestly cover the bisect
+    the run MAY perform (a full bisect is ~14 calls per failing symbol,
+    capped at :data:`~brutex.adapters.groww.probe.DEPTH_PROBE_MAX_CALLS`
+    = 20); the two flags together never double-grant it. Since the operator
+    decree of 2026-07-03 (DEC-DOCTOR-KIT-HONESTY-001 amendment) removed the
+    depth stage from the AUTORUN stage sets, autorun runs never carry either
+    flag (plain 40-call budget); the extension now serves the manual CLI path
+    and any explicit stage-6 selection.
     """
     limit = DEFAULT_CALL_BUDGET
     if options.depth_bisect or options.auto_bisect:

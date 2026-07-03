@@ -11,8 +11,14 @@
  *   - the startup PREFLIGHT verdict of the Mac live-proof kit's cheap stages
  *     (env / creds / totp / token-read+smoke / instrument master), which the
  *     dashboard runs BY ITSELF on boot — the operator runs no command;
- *   - the one-time PROBES verdict (2020 1m depth / VIX hard-gate / bhavcopy
- *     cross-check), auto-run around the first REAL pull and then cached;
+ *   - the one-time PROBES verdict (the VIX hard-gate, riding the
+ *     creds/token/spot-1m prerequisites), auto-run around the first REAL
+ *     pull and then cached. The 2020 1m depth probe and the NSE bhavcopy
+ *     cross-check are NOT autorun stages (operator decree 2026-07-03,
+ *     DEC-DOCTOR-KIT-HONESTY-001 amendment — manual `brutex doctor --live`
+ *     only), so neither can ever surface here; the rendering below is
+ *     stage-name-generic and simply shows whatever stages the verdict
+ *     carries;
  *   - a RED top banner whenever either verdict is fail/error, showing the
  *     kit's diagnostic lines VERBATIM (the golden-tested catalog is the only
  *     wording source — this file never re-words a diagnosis).
@@ -27,7 +33,7 @@
  * the refusal text — grey never papers over a broken live pipe. The pill
  * dot shows the WORST of the preflight and probes verdicts (worstClass),
  * and the pill HEADLINE is likewise ONE flow-scoped worst-of line
- * ("live-proof — preflight: PASS · probes: FAIL — depth[R6]",
+ * ("live-proof — preflight: PASS · probes: FAIL — vix[R5]",
  * DEC-DOCTOR-KIT-HONESTY-001) so a mixed run can never read as a
  * contradictory PASS-then-FAIL toast sequence.
  * When the autorun is not wired (present:false) or disabled via the
@@ -87,7 +93,7 @@
 
   // UNIFIED HEADLINE (DEC-DOCTOR-KIT-HONESTY-001): the pill's headline TEXT is
   // one flow-scoped worst-of line ("live-proof — preflight: PASS · probes:
-  // FAIL — depth[R6]") so the two flows sharing one pill can never read as a
+  // FAIL — vix[R5]") so the two flows sharing one pill can never read as a
   // contradictory PASS-then-FAIL toast sequence. The pill DOT already renders
   // worst-of via worstClass — this fixes the TEXT/labels only. textContent
   // rendering throughout (CodeQL XSS gate: no markup sink, ever).
@@ -100,7 +106,7 @@
   };
 
   function failingStageLabels(verdict) {
-    // "depth[R6]"-style pointers derived from the verdict's own FAIL lines
+    // "vix[R5]"-style pointers derived from the verdict's own FAIL lines
     // (the golden catalog's "FAIL <stage>[<register>]:" prefix); a verdict
     // whose lines carry no such prefix falls back to its FAILed stage names.
     // Pointers only — the diagnosis wording stays the kit's catalog verbatim.
