@@ -15,6 +15,7 @@ import importlib
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -739,6 +740,49 @@ def test_pull_pipeline_clean_run_finish_detail_is_the_complete_note(
     assert snap["state"] == "done"
     assert snap["detail"].startswith("pipeline complete — spot ")
     assert "quarantined" not in snap["detail"]
+    assert "Greeks enrichment FAILED" not in snap["detail"]
+
+
+# ── Greeks-enrichment failure surfaces in the finish detail ───────────────────
+# (DEC-GREEKS-ENRICH-OBSERVE-001)
+
+
+def test_pull_pipeline_greeks_failure_shows_in_finish_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WHOLE-pass Greeks-enrichment failure is NAMED in the job's headline.
+
+    End-to-end through the real pipeline composition + BackgroundPullJob: the
+    historical fake's candle sub-report carries ``greeks_enrich_ok=False``
+    (the fully-guarded pass failed whole — the pull itself completed), the
+    pipeline settles ``done``, and the /pull-progress ``detail`` carries the
+    ", Greeks enrichment FAILED — overlay re-attempted next pull" clause so
+    the operator sees the failed pass instead of one swallowed log line.
+    """
+    _pin_creds_present(monkeypatch)
+
+    def _historical_with_greeks_failure(*args: Any, **kwargs: Any) -> CompositePullReport:
+        base = _fake_historical(*args, **kwargs)
+        inner = base.historical
+        assert inner is not None
+        failing = replace(
+            inner,
+            greeks_enrich_ok=False,
+            greeks_enrich_error="RuntimeError: misconfigured risk-free source",
+        )
+        return replace(base, historical=failing)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(
+        app_module, "pull_historical_for_underlyings", _historical_with_greeks_failure
+    )
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    assert snap["detail"].startswith("pipeline complete — ")
+    assert ", Greeks enrichment FAILED — overlay re-attempted next pull" in snap["detail"]
 
 
 # ── cross-list selection (DEC-UNIVERSE-UI-POLISH-002) ─────────────────────────
