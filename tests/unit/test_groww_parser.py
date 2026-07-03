@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -217,7 +217,7 @@ def test_partial_absent_open_row_is_skipped_not_fatal() -> None:
 # ── once-per-pull epoch-timestamp WARNING (DEC-INGEST-BOUNDARY-INTEGRITY-001) ─
 
 
-def _epoch_warns(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _epoch_warns(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
     """The captured ``groww.parse.epoch_timestamp`` events only."""
     return [e for e in logs if e["event"] == "groww.parse.epoch_timestamp"]
 
