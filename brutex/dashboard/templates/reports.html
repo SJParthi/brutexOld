@@ -347,11 +347,23 @@ function renderChips() {
   for (const s of allSymbols) {
     const chip = document.createElement("span");
     chip.className = "chip" + (selected.has(s.symbol) ? " on" : "");
+    /* Server-derived fields (symbol / exchange) are rendered via createElement +
+       textContent, NEVER string-concatenated into innerHTML — the repo XSS law
+       (DEC-RESULTS-SURFACE-HONESTY-001; a hostile lake directory name must
+       render as inert text). */
+    const nameEl = document.createElement("span");
+    nameEl.textContent = s.symbol;
     // OPT (has an option chain) vs SPOT (spot-only) badge — DEC-OPTIONS-ELIGIBLE-GUARD-001.
-    const badge = s.option_pullable
-      ? '<span class="b opt" title="Option-pullable — has a listed option chain">OPT</span>'
-      : '<span class="b spot" title="Spot-only — no option chain to pull">SPOT</span>';
-    chip.innerHTML = '<span>' + s.symbol + '</span>' + badge + '<span class="x">' + s.exchange + '</span>';
+    const badgeEl = document.createElement("span");
+    badgeEl.className = s.option_pullable ? "b opt" : "b spot";
+    badgeEl.title = s.option_pullable
+      ? "Option-pullable — has a listed option chain"
+      : "Spot-only — no option chain to pull";
+    badgeEl.textContent = s.option_pullable ? "OPT" : "SPOT";
+    const exchEl = document.createElement("span");
+    exchEl.className = "x";
+    exchEl.textContent = s.exchange;
+    chip.append(nameEl, badgeEl, exchEl);
     chip.onclick = () => {
       if (selected.has(s.symbol)) selected.delete(s.symbol); else selected.add(s.symbol);
       chip.classList.toggle("on");
