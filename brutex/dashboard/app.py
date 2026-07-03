@@ -5424,8 +5424,10 @@ def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | No
 
     The returned probe is a zero-arg closure over
     :func:`brutex.dashboard.lake_revision.lake_revision` — one O(1) ``os.stat``
-    of the window-ledger Parquet per call, never raising (every ``OSError`` maps
-    to ``None`` = "no signal" inside ``lake_revision``).
+    of the window-ledger Parquet plus the bounded O(dirs) sweeps-tree digest
+    (DEC-RESULTS-SURFACE-HONESTY-001; instruments × timeframes directory stats,
+    never O(files)) per call, never raising (every ``OSError`` maps to ``None``
+    = "no signal" inside ``lake_revision``).
     """
     store_path = getattr(instrument_store, "path", None)
     if not isinstance(store_path, Path):
@@ -5433,7 +5435,7 @@ def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | No
     lake_root = store_path.parent
 
     def _probe() -> str | None:
-        """One O(1) window-ledger stat token for the wired lake root."""
+        """The composite ledger-stat + sweeps-digest token for the wired lake root."""
         return lake_revision(lake_root)
 
     return _probe

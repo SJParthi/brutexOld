@@ -147,8 +147,12 @@ def test_reports_opt_spot_badge_present() -> None:
     assert ".chip .b.spot" in html, "the SPOT badge style is missing"
     # The render branches on the API's option_pullable flag.
     assert "s.option_pullable" in html, "the chip does not branch on option_pullable"
-    assert ">OPT<" in html, "the OPT badge label is missing"
-    assert ">SPOT<" in html, "the SPOT badge label is missing"
+    # The badge label is assigned via textContent (never innerHTML string-concat —
+    # DEC-RESULTS-SURFACE-HONESTY-001 closed that sink; the old '>OPT<' markup form
+    # is gone by design).
+    assert 'badgeEl.textContent = s.option_pullable ? "OPT" : "SPOT"' in html, (
+        "the OPT/SPOT badge label is missing"
+    )
 
 
 def test_reports_fno_only_selector_present() -> None:
