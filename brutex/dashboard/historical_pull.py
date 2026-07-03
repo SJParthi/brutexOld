@@ -78,11 +78,14 @@ from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
-    OPTION_SEGMENT,
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno_window_opens_on
 from brutex.adapters.groww.contracts import parse_contract_symbol
+from brutex.adapters.groww.expiry_scope import (
+    log_out_of_scope_expiries,
+    partition_contracts_by_scope,
+)
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
@@ -104,7 +107,6 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.calendars.nse import IST
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
@@ -232,6 +234,16 @@ class HistoricalPullReport:
     settled_skipped: int = 0
     """Windows THIS pull newly settled as terminal ``SKIPPED`` (the per-pull ledger
     tally) — the honest-verdict count (never "no action" over a settling pull)."""
+    expiries_out_of_scope: int = 0
+    """Distinct ``(underlying, expiry)`` groups EXCLUDED by the operator's expiry
+    scope (DEC-FNO-EXPIRY-SCOPE-001): an out-of-scope expiry is fetched not at
+    all — zero vendor calls, zero ledger rows, one ``fno.expiry_out_of_scope``
+    log per group; already-stored bars are never touched. Always 0 under the
+    default unbounded scope."""
+    contracts_out_of_scope: int = 0
+    """Contract legs excluded by the expiry scope (the per-leg sum over
+    :attr:`expiries_out_of_scope` groups). These never enter
+    :attr:`contracts_selected` — the pull workload counts in-scope legs only."""
 
     @property
     def verdict(self) -> PullVerdict:
@@ -281,6 +293,8 @@ class HistoricalPullReport:
             "note": self.note,
             "mass_empty_cause": self.mass_empty_cause,
             "settled_skipped": self.settled_skipped,
+            "expiries_out_of_scope": self.expiries_out_of_scope,
+            "contracts_out_of_scope": self.contracts_out_of_scope,
             "verdict": self.verdict.to_dict(),
         }
 
@@ -662,6 +676,8 @@ def _build_note(
     contracts_not_yet_in_window: int = 0,
     windows_skipped: int = 0,
     ledger_load_failed: bool = False,
+    expiries_out_of_scope: int = 0,
+    contracts_out_of_scope: int = 0,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -684,6 +700,14 @@ def _build_note(
     settled-window skip engaging; a failed ledger reload prepends "window ledger
     reload FAILED — running full re-verify pull (no skip); " so a lost cross-run
     memory is announced, never silent. The defaults render byte-identically to before.
+
+    *expiries_out_of_scope* / *contracts_out_of_scope* (DEC-FNO-EXPIRY-SCOPE-001):
+    a scoped-out expiry appends ", N expiries out of scope skipped" to whichever
+    base is built; an ALL-out-of-scope selection (nothing left to pull) gets its
+    OWN honest base — never the misleading "no contracts selected — pull expiries
+    + contracts first" (the registry IS populated; the operator's scope excluded
+    everything). Stored bars are never touched — the note says so. The zero
+    defaults render byte-identically to before.
     """
     prefix = (
         "window ledger reload FAILED — running full re-verify pull (no skip); "
@@ -695,7 +719,18 @@ def _build_note(
         if windows_skipped
         else ""
     )
-    if contracts_selected == 0:
+    scope_suffix = (
+        f", {expiries_out_of_scope} expiries out of scope skipped"
+        if expiries_out_of_scope and contracts_selected
+        else ""
+    )
+    if contracts_selected == 0 and contracts_out_of_scope:
+        base = (
+            f"all {contracts_out_of_scope} selected contract(s) across "
+            f"{expiries_out_of_scope} expiry(ies) fall outside the requested expiry "
+            "scope — nothing pulled (already-stored bars untouched)"
+        )
+    elif contracts_selected == 0:
         base = (
             "no contracts selected — pull expiries + contracts first (the registry is "
             "empty for this selection), then pick a contract / chain / underlying to pull"
@@ -736,7 +771,7 @@ def _build_note(
             f"pulled {windows} windows across {contracts_completed}/{contracts_selected} "
             f"contract(s){skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
         )
-    return f"{prefix}{base}{suffix}"
+    return f"{prefix}{base}{suffix}{scope_suffix}"
 
 
 def _mark_complete(
@@ -966,7 +1001,7 @@ def _run_phase(
         # cause is folded onto the phase result so the report's `verdict` reads the
         # loud, needs-operator ``mass_empty_halt`` — not a generic job error. Because
         # the halt is CAUGHT here (it never escapes to the job layer's
-        # ``_is_pull_halt`` path), the CRITICAL Telegram pull-halt alert fires HERE
+        # ``is_pull_halt`` path), the CRITICAL Telegram pull-halt alert fires HERE
         # (DEC-TELEGRAM-PULL-HALT-001 parity with the spot/CLI routes; best-effort by
         # construction).
         emit_pull_halt_alert(exc)
@@ -1101,110 +1136,6 @@ def _resolve_minute_windows(
     return windows
 
 
-def _derive_daily_from_minute(
-    *,
-    rebuilt: Sequence[_RebuiltContract],
-    windows: dict[str, tuple[date, date]],
-    lake_root: Path,
-    now: datetime,
-) -> None:
-    """Derive 1-day bars from the just-written 1-minute per contract — best-effort.
-
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. 1-minute is the ONLY granularity fetched from
-    Groww; the 1-day series is DERIVED here (never fetched) by resampling each contract's
-    freshly-written 1-minute over its resolved window to midnight-IST daily bars and
-    writing them to the lake's ``FNO/<symbol>/1day`` partition. This is the F&O twin of
-    the spot ``_resample_daily_after_pull`` and DELEGATES the quarantine/tally control
-    flow to the SAME tested driver
-    (:func:`~brutex.data.spot_daily_resample.derive_daily_for_targets`, CLAUDE.md §11
-    COMMON — no duplicated inline loop): it builds one
-    :class:`~brutex.data.spot_daily_resample.DailyDeriveTarget` per contract whose
-    exchange resolves, then hands the per-target read/write builders to the driver. The
-    OHLCV aggregation + midnight-IST re-stamp share the spot resampler's single source of
-    truth; the derived ``1day`` partition is written latest-wins so a later complete pull
-    self-heals a partial-session bar (FIX-2).
-
-    DEC-FNO-TF-DERIVE-OI-001: unlike the spot daily (cash carries no OI), the F&O 1-minute
-    carries a real ``open_interest`` column, so the reader is built with ``include_oi=True``
-    and the driver's ``resample_fn`` is bound to
-    :func:`~brutex.data.fno_daily_resample.resample_1m_to_fno_daily_positional`, which
-    carries the **last-of-day** OI (a snapshot, never summed) into the derived ``1day`` bar.
-    Already-stored derived ``1day`` partitions written before this change carry ``OI=None``
-    and self-heal on the NEXT pull (latest-wins overwrite — ``_bar_values_equal`` compares
-    ``open_interest``); this change does NOT retroactively rewrite on-disk daily OI.
-
-    QUARANTINED on TWO planes: (a) a contract whose ``exchange`` is unresolvable is
-    SKIPPED here (logged ``contract_skipped``, never a target); (b) a per-target
-    derivation error (corrupt slice / write failure) is quarantined by the driver
-    (``errored`` tally) — neither EVER fails the pull. The 1-minute candles are already
-    safely in the lake; the derived daily partition is a convenience layer, so its failure
-    must not regress the authoritative minute data (Golden Rule #10).
-    """
-    from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
-    from brutex.data.spot_daily_resample import (
-        DailyDeriveTarget,
-        derive_daily_for_targets,
-        make_lake_read_1m_window,
-        make_lake_write_1day,
-    )
-
-    before = now.astimezone(IST).date()
-    targets: list[DailyDeriveTarget] = []
-    for _row, contract in rebuilt:
-        window = windows.get(contract.symbol)
-        if window is None:
-            continue
-        try:
-            exchange = contract_exchange(contract)
-        except ValueError as exc:
-            _LOG.warning(
-                "historical.derive_daily.contract_skipped",
-                symbol=contract.symbol,
-                error=str(exc),
-            )
-            continue
-        win_start, win_end = window
-        targets.append(
-            DailyDeriveTarget(
-                exchange=exchange,
-                segment=OPTION_SEGMENT,
-                symbol=contract.symbol,
-                start=win_start,
-                end=win_end,
-            )
-        )
-
-    report = derive_daily_for_targets(
-        targets=targets,
-        build_read_1m=lambda t: make_lake_read_1m_window(
-            lake_root=lake_root,
-            exchange=t.exchange,
-            segment=t.segment,
-            symbol=t.symbol,
-            start=t.start,
-            end=t.end,
-            include_oi=True,  # F&O 1-minute carries OI — carry it into the derived 1day
-        ),
-        build_write_1day=lambda t: make_lake_write_1day(
-            lake_root=lake_root,
-            exchange=t.exchange,
-            segment=t.segment,
-            symbol=t.symbol,
-        ),
-        before=before,
-        # F&O daily carries last-of-day OI (DEC-FNO-TF-DERIVE-OI-001) — the ONE
-        # knob that makes the SHARED spot daily driver OI-correct for derivatives.
-        resample_fn=resample_1m_to_fno_daily_positional,
-    )
-    _LOG.info(
-        "historical.derive_daily.done",
-        derived=report.derived,
-        no_minute=report.no_minute,
-        errored=report.errored,
-        bars=report.bars,
-    )
-
-
 def _enrich_greeks_from_minute(
     *,
     rebuilt: Sequence[_RebuiltContract],
@@ -1214,9 +1145,13 @@ def _enrich_greeks_from_minute(
     """Post-pull Greeks enrichment over the just-written option 1-minute — best-effort.
 
     ``greeks_enrich_after_pull`` (DEC-GREEKS-ENGINE-PR2B-001 /
-    `DEC-GREEKS-GENERATION-TIME-001`, plan §15.4): the F&O Greeks twin of
-    :func:`_derive_daily_from_minute`, run at the SAME post-drain seam (the
-    fetch lane has fully drained — the pass can never block or slow a fetch).
+    `DEC-GREEKS-GENERATION-TIME-001`, plan §15.4): the F&O Greeks pass at the
+    post-drain seam (the fetch lane has fully drained — the pass can never
+    block or slow a fetch). It once shared this seam with the (now removed)
+    mid-pull ``_derive_daily_from_minute`` daily derive — the ``1day`` derive
+    was relocated into the pipeline's automatic FINAL prebuild stage
+    (DEC-PIPELINE-AUTOPREBUILD-001); the Greeks overlay stays HERE because it
+    annotates the just-pulled 1-minute bars themselves.
     One :class:`~brutex.data.greeks_enrich.GreeksEnrichTarget` per resolved
     contract window; FUT legs are skipped INSIDE the driver (never a bogus
     Greek for a future); the risk-free source is the locked PR-1 seam
@@ -1294,6 +1229,8 @@ def pull_contract_candles(
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
     run_parallel: RunParallel | None = None,
+    scope_start: date | None = None,
+    scope_end: date | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -1383,6 +1320,17 @@ def pull_contract_candles(
         :class:`~brutex.orchestrator.parallel.PoolRunParallel` from the session
         controller (:func:`_option_run_parallel`) — a dry-run / no-controller pull then
         keeps the byte-identical serial default; tests inject a synchronous fake.
+    scope_start, scope_end
+        OPTIONAL inclusive EXPIRY-scope bounds (DEC-FNO-EXPIRY-SCOPE-001): only
+        contracts whose expiry lies within ``[scope_start, scope_end]`` are
+        pulled; an out-of-scope expiry is skipped ENTIRELY — zero vendor calls,
+        zero ledger rows (the partition runs strictly BEFORE any planning), one
+        honest ``fno.expiry_out_of_scope`` log per ``(underlying, expiry)``
+        group, stored bars untouched. The scope selects WHICH expiries — it
+        NEVER reshapes windows (in-scope contracts keep the normal 30d/60d
+        default window law over the standard envelope). ``None``/``None`` (the
+        default) is byte-identical to the unscoped pull. Distinct from
+        *from_date*/*to_date*, which reshape every contract's fetch WINDOW.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -1446,7 +1394,15 @@ def pull_contract_candles(
     write_pool = (
         None if fetch_pipeline is not None else _build_write_consumer(sink, dry_run=dry_run)
     )
-    rebuilt = _rebuild_contracts(contracts)
+    # Expiry-level date scoping (DEC-FNO-EXPIRY-SCOPE-001): partition the selection
+    # STRICTLY BEFORE the contract rebuild + window planning, so an out-of-scope
+    # expiry never reaches plan_contract_windows (zero PLANNED ledger rows — a stray
+    # row would make every later pull re-attempt it) and never costs a vendor call.
+    # The default (None, None) scope keeps every contract — byte-identical to before.
+    # Stored lake bars for a scoped-out expiry are NEVER touched.
+    scoped = partition_contracts_by_scope(contracts, scope_start=scope_start, scope_end=scope_end)
+    log_out_of_scope_expiries(scoped, scope_start=scope_start, scope_end=scope_end)
+    rebuilt = _rebuild_contracts(scoped.in_scope)
 
     # Per-contract 1-minute window (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): explicit operator
     # dates OVERRIDE (every contract uses the resolved range); else each contract's DEFAULT
@@ -1546,20 +1502,17 @@ def pull_contract_candles(
     if fetch_pipeline is not None:
         emit_underlying_all_empty(minute.merged_pairs, [contract for _row, contract in rebuilt])
 
-    # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
-    # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the
-    # derived 1-day partition is a best-effort convenience. Skipped on a dry-run (the
-    # NullBarSink wrote nothing, and the sentinel lake_root may not be writable).
+    # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the mid-pull F&O 1-day derivation that ran
+    # here (``_derive_daily_from_minute``) is REMOVED — derived data (intraday TFs +
+    # the derived ``1day``) is written ONLY by the pipeline's final prebuild phase
+    # (brutex.dashboard.pipeline_prebuild), strictly after a fully-successful fetch.
     if not dry_run:
-        _derive_daily_from_minute(
-            rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root, now=now
-        )
         # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
         # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
         # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
-        # underlying spot — the F&O Greeks twin of the daily derive above, at the SAME
-        # post-drain seam. Best-effort: NEVER fails the pull (fully guarded inside);
-        # FUT legs never get Greeks; skipped on a dry-run (nothing was written).
+        # underlying spot, at the post-drain seam. Best-effort: NEVER fails the pull
+        # (fully guarded inside); FUT legs never get Greeks; skipped on a dry-run
+        # (nothing was written).
         _enrich_greeks_from_minute(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
 
     # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
@@ -1577,6 +1530,8 @@ def pull_contract_candles(
         contracts_not_yet_in_window=contracts_not_yet_in_window,
         windows_skipped=minute.skipped_windows,
         ledger_load_failed=minute.ledger_load_failed,
+        expiries_out_of_scope=scoped.expiries_out_of_scope,
+        contracts_out_of_scope=scoped.contracts_out_of_scope,
     )
     return HistoricalPullReport(
         dry_run=dry_run,
@@ -1602,6 +1557,9 @@ def pull_contract_candles(
         # the honest settle tally ride the report (see `HistoricalPullReport.verdict`).
         mass_empty_cause=minute.mass_empty_cause,
         settled_skipped=minute.settled_skipped,
+        # DEC-FNO-EXPIRY-SCOPE-001: the honest out-of-scope tallies (0/0 unscoped).
+        expiries_out_of_scope=scoped.expiries_out_of_scope,
+        contracts_out_of_scope=scoped.contracts_out_of_scope,
     )
 
 

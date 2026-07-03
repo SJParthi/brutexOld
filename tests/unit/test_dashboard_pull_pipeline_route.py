@@ -12,6 +12,7 @@ the ``[ui]`` extra (FastAPI) or duckdb is absent.
 from __future__ import annotations
 
 import importlib
+import threading
 import time
 from collections.abc import Iterator
 from datetime import date
@@ -29,6 +30,7 @@ from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.prebuild_gate import PrebuildGate
 from brutex.dashboard.pull_controller import BulkSpotReport, SymbolPullResult
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -249,38 +251,53 @@ def test_pull_pipeline_unknown_selection_fails_closed_400(
     assert "99999" in resp.json()["detail"]
 
 
-# ── the gated FINAL pre-build stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ────────
+# ── the gated auto-prebuild stage (DEC-PIPELINE-AUTOPREBUILD-001) ──────────────
 
 
-def test_pull_pipeline_runs_prebuild_as_final_stage_on_clean_fetch(
+def test_pull_pipeline_runs_prebuild_after_clean_fetch(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fully-successful offline pipeline runs the FINAL pre-build stage.
+    """A fully-successful offline pipeline runs the automatic prebuild stage.
 
-    The route binds ``run_prebuild`` to a materialiser driven through
-    ``brutex.data.tf_autoderive.run_autoderive`` (lazily imported inside the job
-    body). We spy on it: a clean fetch (the offline fakes are all clean) must invoke
-    it ONCE over the pulled target(s), proving the unified pre-build runs as the
-    pipeline's automatic final stage — the operator never clicks it manually.
+    The route binds ``run_prebuild`` to the pure crash-guarded
+    ``run_pipeline_prebuild_guarded`` (DEC-PIPELINE-AUTOPREBUILD-001 — the old
+    ``run_autoderive`` binding is gone). We spy on the app-module binding: a
+    clean fetch (the offline fakes are all clean) must invoke it ONCE over the
+    pulled target(s) with the target-shaped materialiser + cascade builder,
+    proving the prebuild runs automatically — the operator never clicks it.
     """
-    from brutex.data import tf_autoderive
+    from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 
     seen: list[tuple[str, ...]] = []
-    real_report = tf_autoderive.AutoderiveReport(outcomes=())
 
-    def _spy_run_autoderive(*, symbols: Any, materialize_one: Any) -> Any:
-        seen.append(tuple(symbols))
-        return real_report
+    def _spy_prebuild(
+        *, instruments: Any, cascade_or_error: Any, materialize: Any, **kwargs: Any
+    ) -> PrebuildOutcome:
+        seen.append(tuple(inst.symbol_name for inst in instruments))
+        return PrebuildOutcome(symbols_built=1, total_bars=9, failed=(), failed_count=0, ok=True)
 
-    monkeypatch.setattr(tf_autoderive, "run_autoderive", _spy_run_autoderive)
+    monkeypatch.setattr(app_module, "run_pipeline_prebuild_guarded", _spy_prebuild)
     _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     resp = client.post("/api/v1/universe/pull-pipeline")
     assert resp.status_code == 200
     assert _wait_for_job(client)["state"] == "done"
-    # The FINAL pre-build stage ran exactly once over the pulled target (NIFTY).
+    # The prebuild stage ran exactly once over the pulled target (NIFTY).
     assert len(seen) == 1, "the pre-build stage must run once on a clean fetch"
     assert "NIFTY" in seen[0], "pre-build must cover the pulled target symbol"
+
+
+def test_pull_pipeline_prebuild_crash_never_fails_the_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL guarded prebuild runs over an empty lake (NIFTY has no stored
+    1-minute) — its per-symbol failure is quarantined, and the already-successful
+    fetch job still settles ``done`` (the prebuild can never kill the job)."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
 
 
 # ── spot from/to date range (DEC-UNIVERSE-PULL-DATERANGE-001) ─────────────────
@@ -310,6 +327,32 @@ def _patch_spines_capturing(
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _metadata)
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
     return spot_calls, metadata_calls
+
+
+def _patch_spines_capturing_historical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Wire the offline fakes, RECORDING the spot AND historical phases' kwargs.
+
+    Returns ``(spot_calls, historical_calls)`` so a test can assert BOTH that the
+    spot phase received the operator dates verbatim AND that the F&O historical
+    phase received them as the parsed EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001).
+    """
+    spot_calls: list[dict[str, Any]] = []
+    historical_calls: list[dict[str, Any]] = []
+
+    def _spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        spot_calls.append(dict(kwargs))
+        return _fake_spot(*args, **kwargs)
+
+    def _historical(*args: Any, **kwargs: Any) -> CompositePullReport:
+        historical_calls.append(dict(kwargs))
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _historical)
+    return spot_calls, historical_calls
 
 
 def test_pull_pipeline_blank_dates_thread_none_to_spot(
@@ -430,3 +473,269 @@ def test_pull_pipeline_whitespace_dates_behave_as_blank(
     assert spot_calls[0]["from_date"] is None
     assert spot_calls[0]["to_date"] is None
     assert metadata_calls[0]["years"][0] == 2020
+
+
+# ── F&O expiry scoping via the operator dates (DEC-FNO-EXPIRY-SCOPE-001) ─────
+
+
+def test_pull_pipeline_explicit_dates_spot_verbatim_and_historical_expiry_scope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Permutation (i): SPOT still gets from/to VERBATIM; historical gets the SCOPE.
+
+    Explicit valid dates thread UNCHANGED to the spot phase (the pre-existing
+    DEC-UNIVERSE-PULL-DATERANGE-001 contract — pinned so the scoping change can
+    never disturb it) AND reach the F&O historical phase as the PARSED expiry
+    scope bounds (``scope_start`` / ``scope_end`` as ``date`` objects) — never as
+    the window-reshaping ``from_date`` / ``to_date``.
+    """
+    _pin_creds_present(monkeypatch)
+    spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2021-03-01", "to_date": "2022-04-15"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    # SPOT: the raw strings, verbatim (unchanged by the scoping feature).
+    assert spot_calls[0]["from_date"] == "2021-03-01"
+    assert spot_calls[0]["to_date"] == "2022-04-15"
+    # HISTORICAL: the parsed EXPIRY scope — and NO window-reshaping dates.
+    assert len(historical_calls) == 1
+    assert historical_calls[0]["scope_start"] == date(2021, 3, 1)
+    assert historical_calls[0]["scope_end"] == date(2022, 4, 15)
+    assert "from_date" not in historical_calls[0]
+    assert "to_date" not in historical_calls[0]
+
+
+def test_pull_pipeline_blank_dates_thread_unbounded_scope_to_historical(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blank dates ⇒ the historical phase gets an UNBOUNDED (None/None) expiry scope.
+
+    DEFAULT-PRESERVATION (DEC-FNO-EXPIRY-SCOPE-001): a no-date pull threads
+    ``scope_start=None`` / ``scope_end=None`` — byte-identical to the unscoped
+    pull (every expiry in scope).
+    """
+    _pin_creds_present(monkeypatch)
+    _spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert len(historical_calls) == 1
+    assert historical_calls[0]["scope_start"] is None
+    assert historical_calls[0]["scope_end"] is None
+
+
+# ── the movers PREBUILD GATE binding (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2) ──
+
+
+def _gated_client(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gate: PrebuildGate
+) -> TestClient:
+    """A TestClient whose app carries an INJECTED PrebuildGate (the build_app seam)."""
+    monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+    return TestClient(build_app(DashboardState(), instrument_store=store, prebuild_gate=gate))
+
+
+def _patch_blocking_spot(
+    monkeypatch: pytest.MonkeyPatch, *, still_failed_windows: int = 0
+) -> tuple[threading.Event, threading.Event]:
+    """Wire a spot fake that BLOCKS mid-phase until the test says proceed.
+
+    Returns ``(entered, proceed)``: the fake sets *entered* when the pipeline is
+    genuinely running its spot phase, then waits on *proceed* — so the test can
+    deterministically observe the MID-RUN gate state (no sleep-and-hope timing).
+    """
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def _blocking_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        entered.set()
+        assert proceed.wait(timeout=10.0), "test never released the blocking spot fake"
+        report = _fake_spot(*args, **kwargs)
+        report.still_failed_windows = still_failed_windows
+        return report
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _blocking_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    return entered, proceed
+
+
+def test_pull_pipeline_gates_movers_while_running_then_releases_ok_true(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MID-RUN the /movers route is gated (honest `gated: true`, zero candidate
+    computation); after the clean run (prebuild ok=True) the gate is released
+    with ok=True and /movers serves normally again."""
+    from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
+
+    _pin_creds_present(monkeypatch)
+    entered, proceed = _patch_blocking_spot(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "run_pipeline_prebuild_guarded",
+        lambda **kwargs: PrebuildOutcome(
+            symbols_built=1, total_bars=9, failed=(), failed_count=0, ok=True
+        ),
+    )
+    compute_calls: list[str] = []
+
+    def _spy_spot(*args: Any, **kwargs: Any) -> Any:
+        compute_calls.append("spot")
+        raise AssertionError("no candidate computation may run while gated")
+
+    monkeypatch.setattr(app_module, "compute_spot_candidates", _spy_spot)
+    gate = PrebuildGate()
+    with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+        resp = client.post("/api/v1/universe/pull-pipeline")
+        assert resp.status_code == 200
+        try:
+            assert entered.wait(timeout=10.0), "the pipeline job never started its spot phase"
+            # MID-RUN: the gate blocks and the movers route answers honestly.
+            body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+            assert body["gated"] is True
+            assert "prebuild in progress" in body["note"]
+            assert compute_calls == []  # ZERO lake-reading computation while gated
+        finally:
+            proceed.set()
+        assert _wait_for_job(client)["state"] == "done"
+        snap = gate.snapshot()
+        assert snap.blocking is False  # released in the job's finally
+        assert snap.last_ok is True  # the spied prebuild succeeded
+        assert snap.runs == 1
+
+
+def test_pull_pipeline_spot_failure_releases_gate_movers_never_stuck(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pipeline that STOPS at the spot phase (still-failing windows) still
+    releases the gate (ok=False) — a failed pull can never wedge movers shut."""
+    _pin_creds_present(monkeypatch)
+    entered, proceed = _patch_blocking_spot(monkeypatch, still_failed_windows=1)
+    gate = PrebuildGate()
+    with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+        assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+        try:
+            assert entered.wait(timeout=10.0)
+            assert gate.snapshot().blocking is True  # gated while running
+        finally:
+            proceed.set()
+        assert _wait_for_job(client)["state"] == "done"
+        snap = gate.snapshot()
+        assert snap.blocking is False  # movers NEVER stuck behind a failed pull
+        assert snap.last_ok is False  # the prebuild never ran → honest False
+        # And the movers route serves the normal (non-gated) payload again.
+        body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+        assert "gated" not in body
+
+
+def test_pull_pipeline_dry_run_does_not_gate(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An explicit dry_run pipeline writes no real data — it must NOT gate the
+    movers, mid-run OR after (the gate's run counter never moves)."""
+    _pin_creds_present(monkeypatch)
+    entered, proceed = _patch_blocking_spot(monkeypatch)
+    gate = PrebuildGate()
+    with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+        assert (
+            client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"}).status_code
+            == 200
+        )
+        try:
+            assert entered.wait(timeout=10.0)
+            # MID-RUN: not gated — /movers serves the normal payload.
+            assert gate.snapshot().blocking is False
+            body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+            assert "gated" not in body
+        finally:
+            proceed.set()
+        assert _wait_for_job(client)["state"] == "done"
+        assert gate.snapshot().runs == 0  # begin() was never called
+
+
+def test_pull_pipeline_prebuild_global_stop_fails_job_alerts_and_releases_gate(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """END-TO-END F1 wiring pin (DEC-PIPELINE-AUTOPREBUILD-001 hostile-review
+    fold): a disk-full ``LakeWriteHalt`` inside the REAL guarded prebuild
+    RE-RAISES through ``run_full_pipeline`` (no movers warm ever fires), the
+    job settles ``error`` naming the halt, the CRITICAL pull-halt alert fires
+    exactly once, and the movers gate is STILL released (``last_ok=False``) —
+    the halt is loud, and movers are never wedged shut behind it."""
+    from brutex.data.errors import LakeWriteHalt
+
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+
+    def _halting_materialize(*args: Any, **kwargs: Any) -> Any:
+        raise LakeWriteHalt("disk_full")
+
+    monkeypatch.setattr(app_module, "materialize_lake_timeframes", _halting_materialize)
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    gate = PrebuildGate()
+    with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+        assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+        snap = _wait_for_job(client)
+        assert snap["state"] == "error"  # the halt FAILS the job — never a fake "done"
+        assert "LakeWriteHalt" in snap["detail"]
+        assert len(halts) == 1  # the CRITICAL Telegram pull-halt alert fired once
+        assert isinstance(halts[0], LakeWriteHalt)
+        gate_snap = gate.snapshot()
+        assert gate_snap.blocking is False  # the _work finally still released the gate
+        assert gate_snap.last_ok is False  # honest provenance: the prebuild never succeeded
+        # /movers serves the normal (non-gated) payload again — never stuck.
+        body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+        assert "gated" not in body
+
+
+# ── quarantined symbols surface in the finish detail (chunk 3 headline honesty) ──
+
+
+def test_pull_pipeline_quarantined_symbol_shows_in_finish_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-symbol quarantine is NAMED in the job's completion headline.
+
+    End-to-end through the real pipeline composition + BackgroundPullJob: a spot
+    fake whose NIFTY carries a terminally-failed pair passes every phase gate
+    (no pull-wide failure), the pipeline completes, and the /pull-progress
+    ``detail`` reads the honest "pipeline complete — 1 symbol(s) quarantined:
+    NIFTY — …" note instead of the bare "done".
+    """
+    _pin_creds_present(monkeypatch)
+
+    def _spot_with_quarantine(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        return BulkSpotReport(
+            dry_run=kwargs["dry_run"],
+            start_date="2020-01-01",
+            end_date="2026-06-20",
+            symbols=[SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0)],
+        )
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _spot_with_quarantine)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    assert "1 symbol(s) quarantined: NIFTY — " in snap["detail"]
+    assert snap["detail"].startswith("pipeline complete — ")
+
+
+def test_pull_pipeline_clean_run_finish_detail_is_the_complete_note(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean pipeline's headline is the honest complete note (no quarantine)."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    assert snap["detail"].startswith("pipeline complete — spot ")
+    assert "quarantined" not in snap["detail"]

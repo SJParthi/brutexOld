@@ -1,10 +1,13 @@
-"""Property invariants for the gated pre-build (DEC-PREBUILD-SELECT-001).
+"""Property invariants for the pre-build (DEC-PREBUILD-SELECT-001 + DEC-PIPELINE-AUTOPREBUILD-001).
 
 Hypothesis over :func:`brutex.dashboard.gated_prebuild.run_gated_prebuild` +
 the SPOT byte-identity of :func:`brutex.data.timeframe_materialize.materialize_timeframes`:
 
 * any subset / permutation of selected symbols never crashes;
-* the GATE invariant — a phase runs ⇒ every prior RAN phase had ZERO failures;
+* the NON-HALTING invariant (DEC-PIPELINE-AUTOPREBUILD-001 — supersedes the
+  halt gate of DEC-PREBUILD-SELECT-001): EVERY phase always runs in order, no
+  matter which symbols fail; every failure is honestly recorded in its phase's
+  ``failed`` and ``report.ok`` is exactly "zero failures anywhere";
 * SPOT output is byte-identical via the default (``resampler=None``) and the
   explicit SPOT resampler (the golden bit-identity guard).
 """
@@ -59,7 +62,7 @@ _spec = st.tuples(st.booleans(), st.integers(min_value=0, max_value=3), st.boole
 
 
 @given(specs=st.lists(_spec, max_size=8))
-def test_any_selection_never_crashes_and_respects_the_gate(
+def test_any_selection_never_crashes_and_every_phase_always_runs(
     specs: list[tuple[bool, int, bool]],
 ) -> None:
     underlyings = [_underlying(i) for i in range(len(specs))]
@@ -93,20 +96,19 @@ def test_any_selection_never_crashes_and_respects_the_gate(
         materialize_future=materialize_future,
     )
 
-    # GATE invariant: every RAN phase EXCEPT possibly the last (the halting one)
-    # had zero failures; a later phase ran ⇒ all earlier ran phases were ok.
-    ran = report.phases
-    for i, phase in enumerate(ran):
-        is_last = i == len(ran) - 1
-        if not is_last:
-            assert phase.ok, "a non-terminal ran phase must have had zero failures"
-    # halted_after set ⇔ the last ran phase failed AND not all phases ran.
-    if report.halted_after is not None:
-        assert not ran[-1].ok
-        assert len(ran) < len(PREBUILD_PHASE_ORDER) or not report.ok
-    else:
-        # No halt ⇒ every phase ran in order.
-        assert [p.phase for p in ran] == [k.value for k in PREBUILD_PHASE_ORDER]
+    # NON-HALTING invariant (DEC-PIPELINE-AUTOPREBUILD-001): EVERY phase always
+    # runs in order, no matter which symbols fail.
+    assert [p.phase for p in report.phases] == [k.value for k in PREBUILD_PHASE_ORDER]
+    # Every forced failure is honestly recorded in its phase's ``failed`` and
+    # every healthy symbol still succeeded (one bad symbol never aborts a stage).
+    spot_phase, futures_phase, _options_phase = report.phases
+    assert {s for s, _ in spot_phase.failed} == spot_fail
+    assert set(spot_phase.succeeded) == {u.symbol_name for u in underlyings} - spot_fail
+    assert {s for s, _ in futures_phase.failed} == fut_fail
+    expected_fut_ok = {c for lst in futures_by_u.values() for c in lst} - fut_fail
+    assert set(futures_phase.succeeded) == expected_fut_ok
+    # ok ⇔ zero failures anywhere.
+    assert report.ok == (not spot_fail and not fut_fail)
 
 
 def _df_1m(n: int) -> pl.DataFrame:

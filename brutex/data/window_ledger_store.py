@@ -433,7 +433,7 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
             # non-ENOSPC OSError such as EACCES propagates raw, never mis-escalated).
             # LakeWriteHalt is a member of BOTH ingest spines' _GLOBAL_STOP_ERRORS, so it
             # propagates past the per-symbol/per-contract quarantine to the CLI
-            # `_pull_halt_errors` / dashboard `_is_pull_halt` halt handling already in
+            # `_pull_halt_errors` / dashboard `is_pull_halt` halt handling already in
             # place. The fsync (durability for the durable ledger) + temp cleanup on any
             # error are unchanged.
             atomic_write_via(path, _write_parquet)

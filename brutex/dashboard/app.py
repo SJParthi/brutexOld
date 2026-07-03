@@ -108,7 +108,6 @@ from brutex.dashboard.fno_underlying import (
     fno_underlying_forms,
     resolve_fno_index_aliases,
 )
-from brutex.dashboard.gated_prebuild import discover_futures_contracts, run_gated_prebuild
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.lake_revision import lake_revision
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
@@ -141,7 +140,13 @@ from brutex.dashboard.movers_warm import (
     spot_warm_grid,
     warm_movers_snapshots,
 )
+from brutex.dashboard.pipeline_prebuild import (
+    PrebuildOutcome,
+    PrebuildTarget,
+    run_pipeline_prebuild_guarded,
+)
 from brutex.dashboard.pipeline_pull import run_full_pipeline
+from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
 from brutex.dashboard.preopen_report import (
     ReportBasis,
     ReportMode,
@@ -203,13 +208,7 @@ from brutex.data.mapping_integrity import (
 from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
-from brutex.data.timeframe_materialize import (
-    MATERIALIZABLE_TFS,
-    PrebuildKind,
-    intraday_resampler_for,
-    materialize_lake_timeframes,
-    prebuild_kind_for,
-)
+from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
 from brutex.orchestrator.pipeline import (
@@ -906,6 +905,7 @@ def build_app(
     summary_cache: SummaryCache | None = None,
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
+    prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
 ) -> Any:
@@ -949,6 +949,16 @@ def build_app(
         repeat poll between two instrument loads is a dict handoff, not a re-scan.
         Injected so a test can assert the hit/invalidation behaviour; ``None``
         (the default) builds a fresh production cache.
+    prebuild_gate
+        Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
+        the ``/api/v1/movers`` screens while the one-click pull pipeline runs
+        (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the ``/pull-pipeline``
+        background job ``begin()``s it at start and ``release(ok)``s it in a
+        ``try/finally`` when the prebuild finishes or the pipeline stops early
+        (a failed pull can never leave movers blocked). ONLY the full pipeline
+        route gates; a ``dry_run`` pipeline does not. Injected so tests drive
+        the gated/released transitions deterministically; ``None`` (the
+        default) builds a fresh production gate.
     quota_tracker
         Optional read-only daily-quota source for the ``/api/v1/quota``
         endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
@@ -1090,6 +1100,13 @@ def build_app(
     # load moves the token and rebuilds. Content-exact (never a stale illusion —
     # Golden Rule #1).
     _universe_cache = universe_cache if universe_cache is not None else UniverseSnapshotCache()
+    # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
+    # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
+    # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
+    # partitions must never be ranked); the pipeline job releases it in a
+    # try/finally so a failed/stopped pull can never wedge the movers shut. Owned
+    # by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _prebuild_gate = prebuild_gate if prebuild_gate is not None else PrebuildGate()
     # The /db candle-pager TOTAL cache (DEC-DB-CANDLE-COUNT-CACHE-001): the page
     # `COUNT(*)` over `read_parquet(glob)` is O(files) (a Parquet-footer read per
     # monthly file — ~8 ms at 6 years, growing as the lake deepens) and was
@@ -2582,14 +2599,15 @@ def build_app(
         1. **Spot** — :func:`~brutex.dashboard.pull_controller.pull_all_spot`.
         2. **Metadata** — :func:`~brutex.dashboard.metadata_pull.pull_expiries_contracts`.
         3. **Historical** — :func:`~brutex.dashboard.composite_pull.pull_historical_for_underlyings`.
-        4. **Movers (gated)** — warm the default movers snapshots ONLY after a
-           fully-successful fetch (DEC-PULL-SELECTED-PIPELINE-001 — "until/unless
-           successful fetches happen, never run movers").
-        5. **Pre-build timeframes (gated, FINAL)** — materialise the 19 derived
-           intraday timeframes over the just-filled lake ONLY after a
-           fully-successful fetch (DEC-UNIVERSE-PULL-CONSOLIDATE-001 — "pre-build
-           runs as the pipeline's final stage automatically"), so the operator never
-           needs the separate manual button after a one-click pull.
+        4. **Pre-build timeframes (gated, the FINAL data stage —
+           DEC-PIPELINE-AUTOPREBUILD-001)** — materialise ALL derived timeframes
+           (19 intraday + the derived ``1day``) for SPOT + FUTURES + OPTIONS over
+           the just-filled lake, ONLY after a fully-successful fetch. Derived data
+           is written ONLY here — never mid-pull, and the old manual
+           "Pre-build timeframes" button is removed.
+        5. **Movers (gated, AFTER the prebuild)** — warm the default movers
+           snapshots only once the prebuild has run (movers read the derived
+           timeframes the prebuild just wrote).
 
         The GATE between phases is the pure
         :func:`~brutex.dashboard.pipeline_pull.run_full_pipeline`: a phase that ends
@@ -2609,10 +2627,15 @@ def build_app(
         DEC-UNIVERSE-PULL-CONSOLIDATE-001 had removed as inert): they scope the
         SPOT pull window AND narrow the metadata-pull YEAR grid. **Blank ⇒ the
         canonical default** ``[2020-01-01, previous trading day]`` (byte-identical
-        to the pre-picker behaviour). The F&O HISTORICAL phase deliberately does
-        NOT receive these dates — it keeps its per-contract smart default lookback
-        (futures ``expiry − 60d`` / options ``expiry − 30d``) so a wide explicit
-        range can never over-pull the whole options chain. The range is validated
+        to the pre-picker behaviour). The F&O HISTORICAL phase receives the dates
+        as an **EXPIRY scope** (DEC-FNO-EXPIRY-SCOPE-001): only expiries within
+        ``[from_date, to_date]`` (both inclusive) are candle-pulled — an
+        out-of-scope expiry is fetched not at all (zero vendor calls, zero
+        ledger rows, one ``fno.expiry_out_of_scope`` log per expiry; stored
+        bars untouched) — while each IN-scope contract keeps its per-contract
+        smart default WINDOW law (futures ``expiry − 60d`` / options
+        ``expiry − 30d`` over the standard envelope), so a wide explicit range
+        still can never over-pull a contract's window. The range is validated
         EAGERLY via :func:`~brutex.dashboard.pull_controller.resolve_candle_range`
         — a reversed / below-2020 / non-ISO range is a clean 400, never a silent
         empty pull.
@@ -2640,6 +2663,12 @@ def build_app(
                 year=None,
                 now=datetime.now(UTC),
             )
+            # The F&O EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): the SAME operator
+            # dates, parsed ONCE inside the same fail-fast guard (a bad date is a
+            # clean 400, never a 500). Blank ⇒ None ⇒ unbounded ⇒ byte-identical
+            # to the unscoped pull.
+            fno_scope_start = _parse_iso_date_arg(from_date, "from_date") if from_date else None
+            fno_scope_end = _parse_iso_date_arg(to_date, "to_date") if to_date else None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
@@ -2677,6 +2706,12 @@ def build_app(
             so the sequencer + gates stay 100%-testable offline while this thin
             wiring streams live progress through the shared single-flight job.
             """
+            # Movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): flips
+            # True inside `_prebuild_timeframes` when the prebuild outcome is ok;
+            # the try/finally below releases the gate with it — including on a
+            # spot/metadata early stop or a raised phase (ok stays False), so the
+            # movers are NEVER left blocked by a failed pull.
+            prebuild_ok = False
 
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
@@ -2733,7 +2768,9 @@ def build_app(
                 # FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001); the coarse
                 # "historical" label is REFINED to futures-vs-options by the live ledger
                 # counts in build_phase_progress (fno_current_phase_from_counts), so no
-                # segment tag is threaded through the F&O spine.
+                # segment tag is threaded through the F&O spine. The operator's from/to
+                # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
+                # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
                 _pull_job.set_phase("historical")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
@@ -2748,6 +2785,8 @@ def build_app(
                         on_progress=_phase_progress,
                         session_rate=_session_rate,
                         until_clean=True,
+                        scope_start=fno_scope_start,
+                        scope_end=fno_scope_end,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -2913,54 +2952,66 @@ def build_app(
                     ]
                 )
 
-            def _prebuild_timeframes() -> int:
-                """Gated FINAL phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001): pre-build derived TFs.
+            def _prebuild_timeframes() -> PrebuildOutcome:
+                """Gated FINAL data stage (DEC-PIPELINE-AUTOPREBUILD-001): pre-build ALL derived TFs.
 
-                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate) — the
-                operator's "pre-build runs as the pipeline's final stage automatically". For
-                EVERY pulled target it materialises the 19 derived intraday timeframes to the
-                lake via the SHARED segment-aware ``materialize_lake_timeframes``
-                (CLAUDE.md §11 COMMON — the SAME helper the manual derive route + the
-                pull-settle auto-derive use), run through the quarantining run_autoderive
-                driver so one symbol's corrupt partition never sinks the rest. Returns how
-                many symbols built cleanly.
+                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate).
+                Covers the pulled SPOT underlyings PLUS their FUTURES + OPTIONS
+                contracts discovered from the F&O candle lake cascade
+                (``build_fno_cascade(list_fno_candle_datasets(lake_root))`` — the
+                lean store holds only underlyings), each materialising the 19
+                derived intraday timeframes AND the derived ``1day`` partition
+                (``include_daily=True``) via the SHARED segment-aware
+                ``materialize_lake_timeframes`` (CLAUDE.md §11 COMMON). The
+                composition + quarantine control flow is the 100%-tested pure
+                ``run_pipeline_prebuild_guarded`` — this binding is a thin seam.
 
-                The pulled targets here are spot UNDERLYINGS (the lean store discards FUT/CE/PE
-                legs), so :func:`prebuild_kind_for` classifies them SPOT — this stage pre-builds
-                the SPOT intraday. The FUTURES intraday pre-build (discovering each underlying's
-                F&O-lake futures contracts) is the on-demand gated ``?symbols=`` route's job
-                (DEC-PREBUILD-SELECT-001); a symbol with no stored 1-minute base derives nothing
-                (an honest 0, never a fabricated bar).
-
-                Whole-body best-effort: every failure is swallowed so a transient lake-read
-                race NEVER fails the already-successful pull (Correctness of the pull > the
-                pre-build's speed benefit, mirroring the per-segment movers warmers).
+                Crash-guarded INSIDE the pure helper: an unexpected NON-halt
+                prebuild failure logs ``pipeline.prebuild.failed`` LOUDLY and
+                returns an honest ``ok=False`` outcome carrying
+                ``crashed=<ErrorType>`` — it can never kill the already-
+                successful fetch job, and never a silent zero. A pull-wide
+                GLOBAL STOP (disk-full/OOM ``LakeWriteHalt``, quota) RE-RAISES
+                out of the guard (``pull_jobs.is_pull_halt`` — the ONE common
+                predicate) and propagates to ``BackgroundPullJob._run``, which
+                fires the CRITICAL Telegram pull-halt alert; the movers warm
+                never runs after it (the raise precedes the warm stage inside
+                ``run_full_pipeline``) and the ``finally`` below still releases
+                the movers gate with ``prebuild_ok=False``.
                 """
-                from brutex.data.tf_autoderive import run_autoderive
 
-                def _materialize_one(symbol: str) -> object:
-                    inst = _require_store().get(symbol)
-                    if inst is None:  # pragma: no cover — targets come from the store
-                        raise KeyError(symbol)
+                def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
                         lake_root=lake_root,
-                        exchange=inst.exch_id.value,
-                        segment=inst.segment.value,
-                        symbol=inst.symbol_name,
-                        kind=prebuild_kind_for(inst),
-                        tfs=MATERIALIZABLE_TFS,
+                        exchange=target.exchange,
+                        segment=target.segment,
+                        symbol=target.symbol,
+                        kind=target.kind,
+                        include_daily=True,
                     )
 
+                nonlocal prebuild_ok
                 try:
-                    report = run_autoderive(
-                        symbols=[inst.symbol_name for inst in targets],
-                        materialize_one=_materialize_one,  # type: ignore[arg-type]
+                    outcome = run_pipeline_prebuild_guarded(
+                        instruments=targets,
+                        cascade_or_error=lambda: build_fno_cascade(
+                            list_fno_candle_datasets(lake_root)
+                        ),
+                        materialize=_materialize,
+                        source="pipeline",
                     )
-                except Exception as exc:  # pylint: disable=broad-except - best-effort prebuild
-                    _LOG.warning("universe.prebuild.failed", error=str(exc))
-                    return 0
-                _summary_cache.mark_dirty()  # the new derived partitions are fresh datasets
-                return report.symbols_ok
+                finally:
+                    # New derived partitions may be on disk (even a partial run —
+                    # or one the guard re-raised a global-stop out of — may have
+                    # written some) — bump the write generation so the movers warm
+                    # that FOLLOWS the prebuild (and the /db + coverage caches)
+                    # reads fresh.
+                    _summary_cache.mark_dirty()
+                # The gate-release flag (chunk 2): the finally below releases the
+                # movers gate with the prebuild's honest success verdict (a
+                # re-raised global stop skips this line, leaving ok=False).
+                prebuild_ok = outcome.ok
+                return outcome
 
             # Keep the live PULL RATE panel fed through EVERY phase, not just spot
             # (DEC-PULL-RATE-WIDGET-VISIBILITY-001). The spot phase pushes the panel on its
@@ -2970,19 +3021,34 @@ def build_app(
             # real fetches. The sampler ticks the SAME controller through make_rate_observer
             # (observe-only, best-effort, never builds a controller) so the widget stays
             # live the whole pull.
-            with RatePanelSampler(session_rate=_session_rate, observer=make_rate_observer(state)):
-                report = run_full_pipeline(
-                    run_spot=_run_spot,
-                    run_metadata=_run_metadata,
-                    run_historical=_run_historical,
-                    warm_spot_movers=_warm_spot_movers,
-                    warm_futures_movers=_warm_futures_movers,
-                    warm_options_movers=_warm_options_movers,
-                    run_prebuild=_prebuild_timeframes,
-                )
-            if report.spot is not None:
-                _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
-            return report.to_dict()
+            # Movers gate DOWN for the whole real pipeline (chunk 2). A dry_run
+            # writes no real data, so it must NOT gate the movers screens.
+            if not dry_run:
+                _prebuild_gate.begin()
+            try:
+                with RatePanelSampler(
+                    session_rate=_session_rate, observer=make_rate_observer(state)
+                ):
+                    report = run_full_pipeline(
+                        run_spot=_run_spot,
+                        run_metadata=_run_metadata,
+                        run_historical=_run_historical,
+                        warm_spot_movers=_warm_spot_movers,
+                        warm_futures_movers=_warm_futures_movers,
+                        warm_options_movers=_warm_options_movers,
+                        run_prebuild=_prebuild_timeframes,
+                    )
+                if report.spot is not None:
+                    _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                return report.to_dict()
+            finally:
+                # ALWAYS release — a spot/metadata stop, a raised phase, or a
+                # clean run all un-gate the movers (never blocked forever);
+                # `prebuild_ok` carries the prebuild's honest verdict (False when
+                # the pipeline never reached it). Logged by the gate itself
+                # (`pipeline.prebuild.gate_released` {ok}).
+                if not dry_run:
+                    _prebuild_gate.release(prebuild_ok)
 
         pipeline_detail = f"pipeline {len(targets)} symbols"
         if dry_run:
@@ -3187,194 +3253,6 @@ def build_app(
         if raw is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **banner_for(raw).to_dict()})
-
-    @app.post("/api/v1/universe/derive-timeframes")
-    async def api_universe_derive_timeframes(
-        symbol: str | None = Query(default=None),
-        symbols: str | None = Query(default=None),
-        tfs: str | None = Query(default=None),
-    ) -> JSONResponse:
-        """POST /api/v1/universe/derive-timeframes — MANUAL derived-TF materialise.
-
-        Resamples each selected symbol's STORED 1-minute bars to each derived
-        intraday timeframe and writes each as its OWN stored interval partition,
-        so the brute-force sweep then reads a 5m / 15m / 60m bar in O(1) (a
-        direct Parquet read) instead of re-resampling 1m ~33 billion times
-        (DEC-TF-MATERIALIZE-001). **Manual trigger only** — never automatic.
-
-        SEGMENT-AWARE + GATED (DEC-PREBUILD-SELECT-001). A ``?symbols=`` comma
-        list runs a GATED multi-symbol pre-build in the order **SPOT → FUTURES →
-        OPTIONS** (advance only when the current phase FULLY succeeds; the first
-        failing phase HALTS the run). SPOT uses the OI-dropping spot resampler;
-        FUTURES uses the OI-aware F&O resampler; OPTIONS intraday is NEVER
-        materialised (TB-scale, on-demand only) — an explicit, reported no-op.
-        A single ``?symbol=`` keeps the original ``{written, skipped,
-        total_bars}`` shape (back-compat), now also segment-aware.
-
-        Query parameters
-        ----------------
-        symbol
-            A single engine ``symbol_name`` / vendor ``SECURITY_ID``. Resolved to
-            its instrument + lake coordinates via the store. An unknown symbol is
-            a 400 (DEC-PULL-ERROR-VISIBILITY-001).
-        symbols
-            A comma list of ids (the ticked many). Takes precedence over
-            ``symbol``; runs the gated multi-symbol pre-build. An empty / unknown
-            selection fails closed (400).
-        tfs
-            A comma-separated list of TF labels (e.g. ``5m,15m,60m``). Omitted ⇒
-            every materialisable timeframe (:data:`MATERIALIZABLE_TFS`). A
-            requested label outside the storable set is reported in ``skipped``,
-            never written.
-
-        Returns
-        -------
-        Single-symbol: JSON ``{"written": {tf: bars}, "skipped": [...],
-        "total_bars": <int>}``. Multi-symbol (``?symbols=``): the gated report
-        ``{"gated": true, "ok", "halted_after", "source", "total_bars",
-        "phases": [...]}``.
-        """
-        store = _require_store()
-        # Parse the comma list (blank entries dropped); omitted ⇒ all storable.
-        requested: tuple[str, ...] = (
-            tuple(t for t in (s.strip() for s in tfs.split(",")) if t)
-            if tfs is not None
-            else MATERIALIZABLE_TFS
-        )
-        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=False)
-
-        def _materialize_spot(instrument: Instrument) -> Any:
-            """Materialise ONE underlying's SPOT intraday (segment-aware, DEC-PREBUILD-SELECT-001)."""
-            return materialize_lake_timeframes(
-                lake_root=lake_root,
-                exchange=instrument.exch_id.value,
-                segment=instrument.segment.value,
-                symbol=instrument.symbol_name,
-                kind=prebuild_kind_for(instrument),
-                tfs=requested,
-            )
-
-        # ── Multi-symbol GATED path (DEC-PREBUILD-SELECT-001) ──────────────────
-        if symbols is not None:
-            try:
-                targets, source = resolve_pull_targets(
-                    symbols=symbols,
-                    symbol=None,
-                    lookup=store.get,
-                    whole_universe=list,  # never reached (symbols is not None); no dead body
-                )
-            except ValueError as exc:  # empty / unknown selection — fail closed
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            _LOG.info(
-                "universe.derive_timeframes.gated_requested",
-                source=source,
-                count=len(targets),
-                tfs=list(requested),
-            )
-            # Build the F&O cascade ONCE for the whole selection so the FUTURES
-            # phase discovers contracts via O(1) cascade lookups (no per-underlying
-            # lake walk). A contract leaf carries its own exchange + groww_symbol;
-            # remember the exchange so the per-contract materialise reads the right
-            # partition.
-            cascade = build_fno_cascade(list_fno_candle_datasets(lake_root))
-            contract_exchange: dict[str, str] = {}
-
-            def _futures_for(instrument: Instrument) -> list[str]:
-                """Discover *instrument*'s F&O-lake futures contract symbols (+ remember each exchange)."""
-                discovered = discover_futures_contracts(instrument, cascade)
-                for c in discovered:
-                    contract_exchange[c.symbol] = c.exchange
-                return [c.symbol for c in discovered]
-
-            def _materialize_future_contract(contract_symbol: str) -> Any:
-                """Materialise ONE futures contract's OI-aware intraday from the F&O lake."""
-                return materialize_lake_timeframes(
-                    lake_root=lake_root,
-                    exchange=contract_exchange[contract_symbol],
-                    segment=FNO_CANDLE_LAKE_SEGMENT,
-                    symbol=contract_symbol,
-                    kind=PrebuildKind.FUTURES,
-                    tfs=requested,
-                )
-
-            report = run_gated_prebuild(
-                underlyings=targets,
-                materialize_spot=_materialize_spot,
-                futures_contracts_for=_futures_for,
-                materialize_future=_materialize_future_contract,
-                source=source,
-            )
-            # New partitions on disk; let the next coverage poll rediscover them —
-            # but only when something was actually written (skip the rescan on an
-            # options-only / halted / no-data run).
-            if report.total_bars > 0:
-                _summary_cache.mark_dirty()
-            return JSONResponse({"gated": True, **report.to_dict()})
-
-        # ── Single-symbol back-compat path ────────────────────────────────────
-        if symbol is None:
-            raise HTTPException(
-                status_code=400,
-                detail="provide ?symbol=<id> or ?symbols=<csv>",
-            )
-        instrument = store.get(symbol)
-        if instrument is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unknown security_id {symbol!r} — not in the instrument store",
-            )
-        sym = instrument.symbol_name
-        kind = prebuild_kind_for(instrument)
-        _LOG.info(
-            "universe.derive_timeframes.requested",
-            symbol=sym,
-            exchange=instrument.exch_id.value,
-            segment=instrument.segment.value,
-            kind=kind.value,
-            tfs=list(requested),
-        )
-        if intraday_resampler_for(kind) is None:
-            # OPTIONS: intraday is on-demand — an explicit, honest no-op.
-            _LOG.info("universe.derive_timeframes.options_noop", symbol=sym)
-            return JSONResponse(
-                {
-                    "written": {},
-                    "skipped": [],
-                    "total_bars": 0,
-                    "note": (
-                        "options intraday: on-demand (not materialised) — TB-scale, "
-                        "the brute-force engine never reads option intraday"
-                    ),
-                }
-            )
-        try:
-            result = _materialize_spot(instrument)
-        except Exception as exc:  # surface the REAL reason, never swallow it
-            _LOG.exception(
-                "universe.derive_timeframes.failed",
-                symbol=sym,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
-        _LOG.info(
-            "universe.derive_timeframes.ok",
-            symbol=sym,
-            written=result.written,
-            skipped=list(result.skipped),
-            total_bars=result.total_bars,
-        )
-        # The just-materialised partitions are new datasets on disk; let the next
-        # coverage poll rediscover them (mirrors the single-pull invalidation).
-        if result.total_bars > 0:
-            _summary_cache.mark_dirty()
-        return JSONResponse(
-            {
-                "written": result.written,
-                "skipped": list(result.skipped),
-                "total_bars": result.total_bars,
-            }
-        )
 
     @app.get("/api/v1/coverage/counters")
     async def api_coverage_counters() -> JSONResponse:
@@ -4050,6 +3928,23 @@ def build_app(
         """
         store = _require_store()
         try:
+            # Movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while
+            # the one-click pull pipeline runs, answer with the honest `gated: true`
+            # payload and ZERO lake reads — a half-filled lake / mid-overwrite
+            # derived partitions must never be ranked. The page keeps polling and
+            # recovers by itself the moment the pipeline job releases the gate.
+            gate = _prebuild_gate.snapshot()
+            if gate.blocking:
+                return JSONResponse(
+                    gated_movers_payload(
+                        gate,
+                        asset=asset,
+                        interval=interval,
+                        date=date,
+                        time=time,
+                        top_n=top_n,
+                    )
+                )
             if asset not in ("spot", "futures", "options"):
                 # Milestone 1 wired Spot; Milestone 2 Futures; Milestone 3 Options.
                 # Any other (unknown) asset still gets an honest pending payload.
@@ -4274,6 +4169,8 @@ def build_app(
                     top_n=top_n,
                     skipped=spot_cands.skipped,
                     min_volume=min_volume,
+                    stored_reads=spot_cands.stored_reads,
+                    resampled_reads=spot_cands.resampled_reads,
                 )
 
             payload = await run_in_threadpool(_resolve)

@@ -18,7 +18,34 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-21 (DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869 — the
+_Last updated: 2026-07-03 (DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
+MIGRATION.md #1145–#1146 — the pipeline pack. (1) #1145: derived timeframes (the 19
+intraday TFs + the derived `1day`, over SPOT + FUTURES + OPTIONS) are now written ONLY
+by the pull pipeline's ONE automatic FINAL prebuild stage, run strictly after a
+fully-clean 1-minute fetch — every MID-PULL derived write is REMOVED
+(`pull_controller._resample_daily_after_pull` + the `BRUTEX_AUTO_DERIVE_TFS` autoderive
++ `historical_pull._derive_daily_from_minute`) and the manual "Pre-build timeframes"
+button + `derive-timeframes` route are DELETED; the movers warm runs AFTER the prebuild
+gated on `fetch_clean AND PrebuildOutcome.ok` (supersedes the early-spot-warm arm of
+DEC-PIPELINE-SEGMENT-MOVERS-001); `/api/v1/movers` is honestly GATED while the prebuild
+runs (`PrebuildGate`, 200 `gated:true` "prebuild in progress" payload with ZERO lake
+reads, 5 s self-recovering auto-retry, dry-run never gates); spot movers read the
+prebuilt partitions STORED-FIRST (pinned byte-equality vs the 1-minute resample +
+honest `stored_reads`/`resampled_reads` provenance); the completion headline NAMES
+quarantined symbols ("N symbol(s) quarantined: A, B (+K more)", job finish detail = the
+note) and `/coverage/windows` labels empty-vs-failed (`window_status_label`, both
+payload paths). HONEST envelope: a fully-materialised OPTIONS lake costs ~2-3× its
+1-minute footprint (operator-ACCEPTED, decree items #19+#21); the FUTURES/OPTIONS
+movers SESSION readers deliberately stay 1-minute-native (the locked as-of + Greeks-
+overlay semantics of DEC-FNO-TF-DERIVE-OI-001 — materialisation-invariance pinned
+instead); a CLI-pulled lake gets derived TFs on the next dashboard pipeline run; the
+1m→1d derivation of DEC-1MINUTE-ONLY-DERIVE-1DAY-001 STAYS, relocated into the prebuild
+phase. (2) #1146: F&O expiry-level date scoping — an expiry is pulled iff within
+`[from → to]` inclusive; out-of-scope = ZERO vendor calls + ZERO ledger rows + one
+`fno.expiry_out_of_scope` log per (underlying, expiry), stored bars untouched; scope
+SELECTS expiries, never reshapes windows (the 30d/60d law unchanged); the default
+no-dates pull is byte-identical. Both: ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX).
+Earlier: 2026-06-21 (DEC-FNO-MONEYNESS-LABEL-001, MIGRATION.md #869 — the
 per-option moneyness + strike-distance is now shown as ONE combined cell
 (**"ITM -1" / "ITM -10" / "OTM +1" / "OTM +10" / "ATM"**) instead of the split
 bucket + ATM±N columns of #865 — `brutex/data/moneyness.py` `_format_label`
@@ -202,7 +229,9 @@ hostile-review pass._
      anchor) + the 19 intraday timeframes are **DERIVED deterministically from
      the stored 1-minute**, never separately vendor-fetched. The derived `1day`
      is resampled to midnight-IST daily bars (`brutex/data/spot_daily_resample.py`)
-     and written to the lake's 1-day partition after every pull. This supersedes
+     and written to the lake's 1-day partition by the pull pipeline's automatic
+     FINAL prebuild stage — no longer mid-pull (DEC-PIPELINE-AUTOPREBUILD-001,
+     MIGRATION.md #1145; `_resample_daily_after_pull` removed). This supersedes
      the operator-chosen granularity dropdown of DEC-PULL-1DAY-FIRST-001 (#723,
      removed) and re-introduces the 1m→1d derivation removed by
      DEC-REALDATA-ONLY-NO-1M-TO-1D-001 (#852) — now as the always-on PRIMARY
@@ -237,7 +266,80 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/leftovers-pack-r8k4mp` (**DEC-HARDENING-LEFTOVERS-001, MIGRATION.md #1149** — the
+- **Active branch:** `claude/pipeline-pack-04nyec` (**DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
+  MIGRATION.md #1145–#1146** — the pipeline pack. **#1145:** ONE automatic timeframe PREBUILD phase — the 19 derived
+  intraday TFs + the derived `1day`, over SPOT + FUTURES + OPTIONS — is now the pull pipeline's FINAL data stage, run
+  strictly AFTER a fully-clean 1-minute fetch (NEW `dashboard/pipeline_prebuild.py` `run_pipeline_prebuild(_guarded)`
+  binding the SHARED `materialize_lake_timeframes(include_daily=True)`; `gated_prebuild`'s halt-on-first-phase gate
+  REMOVED — per-symbol quarantine, every phase always runs, `halted_after` deleted; OPTIONS materialised for REAL via
+  `discover_option_contracts` + one common `_run_contract_phase`, superseding DEC-PREBUILD-SELECT-001's on-demand no-op).
+  EVERY mid-pull derived write is REMOVED (`pull_controller._resample_daily_after_pull` + the `BRUTEX_AUTO_DERIVE_TFS`
+  pull-settle autoderive [DEC-TF-MATERIALIZE-002] + `historical_pull._derive_daily_from_minute`; `tf_autoderive.py`
+  trimmed to the doctor's `compare_derived_freshness`) and the MANUAL surface is DELETED (the universe "Pre-build
+  timeframes" button + the 188-line `POST /api/v1/universe/derive-timeframes` route; `sweep_preflight` + `doctor`
+  repointed at the pipeline stage). The movers warm moves AFTER the prebuild and fires iff `fetch_clean AND
+  PrebuildOutcome.ok` — all three segments together (supersedes the early-spot-warm arm of
+  DEC-PIPELINE-SEGMENT-MOVERS-001 #951); while the prebuild runs, `/api/v1/movers` is honestly GATED (NEW
+  `prebuild_gate.PrebuildGate` injected into `build_app`; a 200 `gated:true` "prebuild in progress" payload with ZERO
+  lake reads; `movers.html` renders it via `textContent` + a 5 s auto-retry so the screen self-recovers; release in a
+  `finally` — clean run, early stop AND a raised phase all release; a dry-run never gates; the gate is PROCESS-LOCAL).
+  Spot movers read the prebuilt partitions STORED-FIRST (NEW `movers_stored_read.read_stored_day_frame`, month-bounded;
+  BYTE-EQUALITY vs the 1-minute resample PINNED; honest `stored_reads`/`resampled_reads` provenance in the payload;
+  graceful 1-minute fallback; under the merged unified as-of semantic of DEC-HARDENING-LEFTOVERS-001 #1149 the stored
+  FULL-bucket read serves ONLY a whole-day or bucket-final-aligned as-of cutoff [`_stored_serves_cutoff`] — a
+  MID-bucket as-of always takes the 1-minute resample, the only source that can build the partial forming bucket
+  honestly, never a leak of minutes past the as-of instant). Completion honesty: the pipeline headline NAMES quarantined symbols
+  (`derive_quarantined_symbols` — spot failures + historical `start_dates − phase1_complete` folded to underlyings;
+  capped 10 names + the TRUE count, `"N symbol(s) quarantined: A, B (+K more)"`; the job finish detail = the note,
+  500-char cap) and `/coverage/windows` labels empty-vs-failed via ONE `db_view.window_status_label` ("vendor confirmed
+  no trades (N clean attempt(s))" / "— settled" / "FAILED (will re-pull)") on BOTH payload paths. LOUD
+  `pipeline.prebuild.*` / `pipeline.movers_warm.*` / `movers.gate.*` structlog events, all test-pinned. HONEST ENVELOPE
+  (Golden Rule #10): a fully-materialised OPTIONS lake costs **~2-3× its 1-minute footprint** — operator-ACCEPTED
+  (decree items #19+#21), stated at every enabled surface; the FUTURES/OPTIONS movers SESSION readers are deliberately
+  NOT switched to stored-TF reads (`_read_future_session` is the LOCKED 1-minute-native as-of-cutoff snapshot per
+  DEC-FNO-TF-DERIVE-OI-001, carrying the stored Greeks overlay [iv/delta, DEC-GREEKS-ENGINE-PR3B-001] — a stored-TF
+  read cannot be byte-equal and would silently NULL the Greeks; MATERIALISATION-INVARIANCE is pinned instead, plus the
+  pin that their prev-day close/OI BASELINES are served from the prebuilt `1day`); a CLI-pulled lake gets its derived
+  TFs on the NEXT dashboard pipeline run (`brutex fetch` never derived mid-pull — verified). Supersedes the MID-PULL
+  `1day`-derive arm of DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 — the 1m→1d derivation itself STAYS, relocated into the
+  prebuild phase (§1/§2 Rule 3/§6 reconciled). **#1146 (operator req #30):** expiry-LEVEL date scoping for the F&O
+  historical pull — an expiry is IN SCOPE iff within the requested `[from → to]` window (BOTH endpoints inclusive; NEW
+  pure `adapters/groww/expiry_scope.py`); an IN-scope expiry keeps the UNTOUCHED 30d/60d window law
+  (DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127); an OUT-of-scope expiry costs ZERO vendor calls + ZERO ledger rows + ONE
+  `fno.expiry_out_of_scope` log per (underlying, expiry) and NEVER deletes stored data; scope SELECTS expiries, never
+  reshapes windows — threaded route → `composite_pull` → `pull_contract_candles` at the ONE chokepoint before
+  `_rebuild_contracts`; SPOT keeps its verbatim dates; the metadata phase stays unscoped (full calendar cached); the
+  default no-dates pull is byte-identical + 10 permutations (a–j) pinned end-to-end. Both: ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no vocab/rate/scope change; NEW + touched modules ALL 100%
+  line+branch; ruff/ruff-format/`mypy --strict`/`pyright` clean.
+  Prior merged: **DEC-SURFACE-TRIAL-001, MIGRATION.md #1154** — the `/results` +
+  `/reports` **execution-grade SURFACE TRIAL** + the #1069-review leftover folds. The trial: fixtures written with the
+  REAL repo writers (`ResultsStore` sweep stores incl. a cross-store duplicate run_id + a corrupt Parquet;
+  `ParquetWriter` 1-day/1-minute lakes incl. a missing-prior-session hole + exact ±0.005% half-up boundary prices),
+  the REAL routes driven via `build_app`+`TestClient`, and EVERY displayed number recomputed INDEPENDENTLY test-side
+  (hand-rolled integer ₹-grouping — no `format_inr`/Decimal; `fractions.Fraction` %CHNG + an away-from-zero half-up
+  rounder — no `decimal`; single-pass negated-key ranking; brute-force top-mover picks) then asserted equal
+  cell-for-cell against the wire JSON / sheet XML. **VERDICT: NO DIVERGENCE FOUND — every trialed number matched**
+  (money boundaries `₹-0.01`/odd-paisa lakh/`2**60`-paisa; exact-int-not-float ranking with a genuine
+  `float(2**60)==float(2**60+1)` teeth fixture; run_id tie-break; dedup totals; top-slice invariance; CHNG/%CHNG law +
+  contiguity/first-session skips; ±0.005 half-up cells; abs-max/inclusive-min_pct/alphabetical-tie top-mover; fills
+  from the FULL-precision sign incl. the pinned "displays 0.00 but fills green" sub-boundary edge; minute-basis
+  last-close anchor — the ANCHORED prior day now carries 2 bars with distinct closes so an arg_max→arg_min mutation
+  of the prev-close read is verified KILLED (review round-1 fix: the original fixture's 2-bar day was unanchored and
+  the mutation survived) — + hole skip) — the 13-test trial suite is the permanent regression net
+  (`tests/unit/test_surface_trial_results.py` + `test_surface_trial_reports.py`; `/operator` confirmed a nav alias of
+  `/`, not a route). Leftover folds: **MINOR-1 FIXED** — the `SummaryCache` revision-probe `os.stat` is hoisted
+  OUTSIDE the cache lock (`_probe_token` no-lock + `_reconcile_revision_locked` under it) so a probe wedged on a
+  stalled external volume can never block the pull's `mark_dirty` write funnel (regression: a stalled-probe test
+  proving mark_dirty completes + an out-of-order-token test pinning the over-invalidate-never-miss envelope);
+  **MINOR-2 DISPROVEN** for the reviewed sequence (an OSError probe outage never resets the baseline — recovery
+  compares against the PRE-outage token and bumps; the narrower cold-start-during-outage variant is DOCUMENTED as an
+  honest-envelope note, deliberately not mechanised); NIT-1 the movers as-of docstrings now claim MINUTE-granular
+  honesty (the inclusive 13:45 bucket-open bar aggregates through 13:45:59 — never "no data after 13:45"); NIT-2 the
+  stale pre-#1069 bucket-label-cutoff test comment rewritten to the raw-1m mechanism; NIT-3 the #1149 blurb's "all
+  five touched modules" conflation corrected below. READ-side + tests + docs only; ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  Prior merged: **DEC-HARDENING-LEFTOVERS-001, MIGRATION.md #1149** — the
   hardening-leftovers pack, four areas, read-side dashboard + test + comment surfaces ONLY: (1) **cross-process lake
   cache invalidation** — a CLI `brutex fetch` into the same lake now refreshes every generation-keyed dashboard cache
   on the next poll, no restart: NEW COMMON `brutex/dashboard/lake_revision.py` derives an O(1) content token from ONE
@@ -257,7 +359,11 @@ hostile-review pass._
   missing" claim is REFUTED (already a verified `SPECIAL_WEEKEND_TRADING_SESSIONS` entry); the vendor-observed
   Jan-2026 drift (20 vendor sessions vs our derived 21) implies ONE additional Jan-2026 holiday whose date is
   UNVERIFIED and deliberately NOT fabricated — closable only by the official NSE 2026 circular or a live vendor probe.
-  All five touched `brutex/` modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright` clean; ENGINE
+  The five coverage-verified dashboard modules (`lake_revision.py` + `summary_cache.py` + `movers_snapshot.py` +
+  `movers_futures.py` + the UNtouched-but-re-verified `movers_options.py`) 100% line+branch; the other touched
+  `brutex/` files (`app.py` wiring + the `calendars/nse.py` comment-only note) ride their existing suites
+  (NIT-3 wording fix, DEC-SURFACE-TRIAL-001 — the prior "all five touched modules" conflated the coverage-verified
+  set with the six-member touched set); ruff/ruff-format/`mypy --strict`/`pyright` clean; ENGINE
   UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-FETCH-PER-WINDOW-GATE-HONESTY-001, MIGRATION.md #1132** — the
   fetch-per-window CI bench gate (`tests/bench/test_fetch_per_window_guarantee.py`, #1026) now measures the PRODUCTION
@@ -1153,7 +1259,9 @@ hostile-review pass._
    granularity fetched** and the 19 derived intraday TFs + `1d` are all
    DERIVED from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853; the
    `1d` daily anchor is resampled to midnight-IST from the stored 1-minute and
-   written to the lake's 1-day partition, never separately vendor-fetched).
+   written to the lake's 1-day partition — since DEC-PIPELINE-AUTOPREBUILD-001
+   (MIGRATION.md #1145) by the pull pipeline's automatic FINAL prebuild stage,
+   never mid-pull, never separately vendor-fetched).
    Rolling `2020-01-01 → today` range (the data pull floor
    — `GROWW_HISTORY_FLOOR`; DEC-PULL-FLOOR-2020-001, 2026-06-13, MIGRATION.md
    entry #722 — supersedes the prior conservative `2021-01-01` floor of
@@ -1390,7 +1498,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/leftovers-pack-r8k4mp`
+- **Active feature branch:** `claude/pipeline-pack-04nyec`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -1551,13 +1659,13 @@ bruteX/
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
 | F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
-| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `dashboard/historical_pull.py` |
+| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |
 | 1-minute granularity at the 2020 boundary | **UNVERIFIED** — Phase-0 probe gate (rows may not truly start Jan-2020 at 1m) | `groww/constants.py:107`; `adr/0009-...-migration.md:113-114` |
 | Candle intervals (SDK supports) | `1/2/3/5/10/15/30 minute`, `1hour`, `4hour`, `1day`, `1week`, `1month` | `groww/constants.py:57-70`; `groww/api-reference/04-annexures.md:85-98` |
-| Candle interval — Track 1 spot | **`1minute` ONLY fetched** (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 — `resolve_fetch_intervals` always returns `("1minute",)`); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED from the stored 1-minute (`1day` resampled midnight-IST to the lake's 1-day partition after every pull, `spot_daily_resample.derive_daily_for_targets`), never separately vendor-fetched. The granularity dropdown + the bhavcopy cross-check of DEC-PULL-1DAY-FIRST-001 (#723) are REMOVED | `dashboard/pull_controller.py` (`GROWW_FETCH_INTERVALS`, `resolve_fetch_intervals`, `_resample_daily_after_pull`); `data/spot_daily_resample.py` |
+| Candle interval — Track 1 spot | **`1minute` ONLY fetched** (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 — `resolve_fetch_intervals` always returns `("1minute",)`); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED from the stored 1-minute, never separately vendor-fetched — since DEC-PIPELINE-AUTOPREBUILD-001 #1145 written ONLY by the pull pipeline's automatic FINAL prebuild stage (`materialize_lake_timeframes(include_daily=True)`; the midnight-IST `1day` via the shared `spot_daily_resample.make_lake_write_1day`), NEVER mid-pull (`_resample_daily_after_pull` + the `BRUTEX_AUTO_DERIVE_TFS` autoderive + the manual `derive-timeframes` route are REMOVED). The granularity dropdown + the bhavcopy cross-check of DEC-PULL-1DAY-FIRST-001 (#723) are REMOVED | `dashboard/pull_controller.py` (`GROWW_FETCH_INTERVALS`, `resolve_fetch_intervals`); `dashboard/pipeline_prebuild.py`; `data/timeframe_materialize.py`; `data/spot_daily_resample.py` |
 | Chunk window — by interval tier | **1/2/3/5m → 30d · 10/15/30m → 90d · 1h+/1d/1w/1mo → 180d** per call (richer than a single split) | `groww/constants.py:76-89`; `groww/chunks.py:34-60`; `groww/api-reference/03-backtesting.md:238-246` |
 | Candle response shape | **ROW-arrays** — `{"candles": [[ts, open, high, low, close, volume, open_interest], ...]}`; OI `null` for non-FNO | `groww/parser.py:1-18,104-124`; `groww/api-reference/03-backtesting.md:202-236` |
 | **Price unit** | **RUPEES (float)** from Groww — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `groww/api-reference/03-backtesting.md:202` |

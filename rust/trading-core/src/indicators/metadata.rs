@@ -92,13 +92,31 @@ pub fn derive_bar_metadata(
     session_open_seconds: i64,
     expiry_ordinal: i64,
 ) -> BarMetadata {
-    let tod_seconds = hour * SECONDS_PER_HOUR + minute * SECONDS_PER_MINUTE + second;
+    let tod_seconds = seconds_of_day(hour, minute, second);
     BarMetadata {
         tod_seconds,
         weekday: weekday_from_ordinal(day_ordinal),
         minute_of_session: minute_of_session(i64::from(tod_seconds), session_open_seconds),
         is_expiry_day: day_ordinal == expiry_ordinal,
     }
+}
+
+/// Seconds since IST midnight for a wall-clock `HH:MM:SS` — the ONE shared
+/// derivation of the evaluator's Group-8 `tod_seconds` input
+/// (DEC-TOD-SECONDS-RUST-SEAM-001). Factored VERBATIM out of
+/// [`derive_bar_metadata`] (which now delegates) so BruteX's Python eval-path
+/// callers consume the SAME arithmetic through the PyO3 binding instead of
+/// re-deriving `h*3600 + m*60 + s` inline — one source, bit-identical to the
+/// TickVault-native path by construction.
+///
+/// Pure and total over VALID civil components (`hour <= 23`, `minute <= 59`,
+/// `second <= 59` — max 86,399, far inside u32). Range validation for
+/// untrusted input lives at the PyO3 boundary (`py_seconds_of_day`), matching
+/// the crate's guard convention under `panic = "abort"`.
+#[inline]
+#[must_use]
+pub fn seconds_of_day(hour: u32, minute: u32, second: u32) -> u32 {
+    hour * SECONDS_PER_HOUR + minute * SECONDS_PER_MINUTE + second
 }
 
 /// The weekday `0 = Mon … 6 = Sun` of a proleptic-Gregorian day-ordinal. Uses
@@ -164,6 +182,26 @@ mod tests {
 
     // 09:15 IST as seconds-since-midnight (the regular session open).
     const OPEN_0915: i64 = 9 * 3600 + 15 * 60; // 33_300
+
+    // ── seconds_of_day ─────────────────────────────────────────────────────
+    #[test]
+    fn seconds_of_day_matches_inline_arithmetic() {
+        // The factored fn IS the old inline expression — pinned against an
+        // independent literal computation (do NOT "clean up" the test-side
+        // arithmetic: its independence from the fn under test is the point).
+        assert_eq!(seconds_of_day(0, 0, 0), 0);
+        assert_eq!(seconds_of_day(9, 15, 0), 33_300);
+        assert_eq!(seconds_of_day(15, 20, 30), 15 * 3600 + 20 * 60 + 30);
+        assert_eq!(seconds_of_day(23, 59, 59), 86_399);
+    }
+
+    #[test]
+    fn derive_bar_metadata_delegates_to_seconds_of_day() {
+        // Byte-identity of the refactor: the struct's tod_seconds equals the
+        // factored fn for the same civil components.
+        let m = derive_bar_metadata(739_000, 10, 30, 15, OPEN_0915, 739_001);
+        assert_eq!(m.tod_seconds, seconds_of_day(10, 30, 15));
+    }
 
     // ── weekday_from_ordinal ───────────────────────────────────────────────
     #[test]
