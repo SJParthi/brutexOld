@@ -62,11 +62,13 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Final, Protocol
 
+import structlog
+
 from brutex.calendars.nse import IST
 from brutex.data.models import OptionBar
 from brutex.money import rupees_to_paisa
 from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
-from brutex.options.lot_size_history import OptionsUnderlying
+from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 from brutex.options.strike_grid import get_strike_step, round_to_atm
 from brutex.options.strike_rules import (
     OFFSET_RULES,
@@ -113,6 +115,8 @@ __all__ = [
     "signals_from_spot_trades",
 ]
 
+_LOG = structlog.get_logger(__name__)
+
 #: Audit action stamped per rule result by :func:`execute_options_sim`.
 _AUDIT_ACTION: Final[str] = "OPTIONS_SIM_RULE"
 
@@ -153,6 +157,16 @@ class RejectReason(Enum):
     #: The entry (or exit) premium is at/below the tradeable tick floor
     #: (:data:`TICK_FLOOR_MULTIPLE` × tick) — excluded per §7.8.
     TICK_FLOOR = "tick_floor"
+    #: The signal's entry date precedes the recorded lot-size history
+    #: (``brutex.options.lot_size_history`` starts 2021-01-01 while the data
+    #: pull floor is 2020-01-01, GROWW_HISTORY_FLOOR) — the trade cannot be
+    #: sized honestly, so it is REJECTED per-trade instead of crashing the
+    #: whole sim (2020 lot sizes are UNVERIFIED offline; never fabricated).
+    LOT_SIZE_UNKNOWN = "lot_size_unknown"
+    #: The entry or exit bar carries ``volume == 0`` — a stale/carried price
+    #: with zero trades in the minute, so a fill at its open (even with 1-tick
+    #: slippage) is unachievable. Opt-out via ``reject_stale_bars=False``.
+    STALE_BAR = "stale_bar"
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,6 +438,7 @@ def materialize_trade(
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
     delta_chain: DeltaChain | None = None,
+    reject_stale_bars: bool = True,
 ) -> MaterializedTrade | RejectedTrade:
     """Materialize + price one option trade for *signal* under *rule*.
 
@@ -443,11 +458,17 @@ def materialize_trade(
         intra-state GST, 1 lot).
     delta_chain
         Required only for delta-target rules.
+    reject_stale_bars
+        When ``True`` (default), an entry OR exit bar with ``volume == 0``
+        is rejected as :data:`RejectReason.STALE_BAR` — its OHLC is a
+        stale/carried price no real order could have filled at. Pass
+        ``False`` to opt out (accept zero-volume bars as before).
 
     Returns
     -------
     MaterializedTrade | RejectedTrade
-        The priced trade, or a rejection (no data / tick floor).
+        The priced trade, or a rejection (lot size unknown / no data /
+        stale bar / tick floor — checked in that deterministic order).
     """
     # Lazy import (breaks the options↔costs cycle — see the TYPE_CHECKING block):
     # by pricing time the costs package is always fully initialised.
@@ -456,6 +477,25 @@ def materialize_trade(
     from brutex.costs.types import TradeInput
 
     leg = select_option_leg(signal, rule, delta_chain=delta_chain)
+
+    # Lot-size availability guard — checked FIRST (a pure date precondition,
+    # no lake I/O): the lot-size history floor is 2021-01-01 while the data
+    # pull floor is 2020-01-01 (GROWW_HISTORY_FLOOR), so a 2020-dated signal
+    # has no honest lot size. One such signal must reject THIS trade only,
+    # never abort the whole sim. The try is NARROW — it wraps ONLY the lot
+    # lookup, so a ValueError from any other layer still propagates.
+    try:
+        get_lot_size(signal.instrument, signal.entry_ts.date())
+    except ValueError as exc:
+        _LOG.warning(
+            "options.reject.lot_size_unknown",
+            rule=rule.name,
+            instrument=signal.instrument.value,
+            entry_date=signal.entry_ts.date().isoformat(),
+            error=str(exc),
+        )
+        return RejectedTrade(leg=leg, reason=RejectReason.LOT_SIZE_UNKNOWN)
+
     pair = source.load_pair(
         instrument=signal.instrument,
         expiry_date=signal.expiry_date,
@@ -466,6 +506,22 @@ def materialize_trade(
     )
     if pair is None:
         return RejectedTrade(leg=leg, reason=RejectReason.NO_DATA)
+
+    # Zero-volume staleness guard (opt-out via reject_stale_bars=False): a
+    # minute bar with volume == 0 carries a stale/carried OHLC — nothing
+    # traded, so pricing a fill at its open (even 1-tick-slipped) fabricates
+    # an unachievable execution. Checked BEFORE the tick floor: staleness
+    # makes the price itself meaningless.
+    if reject_stale_bars and (pair.entry_bar.volume == 0 or pair.exit_bar.volume == 0):
+        _LOG.warning(
+            "options.reject.stale_bar",
+            rule=rule.name,
+            instrument=signal.instrument.value,
+            strike=leg.strike,
+            entry_volume=pair.entry_bar.volume,
+            exit_volume=pair.exit_bar.volume,
+        )
+        return RejectedTrade(leg=leg, reason=RejectReason.STALE_BAR)
 
     entry_open_paisa = rupees_to_paisa(pair.entry_bar.open)
     exit_open_paisa = rupees_to_paisa(pair.exit_bar.open)
@@ -504,6 +560,19 @@ def materialize_trade(
 class OptionsRuleResult:
     """Aggregated priced outcome of one strike rule over many signals.
 
+    HONESTY — liquidity SELECTION BIAS on accepted-trade P&L (Golden Rule
+    #10): a signal whose entry or exit bar is missing from the lake drops
+    the WHOLE trade (``NO_DATA``), and exit-bar availability correlates
+    with market conditions — an option that went illiquid or stopped
+    printing bars into the forced 15:20 exit is disproportionately one in
+    adverse conditions. The accepted-trade sums below therefore carry an
+    unstated survivorship tilt: the P&L of the trades that COULD be
+    priced, not of every signal the strategy would have taken. The
+    ``STALE_BAR`` guard (zero-volume bars) makes the accepted set MORE
+    honest per trade but concentrates this same selection effect. Read
+    ``net_pnl_paisa`` alongside ``n_rejected`` — a high reject share means
+    a strongly filtered, potentially optimistic sample.
+
     Attributes
     ----------
     rule_name
@@ -513,7 +582,7 @@ class OptionsRuleResult:
     n_accepted
         Signals priced into a :class:`MaterializedTrade`.
     n_rejected_no_data, n_rejected_tick_floor
-        Rejections by reason (sum ``= n_rejected``).
+        Rejections by reason (with the two below, sum ``= n_rejected``).
     gross_pnl_paisa, total_charges_paisa, net_pnl_paisa
         Sums over the accepted trades (int64 paisa).
     n_winners, n_losers
@@ -521,6 +590,14 @@ class OptionsRuleResult:
         — a loss or the vanishingly-rare exact-zero scratch, which the non-zero
         cost stack makes unreachable in practice). ``n_winners + n_losers ==
         n_accepted``.
+    n_rejected_lot_size_unknown
+        Signals whose entry date precedes the recorded lot-size history
+        (:data:`RejectReason.LOT_SIZE_UNKNOWN` — e.g. 2020-dated signals
+        under the 2021-01-01 lot-history floor). Defaults to 0 for
+        back-compat with pre-existing constructors.
+    n_rejected_stale_bar
+        Signals rejected on a zero-volume entry/exit bar
+        (:data:`RejectReason.STALE_BAR`). Defaults to 0 for back-compat.
 
     Raises
     ------
@@ -538,6 +615,8 @@ class OptionsRuleResult:
     net_pnl_paisa: int
     n_winners: int
     n_losers: int
+    n_rejected_lot_size_unknown: int = 0
+    n_rejected_stale_bar: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -545,6 +624,8 @@ class OptionsRuleResult:
             "n_accepted",
             "n_rejected_no_data",
             "n_rejected_tick_floor",
+            "n_rejected_lot_size_unknown",
+            "n_rejected_stale_bar",
             "n_winners",
             "n_losers",
         ):
@@ -565,8 +646,13 @@ class OptionsRuleResult:
 
     @property
     def n_rejected(self) -> int:
-        """Total rejected signals (no-data + tick-floor)."""
-        return self.n_rejected_no_data + self.n_rejected_tick_floor
+        """Total rejected signals (no-data + tick-floor + lot-unknown + stale-bar)."""
+        return (
+            self.n_rejected_no_data
+            + self.n_rejected_tick_floor
+            + self.n_rejected_lot_size_unknown
+            + self.n_rejected_stale_bar
+        )
 
     @property
     def win_rate(self) -> float:
@@ -585,6 +671,7 @@ def run_rule_over_signals(
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
     delta_chain_provider: DeltaChainProvider | None = None,
+    reject_stale_bars: bool = True,
 ) -> OptionsRuleResult:
     """Price every *signal* under *rule* and aggregate into an :class:`OptionsRuleResult`.
 
@@ -600,6 +687,9 @@ def run_rule_over_signals(
         Cost-model parameters.
     delta_chain_provider
         Required for a delta-target rule — yields the per-signal delta chain.
+    reject_stale_bars
+        Threaded to :func:`materialize_trade` — default ``True`` rejects
+        zero-volume entry/exit bars as :data:`RejectReason.STALE_BAR`.
 
     Returns
     -------
@@ -621,6 +711,8 @@ def run_rule_over_signals(
     n_accepted = 0
     n_no_data = 0
     n_tick_floor = 0
+    n_lot_unknown = 0
+    n_stale_bar = 0
     gross = 0
     charges = 0
     net = 0
@@ -638,10 +730,15 @@ def run_rule_over_signals(
             gst_split=gst_split,
             n_lots=n_lots,
             delta_chain=chain,
+            reject_stale_bars=reject_stale_bars,
         )
         if isinstance(outcome, RejectedTrade):
             if outcome.reason == RejectReason.NO_DATA:
                 n_no_data += 1
+            elif outcome.reason == RejectReason.LOT_SIZE_UNKNOWN:
+                n_lot_unknown += 1
+            elif outcome.reason == RejectReason.STALE_BAR:
+                n_stale_bar += 1
             else:
                 n_tick_floor += 1
             continue
@@ -669,6 +766,8 @@ def run_rule_over_signals(
         net_pnl_paisa=net,
         n_winners=winners,
         n_losers=losers,
+        n_rejected_lot_size_unknown=n_lot_unknown,
+        n_rejected_stale_bar=n_stale_bar,
     )
 
 
@@ -682,6 +781,7 @@ def execute_options_sim(
     n_lots: int = 1,
     delta_chain_provider: DeltaChainProvider | None = None,
     audit: AuditAppend | None = None,
+    reject_stale_bars: bool = True,
 ) -> tuple[OptionsRuleResult, ...]:
     """Run the options sim across every *rule* and return one result per rule.
 
@@ -704,6 +804,10 @@ def execute_options_sim(
         Required only if *rules* includes a delta-target rule.
     audit
         Optional audit sink; one row per rule result when supplied.
+    reject_stale_bars
+        Threaded to :func:`materialize_trade` — default ``True`` rejects
+        zero-volume entry/exit bars as :data:`RejectReason.STALE_BAR`;
+        pass ``False`` to opt out at the sim API surface.
 
     Returns
     -------
@@ -720,6 +824,7 @@ def execute_options_sim(
             gst_split=gst_split,
             n_lots=n_lots,
             delta_chain_provider=delta_chain_provider,
+            reject_stale_bars=reject_stale_bars,
         )
         results.append(result)
         if audit is not None:
