@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from types import TracebackType
 
 import pytest
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook, WatchdogFactory
-from brutex.dashboard.pull_progress import STATE_DONE, STATE_ERROR, PullProgress
+from brutex.dashboard.pull_progress import STATE_DONE, STATE_RUNNING, PullProgress
 from brutex.dashboard.pull_stall import (
     DEFAULT_STALL_TIMEOUT_SECONDS,
     PULL_STALL_ENV,
@@ -236,6 +235,9 @@ class _SpyWatchdog:
 
     def __init__(self, on_hung: Callable[[WorkerEvent], None]) -> None:
         self.on_hung = on_hung
+        #: The job assigns its recovery hook post-construction (DEC-PIPELINE-STALL-
+        #: HEARTBEAT-001) — mirrored here so the spy can replay a HUNG→HEALTHY edge.
+        self.on_recovery: Callable[[WorkerEvent], None] | None = None
         self.started = False
         self.stopped = False
         self.beats = 0
@@ -257,6 +259,18 @@ class _SpyWatchdog:
                 new_state=WorkerState.HUNG,
                 last_beat_seconds_ago=last_beat_seconds_ago,
                 timeout_seconds=timeout,
+            )
+        )
+
+    def trigger_recovery(self, *, last_beat_seconds_ago: float = 1.0) -> None:
+        """Simulate the timer thread observing a HUNG→HEALTHY recovery edge."""
+        assert self.on_recovery is not None  # the job wires it in start()
+        self.on_recovery(
+            WorkerEvent(
+                worker_name=PULL_WORKER_NAME,
+                new_state=WorkerState.HEALTHY,
+                last_beat_seconds_ago=last_beat_seconds_ago,
+                timeout_seconds=600.0,
             )
         )
 
@@ -356,207 +370,190 @@ class TestBackgroundPullJobWatchdog:
         emit_progress_beat()
         assert spy.beats == 3
 
-    def test_hung_edge_alerts_and_clears_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A HUNG worker → CRITICAL pull-halt alert + progress error + _running cleared."""
+    def test_hung_edge_alerts_and_marks_stalled_suspect_without_release(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HUNG edge → CRITICAL alert + STALLED-SUSPECT marker; run NOT failed, flight HELD.
+
+        DEC-PIPELINE-STALL-HEARTBEAT-001, the forensic regression (operator run 2026-07-02):
+        last fetch beat 13:58:21 → watchdog fired at ~14:11:10 (769 s silent) during the
+        post-fetch stages and the OLD handler FAILED the progress + cleared ``_running`` +
+        released the single-flight while the worker went on to SUCCEED at 14:15:08. The
+        honest edge now alerts + marks stalled-suspect and keeps the single-flight held.
+        """
         halts: list[BaseException] = []
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
 
         built, factory = _spy_factory()
         captured: list[Callable[[], None]] = []
-        # A capturing WORKER spawner so the worker never finishes (simulates a hang).
+        # A capturing WORKER spawner so the worker never finishes (simulates the silence).
         job = BackgroundPullJob(
             progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
         )
         assert job.start(lambda _h: None, total=1) is True
         assert job.running  # worker captured, still "running"
 
-        # The timer thread declares the worker HUNG.
-        built[0].trigger_hung()
+        # The timer thread declares the worker HUNG (the forensic 769 s silence).
+        built[0].trigger_hung(last_beat_seconds_ago=769.0, timeout=600.0)
 
-        assert len(halts) == 1  # one CRITICAL pull-halt alert fired
+        assert len(halts) == 1  # one CRITICAL pull-halt alert fired (still detected!)
         assert isinstance(halts[0], TimeoutError)
-        # MAJOR-2: the hung edge STOPS its own watchdog so the daemon timer cannot leak
-        # (a truly-hung worker never reaches _run.finally to stop it).
-        assert built[0].stopped is True
+        assert "stalled-suspect" in str(halts[0])
+        # The timer is NOT stopped — it keeps polling so a later heartbeat recovery
+        # (the greeks/prebuild/movers seams) can clear the marker.
+        assert built[0].stopped is False
         snap = job.snapshot()
-        assert snap.state == STATE_ERROR
-        assert "stalled" in snap.detail
-        assert not job.running  # _running CLEARED so future pulls are not refused
+        assert snap.state == STATE_RUNNING  # NOT failed — the worker may still succeed
+        assert snap.stalled is True
+        assert "769" in snap.stall_detail and "stalled-suspect" in snap.stall_detail
+        # The single-flight is HELD: a second pull is REFUSED while the worker is alive
+        # (the double-run race the old release-on-hung design admitted).
+        assert job.running is True
+        assert job.start(lambda _h: None, total=1) is False
 
-    def test_on_hung_swallows_a_raising_progress_fail(
+    def test_worker_success_after_hung_edge_finishes_clean(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """MINOR-4: a raise inside _on_hung (e.g. progress.fail) is swallowed, timer survives."""
+        """The forensic shape end-to-end: hung edge fires, worker later SUCCEEDS → done.
+
+        The run must finish ``done`` (not the old false FAILED), the stalled marker must
+        clear, and the single-flight must release only THEN.
+        """
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        built, factory = _spy_factory()
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+        job.start(lambda _h: None, total=1)
+        built[0].trigger_hung()
+        assert job.snapshot().stalled is True
+        assert job.running is True
+
+        captured[0]()  # the "zombie" worker finishes — and it SUCCEEDS
+
+        snap = job.snapshot()
+        assert snap.state == STATE_DONE  # honest headline (was falsely FAILED before)
+        assert snap.stalled is False  # finish clears the suspect marker
+        assert not job.running  # single-flight released by the worker's own finally
+        assert built[0].stopped is True  # the timer stops with the worker
+        assert job.start(lambda _h: None, total=1) is True  # next pull accepted
+
+    def test_recovery_edge_clears_stalled_suspect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A heartbeat landing after the HUNG edge clears the marker (HUNG→HEALTHY)."""
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        built, factory = _spy_factory()
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+        job.start(lambda _h: None, total=1)
+        built[0].trigger_hung()
+        assert job.snapshot().stalled is True
+        built[0].trigger_recovery()
+        snap = job.snapshot()
+        assert snap.stalled is False
+        assert snap.stall_detail == ""
+        assert snap.state == STATE_RUNNING  # still in flight, honestly healthy again
+
+    def test_on_hung_swallows_a_raising_progress_mark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raise inside _on_hung (e.g. progress.mark_stalled) is swallowed, timer survives."""
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
         built, factory = _spy_factory()
 
         class _BoomProgress(PullProgress):
-            def fail(self, detail: str) -> None:
-                raise RuntimeError("progress.fail boom")
+            def mark_stalled(self, detail: str) -> None:
+                raise RuntimeError("progress.mark_stalled boom")
 
         captured: list[Callable[[], None]] = []
         job = BackgroundPullJob(
             progress=_BoomProgress(), spawn=captured.append, watchdog_factory=factory
         )
         job.start(lambda _h: None, total=1)
-        # The raising progress.fail must NOT propagate out of _on_hung (best-effort).
+        # The raising progress.mark_stalled must NOT propagate out of _on_hung (best-effort).
         built[0].trigger_hung()
-        # The watchdog was still stopped (it runs before the raising fail), so no leak.
-        assert built[0].stopped is True
+        assert job.running is True  # the run is untouched
 
-    def test_future_pull_accepted_after_hung(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """After a hung→stalled transition, a NEW pull starts (single-flight released)."""
-        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
-        built, factory = _spy_factory()
-        captured: list[Callable[[], None]] = []
-        job = BackgroundPullJob(
-            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
-        )
-        job.start(lambda _h: None, total=1)
-        built[0].trigger_hung()
-        assert not job.running
-        # A second pull is now ACCEPTED (would have been silently refused before the fix).
-        accepted = job.start(lambda _h: None, total=1)
-        assert accepted is True
-        assert len(built) == 2  # a fresh watchdog for the new run
-
-    def test_stale_finally_after_new_run_started_does_not_clobber(
+    def test_on_recovered_swallows_a_raising_progress_clear(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """BLOCKER: the DANGEROUS ordering — run B STARTS before stale A's finally runs.
-
-        Interleaving that the shared-flag design got WRONG (and which a regression would
-        re-introduce): run A wedges → A's timer clears ``_running`` → run B starts (now the
-        current run, in flight) → THEN stale worker A unwedges and reaches its ``finally``.
-        The identity gate (``self._watchdog is watchdog``) means A's finally sees it is NOT
-        the current run and leaves run B's ``_running=True`` intact. Without the fix the
-        stale finally clobbers ``_running=False`` while B is in flight → a third pull could
-        start concurrently (single-flight violated). This is the dangerous ordering the prior
-        safe-ordering test never exercised.
-        """
+        """A raise inside _on_recovered (progress.clear_stalled) is swallowed (best-effort)."""
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
         built, factory = _spy_factory()
+
+        class _BoomProgress(PullProgress):
+            def clear_stalled(self) -> None:
+                raise RuntimeError("progress.clear_stalled boom")
+
         captured: list[Callable[[], None]] = []
         job = BackgroundPullJob(
-            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
+            progress=_BoomProgress(), spawn=captured.append, watchdog_factory=factory
         )
-        # Run A starts and hangs (worker A captured, not run). Each ``job.running`` read is
-        # captured into a fresh local so a mypy ``is True``/``is False`` narrowing on the first
-        # read does not poison the property's type for the later reads in this same function.
         job.start(lambda _h: None, total=1)
-        built[0].trigger_hung()  # A's timer: A is current → clears _running
-        running_after_a_hung = job.running
-        assert running_after_a_hung is False
+        built[0].trigger_recovery()  # must NOT raise out — swallowed + logged
+        assert job.running is True
 
-        # *** Run B starts BEFORE stale worker A's finally runs ***
-        b_started = job.start(lambda _h: None, total=1)
-        assert b_started is True
-        running_with_b = job.running
-        assert running_with_b is True  # B is the current run, in flight
-        assert len(built) == 2  # B has its own (current) watchdog
-
-        # Now stale worker A unwedges and reaches its finally (its captured body runs).
-        captured[0]()  # worker A's _run(work, watchdog_A) finally fires
-
-        # Identity gate: A is no longer current (self._watchdog is B), so A's finally did
-        # NOT clobber B's _running. B is still in flight → a third pull is REFUSED.
-        running_after_stale = job.running
-        assert running_after_stale is True
-        c_started = job.start(lambda _h: None, total=1)
-        assert c_started is False  # single-flight holds vs run B
-
-    def test_stale_finally_interleaved_at_token_publish_does_not_clobber(
+    def test_late_hung_edge_for_prior_run_does_not_mark_new_run(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """BLOCKER (residual TOCTOU): run A's finally fires DURING run B's start() lock.
-
-        The deterministic version of the race the sequential test cannot observe: run B's
-        ``start()`` must claim ``_running`` AND publish ``self._watchdog`` ATOMICALLY under
-        one lock. If the token is published OUTSIDE the lock (the racy code), a stale worker
-        A's finally can acquire the just-released lock in the gap between ``_running = True``
-        and ``self._watchdog = wd_B`` — still see ``self._watchdog is wd_A`` → clear
-        ``_running`` → admit a third pull C concurrently with B.
-
-        This injects A's finally at EXACTLY that point via a lock whose release fires a
-        one-shot hook. With the under-lock fix B's token is published BEFORE the lock is
-        released, so the interleaved A-finally sees ``self._watchdog is wd_B`` → no clobber →
-        C is REFUSED. Reverting the under-lock move makes this FAIL (C accepted).
-        """
+        """Identity gate (FALSE arm): a late HUNG edge from a finished run never marks run B."""
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
         built, factory = _spy_factory()
         captured: list[Callable[[], None]] = []
         job = BackgroundPullJob(
             progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
         )
-
-        # Run A starts and hangs; A's timer clears _running (A was current).
-        job.start(lambda _h: None, total=1)
+        job.start(lambda _h: None, total=1)  # run A
+        captured[0]()  # A finishes cleanly → single-flight released
+        assert job.start(lambda _h: None, total=1) is True  # run B, now current
+        assert len(built) == 2
+        # A late duplicate HUNG edge for the SUPERSEDED run A: the identity gate
+        # (self._watchdog is watchdog_A) is False → run B is never marked.
         built[0].trigger_hung()
-        running_after_a_hung = job.running
-        assert running_after_a_hung is False
+        snap = job.snapshot()
+        assert snap.stalled is False
+        assert job.running is True
 
-        # Wrap the job's real lock so that, on the NEXT release (run B's start()), we run the
-        # stale worker A's captured finally exactly once — at the lock-release boundary, i.e.
-        # the instant after the lock is dropped. Under the fix B has already published
-        # self._watchdog INSIDE the lock, so A's gate sees wd_B; in the racy code the token is
-        # published only AFTER the release, so A's gate would still see wd_A and clobber.
-        real_lock = job._lock
-        fired: list[bool] = []
-
-        class _InterleavingLock:
-            def __enter__(self) -> bool:
-                return real_lock.acquire()
-
-            def __exit__(
-                self,
-                exc_type: type[BaseException] | None,
-                exc: BaseException | None,
-                tb: TracebackType | None,
-            ) -> None:
-                real_lock.release()
-                if not fired:
-                    fired.append(True)
-                    captured[0]()  # stale worker A's _run(..., wd_A) finally, mid-B-start
-
-        job._lock = _InterleavingLock()  # type: ignore[assignment]
-
-        # Run B starts. Under the fix, B publishes self._watchdog INSIDE the lock, so when the
-        # release hook runs A's finally, self._watchdog is already wd_B → A's gate is False.
-        b_started = job.start(lambda _h: None, total=1)
-        assert b_started is True
-        assert fired == [True]  # the interleaving actually happened
-        job._lock = real_lock  # restore the real lock for the rest of the test
-
-        # B is still the current in-flight run; single-flight holds → a third pull is REFUSED.
-        running_after_interleave = job.running
-        assert running_after_interleave is True
-        c_started = job.start(lambda _h: None, total=1)
-        assert c_started is False
-
-    def test_stale_on_hung_for_superseded_run_does_not_clobber(
+    def test_late_recovery_edge_for_prior_run_does_not_touch_new_run(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A late _on_hung edge for an ALREADY-superseded run must not clear the new run's flag.
-
-        Covers the _on_hung identity gate's FALSE arm: run A hangs (A's _on_hung clears
-        running), run B starts (now current). If A's timer fires _on_hung(A) AGAIN — a late
-        duplicate — the gate (self._watchdog is watchdog_A) is False, so it leaves run B's
-        _running=True intact.
-        """
+        """Identity gate (FALSE arm) for _on_recovered: a stale recovery never touches run B."""
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
         built, factory = _spy_factory()
         captured: list[Callable[[], None]] = []
         job = BackgroundPullJob(
             progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
         )
-        job.start(lambda _h: None, total=1)
-        built[0].trigger_hung()  # A current → clears running
-        job.start(lambda _h: None, total=1)  # B starts, now current
-        assert job.running
-        # A late duplicate hung edge for the SUPERSEDED run A.
-        built[0].trigger_hung()
-        # The _on_hung identity gate is False (current watchdog is B) → run B's flag untouched.
-        assert job.running
+        job.start(lambda _h: None, total=1)  # run A
+        captured[0]()  # A finishes
+        job.start(lambda _h: None, total=1)  # run B, now current
+        built[1].trigger_hung()  # B is genuinely stalled-suspect
+        assert job.snapshot().stalled is True
+        built[0].trigger_recovery()  # stale recovery from run A — gated out
+        assert job.snapshot().stalled is True  # B's honest marker survives
+
+    def test_stale_finally_identity_gate_false_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_run's finally identity gate (FALSE arm): a superseded worker never clobbers.
+
+        Under DEC-PIPELINE-STALL-HEARTBEAT-001 the watchdog no longer clears ``_running``,
+        so the finally is the ONE release path and its gate is normally always True. The
+        gate is kept as defence in depth — this white-box test supersedes the prior
+        trigger_hung-driven interleavings (which relied on the removed release-on-hung)
+        and pins that a worker whose run identity was superseded leaves the flag alone.
+        """
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        _built, factory = _spy_factory()
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+        job.start(lambda _h: None, total=1)  # run A (captured, in flight)
+        # Simulate supersession of A's run identity (white-box: the invariant guard).
+        job._watchdog = _SpyWatchdog(lambda _e: None)  # type: ignore[assignment]
+        captured[0]()  # A's finally: gate False → _running untouched
+        assert job.running is True
 
     def test_normal_finish_clears_running_and_allows_next_pull(self) -> None:
         """The SAFE path: a clean worker finish clears _running (identity gate True)."""

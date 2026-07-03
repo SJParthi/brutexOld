@@ -489,9 +489,14 @@ class TestOnHung:
             watchdog_factory=factory,
         )
 
-    def test_on_hung_marks_failed_and_clears_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A HUNG edge while THIS run is current: progress → failed, _running cleared,
-        # and a best-effort halt alert fires (monkeypatched so no real notifier runs).
+    def test_on_hung_marks_stalled_suspect_and_holds_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A HUNG edge while THIS run is current (DEC-PIPELINE-STALL-HEARTBEAT-001):
+        # progress → STALLED-SUSPECT (state stays running, never a false FAILED), the
+        # single-flight flag stays HELD (the worker thread may still be alive — releasing
+        # here was the forensically-proven double-run race), and a best-effort halt alert
+        # fires (monkeypatched so no real notifier runs).
         alerts: list[BaseException] = []
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
         captured: list[Callable[[WorkerEvent], None]] = []
@@ -506,10 +511,12 @@ class TestOnHung:
         captured[0](_hung_event())  # fire the HUNG edge directly
 
         snap = job.snapshot()
-        assert snap.state == STATE_ERROR  # _on_hung marked the run failed
-        assert "stalled" in snap.detail  # the stall detail is surfaced
-        assert job.running is False  # identity gate matched → _running cleared
-        assert len(alerts) == 1  # one best-effort halt alert
+        assert snap.state == STATE_RUNNING  # NOT failed — an honest DEGRADED marker only
+        assert snap.stalled is True
+        assert "stalled-suspect" in snap.stall_detail
+        assert snap.detail == "stalled-pull"  # the start detail is untouched
+        assert job.running is True  # single-flight HELD while the worker may be alive
+        assert len(alerts) == 1  # one best-effort halt alert (still detected + reported)
         assert isinstance(alerts[0], TimeoutError)
 
     def test_on_hung_late_fire_does_not_clobber_a_newer_run(
@@ -532,9 +539,10 @@ class TestOnHung:
         job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
 
         stale_on_hung(_hung_event())  # the late fire
-        # progress.fail still ran (best-effort), but the identity gate refused to
-        # touch _running (it belongs to the newer run now).
+        # The identity gate refused to touch the newer run: no stalled marker, no alert
+        # side effects on the current run's tracker.
         assert job._watchdog is newer  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is False
 
     def test_on_hung_body_is_best_effort_and_swallows_errors(
         self, monkeypatch: pytest.MonkeyPatch

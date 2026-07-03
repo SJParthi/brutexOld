@@ -160,6 +160,8 @@ def test_to_dict_shape() -> None:
         "running": True,
         "updated_at": d["updated_at"],
         "phase": "",
+        "stalled": False,
+        "stall_detail": "",
     }
     assert isinstance(d["updated_at"], float)
 
