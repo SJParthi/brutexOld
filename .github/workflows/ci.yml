@@ -430,7 +430,7 @@ jobs:
           # — explicitly engineered for 100% line + branch coverage.
           # This is step 1 of the multi-PR ratchet path to lift the
           # global floor from 90% → 100% (per Golden Rule #12 #1+#2).
-          # DEC-RUST-HARDENING-R2-001 (MIGRATION.md #1165) added the
+          # DEC-RUST-HARDENING-R2-001 (MIGRATION.md #1166) added the
           # `check_wheel_freshness` stage whose dedicated suite lives in
           # `test_doctor_wheel_freshness.py` — the module's covering set
           # is BOTH files (test_doctor.py alone reads 92% since that
@@ -1027,7 +1027,7 @@ jobs:
             echo "(brutex.vocabulary.describe test file not present yet — gate inactive)"
           fi
           # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests) — since
-          # DEC-RUST-HARDENING-R2-001 (#1165) the module's covering set is
+          # DEC-RUST-HARDENING-R2-001 (#1166) the module's covering set is
           # test_doctor.py + test_doctor_wheel_freshness.py (mirrors the
           # DEC-COV-001 block above; test_doctor.py alone reads 92%).
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
