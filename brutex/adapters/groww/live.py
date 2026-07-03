@@ -25,7 +25,7 @@ from brutex.adapters.groww.auth import (
     _real_totp,
 )
 from brutex.adapters.groww.client import GrowwClient, GrowwSDK, _noop_hook, _noop_pace
-from brutex.adapters.groww.constants import GROWW_PULL_CALL_TIMEOUT_S
+from brutex.adapters.groww.constants import GROWW_MAX_REAUTHS, GROWW_PULL_CALL_TIMEOUT_S
 from brutex.adapters.groww.errors import GrowwAuthError
 from brutex.adapters.groww.pool import ClientPool
 from brutex.adapters.groww.reauth import SdkRefresher, _real_sdk_factory
@@ -202,6 +202,11 @@ def build_live_client(
         # SDK call so a stalled connection can never hang the pull — it raises a
         # retryable timeout instead, which the client's bounded retry loop handles.
         call_timeout_seconds=GROWW_PULL_CALL_TIMEOUT_S,
+        # FP-1 hardening (DEC-GROWW-AUTH-HALT-001): the PRODUCTION re-auth budget is
+        # 2 (the GrowwClient default stays 1 for offline/tests) so the 06:00 IST
+        # rotation's possible fresh-token propagation lag cannot false-exhaust the
+        # budget into a terminal auth halt; a truly-dead credential still halts.
+        max_reauths=GROWW_MAX_REAUTHS,
     )
 
 
@@ -278,6 +283,10 @@ def build_live_pool(
             on_rate_limit=on_rate_limit or _noop_hook,
             on_success=on_success or _noop_hook,
             call_timeout_seconds=GROWW_PULL_CALL_TIMEOUT_S,
+            # FP-1 hardening (DEC-GROWW-AUTH-HALT-001): production re-auth budget 2
+            # on EVERY leaf (mirrors build_live_client) — the 06:00 IST rotation lag
+            # cannot false-exhaust one leaf's budget into a pull-wide auth halt.
+            max_reauths=GROWW_MAX_REAUTHS,
             meter=meter,
         )
         for index in range(safe_size)

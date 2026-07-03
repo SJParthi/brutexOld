@@ -194,6 +194,36 @@ def test_build_live_pool_builds_k_connections_sharing_one_meter() -> None:
     assert all(leaf.pace is not None for leaf in leaves)
 
 
+def test_build_live_client_injects_production_reauth_budget() -> None:
+    """FP-1 hardening (DEC-GROWW-AUTH-HALT-001): the PRODUCTION live build site
+    injects ``GROWW_MAX_REAUTHS`` (2) so the 06:00 IST rotation lag cannot
+    false-exhaust the budget into a terminal auth halt. The ``GrowwClient``
+    DEFAULT stays 1 (offline / unit-test back-compat, untouched)."""
+    from brutex.adapters.groww.constants import GROWW_MAX_REAUTHS
+
+    client = build_live_client(
+        _CREDS,
+        token_factory=lambda _k, _t: "T",
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_FakeSDK,
+    )
+    assert client.max_reauths == GROWW_MAX_REAUTHS == 2
+
+
+def test_build_live_pool_injects_production_reauth_budget_on_every_leaf() -> None:
+    """Every pool leaf carries the production re-auth budget (mirrors the client)."""
+    from brutex.adapters.groww.constants import GROWW_MAX_REAUTHS
+
+    pool = build_live_pool(
+        _CREDS,
+        size=3,
+        token_factory=lambda _k, _t: "T",
+        totp_minter=lambda _s: "000000",
+        sdk_factory=_FakeSDK,
+    )
+    assert all(leaf.max_reauths == GROWW_MAX_REAUTHS for leaf in pool._clients)
+
+
 def test_build_live_pool_size_clamped_to_at_least_one() -> None:
     """A nonsensical size (0 / negative) clamps to a single-connection pool (fail-safe)."""
     pool = build_live_pool(
