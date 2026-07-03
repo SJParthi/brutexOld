@@ -325,6 +325,30 @@ _IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 #: ``00:00:00`` suffix) in the candle viewer (DEC-DB-CANDLE-DERIVED-001).
 _DAILY_INTERVAL: Final[str] = "1day"
 
+#: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
+#: the candle grid renders (:func:`_format_candle_timestamp`). Adds the fixed
+#: +05:30 IST offset (330 minutes; India has no DST — CLAUDE.md §6) to the UTC
+#: wall-clock before truncating, so it is independent of the ambient DuckDB
+#: session ``TimeZone`` (the operator runs Asia/Kolkata). Used by the derived-1day
+#: date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O full-stored-life span.
+_IST_DATE_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')::DATE"
+
+#: The SQL fragment for a bar's **UTC calendar date** — the legacy intraday date
+#: bound (byte-identical to the pre-DEC-DB-UX-PACK-001 comparison). Real intraday
+#: bars trade 03:45–10:00 UTC where the UTC and IST dates coincide, so intraday
+#: filtering keeps this expression (CLAUDE.md §6 store-UTC / display-IST).
+_UTC_DATE_EXPR: Final[str] = "(\"timestamp\" AT TIME ZONE 'UTC')::DATE"
+
+#: The Track-1 SPOT data-pull floor (``GROWW_HISTORY_FLOOR`` = 2020-01-01,
+#: :mod:`brutex.dashboard.pull_controller`). The ``/db`` SPOT date filter defaults
+#: its START to this floor when the operator leaves the "from" input blank — the
+#: honest lower bound of what the lake can hold, NEVER "today" (an empty input must
+#: not masquerade as a live one-day filter — the inert-filter illusion,
+#: DEC-DB-UX-PACK-001 Feature 2). Kept as a local literal (not an import of the
+#: heavy pull-controller module) with this citation so the read-only viewer stays
+#: import-light; a drift is caught by :func:`test_spot_filter_floor_matches_pull_floor`.
+_SPOT_FILTER_FLOOR_ISO: Final[str] = "2020-01-01"
+
 #: The 1-minute base partition — the source of the previous-day close BASELINE
 #: for the derived %-change / gap columns. The engine is 1-minute-based, so the
 #: baseline is the prior trading day's **last 1-minute close** (the 15:29 IST
@@ -1590,13 +1614,16 @@ def query_candles(
     safe_limit = clamp_limit(limit)
     safe_offset = clamp_offset(offset)
 
-    # Compare the bar's UTC *calendar date* — `"timestamp"` is TIMESTAMPTZ
-    # (parquet_writer stores time_zone="UTC"); the shared `_date_bounds` pins
-    # the wall-clock to UTC and truncates, so the bound comparison is
-    # independent of the ambient DuckDB session `TimeZone` (the operator runs
-    # Asia/Kolkata). Both bounds inclusive (Golden Rule #7 — same UTC date in
-    # → same rows out, regardless of session tz).
-    where_clauses, where_params = _date_bounds(start, end)
+    # Compare the bar's calendar date via the shared `_date_bounds`, which pins the
+    # comparison to the IST date for the DERIVED 1day interval (so the filter matches
+    # the date the grid renders — DEC-DB-UX-PACK-001 Feature 3) and to the UTC date
+    # for every intraday interval (byte-identical to before, session-tz independent).
+    # Both bounds inclusive (Golden Rule #7). The raw (possibly `None`) `start`/`end`
+    # are what filter the rows + key the paging-invariant count cache — the honest
+    # applied-range chip metadata is resolved SEPARATELY below (never fed to the WHERE),
+    # so the row set + total stay byte-unchanged.
+    is_fno = segment == FNO_CANDLE_LAKE_SEGMENT
+    where_clauses, where_params = _date_bounds(start, end, interval=interval)
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     # Empty / not-yet-pulled partition set → return an empty page instead of
@@ -1618,6 +1645,17 @@ def query_candles(
             "total": 0,
             "limit": safe_limit,
             "offset": safe_offset,
+            # An empty partition has no stored span, so F&O defaults to (None, None)
+            # — an honest "no stored data"; SPOT still reports [2020-01-01, today]
+            # (DEC-DB-UX-PACK-001 Feature 2).
+            "applied_range": resolve_applied_range(
+                is_fno=is_fno,
+                explicit_start=start,
+                explicit_end=end,
+                stored_start_ist=None,
+                stored_end_ist=None,
+                today_ist=_today_ist_iso(),
+            ),
         }
 
     # The glob is built from coordinates validated above (no free user text),
@@ -1745,6 +1783,25 @@ def query_candles(
     rows = [
         [*rendered_row, *extra] for rendered_row, extra in zip(rendered, extra_cells, strict=True)
     ]
+    # Resolve the honest applied-range chip metadata (DEC-DB-UX-PACK-001 Feature 2).
+    # SPOT reports [2020-01-01, today]; an F&O contract reports its FULL STORED LIFE,
+    # read once (resilient MIN/MAX over the IST-date span) ONLY when a bound is blank —
+    # an explicit range needs no scan. This is REPORTING metadata; the WHERE above uses
+    # the raw bounds, so the row set / total are byte-unchanged.
+    if is_fno and (start is None or end is None):
+        stored_start_ist, stored_end_ist = _fno_stored_ist_span_resilient(
+            conn, base, source=source, skip_source=skip_source
+        )
+    else:
+        stored_start_ist, stored_end_ist = (None, None)
+    applied_range = resolve_applied_range(
+        is_fno=is_fno,
+        explicit_start=start,
+        explicit_end=end,
+        stored_start_ist=stored_start_ist,
+        stored_end_ist=stored_end_ist,
+        today_ist=_today_ist_iso(),
+    )
     return {
         "symbol": symbol,
         "interval": interval,
@@ -1753,32 +1810,143 @@ def query_candles(
         "total": total,
         "limit": safe_limit,
         "offset": safe_offset,
+        "applied_range": applied_range,
     }
 
 
-def _date_bounds(start: str | None, end: str | None) -> tuple[list[str], list[Any]]:
-    """Build the inclusive UTC-date ``WHERE`` fragments shared by both readers.
+def _date_bounds(
+    start: str | None, end: str | None, *, interval: str
+) -> tuple[list[str], list[Any]]:
+    """Build the inclusive calendar-date ``WHERE`` fragments shared by both readers.
 
-    Returns ``(clauses, params)`` where each clause compares the bar's UTC
-    *calendar date* (``("timestamp" AT TIME ZONE 'UTC')::DATE``) against a bound
-    ISO date — independent of the ambient DuckDB session ``TimeZone`` (the
-    operator runs Asia/Kolkata). Both bounds inclusive (Golden Rule #7). A
-    ``None`` bound contributes nothing.
+    Returns ``(clauses, params)`` where each clause compares the bar's *calendar
+    date* against a bound ISO date. Which calendar the comparison uses depends on
+    the *interval*, so the filter matches the date the grid actually renders:
+
+    * ``"1day"`` (the DERIVED daily anchor) — a daily bar is stamped midnight-IST,
+      which the lake stores as the PREVIOUS calendar day ``18:30`` UTC. A UTC-date
+      comparison is therefore OFF BY ONE versus the IST date the grid shows
+      (:func:`_format_candle_timestamp` renders 1day DATE-ONLY in IST): filtering
+      ``2026-02-03`` under the old UTC bound returned the ``02-04`` row and dropped
+      the ``02-03`` row. So 1day compares the **IST** calendar date
+      (:data:`_IST_DATE_EXPR`) — DEC-DB-UX-PACK-001 Feature 3.
+    * every intraday interval — keeps the **UTC** calendar date
+      (:data:`_UTC_DATE_EXPR`), byte-identical to the prior behaviour. Real intraday
+      bars trade 03:45–10:00 UTC where the UTC and IST dates coincide, so this is
+      the same day either way and is independent of the ambient DuckDB session
+      ``TimeZone`` (the operator runs Asia/Kolkata; regression-pinned).
+
+    Both bounds inclusive (Golden Rule #7). A ``None`` bound contributes nothing.
 
     Raises
     ------
     ValueError
         On a malformed ISO date bound (via :func:`_parse_iso_date`).
     """
+    date_expr = _IST_DATE_EXPR if interval == _DAILY_INTERVAL else _UTC_DATE_EXPR
     clauses: list[str] = []
     params: list[Any] = []
     if start is not None:
-        clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE >= ?")
+        clauses.append(f"{date_expr} >= ?")
         params.append(_parse_iso_date(start, "start").isoformat())
     if end is not None:
-        clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE <= ?")
+        clauses.append(f"{date_expr} <= ?")
         params.append(_parse_iso_date(end, "end").isoformat())
     return clauses, params
+
+
+def _today_ist_iso() -> str:
+    """Today's IST calendar date as ISO ``YYYY-MM-DD`` — the SPOT filter's default END.
+
+    The ``/db`` SPOT date filter reports ``[2020-01-01, today]`` as its applied
+    range when the operator leaves the inputs blank (DEC-DB-UX-PACK-001 Feature 2),
+    so a blank "to" shows the honest current day, never an empty-then-faked-live one.
+    """
+    return datetime.now(_IST).date().isoformat()
+
+
+def resolve_applied_range(
+    *,
+    is_fno: bool,
+    explicit_start: str | None,
+    explicit_end: str | None,
+    stored_start_ist: str | None,
+    stored_end_ist: str | None,
+    today_ist: str,
+    spot_floor: str = _SPOT_FILTER_FLOOR_ISO,
+) -> dict[str, str | None]:
+    """Resolve the HONEST applied date range the ``/db`` filter chip shows.
+
+    An empty operator input is filled with the true DEFAULT for its dataset, never
+    "today" (the inert-filter illusion this closes — DEC-DB-UX-PACK-001 Feature 2):
+
+    * SPOT (``is_fno=False``): ``[2020-01-01, today]`` — the pull floor
+      (``GROWW_HISTORY_FLOOR``, :data:`_SPOT_FILTER_FLOOR_ISO`) to the current IST day.
+    * F&O contract (``is_fno=True``): its FULL STORED LIFE — the earliest → latest
+      stored bar IST date; ``None`` on either side when the partition is empty (an
+      honest "no stored data" rather than a fabricated span).
+
+    An explicit bound always wins and each side defaults INDEPENDENTLY (an explicit
+    ``from`` with a blank ``to`` keeps the explicit start + the default end). Pure —
+    the returned range is REPORTING metadata only; the row-filtering ``WHERE`` still
+    uses the raw explicit bounds via :func:`_date_bounds`, so the page's rows / total
+    and the paging-invariant count cache are byte-unchanged (the resolved range is
+    always a superset of the returned rows, so "every returned row lies inside the
+    selected range" holds by construction — test-pinned).
+    """
+    if explicit_start is not None:
+        start: str | None = explicit_start
+    elif is_fno:
+        start = stored_start_ist
+    else:
+        start = spot_floor
+    if explicit_end is not None:
+        end: str | None = explicit_end
+    elif is_fno:
+        end = stored_end_ist
+    else:
+        end = today_ist
+    return {"start": start, "end": end}
+
+
+def _iso_date_or_none(value: Any) -> str | None:
+    """Render a DuckDB ``DATE`` cell as ISO ``YYYY-MM-DD``, or ``None`` for a NULL.
+
+    ``MIN``/``MAX`` over the IST-date expression returns a :class:`datetime.date`
+    (or ``None`` for an empty scan); anything else defensively falls back to ``str``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _fno_stored_ist_span_resilient(
+    conn: Any, base: Path, *, source: str, skip_source: str
+) -> tuple[str | None, str | None]:
+    """The (min, max) IST calendar date of an F&O partition's stored bars, resilient.
+
+    The F&O ``/db`` filter's "full stored life" default (DEC-DB-UX-PACK-001
+    Feature 2): one ``MIN``/``MAX`` over :data:`_IST_DATE_EXPR` through the SAME
+    corrupt-file-resilient probe (:func:`_execute_parquet_resilient`) every other
+    candle read uses, so a dup-poisoned / unreadable partition degrades to
+    ``(None, None)`` (an honest "no derivable span") instead of a 500. Returns
+    ``(None, None)`` for an empty / all-unreadable scan.
+    """
+    rows = _execute_parquet_resilient(
+        conn,
+        base,
+        f"SELECT MIN({_IST_DATE_EXPR}), MAX({_IST_DATE_EXPR}) FROM {source}",  # noqa: S608  # nosec B608 - constant expr over read_parquet(?) with a bound path
+        [],
+        source=skip_source,
+    )
+    if not rows:  # all files unreadable → an honest "no derivable span"
+        return (None, None)
+    lo, hi = rows[0]
+    # A readable-but-empty scan yields (None, None); _iso_date_or_none maps each None
+    # straight through, so no separate empty-guard branch is needed.
+    return (_iso_date_or_none(lo), _iso_date_or_none(hi))
 
 
 def _render_candle_rows(
@@ -2437,7 +2605,10 @@ def query_option_candles(
     safe_limit = clamp_limit(limit)
     safe_offset = clamp_offset(offset)
 
-    where_clauses, where_params = _date_bounds(start, end)
+    # Options roll a 1-minute table (intraday), so the date bound stays the UTC
+    # calendar date — byte-identical to before (DEC-DB-UX-PACK-001 Feature 3 only
+    # rewrites the DERIVED 1day interval, which the expired-options lake never holds).
+    where_clauses, where_params = _date_bounds(start, end, interval="1minute")
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     base = lake_root / OPTIONS_DIR_NAME / series
@@ -2453,6 +2624,17 @@ def query_option_candles(
             "total": 0,
             "limit": safe_limit,
             "offset": safe_offset,
+            # An expired-option series is an F&O contract → its default range is its
+            # FULL STORED LIFE; an empty series has none, so (None, None) — never a
+            # fabricated / "today" span (DEC-DB-UX-PACK-001 Feature 2).
+            "applied_range": resolve_applied_range(
+                is_fno=True,
+                explicit_start=start,
+                explicit_end=end,
+                stored_start_ist=None,
+                stored_end_ist=None,
+                today_ist=_today_ist_iso(),
+            ),
         }
 
     # The glob is built from the validated series segment (no free user text),
@@ -2498,6 +2680,27 @@ def query_option_candles(
     # Options roll a 1-minute table, so the bar always renders full HH:MM:SS (no
     # date-only collapse); options carry no spot derived %-columns.
     rows = _render_candle_rows(cursor.fetchall(), out_columns, "1minute")
+
+    def _stored_span() -> tuple[str | None, str | None]:
+        """The series' full-stored-life IST-date span (DEC-DB-UX-PACK-001 Feature 2).
+
+        One ``MIN``/``MAX`` over the IST-date expression, read ONLY when a bound is
+        blank (an explicit range needs no scan). Reached only AFTER the page's own
+        reads above have already scanned the SAME glob, so the files are readable
+        here; a readable-but-empty series yields ``(None, None)`` (``_iso_date_or_none``
+        maps each ``NULL`` through). Genuine corruption surfaces on the page read
+        above exactly as before — this adds no new failure path (the expired-options
+        reader is intentionally non-resilient, unlike the F&O candle path).
+        """
+        row = conn.execute(
+            f"SELECT MIN({_IST_DATE_EXPR}), MAX({_IST_DATE_EXPR}) FROM {source}",  # noqa: S608  # nosec B608 - constant expr over read_parquet(?) with a bound path
+            [glob],
+        ).fetchone()
+        return (_iso_date_or_none(row[0]), _iso_date_or_none(row[1]))
+
+    stored_start_ist, stored_end_ist = (
+        _stored_span() if (start is None or end is None) else (None, None)
+    )
     return {
         "series": series,
         "interval": "1minute",
@@ -2506,6 +2709,14 @@ def query_option_candles(
         "total": total,
         "limit": safe_limit,
         "offset": safe_offset,
+        "applied_range": resolve_applied_range(
+            is_fno=True,
+            explicit_start=start,
+            explicit_end=end,
+            stored_start_ist=stored_start_ist,
+            stored_end_ist=stored_end_ist,
+            today_ist=_today_ist_iso(),
+        ),
     }
 
 
@@ -3566,6 +3777,7 @@ __all__ = [
     "query_table",
     "registry_counts",
     "registry_path_for",
+    "resolve_applied_range",
     "sample_rows",
     "spot_window_rollup",
     "summarize_option_datasets",
