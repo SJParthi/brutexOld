@@ -262,6 +262,31 @@ class TestPoisonedPartitionHeal:
         assert stored["timestamp"].to_list() == [_ts(0), _ts(1)]  # healed on disk
         assert len(_events(logs, "lake.partition.dedup_healed")) == 1
 
+    def test_latest_wins_heal_still_keeps_first_physical_row(self, tmp_path: Path) -> None:
+        """ACCEPTED-BY-DESIGN divergence pin (hostile-review ask, DEC-LAKE-WRITE-UNIQUE-001):
+        the self-heal READ collapse is deliberately MODE-INDEPENDENT keep-FIRST — a
+        poisoned stored file healed under ``latest-wins`` keeps the FIRST physical
+        occurrence, even though the fresh latest-wins in-batch rule (#1137) would
+        keep the LATER one for the same payload. Confined to latest-wins (only the
+        derived-1day path uses it, where a PHYSICAL duplicate daily timestamp is
+        implausible); the production keep-first spine is unaffected. This pin makes
+        the documented edge a regression guard, not an accident.
+        """
+        writer = ParquetWriter(lake_root=tmp_path)
+        dest = _dest(tmp_path)
+        # Same-poisoned payload as the fresh latest-wins test: first row 100.0,
+        # later duplicate 999.0 — the heal must keep 100.0 (FIRST physical row).
+        _poison_partition(dest, [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11), (_ts(1), 101.0, 12)])
+        with capture_logs() as logs:
+            result = writer.write(
+                bars=[_bar(2, close="102.00")], merge_mode="latest-wins", **_COORDS
+            )
+        assert result.row_count == 3
+        stored = _stored_frame(dest)
+        assert stored["timestamp"].to_list() == [_ts(0), _ts(1), _ts(2)]
+        assert stored["close"].to_list() == [100.0, 101.0, 102.0]  # FIRST wins, mode-independent
+        assert len(_events(logs, "lake.partition.dedup_healed")) == 1
+
     def test_healed_file_re_touch_is_a_byte_identical_noop(self, tmp_path: Path) -> None:
         """After the heal, the same touch is a pure no-op — idempotent (Rule #7)."""
         writer = ParquetWriter(lake_root=tmp_path)
