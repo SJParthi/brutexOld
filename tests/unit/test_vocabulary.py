@@ -786,3 +786,75 @@ class TestEvaluatorEdgeCases:
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert not _bit(m, B.BIT_GAP_UP_DAY)
         assert not _bit(m, B.BIT_GAP_DOWN_DAY)
+
+
+class TestTodSecondsRustSeam:
+    """DEC-TOD-SECONDS-RUST-SEAM-001: ONE shared tod derivation, no inline copies.
+
+    The evaluator's Group-8 ``tod_seconds`` (and the Stage-1A VWAP feed + the
+    bar-metadata stamp) now come from ``trading_core.seconds_of_day`` — the
+    SAME Rust arithmetic ``derive_bar_metadata`` uses — instead of three
+    independent Python ``h*3600 + m*60 + s`` copies.
+    """
+
+    def test_seconds_of_day_matches_independent_arithmetic(self) -> None:
+        # The independent test-side inline expression is the ORACLE — do NOT
+        # "clean it up" onto the binding (its independence is the point).
+        import trading_core
+
+        for hour, minute, second in [(0, 0, 0), (9, 15, 0), (15, 20, 30), (23, 59, 59)]:
+            assert int(trading_core.seconds_of_day(hour, minute, second)) == (
+                hour * 3600 + minute * 60 + second
+            )
+            meta_tod = trading_core.derive_bar_metadata(
+                739_000, hour, minute, second, 33_300, 739_001
+            )[0]
+            assert int(meta_tod) == hour * 3600 + minute * 60 + second
+
+    @pytest.mark.parametrize(
+        ("hour", "minute", "second", "field"),
+        [
+            (24, 0, 0, "hour"),
+            (2_000_000, 0, 0, "hour"),
+            (0, 60, 0, "minute"),
+            (0, 0, 60, "second"),
+        ],
+    )
+    def test_out_of_range_component_raises_value_error(
+        self, hour: int, minute: int, second: int, field: str
+    ) -> None:
+        # The FFI boundary guard: garbage civil components raise a clean
+        # ValueError (never an aborting Rust panic under panic="abort").
+        import trading_core
+
+        with pytest.raises(ValueError, match=field):
+            trading_core.seconds_of_day(hour, minute, second)
+
+    def test_no_inline_tod_arithmetic_on_the_eval_path(self) -> None:
+        # Source-scan guard, NARROWLY scoped to the three eval-path feeds the
+        # seam replaced (calendars/nse.py keeps its calendar-construction copy
+        # DELIBERATELY — out of the eval path, a named exclusion).
+        from pathlib import Path
+
+        import brutex.engine.stage1a
+        import brutex.feed.bar_metadata
+        import brutex.vocabulary.evaluator
+
+        for module in (
+            brutex.vocabulary.evaluator,
+            brutex.engine.stage1a,
+            brutex.feed.bar_metadata,
+        ):
+            source = Path(str(module.__file__)).read_text(encoding="utf-8")
+            assert "* 3600" not in source, (
+                f"inline tod arithmetic reintroduced in {module.__name__}"
+            )
+
+    def test_evaluator_group8_bits_unchanged_via_seam(self) -> None:
+        # Bit-identity of the swap: a 09:30 IST bar still fires EARLY_MORNING
+        # through the seam-derived tod (byte-identical to the old inline path).
+        snapshot = _make_snapshot(
+            timestamp_ist=datetime(2026, 6, 29, 9, 30, tzinfo=ZoneInfo("Asia/Kolkata"))
+        )
+        mask = evaluate_atoms(snapshot, _default_proximity(), _empty_history())
+        assert _bit(mask, B.BIT_EARLY_MORNING)

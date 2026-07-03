@@ -1062,6 +1062,40 @@ fn py_minute_of_session(tod_seconds: i64, session_open_seconds: i64) -> i32 {
     crate::indicators::metadata::minute_of_session(tod_seconds, session_open_seconds)
 }
 
+/// Seconds since IST midnight for a wall-clock `HH:MM:SS` — the ONE shared
+/// Group-8 `tod_seconds` derivation (DEC-TOD-SECONDS-RUST-SEAM-001), replacing
+/// BruteX's Python-side inline `h*3600 + m*60 + s` on the eval path so the
+/// value is derived ONCE, bit-identical to the TickVault-native path.
+///
+/// The RANGE guard lives HERE at the FFI boundary: `hour <= 23`, `minute <= 59`,
+/// `second <= 59` — a violation raises a clean `ValueError`, never an inner
+/// `overflow-checks` panic → SIGABRT under `panic = "abort"` (e.g. a garbage
+/// `hour = 2_000_000` would overflow `hour * 3600` unguarded).
+#[pyfunction]
+#[pyo3(name = "seconds_of_day", signature = (hour, minute, second))]
+fn py_seconds_of_day(hour: u32, minute: u32, second: u32) -> PyResult<u32> {
+    seconds_of_day_impl(hour, minute, second).map_err(PyValueError::new_err)
+}
+
+/// Pure logic for [`py_seconds_of_day`] — `Result<u32, String>` so the range
+/// guard + the delegation are unit-covered without a libpython link.
+fn seconds_of_day_impl(hour: u32, minute: u32, second: u32) -> Result<u32, String> {
+    for (name, value, max) in [
+        ("hour", hour, 23u32),
+        ("minute", minute, 59),
+        ("second", second, 59),
+    ] {
+        if value > max {
+            return Err(format!(
+                "{name} ({value}) out of the civil range [0, {max}]"
+            ));
+        }
+    }
+    Ok(crate::indicators::metadata::seconds_of_day(
+        hour, minute, second,
+    ))
+}
+
 /// Resolve the active near-month future a trade entering on `entry_ordinal` uses,
 /// given the caller-supplied holiday-shifted candidate + next-month expiries
 /// (ADR-0012 D11). Returns the active contract's expiry ordinal. Shared decision
@@ -1286,6 +1320,7 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_bar_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(py_weekday_from_ordinal, m)?)?;
     m.add_function(wrap_pyfunction!(py_minute_of_session, m)?)?;
+    m.add_function(wrap_pyfunction!(py_seconds_of_day, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_near_month, m)?)?;
     m.add_function(wrap_pyfunction!(py_greeks, m)?)?;
     m.add_class::<PyVwapState>()?;
@@ -2196,6 +2231,29 @@ mod tests {
         } else {
             assert!(res.unwrap_err().contains("prior_n"));
         }
+    }
+
+    // ── seconds_of_day_impl (tod Rust-seam binding) ────────────────────────
+
+    #[test]
+    fn seconds_of_day_impl_valid_and_boundaries() {
+        assert_eq!(seconds_of_day_impl(0, 0, 0).unwrap(), 0);
+        assert_eq!(seconds_of_day_impl(9, 15, 0).unwrap(), 33_300);
+        assert_eq!(seconds_of_day_impl(23, 59, 59).unwrap(), 86_399);
+    }
+
+    #[test]
+    fn seconds_of_day_impl_rejects_out_of_range_components() {
+        // Each component named in its own reject; hour=2_000_000 is the exact
+        // garbage input that would overflow `hour * 3600` unguarded.
+        let h = seconds_of_day_impl(24, 0, 0).unwrap_err();
+        assert!(h.contains("hour"), "got: {h}");
+        let huge = seconds_of_day_impl(2_000_000, 0, 0).unwrap_err();
+        assert!(huge.contains("hour"), "got: {huge}");
+        let m = seconds_of_day_impl(0, 60, 0).unwrap_err();
+        assert!(m.contains("minute"), "got: {m}");
+        let sec = seconds_of_day_impl(0, 0, 60).unwrap_err();
+        assert!(sec.contains("second"), "got: {sec}");
     }
 
     // ── property layer ─────────────────────────────────────────────────────
