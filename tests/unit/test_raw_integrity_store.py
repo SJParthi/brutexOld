@@ -163,6 +163,86 @@ def test_load_non_string_captured_at_is_none(tmp_path: Path) -> None:
     assert record.captured_at is None
 
 
+# --------------------------------------------------------------------------- #
+# issued_symbol — the `%26` fallback verify correction (back-compat both ways)
+# --------------------------------------------------------------------------- #
+def test_issued_symbol_round_trips_through_sidecar(tmp_path: Path) -> None:
+    # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001 Fix-1: an encoded-form capture
+    # survives the append → load round trip with its issued form intact.
+    record = build_record(
+        _PAYLOAD,
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-M&M",
+        interval="1minute",
+        window_start="2024-01-01 00:00:00",
+        window_end="2024-01-31 00:00:00",
+        now=datetime(2024, 6, 1, tzinfo=UTC),
+        issued_symbol="NSE-M%26M",
+    )
+    append_record(record, tmp_path)
+    (loaded,) = load_records(tmp_path).values()
+    assert loaded == record
+    assert loaded.issued_symbol == "NSE-M%26M"
+    assert loaded.fetch_symbol == "NSE-M%26M"
+
+
+def test_plain_record_json_line_has_no_issued_symbol_key(tmp_path: Path) -> None:
+    # BACK-COMPAT (byte-identical plain path): a plain-form record's sidecar line
+    # carries NO ``issued_symbol`` key — the exact pre-field serialisation format.
+    import json
+
+    append_record(_record(), tmp_path)
+    line = shard_path(tmp_path, "NSE-NIFTY").read_text(encoding="utf-8").strip()
+    assert "issued_symbol" not in line
+    assert set(json.loads(line)) == {
+        "exchange",
+        "segment",
+        "groww_symbol",
+        "interval",
+        "window_start",
+        "window_end",
+        "payload_hash",
+        "row_count",
+        "algorithm",
+        "captured_at",
+    }
+
+
+def test_legacy_line_without_issued_symbol_loads_as_none(tmp_path: Path) -> None:
+    # BACK-COMPAT (mandatory): a LEGACY sidecar line written before the field
+    # existed loads with ``issued_symbol=None`` → ``fetch_symbol`` is the key
+    # symbol, so verify re-issues exactly the call it always did.
+    path = integrity_dir(tmp_path)
+    path.mkdir(parents=True, exist_ok=True)
+    integrity_path(tmp_path).write_text(
+        '{"exchange":"NSE","segment":"CASH","groww_symbol":"NSE-NIFTY",'
+        '"interval":"1minute","window_start":"a","window_end":"b",'
+        '"payload_hash":"h","row_count":1,"algorithm":"blake2b",'
+        '"captured_at":null}\n',
+        encoding="utf-8",
+    )
+    (record,) = load_records(tmp_path).values()
+    assert record.issued_symbol is None
+    assert record.fetch_symbol == "NSE-NIFTY"
+
+
+def test_non_string_issued_symbol_loads_as_none(tmp_path: Path) -> None:
+    # A malformed (non-string) issued_symbol is provenance-adjacent — never fatal.
+    path = integrity_dir(tmp_path)
+    path.mkdir(parents=True, exist_ok=True)
+    integrity_path(tmp_path).write_text(
+        '{"exchange":"NSE","segment":"CASH","groww_symbol":"NSE-NIFTY",'
+        '"interval":"1minute","window_start":"a","window_end":"b",'
+        '"payload_hash":"h","row_count":1,"algorithm":"blake2b",'
+        '"captured_at":null,"issued_symbol":123}\n',
+        encoding="utf-8",
+    )
+    (record,) = load_records(tmp_path).values()
+    assert record.issued_symbol is None
+    assert record.fetch_symbol == "NSE-NIFTY"
+
+
 def test_load_unreadable_file_degrades_to_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -181,18 +261,35 @@ def test_load_unreadable_file_degrades_to_empty(
 # --------------------------------------------------------------------------- #
 def test_capture_hook_persists_record(tmp_path: Path) -> None:
     hook = make_capture_hook(tmp_path, exchange="NSE", segment="CASH", groww_symbol="NSE-NIFTY")
-    hook(_PAYLOAD, "1minute", "2024-01-01 00:00:00", "2024-01-31 00:00:00")
+    hook(_PAYLOAD, "1minute", "2024-01-01 00:00:00", "2024-01-31 00:00:00", "NSE-NIFTY")
     loaded = load_records(tmp_path)
     (record,) = loaded.values()
     assert record.payload_hash == hash_payload(_PAYLOAD)
     assert record.groww_symbol == "NSE-NIFTY"
     assert record.interval == "1minute"
+    # A plain-form fetch (issued == key symbol) is NORMALISED to None — the record
+    # (and its sidecar line) stays byte-identical to the pre-issued_symbol format.
+    assert record.issued_symbol is None
+    assert record.fetch_symbol == "NSE-NIFTY"
+
+
+def test_capture_hook_records_divergent_issued_symbol(tmp_path: Path) -> None:
+    # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001 Fix-1: a `%26` fallback recovery is
+    # captured under the PLAIN key symbol but was PHYSICALLY fetched with the
+    # encoded form — the surviving record must carry that issued form so the
+    # verify path can re-issue the byte-identical call.
+    hook = make_capture_hook(tmp_path, exchange="NSE", segment="CASH", groww_symbol="NSE-M&M")
+    hook(_PAYLOAD, "1minute", "2024-01-01 00:00:00", "2024-01-31 00:00:00", "NSE-M%26M")
+    (record,) = load_records(tmp_path).values()
+    assert record.groww_symbol == "NSE-M&M"  # keyed under the PLAIN symbol
+    assert record.issued_symbol == "NSE-M%26M"  # the form actually sent
+    assert record.fetch_symbol == "NSE-M%26M"  # verify re-issues THIS form
 
 
 def test_capture_hook_swallows_malformed_payload(tmp_path: Path) -> None:
     hook = make_capture_hook(tmp_path, exchange="NSE", segment="CASH", groww_symbol="X")
     # An un-hashable payload must NEVER raise out of the hook (best-effort).
-    hook({"candles": object()}, "1minute", "a", "b")
+    hook({"candles": object()}, "1minute", "a", "b", "X")
     assert load_records(tmp_path) == {}  # nothing persisted, no crash
 
 
@@ -206,7 +303,7 @@ def test_capture_hook_swallows_write_failure(
 
     monkeypatch.setattr("brutex.data.raw_integrity_store.append_record", _boom)
     # A sidecar write failure must NEVER raise out of the hook (best-effort).
-    hook(_PAYLOAD, "1minute", "a", "b")
+    hook(_PAYLOAD, "1minute", "a", "b", "X")
 
 
 # --------------------------------------------------------------------------- #
@@ -216,8 +313,12 @@ def test_capture_hook_factory_attributes_each_symbol(tmp_path: Path) -> None:
     # A single factory (bound to one lake root) builds a CORRECTLY per-symbol hook —
     # the property the live build sites rely on (one adapter, many symbols).
     factory = make_capture_hook_factory(tmp_path)
-    factory("NSE", "CASH", "NSE-NIFTY")(_PAYLOAD, "1minute", "2024-01-01 00:00:00", "e1")
-    factory("BSE", "CASH", "BSE-SENSEX")(_PAYLOAD, "1minute", "2024-01-02 00:00:00", "e2")
+    factory("NSE", "CASH", "NSE-NIFTY")(
+        _PAYLOAD, "1minute", "2024-01-01 00:00:00", "e1", "NSE-NIFTY"
+    )
+    factory("BSE", "CASH", "BSE-SENSEX")(
+        _PAYLOAD, "1minute", "2024-01-02 00:00:00", "e2", "BSE-SENSEX"
+    )
     loaded = load_records(tmp_path)
     symbols = {record.groww_symbol for record in loaded.values()}
     assert symbols == {"NSE-NIFTY", "BSE-SENSEX"}  # each window kept its own symbol

@@ -3022,13 +3022,18 @@ def cmd_fetch(
         return EXIT_OK
 
     # The pull-wide global stops that HALT every remaining window (disk-full/OOM, a
-    # quota stop, or a tripped mass-empty circuit breaker) — distinct from a per-symbol
-    # quarantine. Mirrors the ingest spine's `_GLOBAL_STOP_ERRORS` carve-out
+    # quota stop, a tripped mass-empty circuit breaker, or a TERMINAL dead-credential
+    # auth failure — DEC-GROWW-AUTH-HALT-001) — distinct from a per-symbol quarantine.
+    # Mirrors the ingest spine's `_GLOBAL_STOP_ERRORS` carve-out
     # (DEC-LAKE-WRITE-HALT-001 / quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001); each
     # fires a best-effort CRITICAL Telegram pull-halt alert then re-raises
-    # (DEC-TELEGRAM-PULL-HALT-001).
+    # (DEC-TELEGRAM-PULL-HALT-001). The RETRYABLE `GrowwAuthError` subclasses (a
+    # throttled mint / a stale read-only re-read) never alert — carved back out via
+    # `is_terminal_auth_failure` at the except site (they re-raise unchanged, exactly
+    # as they propagated before this tuple caught them).
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
+    from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
     from brutex.adapters.groww.pull_pipeline import (
         build_fetch_pipeline,
         build_write_consumer,
@@ -3059,6 +3064,7 @@ def cmd_fetch(
         DailyQuotaExceeded,
         QuotaInvariantError,
         MassEmptySettleHalt,
+        GrowwAuthError,
     )
 
     resolved = _resolve_lake_root(lake_root)
@@ -3424,12 +3430,17 @@ def cmd_fetch(
                     detect_completeness_gaps=not dry_run,
                 )
             except _pull_halt_errors as exc:
-                # A pull-wide global stop (disk-full/OOM LakeWriteHalt, or a quota stop)
+                # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
+                # a TERMINAL dead-credential GrowwAuthError — DEC-GROWW-AUTH-HALT-001)
                 # HALTS every remaining window, unlike a per-symbol quarantine — fire a
                 # best-effort CRITICAL Telegram alert so the operator knows the pull
                 # STOPPED, then re-raise so the existing halt handling (controller
                 # verdict / non-zero exit) is byte-unchanged (DEC-TELEGRAM-PULL-HALT-001).
-                _emit_pull_halt_alert(exc)
+                # A RETRYABLE GrowwAuthError subclass (throttled mint / stale read-only
+                # re-read) is NOT a halt — it re-raises unchanged with NO alert, exactly
+                # as it propagated before this tuple caught it.
+                if not isinstance(exc, GrowwAuthError) or is_terminal_auth_failure(exc):
+                    _emit_pull_halt_alert(exc)
                 raise
 
         until_outcome = None

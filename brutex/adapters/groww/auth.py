@@ -62,15 +62,23 @@ class TokenInfo:
 
 
 def _real_totp(secret: str) -> str:  # pragma: no cover — needs pyotp + a real secret
-    """Default TOTP minter: ``pyotp.TOTP(secret).now()`` (lazy import)."""
-    import pyotp  # type: ignore[import-not-found]
+    """Default TOTP minter: ``pyotp.TOTP(secret).now()`` (lazy import).
+
+    No inline ignore: the ``pyotp``/``growwapi`` dual-env import hygiene lives in the
+    ``[[tool.mypy.overrides]]`` per-module table (DEC-MYPY-GROWWAPI-STUBS-001), so the
+    import is clean BOTH with and without the optional runtime deps installed.
+    """
+    import pyotp
 
     return str(pyotp.TOTP(secret).now())
 
 
 def _real_token_factory(api_key: str, totp: str) -> str:  # pragma: no cover — needs growwapi
-    """Default token factory: ``GrowwAPI.get_access_token(...)`` (lazy import)."""
-    from growwapi import GrowwAPI  # type: ignore[import-not-found]
+    """Default token factory: ``GrowwAPI.get_access_token(...)`` (lazy import).
+
+    No inline ignore — see :func:`_real_totp` (DEC-MYPY-GROWWAPI-STUBS-001).
+    """
+    from growwapi import GrowwAPI
 
     return str(GrowwAPI.get_access_token(api_key=api_key, totp=totp))
 
