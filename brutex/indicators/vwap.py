@@ -114,8 +114,26 @@ class VwapState:
         Returns:
             The session VWAP in int64 paisa, or ``None`` while warming up.
 
+        Raises:
+            ValueError: If ``typical_paisa`` is negative. The documented
+                bit-for-bit identity with the Rust twin holds only for
+                non-negative operands (Rust's i128 ``/`` truncates toward
+                zero; Python's ``//`` floors — a negative ``cum_pv`` would
+                silently diverge by one paisa), so BOTH twins reject a
+                negative typical at the boundary instead of silently
+                disagreeing (a negative typical is not a real price — HLC3 of
+                positive prices). Mirrors the PyO3 guard on
+                ``trading_core.VwapState.update``. Raised BEFORE any state
+                change, matching the Rust twin's guard-first ordering.
+
         O(1) per bar.
         """
+        if typical_paisa < 0:
+            raise ValueError(
+                f"typical_paisa ({typical_paisa}) must be non-negative: the "
+                "Python/Rust twin identity (floor vs truncating division) "
+                "holds only for non-negative typical prices"
+            )
         new_session = (
             session_key != self.session_key
             or session_day != self.session_day
@@ -140,7 +158,9 @@ class VwapState:
         if self.cum_vol <= 0:
             return None
         # Truncating floor division on non-negative operands — matches the Rust
-        # i128 ``cum_pv / cum_vol`` narrowing bit-for-bit.
+        # i128 ``cum_pv / cum_vol`` narrowing bit-for-bit. The non-negative
+        # envelope is ENFORCED by update()'s typical_paisa guard (both twins),
+        # so cum_pv can never go negative and floor == trunc always holds here.
         return self.cum_pv // self.cum_vol
 
     def reset(self) -> None:
