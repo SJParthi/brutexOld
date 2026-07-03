@@ -99,7 +99,6 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink, NullBarSink
-from brutex.data.tf_autoderive import autoderive_enabled
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -117,13 +116,9 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    import polars as pl
-
     from brutex.adapters.call_meter import CallMeter
     from brutex.adapters.groww.run_ingest import SpotIngestWithRetry
     from brutex.adapters.rate_common import RateController
-    from brutex.data.models import CandleBar
-    from brutex.data.spot_daily_resample import DailyDeriveTarget
     from brutex.observability.pull_health import PullHealthMonitor
 
 _LOG = structlog.get_logger(__name__)
@@ -1480,8 +1475,9 @@ def pull_all_spot(
         # 1-MINUTE-ONLY fetch (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): the SPOT pull fetches
         # ONLY ``1minute`` from Groww — :func:`resolve_fetch_intervals` always resolves
         # to ``("1minute",)`` so ``daily_requested`` is False and only the 1-minute phase
-        # runs. ``1day`` is DERIVED after the pull from the just-written 1-minute
-        # (``_resample_daily_after_pull``), never vendor-fetched. The legacy ``1day``
+        # runs. ``1day`` is DERIVED from the stored 1-minute by the pipeline's final
+        # prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001 — never mid-pull, never
+        # vendor-fetched). The legacy ``1day``
         # phase block below is RETAINED but dormant for any defensive caller that still
         # injects ``intervals=("1day",)`` directly. The decoupled-phase plumbing
         # (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851) is unchanged; both phases
@@ -1806,7 +1802,7 @@ def pull_all_spot(
                 # flush + the outer finally); every un-settled window stays retryable. Map to
                 # the loud needs-operator ``mass_empty_halt`` verdict (naming the counts +
                 # candidate causes) instead of a generic job error. Because the halt is
-                # CAUGHT here (it never escapes to the job layer's ``_is_pull_halt``
+                # CAUGHT here (it never escapes to the job layer's ``is_pull_halt``
                 # escaping-exception path), the CRITICAL Telegram pull-halt alert is fired
                 # HERE — parity with the F&O route and the CLI ``_pull_halt_errors`` set
                 # (DEC-TELEGRAM-PULL-HALT-001; minor M-3). Best-effort by construction —
@@ -1839,9 +1835,9 @@ def pull_all_spot(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=())
             )
 
-        # Success-path latch for the post-drain 1-day derivation below: set as the
-        # try body's LAST statement, so a phase error leaves it False and the
-        # ``finally`` skips the derive (the drains + ledger persist still run).
+        # Success-path latch for the post-drain L2 lake heal below (DEC-LAKE-HEAL-001):
+        # set as the try body's LAST statement, so a phase error leaves it False and
+        # the ``finally`` skips the heal (the drains + ledger persist still run).
         fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (over EVERY symbol; full range) ──
@@ -1907,7 +1903,7 @@ def pull_all_spot(
                             window_days_for=groww_window_days_for,
                         )
                     _run_phase(minute_intervals, instruments, None)
-            # Fetch phases done — arm the post-drain 1-day derivation in the finally.
+            # Fetch phases done — arm the post-drain L2 lake heal in the finally.
             fetch_phases_ok = True
         finally:
             # Drain the FULL async fetch/process pipeline FIRST (DEC-GROWW-FETCH-ASYNC-SEPARATION-001
@@ -1926,36 +1922,24 @@ def pull_all_spot(
             # no-op when the batched path is OFF (the synchronous default). Best-effort: a drain
             # error is logged, never re-raised, so the ledger persist below always runs.
             _drain_write_consumer(_write_consumer)
-            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
-            # 1-minute is the ONLY granularity fetched from Groww; the 1-day partition
-            # the engine reads (the PDH/PDL daily anchor) is DERIVED here by resampling
-            # the just-pulled 1-minute over the FULL [start, end) range to midnight-IST
-            # daily bars and writing the 1-day partition. UNCONDITIONAL — there is no
-            # vendor 1-day to be empty (this supersedes the resample-on-EMPTY arm of the
-            # retired #842/#852). Runs AFTER BOTH drains above — the async fetch
-            # pipeline is ON by default, so until it drains the just-fetched 1-minute
-            # bars are NOT yet durably in the lake and a pre-drain resample derived the
-            # daily anchor from an INCOMPLETE 1-minute lake (forensic-audit #15) — and
-            # BEFORE end_pull_ledger so it shares the pull's lifetime. SUCCESS-path
-            # only (``fetch_phases_ok``): a phase error / a drain-raised halt skips it,
-            # byte-preserving the failure path. Quarantined end-to-end (it can NEVER
-            # fail the pull) and a no-op for any symbol with no 1-minute.
+            # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the always-on mid-pull 1-day
+            # derivation that ran here (DEC-1MINUTE-ONLY-DERIVE-1DAY-001's
+            # ``_resample_daily_after_pull``) is REMOVED — derived data (the 19
+            # intraday TFs + the derived ``1day``) is written ONLY by the pipeline's
+            # final prebuild phase (brutex.dashboard.pipeline_prebuild), which runs
+            # strictly after a fully-successful fetch. Never mid-pull.
+            # DEC-LAKE-HEAL-001 L2: heal the just-pulled slice at the SAME
+            # post-drain seam (the fetched 1-minute is durably in the lake only
+            # after both drains above), so the pipeline's later prebuild phase
+            # reads clean 1-minute. SUCCESS-path only (``fetch_phases_ok``);
+            # LakeWriteHalt re-raises inside (graceful pull-halt), any other
+            # heal error is swallowed — it can never fail the pull.
             if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
-                # DEC-LAKE-HEAL-001 L2: heal the pulled slice FIRST so the
-                # daily derive below reads clean 1-minute.
                 _heal_after_pull(
                     instruments=instruments,
                     lake_root=lake_root,
                     start=start.date(),
                     end=end.date(),
-                    pull_id=pid,
-                )
-                _resample_daily_after_pull(
-                    instruments=instruments,
-                    lake_root=lake_root,
-                    start=start.date(),
-                    end=end.date(),
-                    now=now if now is not None else datetime.now(UTC),
                     pull_id=pid,
                 )
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
@@ -2073,84 +2057,14 @@ def pull_all_spot(
                 pending_windows=verdict.pending_windows,
                 auth_cause=verdict.auth_cause,
             )
-        # AUTOMATIC derived-TF materialisation on settle (DEC-TF-MATERIALIZE-002):
-        # re-derive the 19 intraday timeframes for every symbol that landed NEW
-        # 1-minute bars — zero clicks, gated behind the BRUTEX_AUTO_DERIVE_TFS=1
-        # opt-in (default OFF per the operator's 2026-06-11 storage decision).
-        # Quarantined end-to-end: auto-derive can NEVER fail or slow a pull's
-        # verdict (the pull already returned its bars + ledger state).
-        if not dry_run and autoderive_enabled():  # pragma: no cover — raw lake I/O glue
-            _autoderive_after_pull(
-                instruments=instruments, bulk=bulk, lake_root=lake_root, pull_id=pid
-            )
+        # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the BRUTEX_AUTO_DERIVE_TFS pull-settle
+        # auto-derive (DEC-TF-MATERIALIZE-002's ``_autoderive_after_pull``) is REMOVED
+        # — derived timeframes are written ONLY by the pipeline's final prebuild phase.
         # The G5 finish record (pairs with the start above): a crash anywhere in
         # between leaves start-without-finish — exactly the interrupted-pull
         # signature stage 12 diagnoses. Never raises.
         record_pull_finish(lake_root, pull_id=pid, verdict=verdict.kind)
     return bulk
-
-
-def _autoderive_after_pull(  # pragma: no cover — raw lake I/O glue; planner core is 100%-unit-tested
-    *,
-    instruments: Sequence[Instrument],
-    bulk: BulkSpotReport,
-    lake_root: Path,
-    pull_id: str,
-) -> None:
-    """Re-materialise the 19 derived TFs for every symbol the pull refreshed.
-
-    The pull-settle arm of DEC-TF-MATERIALIZE-002: binds the SHARED lake
-    read/write builders (the same pair the manual derive route uses —
-    CLAUDE.md §11 COMMON) per settled symbol and runs the quarantining
-    planner. Wrapped so NO failure here can ever surface as a pull error —
-    the pull's verdict is already final when this runs.
-    """
-    from brutex.data.tf_autoderive import plan_autoderive_symbols, run_autoderive
-    from brutex.data.timeframe_materialize import (
-        MATERIALIZABLE_TFS,
-        MaterializeResult,
-        make_lake_read_1m,
-        make_lake_write_tf,
-        materialize_timeframes,
-    )
-
-    try:
-        by_symbol = {inst.symbol_name: inst for inst in instruments}
-        planned = plan_autoderive_symbols(bulk.symbols)
-
-        def _materialize_one(symbol: str) -> MaterializeResult:
-            inst = by_symbol[symbol]
-            exchange = inst.exch_id.value
-            segment = inst.segment.value
-            return materialize_timeframes(
-                tfs=MATERIALIZABLE_TFS,
-                read_1m=make_lake_read_1m(
-                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-                ),
-                write_tf=make_lake_write_tf(
-                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-                ),
-            )
-
-        report = run_autoderive(symbols=planned, materialize_one=_materialize_one)
-    except Exception as exc:
-        _LOG.warning("universe.autoderive.error", pull_id=pull_id, error=str(exc))
-        return
-    _LOG.info(
-        "universe.autoderive.done",
-        pull_id=pull_id,
-        symbols_planned=len(planned),
-        symbols_ok=report.symbols_ok,
-        symbols_failed=report.symbols_failed,
-        derived_bars=report.total_bars,
-    )
-    if report.symbols_failed:
-        _LOG.warning(
-            "universe.autoderive.quarantined",
-            pull_id=pull_id,
-            symbols=[o.symbol for o in report.outcomes if not o.ok],
-            note="auto-derive quarantined these symbols; the pull itself is unaffected",
-        )
 
 
 def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 100%-unit-tested
@@ -2166,8 +2080,9 @@ def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 10
     Runs the COMMON :func:`~brutex.data.lake_heal.heal_after_pull` core —
     a scan BOUNDED to the pulled ``(exchange, segment, symbol)`` targets ×
     the pulled span's UTC months, then the automatic keep-FIRST heal
-    (``BRUTEX_LAKE_HEAL=observe`` logs only) — BEFORE the pull's own daily
-    derive, so :func:`_resample_daily_after_pull` reads clean 1-minute.
+    (``BRUTEX_LAKE_HEAL=observe`` logs only) — at the post-drain seam, so
+    the pipeline's final prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001,
+    which now owns ALL derived-TF/1-day writes) reads clean 1-minute.
     :class:`~brutex.data.errors.LakeWriteHalt` RE-RAISES (a disk-full heal
     must halt the pull exactly like any lake write — it reaches the existing
     ``_is_pull_halt`` / ``emit_pull_halt_alert`` handling); every OTHER error
@@ -2177,9 +2092,9 @@ def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 10
     the COMMON :func:`~brutex.data.lake_heal.open_lake_catalog`) so a healed
     partition's rotated ``raw_hash`` reaches the catalog immediately — an
     open failure logs + proceeds with ``catalog=None``, never blocking the
-    pull. Marked ``no cover`` per the sibling ``_resample_daily_after_pull``
-    convention; the core is 100%-unit-tested and the glue contract is pinned
-    by ``tests/integration/test_lake_heal_pull_seam.py``.
+    pull. Marked ``no cover`` per the raw-lake-I/O-glue convention; the core
+    is 100%-unit-tested and the glue contract is pinned by
+    ``tests/integration/test_lake_heal_pull_seam.py``.
     """
     from brutex.data.errors import LakeWriteHalt
     from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog
@@ -2210,97 +2125,6 @@ def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 10
         raise
     except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull
         _LOG.warning("lake_heal.post_pull_error", pull_id=pull_id, error=str(exc))
-
-
-def _resample_daily_after_pull(  # pragma: no cover — raw lake I/O glue; derive core is 100%-unit-tested
-    *,
-    instruments: Sequence[Instrument],
-    lake_root: Path,
-    start: date,
-    end: date,
-    now: datetime,
-    pull_id: str,
-) -> None:
-    """Derive each symbol's ``1day`` partition from its just-pulled 1-minute (always-on).
-
-    The PRIMARY arm of DEC-1MINUTE-ONLY-DERIVE-1DAY-001: 1-minute is the ONLY granularity
-    fetched from Groww, so the ``1day`` series the engine reads is DERIVED here — resample
-    each symbol's freshly-written 1-minute over the FULL pulled ``[start, end)`` range to
-    midnight-IST daily bars (:func:`~brutex.data.spot_daily_resample.derive_daily_for_targets`,
-    reusing the single-source-of-truth OHLCV aggregation + midnight-IST re-stamp) and write
-    the ``1day`` partition. UNCONDITIONAL (no vendor 1-day to be empty). Binds the SHARED
-    window-bounded lake read + ``1day`` write builders per symbol and runs the quarantining
-    driver. Wrapped so NO failure here can ever surface as a pull error, and a no-op (no
-    1-minute backs the range) is honest, never an invented bar. Runs in the pull's
-    ``finally`` AFTER the fetch-pipeline + write-consumer drains (so it reads the COMPLETE
-    durable 1-minute lake — the default-ON async pipeline defers writes until drain,
-    forensic-audit #15) and BEFORE ``end_pull_ledger``, so it shares the pull's lifetime.
-    """
-    from brutex.calendars.nse import IST
-    from brutex.data.spot_daily_resample import (
-        DailyDeriveTarget,
-        derive_daily_for_targets,
-        make_lake_read_1m_window,
-        make_lake_write_1day,
-    )
-
-    try:
-        by_symbol = {inst.symbol_name: inst for inst in instruments}
-        # ``before`` is today's IST *date* (the forming-session cutoff). The canonical
-        # ``calendars.nse.IST`` (ZoneInfo) and the resampler's fixed +05:30 agree exactly
-        # for the 2020+ no-DST scope, so the cutoff date is representation-independent.
-        before = now.astimezone(IST).date()
-        targets = [
-            DailyDeriveTarget(
-                exchange=inst.exch_id.value,
-                segment=inst.segment.value,
-                symbol=inst.symbol_name,
-                start=start,
-                end=end,
-            )
-            for inst in instruments
-        ]
-
-        def _build_read(target: DailyDeriveTarget) -> Callable[[], pl.DataFrame]:
-            inst = by_symbol[target.symbol]
-            return make_lake_read_1m_window(
-                lake_root=lake_root,
-                exchange=inst.exch_id.value,
-                segment=inst.segment.value,
-                symbol=target.symbol,
-                start=target.start,
-                end=target.end,
-            )
-
-        def _build_write(
-            target: DailyDeriveTarget,
-        ) -> Callable[[Sequence[CandleBar]], int]:
-            inst = by_symbol[target.symbol]
-            return make_lake_write_1day(
-                lake_root=lake_root,
-                exchange=inst.exch_id.value,
-                segment=inst.segment.value,
-                symbol=target.symbol,
-            )
-
-        report = derive_daily_for_targets(
-            targets=targets,
-            build_read_1m=_build_read,
-            build_write_1day=_build_write,
-            before=before,
-        )
-    except Exception as exc:
-        _LOG.warning("universe.daily_derive.error", pull_id=pull_id, error=str(exc))
-        return
-    if report.targets:
-        _LOG.info(
-            "universe.daily_derive.done",
-            pull_id=pull_id,
-            derived=report.derived,
-            no_minute=report.no_minute,
-            errored=report.errored,
-            bars=report.bars,
-        )
 
 
 def pull_candles(
@@ -2415,8 +2239,9 @@ def pull_candles(
         # disk read-only for the db_view fallback + one-shot ledger migration.
         # 1-MINUTE-ONLY fetch (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): the SPOT pull fetches
         # ONLY ``1minute`` from Groww (``resolve_fetch_intervals`` → ``("1minute",)``),
-        # so only the 1-minute phase runs; ``1day`` is DERIVED after the pull
-        # (``_resample_daily_after_pull``), never vendor-fetched. The dormant ``1day``
+        # so only the 1-minute phase runs; ``1day`` is DERIVED from the stored 1-minute
+        # by the pipeline's final prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001 — never
+        # mid-pull, never vendor-fetched). The dormant ``1day``
         # phase block is RETAINED for any defensive caller that injects
         # ``intervals=("1day",)`` directly. The decoupled-phase plumbing
         # (DEC-SPOT-INTERVAL-DECOUPLE-001, MIGRATION.md #851) is unchanged; both phases
@@ -2565,9 +2390,9 @@ def pull_candles(
             phase_auth_aborted = phase_auth_aborted or phase_report.auth_aborted
             return phase_report
 
-        # Success-path latch for the post-drain 1-day derivation below: set as the
-        # try body's LAST statement, so a phase error leaves it False and the
-        # ``finally`` skips the derive (the drains + ledger persist still run).
+        # Success-path latch for the post-drain L2 lake heal below (DEC-LAKE-HEAL-001):
+        # set as the try body's LAST statement, so a phase error leaves it False and
+        # the ``finally`` skips the heal (the drains + ledger persist still run).
         fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (full range) ──
@@ -2618,7 +2443,7 @@ def pull_candles(
                             window_days_for=groww_window_days_for,
                         )
                     _run_phase(minute_intervals, None)
-            # Fetch phases done — arm the post-drain 1-day derivation in the finally.
+            # Fetch phases done — arm the post-drain L2 lake heal in the finally.
             fetch_phases_ok = True
         finally:
             # Drain the FULL async fetch/process pipeline FIRST (DEC-GROWW-FETCH-ASYNC-SEPARATION-001
@@ -2635,32 +2460,20 @@ def pull_candles(
             # saving the ledger, so every settled window is on disk (settle-after-durable). A
             # no-op when the batched path is OFF (the synchronous default). Best-effort.
             _drain_write_consumer(_write_consumer)
-            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
-            # Derive this instrument's 1-day partition from the just-pulled 1-minute over
-            # the FULL [start, end) range (midnight-IST stamped). UNCONDITIONAL — 1-minute
-            # is the only fetched granularity; 1-day is never vendor-fetched. Runs AFTER
-            # BOTH drains above (the default-ON async pipeline must land every queued
-            # 1-minute bar in the lake first, else the daily anchor derives from an
-            # INCOMPLETE 1-minute lake — forensic-audit #15) and BEFORE end_pull_ledger.
-            # SUCCESS-path only (``fetch_phases_ok``): a phase error / a drain-raised
-            # halt skips it, byte-preserving the failure path. Quarantined end-to-end
-            # (can NEVER fail the pull); a no-op when no 1-minute backs it.
+            # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the mid-pull 1-day derivation
+            # that ran here is REMOVED — derived data is written ONLY by the
+            # pipeline's final prebuild phase (brutex.dashboard.pipeline_prebuild).
+            # DEC-LAKE-HEAL-001 L2: heal the just-pulled slice at the SAME
+            # post-drain seam (both drains above landed the 1-minute durably),
+            # so the pipeline's later prebuild phase reads clean 1-minute.
+            # SUCCESS-path only (``fetch_phases_ok``); LakeWriteHalt re-raises
+            # inside (graceful pull-halt), any other heal error is swallowed.
             if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
-                # DEC-LAKE-HEAL-001 L2: heal the pulled slice FIRST so the
-                # daily derive below reads clean 1-minute.
                 _heal_after_pull(
                     instruments=[instrument],
                     lake_root=lake_root,
                     start=start.date(),
                     end=end.date(),
-                    pull_id=pid,
-                )
-                _resample_daily_after_pull(
-                    instruments=[instrument],
-                    lake_root=lake_root,
-                    start=start.date(),
-                    end=end.date(),
-                    now=datetime.now(UTC),
                     pull_id=pid,
                 )
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)

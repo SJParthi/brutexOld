@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
+from brutex.dashboard.movers_stored_read import read_stored_day_frame
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -66,6 +67,7 @@ __all__ = [
     "build_snapshot_payload",
     "compute_snapshot",
     "compute_spot_candidates",
+    "filter_to_ist_minute",
     "interval_minutes",
     "normalize_min_volume",
     "parse_snapshot_date",
@@ -408,6 +410,8 @@ def build_snapshot_payload(
     top_n: int,
     skipped: int,
     min_volume: int | None = None,
+    stored_reads: int = 0,
+    resampled_reads: int = 0,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -423,6 +427,13 @@ def build_snapshot_payload(
     ``volume`` ranking additionally drops contracts below it (``None`` / ``0`` ⇒ the
     byte-identical no-floor default). It is applied at RANK time (the cheap step), so
     a floor change re-ranks the SAME cached candidate set — never a re-scan.
+
+    *stored_reads* / *resampled_reads* echo the candidate set's read-path
+    provenance (:attr:`SpotCandidates.stored_reads` /
+    :attr:`SpotCandidates.resampled_reads` — DEC-PIPELINE-AUTOPREBUILD-001
+    chunk 2): how many contributing instruments were served from the pipeline
+    prebuild's STORED interval partitions vs the on-the-fly 1-minute resample
+    fallback — honesty visible in the payload, nothing noisy in the UI.
     """
     floor = normalize_min_volume(min_volume)
     ranked: dict[str, list[dict[str, Any]]] = {
@@ -461,6 +472,8 @@ def build_snapshot_payload(
         "min_volume": floor,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
+        "stored_reads": stored_reads,
+        "resampled_reads": resampled_reads,
         "note": note,
         **ranked,
     }
@@ -551,6 +564,43 @@ def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
     )
 
 
+def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -> pl.DataFrame:
+    """Keep only *frame*'s rows whose IST minute-of-day is ``≤ cutoff_min``.
+
+    THE one COMMON as-of cutoff filter for every ``/movers`` tab
+    (DEC-HARDENING-LEFTOVERS-001 — kills the copy-pasted Int32 minute-of-day
+    expression that lived in BOTH the spot and the futures session readers,
+    CLAUDE.md §11 COMMON). The **unified as-of semantic** it owns: keep every
+    RAW 1-minute bar whose IST minute-of-day is ``≤ cutoff_min``; intraday
+    buckets are then formed only from ELAPSED minutes — a partially-elapsed
+    bucket honestly reflects only the elapsed minutes, never a forming-bucket
+    leak of minute bars PAST the as-of minute (Golden Rule #1: an "as of
+    13:45" snapshot must never include any bar STARTING after 13:45; the
+    inclusive 13:45 bar itself is a bucket-OPEN-stamped 1-minute bar, so it
+    aggregates trades through 13:45:59 — the guarantee is minute-granular,
+    not instant-granular).
+
+    Parameters
+    ----------
+    frame
+        A polars frame of raw 1-minute bars carrying a tz-aware UTC timestamp
+        column named *ts_col* (``"ts_utc"`` in the spot reader, ``"timestamp"``
+        in the futures/options reader).
+    cutoff_min
+        Inclusive IST minute-of-day cutoff (e.g. ``13*60+45`` for 13:45).
+    ts_col
+        The timestamp column name to convert + compare on.
+    """
+    import polars as pl
+
+    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
+    # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
+    # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
+    # wraps to a negative Int8); the cast gives the true minute-of-day.
+    minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
+    return frame.filter(minute_of_day <= cutoff_min)
+
+
 def _read_session_bars(
     lake_root: Path,
     *,
@@ -561,7 +611,7 @@ def _read_session_bars(
     minutes: int,
     cutoff_min: int | None,
 ) -> list[CandleBar]:
-    """Read *day*'s 1-minute bars, resample to *minutes*, slice to ``≤ cutoff_min``.
+    """Read *day*'s 1-minute bars, cut at ``≤ cutoff_min``, resample to *minutes*.
 
     Reads *day*'s bars via :func:`~brutex.data.lake_day_glob.read_day_intraday_frame`
     — ONLY ``1minute/<yyyy>/<mm>.parquet`` for a SESSION-FILTERED symbol (an IST
@@ -572,12 +622,23 @@ def _read_session_bars(
     back to the whole partition there to stay byte-equivalent (its full-day series
     can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
-    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11),
-    then :func:`~brutex.data.tf_resampler.resample_1m_to_tf` buckets to the chosen
-    timeframe (1minute → no-op, 1day → the single session bar). For an intraday
-    timeframe the bars are kept up to (and including) the bar whose IST
-    open-minute ``≤ cutoff_min``. Empty when the symbol has no 1-minute bars on
-    *day* (the caller reports it skipped, never fabricated — Golden Rule #1).
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
+
+    **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
+    the ``cutoff_min`` filter is applied to the RAW 1-minute frame **BEFORE**
+    resampling, via the COMMON :func:`filter_to_ist_minute` — the same instant
+    the futures/options session reader cuts at. Previously the cut was applied
+    AFTER resampling on the resampled bucket-OPEN minute, so the final kept
+    bucket leaked bars PAST the as-of minute (e.g. cutoff 10:00, TF=5m: the
+    10:00 bucket included 10:01–10:04). Now the last bucket aggregates only the
+    elapsed minutes ``≤ cutoff_min``, so LTP / volume / value end at the close
+    of the as-of MINUTE (the inclusive bucket-open bar aggregates through its
+    final second — minute-granular, not instant-granular).
+
+    :func:`~brutex.data.tf_resampler.resample_1m_to_tf` then buckets the kept
+    minutes to the chosen timeframe (1minute → no-op). Empty when the symbol has
+    no 1-minute bars on *day*, or none at/before the cutoff (the caller reports
+    it skipped, never fabricated — Golden Rule #1).
     """
     import polars as pl
 
@@ -595,19 +656,107 @@ def _read_session_bars(
     )
     ist_date = pl.col("ts_utc").dt.convert_time_zone(_IST).dt.date()
     day_df = df.filter(ist_date == day).sort("ts_utc")
+    if cutoff_min is not None:
+        day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
     if day_df.is_empty():
         return []
     res = resample_1m_to_tf(day_df, minutes).sort("ts_utc")
-    if cutoff_min is not None:
-        ist = pl.col("ts_utc").dt.convert_time_zone(_IST)
-        # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-        # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
-        # wraps to a negative Int8); the cast gives the true minute-of-day.
-        minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
-        res = res.filter(minute_of_day <= cutoff_min)
-    if res.is_empty():
-        return []
     return [_row_to_bar(row) for row in res.iter_rows(named=True)]
+
+
+def _stored_serves_cutoff(minutes: int, cutoff_min: int | None) -> bool:
+    """``True`` iff the stored *minutes*-bucket partition can serve *cutoff_min* exactly.
+
+    The stored partitions hold FULL resampled buckets, while the unified as-of
+    semantic (DEC-HARDENING-LEFTOVERS-001 — :func:`filter_to_ist_minute` on the
+    RAW 1-minute frame BEFORE resampling) makes the final bucket a PARTIAL
+    aggregate of only the elapsed minutes. A stored read is therefore byte-equal
+    to the resample path only when every kept bucket is fully elapsed at the
+    cutoff:
+
+    * ``cutoff_min is None`` — the whole-day read (every bucket final), or
+    * the cutoff sits on a bucket's FINAL minute of the 09:15-anchored grid
+      (``(cutoff_min - _SESSION_OPEN_MIN + 1) % minutes == 0`` — e.g. 09:19 /
+      09:24 for 5-minute; every minute for 1-minute).
+
+    A MID-bucket as-of must aggregate a partial forming bucket, which only the
+    1-minute base can build — the caller falls back to the on-the-fly resample
+    (honest ``resampled_reads`` provenance, never a forming-bucket leak of
+    minutes past the as-of instant — Golden Rule #1).
+    """
+    if cutoff_min is None:
+        return True
+    return (cutoff_min - _SESSION_OPEN_MIN + 1) % minutes == 0
+
+
+def _read_intraday_bars(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    day: date_cls,
+    minutes: int,
+    cutoff_min: int | None,
+) -> tuple[list[CandleBar], bool]:
+    """STORED-FIRST intraday day read → ``(bars, from_stored)``.
+
+    DEC-PIPELINE-AUTOPREBUILD-001 (chunk 2, the movers arm): the pipeline's
+    final prebuild stage materialises every derived timeframe as its own stored
+    partition, so the intraday movers read tries the STORED *interval*
+    partition FIRST (:func:`~brutex.dashboard.movers_stored_read.read_stored_day_frame`
+    — month-bounded, the same ``O(one month)`` envelope as the 1-minute read).
+    When the stored partition yields rows for *day* they are used directly (no
+    resample — ``from_stored=True``); when it is absent/empty for the day, the
+    read FALLS BACK to the on-the-fly 1-minute resample
+    (:func:`_read_session_bars`, byte-identical behaviour — ``from_stored=False``)
+    so a CLI-only or never-prebuilt lake keeps working — the fallback is stated
+    openly, never hidden (Golden Rule #10).
+
+    **The equality contract under the unified as-of semantic
+    (DEC-HARDENING-LEFTOVERS-001):** the two paths return IDENTICAL bars for the
+    same coordinate — the prebuild wrote the stored partition with the SAME
+    fixed-arithmetic session-anchored resampler the fallback runs (see
+    :mod:`brutex.dashboard.movers_stored_read`, integration-pinned). The stored
+    partition holds FULL buckets, so it is consulted only when it can reproduce
+    the raw-1m as-of cut exactly (:func:`_stored_serves_cutoff` — whole-day, or
+    a bucket-final-aligned cutoff, filtered on the bucket-open minute via the
+    COMMON :func:`filter_to_ist_minute`); a MID-bucket as-of always takes the
+    1-minute resample fallback, the only source that can aggregate the partial
+    forming bucket honestly (never a leak of minutes past the as-of instant).
+    """
+    if _stored_serves_cutoff(minutes, cutoff_min):
+        stored = read_stored_day_frame(
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            day=day,
+        )
+        if stored is not None:
+            # A bucket-final-aligned cutoff keeps exactly the fully-elapsed
+            # buckets when cut on the bucket-OPEN minute (open ≤ cutoff ⇒ the
+            # bucket's last minute ≤ cutoff, by alignment).
+            res = (
+                stored
+                if cutoff_min is None
+                else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
+            )
+            return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
+    return (
+        _read_session_bars(
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            day=day,
+            minutes=minutes,
+            cutoff_min=cutoff_min,
+        ),
+        False,
+    )
 
 
 def _read_daily_partition(
@@ -623,10 +772,18 @@ def _read_daily_partition(
     """
     import polars as pl
 
+    from brutex.data.lake_read import dedup_bars_frame
+
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return None
-    return pl.read_parquet(base.as_posix() + "/**/*.parquet")
+    # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): a poisoned-era duplicated
+    # 1-day partition would otherwise double-serve a day — warned, never silent.
+    frame, _dropped = dedup_bars_frame(
+        pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+        source=f"movers_daily:{exchange}/{segment}/{symbol}",
+    )
+    return frame
 
 
 def _read_daily_bars(
@@ -769,11 +926,20 @@ class SpotCandidates:
         honestly, never fabricated (Golden Rule #1).
     date
         The normalised ISO ``YYYY-MM-DD`` snapshot day (``date=None`` ⇒ today).
+    stored_reads, resampled_reads
+        Read-path provenance (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2 — honesty
+        visible in the payload): of the instruments that CONTRIBUTED a snapshot,
+        how many were served from a STORED interval partition (the pipeline
+        prebuild's output; the daily path always reads the stored ``1day``, so
+        it counts here too) vs the on-the-fly 1-minute RESAMPLE fallback (a
+        never-prebuilt lake). A skipped instrument counts in neither.
     """
 
     snapshots: tuple[MoverSnapshot, ...]
     skipped: int
     date: str
+    stored_reads: int = 0
+    resampled_reads: int = 0
 
 
 def resolve_candle_datasets(
@@ -824,7 +990,14 @@ def compute_spot_candidates(
       is DERIVED from the fetched 1-minute, so a daily snapshot reads the derived
       bars off disk and never re-resamples here.
     * **Intraday** (``1minute`` … ``4hour``) → discover the ``1minute``
-      partitions and resample to *interval* up to *time* (:func:`_read_session_bars`).
+      partitions, then read each symbol's day STORED-FIRST
+      (:func:`_read_intraday_bars`, DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the
+      pipeline prebuild's materialised *interval* partition when it has the day
+      (no resample — identical bars, the same resampler wrote them), else the
+      on-the-fly 1-minute resample fallback (:func:`_read_session_bars` — a
+      CLI-only / never-prebuilt lake keeps working). The per-path counts are
+      surfaced as :attr:`SpotCandidates.stored_reads` /
+      :attr:`SpotCandidates.resampled_reads` (honesty in the payload).
 
     An empty lake (or an unknown interval) yields an empty :class:`SpotCandidates`
     — never a 500, never a fabricated mover (Golden Rule #1).
@@ -885,10 +1058,15 @@ def compute_spot_candidates(
 
     snapshots: list[MoverSnapshot] = []
     skipped = 0
+    stored_reads = 0
+    resampled_reads = 0
     skip_errors = movers_read_skip_errors()
     for dataset in spot_datasets:
         try:
             if is_daily:
+                # The daily path reads the stored (derived) `1day` partition by
+                # construction — it counts as a stored read below.
+                from_stored = True
                 bars = _read_daily_bars(
                     lake_root,
                     exchange=dataset["exchange"],
@@ -897,11 +1075,12 @@ def compute_spot_candidates(
                     day=day,
                 )
             else:
-                bars = _read_session_bars(
+                bars, from_stored = _read_intraday_bars(
                     lake_root,
                     exchange=dataset["exchange"],
                     segment=dataset["segment"],
                     symbol=dataset["symbol"],
+                    interval=interval,
                     day=day,
                     minutes=minutes,
                     cutoff_min=cutoff_min,
@@ -935,9 +1114,22 @@ def compute_spot_candidates(
         if snap is None:  # no bars on the selected day → reported skipped, never faked.
             skipped += 1
             continue
+        # Read-path provenance (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): count
+        # ONLY the instruments that contributed a snapshot, by which path
+        # served their bars (stored partition vs 1-minute resample fallback).
+        if from_stored:
+            stored_reads += 1
+        else:
+            resampled_reads += 1
         snapshots.append(snap)
 
-    return SpotCandidates(snapshots=tuple(snapshots), skipped=skipped, date=date_str)
+    return SpotCandidates(
+        snapshots=tuple(snapshots),
+        skipped=skipped,
+        date=date_str,
+        stored_reads=stored_reads,
+        resampled_reads=resampled_reads,
+    )
 
 
 def run_movers_snapshot(
@@ -984,4 +1176,6 @@ def run_movers_snapshot(
         time=time,
         top_n=top_n,
         skipped=candidates.skipped,
+        stored_reads=candidates.stored_reads,
+        resampled_reads=candidates.resampled_reads,
     )

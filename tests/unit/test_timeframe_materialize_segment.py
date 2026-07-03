@@ -1,16 +1,21 @@
-"""Segment-aware pre-build routing tests (DEC-PREBUILD-SELECT-001).
+"""Segment-aware pre-build routing tests (DEC-PREBUILD-SELECT-001 + DEC-PIPELINE-AUTOPREBUILD-001).
 
-Covers the NEW segment classification + resampler routing added to
+Covers the segment classification + resampler routing in
 ``brutex.data.timeframe_materialize``:
 
 * :func:`prebuild_kind_for` maps INDEX/CASH → SPOT, FNO+FUT → FUTURES,
   FNO+CE/PE → OPTIONS;
-* :func:`intraday_resampler_for` returns the SPOT resampler, the OI-aware
-  FUTURES resampler, and ``None`` for OPTIONS;
+* :func:`intraday_resampler_for` returns the SPOT resampler for SPOT and the
+  OI-aware F&O resampler for BOTH FUTURES and OPTIONS
+  (DEC-PIPELINE-AUTOPREBUILD-001 enabled option materialisation — supersedes
+  the earlier ``None``-for-OPTIONS on-demand design);
+* :func:`daily_resample_fn_for` returns the spot midnight-IST daily for SPOT
+  and the carry-last-OI F&O daily for FUTURES/OPTIONS (the extracted COMMON
+  core of the removed mid-pull ``_derive_daily_from_minute`` selection);
 * :func:`materialize_timeframes` with an injected ``resampler`` routes through
-  it (FUTURES preserves OI), and the default (``resampler=None``) is the SPOT
-  path — byte-identical to the pre-change behaviour (golden bit-identity);
-* the regression: an F&O FUTURES contract is NO longer routed through the
+  it (FUTURES/OPTIONS preserve OI), and the default (``resampler=None``) is the
+  SPOT path — byte-identical to the pre-change behaviour (golden bit-identity);
+* the regression: an F&O contract is NO longer routed through the
   OI-dropping SPOT resampler.
 
 Pure — fake ``write_tf``, REAL resamplers, polars fixtures. No lake / FastAPI.
@@ -23,12 +28,15 @@ from decimal import Decimal
 
 import polars as pl
 import pytest
+from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
 from brutex.data.fno_resample import derive_fno_intraday_tfs
+from brutex.data.spot_daily_resample import resample_1m_to_daily_default
 from brutex.data.spot_resample import derive_intraday_tfs
 from brutex.data.timeframe_materialize import (
+    DAILY_TF_LABEL,
     PrebuildKind,
+    daily_resample_fn_for,
     intraday_resampler_for,
-    materialize_lake_timeframes,
     materialize_timeframes,
     prebuild_kind_for,
 )
@@ -150,23 +158,25 @@ class TestIntradayResamplerFor:
     def test_futures_returns_fno_resampler(self) -> None:
         assert intraday_resampler_for(PrebuildKind.FUTURES) is derive_fno_intraday_tfs
 
-    def test_options_returns_none(self) -> None:
-        assert intraday_resampler_for(PrebuildKind.OPTIONS) is None
+    def test_options_returns_fno_resampler(self) -> None:
+        """REGRESSION FLIP (DEC-PIPELINE-AUTOPREBUILD-001): OPTIONS materialise
+        OI-aware like FUTURES — the old pin was ``is None`` (on-demand only)."""
+        assert intraday_resampler_for(PrebuildKind.OPTIONS) is derive_fno_intraday_tfs
 
 
-# ── materialize_lake_timeframes OPTIONS guard ─────────────────────────────
+# ── daily_resample_fn_for (the extracted daily-derive selection) ───────────
 
 
-def test_materialize_lake_timeframes_rejects_options(tmp_path: object) -> None:
-    """The shared helper refuses OPTIONS — option intraday is on-demand, never built."""
-    with pytest.raises(ValueError, match="on-demand"):
-        materialize_lake_timeframes(
-            lake_root=tmp_path,  # type: ignore[arg-type]  — never read; raises before any I/O
-            exchange="NSE",
-            segment="FNO",
-            symbol="NSE-NIFTY-25JAN-20000-CE",
-            kind=PrebuildKind.OPTIONS,
-        )
+class TestDailyResampleFnFor:
+    def test_spot_returns_spot_daily(self) -> None:
+        assert daily_resample_fn_for(PrebuildKind.SPOT) is resample_1m_to_daily_default
+
+    @pytest.mark.parametrize("kind", [PrebuildKind.FUTURES, PrebuildKind.OPTIONS])
+    def test_fno_kinds_return_carry_last_oi_daily(self, kind: PrebuildKind) -> None:
+        assert daily_resample_fn_for(kind) is resample_1m_to_fno_daily_positional
+
+    def test_daily_tf_label_is_the_lake_interval(self) -> None:
+        assert DAILY_TF_LABEL == "1day"
 
 
 # ── materialize_timeframes resampler routing ──────────────────────────────
@@ -220,6 +230,22 @@ class TestMaterializeRouting:
         assert result.written["5m"] > 0
         frame = rec.writes[0][1]
         assert "open_interest" in frame.columns  # the OI column survives (regression)
+
+    def test_options_resampler_preserves_open_interest(self) -> None:
+        """OPTIONS route through the SAME OI-aware F&O resampler as FUTURES
+        (DEC-PIPELINE-AUTOPREBUILD-001 — option bars are OI-carrying F&O bars)."""
+        df = _df_1m(with_oi=True)
+        rec = _Recorder()
+
+        result = materialize_timeframes(
+            tfs=("5m",),
+            read_1m=lambda: df,
+            write_tf=rec,
+            resampler=intraday_resampler_for(PrebuildKind.OPTIONS),
+        )
+
+        assert result.written["5m"] > 0
+        assert "open_interest" in rec.writes[0][1].columns
 
     def test_regression_futures_not_routed_through_oi_dropping_spot(self) -> None:
         """REGRESSION: an F&O futures frame keeps OI through the prebuild path.

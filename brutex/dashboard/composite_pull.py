@@ -235,6 +235,8 @@ def pull_historical_for_underlyings(
     on_progress: ProgressHook | None = None,
     session_rate: SessionRateController | None = None,
     until_clean: bool = True,
+    scope_start: date | None = None,
+    scope_end: date | None = None,
 ) -> CompositePullReport:
     """One-click composite: refresh metadata THEN pull candles for the selected underlyings.
 
@@ -296,6 +298,17 @@ def pull_historical_for_underlyings(
     until_clean
         Forwarded to phase (b) (default ``True`` — auto-retry every failed window
         until the selection drains clean; DEC-GROWW-DERIV-UNTIL-CLEAN-001).
+    scope_start, scope_end
+        OPTIONAL inclusive EXPIRY-scope bounds forwarded to phase (b)
+        (DEC-FNO-EXPIRY-SCOPE-001): only registry contracts whose expiry lies
+        within ``[scope_start, scope_end]`` are candle-pulled; an out-of-scope
+        expiry is a true zero-call, zero-ledger-row skip (one honest
+        ``fno.expiry_out_of_scope`` log per expiry group; stored bars
+        untouched). The scope selects WHICH expiries — the in-scope contracts
+        keep their normal per-type default window law. Phase (a)'s metadata
+        refresh is NOT scoped (the registry deliberately caches the FULL
+        calendar; scoping is a candle-pull concern). ``None``/``None`` (the
+        default) is byte-identical to the unscoped composite.
 
     Returns
     -------
@@ -392,21 +405,30 @@ def pull_historical_for_underlyings(
         session_rate=session_rate,
         until_clean=until_clean,
         run_parallel=historical_run_parallel,
+        scope_start=scope_start,
+        scope_end=scope_end,
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law
     # skips would read like partial failure ("8/12") — carry the honest breakdown so
-    # a not-yet-open skip is never mistaken for a failed contract.
+    # a not-yet-open skip is never mistaken for a failed contract. Likewise a
+    # scoped-out expiry (DEC-FNO-EXPIRY-SCOPE-001) is NAMED in the note, never a
+    # silent shrink of the pulled set.
     skipped_suffix = (
         f" ({historical.contracts_not_yet_in_window} not yet in window)"
         if historical.contracts_not_yet_in_window
+        else ""
+    )
+    scope_suffix = (
+        f", {historical.expiries_out_of_scope} expiries out of scope skipped"
+        if historical.expiries_out_of_scope
         else ""
     )
     note = (
         f"refreshed metadata for {len(tradable)} underlying(s) "
         f"({metadata.contracts_persisted} contract(s)), then pulled "
         f"{historical.contracts_completed}/{historical.contracts_selected} contract(s)"
-        f"{skipped_suffix} ({historical.bars_appended} bar(s))"
+        f"{skipped_suffix} ({historical.bars_appended} bar(s)){scope_suffix}"
     )
     return CompositePullReport(
         dry_run=dry_run,

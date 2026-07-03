@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 import structlog
 
+from brutex.data.lake_read import bars_by_ts_first
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
@@ -662,7 +663,11 @@ def ranked_combo_to_result_row(
         take_profit_paisa=tp_paisa,
     )
     if trades:
-        ts_to_bar = {bar.timestamp: bar for bar in bars}
+        # Keep-FIRST timestamp map (DEC-LAKE-READ-UNIQUE-001): a plain dict
+        # comprehension is silently LAST-wins on a duplicated bar timestamp, so
+        # a poisoned-era duplicate would swap the REAL entry/exit price anchor
+        # for the re-stated one. The COMMON gate keeps the first bar + WARNs.
+        ts_to_bar = bars_by_ts_first(bars, source=f"sweep_run:{instrument}/{tf}/{direction}")
         entries = [ts_to_bar[t.entry_ts].open for t in trades]
         exits = [ts_to_bar[t.exit_ts].close for t in trades]
         avg_entry = round_money(sum(entries, Decimal("0")) / len(entries))

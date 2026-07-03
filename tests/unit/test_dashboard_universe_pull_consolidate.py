@@ -46,17 +46,21 @@ def test_only_one_pull_button_remains() -> None:
 
 
 def test_kept_controls_are_present() -> None:
-    """The selection helpers + granularity + unified pre-build stay."""
+    """The selection helpers + granularity stay (the manual pre-build button is gone).
+
+    DEC-PIPELINE-AUTOPREBUILD-001 removed the ``matbtn`` manual pre-build — the
+    pipeline's automatic prebuild stage replaces it, so it is pinned ABSENT here
+    (the removed-surface pins live in test_dashboard_universe_ux.py).
+    """
     html = _render_universe_html()
     for needle in (
         'id="selallbtn"',  # ✓ all shown
         'id="clrselbtn"',  # ✗ clear
         'id="tickconstbtn"',  # ⊕ tick its constituents
         "granularity · <b>1-minute</b> (1-day derived)",  # granularity display
-        'id="matbtn"',  # the ONE unified pre-build button
-        "⚙ Pre-build timeframes",
     ):
         assert needle in html, f"kept control missing: {needle}"
+    assert 'id="matbtn"' not in html, "the manual pre-build button must stay removed"
 
 
 def test_spot_date_range_picker_is_readded_and_wired() -> None:
@@ -176,11 +180,16 @@ def test_transient_poll_blip_is_retried_not_a_failure() -> None:
 
 
 def test_pipeline_button_runs_final_prebuild_stage() -> None:
-    """The page advertises the pipeline's FINAL pre-build stage in the chain copy."""
+    """The page advertises the pipeline's FINAL pre-build stage in the chain copy.
+
+    DEC-PIPELINE-AUTOPREBUILD-001: the pre-build is AUTOMATIC-only now, so the
+    old "on-demand re-warm" framing (the removed manual button) must be gone.
+    """
     html = _render_universe_html()
     # The hero sub-line names the full gated chain INCLUDING pre-build as the final stage.
     assert "historical → pre-build" in html, (
         "the chain copy must name pre-build as the pipeline's final stage"
     )
-    # The ⚙ button is the on-demand re-warm (the automatic pre-build runs in the pipeline).
-    assert "on-demand re-warm" in html, "the pre-build button must be framed as a re-warm"
+    assert "on-demand re-warm" not in html, (
+        "the manual re-warm framing must be gone — the prebuild is automatic-only"
+    )

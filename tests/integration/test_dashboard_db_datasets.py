@@ -264,7 +264,9 @@ class TestDbOptionsRouteCountCache:
                 self._real = real
 
             def execute(self, sql: str, parameters: object = None) -> object:
-                if "COUNT(*)" in sql:
+                # The deduped total is a COUNT(DISTINCT …) since
+                # DEC-LAKE-READ-UNIQUE-001 — match any COUNT( aggregate.
+                if "COUNT(" in sql:
                     execs["count"] += 1
                 return (
                     self._real.execute(sql)  # type: ignore[attr-defined]

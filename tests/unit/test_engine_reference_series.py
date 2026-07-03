@@ -6,7 +6,7 @@ DYNAMIC mechanism that stamps the India VIX level on every trade (REFERENCE
 ONLY, never a signal input; DEC-VIX-TRADE-STAMP-001). Covers:
 
 * O(1) ``timestamp → close`` lookup (present + absent instant);
-* duplicate-timestamp last-wins tie-break;
+* duplicate-timestamp keep-FIRST collapse + warning (DEC-LAKE-READ-UNIQUE-001);
 * :meth:`TradeReferenceStamper.stamp` with VIX present at both ends, missing at
   entry, missing at exit, missing at both (→ ``None`` + a logged warning, never
   a fabricated value);
@@ -68,12 +68,23 @@ class TestReferenceSeries:
         series = ReferenceSeries.from_bars(VIX_SERIES_NAME, [_vix_bar(0, "15.10")])
         assert series.level_at(_T0 + timedelta(minutes=99)) is None
 
-    def test_duplicate_timestamp_keeps_last(self) -> None:
-        """A defensive tie-break: a repeated timestamp keeps the LAST bar's close."""
-        series = ReferenceSeries.from_bars(
-            VIX_SERIES_NAME, [_vix_bar(0, "15.10"), _vix_bar(0, "15.99")]
-        )
-        assert series.level_at(_T0) == Decimal("15.99")
+    def test_duplicate_timestamp_keeps_first_and_warns(self) -> None:
+        """A repeated timestamp keeps the FIRST bar's close + warns (keep-FIRST).
+
+        DEC-LAKE-READ-UNIQUE-001 flipped the old silent LAST-wins tie-break: a
+        poisoned-era duplicate re-statement must never silently replace the
+        real close, and the collapse is warned via the COMMON read gate.
+        """
+        with _capture_logs() as logs:
+            series = ReferenceSeries.from_bars(
+                VIX_SERIES_NAME, [_vix_bar(0, "15.10"), _vix_bar(0, "15.99")]
+            )
+        assert series.level_at(_T0) == Decimal("15.10")
+        dedup = [e for e in logs if e["event"] == "lake.read.duplicates_dropped"]
+        assert len(dedup) == 1
+        assert dedup[0]["dropped"] == 1
+        assert dedup[0]["conflict_count"] == 1
+        assert dedup[0]["source"] == f"reference_series:{VIX_SERIES_NAME}"
 
     def test_empty_series_is_all_misses(self) -> None:
         series = ReferenceSeries.from_bars(VIX_SERIES_NAME, [])

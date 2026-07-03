@@ -1656,6 +1656,7 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     from brutex.data.catalog import Catalog
     from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
     from brutex.data.lake_heal import heal_after_reconcile, lake_heal_audit
+    from brutex.data.lake_read import dedup_bars
     from brutex.feed.replay import ReplayFeed
     from brutex.notifications.sweep_alerts import emit_lake_heal_alert
 
@@ -1699,7 +1700,15 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
                 start=_parse(ctx.start),
                 end=_parse(ctx.end),
             )
-            slices[(instrument, tf_label)] = [event.bar for event in feed]
+            # Belt-and-braces read gate (DEC-LAKE-READ-UNIQUE-001): the feed's
+            # Catalog.get_bars already collapses stored duplicates keep-FIRST;
+            # this idempotent second pass pins the invariant at the cascade's
+            # own input mouth (a clean stream passes through byte-identically).
+            clean_bars, _dropped = dedup_bars(
+                [event.bar for event in feed],
+                source=f"cascade_wire:{instrument}/{tf_label}",
+            )
+            slices[(instrument, tf_label)] = clean_bars
 
     def bars_for(instrument: str, tf_label: str) -> list[CandleBar]:
         return slices.get((instrument, tf_label), [])

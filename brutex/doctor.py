@@ -340,9 +340,17 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
         interval_to_label = {v: k for k, v in INTRADAY_TF_INTERVALS.items()}
 
         def _read(symbol_dir: Path, interval: str) -> pl.DataFrame:
+            from brutex.data.lake_read import dedup_bars_frame
+
+            # Keep-FIRST read dedup BEFORE the sort (DEC-LAKE-READ-UNIQUE-001):
+            # the freshness compare must see the same deduped bars every wired
+            # reader serves, not a poisoned-era physical duplicate.
+            frame, _dropped = dedup_bars_frame(
+                pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
+                source=f"doctor:{symbol_dir.name}/{interval}",
+            )
             return (
-                pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet")
-                .rename({"timestamp": "ts_utc"})
+                frame.rename({"timestamp": "ts_utc"})
                 .select("ts_utc", "open", "high", "low", "close", "volume")
                 .sort("ts_utc")
             )
@@ -372,7 +380,8 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                     status="FAIL",
                     detail=(
                         f"{symbol}: stored derived TFs drift from a fresh re-derivation: "
-                        f"{stale} — re-derive via POST /api/v1/universe/derive-timeframes"
+                        f"{stale} — re-derive via the pipeline's automatic prebuild "
+                        "stage (▶ Pull · full pipeline, DEC-PIPELINE-AUTOPREBUILD-001)"
                     ),
                 )
             return CheckResult(

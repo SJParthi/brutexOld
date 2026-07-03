@@ -107,6 +107,8 @@ def spot_close_by_ts_window(
     """
     import polars as pl
 
+    from brutex.data.lake_read import dedup_bars_frame
+
     for segment in SPOT_PROBE_SEGMENTS:
         base = lake_root / "bars" / exchange / segment / underlying / interval
         files = ist_span_partition_files(base, start, end)
@@ -117,6 +119,12 @@ def spot_close_by_ts_window(
             .select("timestamp", "close")
             .filter(pl.col("close").is_not_null())
             .collect()
+        )
+        # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): the dict build below
+        # was LAST-wins on a poisoned-era duplicate instant — the first stored
+        # non-null close wins now, warned, never silent.
+        frame, _dropped = dedup_bars_frame(
+            frame, source=f"spot_join:{exchange}/{segment}/{underlying}/{interval}"
         )
         close_by_ts = {
             utc_instant(ts): Decimal(str(close))

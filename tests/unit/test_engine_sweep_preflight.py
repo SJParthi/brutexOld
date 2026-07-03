@@ -43,25 +43,30 @@ class TestPreflightSlices:
 
 
 class TestRemediation:
-    def test_derived_only_points_at_materialization(self) -> None:
+    def test_derived_only_points_at_pipeline_prebuild(self) -> None:
+        # DEC-PIPELINE-AUTOPREBUILD-001: the manual derive-timeframes route + the
+        # BRUTEX_AUTO_DERIVE_TFS opt-in are removed — the remedy is the pipeline's
+        # automatic prebuild stage.
         report = PreflightReport(missing=(("NIFTY", "5minute"), ("NIFTY", "2hour")), requested=4)
         remedy = report.remediation()
-        assert "derive-timeframes" in remedy
-        assert "BRUTEX_AUTO_DERIVE_TFS=1" in remedy
+        assert "full pipeline" in remedy
+        assert "prebuild" in remedy
         assert "2hour, 5minute" in remedy
-        assert "pull" not in remedy.split("derive-timeframes")[0]
+        assert "derive-timeframes" not in remedy  # the deleted route is never suggested
+        assert "BRUTEX_AUTO_DERIVE_TFS" not in remedy  # the removed opt-in is never suggested
+        assert "pull the" not in remedy  # derived-only ⇒ no fetch clause
 
     def test_fetched_only_points_at_pull(self) -> None:
         report = PreflightReport(missing=(("NIFTY", "1minute"), ("SENSEX", "1day")), requested=4)
         remedy = report.remediation()
         assert "pull the" in remedy
         assert "1day, 1minute" in remedy
-        assert "derive-timeframes" not in remedy
+        assert "prebuild" not in remedy
 
     def test_mixed_names_both_remedies(self) -> None:
         report = PreflightReport(missing=(("NIFTY", "1minute"), ("NIFTY", "5minute")), requested=2)
         remedy = report.remediation()
-        assert "derive-timeframes" in remedy
+        assert "prebuild" in remedy
         assert "pull the" in remedy
 
     def test_ok_report_remediation_is_empty(self) -> None:

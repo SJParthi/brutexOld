@@ -5,19 +5,21 @@ Pins the pull-seam glue contract on BOTH L2 wirings:
 
 * ``brutex.dashboard.historical_pull._heal_lake_after_pull`` — the F&O twin,
   called by ``pull_contract_candles`` inside ``if not dry_run:`` BEFORE the
-  daily derive: a pre-poisoned month inside the pulled span is healed
-  end-to-end (raw-pyarrow dup → keep-FIRST winner on disk + restorable
-  quarantine copy), the heal runs BEFORE ``_derive_daily_from_minute`` (order
-  spy), a dry-run never heals, ``LakeWriteHalt`` from the heal PROPAGATES out
-  of the pull (disk-full = pull halt), and every other heal error is swallowed
-  + logged ``lake_heal.post_pull_error`` (a heal bug never fails a pull).
+  Greeks enrichment (the seam's downstream 1-minute reader now that the
+  mid-pull daily derive is removed — DEC-PIPELINE-AUTOPREBUILD-001): a
+  pre-poisoned month inside the pulled span is healed end-to-end
+  (raw-pyarrow dup → keep-FIRST winner on disk + restorable quarantine
+  copy), the heal runs BEFORE ``_enrich_greeks_from_minute`` (order spy), a
+  dry-run never heals, ``LakeWriteHalt`` from the heal PROPAGATES out of the
+  pull (disk-full = pull halt), and every other heal error is swallowed +
+  logged ``lake_heal.post_pull_error`` (a heal bug never fails a pull).
   Target derivation is pinned: no-window / unresolvable-exchange contracts
   contribute nothing; the span is the UNION of the resolved windows.
 
 * ``brutex.dashboard.pull_controller._heal_after_pull`` — the spot glue
-  (``# pragma: no cover`` raw-lake I/O per the ``_resample_daily_after_pull``
-  convention, so its contract is pinned HERE): heals a poisoned pulled slice,
-  re-raises ``LakeWriteHalt``, swallows + logs everything else.
+  (``# pragma: no cover`` raw-lake-I/O-glue convention, so its contract is
+  pinned HERE): heals a poisoned pulled slice, re-raises ``LakeWriteHalt``,
+  swallows + logs everything else.
 
 Offline throughout: fake Groww SDK (canned candles), a recording sink for the
 ingest writes, a REAL temp registry + lake; poison planted with raw pyarrow
@@ -219,15 +221,20 @@ class TestFnoPullSeam:
         assert len(quarantined) == 1
         assert quarantined[0].read_bytes() == original_bytes
 
-    def test_heal_runs_before_daily_derive(
+    def test_heal_runs_before_greeks_enrichment(
         self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Order pin: the heal fires BEFORE the daily derive reads the 1-minute."""
+        """Order pin: the heal fires BEFORE the Greeks enrichment reads the 1-minute.
+
+        (The mid-pull daily derive was removed by DEC-PIPELINE-AUTOPREBUILD-001;
+        the downstream 1-minute reader at this seam is now the Greeks enrichment,
+        and the pipeline's final prebuild phase runs strictly later.)
+        """
         order: list[str] = []
         monkeypatch.setattr(hp, "_heal_lake_after_pull", lambda **_kw: order.append("heal"))
-        monkeypatch.setattr(hp, "_derive_daily_from_minute", lambda **_kw: order.append("derive"))
+        monkeypatch.setattr(hp, "_enrich_greeks_from_minute", lambda **_kw: order.append("greeks"))
         _pull(registry, tmp_lake, dry_run=False)
-        assert order[:2] == ["heal", "derive"]
+        assert order[:2] == ["heal", "greeks"]
 
     def test_dry_run_never_heals(
         self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch

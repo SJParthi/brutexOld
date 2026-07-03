@@ -125,11 +125,12 @@
         <label class="ctl">Date<input type="date" id="date" /></label>
         <label class="ctl">Timeframe
           <!-- ALL 21 Track-1 timeframes (DEC-MOVERS-COMPLETENESS-001): 1m base + 19 derived
-               intraday + 1d. Every option is derived ON-THE-FLY from the stored 1-minute by
-               resample_1m_to_tf (movers_snapshot.py) — none needs a pre-materialised partition,
-               so all 21 work as long as 1-minute spot / FNO candles are in the lake. The labels
-               + minute map below mirror brutex.data.timeframes.LAKE_INTERVAL_LABELS (the single
-               source of truth — CLAUDE.md §11 COMMON). -->
+               intraday + 1d. Spot reads the pipeline-prebuilt STORED interval partition FIRST
+               (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2) and falls back to the on-the-fly
+               resample_1m_to_tf of the stored 1-minute — so all 21 work as long as 1-minute
+               spot / FNO candles are in the lake, prebuilt or not. The labels + minute map
+               below mirror brutex.data.timeframes.LAKE_INTERVAL_LABELS (the single source of
+               truth — CLAUDE.md §11 COMMON). -->
           <select id="interval">
             <option value="1day" selected>1 day</option>
             <option value="4hour">4 hour</option>
@@ -221,6 +222,12 @@ const TF_MIN = {
 };
 const state = { asset:"spot", category:"price_gainers", interval:"1day", time:"", sort:{idx:null,dir:1} };
 let rowsData = [];
+/* Prebuild-gate auto-recovery timer (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2):
+   while the pull pipeline gates the movers (payload `gated: true`), re-poll
+   every few seconds so the screen recovers BY ITSELF the moment the gate
+   lifts — no manual refresh needed. Cleared on every non-gated load. */
+let gateTimer = null;
+const GATE_RETRY_MS = 5000;
 /* The full payload from the last successful fetch — it holds EVERY category list
    for the current coordinate (date/timeframe/time/exchange/top_n/expiry/track), so
    switching the sub-filter pill is a pure client-side re-render with NO server
@@ -359,6 +366,22 @@ async function load() {
     const r = await fetch("/api/v1/movers?"+p.toString());
     if (!r.ok) throw new Error("HTTP "+r.status);
     const j = await r.json();
+    if (j.gated) {
+      /* Prebuild gate (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the pipeline is
+         still writing the derived partitions the movers read — render the honest
+         server note PROMINENTLY (textContent only, never innerHTML for the
+         dynamic string — the repo's XSS-guard convention) with an empty grid,
+         and schedule an auto-retry so the screen recovers when the gate lifts. */
+      lastPayload = null;  /* a pill switch must re-fetch, never re-render the gated shell. */
+      rowsData = [];
+      renderHead(); renderRows();
+      $("asof").textContent = `as-of ${(j.date||"")} — gated`;
+      $("noteText").textContent = j.note || "prebuild in progress — movers available when finished.";
+      clearTimeout(gateTimer);
+      gateTimer = setTimeout(load, GATE_RETRY_MS);
+      return;
+    }
+    clearTimeout(gateTimer);
     lastPayload = j;  /* cache: sub-filter switches now re-render from this, no refetch. */
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();

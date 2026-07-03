@@ -421,6 +421,22 @@ class Catalog:
             frames.append(pl.read_parquet(str(path)))
 
         combined = pl.concat(frames, how="vertical_relaxed")
+        # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): a partition poisoned
+        # BEFORE the write-side uniqueness fix (DEC-LAKE-WRITE-UNIQUE-001) can
+        # physically carry duplicate timestamps; collapse them keep-FIRST — the
+        # frames are concatenated in ascending (year, month) order, so the first
+        # physical row matches what a write-side heal keeps — BEFORE the sort
+        # (sorting could reorder equal timestamps and make "first" ambiguous).
+        # This is the engine's load-bearing input mouth: every ReplayFeed /
+        # sweep / cascade bar stream flows through here, so a duplicate bar can
+        # never reach the Stage-1A condition masks again. The collapse warns
+        # (`lake.read.duplicates_dropped`), never silent; a clean partition is
+        # byte-identical (unique() drops nothing).
+        from brutex.data.lake_read import dedup_bars_frame
+
+        combined, _dropped = dedup_bars_frame(
+            combined, source=f"catalog:{exchange}/{segment}/{symbol}/{interval}"
+        )
         # Filter to the exact window and keep only the canonical column
         # order. polars' filter is zero-copy slice-level, not row-level.
         filtered = combined.filter(
