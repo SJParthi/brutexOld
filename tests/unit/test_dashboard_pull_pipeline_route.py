@@ -739,3 +739,74 @@ def test_pull_pipeline_clean_run_finish_detail_is_the_complete_note(
     assert snap["state"] == "done"
     assert snap["detail"].startswith("pipeline complete — spot ")
     assert "quarantined" not in snap["detail"]
+
+
+# ── cross-list selection (DEC-UNIVERSE-UI-POLISH-002) ─────────────────────────
+
+
+def _adanient() -> Instrument:
+    """A STOCK universe row — the cross-list partner of the ``_nifty`` index."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=25,
+        symbol_name="ADANIENT",
+        display_name="ADANI ENTERPRISES",
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def test_pull_pipeline_cross_list_selection_scopes_both_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick on the STOCKS list + a tick on the INDEX list pull TOGETHER.
+
+    DEC-UNIVERSE-UI-POLISH-002 (route half of the cross-list selection fix):
+    the operator ticked ADANIENT (stocks) and NIFTY (index) yet the pull
+    scoped only one — the frontend's tab-switch ``selMulti.clear()`` wiped the
+    hidden list's ticks (fixed + pinned in
+    ``test_dashboard_universe_crosslist_select.py``). This pins the BACKEND
+    contract the fix relies on: ONE ``?symbols=`` comma list spanning BOTH
+    instrument kinds resolves to BOTH targets (``resolve_pull_targets`` is
+    kind-agnostic) and the spot phase receives BOTH instruments, in tick order.
+    """
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    store.upsert_many(
+        [_nifty(), _adanient()],
+        snapshot_date=date(2024, 1, 2),
+        run_id="r1",
+        csv_source_sha256="0" * 64,
+    )
+    try:
+        monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+        _pin_creds_present(monkeypatch)
+        _patch_spines(monkeypatch)
+        spot_target_sets: list[list[str]] = []
+
+        def _capture_spot(targets: Any, *args: Any, **kwargs: Any) -> BulkSpotReport:
+            spot_target_sets.append([inst.symbol_name for inst in targets])
+            return _fake_spot(**kwargs)
+
+        monkeypatch.setattr(app_module, "pull_all_spot", _capture_spot)
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as client:
+            body = client.post(
+                "/api/v1/universe/pull-pipeline", params={"symbols": "ADANIENT,NIFTY"}
+            ).json()
+            assert body["started"] is True
+            assert body["targets"] == 2, "BOTH the stock and the index must be targeted"
+            assert body["target_source"] == "selection"
+            assert _wait_for_job(client)["state"] == "done"
+        # The spot phase received the COMBINED cross-list selection, tick-ordered.
+        assert spot_target_sets == [["ADANIENT", "NIFTY"]]
+    finally:
+        store.close()

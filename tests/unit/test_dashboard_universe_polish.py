@@ -13,9 +13,10 @@ What this pins:
   surfaces align to one rhythm instead of ad-hoc per-element pixels;
 * the ``--line`` custom property is finally DEFINED (the date/select inline
   styles referenced it but the palette never declared it → invisible borders);
-* the pull toolbar is grouped (``pull-row`` / ``ctl-field``) with a shared control
-  height, and carries ``role="toolbar"`` (the ``daterange`` group was REMOVED by
-  DEC-UNIVERSE-PULL-CONSOLIDATE-001 — the pipeline accepts no from/to);
+* the pull toolbar is grouped (``pull-row`` clusters) with a shared control
+  height, and carries ``role="toolbar"`` (the ``daterange`` group has since been
+  RE-ADDED + wired by DEC-UNIVERSE-PULL-DATERANGE-001; the ``ctl-field``
+  granularity chip was later REMOVED by DEC-UNIVERSE-UI-POLISH-002);
 * the responsive grid collapses (no fixed-3-col overflow on laptop/tablet/phone);
 * the nav is class-driven with an ``aria-current`` "you are here" pill (was
   inline-styled, which blocked hover/focus states);
@@ -53,9 +54,13 @@ def test_pull_toolbar_is_grouped_and_labelled() -> None:
     assert 'class="pull-row"' in html, "the control row grouping is missing"
     # The from→to spot date GROUP is RE-ADDED + wired (DEC-UNIVERSE-PULL-DATERANGE-001
     # — the pipeline route now threads from_date/to_date into the spot phase). The
-    # toolbar groups it alongside the static granularity field.
+    # static ``ctl-field`` granularity chip that shared its shape is REMOVED
+    # (DEC-UNIVERSE-UI-POLISH-002 — dead UI noise since 1-minute is the ONLY
+    # granularity, DEC-1MINUTE-ONLY-DERIVE-1DAY-001).
     assert 'class="daterange"' in html, "the spot date-range group must be present"
-    assert 'class="ctl-field"' in html, "the granularity field group is missing"
+    assert 'class="ctl-field"' not in html, (
+        "the granularity chip must stay removed (DEC-UNIVERSE-UI-POLISH-002)"
+    )
     # every pull-bar button shares ONE height so the row aligns.
     assert re.search(r"\.pullbtn, \.loadbtn \{[^}]*min-height:var\(--ctl-h\)", html), (
         "the shared button height that aligns the toolbar is missing"
