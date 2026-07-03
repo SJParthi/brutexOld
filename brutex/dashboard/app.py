@@ -144,6 +144,7 @@ from brutex.dashboard.pipeline_prebuild import (
     run_pipeline_prebuild_guarded,
 )
 from brutex.dashboard.pipeline_pull import run_full_pipeline
+from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
 from brutex.dashboard.preopen_report import (
     ReportBasis,
     ReportMode,
@@ -902,6 +903,7 @@ def build_app(
     summary_cache: SummaryCache | None = None,
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
+    prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
 ) -> Any:
@@ -945,6 +947,16 @@ def build_app(
         repeat poll between two instrument loads is a dict handoff, not a re-scan.
         Injected so a test can assert the hit/invalidation behaviour; ``None``
         (the default) builds a fresh production cache.
+    prebuild_gate
+        Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
+        the ``/api/v1/movers`` screens while the one-click pull pipeline runs
+        (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the ``/pull-pipeline``
+        background job ``begin()``s it at start and ``release(ok)``s it in a
+        ``try/finally`` when the prebuild finishes or the pipeline stops early
+        (a failed pull can never leave movers blocked). ONLY the full pipeline
+        route gates; a ``dry_run`` pipeline does not. Injected so tests drive
+        the gated/released transitions deterministically; ``None`` (the
+        default) builds a fresh production gate.
     quota_tracker
         Optional read-only daily-quota source for the ``/api/v1/quota``
         endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
@@ -1076,6 +1088,13 @@ def build_app(
     # load moves the token and rebuilds. Content-exact (never a stale illusion —
     # Golden Rule #1).
     _universe_cache = universe_cache if universe_cache is not None else UniverseSnapshotCache()
+    # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
+    # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
+    # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
+    # partitions must never be ranked); the pipeline job releases it in a
+    # try/finally so a failed/stopped pull can never wedge the movers shut. Owned
+    # by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _prebuild_gate = prebuild_gate if prebuild_gate is not None else PrebuildGate()
     # The /db candle-pager TOTAL cache (DEC-DB-CANDLE-COUNT-CACHE-001): the page
     # `COUNT(*)` over `read_parquet(glob)` is O(files) (a Parquet-footer read per
     # monthly file — ~8 ms at 6 years, growing as the lake deepens) and was
@@ -2664,6 +2683,12 @@ def build_app(
             so the sequencer + gates stay 100%-testable offline while this thin
             wiring streams live progress through the shared single-flight job.
             """
+            # Movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): flips
+            # True inside `_prebuild_timeframes` when the prebuild outcome is ok;
+            # the try/finally below releases the gate with it — including on a
+            # spot/metadata early stop or a raised phase (ok stays False), so the
+            # movers are NEVER left blocked by a failed pull.
+            prebuild_ok = False
 
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
@@ -2930,6 +2955,7 @@ def build_app(
                         include_daily=True,
                     )
 
+                nonlocal prebuild_ok
                 outcome = run_pipeline_prebuild_guarded(
                     instruments=targets,
                     cascade_or_error=lambda: build_fno_cascade(list_fno_candle_datasets(lake_root)),
@@ -2940,6 +2966,9 @@ def build_app(
                 # written some) — bump the write generation so the movers warm that
                 # FOLLOWS the prebuild (and the /db + coverage caches) reads fresh.
                 _summary_cache.mark_dirty()
+                # The gate-release flag (chunk 2): the finally below releases the
+                # movers gate with the prebuild's honest success verdict.
+                prebuild_ok = outcome.ok
                 return outcome
 
             # Keep the live PULL RATE panel fed through EVERY phase, not just spot
@@ -2950,19 +2979,34 @@ def build_app(
             # real fetches. The sampler ticks the SAME controller through make_rate_observer
             # (observe-only, best-effort, never builds a controller) so the widget stays
             # live the whole pull.
-            with RatePanelSampler(session_rate=_session_rate, observer=make_rate_observer(state)):
-                report = run_full_pipeline(
-                    run_spot=_run_spot,
-                    run_metadata=_run_metadata,
-                    run_historical=_run_historical,
-                    warm_spot_movers=_warm_spot_movers,
-                    warm_futures_movers=_warm_futures_movers,
-                    warm_options_movers=_warm_options_movers,
-                    run_prebuild=_prebuild_timeframes,
-                )
-            if report.spot is not None:
-                _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
-            return report.to_dict()
+            # Movers gate DOWN for the whole real pipeline (chunk 2). A dry_run
+            # writes no real data, so it must NOT gate the movers screens.
+            if not dry_run:
+                _prebuild_gate.begin()
+            try:
+                with RatePanelSampler(
+                    session_rate=_session_rate, observer=make_rate_observer(state)
+                ):
+                    report = run_full_pipeline(
+                        run_spot=_run_spot,
+                        run_metadata=_run_metadata,
+                        run_historical=_run_historical,
+                        warm_spot_movers=_warm_spot_movers,
+                        warm_futures_movers=_warm_futures_movers,
+                        warm_options_movers=_warm_options_movers,
+                        run_prebuild=_prebuild_timeframes,
+                    )
+                if report.spot is not None:
+                    _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                return report.to_dict()
+            finally:
+                # ALWAYS release — a spot/metadata stop, a raised phase, or a
+                # clean run all un-gate the movers (never blocked forever);
+                # `prebuild_ok` carries the prebuild's honest verdict (False when
+                # the pipeline never reached it). Logged by the gate itself
+                # (`pipeline.prebuild.gate_released` {ok}).
+                if not dry_run:
+                    _prebuild_gate.release(prebuild_ok)
 
         pipeline_detail = f"pipeline {len(targets)} symbols"
         if dry_run:
@@ -3842,6 +3886,23 @@ def build_app(
         """
         store = _require_store()
         try:
+            # Movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while
+            # the one-click pull pipeline runs, answer with the honest `gated: true`
+            # payload and ZERO lake reads — a half-filled lake / mid-overwrite
+            # derived partitions must never be ranked. The page keeps polling and
+            # recovers by itself the moment the pipeline job releases the gate.
+            gate = _prebuild_gate.snapshot()
+            if gate.blocking:
+                return JSONResponse(
+                    gated_movers_payload(
+                        gate,
+                        asset=asset,
+                        interval=interval,
+                        date=date,
+                        time=time,
+                        top_n=top_n,
+                    )
+                )
             if asset not in ("spot", "futures", "options"):
                 # Milestone 1 wired Spot; Milestone 2 Futures; Milestone 3 Options.
                 # Any other (unknown) asset still gets an honest pending payload.
@@ -4066,6 +4127,8 @@ def build_app(
                     top_n=top_n,
                     skipped=spot_cands.skipped,
                     min_volume=min_volume,
+                    stored_reads=spot_cands.stored_reads,
+                    resampled_reads=spot_cands.resampled_reads,
                 )
 
             payload = await run_in_threadpool(_resolve)
