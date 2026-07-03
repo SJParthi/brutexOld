@@ -2350,9 +2350,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         liveproof = _build_liveproof_autorun(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("liveproof.build_failed", error=str(exc))
-    app = build_app(
-        state, instrument_store=store, summary_cache=summary_cache, liveproof=liveproof
-    )
+    app = build_app(state, instrument_store=store, summary_cache=summary_cache, liveproof=liveproof)
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
     # ITSELF (the hard operator law). Guarded like the auto-resume launch so
