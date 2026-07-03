@@ -337,7 +337,8 @@ async function load() {
       eraBanner.textContent = "⚠ results span " + eras.length + " data eras ("
         + eras.map((h) => String(h).slice(0, 12)).join(", ")
         + ") — old-era and new-era backtest results are co-ranked in this one table;"
-        + " census/heal pending (dup-train PR-3). Rows carry a per-row snapshot_era marker.";
+        + " census/heal pending (dup-train PR-3). Per-row era details are in the API"
+        + " payload (snapshot_era).";
       eraBanner.classList.add("show");
     } else {
       eraBanner.textContent = "";
