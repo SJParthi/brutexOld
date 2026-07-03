@@ -26,7 +26,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
-import polars as pl
 import pytest
 from brutex.adapters.groww.errors import GrowwAuthError, GrowwBadRequestError
 from brutex.adapters.groww.fetch_pipeline import RawFetchResult
@@ -2407,89 +2406,20 @@ class _DeferredPipeline:
             result.tail.process(result.tail)
 
 
-class TestDailyDeriveAfterDrain:
-    """Forensic-audit #15: the 1-day derive runs AFTER both drains, success-path only."""
+class TestNoMidPullDerivedWrites:
+    """DEC-PIPELINE-AUTOPREBUILD-001: the pull writes NO derived data mid-pull.
 
-    def _spy_order(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-        """Spy the two drain helpers + the resample; return the shared order log."""
-        order: list[str] = []
-        monkeypatch.setattr(
-            "brutex.dashboard.pull_controller._drain_fetch_pipeline",
-            lambda _p: order.append("fetch_pipeline"),
-        )
-        monkeypatch.setattr(
-            "brutex.dashboard.pull_controller._drain_write_consumer",
-            lambda _c: order.append("write_consumer"),
-        )
-        monkeypatch.setattr(
-            "brutex.dashboard.pull_controller._resample_daily_after_pull",
-            lambda **_kw: order.append("resample"),
-        )
-        return order
+    REGRESSION FLIP of the old ``TestDailyDeriveAfterDrain`` (forensic-audit
+    #15): the always-on post-drain 1-day derive (``_resample_daily_after_pull``)
+    is REMOVED — derived timeframes (incl. the ``1day`` anchor) are written ONLY
+    by the pipeline's final prebuild phase, never by ``pull_all_spot`` /
+    ``pull_candles``. These tests pin that a real pull lands the 1-minute bars
+    but leaves NO ``1day`` (or any other derived) partition behind.
+    """
 
-    def test_pull_all_spot_resample_runs_after_both_drains(
+    def test_pull_all_spot_writes_no_daily_partition(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        order = self._spy_order(monkeypatch)
-        pull_all_spot(
-            [_index("13")],
-            lake_root=tmp_path,
-            dry_run=False,
-            now=_BULK_NOW,
-            from_date="2024-01-01",
-            to_date="2024-01-05",
-            adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
-        )
-        # The pipeline is ON by default, so a pre-drain resample read an INCOMPLETE
-        # 1-minute lake — the derive must follow BOTH drains (forensic-audit #15).
-        assert order == ["fetch_pipeline", "write_consumer", "resample"]
-
-    def test_pull_candles_resample_runs_after_both_drains(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        order = self._spy_order(monkeypatch)
-        pull_candles(
-            _index("13"),
-            lake_root=tmp_path,
-            from_date="2024-01-01",
-            to_date="2024-01-05",
-            dry_run=False,
-            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), NullBarSink()),
-        )
-        assert order == ["fetch_pipeline", "write_consumer", "resample"]
-
-    def test_resample_skipped_when_a_phase_errors(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Failure path preserved: the drains still run; the resample does NOT; the error propagates."""
-        order = self._spy_order(monkeypatch)
-
-        def _boom(*_args: object, **_kwargs: object) -> int:
-            raise RuntimeError("planner boom")
-
-        # Raise INSIDE the try (the minute block's plan) — deterministic phase error.
-        monkeypatch.setattr("brutex.dashboard.pull_controller.plan_windows", _boom)
-        with pytest.raises(RuntimeError, match="planner boom"):
-            pull_all_spot(
-                [_index("13")],
-                lake_root=tmp_path,
-                dry_run=False,
-                now=_BULK_NOW,
-                from_date="2024-01-01",
-                to_date="2024-01-05",
-                adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
-            )
-        assert order == ["fetch_pipeline", "write_consumer"]  # drains ran; NO resample
-
-    def test_pipeline_on_daily_derived_from_all_drained_minute_bars(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """End-to-end #15: the derived 1-day reflects ALL drained 1-minute bars.
-
-        With the deferred pipeline NO 1-minute bar is durable until the drain, so a
-        pre-drain resample (the defect) derives NOTHING; the fixed post-drain resample
-        derives exactly one midnight-IST daily bar per stored 1-minute session date.
-        """
         pipeline = _DeferredPipeline()
         monkeypatch.setattr(
             "brutex.dashboard.pull_controller._build_fetch_pipeline",
@@ -2508,14 +2438,27 @@ class TestDailyDeriveAfterDrain:
         assert pipeline.pending == []  # every queued tail was drained durably
         minute_files = sorted(tmp_path.glob("bars/*/*/*/1minute/*/*.parquet"))
         assert minute_files  # the drained tails DID land 1-minute bars
-        minute = pl.concat([pl.read_parquet(f) for f in minute_files])
-        expected_days = minute.get_column("timestamp").dt.date().n_unique()
-        assert expected_days > 0
-        daily_files = sorted(tmp_path.glob("bars/*/*/*/1day/*/*.parquet"))
-        assert daily_files, "1-day partition missing — resample ran before the drains"
-        daily = pl.concat([pl.read_parquet(f) for f in daily_files])
-        # One derived daily bar per stored 1-minute session date — the POST-drain count.
-        assert daily.height == expected_days
+        # The decree's pin: NO mid-pull derived write — the 1day partition is
+        # written only by the pipeline prebuild, which did not run here.
+        assert not list(tmp_path.glob("bars/*/*/*/1day/**")), (
+            "pull_all_spot must not write a derived 1day partition mid-pull "
+            "(DEC-PIPELINE-AUTOPREBUILD-001)"
+        )
+
+    def test_pull_candles_writes_no_daily_partition(self, tmp_path: Path) -> None:
+        pull_candles(
+            _index("13"),
+            lake_root=tmp_path,
+            from_date="2024-01-01",
+            to_date="2024-01-05",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), _real_sink(tmp_path)),
+        )
+        assert sorted(tmp_path.glob("bars/*/*/*/1minute/*/*.parquet"))
+        assert not list(tmp_path.glob("bars/*/*/*/1day/**")), (
+            "pull_candles must not write a derived 1day partition mid-pull "
+            "(DEC-PIPELINE-AUTOPREBUILD-001)"
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────

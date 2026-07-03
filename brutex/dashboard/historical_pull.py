@@ -78,7 +78,6 @@ from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
-    OPTION_SEGMENT,
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno_window_opens_on
@@ -104,7 +103,6 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
-from brutex.calendars.nse import IST
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
@@ -1101,110 +1099,6 @@ def _resolve_minute_windows(
     return windows
 
 
-def _derive_daily_from_minute(
-    *,
-    rebuilt: Sequence[_RebuiltContract],
-    windows: dict[str, tuple[date, date]],
-    lake_root: Path,
-    now: datetime,
-) -> None:
-    """Derive 1-day bars from the just-written 1-minute per contract — best-effort.
-
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001. 1-minute is the ONLY granularity fetched from
-    Groww; the 1-day series is DERIVED here (never fetched) by resampling each contract's
-    freshly-written 1-minute over its resolved window to midnight-IST daily bars and
-    writing them to the lake's ``FNO/<symbol>/1day`` partition. This is the F&O twin of
-    the spot ``_resample_daily_after_pull`` and DELEGATES the quarantine/tally control
-    flow to the SAME tested driver
-    (:func:`~brutex.data.spot_daily_resample.derive_daily_for_targets`, CLAUDE.md §11
-    COMMON — no duplicated inline loop): it builds one
-    :class:`~brutex.data.spot_daily_resample.DailyDeriveTarget` per contract whose
-    exchange resolves, then hands the per-target read/write builders to the driver. The
-    OHLCV aggregation + midnight-IST re-stamp share the spot resampler's single source of
-    truth; the derived ``1day`` partition is written latest-wins so a later complete pull
-    self-heals a partial-session bar (FIX-2).
-
-    DEC-FNO-TF-DERIVE-OI-001: unlike the spot daily (cash carries no OI), the F&O 1-minute
-    carries a real ``open_interest`` column, so the reader is built with ``include_oi=True``
-    and the driver's ``resample_fn`` is bound to
-    :func:`~brutex.data.fno_daily_resample.resample_1m_to_fno_daily_positional`, which
-    carries the **last-of-day** OI (a snapshot, never summed) into the derived ``1day`` bar.
-    Already-stored derived ``1day`` partitions written before this change carry ``OI=None``
-    and self-heal on the NEXT pull (latest-wins overwrite — ``_bar_values_equal`` compares
-    ``open_interest``); this change does NOT retroactively rewrite on-disk daily OI.
-
-    QUARANTINED on TWO planes: (a) a contract whose ``exchange`` is unresolvable is
-    SKIPPED here (logged ``contract_skipped``, never a target); (b) a per-target
-    derivation error (corrupt slice / write failure) is quarantined by the driver
-    (``errored`` tally) — neither EVER fails the pull. The 1-minute candles are already
-    safely in the lake; the derived daily partition is a convenience layer, so its failure
-    must not regress the authoritative minute data (Golden Rule #10).
-    """
-    from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
-    from brutex.data.spot_daily_resample import (
-        DailyDeriveTarget,
-        derive_daily_for_targets,
-        make_lake_read_1m_window,
-        make_lake_write_1day,
-    )
-
-    before = now.astimezone(IST).date()
-    targets: list[DailyDeriveTarget] = []
-    for _row, contract in rebuilt:
-        window = windows.get(contract.symbol)
-        if window is None:
-            continue
-        try:
-            exchange = contract_exchange(contract)
-        except ValueError as exc:
-            _LOG.warning(
-                "historical.derive_daily.contract_skipped",
-                symbol=contract.symbol,
-                error=str(exc),
-            )
-            continue
-        win_start, win_end = window
-        targets.append(
-            DailyDeriveTarget(
-                exchange=exchange,
-                segment=OPTION_SEGMENT,
-                symbol=contract.symbol,
-                start=win_start,
-                end=win_end,
-            )
-        )
-
-    report = derive_daily_for_targets(
-        targets=targets,
-        build_read_1m=lambda t: make_lake_read_1m_window(
-            lake_root=lake_root,
-            exchange=t.exchange,
-            segment=t.segment,
-            symbol=t.symbol,
-            start=t.start,
-            end=t.end,
-            include_oi=True,  # F&O 1-minute carries OI — carry it into the derived 1day
-        ),
-        build_write_1day=lambda t: make_lake_write_1day(
-            lake_root=lake_root,
-            exchange=t.exchange,
-            segment=t.segment,
-            symbol=t.symbol,
-        ),
-        before=before,
-        # F&O daily carries last-of-day OI (DEC-FNO-TF-DERIVE-OI-001) — the ONE
-        # knob that makes the SHARED spot daily driver OI-correct for derivatives.
-        resample_fn=resample_1m_to_fno_daily_positional,
-    )
-    _LOG.info(
-        "historical.derive_daily.done",
-        derived=report.derived,
-        no_minute=report.no_minute,
-        errored=report.errored,
-        bars=report.bars,
-    )
-
-
 def _enrich_greeks_from_minute(
     *,
     rebuilt: Sequence[_RebuiltContract],
@@ -1546,20 +1440,17 @@ def pull_contract_candles(
     if fetch_pipeline is not None:
         emit_underlying_all_empty(minute.merged_pairs, [contract for _row, contract in rebuilt])
 
-    # ── Derive 1-day from the just-written 1-minute per contract (quarantined) ──────────
-    # NEVER fails the pull — the authoritative 1-minute candles are already in the lake; the
-    # derived 1-day partition is a best-effort convenience. Skipped on a dry-run (the
-    # NullBarSink wrote nothing, and the sentinel lake_root may not be writable).
+    # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the mid-pull F&O 1-day derivation that ran
+    # here (``_derive_daily_from_minute``) is REMOVED — derived data (intraday TFs +
+    # the derived ``1day``) is written ONLY by the pipeline's final prebuild phase
+    # (brutex.dashboard.pipeline_prebuild), strictly after a fully-successful fetch.
     if not dry_run:
-        _derive_daily_from_minute(
-            rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root, now=now
-        )
         # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
         # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
         # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
-        # underlying spot — the F&O Greeks twin of the daily derive above, at the SAME
-        # post-drain seam. Best-effort: NEVER fails the pull (fully guarded inside);
-        # FUT legs never get Greeks; skipped on a dry-run (nothing was written).
+        # underlying spot, at the post-drain seam. Best-effort: NEVER fails the pull
+        # (fully guarded inside); FUT legs never get Greeks; skipped on a dry-run
+        # (nothing was written).
         _enrich_greeks_from_minute(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
 
     # ``candle_status=complete`` keys on the 1-minute completion set (a contract is

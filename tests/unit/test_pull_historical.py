@@ -1767,159 +1767,43 @@ def test_resolve_minute_windows_explicit_overrides_far_expiry(registry: Registry
     assert set(out.values()) == {(date(2026, 6, 1), date(2026, 7, 1))}
 
 
-def test_derive_daily_from_minute_writes_one_day_partition(
+def test_live_pull_writes_no_daily_partition_mid_pull(
     registry: RegistryStore, tmp_lake: Path
 ) -> None:
-    """The always-on 1-day derivation resamples the just-written 1-minute to a 1-day bar."""
-    from datetime import UTC, datetime
-    from decimal import Decimal
+    """DEC-PIPELINE-AUTOPREBUILD-001: the F&O pull writes NO derived data mid-pull.
 
-    from brutex.data.models import CandleBar
+    REGRESSION FLIP of the removed ``_derive_daily_from_minute`` suite: the
+    always-on post-drain F&O 1-day derive is REMOVED — the derived ``1day``
+    (and every intraday TF) is written ONLY by the pipeline's final prebuild
+    phase. A LIVE-shaped pull with a REAL ParquetBarSink lands the 1-minute
+    bars in the lake but leaves NO ``1day`` partition behind.
+    """
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
-    # Seed the lake with one full IST session of 1-minute for the FUT contract, so the
-    # derivation has real 1-minute to resample to a midnight-IST daily bar.
-    contract = "NSE-NIFTY-25Jan24-FUT"
+    sdk = _FakeSDK()
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_lake))
-    minute_bars = [
-        CandleBar(
-            timestamp=datetime(2024, 1, 15, hh, mm, tzinfo=UTC),
-            open=Decimal("100"),
-            high=Decimal("110"),
-            low=Decimal("90"),
-            close=Decimal("105"),
-            volume=10,
-            open_interest=7,
-        )
-        for (hh, mm) in [(3, 45), (6, 0), (10, 0)]  # 09:15 / mid / ~15:30 IST
+    selected = [
+        r for r in registry.list_contracts(underlying="NIFTY") if r.contract_symbol.endswith("FUT")
     ]
-    sink.append(
-        exchange="NSE", segment="FNO", symbol=contract, interval="1minute", bars=minute_bars
-    )
-    rebuilt = hp._rebuild_contracts(
-        [r for r in registry.list_contracts() if r.contract_symbol == contract]
-    )
-    windows = {contract: (date(2024, 1, 1), date(2024, 1, 26))}
-    hp._derive_daily_from_minute(
-        rebuilt=rebuilt,
-        windows=windows,
+    pull_contract_candles(
+        selected,
         lake_root=tmp_lake,
-        now=datetime(2024, 2, 1, tzinfo=UTC),
+        dry_run=False,
+        intervals=("1minute",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
     )
-    # The 1-day partition now holds the derived midnight-IST daily bar.
-    daily_dir = tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day"
-    assert daily_dir.is_dir()
-    assert any(daily_dir.rglob("*.parquet"))
-    # DEC-FNO-TF-DERIVE-OI-001: the derived F&O 1-day bar carries the last-of-day OI
-    # (7 here) — NOT None (the old spot-path hardcode). The 1-minute all carry OI=7.
-    import polars as pl
-
-    daily = pl.read_parquet((daily_dir / "**" / "*.parquet").as_posix())
-    assert daily.height == 1
-    assert daily.get_column("open_interest").to_list() == [7]
-
-
-def test_derive_daily_from_minute_no_minute_is_noop(
-    registry: RegistryStore, tmp_lake: Path
-) -> None:
-    """No stored 1-minute for the contract → the derivation is a clean no-op (no 1-day)."""
-    from datetime import UTC, datetime
-
-    contract = "NSE-NIFTY-25Jan24-FUT"
-    rebuilt = hp._rebuild_contracts(
-        [r for r in registry.list_contracts() if r.contract_symbol == contract]
+    # The 1-minute bars ARE durably in the lake (the pull did its job) ...
+    assert sorted(tmp_lake.glob("bars/*/FNO/*/1minute/*/*.parquet"))
+    # ... but NO derived 1day partition exists — derived data is written ONLY
+    # by the pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001), never mid-pull.
+    assert not list(tmp_lake.glob("bars/*/FNO/*/1day/**")), (
+        "the F&O pull must not write a derived 1day partition mid-pull"
     )
-    hp._derive_daily_from_minute(
-        rebuilt=rebuilt,
-        windows={contract: (date(2024, 1, 1), date(2024, 1, 26))},
-        lake_root=tmp_lake,
-        now=datetime(2024, 2, 1, tzinfo=UTC),
-    )
-    assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()
-
-
-def test_derive_daily_from_minute_window_none_skips(
-    registry: RegistryStore, tmp_lake: Path
-) -> None:
-    """A contract with NO resolved window is SKIPPED (the ``window is None`` arm) — no 1-day."""
-    from datetime import UTC, datetime
-
-    contract = "NSE-NIFTY-25Jan24-FUT"
-    rebuilt = hp._rebuild_contracts(
-        [r for r in registry.list_contracts() if r.contract_symbol == contract]
-    )
-    # Empty windows map → the contract has no entry → the ``continue`` skip, no target built.
-    hp._derive_daily_from_minute(
-        rebuilt=rebuilt,
-        windows={},
-        lake_root=tmp_lake,
-        now=datetime(2024, 2, 1, tzinfo=UTC),
-    )
-    assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()
-
-
-def test_derive_daily_from_minute_unresolvable_exchange_skipped(tmp_lake: Path) -> None:
-    """A contract whose symbol has no exchange token is SKIPPED (``contract_skipped`` arm)."""
-    from datetime import UTC, datetime
-
-    # A symbol with NO ``-`` → ``contract_exchange`` raises ValueError → quarantined-skip.
-    bad = DerivativeContract(
-        underlying_symbol="NIFTY",
-        expiry=date(2024, 1, 25),
-        symbol="NOEXCHANGETOKEN",
-        contract_type="FUT",
-        strike=None,
-    )
-    row = ContractRow(
-        exch="NSE",
-        underlying="NIFTY",
-        expiry_date=date(2024, 1, 25),
-        contract_symbol="NOEXCHANGETOKEN",
-        strike=None,
-        side="FUT",
-        candle_status=CANDLE_STATUS_NONE,
-        last_run_id="run",
-        fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
-    )
-    hp._derive_daily_from_minute(
-        rebuilt=[(row, bad)],
-        windows={"NOEXCHANGETOKEN": (date(2024, 1, 1), date(2024, 1, 26))},
-        lake_root=tmp_lake,
-        now=datetime(2024, 2, 1, tzinfo=UTC),
-    )
-    # The bad contract never became a derive target → no partition written, pull unaffected.
-    assert not any(tmp_lake.rglob("*.parquet"))
-
-
-def test_derive_daily_from_minute_quarantines_per_target_error(
-    registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A per-target derive error is QUARANTINED by the driver — the pull is never failed."""
-    from datetime import UTC, datetime
-
-    import brutex.data.spot_daily_resample as sdr
-
-    contract = "NSE-NIFTY-25Jan24-FUT"
-    rebuilt = hp._rebuild_contracts(
-        [r for r in registry.list_contracts() if r.contract_symbol == contract]
-    )
-
-    def _boom(*_args: object, **_kwargs: object) -> object:
-        raise RuntimeError("corrupt 1-minute slice")
-
-    # Make the shared read builder's reader raise so the driver's ``except`` arm runs.
-    monkeypatch.setattr(sdr, "make_lake_read_1m_window", lambda **_kw: _boom)
-
-    # Must NOT raise — the quarantine swallows the per-target error (Golden Rule #10).
-    hp._derive_daily_from_minute(
-        rebuilt=rebuilt,
-        windows={contract: (date(2024, 1, 1), date(2024, 1, 26))},
-        lake_root=tmp_lake,
-        now=datetime(2024, 2, 1, tzinfo=UTC),
-    )
-    # No 1-day partition was written (the derive errored), but the pull completed cleanly.
-    assert not (tmp_lake / "bars" / "NSE" / "FNO" / contract / "1day").exists()
 
 
 # ── DEC-FNO-LEDGER-LAKE-RECONCILE-001: F&O ledger↔lake cold-start reconcile ───────────
