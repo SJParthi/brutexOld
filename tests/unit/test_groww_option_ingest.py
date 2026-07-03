@@ -3226,3 +3226,146 @@ def test_run_driver_emits_windows_skipped_settled_info() -> None:
     assert events[0]["windows_skipped_settled"] == 1
     assert events[0]["pairs"] == 2
     assert events[0]["log_level"] == "info"
+
+
+class TestEmptyBreakerOptionSpine:
+    """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the mass-empty breaker on the F&O spine."""
+
+    def test_trip_halts_contract_and_leaves_window_retryable(self) -> None:
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker, MassEmptySettleHalt
+
+        ledger = WindowLedger()
+        # Trip on the FIRST observed empty via the FRACTION rule (an all-empty fresh
+        # pull is the throttle-from-start shape; the consecutive rule requires a
+        # post-data empty, so it can never fire here by design).
+        breaker = EmptySettleBreaker(
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=1,
+            fraction_min_series=1,
+        )
+        with pytest.raises(MassEmptySettleHalt):
+            ingest_option_contract(
+                _client(_FakeSDK(payload=_EMPTY)),
+                _Sink(),
+                contract=_ce(),
+                interval="1day",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                ledger=ledger,
+                empty_retry_attempts=2,
+                now_ist=_now,
+                empty_breaker=breaker,
+            )
+        assert breaker.tripped
+        # The tripping window was never recorded — it stays fully retryable.
+        assert ledger.count == 0
+        key = WindowKey(
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            security_id="NSE-NIFTY-02Jan25-28500-CE",
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+        )
+        assert not ledger.is_skippable(key)
+
+    def test_data_window_observes_without_trip(self) -> None:
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
+
+        breaker = EmptySettleBreaker(
+            min_series=1, consecutive_limit=1, fraction_limit=1.0, min_observations=999
+        )
+        report = ingest_option_contract(
+            _client(_FakeSDK()),  # returns candles
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            empty_breaker=breaker,
+        )
+        assert report.bars_appended == 1
+        assert not breaker.tripped
+        assert breaker.counts() == (1, 0, 0)  # observed once, zero empties
+
+    def test_run_ingest_propagates_halt_as_global_stop(self) -> None:
+        # The runner must NOT quarantine a MassEmptySettleHalt as one contract's
+        # failure — it is a _GLOBAL_STOP_ERRORS member: contract 1's empty counts,
+        # contract 2's empty trips, and the halt propagates out of the whole run.
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker, MassEmptySettleHalt
+
+        breaker = EmptySettleBreaker(
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=2,
+            fraction_min_series=1,
+        )
+        with pytest.raises(MassEmptySettleHalt) as excinfo:
+            run_groww_option_ingest(
+                _client(_FakeSDK(payload=_EMPTY)),
+                _Sink(),
+                contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE"), _ce("NSE-NIFTY-02Jan25-28600-CE")],
+                intervals=["1day"],
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                ledger=WindowLedger(),
+                now_ist=_now,
+                empty_breaker=breaker,
+            )
+        assert excinfo.value.consecutive_empties == 2
+        assert "reopen-skipped" in str(excinfo.value)
+
+    def test_tail_suppresses_settle_when_tripped(self) -> None:
+        # A queued/in-flight tail recording AFTER the trip must not settle: the
+        # option tail re-checks allow_settle() and records an UNTRUSTED empty.
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker, MassEmptySettleHalt
+        from brutex.adapters.groww.option_ingest import (
+            _OptionRawWindow,
+            _process_option_window_tail,
+        )
+        from brutex.data.window_ledger import EMPTY as _EMPTY_STATUS
+
+        breaker = EmptySettleBreaker(
+            min_series=1,
+            consecutive_limit=0,
+            fraction_limit=1.0,
+            min_observations=1,
+            fraction_min_series=1,
+        )
+        with pytest.raises(MassEmptySettleHalt):
+            breaker.observe_empty("X:1day", symbol="X", window_end=date(2024, 1, 2))
+        ledger = WindowLedger()
+        key = WindowKey(
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            security_id="NSE-NIFTY-02Jan25-28500-CE",
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+        )
+        raw = _OptionRawWindow(
+            contract=_ce(),
+            interval="1day",
+            exchange="NSE",
+            key=key,
+            raw_bars=[],
+            fetch_count=2,
+            settle_empty=True,  # computed pre-trip on the producer
+            attempt=0,
+        )
+        report = _process_option_window_tail(
+            _Sink(),
+            raw,
+            ledger=ledger,
+            on_success=None,
+            pull_id="p",
+            fields={"symbol": key.security_id, "interval": "1day"},
+            empty_breaker=breaker,
+        )
+        assert report.bars_appended == 0
+        rec = ledger.records()[0]
+        assert rec.status == _EMPTY_STATUS  # NOT SKIPPED — settle suppressed
+        assert rec.empty_streak == 0  # untrusted empty: streak preserved
+        assert not ledger.is_skippable(key)

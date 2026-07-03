@@ -144,6 +144,39 @@ class SummaryCache:
         Minimum seconds between two real recomputes of the same kind while
         dirty (defaults to :data:`DEFAULT_TTL_FLOOR_S`). A non-positive value
         means "recompute on every dirty read" (no floor).
+    revision_probe
+        Optional zero-arg **cross-process freshness probe**
+        (DEC-HARDENING-LEFTOVERS-001; production wiring:
+        :func:`brutex.dashboard.lake_revision.lake_revision` over the lake
+        root). Called **OUTSIDE the cache lock** on every :attr:`generation`
+        read and every :meth:`get_or_refresh` plan
+        (DEC-SURFACE-TRIAL-001 — the probe is one ``os.stat`` of a lake that
+        may live on a stalled external volume, and a wedged syscall holding
+        the lock would block the pull's :meth:`mark_dirty` write funnel; the
+        token is *reconciled* under the lock), it returns an opaque content
+        token (``str``) or ``None`` ("unknown — no signal"). The FIRST
+        non-``None`` observation records the baseline WITHOUT bumping; a later
+        token **change** bumps the generation exactly once (and records the new
+        token); ``None`` is a no-op. This is how a CLI ``brutex fetch`` in a
+        SEPARATE process (which can never call :meth:`mark_dirty`) invalidates
+        every generation-keyed dashboard cache. The probe MUST be O(1) and MUST
+        NOT raise (the production probe maps every :class:`OSError` to
+        ``None``). ``None`` (the default) disables the probe — byte-identical
+        to the pre-probe behaviour. Honest notes: (a) a dashboard-side pull may
+        DOUBLE-bump (its own :meth:`mark_dirty` + the probe seeing the ledger
+        move) — harmless, the keyed caches recompute lazily at most once per
+        distinct generation actually read; (b) because tokens are observed
+        outside the lock, two concurrent readers may reconcile OUT OF ORDER —
+        the consequence is only ever a spurious EXTRA bump (over-invalidation),
+        never a missed change: the next probe of the final on-disk state always
+        differs from any stale baseline, and the generation stays monotonic;
+        (c) cold-start-during-outage limit: if the app STARTS while the probe
+        is erroring (``None``) and a CLI write lands BEFORE the probe recovers,
+        the first recovered token is recorded as the baseline WITHOUT a bump —
+        caches populated during the outage survive until the next dashboard
+        :meth:`mark_dirty` or ledger move. This is the deliberate cost of the
+        baseline-no-bump design (a healthy warm start must not invalidate its
+        cold caches); the outage window is loudly logged per probe call.
 
     Notes
     -----
@@ -160,9 +193,14 @@ class SummaryCache:
         *,
         clock: Callable[[], float] = _monotonic,
         ttl_floor_s: float = DEFAULT_TTL_FLOOR_S,
+        revision_probe: Callable[[], str | None] | None = None,
     ) -> None:
         self._clock = clock
         self._ttl_floor_s = ttl_floor_s
+        self._revision_probe = revision_probe
+        #: Last token the probe returned (``None`` until the first non-None
+        #: observation — the baseline is recorded WITHOUT a bump).
+        self._last_revision: str | None = None
         self._lock = threading.Lock()
         self._generation = 0
         self._entries: dict[str, _Entry] = {}
@@ -182,10 +220,58 @@ class SummaryCache:
         with self._lock:
             self._generation += 1
 
+    def _probe_token(self) -> str | None:
+        """Run the cross-process revision probe — NO lock held (O(1)).
+
+        The probe is one ``os.stat`` of the window-ledger Parquet, which on
+        the production 8 TB external-SSD lake can WEDGE if the volume stalls
+        (the observed mode DEC-FETCH-HUNG-WRITE-DEADLINE-001 guards the write
+        path against). Running it outside ``self._lock`` guarantees a hung
+        probe can never block a concurrent :meth:`mark_dirty` from the pull's
+        write funnel or a :meth:`generation` read (DEC-SURFACE-TRIAL-001 —
+        restores the module's own "no I/O under the lock" design intent).
+        Returns ``None`` when no probe is wired.
+        """
+        if self._revision_probe is None:
+            return None
+        return self._revision_probe()
+
+    def _reconcile_revision_locked(self, token: str | None) -> None:
+        """Reconcile the generation against a probed *token* — O(1).
+
+        Caller MUST hold ``self._lock``; *token* was probed OUTSIDE it. A
+        ``None`` token → no-op. First non-``None`` token → record the baseline
+        WITHOUT bumping (an app started over an existing lake must not
+        invalidate its cold caches). A token CHANGE → record it + bump the
+        generation exactly once, so every generation-keyed cache invalidates
+        on the next key build (DEC-HARDENING-LEFTOVERS-001 — the CLI-write
+        staleness fix). Tokens observed outside the lock may be applied out of
+        order under concurrency — the worst case is a spurious extra bump
+        (pure over-invalidation), never a missed change, and ``_generation``
+        only ever increments (see the ``revision_probe`` parameter notes).
+        """
+        if token is None:
+            return
+        if self._last_revision is None:
+            self._last_revision = token
+            return
+        if token != self._last_revision:
+            self._last_revision = token
+            self._generation += 1
+
     @property
     def generation(self) -> int:
-        """The current monotonic generation counter — O(1)."""
+        """The current monotonic generation counter — O(1).
+
+        Reconciles against the ``revision_probe`` first (one O(1) ``stat``,
+        taken OUTSIDE the lock so a stalled volume can never block the write
+        funnel — DEC-SURFACE-TRIAL-001), so a ledger checkpoint written by
+        ANOTHER process (a CLI ``brutex fetch``) advances the generation on
+        the very next read.
+        """
+        token = self._probe_token()
         with self._lock:
+            self._reconcile_revision_locked(token)
             return self._generation
 
     def get_or_refresh(self, kind: str, *, recompute: Recompute) -> SummaryPayload:
@@ -220,7 +306,13 @@ class SummaryCache:
         SummaryPayload
             The cached or freshly-computed summary for *kind*.
         """
+        # Probe OUTSIDE the lock (a hung stat must never block mark_dirty —
+        # DEC-SURFACE-TRIAL-001), then reconcile + plan under it: the
+        # SPOT/OPTIONS summaries themselves (not only the generation-KEYED
+        # sibling caches) see a CLI-process ledger checkpoint as dirty.
+        token = self._probe_token()
         with self._lock:
+            self._reconcile_revision_locked(token)
             decision = self._plan(kind)
         if decision is None:
             # Hit or stale-but-throttled: a payload is available without a scan.

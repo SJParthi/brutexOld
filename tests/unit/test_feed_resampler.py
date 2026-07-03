@@ -228,6 +228,34 @@ class TestEdgeCases:
         )
         assert out == bars
 
+    def test_identity_path_rejects_duplicate_bar(self) -> None:
+        """The identity passthrough runs the SAME monotonic guard as the
+        down-sampling path (DEC-LAKE-READ-UNIQUE-001) — previously it returned
+        early and a duplicated bar rode through silently (fails-before pin)."""
+        bars = [_bar(0), _bar(0), _bar(1)]
+        with pytest.raises(ResampleError, match="strictly-increasing"):
+            resample_bars(bars=bars, source_interval="1minute", target_interval="1minute")
+
+    def test_identity_path_rejects_out_of_order_bar(self) -> None:
+        bars = [_bar(1), _bar(0)]
+        with pytest.raises(ResampleError, match="strictly-increasing"):
+            resample_bars(bars=bars, source_interval="1minute", target_interval="1minute")
+
+    def test_identity_path_rejects_naive_timestamp(self) -> None:
+        stripped = CandleBar.__new__(CandleBar)
+        object.__setattr__(stripped, "timestamp", datetime(2024, 1, 2, 9, 15))
+        for name, value in (
+            ("open", Decimal("100")),
+            ("high", Decimal("101")),
+            ("low", Decimal("99")),
+            ("close", Decimal("100")),
+            ("volume", 1),
+            ("open_interest", None),
+        ):
+            object.__setattr__(stripped, name, value)
+        with pytest.raises(ResampleError, match="tz-aware"):
+            resample_bars(bars=[stripped], source_interval="1minute", target_interval="1minute")
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Aggregation — OHLCV correctness

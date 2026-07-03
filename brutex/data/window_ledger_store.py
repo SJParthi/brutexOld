@@ -299,6 +299,7 @@ def merge_ledger_rows(
     disk_rows: Sequence[LedgerRow],
     *,
     pruned_keys: frozenset[_RowKey] = frozenset(),
+    reopened_keys: frozenset[_RowKey] = frozenset(),
 ) -> list[LedgerRow]:
     """Merge the in-memory rows with the on-disk rows per window key — pure.
 
@@ -318,7 +319,16 @@ def merge_ledger_rows(
       (``SUCCESS``/``SKIPPED`` > ``EMPTY`` > ``FAILED`` > ``PLANNED``), then the newer
       ``last_attempt_at`` timestamp, then the higher ``attempts``, then a
       deterministic full-row tie-break — so the merged file is IDENTICAL regardless
-      of writer order (no row loss, deterministic winner).
+      of writer order (no row loss, deterministic winner). EXCEPTION: a key in
+      *reopened_keys* (a ``SKIPPED`` row THIS ledger DELIBERATELY demoted to a
+      retryable ``FAILED`` via
+      :meth:`~brutex.data.window_ledger.WindowLedger.reopen_skipped`,
+      DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) keeps the IN-MEMORY row outright — the
+      more-settled rule would otherwise resurrect the on-disk ``SKIPPED`` copy and
+      silently undo the operator's re-open (the ``brutex reopen-skipped`` CLI runs
+      under the account-wide pull single-flight lock, so no concurrent pull is
+      mid-flight while it saves; a re-verify pull's later genuine outcome then wins
+      normally on ITS save).
 
     Output is sorted by window key (the same order :meth:`WindowLedger.to_rows`
     emits), so a merge with an empty/absent disk side is byte-row-identical to the
@@ -332,6 +342,8 @@ def merge_ledger_rows(
             if key not in pruned_keys:
                 merged[key] = row
             continue
+        if key in reopened_keys:
+            continue  # a deliberate re-open — the in-memory demotion wins outright
         if _row_preference(row) > _row_preference(mine):
             merged[key] = row
     return sorted(merged.values(), key=_row_key)
@@ -347,7 +359,8 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     a corrupt/absent file merges as empty), (2) merges it with the in-memory rows via
     :func:`merge_ledger_rows` (per-key, preferring the more-settled status →
     newer ``last_attempt_at`` → higher ``attempts``; a row this ledger deliberately
-    PRUNED is dropped, not resurrected), then (3) serialises the merged rows to a
+    PRUNED is dropped, not resurrected, and a row it deliberately RE-OPENED via
+    ``reopen_skipped`` keeps the in-memory demotion), then (3) serialises the merged rows to a
     Parquet table with the fixed :data:`_COLUMNS` schema and atomically replaces the
     file. Two concurrent pulls on one lake therefore NEVER clobber each other's rows
     (the later writer reads AFTER the earlier writer's ``os.replace``). The ledger
@@ -377,7 +390,12 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
         # os.replace — its merge then includes the earlier rows (no lost update).
         with partition_write_lock(lake_root, path):
             disk_rows = load_window_ledger(lake_root).to_rows()
-            rows = merge_ledger_rows(ledger.to_rows(), disk_rows, pruned_keys=ledger.pruned_keys())
+            rows = merge_ledger_rows(
+                ledger.to_rows(),
+                disk_rows,
+                pruned_keys=ledger.pruned_keys(),
+                reopened_keys=ledger.reopened_keys(),
+            )
             # Build per-column arrays in the fixed order so the schema is stable.
             by_col: dict[str, list[Any]] = {name: [] for name in _COLUMNS}
             for row in rows:

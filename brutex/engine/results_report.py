@@ -50,8 +50,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
+import structlog
+
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
 from brutex.money import format_inr
+
+_LOG = structlog.get_logger(__name__)
 
 #: Friendly ``--sort-by`` aliases → the underlying rankable :class:`ResultRow` column.
 #: Kept here as the ONE place the CLI sort vocabulary lives (CLAUDE.md §11 COMMON).
@@ -77,8 +81,86 @@ DEFAULT_SORT_BY: Final[str] = "sharpe"
 #: orchestrator import graph (the ``_TUPLE_DIGEST_LEN`` precedent).
 _QUARANTINE_DIRNAME: Final[str] = "quarantine"
 
+#: Where the sweep's hash-chained audit log lives under a results root — the
+#: SAME convention every ``brutex sweep-all`` entry point writes
+#: (``cli.py``: ``out_root / "audit" / "sweep-all.jsonl"``). The recorded
+#: reproducibility context (``data_snapshot_hash``) is read from its
+#: ``SWEEP_START`` payloads for the snapshot-mismatch quarantine below.
+_AUDIT_RELPATH: Final[tuple[str, str]] = ("audit", "sweep-all.jsonl")
 
-def discover_result_files(root: Path) -> list[Path]:
+#: Cap on the quarantined-path list woven into the aggregated WARNING (the
+#: count is always exact; the sample is bounded so a huge tree cannot log-storm).
+_QUARANTINE_LOG_PATH_CAP: Final[int] = 20
+
+#: The one aggregated snapshot-mismatch quarantine WARNING
+#: (DEC-LAKE-READ-UNIQUE-001) — poisoned-era result files excluded from a
+#: read-back because their recorded ``data_snapshot_hash`` no longer matches
+#: the caller's CURRENT lake snapshot context.
+SNAPSHOT_QUARANTINE_EVENT: Final[str] = "results.snapshot_mismatch_quarantined"
+
+
+def _recorded_snapshot_hash(root: Path) -> str | None:
+    """Best-effort read of the tree's recorded ``data_snapshot_hash``, or ``None``.
+
+    Reads the audit chain's ``SWEEP_START`` payloads via the doctor's
+    :func:`~brutex.engine.sweep_verify.recorded_context_from_audit` (CLAUDE.md
+    §11 COMMON — the ONE recorded-context reader; function-local import so this
+    module's read+render surface stays lean and is only paid when a caller
+    actually supplies a current snapshot context). ``None`` when the audit log
+    is absent, carries no ``SWEEP_START``, or is unreadable/inconsistent — the
+    caller then keeps legacy behaviour (conservative: never quarantine on a
+    guess, Golden Rule #1).
+    """
+    from brutex.engine.sweep_verify import SweepVerifyError, recorded_context_from_audit
+
+    try:
+        context = recorded_context_from_audit(root.joinpath(*_AUDIT_RELPATH))
+    except SweepVerifyError:
+        return None
+    return None if context is None else context.data_snapshot_hash
+
+
+def _quarantine_snapshot_mismatch(
+    root: Path, files: list[Path], *, current_snapshot_hash: str | None
+) -> list[Path]:
+    """Filter poisoned-era result files whose recorded snapshot mismatches — the seam.
+
+    DEC-LAKE-READ-UNIQUE-001: after a lake heal/re-pull changes the data, result
+    rows swept against the OLD (possibly duplicate-poisoned) lake must not
+    co-rank with clean ones in ``brutex report`` / the leaderboard / Stage-3
+    survivor selection. With a *current_snapshot_hash* supplied AND the tree's
+    recorded ``data_snapshot_hash`` derivable (its audit chain), a mismatch
+    quarantines the discovered files with ONE aggregated
+    :data:`SNAPSHOT_QUARANTINE_EVENT` WARNING naming the count + a bounded path
+    sample.
+
+    Honest envelope (Golden Rule #10): the recorded context is TREE-level (one
+    ``data_snapshot_hash`` per audit chain — per-FILE recorded hashes do not
+    exist today; the per-tuple filename digest folds the hash but is a one-way
+    BLAKE3), so a mismatch quarantines the WHOLE tree's files, and a tree with
+    NO derivable recorded context is kept byte-identical to legacy behaviour.
+    Per-file-granular quarantine over a mixed-era tree needs the at-rest census
+    (dup-train PR-3) and is NOT claimed here. ``current_snapshot_hash=None``
+    (every existing call site's default) is byte-identical to legacy.
+    """
+    if current_snapshot_hash is None or not files:
+        return files
+    recorded = _recorded_snapshot_hash(root)
+    if recorded is None or recorded == current_snapshot_hash:
+        return files
+    rel_paths = [p.relative_to(root).as_posix() for p in files]
+    _LOG.warning(
+        SNAPSHOT_QUARANTINE_EVENT,
+        root=str(root),
+        recorded=recorded,
+        current=current_snapshot_hash,
+        count=len(files),
+        paths=rel_paths[:_QUARANTINE_LOG_PATH_CAP],
+    )
+    return []
+
+
+def discover_result_files(root: Path, *, current_snapshot_hash: str | None = None) -> list[Path]:
     """Return every per-tuple ``*.parquet`` under *root*, in deterministic sorted order.
 
     Recursively globs ``**/*.parquet`` so the orchestrator's
@@ -92,6 +174,13 @@ def discover_result_files(root: Path) -> list[Path]:
     ----------
     root
         The grid results root directory.
+    current_snapshot_hash
+        Optional CURRENT lake snapshot context
+        (:meth:`~brutex.data.catalog.Catalog.data_snapshot_hash`). When
+        supplied and the tree's recorded context mismatches, the poisoned-era
+        files are quarantined with one aggregated WARNING
+        (:func:`_quarantine_snapshot_mismatch`, DEC-LAKE-READ-UNIQUE-001).
+        ``None`` (the default) is byte-identical to legacy behaviour.
 
     Returns
     -------
@@ -105,14 +194,15 @@ def discover_result_files(root: Path) -> list[Path]:
     """
     if not root.is_dir():
         raise ResultsStoreError(f"results root not found or not a directory: {root}")
-    return [
+    files = [
         path
         for path in sorted(root.glob("**/*.parquet"))
         if _QUARANTINE_DIRNAME not in path.relative_to(root).parts
     ]
+    return _quarantine_snapshot_mismatch(root, files, current_snapshot_hash=current_snapshot_hash)
 
 
-def load_results_tree(root: Path) -> ResultsStore:
+def load_results_tree(root: Path, *, current_snapshot_hash: str | None = None) -> ResultsStore:
     """Merge every per-tuple Parquet under *root* into one in-memory store.
 
     Each tuple's finalists carry globally-unique BLAKE3 ``run_id`` keys (the 9-field
@@ -125,6 +215,11 @@ def load_results_tree(root: Path) -> ResultsStore:
     ----------
     root
         The grid results root directory.
+    current_snapshot_hash
+        Optional CURRENT lake snapshot context — threaded to
+        :func:`discover_result_files`'s snapshot-mismatch quarantine
+        (DEC-LAKE-READ-UNIQUE-001). ``None`` (the default) is byte-identical
+        to legacy behaviour.
 
     Returns
     -------
@@ -139,7 +234,9 @@ def load_results_tree(root: Path) -> ResultsStore:
         If *root* does not exist, ``polars`` is missing, or a cross-file ``run_id``
         conflict is detected.
     """
-    return _merge_files(root, discover_result_files(root))
+    return _merge_files(
+        root, discover_result_files(root, current_snapshot_hash=current_snapshot_hash)
+    )
 
 
 def _merge_files(root: Path, files: Sequence[Path]) -> ResultsStore:
@@ -420,6 +517,7 @@ def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY)
 
 __all__ = [
     "DEFAULT_SORT_BY",
+    "SNAPSHOT_QUARANTINE_EVENT",
     "SORT_ALIASES",
     "discover_result_files",
     "load_results_tree",

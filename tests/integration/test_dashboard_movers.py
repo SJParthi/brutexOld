@@ -27,6 +27,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -40,6 +41,7 @@ from brutex.dashboard.movers_snapshot import (
     _prev_day_close,
     _read_daily_bars,
     _read_session_bars,
+    filter_to_ist_minute,
     run_movers_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -193,8 +195,12 @@ class TestReadSessionBars:
                 _min_bar(hour=9, minute=20, close="200", volume=10),  # next 5m bucket
             ],
         )
-        # 5-minute buckets: 09:15 (label 555) and 09:20 (label 560). cutoff 559
-        # keeps ONLY the 09:15 bucket (close=105, volume=20).
+        # Unified raw-1m semantic (DEC-HARDENING-LEFTOVERS-001): cutoff 559 keeps
+        # the RAW minutes 09:15 + 09:16 (minute-of-day ≤ 559) and EXCLUDES the raw
+        # 09:20 bar BEFORE resampling, so only the 09:15 5-minute bucket forms
+        # (close=105, volume=20) — the cut is on raw minutes, NOT on the resampled
+        # bucket-open labels (that pre-#1069 mechanism gave the same outcome here
+        # by coincidence).
         bars = _read_session_bars(
             tmp_path,
             exchange=_EXCHANGE,
@@ -207,6 +213,41 @@ class TestReadSessionBars:
         assert len(bars) == 1
         assert bars[0].close == Decimal("105")
         assert bars[0].volume == 20
+
+    def test_as_of_cutoff_excludes_forming_bucket_minutes(self, tmp_path: Path) -> None:
+        """DEC-HARDENING-LEFTOVERS-001 regression — the old spot forming-bucket leak.
+
+        Before the fix the cutoff was applied AFTER resampling on the bucket-OPEN
+        minute, so an as-of 09:18 snapshot on TF=5m kept the WHOLE 09:15 bucket —
+        including the 09:19 bar PAST the as-of instant (LTP 400, volume 40). The
+        unified raw-1m cut keeps only the elapsed minutes ≤ 09:18, so the last
+        bucket honestly aggregates 3 bars (LTP 300, volume 30).
+        """
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1minute",
+            [
+                _min_bar(hour=9, minute=15, close="100", volume=10),
+                _min_bar(hour=9, minute=16, close="200", volume=10),
+                _min_bar(hour=9, minute=18, close="300", volume=10),
+                _min_bar(hour=9, minute=19, close="400", volume=10),  # PAST the as-of
+            ],
+        )
+        bars = _read_session_bars(
+            tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol="NIFTY",
+            day=_DAY,
+            minutes=5,
+            cutoff_min=9 * 60 + 18,  # as of 09:18 IST, mid-bucket
+        )
+        assert len(bars) == 1
+        # Only the ELAPSED minutes: the 09:19 bar leaks under the OLD semantic
+        # (close 400 / volume 40); the honest as-of cut excludes it.
+        assert bars[0].close == Decimal("300")
+        assert bars[0].volume == 30
 
     def test_cutoff_before_session_returns_empty(self, tmp_path: Path) -> None:
         _write(tmp_path, "NIFTY", "1minute", [_min_bar(hour=9, minute=15, close="100", volume=10)])
@@ -247,6 +288,47 @@ class TestReadSessionBars:
         assert len(bars) == 1
         assert bars[0].close == Decimal("130")
         assert bars[0].volume == 50
+
+
+# ── filter_to_ist_minute (the ONE COMMON as-of cut, DEC-HARDENING-LEFTOVERS-001) ──
+
+
+class TestFilterToIstMinute:
+    """The shared raw-1m IST minute-of-day cutoff (spot + futures + options)."""
+
+    @staticmethod
+    def _frame(ts_col: str, *hhmm: tuple[int, int]) -> Any:
+        """A minimal 1-column UTC frame whose rows sit at the given IST HH:MM."""
+        import polars as pl
+
+        stamps = []
+        for hour, minute in hhmm:
+            total = hour * 60 + minute - (5 * 60 + 30)  # IST → UTC (fixed +05:30)
+            stamps.append(
+                datetime(_DAY.year, _DAY.month, _DAY.day, total // 60, total % 60, tzinfo=UTC)
+            )
+        return pl.DataFrame({ts_col: stamps}).with_columns(
+            pl.col(ts_col).dt.convert_time_zone("UTC")
+        )
+
+    def test_boundary_minute_is_kept_inclusive(self) -> None:
+        frame = self._frame("ts_utc", (9, 15), (9, 16), (9, 17))
+        kept = filter_to_ist_minute(frame, 9 * 60 + 16, ts_col="ts_utc")
+        assert kept.height == 2  # 09:15 and the ON-boundary 09:16; 09:17 dropped
+
+    def test_afternoon_minute_survives_the_int32_cast(self) -> None:
+        # 15:25 IST = minute-of-day 925 — an Int8 hour*60 would overflow (15*60
+        # wraps); the helper's Int32 cast keeps the true minute-of-day.
+        frame = self._frame("ts_utc", (15, 25), (15, 29))
+        kept = filter_to_ist_minute(frame, 15 * 60 + 25, ts_col="ts_utc")
+        assert kept.height == 1
+
+    def test_futures_timestamp_column_spelling(self) -> None:
+        # The futures/options reader carries `timestamp`, not `ts_utc` — the
+        # ONE helper serves both spellings via ts_col (CLAUDE.md §11 COMMON).
+        frame = self._frame("timestamp", (9, 15), (9, 20))
+        kept = filter_to_ist_minute(frame, 9 * 60 + 15, ts_col="timestamp")
+        assert kept.height == 1
 
 
 # ── _read_daily_bars (direct, every branch) ───────────────────────────────

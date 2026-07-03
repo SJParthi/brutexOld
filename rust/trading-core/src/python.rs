@@ -24,7 +24,7 @@ use crate::indicators::market_structure::{
 };
 use crate::indicators::pivots::{PivotLevels, compute_pivot_levels};
 use crate::indicators::vwap::VwapState as CoreVwapState;
-use crate::spec::Direction;
+use crate::spec::{Direction, StrategySpec};
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
 ///
@@ -790,6 +790,99 @@ fn evaluate_spec_impl(
     Ok((bar_bits, fires, dir.as_u8()))
 }
 
+/// Return the FROZEN 57-byte canonical spec encode (`StrategySpec::canonical_bytes`,
+/// DEC-STRATEGYSPEC-CORE-001) for one spec, as Python `bytes` — the ONE encoder
+/// (CLAUDE.md §11 COMMON): BruteX's Python `StrategySpec` calls this instead of
+/// re-implementing the byte layout, so the run-identity fingerprint is
+/// bit-identical to TickVault's native `canonical_bytes` by construction
+/// (DEC-SPEC-IDENTITY-WIRING-001).
+///
+/// Boundary guard set (every reject is a clean `ValueError`, never a panic →
+/// SIGABRT under `panic="abort"`): `condition_mask_hex` must parse as u128 hex;
+/// the mask must require IMPLEMENTED bits only; `direction` must be 0/1
+/// (`Direction::from_u8`); each proximity bps must sit in `[0, MAX_BPS]` (the
+/// SAME constant the evaluate boundary uses). `prior_n`/`symbol_id` widths are
+/// enforced by the PyO3 `u64`/`u32` conversions (an out-of-range Python int
+/// raises `OverflowError` — the documented backstop). NOTE: `symbol_id = 0` is
+/// ACCEPTED here (shared-crate semantics — `StrategySpec::new` allows it);
+/// BruteX reserves id 0 as a POLICY in its Python symbol registry
+/// (`brutex/strategies/spec.py`), not in this crate.
+#[pyfunction]
+#[pyo3(signature = (
+    condition_mask_hex, direction, pivot_bps, pdh_pdl_bps, fib_bps, prior_n, symbol_id,
+))]
+fn spec_canonical_bytes(
+    condition_mask_hex: &str,
+    direction: u8,
+    pivot_bps: i64,
+    pdh_pdl_bps: i64,
+    fib_bps: i64,
+    prior_n: u64,
+    symbol_id: u32,
+) -> PyResult<Vec<u8>> {
+    // Thin PyO3 wrapper — validation + encode in the pure `_impl` (unit-tested
+    // without a libpython link); `Err(String)` maps to a clean `ValueError`.
+    spec_canonical_bytes_impl(
+        condition_mask_hex,
+        direction,
+        pivot_bps,
+        pdh_pdl_bps,
+        fib_bps,
+        prior_n,
+        symbol_id,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+/// Pure logic for [`spec_canonical_bytes`] — `Result<Vec<u8>, String>` so the
+/// no-libpython `cargo test` covers every branch (valid + each reject).
+fn spec_canonical_bytes_impl(
+    condition_mask_hex: &str,
+    direction: u8,
+    pivot_bps: i64,
+    pdh_pdl_bps: i64,
+    fib_bps: i64,
+    prior_n: u64,
+    symbol_id: u32,
+) -> Result<Vec<u8>, String> {
+    // Mask + direction: the SAME parse/validate messages as `evaluate_spec_impl`
+    // (one boundary vocabulary, no drift).
+    let condition_mask = u128::from_str_radix(condition_mask_hex, 16)
+        .map_err(|e| format!("condition_mask_hex {condition_mask_hex:?} is not valid hex: {e}"))?;
+    let dir = Direction::from_u8(direction)?;
+    // Proximity bps: reuse the evaluate boundary's [0, MAX_BPS] envelope (there
+    // is no `close` here to product-check — the encode never multiplies, so the
+    // range guard alone keeps the value meaningful + i64-encodable).
+    for (name, bps) in [
+        ("pivot_bps", pivot_bps),
+        ("pdh_pdl_bps", pdh_pdl_bps),
+        ("fib_bps", fib_bps),
+    ] {
+        if !(0..=MAX_BPS).contains(&bps) {
+            return Err(format!(
+                "{name} ({bps}) out of the overflow-safe range [0, {MAX_BPS}]"
+            ));
+        }
+    }
+    // `canonical_bytes` encodes `prior_n` as a fixed u64; the in-memory struct
+    // holds usize, so refuse a value the platform cannot represent (unreachable
+    // on the 64-bit wheel/TickVault targets — an honest guard, not a live path).
+    let prior_n_usize = usize::try_from(prior_n)
+        .map_err(|_| format!("prior_n ({prior_n}) exceeds the platform usize range"))?;
+    let spec = StrategySpec::new(
+        condition_mask,
+        dir,
+        ProximityParams {
+            pivot_proximity_bps: pivot_bps,
+            pdh_pdl_proximity_bps: pdh_pdl_bps,
+            fib_proximity_bps: fib_bps,
+        },
+        prior_n_usize,
+        symbol_id,
+    )?;
+    Ok(spec.canonical_bytes())
+}
+
 /// Compute the 9 standard pivot levels from the previous day's H/L/C — the
 /// single-source indicator math BruteX's `compute_pivot_levels` wrapper packs
 /// into its `PivotLevels` dataclass (so the arithmetic lives ONCE, in Rust).
@@ -1183,6 +1276,7 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(evaluate_from_raw, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_with_levels, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_spec, m)?)?;
+    m.add_function(wrap_pyfunction!(spec_canonical_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_pivot_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_fib_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_ema, m)?)?;
@@ -2025,6 +2119,83 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("pivot_levels must have"), "got: {err}");
+    }
+
+    // ── spec_canonical_bytes_impl (identity-wiring binding) ────────────────
+
+    #[test]
+    fn canonical_bytes_impl_matches_struct_encode() {
+        // The binding must return EXACTLY `StrategySpec::canonical_bytes` for
+        // the same spec — the COMMON one-encoder guarantee.
+        let got = spec_canonical_bytes_impl("1f", 0, 50, 10, 25, 3, 1).unwrap();
+        let spec = StrategySpec::new(
+            0x1f,
+            Direction::Long,
+            ProximityParams {
+                pivot_proximity_bps: 50,
+                pdh_pdl_proximity_bps: 10,
+                fib_proximity_bps: 25,
+            },
+            3,
+            1,
+        )
+        .unwrap();
+        assert_eq!(got, spec.canonical_bytes());
+        assert_eq!(got.len(), 57, "the v1 encode is exactly 57 bytes");
+    }
+
+    #[test]
+    fn canonical_bytes_impl_accepts_symbol_id_zero() {
+        // Shared-crate semantics: id 0 encodes fine here — the reservation is
+        // BruteX Python-registry POLICY, not a crate rule (spec.rs accepts 0).
+        let got = spec_canonical_bytes_impl("0", 1, 0, 0, 0, 0, 0).unwrap();
+        assert_eq!(got.len(), 57);
+    }
+
+    #[test]
+    fn canonical_bytes_impl_rejects_non_hex_mask() {
+        let err = spec_canonical_bytes_impl("zz", 0, 50, 10, 25, 3, 1).unwrap_err();
+        assert!(err.contains("is not valid hex"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_bytes_impl_rejects_reserved_bit() {
+        // Bit 127 is far outside IMPLEMENTED_MASK — refused like evaluate_spec.
+        let reserved = format!("{:032x}", 1u128 << 127);
+        let err = spec_canonical_bytes_impl(&reserved, 0, 50, 10, 25, 3, 1).unwrap_err();
+        assert!(err.contains("unimplemented/reserved"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_bytes_impl_rejects_bad_direction() {
+        let err = spec_canonical_bytes_impl("1", 2, 50, 10, 25, 3, 1).unwrap_err();
+        assert!(err.contains("direction"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_bytes_impl_rejects_out_of_range_bps() {
+        // Negative and absurd bps both fail the [0, MAX_BPS] envelope, naming
+        // the offending field.
+        let neg = spec_canonical_bytes_impl("1", 0, -1, 10, 25, 3, 1).unwrap_err();
+        assert!(neg.contains("pivot_bps"), "got: {neg}");
+        let huge = spec_canonical_bytes_impl("1", 0, 50, MAX_BPS + 1, 25, 3, 1).unwrap_err();
+        assert!(huge.contains("pdh_pdl_bps"), "got: {huge}");
+        let fib = spec_canonical_bytes_impl("1", 0, 50, 10, -7, 3, 1).unwrap_err();
+        assert!(fib.contains("fib_bps"), "got: {fib}");
+    }
+
+    #[test]
+    fn canonical_bytes_impl_prior_n_u64_max_platform_behaviour() {
+        // On the 64-bit wheel/TickVault targets u64::MAX fits usize, so the
+        // encode succeeds (the try_from guard exists for a 32-bit target where
+        // it would reject instead — an honest platform guard, not a live path).
+        let res = spec_canonical_bytes_impl("1", 0, 50, 10, 25, u64::MAX, 1);
+        if usize::BITS >= 64 {
+            let bytes = res.unwrap();
+            assert_eq!(bytes.len(), 57);
+        } else {
+            assert!(res.unwrap_err().contains("prior_n"));
+        }
     }
 
     // ── property layer ─────────────────────────────────────────────────────

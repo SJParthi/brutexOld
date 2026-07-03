@@ -218,3 +218,17 @@ As per Groww dashboard alert: **Static IP registration was mandatory before 31 M
 - API Keys dashboard: https://groww.in/trade-api/api-keys
 - Trading API subscription page: https://groww.in/user/profile/trading-apis
 - Official docs index: https://groww.in/trade-api/docs
+
+---
+
+## Later fuller snapshot (2026-07-03)
+
+A complete **26-page** capture of the Groww Trade API docs (14 Python-SDK
+pages + the entire 12-page REST/curl parallel set — orders, smart-orders,
+portfolio, margin, user, historical-data, auth/checksum flows), taken
+2026-07-03 at SDK 1.5.0, lives at
+[`docs/groww/trade-api-2026-07-03/`](../trade-api-2026-07-03/README.md)
+(DEC-VENDOR-DOCS-IMPORT-001, MIGRATION.md #1144). That directory is a
+**reference snapshot only** — THIS directory remains the authoritative
+file:line-cited source-of-truth; reconcile facts into here (with a decision
+ID) before citing them from code.

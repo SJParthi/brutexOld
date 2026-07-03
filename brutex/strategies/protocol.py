@@ -21,6 +21,11 @@ from typing import Any, ClassVar, Protocol, runtime_checkable
 from brutex.feed.replay import FeedEvent
 from brutex.strategies.types import Signal, StrategyState
 
+#: Machine-generated run-identity namespaces a FREE-FORM strategy_id may never
+#: enter: the mask sweep mints ``"mask:%032x"`` (DEC-MASK-IDENTITY-001) and the
+#: spec layer mints ``"spec:<canonical hex>"`` (DEC-SPEC-IDENTITY-WIRING-001).
+_RESERVED_STRATEGY_ID_PREFIXES: tuple[str, ...] = ("mask:", "spec:")
+
 
 @dataclass(frozen=True, slots=True)
 class StrategyMeta:
@@ -70,6 +75,15 @@ class StrategyMeta:
     def __post_init__(self) -> None:
         if not self.strategy_id:
             raise ValueError("StrategyMeta.strategy_id must be non-empty")
+        for reserved in _RESERVED_STRATEGY_ID_PREFIXES:
+            if self.strategy_id.startswith(reserved):
+                # A free-form registration inside a machine namespace could
+                # alias a mask/spec run-identity in the shared combo_hash
+                # strategy_id slot — refused loudly.
+                raise ValueError(
+                    f"StrategyMeta.strategy_id {self.strategy_id!r} uses the RESERVED "
+                    f"machine-identity prefix {reserved!r}; choose a different id"
+                )
         if not self.version:
             raise ValueError("StrategyMeta.version must be non-empty")
         if not self.symbols:

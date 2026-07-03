@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
@@ -96,7 +97,10 @@ from brutex.adapters.groww.option_ingest import (
 from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
+    PullVerdict,
     UntilCleanRound,
+    classify_pull,
+    mark_synthetic,
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
@@ -116,6 +120,7 @@ from brutex.data.window_ledger_store import (
     make_live_ledger_flush,
 )
 from brutex.data.write_consumer import WriteConsumer
+from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
@@ -220,6 +225,38 @@ class HistoricalPullReport:
     #: start (DEC-WINDOW-LEDGER-RESCUE-001) — the pull ran a full re-verify (no
     #: skip); the note announces it loudly, never silent.
     ledger_load_failed: bool = False
+    mass_empty_cause: str | None = None
+    """The mass-empty circuit-breaker halt message (DEC-EMPTY-WINDOW-CIRCUIT-
+    BREAKER-001 minor M-5) when the F&O phase HALTED on a suspected soft-throttle
+    [R2] / mis-addressing [R3] clean-empty burst; ``None`` when it never tripped."""
+    settled_skipped: int = 0
+    """Windows THIS pull newly settled as terminal ``SKIPPED`` (the per-pull ledger
+    tally) — the honest-verdict count (never "no action" over a settling pull)."""
+
+    @property
+    def verdict(self) -> PullVerdict:
+        """The polished, prioritised :class:`PullVerdict` for this F&O pull.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 minor M-5 — the F&O bulk route's twin
+        of ``BulkSpotReport.verdict`` (CLAUDE.md §11 COMMON: the SAME
+        :func:`~brutex.adapters.ingest_common.classify_pull` vocabulary, so a
+        mass-empty halt reads identically loud on both routes). ``no_data`` is 0:
+        the F&O report does not carry a per-symbol no-data rollup (an all-empty
+        contract settles via the ledger and rides ``settled_skipped``). A dry-run
+        verdict is marked SYNTHETIC like the spot route's.
+        """
+        verdict = classify_pull(
+            auth_aborted=self.auth_aborted,
+            still_failed_windows=self.still_failed_windows,
+            failed_pairs=self.failed_pairs,
+            no_data=0,
+            completed=self.contracts_completed,
+            mass_empty_cause=self.mass_empty_cause,
+            settled_skipped=self.settled_skipped,
+        )
+        if self.dry_run:
+            return mark_synthetic(verdict)
+        return verdict
 
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the ``pull-historical`` route + the live panel."""
@@ -242,6 +279,9 @@ class HistoricalPullReport:
             "minute_requested": self.minute_requested,
             "minute_skipped": self.minute_skipped,
             "note": self.note,
+            "mass_empty_cause": self.mass_empty_cause,
+            "settled_skipped": self.settled_skipped,
+            "verdict": self.verdict.to_dict(),
         }
 
 
@@ -518,6 +558,14 @@ class _PhaseResult:
     #: start (DEC-WINDOW-LEDGER-RESCUE-001) — this phase ran a full re-verify
     #: (no skip); folded into the report note, never silent.
     ledger_load_failed: bool = False
+    #: The mass-empty circuit-breaker halt message (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001
+    #: minor M-5) when this phase HALTED mid-flight on a suspected soft-throttle [R2] /
+    #: mis-addressing [R3] clean-empty burst; ``None`` when the breaker never tripped.
+    mass_empty_cause: str | None = None
+    #: Windows THIS phase newly settled as terminal ``SKIPPED`` — the per-pull ledger
+    #: tally (:attr:`~brutex.data.window_ledger.WindowLedger.newly_settled_skipped`)
+    #: the honest verdict names. 0 for a dry-run (no ledger — nothing settles).
+    settled_skipped: int = 0
 
 
 def _drain_fetch_pipeline_in_phase(pipeline: FetchPipeline | None) -> None:
@@ -610,6 +658,7 @@ def _build_note(
     failed_pairs: int,
     still_failed_windows: int,
     auth_aborted: bool,
+    mass_empty_halted: bool = False,
     contracts_not_yet_in_window: int = 0,
     windows_skipped: int = 0,
     ledger_load_failed: bool = False,
@@ -617,9 +666,10 @@ def _build_note(
     """Honest one-line outcome note for the report / live panel.
 
     Single-phase 1-minute pull (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): the note describes
-    the 1-minute phase's outcome — empty selection / dry-run / auth death / quarantine /
-    transient residual / clean. The 1-day derivation runs after, quarantined, and never
-    enters the note (its failure is logged, not surfaced as a pull outcome).
+    the 1-minute phase's outcome — empty selection / dry-run / auth death / mass-empty
+    halt / quarantine / transient residual / clean. The 1-day derivation runs after,
+    quarantined, and never enters the note (its failure is logged, not surfaced as a
+    pull outcome).
 
     *contracts_not_yet_in_window* (DEC-FNO-FAR-EXPIRY-WINDOW-001, display honesty):
     the clean line's ``completed/selected`` ratio counts the WHOLE selection, so a
@@ -657,6 +707,15 @@ def _build_note(
         )
     elif auth_aborted:
         base = "auth token expired mid-pull — re-set Groww credentials and re-pull (idempotent)"
+    elif mass_empty_halted:
+        # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 minor M-5: the mass-empty breaker halted
+        # the phase — the report's `verdict` carries the full count-naming message +
+        # triage actions; this note is the one-line panel summary.
+        base = (
+            "mass-empty circuit breaker HALTED the pull (suspected vendor soft-throttle "
+            "or mis-addressing) — see the verdict: triage, then re-pull; un-settled "
+            "windows stay retryable and `brutex reopen-skipped` reverses earlier settles"
+        )
     elif failed_pairs:
         base = (
             f"pulled {windows} windows; {failed_pairs} contract/interval pair(s) quarantined — "
@@ -866,6 +925,7 @@ def _run_phase(
         passes.append(result)
         return result
 
+    mass_empty_cause: str | None = None
     try:
         if until_clean:
 
@@ -895,6 +955,31 @@ def _run_phase(
             )
         else:
             _one_pass()
+    except MassEmptySettleHalt as exc:
+        # The mass-empty circuit breaker TRIPPED mid-phase (DEC-EMPTY-WINDOW-CIRCUIT-
+        # BREAKER-001 minor M-5 — the F&O bulk route's polished halt, mirroring the
+        # spot route's pull_controller handler): a suspected vendor soft-throttle [R2]
+        # / mis-addressing [R3] episode was answering contract windows with clean-empty
+        # 200s, so the spine HALTED before settling them SKIPPED. Everything already
+        # committed survives (bars via the sink; window records via the finally's
+        # drain + ledger persist below); every un-settled window stays retryable. The
+        # cause is folded onto the phase result so the report's `verdict` reads the
+        # loud, needs-operator ``mass_empty_halt`` — not a generic job error. Because
+        # the halt is CAUGHT here (it never escapes to the job layer's
+        # ``_is_pull_halt`` path), the CRITICAL Telegram pull-halt alert fires HERE
+        # (DEC-TELEGRAM-PULL-HALT-001 parity with the spot/CLI routes; best-effort by
+        # construction).
+        emit_pull_halt_alert(exc)
+        mass_empty_cause = str(exc)
+        _LOG.warning(
+            "historical.pull.mass_empty_halt",
+            error=str(exc),
+            rounds_completed=len(passes),
+            note=(
+                "mass clean-empty responses — F&O pull halted before settling; "
+                "committed work kept; un-settled windows stay retryable"
+            ),
+        )
     finally:
         # CRITICAL ORDER (DEC-FNO-ASYNC-PIPELINE-WIRE-001): drain the async fetch_pipeline
         # BEFORE persisting the ledger. In async mode each contract's tail — incl. the durable
@@ -924,16 +1009,27 @@ def _run_phase(
         bars=sum(p.bars for p in passes),
         windows=sum(p.windows for p in passes),
         failed_pairs=passes[-1].failed_pairs if passes else 0,
+        # HONEST UNDERCOUNT on a halt: ``passes`` holds only COMPLETED passes — the
+        # pass a mid-flight MassEmptySettleHalt aborted never appended, so its
+        # still-pending windows are NOT in this residual (the halt verdict already
+        # demands triage + a re-pull; the ledger, not this count, is the retry
+        # authority).
         still_failed_windows=passes[-1].still_failed_windows if passes else 0,
         auth_aborted=passes[-1].auth_aborted if passes else False,
         complete=complete,
-        clean=barrier_clean,
+        # A halted phase is never the clean barrier, whatever landed before the trip.
+        clean=barrier_clean and mass_empty_cause is None,
         merged_pairs=merged_pairs,
         failure_symbols=frozenset(failure_symbols),
         # The FIRST pass's skips — the operator-meaningful "no vendor hit" count
         # (later until-clean rounds re-skip the same settled windows by design).
         skipped_windows=passes[0].skipped_windows if passes else 0,
         ledger_load_failed=ledger_load_failed,
+        mass_empty_cause=mass_empty_cause,
+        # Honest-verdict settle tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): every
+        # window THIS phase newly settled SKIPPED (fast-settle + streak promotion),
+        # counted by the per-pull ledger instance. 0 on a dry-run (no ledger).
+        settled_skipped=ledger.newly_settled_skipped if ledger is not None else 0,
     )
 
 
@@ -1477,6 +1573,7 @@ def pull_contract_candles(
         failed_pairs=minute.failed_pairs,
         still_failed_windows=minute.still_failed_windows,
         auth_aborted=minute.auth_aborted,
+        mass_empty_halted=minute.mass_empty_cause is not None,
         contracts_not_yet_in_window=contracts_not_yet_in_window,
         windows_skipped=minute.skipped_windows,
         ledger_load_failed=minute.ledger_load_failed,
@@ -1501,6 +1598,10 @@ def pull_contract_candles(
         contracts_not_yet_in_window=contracts_not_yet_in_window,
         windows_skipped=minute.skipped_windows,
         ledger_load_failed=minute.ledger_load_failed,
+        # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 minor M-5: the polished halt verdict +
+        # the honest settle tally ride the report (see `HistoricalPullReport.verdict`).
+        mass_empty_cause=minute.mass_empty_cause,
+        settled_skipped=minute.settled_skipped,
     )
 
 

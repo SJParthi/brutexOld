@@ -24,6 +24,7 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition_lock import partition_lock_path
 from brutex.data.window_ledger import (
     EMPTY_TERMINAL_THRESHOLD,
+    FAILED,
     PLANNED,
     SKIPPED,
     SUCCESS,
@@ -1297,6 +1298,19 @@ class TestMergeLedgerRows:
         planned = _row(status=PLANNED, attempts=0, last_attempt=None)
         assert merge_ledger_rows([weird], [planned]) == [planned]
 
+    def test_reopened_key_memory_demotion_wins_over_settled_disk(self) -> None:
+        # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × the merge-on-save: a deliberate
+        # reopen_skipped demotion (SKIPPED → FAILED in memory) must NOT be undone
+        # by the on-disk SKIPPED copy's more-settled rank — for a reopened key the
+        # in-memory row wins outright.
+        demoted = _row(status=FAILED, attempts=2)
+        settled = _row(status=SKIPPED, attempts=2)
+        key = (demoted[0], demoted[1], demoted[2], demoted[3], demoted[4])
+        # WITHOUT the tombstone the settled disk copy wins (the resurrect bug):
+        assert merge_ledger_rows([demoted], [settled]) == [settled]
+        # WITH the tombstone the deliberate demotion survives the merge:
+        assert merge_ledger_rows([demoted], [settled], reopened_keys=frozenset({key})) == [demoted]
+
 
 # --- DEC-WINDOW-LEDGER-RESCUE-001: cross-process-safe save (flock + read-merge-write) --
 
@@ -1361,6 +1375,24 @@ class TestSaveMergeCrossProcess:
         final = load_window_ledger(tmp_path)
         assert final.count == 1
         assert final.records()[0].status == SUCCESS  # the settled row wins the merge
+
+    def test_reopened_demotion_survives_the_merge_on_save(self, tmp_path: Path) -> None:
+        # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × DEC-WINDOW-LEDGER-RESCUE-001: the
+        # `brutex reopen-skipped` load→demote→save round-trip. FAILS-BEFORE the
+        # reopened-keys tombstone: the on-disk SKIPPED copy out-ranked the in-memory
+        # FAILED demotion in the merge and the re-open was silently undone.
+        seeded = WindowLedger(_threshold=1)
+        assert seeded.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW) == (
+            SKIPPED
+        )
+        save_window_ledger(seeded, tmp_path)
+        reopener = load_window_ledger(tmp_path)
+        assert reopener.reopen_skipped() == 1
+        save_window_ledger(reopener, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.count == 1
+        assert restored.records()[0].status == FAILED  # the demotion persisted
+        assert restored.is_skippable(_key()) is False  # the next pull re-fetches it
 
     def test_save_lock_timeout_skips_and_warns(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

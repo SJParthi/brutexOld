@@ -118,10 +118,13 @@ def _is_pull_halt(exc: BaseException) -> bool:
     part of the heavy PyO3 chain), and this check only runs on the rare
     worker-exception path.
     """
+    from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.data.errors import LakeWriteHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
-    return isinstance(exc, (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError))
+    return isinstance(
+        exc, (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError, MassEmptySettleHalt)
+    )
 
 
 class _Invalidatable(Protocol):

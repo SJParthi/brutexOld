@@ -39,6 +39,35 @@ batch before rendering (:meth:`ParquetWriter._dedup_batch`) — so a first
 write can never land two rows for one timestamp
 (DEC-FRESH-WRITE-BATCH-DEDUP-001).
 
+## Write-side uniqueness invariant (DEC-LAKE-WRITE-UNIQUE-001)
+
+A vendor payload can physically carry DUPLICATE same-timestamp rows (measured:
+135 duplicate 1-minute rows in one ADANIENT January window, reproduced
+deterministically across two pulls). The merge branch always deduped against
+the STORED bars, and the fresh branch now dedups the batch per merge_mode
+(:meth:`ParquetWriter._dedup_batch`, DEC-FRESH-WRITE-BATCH-DEDUP-001 above) —
+but a lake POISONED before that fix never self-healed (the ``added == 0``
+merge path returned the poisoned bytes forever), and every collapse was
+SILENT. This layer completes the invariant:
+
+1. **Observability** — the duplicate collapse is COUNTED per write batch and
+   reported as one aggregated ``lake.vendor_duplicate_rows`` WARNING
+   (symbol/interval/window/count) on BOTH branches — what the vendor sent is
+   never silently normalised away (Golden Rule #1).
+2. **Merge self-heal** — :meth:`ParquetWriter._merge_write` compares the
+   stored file's PHYSICAL row count (Parquet footer, O(footer)) against its
+   unique-timestamp count and forces a deduped rewrite even when the merge
+   itself added nothing (``lake.partition.dedup_healed``), so an
+   already-poisoned closed-month file heals on the next touch.
+3. **Keep-first read collapse** — :meth:`ParquetWriter._read_existing_bars`
+   collapses stored duplicates keep-FIRST (the first physical row wins,
+   honouring DEC-LAKE-CONFLICT-KEEPFIRST-001) and logs
+   ``lake.partition.duplicate_collapsed`` (previously a silent last-wins).
+4. **Tripwire** (:meth:`ParquetWriter._assert_strictly_increasing`) — after
+   dedup, timestamps must be STRICTLY increasing before render; a violation
+   raises a loud :class:`~brutex.data.errors.WriterError` naming the
+   partition (impossible post-dedup — a genuine invariant assert).
+
 ## Per-partition write serialisation (DEC-DHAN-PARALLEL-WINDOWS-001)
 
 Merge-on-write is a read-modify-write (read the stored month → union the
@@ -62,6 +91,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -466,6 +496,14 @@ class ParquetWriter:
         (year, month) = next(iter(partitions))
 
         sorted_bars = sorted(bars, key=lambda b: b.timestamp)
+        # Duplicate-timestamp COUNT for the aggregated observability WARNING below
+        # (DEC-LAKE-WRITE-UNIQUE-001): a vendor payload can physically repeat a
+        # timestamp (measured live — 135 duplicate 1-minute rows in one window).
+        # BOTH branches collapse the duplicates — the fresh branch via
+        # `_dedup_batch` (DEC-FRESH-WRITE-BATCH-DEDUP-001), the merge branch via
+        # its timestamp-keyed dict — but neither reported the COUNT, so the
+        # collapse was silent. One O(batch) set sizes it for either branch.
+        duplicates_in_batch = len(sorted_bars) - len({b.timestamp for b in sorted_bars})
         first_ts = sorted_bars[0].timestamp
         last_ts = sorted_bars[-1].timestamp
 
@@ -558,6 +596,10 @@ class ParquetWriter:
                 # SAME per-merge_mode collision rule `_merge_write` uses, so a
                 # fresh write + a re-pull of the same batch stay bit-idempotent.
                 fresh_bars, batch_conflicts = self._dedup_batch(sorted_bars, merge_mode=merge_mode)
+                # P9 tripwire (DEC-LAKE-WRITE-UNIQUE-001): post-dedup the batch MUST be
+                # strictly increasing; a violation is a loud WriterError, never a
+                # silently-poisoned partition.
+                self._assert_strictly_increasing(dest, fresh_bars)
                 content_bytes = self._render_bytes(fresh_bars)
                 self._atomic_write(dest, content_bytes)
                 result = WriteResult(
@@ -584,6 +626,23 @@ class ParquetWriter:
             partition_rows=result.row_count,
             partition=str(dest),
         )
+        if duplicates_in_batch:
+            # ONE aggregated WARNING per write when the vendor sent physically
+            # duplicate rows (DEC-LAKE-WRITE-UNIQUE-001) — the batch was collapsed
+            # per the merge_mode rule (fresh: `_dedup_batch`, merge: the
+            # timestamp-keyed dict), so nothing corrupt was stored; this names
+            # what the vendor did (never silent, Golden Rule #1). Emitted outside
+            # the locks like the write telemetry (logging is not part of the
+            # serialised critical section).
+            _LOG.warning(
+                "lake.vendor_duplicate_rows",
+                symbol=symbol,
+                interval=interval,
+                window_start=first_ts.isoformat(),
+                window_end=last_ts.isoformat(),
+                dropped=duplicates_in_batch,
+                partition=str(dest),
+            )
         return result
 
     def _merge_write(
@@ -594,7 +653,11 @@ class ParquetWriter:
         Reads the stored bars, merges the incoming ones keyed by timestamp
         (O(1) per bar), and rewrites the full month only if the stored content
         changed. A timestamp already present with identical OHLCV is a silent
-        no-op.
+        no-op — UNLESS the stored file itself physically carries duplicate
+        timestamps (a partition poisoned before DEC-LAKE-WRITE-UNIQUE-001), in
+        which case the merge FORCES a deduped rewrite even when it adds nothing
+        (``lake.partition.dedup_healed``), so a poisoned closed month self-heals
+        on the next touch instead of returning the poisoned bytes forever.
 
         A same-timestamp/different-value collision is resolved per *merge_mode*:
 
@@ -617,6 +680,17 @@ class ParquetWriter:
         # partition; this matches the option writer's no-second-read no-op).
         existing_bytes = self._read_existing_bytes(dest)
         merged = self._read_existing_bars(dest, existing_bytes)
+        # Dedup self-heal (DEC-LAKE-WRITE-UNIQUE-001): a partition poisoned BEFORE the
+        # write-side uniqueness invariant landed physically carries duplicate
+        # timestamps. `_read_existing_bars` collapses them keep-FIRST, so comparing the
+        # stored file's PHYSICAL row count (Parquet footer — O(footer), no column
+        # decode) against the unique-timestamp count detects the poison; a positive
+        # delta FORCES a deduped rewrite below even when the merge itself adds nothing
+        # (the old no-op path returned the poisoned bytes forever). Runs under the
+        # partition locks `write()` already holds on this path — never re-acquired.
+        stored_unique = len(merged)
+        stored_physical = self._stored_physical_rows(dest, existing_bytes)
+        heal_dropped = 0 if stored_physical is None else stored_physical - stored_unique
         added = 0
         rewrite = False
         conflicts: list[BarConflict] = []
@@ -661,7 +735,7 @@ class ParquetWriter:
                         merged[bar.timestamp] = bar
                         rewrite = True
             merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
-        if added == 0 and not rewrite:
+        if added == 0 and not rewrite and heal_dropped == 0:
             # Every incoming bar is already stored identically or is a conflict
             # (kept-first) → no rewrite needed; the stored file is unchanged. Reuse the
             # already-read bytes for the hash/size — no second full read of the partition.
@@ -676,6 +750,18 @@ class ParquetWriter:
                 conflicts=tuple(conflicts),
             )
 
+        if heal_dropped > 0:
+            # The stored file physically carried duplicate timestamps — the rewrite
+            # below persists the keep-first collapsed rows (DEC-LAKE-WRITE-UNIQUE-001).
+            _LOG.warning(
+                "lake.partition.dedup_healed",
+                partition=str(dest),
+                kept=stored_unique,
+                dropped=heal_dropped,
+            )
+        # P9 tripwire (DEC-LAKE-WRITE-UNIQUE-001): the merged month is a dict keyed by
+        # timestamp sorted ascending, so this can never fire — a genuine invariant assert.
+        self._assert_strictly_increasing(dest, merged_sorted)
         content_bytes = self._render_bytes(merged_sorted)
         self._atomic_write(dest, content_bytes)
         return WriteResult(
@@ -810,8 +896,79 @@ class ParquetWriter:
             raise WriterError(f"unreadable existing partition {dest}: {exc}") from exc
 
     @staticmethod
+    def _assert_strictly_increasing(dest: Path, sorted_bars: list[CandleBar]) -> None:
+        """P9 write-invariant tripwire: refuse to render a non-strictly-increasing batch.
+
+        DEC-LAKE-WRITE-UNIQUE-001: every render site runs AFTER the keep-first
+        dedup, so the timestamps handed to :meth:`_render_bytes` are unique and
+        ascending BY CONSTRUCTION — this assert can only fire on a genuine code
+        regression (a future edit bypassing the dedup), in which case it raises
+        a loud :class:`~brutex.data.errors.WriterError` NAMING the partition
+        instead of silently persisting a poisoned file. O(n) over the batch —
+        strictly cheaper than the Parquet render it guards.
+        """
+        for prev, cur in itertools.pairwise(sorted_bars):
+            if cur.timestamp <= prev.timestamp:
+                raise WriterError(
+                    f"write invariant violated for partition {dest}: timestamps not "
+                    f"strictly increasing after dedup "
+                    f"({cur.timestamp.isoformat()} <= {prev.timestamp.isoformat()}) — "
+                    f"refusing to render a poisoned partition"
+                )
+
+    @staticmethod
+    def _stored_physical_rows(dest: Path, existing_bytes: bytes) -> int | None:
+        """The stored partition's PHYSICAL row count, from the Parquet footer.
+
+        DEC-LAKE-WRITE-UNIQUE-001: the dedup self-heal needs the file's physical
+        row count to compare against the unique-timestamp count
+        :meth:`_read_existing_bars` returns. The footer's ``num_rows`` is
+        authoritative and O(footer) — no column decode, so the steady-state
+        no-op merge (the re-pull hot path) pays only a metadata read.
+
+        ``None`` when the footer probe fails (defensive — polars just parsed
+        these same bytes, so a pyarrow footer failure is essentially
+        unreachable): the caller then SKIPS the heal check for this write
+        rather than guessing, and the probe failure is logged
+        (``lake.partition.rowcount_probe_failed``) so it is never silent. The
+        heal re-runs on the next touch (honest envelope: on that exotic edge
+        the poison persists until the probe succeeds — never mis-healed).
+        """
+        import io
+
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError as exc:  # pragma: no cover — ships with polars in the [data] extra
+            raise WriterError(
+                "ParquetWriter requires 'pyarrow' — install with "
+                "'pip install -e .[data]' to enable the P2 data lake"
+            ) from exc
+
+        try:
+            parquet_file = pq.ParquetFile(  # type: ignore[no-untyped-call, unused-ignore]
+                io.BytesIO(existing_bytes)
+            )
+            return int(parquet_file.metadata.num_rows)
+        except (pa.ArrowException, OSError) as exc:
+            _LOG.warning(
+                "lake.partition.rowcount_probe_failed",
+                partition=str(dest),
+                error=str(exc),
+            )
+            return None
+
+    @staticmethod
     def _read_existing_bars(dest: Path, existing_bytes: bytes) -> dict[datetime, CandleBar]:
         """Parse a stored partition's *existing_bytes* into ``{timestamp: CandleBar}``.
+
+        A physically-duplicated stored timestamp (a partition poisoned before
+        DEC-LAKE-WRITE-UNIQUE-001) is collapsed keep-FIRST — the first physical
+        row wins, honouring DEC-LAKE-CONFLICT-KEEPFIRST-001 — and the collapse
+        is logged (``lake.partition.duplicate_collapsed``), never silent. (The
+        old code collapsed last-wins with no log.) The merge caller compares
+        this map's size against the footer row count to drive the dedup
+        self-heal.
 
         Prices are snapped to the 2dp tick grid by the VECTORIZED, GIL-releasing
         :func:`_snap_price_expr` (DEC-LAKE-WRITE-VECTORIZE-001) — a polars-native
@@ -921,6 +1078,13 @@ class ParquetWriter:
             for idx, (ts, op, hi, lo, cl, vol, oi) in enumerate(
                 zip(timestamps, opens, highs, lows, closes, volumes, ois, strict=True)
             ):
+                if ts in out:
+                    # Keep-FIRST collapse of a physically-duplicated stored timestamp
+                    # (DEC-LAKE-WRITE-UNIQUE-001): the FIRST physical row wins —
+                    # honouring DEC-LAKE-CONFLICT-KEEPFIRST-001 — where the old
+                    # last-assignment silently let the LAST row win. Counted + logged
+                    # below, never silent.
+                    continue
                 bar: CandleBar
                 if overlay_lists is None:
                     bar = CandleBar(
@@ -959,6 +1123,7 @@ class ParquetWriter:
             # per-row path's contract): a quarantinable WriterError naming the
             # path, never a raw mid-merge crash (GAP #1 semantics preserved).
             raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
+        ParquetWriter._log_duplicate_collapse(dest, physical=len(timestamps), unique=len(out))
         return out
 
     @staticmethod
@@ -1026,6 +1191,10 @@ class ParquetWriter:
             for idx, (ts, op, hi, lo, cl, vol, oi) in enumerate(
                 zip(timestamps, opens, highs, lows, closes, volumes, ois, strict=True)
             ):
+                if ts in out:
+                    # Keep-FIRST collapse, mirroring the columnar path
+                    # (DEC-LAKE-WRITE-UNIQUE-001) — counted + logged below.
+                    continue
                 base: CandleBar
                 if overlay is None:
                     base = CandleBar(
@@ -1062,7 +1231,27 @@ class ParquetWriter:
                 out[bar.timestamp] = bar
         except (InvalidOperation, ValueError) as exc:
             raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
+        ParquetWriter._log_duplicate_collapse(dest, physical=len(timestamps), unique=len(out))
         return out
+
+    @staticmethod
+    def _log_duplicate_collapse(dest: Path, *, physical: int, unique: int) -> None:
+        """Log a stored-duplicate keep-first collapse — never silent (DEC-LAKE-WRITE-UNIQUE-001).
+
+        Emitted by BOTH partition-decode paths (columnar + the per-row fallback)
+        when the stored file physically carried more rows than unique timestamps.
+        The merge caller separately decides the self-heal rewrite off the footer
+        row count; this event makes the READ-side collapse itself visible (the
+        old code collapsed silently, last-wins).
+        """
+        if physical > unique:
+            _LOG.warning(
+                "lake.partition.duplicate_collapsed",
+                partition=str(dest),
+                physical_rows=physical,
+                unique_timestamps=unique,
+                collapsed=physical - unique,
+            )
 
     @staticmethod
     def _bar_values_equal(a: CandleBar, b: CandleBar) -> bool:

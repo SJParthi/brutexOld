@@ -46,6 +46,7 @@ __all__ = [
     "EMPTY_TERMINAL_THRESHOLD",
     "FAILED",
     "PLANNED",
+    "REOPENED_MARKER",
     "SETTLED_STATUSES",
     "SKIPPED",
     "SUCCESS",
@@ -81,6 +82,15 @@ SKIPPED: str = "SKIPPED"
 #: old-gap settle path (DEC-OLD-GAP-FAST-SETTLE-001), so this never re-hammers an
 #: ancient dead window — only recent maybe-late windows get the few extra chances.
 EMPTY_TERMINAL_THRESHOLD: int = 3
+
+#: The ``last_error`` marker :meth:`WindowLedger.reopen_skipped` stamps on a
+#: re-opened row (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). A ``FAILED`` row carrying
+#: this marker is a DELIBERATE operator re-check (``brutex reopen-skipped``), so
+#: :meth:`WindowLedger.is_expected_empty_recheck` reports it expected-empty and the
+#: mass-empty breaker never counts its re-verification — a reopen + re-pull can
+#: never re-trip the breaker endlessly on the very windows the operator chose to
+#: re-verify.
+REOPENED_MARKER: str = "REOPENED"
 
 #: The two settled statuses — a window in either is skipped on the next pull.
 _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
@@ -240,6 +250,28 @@ class WindowLedger:
     _pruned: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
+    #: Windows NEWLY settled ``SKIPPED`` by THIS ledger instance (DEC-EMPTY-WINDOW-
+    #: CIRCUIT-BREAKER-001 — honest-verdict requirement). A ledger instance is loaded
+    #: fresh per pull (``begin_pull_ledger``), so this counts the CURRENT pull's
+    #: settles across every path that can produce one (the old-gap fast-settle, the
+    #: across-pull EMPTY-streak promotion, the bounded degraded-settle, and
+    #: :meth:`settle_known_gap`) — a re-record of an already-``SKIPPED`` row never
+    #: double-counts. NOT serialised (a per-run tally, not history).
+    _settled_skipped_count: int = field(default=0, repr=False)
+    #: Keys :meth:`reopen_skipped` DELIBERATELY demoted ``SKIPPED`` → ``FAILED`` during
+    #: THIS process's lifetime (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × the
+    #: DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save). The merge-on-save's same-key
+    #: conflict rule prefers the MORE-SETTLED status, so without this tombstone the
+    #: on-disk ``SKIPPED`` copy (rank 3) would beat the reopened ``FAILED`` row
+    #: (rank 1) on the very next save and SILENTLY UNDO the operator's re-open —
+    #: exactly the resurrect-from-disk class the ``_pruned`` tombstones close for the
+    #: orphan GC. For a key in this set the IN-MEMORY row wins the merge outright.
+    #: Never serialised (per-instance lifetime — the window between load and save;
+    #: the ``brutex reopen-skipped`` CLI runs under the account-wide pull
+    #: single-flight lock, so no concurrent pull is mid-flight while it saves).
+    _reopened: set[tuple[str, str, str, str, str]] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -327,6 +359,36 @@ class WindowLedger:
             record = self._by_window.get(wk)
             return record is not None and record.status in _SKIPPABLE
 
+    def is_expected_empty_recheck(self, key: WindowKey) -> bool:
+        """``True`` iff an EMPTY re-fetch of *key* is EXPECTED, not throttle evidence — **O(1)**.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the ledger-knowledge feed for the
+        mass-empty breaker's per-call ``expected`` hint. Two prior-row shapes make a
+        fresh empty response UNINFORMATIVE for throttle detection:
+
+        * the row is already ``EMPTY`` — a prior pull saw this window empty, so a
+          re-confirmation is the expected outcome (the empty-dominated RESUME shape:
+          a worklist made of prior pulls' pre-listing prefixes must not read as a
+          throttled universe);
+        * the row is a ``FAILED`` stamped :data:`REOPENED_MARKER` — a DELIBERATE
+          operator re-check via ``brutex reopen-skipped``; re-verifying it empty is
+          the whole point, so it is breaker-exempt by design (a bulk reopen +
+          re-pull can never re-trip the breaker endlessly).
+
+        Any other row (``PLANNED`` / ordinary ``FAILED`` / absent) leaves the empty
+        fully counted — a 429-retried or never-fetched window coming back empty IS
+        informative. The breaker still counts these windows as OBSERVED (only the
+        trip tally is exempt), and it still refuses their SETTLE after a trip.
+        """
+        wk = self._key(key)
+        with self._lock:
+            record = self._by_window.get(wk)
+            if record is None:
+                return False
+            return record.status == EMPTY or (
+                record.status == FAILED and record.last_error == REOPENED_MARKER
+            )
+
     def record(
         self,
         key: WindowKey,
@@ -339,6 +401,7 @@ class WindowLedger:
         settle_empty: bool = False,
         degraded: bool = False,
         degraded_reason: str | None = None,
+        suppress_settle: bool = False,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -391,6 +454,17 @@ class WindowLedger:
         demotion only RE-OPENS the window for completion, never deletes data. ``degraded``
         is IGNORED for a ``FAILED`` (already re-pullable) or an ``EMPTY`` (no bars to be
         incomplete); the default ``False`` is byte-identical to the prior behaviour.
+
+        *suppress_settle* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) marks an ``EMPTY``
+        outcome as **UNTRUSTED** — recorded while the pull's mass-empty circuit
+        breaker is TRIPPED (a suspected vendor soft-throttle [R2] / mis-addressing
+        [R3] episode, when a clean-empty 200 is NOT evidence of no-data). The window
+        is recorded ``EMPTY`` (retryable, honest about what the vendor returned) but
+        its ``empty_streak`` is PRESERVED (not bumped — a suspect empty must not step
+        the window toward the across-pull ``SKIPPED`` promotion) and it can NEVER
+        settle ``SKIPPED`` on this record (both the fast-settle and the streak
+        promotion are gated off). IGNORED for ``SUCCESS`` / ``FAILED`` / degraded
+        outcomes; the default ``False`` is byte-identical to the prior behaviour.
         """
         classified = classify_window_status(raw_bars, error_type, degraded=degraded)
         # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
@@ -421,7 +495,11 @@ class WindowLedger:
             #     only ever settle a window seen genuinely EMPTY ``_threshold`` times.
             prior_streak = prior.empty_streak if prior is not None else 0
             if classified == EMPTY:
-                empty_streak = prior_streak + 1
+                # An UNTRUSTED empty (the pull's mass-empty breaker is tripped —
+                # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) preserves the streak: a
+                # throttle-shaped empty is NOT evidence of no-data, so it must not
+                # step the window toward the across-pull SKIPPED promotion.
+                empty_streak = prior_streak if suppress_settle else prior_streak + 1
             elif degraded_success:
                 # A demoted-SUCCESS (interior gap / truncation) re-pull is BOUNDED: bump the
                 # streak so it settles SKIPPED at the threshold, exactly like a genuine EMPTY,
@@ -437,19 +515,26 @@ class WindowLedger:
                 # accept the gap and settle SKIPPED so the pull converges (the operator has
                 # been warned each time; the stored bars are kept).
                 status = SKIPPED
-            elif classified == EMPTY and settle_empty:
+            elif classified == EMPTY and settle_empty and not suppress_settle:
                 # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an in-pull-confirmed
                 # empty window OLD enough that vendor data can never appear is a PERMANENT
                 # gap — settle it SKIPPED in ONE pull, forcing the streak to the threshold
                 # so the persisted row is identical to a normal across-pull settle. Only
                 # ever reached for EMPTY (a SUCCESS/FAILED ignores the hint), so it can
                 # never mask a window with data. RECENT windows (settle_empty False) keep
-                # the conservative across-pull streak below.
+                # the conservative across-pull streak below. GATED OFF while the pull's
+                # mass-empty breaker is tripped (suppress_settle — a throttle-shaped
+                # empty must never cement, DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
                 empty_streak = self._threshold
                 status = SKIPPED
-            elif classified == EMPTY and empty_streak >= self._threshold:
+            elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
+            if status == SKIPPED and (prior is None or prior.status != SKIPPED):
+                # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): count every
+                # window THIS instance newly settles SKIPPED, whatever the path (fast-settle,
+                # streak promotion, degraded accept-gap) — the verdict must SAY it.
+                self._settled_skipped_count += 1
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
                 security_id=key.security_id,
@@ -485,6 +570,10 @@ class WindowLedger:
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             bars = prior.bars if prior is not None else 0
             empty_streak = prior.empty_streak if prior is not None else 0
+            if prior is None or prior.status != SKIPPED:
+                # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a known-gap
+                # settle is a newly-SKIPPED window too — the verdict must SAY it.
+                self._settled_skipped_count += 1
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
                 security_id=key.security_id,
@@ -501,6 +590,105 @@ class WindowLedger:
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
             )
             return SKIPPED
+
+    @property
+    def newly_settled_skipped(self) -> int:
+        """Windows newly settled ``SKIPPED`` by THIS instance (per-pull) — **O(1)**.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 (honest verdicts): a pull that settled
+        ANY window as terminal ``SKIPPED`` must SAY so — the verdict layer reads this
+        after the pull and appends the count + the ``brutex reopen-skipped``
+        re-verify hint. Counts only prior-status transitions (a re-record of an
+        already-``SKIPPED`` row never double-counts), across every settle path.
+        """
+        with self._lock:
+            return self._settled_skipped_count
+
+    def reopen_skipped(
+        self,
+        *,
+        market: str | None = None,
+        security_id: str | None = None,
+        limit: int | None = None,
+        reason: str = REOPENED_MARKER,
+    ) -> int:
+        """Re-open ``SKIPPED`` windows for re-verification — returns the count re-opened.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 (un-cementable settles, register R2 fix:
+        "make SKIPPED reversible via an operator re-open action"). Every matching
+        ``SKIPPED`` row is demoted to ``FAILED`` with ``empty_streak`` RESET to 0 and
+        *reason* stamped as ``last_error`` — so :meth:`is_skippable` turns ``False``
+        and the next pull re-fetches it with the FULL fresh confirmation budget (a
+        genuinely-empty window re-settles honestly on that pull, now under the
+        breaker's guard; a throttle-poisoned one recovers its data). The default
+        *reason* is :data:`REOPENED_MARKER`, which
+        :meth:`is_expected_empty_recheck` recognises — the re-verify pull treats the
+        re-opened windows as DELIBERATE re-checks, exempt from the mass-empty
+        breaker's trip tally (a bulk reopen + re-pull can never re-trip endlessly).
+        ``bars`` / ``attempts`` / ``first_seen_at`` / ``last_attempt_at`` are
+        preserved (no fetch happened here); the stored lake bars are untouched (the
+        idempotent keep-first sink absorbs the re-fetch) — re-opening is always
+        DATA-SAFE. Each re-opened key is tombstoned in :meth:`reopened_keys` so the
+        DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save cannot resurrect the on-disk
+        ``SKIPPED`` copy (its more-settled rank would otherwise silently undo the
+        demotion on the very next flush).
+
+        *market* / *security_id* filter the selection (``None`` = any); *limit*
+        bounds it to the FIRST *limit* rows in the deterministic
+        (market, symbol, interval, start, end) sort order — the bounded-sample
+        re-verify path. Each re-open is an **O(1)** row swap; the selection pass is
+        **O(rows log rows)** once per operator action (the ``sorted`` scan that buys
+        the deterministic ``--limit`` sample; the ``prune_superseded`` envelope,
+        never the per-window hot path). Idempotent: re-running re-opens nothing new
+        (``FAILED`` rows no longer match).
+        """
+        doomed: list[tuple[str, str, str, str, str]] = []
+        with self._lock:
+            for wk in sorted(self._by_window):
+                row = self._by_window[wk]
+                if row.status != SKIPPED:
+                    continue
+                if market is not None and row.market != market:
+                    continue
+                if security_id is not None and row.security_id != security_id:
+                    continue
+                if limit is not None and len(doomed) >= limit:
+                    break
+                doomed.append(wk)
+            for wk in doomed:
+                row = self._by_window[wk]
+                self._by_window[wk] = WindowLedgerRecord(
+                    market=row.market,
+                    security_id=row.security_id,
+                    interval=row.interval,
+                    window_start=row.window_start,
+                    window_end=row.window_end,
+                    status=FAILED,
+                    bars=row.bars,
+                    attempts=row.attempts,
+                    last_error=reason,
+                    first_seen_at=row.first_seen_at,
+                    last_attempt_at=row.last_attempt_at,
+                    empty_streak=0,
+                    in_pull_fetches=row.in_pull_fetches,
+                )
+            self._reopened.update(doomed)
+        return len(doomed)
+
+    def reopened_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
+        """The keys :meth:`reopen_skipped` demoted this process — thread-safe snapshot.
+
+        DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 × DEC-WINDOW-LEDGER-RESCUE-001.
+        Consumed by the merge-on-save
+        (:func:`~brutex.data.window_ledger_store.save_window_ledger`) so a
+        DELIBERATELY re-opened row's on-disk ``SKIPPED`` copy is not resurrected by
+        the more-settled-status conflict rule (which would silently undo the
+        operator's ``brutex reopen-skipped``); for these keys the in-memory row wins
+        the merge outright. The twin of :meth:`pruned_keys`. O(reopened) copy under
+        the lock.
+        """
+        with self._lock:
+            return frozenset(self._reopened)
 
     def prune_superseded(
         self, planned_tiles: Mapping[tuple[str, str, str], Mapping[str, str]]
