@@ -197,7 +197,8 @@ jobs:
             "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py" \
             "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py" \
-            "brutex/data/parser.py:tests/unit/test_data_parser.py"; do
+            "brutex/data/parser.py:tests/unit/test_data_parser.py" \
+            "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py"; do
             mod="${pair%%:*}"
             tf="${pair##*:}"
             name="$(basename "$mod" .py)"
