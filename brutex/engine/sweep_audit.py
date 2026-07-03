@@ -439,31 +439,106 @@ class SweepAuditWriter:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _read_entries_with_torn_tail(path: Path) -> tuple[list[SweepAuditEntry], bool]:
-    """Read every entry from *path*, tolerating a single torn final line.
+def _iter_committed_entries(path: Path) -> Iterator[SweepAuditEntry]:
+    """Generator body of :func:`iter_entries` — one parsed entry per committed line.
 
-    Returns the parsed entries plus a flag that is ``True`` when the file's
-    LAST line was a **torn tail** — an interrupted append left behind by a
-    crash / ``SIGKILL`` mid-write (DEC-AUDIT-TORN-TAIL-001).
+    Applies the DEC-AUDIT-TORN-TAIL-001 discriminator line by line (see
+    :func:`iter_entries` for the full contract): an unterminated FINAL line is
+    an uncommitted torn tail and is skipped, a blank committed line is benign
+    filler, and a malformed committed (newline-terminated) line is REAL
+    corruption and raises :class:`SweepAuditError` naming ``path:line_no``.
+    Peak memory is O(1) — one raw line + one parsed entry at a time, never the
+    whole log (DEC-SWEEP-SCALE-OPERABILITY-001).
+    """
+    with open(path, encoding="utf-8") as f:
+        for line_no, raw in enumerate(f, start=1):
+            if not raw.endswith("\n"):
+                # Unterminated final line == interrupted append == torn tail.
+                # Skip it (committed or not, it is uncommitted); only the
+                # FILE's final line can ever lack the "\n" — the writer
+                # appends `line + "\n"` in one write call.
+                continue
+            line = raw.rstrip("\n")
+            if not line:
+                # A blank committed (newline-terminated) line is benign filler.
+                continue
+            try:
+                yield SweepAuditEntry.from_json_line(line)
+            except SweepAuditError as exc:
+                raise SweepAuditError(f"{path}:{line_no}: {exc}") from exc
+
+
+def iter_entries(path: Path) -> Iterator[SweepAuditEntry]:
+    """Stream every committed entry from *path* WITHOUT verifying the chain.
+
+    The O(1)-memory streaming primitive (DEC-SWEEP-SCALE-OPERABILITY-001) behind
+    :func:`read_entries` and :func:`verify_chain`: entries are parsed one line
+    at a time, so a multi-GB sweep log is scanned without ever materialising
+    the whole chain into a list.
 
     Torn-tail discriminator (hash-chain-safe)
     -----------------------------------------
     The writer always appends ``line + "\\n"`` in one :py:meth:`write` call, so
     a committed record is **defined** as a line terminated by ``"\\n"``. A crash
     mid-append can therefore only ever leave its damage on the FINAL line and
-    only when that line is missing its trailing newline (the write was cut off
-    before, or partway through, the ``"\\n"``). That newline-less final line —
-    whether its JSON is partial or even complete-but-unterminated — is an
-    UNCOMMITTED torn tail and is skipped so an unattended resume can recover
-    from the last complete, hash-valid entry instead of dying with
-    :class:`SweepAuditError`.
-
+    only when that line is missing its trailing newline. That newline-less
+    final line — whether its JSON is partial or even complete-but-unterminated
+    — is an UNCOMMITTED torn tail and is skipped (DEC-AUDIT-TORN-TAIL-001).
     Everything that IS newline-terminated is a committed record and is parsed
-    strictly: a malformed line that carries a trailing newline (so it is NOT
-    the file's final line) is REAL corruption and still raises
-    :class:`SweepAuditError`. Mid-file integrity is NOT weakened — only an
-    unterminated tail is forgiven, and the hash chain over the committed prefix
-    is still verified by :func:`verify_chain`.
+    strictly: a malformed line that carries a trailing newline is REAL
+    corruption and still raises. Mid-file integrity is NOT weakened — only an
+    unterminated tail is forgiven, and the hash chain over the committed
+    prefix is still verified by :func:`verify_chain`.
+
+    Parameters
+    ----------
+    path
+        The sweep audit ``.jsonl`` file.
+
+    Returns
+    -------
+    Iterator[SweepAuditEntry]
+        Lazily-parsed committed entries in file order.
+
+    Raises
+    ------
+    SweepAuditError
+        Immediately (at call time) if the file is missing; during iteration if
+        any committed (newline-terminated) line is malformed / missing
+        required fields.
+    """
+    if not path.exists():
+        raise SweepAuditError(f"Sweep audit log not found: {path}")
+    return _iter_committed_entries(path)
+
+
+def _has_torn_tail(path: Path) -> bool:
+    """Return ``True`` iff *path* ends in an unterminated (torn) final line — O(1).
+
+    The same predicate :func:`_read_tail_entry` computes inline (the file does
+    not end in ``"\\n"``): an unterminated final line is an interrupted append
+    (DEC-AUDIT-TORN-TAIL-001). An empty file has no lines, so it is never torn.
+    One ``seek`` + a single-byte read — never the whole log.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size == 0:
+            return False
+        f.seek(size - 1)
+        return f.read(1) != b"\n"
+
+
+def _read_entries_with_torn_tail(path: Path) -> tuple[list[SweepAuditEntry], bool]:
+    """Read every entry from *path*, tolerating a single torn final line.
+
+    Returns the parsed entries plus a flag that is ``True`` when the file's
+    LAST line was a **torn tail** — an interrupted append left behind by a
+    crash / ``SIGKILL`` mid-write (DEC-AUDIT-TORN-TAIL-001). Re-expressed over
+    the streaming :func:`iter_entries` + the O(1) :func:`_has_torn_tail`
+    predicate (DEC-SWEEP-SCALE-OPERABILITY-001) — the discriminator lives in ONE
+    place (CLAUDE.md §11 COMMON); the list materialisation here is this
+    variant's deliberate contract.
 
     This is the deliberate STANDALONE twin of
     :func:`brutex.orchestrator.audit._read_entries_with_torn_tail` (that chain
@@ -475,40 +550,8 @@ def _read_entries_with_torn_tail(path: Path) -> tuple[list[SweepAuditEntry], boo
         If the file is missing, or any committed (newline-terminated) line is
         malformed / missing required fields.
     """
-    if not path.exists():
-        raise SweepAuditError(f"Sweep audit log not found: {path}")
-    entries: list[SweepAuditEntry] = []
-    torn_tail = False
-    with open(path, encoding="utf-8") as f:
-        for line_no, raw in enumerate(f, start=1):
-            terminated = raw.endswith("\n")
-            line = raw.rstrip("\n")
-            if not terminated:
-                # Unterminated final line == interrupted append == torn tail.
-                # Skip it (committed or not, it is uncommitted) and flag the
-                # tail so the resume path truncates it.
-                torn_tail = True
-                continue
-            if not line:
-                # A blank committed (newline-terminated) line is benign filler.
-                continue
-            try:
-                entries.append(SweepAuditEntry.from_json_line(line))
-            except SweepAuditError as exc:
-                raise SweepAuditError(f"{path}:{line_no}: {exc}") from exc
-    return entries, torn_tail
-
-
-def _read_entries(path: Path) -> list[SweepAuditEntry]:
-    """Read every entry from *path* without verifying the chain.
-
-    A torn final line (an interrupted append left by a crash mid-write) is
-    tolerated and skipped (DEC-AUDIT-TORN-TAIL-001); real corruption of a
-    committed (newline-terminated) line still raises :class:`SweepAuditError`.
-    See :func:`_read_entries_with_torn_tail` for the full discriminator.
-    """
-    entries, _torn_tail = _read_entries_with_torn_tail(path)
-    return entries
+    entries = list(iter_entries(path))
+    return entries, _has_torn_tail(path)
 
 
 #: Reverse-read chunk size (bytes) for :func:`_read_tail_entry` +
@@ -706,17 +749,38 @@ def _truncate_torn_tail(path: Path) -> None:
         ) from exc
 
 
+def _read_entries(path: Path) -> list[SweepAuditEntry]:
+    """Materialise every entry from *path* without verifying the chain.
+
+    A thin ``list(...)`` over the streaming :func:`iter_entries`
+    (DEC-SWEEP-SCALE-OPERABILITY-001) — deliberately O(N) memory for the list
+    contract. A torn final line is tolerated and skipped
+    (DEC-AUDIT-TORN-TAIL-001); real corruption of a committed
+    (newline-terminated) line still raises :class:`SweepAuditError`.
+    """
+    return list(iter_entries(path))
+
+
 def read_entries(path: Path) -> list[SweepAuditEntry]:
     """Return all entries in *path* WITHOUT verifying the chain.
 
-    Use for a quick tail / dashboard view; use :func:`verify_chain` when you
-    need the integrity guarantee.
+    A list materialisation kept for the quick tail / dashboard view's list
+    contract — deliberately O(N) memory (the O(1)-memory streaming primitive
+    is :func:`iter_entries`). Use :func:`verify_chain` when you need the
+    integrity guarantee.
     """
     return _read_entries(path)
 
 
 def verify_chain(path: Path) -> int:
-    """Read *path* and verify the BLAKE3 hash chain end-to-end.
+    """Stream *path* and verify the BLAKE3 hash chain end-to-end — O(1) memory.
+
+    Iterates :func:`iter_entries` one entry at a time
+    (DEC-SWEEP-SCALE-OPERABILITY-001), carrying only the previous ``entry_hash`` +
+    the running count — a multi-GB sweep log verifies without materialising
+    the whole chain into memory (the prior implementation built the full entry
+    list first). The three per-entry checks are unchanged: seq ordering,
+    ``prev_hash`` linkage, recomputed ``entry_hash``.
 
     Returns the number of entries verified. ``0`` means the file exists but is
     empty (trivially valid).
@@ -728,10 +792,10 @@ def verify_chain(path: Path) -> int:
     SweepAuditChainCorruption
         On the first integrity break, carrying the offending ``seq``.
     """
-    entries = _read_entries(path)
     prev_hash = GENESIS_PREV_HASH
+    verified = 0
 
-    for expected_seq, entry in enumerate(entries):
+    for expected_seq, entry in enumerate(iter_entries(path)):
         if entry.seq != expected_seq:
             raise SweepAuditChainCorruption(
                 seq=entry.seq,
@@ -755,8 +819,9 @@ def verify_chain(path: Path) -> int:
                 reason="entry_hash does not match recomputed hash (content tampered)",
             )
         prev_hash = entry.entry_hash
+        verified += 1
 
-    return len(entries)
+    return verified
 
 
 __all__ = [
@@ -768,6 +833,7 @@ __all__ = [
     "SweepAuditError",
     "SweepAuditWriteError",
     "SweepAuditWriter",
+    "iter_entries",
     "read_entries",
     "verify_chain",
 ]

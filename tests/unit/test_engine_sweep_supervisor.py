@@ -6,7 +6,9 @@ Covers every public symbol + every branch for the strict 100% line + branch gate
 * **unit** — :func:`grid_identity`, :func:`tuple_cache_key`, :func:`publish_progress`
   / :func:`read_progress` / :func:`idle_progress`, the ``_drive_watchdog`` loop
   (both branches), and every :func:`run_supervised_grid` path: run, no-bars skip,
-  cache skip, resume skip, abort, and the watchdog daemon thread.
+  cache skip, resume skip (incl. the BATCHED O(1) resume emission of
+  DEC-SWEEP-SCALE-OPERABILITY-001 — one summarising audit line + one progress publish
+  per resumed prefix), abort, and the watchdog daemon thread.
 * **integration** — a real end-to-end supervised grid (real bars, real
   ``ComboDedup``/``AuditWriter``/``ResultsStore``/``SweepCache``) persisting +
   audit-chaining + checkpointing + dedup-caching a tuple.
@@ -46,7 +48,12 @@ from brutex.engine.sweep_orchestrator import (
     make_store_for,
     tuple_store_path,
 )
-from brutex.engine.sweep_progress import STATE_DONE, STATE_ERROR, SweepProgress
+from brutex.engine.sweep_progress import (
+    STATE_DONE,
+    STATE_ERROR,
+    SweepProgress,
+    SweepProgressSnapshot,
+)
 from brutex.engine.sweep_run import ComboDedup, SweepComboError
 from brutex.engine.sweep_supervisor import (
     DEFAULT_WORKER_NAME,
@@ -450,6 +457,99 @@ class TestRunSupervisedGrid:
             assert summary.tuples_skipped_no_bars == 1
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_SKIPPED_RESUME" in actions
+
+    def test_resume_batches_prefix_into_one_audit_line(self, tmp_path: Path) -> None:
+        """A resume over N>1 completed tuples emits ONE summarising audit line.
+
+        O(1) resume emission (DEC-SWEEP-SCALE-OPERABILITY-001): on a 4-tuple grid
+        with indices 0-2 already checkpointed, the restart writes EXACTLY ONE
+        ``TUPLE_SKIPPED_RESUME`` line (the prior per-tuple emission wrote 3)
+        carrying ``resumed_count`` + the resume boundary, fires ONE progress
+        publish for the whole prefix, and the hash chain — with the summary as
+        an ordinary entry — still verifies end-to-end.
+        """
+        grid = _grid(instruments=["I0", "I1", "I2", "I3"])
+        snaps: list[SweepProgressSnapshot] = []
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            for idx in range(3):  # indices 0-2 completed on a prior life
+                guards.checkpoint.record(idx)
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                on_progress=snaps.append,
+            )
+            assert summary.skipped_resume == 3
+            assert summary.tuples_skipped_no_bars == 1  # index 3 (no bars)
+            # Progress advanced by the FULL prefix + the one no-bars tuple.
+            snap = guards.progress.snapshot()
+            assert snap.evaluated == 4
+            assert snap.skipped == 4
+        entries = read_entries(tmp_path / "sup.jsonl")
+        actions = [e.action for e in entries]
+        # EXACTLY ONE summarising resume line — the O(1) emission proof.
+        assert actions == [
+            "SUPERVISOR_START",
+            "TUPLE_SKIPPED_RESUME",
+            "TUPLE_NO_BARS",
+            "SUPERVISOR_COMPLETE",
+        ]
+        resume = next(e for e in entries if e.action == "TUPLE_SKIPPED_RESUME")
+        # The payload reconstructs the skipped set exactly: enumeration indices
+        # [0, resumed_count) below the resume boundary (Golden Rule #7).
+        assert resume.payload == {"resumed_count": 3, "resume_from": 3}
+        # The resumed run's chain verifies end-to-end (Golden Rule #8).
+        assert verify_chain(tmp_path / "sup.jsonl") == 4
+        # ONE batched progress publish for the whole prefix (the first snapshot
+        # already carries all 3 resumed tuples), then one per real tuple + the
+        # finish publish — O(1) fires for the prefix, not O(resumed).
+        assert len(snaps) == 3
+        assert snaps[0].evaluated == 3
+        assert snaps[0].skipped == 3
+
+    def test_fully_resumed_rerun_emits_single_summary_line(self, tmp_path: Path) -> None:
+        """An idempotent re-run over an N-tuple complete grid is O(1) in audit lines.
+
+        The resume_count == total edge: the second run's ENTIRE grid is the
+        resumed prefix — one summary line, zero per-tuple emission, and the
+        shared audit file still verifies across both runs.
+        """
+        grid = _grid(instruments=["I0", "I1", "I2"])
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            first = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+            second = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        assert first.tuples_skipped_no_bars == 3
+        assert first.skipped_resume == 0
+        assert second.skipped_resume == 3
+        assert second.tuples_skipped_no_bars == 0
+        actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
+        # Run 1: START + 3×NO_BARS + COMPLETE; run 2: START + ONE summarising
+        # RESUME + COMPLETE — never one line per resumed tuple.
+        assert actions.count("TUPLE_SKIPPED_RESUME") == 1
+        assert verify_chain(tmp_path / "sup.jsonl") == len(actions) == 8
 
     def test_idempotent_rerun_does_no_work(self, tmp_path: Path) -> None:
         """A second run over the same guards resumes past the only tuple (no rework)."""

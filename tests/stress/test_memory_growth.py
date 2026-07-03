@@ -100,8 +100,12 @@ Honest envelope — what this module does NOT prove
   the store's contract, NOT real BLAKE3 combo hashes (Golden Rule #1).
 * The LMDB-backed ``DailyQuotaTracker`` — excluded via the documented
   ``quota_tracker=None`` bucket-only test mode; production wires one.
-* O(rows) paths: ``ResultsStore.flush()``/``load()``, ``verify_chain`` /
-  ``read_entries``, ``AuditWriter.open(resume=True)`` whole-file replay.
+* O(rows) paths: ``ResultsStore.flush()``/``load()``, the orchestrator
+  ``verify_chain`` and both modules' ``read_entries`` (the list contract),
+  ``AuditWriter.open(resume=True)`` whole-file replay. (The sweep-side twin
+  ``brutex.engine.sweep_audit.verify_chain`` now STREAMS at O(1) RAM —
+  DEC-SWEEP-SCALE-OPERABILITY-001, proven by its unit-level comparative
+  tracemalloc oracle — the orchestrator twin remains O(rows).)
 * fd lifecycle across ``AuditWriter`` reopen/close cycles (one writer held
   open here); chain INTEGRITY at scale (that is
   ``test_audit_chain_sustained.py``'s invariant).

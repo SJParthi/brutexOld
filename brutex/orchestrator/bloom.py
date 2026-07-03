@@ -225,6 +225,13 @@ class BloomCapacityExceeded(BruteXError):
     to (a) record this as a ``BLOOM_CAPACITY_EXCEEDED`` audit entry,
     (b) raise a Telegram alert, (c) halt the affected phase.
 
+    The limit is the constructor's ``capacity`` — an OPERATOR knob, not a
+    hard wall (only :data:`MAX_BLOOM_BYTES` is). For the sweep dedup cache
+    it is tunable via
+    :meth:`brutex.engine.sweep_cache.SweepCache.open`'s ``bloom_capacity``
+    (the ``--sweep-cache-bloom-capacity`` flag /
+    ``BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY`` env var, R2-SL-F4-F5).
+
     Reset path: future PR will add a CLI command that drops the filter
     and rebuilds it from the LMDB ground-truth via
     :meth:`WorkItemStore.iter_phase`.
@@ -368,7 +375,9 @@ class BloomFilter:
                     f"BloomFilter capacity {self.capacity:_} reached "
                     f"(insertions_attempted={self._insertions_attempted:_}). "
                     f"Operator must reset + rebuild or escalate "
-                    f"to a larger capacity.",
+                    f"to a larger capacity (for the sweep dedup cache: "
+                    f"--sweep-cache-bloom-capacity or "
+                    f"BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY).",
                 )
             self._impl.add_bytes(content_hash)
             self._insertions_attempted += 1
