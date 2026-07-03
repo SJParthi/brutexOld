@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -311,3 +311,267 @@ class TestOpenCatalogContextManager:
         # raises the closed-guard error.
         with pytest.raises(CatalogError, match="closed"):
             captured.count()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Real-lake happy paths — get_bars / data_snapshot_hash / closed guards
+# (DEC-LAKE-READ-UNIQUE-001: the per-touched-file coverage gate maps
+# catalog.py to THIS stem suite, so the happy paths formerly exercised only
+# by test_data_lake_real.py are covered here too — self-sufficient at 100%.)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _write_month_partition(
+    lake_root: Path,
+    *,
+    entry: CatalogEntry,
+    closes: list[float],
+    duplicate_first_minute: bool = False,
+) -> None:
+    """Write the entry's month Parquet directly (polars — bypasses the writer).
+
+    One 1-minute bar per element of *closes*, starting at the entry's
+    ``first_ts``. With ``duplicate_first_minute`` a CONFLICTING duplicate of
+    the first instant is appended LAST (a poisoned-era partition — the fixed
+    writer refuses to store one, so the poison is planted raw).
+    """
+    import polars as pl
+    from brutex.data.partition import build_partition_path
+
+    stamps = [entry.first_ts + timedelta(minutes=i) for i in range(len(closes))]
+    prices = list(closes)
+    if duplicate_first_minute:
+        stamps.append(entry.first_ts)
+        prices.append(999_999.0)
+    dest = build_partition_path(
+        lake_root=lake_root,
+        exchange=entry.exchange,
+        segment=entry.segment,
+        symbol=entry.symbol,
+        interval=entry.interval,
+        year=entry.year,
+        month=entry.month,
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "timestamp": stamps,
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [10] * len(prices),
+            "open_interest": [None] * len(prices),
+        }
+    ).with_columns(pl.col("open_interest").cast(pl.Int64)).write_parquet(dest)
+
+
+class TestGetBarsRealLake:
+    """``get_bars`` over a real Parquet lake — happy path + the read dedup gate."""
+
+    def test_happy_path_returns_sorted_window(self, tmp_path: Path) -> None:
+        entry = _entry(month=1, year=2024)
+        _write_month_partition(tmp_path, entry=entry, closes=[100.0, 101.0, 102.0])
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            cat.upsert(entry)
+            table = cat.get_bars(
+                lake_root=tmp_path,
+                exchange=entry.exchange,
+                segment=entry.segment,
+                symbol=entry.symbol,
+                interval=entry.interval,
+                start=entry.first_ts,
+                end=entry.first_ts + timedelta(minutes=1),
+            )
+        # Window-filtered (2 of 3 bars), ascending, canonical columns.
+        assert table.column("close").to_pylist() == [100.0, 101.0]
+        timestamps = table.column("timestamp").to_pylist()
+        assert timestamps == sorted(timestamps)
+
+    def test_poisoned_partition_collapses_keep_first(self, tmp_path: Path) -> None:
+        """DEC-LAKE-READ-UNIQUE-001: the read gate drops the 999999 re-statement."""
+        entry = _entry(month=1, year=2024)
+        _write_month_partition(
+            tmp_path, entry=entry, closes=[100.0, 101.0], duplicate_first_minute=True
+        )
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            cat.upsert(entry)
+            table = cat.get_bars(
+                lake_root=tmp_path,
+                exchange=entry.exchange,
+                segment=entry.segment,
+                symbol=entry.symbol,
+                interval=entry.interval,
+                start=entry.first_ts,
+                end=entry.first_ts + timedelta(minutes=5),
+            )
+        assert table.column("close").to_pylist() == [100.0, 101.0]  # keep-FIRST won
+
+    def test_no_matching_partition_returns_canonical_empty_table(self, tmp_path: Path) -> None:
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            table = cat.get_bars(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 2, tzinfo=UTC),
+            )
+        assert table.num_rows == 0
+        assert table.column_names == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "open_interest",
+        ]
+
+    def test_missing_partition_file_raises(self, tmp_path: Path) -> None:
+        entry = _entry(month=1, year=2024)  # catalog row, but NO Parquet on disk
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            cat.upsert(entry)
+            with pytest.raises(CatalogError, match="missing partition file"):
+                cat.get_bars(
+                    lake_root=tmp_path,
+                    exchange=entry.exchange,
+                    segment=entry.segment,
+                    symbol=entry.symbol,
+                    interval=entry.interval,
+                    start=entry.first_ts,
+                    end=entry.last_ts,
+                )
+
+    def test_naive_bounds_rejected(self, tmp_path: Path) -> None:
+        with (
+            Catalog.open(tmp_path / "catalog.duckdb") as cat,
+            pytest.raises(CatalogError, match="timezone-aware"),
+        ):
+            cat.get_bars(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 1),  # naive
+                end=datetime(2024, 1, 2, tzinfo=UTC),
+            )
+
+    def test_inverted_window_rejected(self, tmp_path: Path) -> None:
+        with (
+            Catalog.open(tmp_path / "catalog.duckdb") as cat,
+            pytest.raises(CatalogError, match=">="),
+        ):
+            cat.get_bars(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 2, tzinfo=UTC),
+                end=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+
+
+class TestDataSnapshotHashRealRollup:
+    """``data_snapshot_hash`` over real rows — deterministic sha256 rollup."""
+
+    def test_rollup_matches_manual_sha256(self, tmp_path: Path) -> None:
+        e1 = _entry(symbol="NSE-NIFTY", month=1)
+        e2 = _entry(symbol="NSE-BANKNIFTY", month=1)
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            cat.upsert(e1)
+            cat.upsert(e2)
+            digest = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NSE-NIFTY", "NSE-BANKNIFTY", "NSE-NIFTY"],  # dupes de-duped
+                interval="1minute",
+                start=e1.first_ts,
+                end=e1.last_ts,
+            )
+        # Canonical order = sorted symbols → BANKNIFTY then NIFTY.
+        expected = hashlib.sha256((e2.raw_hash + e1.raw_hash).encode("ascii")).hexdigest()
+        assert digest == expected
+
+    def test_empty_slice_is_sha256_of_empty_string(self, tmp_path: Path) -> None:
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            digest = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=[],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 2, tzinfo=UTC),
+            )
+        assert digest == hashlib.sha256(b"").hexdigest()
+
+
+class TestClosedGuardsAndIdempotentClose:
+    """The remaining closed-catalog guards + double-close idempotence."""
+
+    def test_upsert_on_closed_catalog_raises(self, tmp_path: Path) -> None:
+        cat = Catalog.open(tmp_path / "catalog.duckdb")
+        cat.close()
+        with pytest.raises(CatalogError, match="closed"):
+            cat.upsert(_entry())
+
+    def test_get_on_closed_catalog_raises(self, tmp_path: Path) -> None:
+        cat = Catalog.open(tmp_path / "catalog.duckdb")
+        cat.close()
+        with pytest.raises(CatalogError, match="closed"):
+            cat.get(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+
+    def test_get_roundtrip_found_and_absent(self, tmp_path: Path) -> None:
+        entry = _entry(month=2)
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            cat.upsert(entry)
+            found = cat.get(
+                exchange=entry.exchange,
+                segment=entry.segment,
+                symbol=entry.symbol,
+                interval=entry.interval,
+                year=entry.year,
+                month=entry.month,
+            )
+            absent = cat.get(
+                exchange=entry.exchange,
+                segment=entry.segment,
+                symbol=entry.symbol,
+                interval=entry.interval,
+                year=entry.year,
+                month=12,
+            )
+        assert found is not None
+        assert found.raw_hash == entry.raw_hash
+        assert absent is None
+
+    def test_close_twice_is_idempotent(self, tmp_path: Path) -> None:
+        cat = Catalog.open(tmp_path / "catalog.duckdb")
+        cat.close()
+        cat.close()  # the early-return branch — no raise, still closed
+        with pytest.raises(CatalogError, match="closed"):
+            cat.count()
+
+    def test_snapshot_hash_naive_bounds_rejected(self, tmp_path: Path) -> None:
+        with (
+            Catalog.open(tmp_path / "catalog.duckdb") as cat,
+            pytest.raises(CatalogError, match="timezone-aware"),
+        ):
+            cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NSE-NIFTY"],
+                interval="1minute",
+                start=datetime(2024, 1, 1),  # naive
+                end=datetime(2024, 1, 2, tzinfo=UTC),
+            )
