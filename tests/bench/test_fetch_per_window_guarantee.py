@@ -62,7 +62,7 @@ not a claim about vendor health.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.groww.chunks import plan_candle_windows
@@ -76,6 +76,7 @@ from brutex.adapters.groww.strike_chain_bound import (
     build_empty_retry_budget,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.calendars.nse import is_trading_day
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
 
@@ -216,9 +217,14 @@ def _chunks_for(window: tuple[date, date]) -> int:
 class _CountingSDK:
     """A ``GrowwSDK``-shaped fake that COUNTS fetches; liquid symbols return a bar, dead empty.
 
-    Each liquid chunk fetch returns ONE bar stamped at ITS OWN chunk's start day (09:30 IST,
-    inside the session filter), so a multi-chunk liquid window stores one DISTINCT bar per
-    chunk — making the no-data-lost assertion exact under production-shaped chunk tiling.
+    Each liquid chunk fetch returns ONE bar stamped 09:30 IST on the FIRST NSE trading day
+    on/after its chunk's start (the calendar-aware ingest-boundary session filter,
+    DEC-INGEST-BOUNDARY-INTEGRITY-001, keeps it — a raw chunk-start day can be a weekend /
+    holiday, e.g. the FUT window's ``expiry − 60d`` = Sunday 2024-12-01, and would be
+    honestly dropped as ``non_trading_date``). Chunks tile ~30 days apart while the
+    trading-day walk advances at most a few days, so a multi-chunk liquid window still
+    stores one DISTINCT bar per chunk — keeping the no-data-lost assertion exact under
+    production-shaped chunk tiling.
     """
 
     def __init__(self, liquid: frozenset[str]) -> None:
@@ -229,11 +235,13 @@ class _CountingSDK:
         self.fetches += 1
         symbol = str(kw["groww_symbol"])
         if symbol in self._liquid:
-            chunk_day = str(kw["start_time"])[:10]
+            bar_day = date.fromisoformat(str(kw["start_time"])[:10])
+            while not is_trading_day(bar_day):
+                bar_day += timedelta(days=1)
             return {
                 "candles": [
                     [
-                        f"{chunk_day}T09:30:00",
+                        f"{bar_day.isoformat()}T09:30:00",
                         100.0,
                         101.0,
                         99.0,
