@@ -70,6 +70,14 @@ DEFAULT_BLOOM_FPR: Final[float] = 1e-7
 #: Default LMDB memory-map ceiling (MiB) for the exact store.
 DEFAULT_MAP_SIZE_MB: Final[int] = 2 * 1024
 
+#: Environment variable overriding the L1 Bloom capacity (distinct-digest
+#: count) for the sweep dedup cache. Resolution order: explicit
+#: ``bloom_capacity`` argument > this env var > :data:`DEFAULT_BLOOM_CAPACITY`
+#: (see :func:`resolve_sweep_cache_bloom_capacity`). The paired CLI flag is
+#: ``--sweep-cache-bloom-capacity`` — the remedy for the FAIL_CLOSED
+#: >capacity resume refusal (:class:`SweepCacheCapacityError`).
+SWEEP_CACHE_BLOOM_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY"
+
 #: Sub-directory under the cache root holding the LMDB exact-membership env.
 _EXACT_SUBDIR: Final[str] = "exact"
 
@@ -86,10 +94,96 @@ class SweepCacheCapacityError(SweepCacheError):
     digests than the configured ``bloom_capacity`` — repopulating the Bloom would
     overflow its FAIL_CLOSED capacity gate mid-rebuild
     (:class:`brutex.orchestrator.bloom.BloomCapacityExceeded`). FAIL_CLOSED, never
-    silent: the operator must re-open with a larger ``bloom_capacity`` so the
+    silent: the operator must re-open with a larger ``bloom_capacity`` — the
+    ``--sweep-cache-bloom-capacity`` flag or the
+    :data:`SWEEP_CACHE_BLOOM_CAPACITY_ENV` environment variable — so the
     resume's Bloom faithfully reflects every persisted digest (Golden Rule #5 —
     no silent FPR drift).
     """
+
+
+def resolve_sweep_cache_map_mb(
+    explicit: int | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    """Resolve the SweepCache LMDB map ceiling (MiB) — an operator knob.
+
+    Resolution order: *explicit* argument (e.g. the ``--sweep-cache-map-mb``
+    CLI flag) > the ``BRUTEX_SWEEP_CACHE_MAP_MB`` environment variable
+    (:data:`brutex.data.lmdb_membership.SWEEP_CACHE_MAP_MB_ENV`, the ONE
+    shared knob name) > :data:`DEFAULT_MAP_SIZE_MB`. Delegates the parse /
+    validation to the COMMON
+    :func:`brutex.data.lmdb_membership.resolve_positive_int_env` (Rule 11
+    COMMON — one resolver, engine imports from data).
+
+    Parameters
+    ----------
+    explicit
+        The explicit operator value, or ``None`` to consult the environment.
+    env
+        Environment mapping (defaults to :data:`os.environ`) — injectable for
+        tests.
+
+    Returns
+    -------
+    int
+        The resolved map ceiling in MiB (this module's
+        :data:`DEFAULT_MAP_SIZE_MB` when no knob is set).
+
+    Raises
+    ------
+    ValueError
+        If the explicit value or the env-var value is not a positive integer
+        (loud, naming the env var — never a silent fallback).
+    """
+    # Imported lazily: lmdb_membership pulls the runtime-only ``lmdb`` wheel;
+    # this module must stay importable without it (see :meth:`SweepCache.open`).
+    from brutex.data.lmdb_membership import SWEEP_CACHE_MAP_MB_ENV, resolve_positive_int_env
+
+    resolved = resolve_positive_int_env(SWEEP_CACHE_MAP_MB_ENV, explicit, env=env)
+    return DEFAULT_MAP_SIZE_MB if resolved is None else resolved
+
+
+def resolve_sweep_cache_bloom_capacity(
+    explicit: int | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    """Resolve the SweepCache L1 Bloom capacity — an operator knob.
+
+    Resolution order: *explicit* argument (e.g. the
+    ``--sweep-cache-bloom-capacity`` CLI flag) >
+    :data:`SWEEP_CACHE_BLOOM_CAPACITY_ENV` > :data:`DEFAULT_BLOOM_CAPACITY`.
+    The actionable remedy for the FAIL_CLOSED >capacity resume refusal
+    (:class:`SweepCacheCapacityError`).
+
+    Parameters
+    ----------
+    explicit
+        The explicit operator value, or ``None`` to consult the environment.
+    env
+        Environment mapping (defaults to :data:`os.environ`) — injectable for
+        tests.
+
+    Returns
+    -------
+    int
+        The resolved Bloom capacity (:data:`DEFAULT_BLOOM_CAPACITY` when no
+        knob is set).
+
+    Raises
+    ------
+    ValueError
+        If the explicit value or the env-var value is not a positive integer
+        (loud, naming the env var — never a silent fallback).
+    """
+    # Imported lazily — same runtime-only-wheel rationale as
+    # :func:`resolve_sweep_cache_map_mb` (the COMMON resolver lives in data/).
+    from brutex.data.lmdb_membership import resolve_positive_int_env
+
+    resolved = resolve_positive_int_env(SWEEP_CACHE_BLOOM_CAPACITY_ENV, explicit, env=env)
+    return DEFAULT_BLOOM_CAPACITY if resolved is None else resolved
 
 
 def combo_digest(
@@ -204,9 +298,9 @@ class SweepCache:
         cls,
         path: Path,
         *,
-        bloom_capacity: int = DEFAULT_BLOOM_CAPACITY,
+        bloom_capacity: int | None = None,
         bloom_fpr: float = DEFAULT_BLOOM_FPR,
-        map_size_mb: int = DEFAULT_MAP_SIZE_MB,
+        map_size_mb: int | None = None,
     ) -> SweepCache:
         """Open (creating if absent) a sweep dedup cache rooted at *path*.
 
@@ -224,19 +318,31 @@ class SweepCache:
         ----------
         path
             Cache root directory (created with parents).
-        bloom_capacity, bloom_fpr
-            L1 sizing (see :data:`DEFAULT_BLOOM_CAPACITY` /
-            :data:`DEFAULT_BLOOM_FPR`).
+        bloom_capacity
+            L1 Bloom capacity — an operator knob (R2-SL-F4-F5): explicit value
+            > :data:`SWEEP_CACHE_BLOOM_CAPACITY_ENV` >
+            :data:`DEFAULT_BLOOM_CAPACITY`
+            (:func:`resolve_sweep_cache_bloom_capacity`).
+        bloom_fpr
+            L1 false-positive-rate target (see :data:`DEFAULT_BLOOM_FPR`).
         map_size_mb
-            L2 LMDB memory-map ceiling in MiB.
+            L2 LMDB memory-map ceiling in MiB — an operator knob: explicit
+            value > ``BRUTEX_SWEEP_CACHE_MAP_MB`` > :data:`DEFAULT_MAP_SIZE_MB`
+            (:func:`resolve_sweep_cache_map_mb`).
 
         Raises
         ------
         SweepCacheCapacityError
             If the persisted exact store already holds more digests than
-            ``bloom_capacity`` — repopulating would overflow the Bloom's
-            FAIL_CLOSED capacity gate. FAIL_CLOSED: the operator must re-open
-            with a larger ``bloom_capacity`` (Golden Rule #5, no silent FPR drift).
+            the resolved ``bloom_capacity`` — repopulating would overflow the
+            Bloom's FAIL_CLOSED capacity gate. FAIL_CLOSED: the operator must
+            re-open with a larger ``bloom_capacity``
+            (``--sweep-cache-bloom-capacity`` /
+            :data:`SWEEP_CACHE_BLOOM_CAPACITY_ENV`; Golden Rule #5, no silent
+            FPR drift). The just-opened exact store is closed before the raise
+            so the refused open leaks no LMDB environment.
+        ValueError
+            If either knob (explicit or env) is not a positive integer.
         """
         # Imported lazily: both pull runtime-only deps (fastbloom_rs / lmdb) and
         # keep this module importable (for the per-module coverage gate) without
@@ -244,10 +350,18 @@ class SweepCache:
         from brutex.data.lmdb_membership import LmdbMembership
         from brutex.orchestrator.bloom import BloomFilter
 
+        resolved_capacity = resolve_sweep_cache_bloom_capacity(bloom_capacity)
+        resolved_map_mb = resolve_sweep_cache_map_mb(map_size_mb)
         path.mkdir(parents=True, exist_ok=True)
-        bloom = BloomFilter(capacity=bloom_capacity, fpr_target=bloom_fpr)
-        exact = LmdbMembership.open(path / _EXACT_SUBDIR, map_size_mb=map_size_mb)
-        cls._rebuild_bloom_from_exact(bloom, exact, bloom_capacity=bloom_capacity)
+        bloom = BloomFilter(capacity=resolved_capacity, fpr_target=bloom_fpr)
+        exact = LmdbMembership.open(path / _EXACT_SUBDIR, map_size_mb=resolved_map_mb)
+        try:
+            cls._rebuild_bloom_from_exact(bloom, exact, bloom_capacity=resolved_capacity)
+        except SweepCacheCapacityError:
+            # Never leak the LMDB env on a refused open — the operator's very
+            # next action is re-opening the SAME path with a larger capacity.
+            exact.close()
+            raise
         return cls(bloom=bloom, exact=exact)
 
     @staticmethod
@@ -275,8 +389,9 @@ class SweepCache:
             raise SweepCacheCapacityError(
                 f"resume: persisted exact-store holds {persisted:_} digests but "
                 f"bloom_capacity is {bloom_capacity:_} — re-open with a larger "
-                f"bloom_capacity so the Bloom can faithfully reflect every "
-                f"recorded combo (FAIL_CLOSED, Golden Rule #5)."
+                f"bloom_capacity (raise --sweep-cache-bloom-capacity or "
+                f"{SWEEP_CACHE_BLOOM_CAPACITY_ENV}) so the Bloom can faithfully "
+                f"reflect every recorded combo (FAIL_CLOSED, Golden Rule #5)."
             )
         for digest in exact.iter_keys():
             bloom.add(digest)
@@ -345,23 +460,35 @@ class SweepCache:
         the Bloom, so duplicate inserts never erode the FPR — CLAUDE.md §2
         Rule 7).
 
-        The exact-store probe, the Bloom insert, and the exact-store insert are
+        **Durability ordering — exact-first (R2-SL-F4-F5).** The durable L2
+        ground truth is written BEFORE the approximate L1 accelerator: a
+        write fault during ``exact.add`` (e.g. a map-full
+        :class:`~brutex.data.lmdb_membership.LmdbMapFullError`) propagates
+        with the Bloom UNTOUCHED, so no phantom Bloom entry can outlive the
+        failure. The idempotence guard stays honest — a retry after growing
+        the map re-records cleanly (no double-count against the FAIL_CLOSED
+        Bloom capacity, no false-positive skip of a never-persisted combo).
+        The Bloom has no delete, so the reverse order could never be rolled
+        back. (The Bloom-first sibling
+        :meth:`brutex.data.option_dedup.OptionDedupIndex._add_locked` still
+        carries the old ordering — a flagged Rule-11 COMMON follow-up, not
+        changed here.)
+
+        The exact-store probe, the exact-store insert, and the Bloom insert are
         ONE critical section held under ``self._lock``, so two concurrent workers
         recording the SAME new digest can never both pass the probe and both
         insert — the digest is admitted to the Bloom EXACTLY once (no
         double-count against the FAIL_CLOSED Bloom capacity, no double-evaluation
-        of the tuple). Mirrors
-        :meth:`brutex.data.option_dedup.OptionDedupIndex.add_if_new`. The LMDB
-        get/put are O(1) and I/O-free at the Python layer, so the hold time is
-        O(1).
+        of the tuple). The LMDB get/put are O(1) and I/O-free at the Python
+        layer, so the hold time is O(1).
         """
         self._require_open()
         with self._lock:
             if digest in self._exact:
                 return False
+            self._exact.add(digest)
             self._bloom.add(digest)
             self._records += 1
-            self._exact.add(digest)
             return True
 
     # ── Combo-keyed convenience ────────────────────────────────────────────
@@ -413,8 +540,11 @@ __all__ = [
     "DEFAULT_BLOOM_CAPACITY",
     "DEFAULT_BLOOM_FPR",
     "DEFAULT_MAP_SIZE_MB",
+    "SWEEP_CACHE_BLOOM_CAPACITY_ENV",
     "SweepCache",
     "SweepCacheCapacityError",
     "SweepCacheError",
     "combo_digest",
+    "resolve_sweep_cache_bloom_capacity",
+    "resolve_sweep_cache_map_mb",
 ]
