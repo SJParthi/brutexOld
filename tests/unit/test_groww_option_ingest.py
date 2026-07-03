@@ -2242,10 +2242,27 @@ class TestSuspiciousEmptyFlag:
         pairs = {k: _ireport(windows=1, bars=10) for k in pairs}
         assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
 
-    def test_below_threshold_not_flagged(self) -> None:
-        # Only 2 empty contracts (< _ALL_EMPTY_MIN_CONTRACTS) → not suspicious.
+    def test_low_leg_two_clean_empty_flags(self) -> None:
+        # REWRITTEN by DEC-SILENT-VANISH-LOWLEG-001 (was ``test_below_threshold_not_flagged``,
+        # which pinned the 1-2-leg gap as intended): a PURE 2-leg all-clean-empty chain —
+        # no skip / transient / clamp / quarantine sibling — NOW flags, marked low_leg.
         contracts, pairs = _empty_chain("WIPRO", 2)
-        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+        scan = scan_underlying_all_empty(pairs, contracts)
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="WIPRO", attempted_pairs=2, stored_bars=0, low_leg=True
+            ),
+        )
+
+    def test_low_leg_one_clean_empty_flags(self) -> None:
+        # The 1-leg illiquid twin: a single clean-empty leg with NO disqualifying sibling flags.
+        contracts, pairs = _empty_chain("JIOFIN", 1)
+        scan = scan_underlying_all_empty(pairs, contracts)
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="JIOFIN", attempted_pairs=1, stored_bars=0, low_leg=True
+            ),
+        )
 
     def test_skip_only_not_flagged(self) -> None:
         # All ledger-skips (skipped_windows=1) → 0 attempted → never-tried, not flagged.
@@ -2272,6 +2289,92 @@ class TestSuspiciousEmptyFlag:
         pairs = {("NSE-GHOST-99-FUT", "1day"): _ireport(windows=1, bars=0)}
         assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
 
+    # ── DEC-SILENT-VANISH-LOWLEG-001: every excluded false-positive shape regression-pinned.
+    # The low-leg Tier B rule must NOT reintroduce the shapes the #919 guards exclude —
+    # each disqualifying sibling shape is pinned individually.
+
+    def test_low_leg_skip_sibling_not_flagged(self) -> None:
+        # RE-PULL shape: 1 clean-empty + 1 ledger-skipped sibling → NOT flagged (an
+        # already-settled sibling means this is not a fresh whole-chain vendor answer).
+        contracts, _ = _empty_chain("HDFC", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=1, skipped=1),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_transient_sibling_not_flagged(self) -> None:
+        # TRANSIENT-storm shape: 1 clean-empty + 1 still-failing sibling → NOT flagged.
+        contracts, _ = _empty_chain("SBIN", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=1, still_failed=1),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_empty_clamp_sibling_not_flagged(self) -> None:
+        # EMPTY-CLAMP shape: 1 clean-empty + 1 windows==0 no-op sibling → NOT flagged.
+        contracts, _ = _empty_chain("ITC", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=0),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_quarantined_sibling_not_flagged(self) -> None:
+        # QUARANTINE shape: 1 clean-empty + 1 terminally-quarantined sibling (never enters
+        # ``pairs``) → NOT flagged — "every attempted contract was a clean empty" is false.
+        contracts, _ = _empty_chain("TATASTEEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        scan = scan_underlying_all_empty(pairs, contracts, [contracts[1].symbol])
+        assert not scan.has_suspicious()
+
+    def test_low_leg_stored_bars_sibling_not_flagged(self) -> None:
+        # MIXED chain: 1 clean-empty + 1 clean-with-bars → stored > 0 → NOT flagged.
+        contracts, _ = _empty_chain("INFY", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=1, bars=11),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_unknown_failed_symbol_is_ignored(self) -> None:
+        # A quarantined symbol NOT in contract_list is defensively dropped (mirrors the
+        # unknown-pair drop) — it cannot disqualify an unrelated 1-leg clean-empty chain.
+        contracts, pairs = _empty_chain("RELIANCE", 1)
+        scan = scan_underlying_all_empty(pairs, contracts, ["NSE-GHOST-99-FUT"])
+        assert [r.underlying for r in scan.suspicious] == ["RELIANCE"]
+
+    def test_low_leg_never_planned_sibling_still_flags(self) -> None:
+        # HONEST-residual pin (docstring-documented, accepted): a NEVER-PLANNED sibling —
+        # a far-future contract skipped at planning time (fno.window_not_open,
+        # DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
+        # IngestReport pair, no failure) — is structurally INVISIBLE to Tier B, so a
+        # 1-clean-empty-near-leg + 1-not-yet-open-far-leg chain STILL flags low_leg=True.
+        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically);
+        # observe-only WARN noise, deliberately not mechanised away.
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        # contracts[1] was never planned: absent from pairs AND from failed_symbols.
+        scan = scan_underlying_all_empty(pairs, contracts, [])
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(underlying="BEL", attempted_pairs=1, stored_bars=0, low_leg=True),
+        )
+
+    def test_tier_a_ignores_nonclean_and_failed_siblings(self) -> None:
+        # The ≥3 Tier A rule must NOT become stricter: 3 clean empties + a skipped sibling
+        # + a quarantined sibling STILL flag (non-clean/failed siblings ignored, as shipped),
+        # and the report is NOT low_leg.
+        contracts = [_udl_fut(f"NSE-VEDL-{i:02d}-FUT", "VEDL") for i in range(5)]
+        pairs = {(c.symbol, "1day"): _ireport(windows=1, bars=0) for c in contracts[:3]}
+        pairs[contracts[3].symbol, "1day"] = _ireport(windows=1, skipped=1)
+        scan = scan_underlying_all_empty(pairs, contracts, [contracts[4].symbol])
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="VEDL", attempted_pairs=3, stored_bars=0, low_leg=False
+            ),
+        )
+
     def test_multi_underlying_only_empty_flagged(self) -> None:
         empty_c, empty_p = _empty_chain("M&M", 3)
         good_c, good_p = _empty_chain("TCS", 3)
@@ -2288,6 +2391,20 @@ class TestSuspiciousEmptyFlag:
         assert len(warns) == 1
         assert warns[0]["underlying"] == repr("M&M")
         assert warns[0]["attempted_pairs"] == 4 and warns[0]["stored_bars"] == 0
+        assert warns[0]["low_leg"] is False  # a Tier A whole-chain flag, not the low-leg tier
+
+    def test_emit_logs_low_leg_marker(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-001: a Tier B flag carries low_leg=True in the payload
+        # so triage can weigh a 1-leg warning lower than a whole-chain one.
+        contracts, pairs = _empty_chain("WIPRO", 1)
+        scan = scan_underlying_all_empty(pairs, contracts)
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(scan, pull_id="pid-1")
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("WIPRO")
+        assert warns[0]["attempted_pairs"] == 1
+        assert warns[0]["low_leg"] is True
 
     def test_emit_silent_when_clean(self) -> None:
         with capture_logs() as logs:
@@ -2326,6 +2443,49 @@ class TestSuspiciousEmptyFlag:
         assert report.bars_appended == 0
         warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
         assert len(warns) == 1 and warns[0]["underlying"] == repr("NIFTY")
+
+    def test_run_ingest_fires_low_leg_flag_end_to_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-001: a 1-leg chain whose only contract fetches
+        # cleanly-empty fires the WARNING through the sync driver, marked low_leg.
+        monkeypatch.setattr(_oi, "fetch_option_candles", lambda *a, **k: [])
+        with capture_logs() as logs:
+            report = run_groww_option_ingest(
+                _client(_FakeSDK(payload=_candles())),
+                _Sink(),
+                contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE")],
+                intervals=["1day"],
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                now_ist=_now,
+            )
+        assert report.bars_appended == 0
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("NIFTY")
+        assert warns[0]["low_leg"] is True
+
+    def test_run_ingest_quarantined_sibling_suppresses_low_leg_flag(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-001: the sync driver threads its quarantined failures
+        # into the scan — a 2-leg chain with 1 clean-empty + 1 terminally-quarantined leg
+        # must NOT flag (the quarantine never enters ``pairs``, so without the threading
+        # it would be indistinguishable from a genuine 1-leg all-clean-empty chain).
+        good = _ce("NSE-NIFTY-02Jan25-28500-CE")
+        bad = _ce("NSE-NIFTY-02Jan25-99999-PE")
+        sdk = _FakeSDK(payload=_EMPTY, raise_for={bad.symbol: GrowwAPIBadRequestException("nope")})
+        with capture_logs() as logs:
+            report = run_groww_option_ingest(
+                _client(sdk),
+                _Sink(),
+                contracts=[good, bad],
+                intervals=["1day"],
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                now_ist=_now,
+            )
+        assert report.failed_pairs == 1  # the quarantine happened
+        assert [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT] == []
 
     def test_run_ingest_skips_scan_in_async_pipeline_mode(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2487,6 +2647,7 @@ def _raw_window(
         raw_bars=bars,
         fetch_count=1,
         settle_empty=False,
+        old_window=False,
         attempt=0,
     )
 
@@ -2822,6 +2983,81 @@ def test_budget_reduced_empty_strike_remains_refetchable_next_pull() -> None:
     sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})  # now it has data
     _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
     assert sdk2.fetches[deep.symbol] == 1  # re-fetched on the next pull → data recovered
+
+
+def test_budget_reduced_dead_strike_settles_on_cumulative_cross_pull_count() -> None:
+    """REGRESSION (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) — a dead deep strike settles at pull 2.
+
+    FAILS BEFORE the fix: a reduced-budget (1 fetch/pull) old dead strike could never reach
+    ``CONFIRMED_EMPTY_MIN_FETCHES`` (2) inside one pull, so the old-gap fast-settle was
+    structurally unreachable and the strike re-fetched every pull until the slower 3-pull
+    streak promotion (an honest bounded 3-pull tax for an expired contract — and unbounded
+    only for the breaker-suppressed / key-reset shapes this fix deliberately does NOT
+    settle, data-safety first). PASSES AFTER: the ledger
+    accumulates the genuine clean-EMPTY confirmations ACROSS pulls (``prior.empty_streak +
+    in_pull_fetches``), so the second pull's clean empty settles it SKIPPED and the third
+    pull makes ZERO vendor calls for it.
+    """
+    from brutex.data.window_ledger import SKIPPED
+
+    deep = _opt(18000)
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id=deep.symbol,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 5),
+    )
+    ledger = WindowLedger()
+    # Pull 1 — ONE clean empty (reduced budget): NOT confirmation, stays re-fetchable.
+    sdk1 = _PerSymbolSDK()
+    _run_with_budget(sdk1, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert sdk1.fetches[deep.symbol] == 1
+    assert not ledger.is_skippable(key)
+    # Pull 2 — the SECOND independent clean empty crosses the SAME 2-confirmation bar.
+    sdk2 = _PerSymbolSDK()
+    _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert sdk2.fetches[deep.symbol] == 1
+    rec = ledger.records()[0]
+    assert rec.status == SKIPPED  # settled on the CUMULATIVE count, not the per-pull count
+    assert ledger.is_skippable(key)
+    # Pull 3 — ZERO vendor calls: the confirmed-dead strike no longer costs a fetch per pull.
+    sdk3 = _PerSymbolSDK()
+    _run_with_budget(sdk3, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert deep.symbol not in sdk3.fetches
+
+
+def test_budget_reduced_uncertain_window_stays_refetchable_and_data_wins() -> None:
+    """DATA-SAFETY law (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) — "if uncertain, fetch".
+
+    A window that could still have data is NEVER settled by the cumulative rule: a
+    transient-only pull (429 storm, no clean answer) advances NOTHING, the window stays
+    re-fetchable, and when data finally arrives it is stored — the prior clean-empty
+    evidence never masks it.
+    """
+    deep = _opt(18000)
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id=deep.symbol,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 5),
+    )
+    ledger = WindowLedger()
+    # Pull 1 — one clean empty (streak 1).
+    _run_with_budget(_PerSymbolSDK(), [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    # Pull 2 — an all-429 transient storm: NOT clean-empty evidence, never settles.
+    sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: GrowwAPIRateLimitException("429")})
+    _run_with_budget(
+        sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=1, ledger=ledger
+    )
+    assert not ledger.is_skippable(key)  # still re-fetchable — a 429 is not evidence
+    # Pull 3 — DATA arrives: stored, never masked by the accumulated empty evidence.
+    sdk3 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})
+    report = _run_with_budget(sdk3, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert report.bars_appended == 1
+    assert ledger.records()[0].status == "SUCCESS"
+    assert ledger.records()[0].empty_streak == 0  # the evidence reset — data wins
 
 
 def test_budget_none_map_byte_identical_full_budget() -> None:
@@ -3353,6 +3589,7 @@ class TestEmptyBreakerOptionSpine:
             raw_bars=[],
             fetch_count=2,
             settle_empty=True,  # computed pre-trip on the producer
+            old_window=True,  # even the budget-aware cumulative arm must stay suppressed
             attempt=0,
         )
         report = _process_option_window_tail(

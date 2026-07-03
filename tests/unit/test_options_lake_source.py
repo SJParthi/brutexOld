@@ -290,7 +290,7 @@ def test_strike_collision_warns_once_naming_both_and_still_resolves(
             exit_ts=_EXIT,
         )
     collisions = [entry for entry in logs if entry["event"] == STRIKE_COLLISION_EVENT]
-    assert len(collisions) == 1  # exactly ONE warning per collided key
+    assert len(collisions) == 1  # one warning per collided PAIR (2-way ⇒ exactly one)
     warn = collisions[0]
     assert warn["log_level"] == "warning"
     # BOTH raw directory names are named via repr(), plus the decoded coordinates.
@@ -304,6 +304,45 @@ def test_strike_collision_warns_once_naming_both_and_still_resolves(
     assert pair.entry_bar.open == Decimal("111.00")
     index = src._symbol_index["NSE", "NIFTY"]
     assert index[date(2025, 1, 2), Decimal("24650"), "CE"] == _COLLIDE_KEPT
+
+
+def test_three_way_collision_emits_one_warning_per_pair_naming_all_dirs(tmp_path: Path) -> None:
+    """An N-way Decimal-equal collision emits N−1 warnings — every raw dir named.
+
+    The honesty envelope of the pairwise WARN (DEC-LAKE-SOURCE-STRIKE-COLLIDE-001,
+    reworded from the 2-way "exactly ONE" claim): three spellings of one strike
+    (``24650`` / ``24650.0`` / ``24650.00``) emit TWO warnings, the intermediate
+    winner appearing as ``kept`` in the first and ``shadowed`` in the second, so
+    ALL THREE raw dirs are named across the warnings — no silent shadow.
+    """
+    three = [
+        "NSE-NIFTY-02Jan25-24650-CE",
+        "NSE-NIFTY-02Jan25-24650.0-CE",
+        "NSE-NIFTY-02Jan25-24650.00-CE",
+    ]
+    assert sorted(three) == three  # the deterministic sorted-walk order this test pins
+    lake = tmp_path / "lake"
+    for symbol in three:
+        _write_contract(
+            lake,
+            exchange="NSE",
+            symbol=symbol,
+            bars=[_bar(_ENTRY, "100.00"), _bar(_EXIT, "100.00")],
+        )
+    src = LakeOptionBarSource(lake)
+    with capture_logs() as logs:
+        index = src._build_symbol_index("NSE", "NIFTY")
+    collisions = [entry for entry in logs if entry["event"] == STRIKE_COLLISION_EVENT]
+    assert len(collisions) == 2  # N−1 pairwise warnings for an N-way collision
+    assert collisions[0]["shadowed"] == repr(three[0])
+    assert collisions[0]["kept"] == repr(three[1])
+    assert collisions[1]["shadowed"] == repr(three[1])  # the intermediate winner, re-named
+    assert collisions[1]["kept"] == repr(three[2])
+    # Every colliding raw dir is named at least once across the warnings.
+    named = {c["shadowed"] for c in collisions} | {c["kept"] for c in collisions}
+    assert named == {repr(s) for s in three}
+    # The final index resolves to the lexicographically-last spelling.
+    assert index[date(2025, 1, 2), Decimal("24650"), "CE"] == three[-1]
 
 
 def test_no_collision_emits_no_strike_collision_warning(lake_with_nifty_ce: Path) -> None:

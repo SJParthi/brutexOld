@@ -164,11 +164,14 @@ class LakeOptionBarSource:
         """Scan ``bars/<exchange>/FNO/`` and index this underlying's OPTION contracts.
 
         The scan is ``sorted()`` so the walk order is deterministic across
-        filesystems (raw ``iterdir()`` order is OS-arbitrary). When two sibling
+        filesystems (raw ``iterdir()`` order is OS-arbitrary). When sibling
         directories decode to Decimal-EQUAL strikes for the same
         ``(expiry, option_type)`` — e.g. ``…-24650-CE`` vs ``…-24650.0-CE`` —
-        exactly ONE :data:`STRIKE_COLLISION_EVENT` WARNING names BOTH raw
-        directory names via ``repr()``, then the keep-policy applies: the
+        one :data:`STRIKE_COLLISION_EVENT` WARNING fires PER COLLIDED PAIR,
+        naming the shadowed + kept raw directory names via ``repr()`` (an N-way
+        collision emits N−1 warnings; every colliding raw dir is named across
+        them, the intermediate winner appearing as ``kept`` in one and
+        ``shadowed`` in the next). Then the keep-policy applies: the
         lexicographically-LATER raw name wins (last write of the sorted walk),
         matching the module's long-standing last-wins overwrite but now
         deterministic + visible. The shadowed directory's bars are unreachable
@@ -191,8 +194,9 @@ class LakeOptionBarSource:
             key: _ContractKey = (parts.expiry, parts.strike, parts.option_type)
             existing = index.get(key)
             if existing is not None:
-                # Decimal-equal strike collision: warn ONCE naming both raw dirs,
-                # then keep the deterministic pick (the later sorted name wins).
+                # Decimal-equal strike collision: warn once PER collided pair naming
+                # both raw dirs, then keep the deterministic pick (later sorted name
+                # wins; an N-way collision emits N−1 of these, naming every dir).
                 _LOG.warning(
                     STRIKE_COLLISION_EVENT,
                     exchange=exchange,

@@ -168,6 +168,7 @@ from brutex.dashboard.pull_controller import (
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.rate_sampler import RatePanelSampler
+from brutex.dashboard.registry_strikes import make_registry_chain_loader
 from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.spot_cascade import (
     SpotCascadeIndex,
@@ -1176,6 +1177,19 @@ def build_app(
     # (a metadata pull bumps it → re-read; otherwise an options poll is an O(1) handoff),
     # keyed per exchange. REUSES the COMMON `MoversSnapshotCache` (one calendar key).
     _options_calendar_cache = MoversSnapshotCache()
+    # The Options-tab AUTHORITATIVE strike-chain cache (DEC-MONEYNESS-REGISTRY-STEP-001):
+    # the ATM±N strike-grid step derives from the FULL vendor strike chain of each
+    # tier-target (underlying, expiry) in `registry.duckdb` — otherwise the sparse
+    # lake-observed ladder can OVERESTIMATE the step on a sparsely-pulled expiry. Read
+    # LAZILY per key via `make_registry_chain_loader` (ONE narrowed DuckDB read per
+    # (exchange, underlying, expiry) — never the whole monotonically-growing contracts
+    # table; Golden Rule #5 bounded reads, DEC-FNO-HONESTY-PACK-001). Each chain is
+    # invariant between metadata pulls, so it is memoised behind the SAME write
+    # generation as the calendar cache above (a metadata pull bumps it → re-read;
+    # otherwise an options poll is an O(1) handoff), keyed per (exchange, underlying,
+    # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
+    # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
+    _options_strikes_cache = MoversSnapshotCache()
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -2956,6 +2970,17 @@ def build_app(
                         generation=gen,
                         compute=lambda: load_registry_expiries(registry_path, exchange=exch),
                     )
+                    # The warm mirrors the live route's AUTHORITATIVE strike chains
+                    # (DEC-MONEYNESS-REGISTRY-STEP-001) via the SAME lazy bounded
+                    # per-(underlying, expiry) loader + cache (Golden Rule #5 /
+                    # DEC-FNO-HONESTY-PACK-001) so the warmed candidate set is
+                    # byte-identical to what the options poll would compute.
+                    registry_chain_for = make_registry_chain_loader(
+                        registry_path,
+                        exchange=exch,
+                        cache=_options_strikes_cache,
+                        generation=gen,
+                    )
 
                     def _opt_job() -> int:
                         cands = _movers_cache.get_or_compute(
@@ -2978,6 +3003,7 @@ def build_app(
                                 expiry_track=trk,
                                 exchange=exch,
                                 calendar_expiries=calendar_expiries,
+                                registry_chain_for=registry_chain_for,
                             ),
                         )
                         return len(cands.movers)
@@ -4127,6 +4153,22 @@ def build_app(
                             registry_path_for(store_path), exchange=exch
                         ),
                     )
+                    # The AUTHORITATIVE strike chains (DEC-MONEYNESS-REGISTRY-STEP-001):
+                    # the ATM±N grid step per (underlying, expiry) reads the FULL vendor
+                    # chain from registry.duckdb (not the sparse lake ladder) via a LAZY
+                    # per-(underlying, expiry) loader — one NARROWED DuckDB read per
+                    # tier-target key, memoised per key + write generation, NEVER the
+                    # whole monotonically-growing contracts table held resident
+                    # (Golden Rule #5 bounded reads — DEC-FNO-HONESTY-PACK-001; the
+                    # /db `_registry_strike_chain` shape). A per-key `None` (absent /
+                    # empty registry) → the lake-ladder fallback with its honest
+                    # low-confidence label.
+                    registry_chain_for = make_registry_chain_loader(
+                        registry_path_for(store_path),
+                        exchange=exch,
+                        cache=_options_strikes_cache,
+                        generation=generation,
+                    )
                     key = candidate_key(
                         asset="options",
                         exchange=exch,
@@ -4149,6 +4191,7 @@ def build_app(
                             exchange=exch,
                             datasets=movers_datasets,
                             calendar_expiries=calendar_expiries,
+                            registry_chain_for=registry_chain_for,
                         ),
                     )
                     return build_options_payload(
@@ -5155,10 +5198,12 @@ def build_app(
         column / date raises ``ValueError`` there → HTTP 400 here.
         """
         store = _require_store()
-        lake_root = getattr(store, "path", None)
-        if not isinstance(lake_root, Path):
+        # NOTE: `store.path` is the instruments.duckdb FILE path (the lean master);
+        # the lake root is its parent dir — named accordingly (readability, not a bug).
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
             raise HTTPException(status_code=400, detail="no lake root wired for candle reads")
-        lake = lake_root.parent
+        lake = store_path.parent
         columns = tuple(column) if column else None
         try:
             payload = await run_in_threadpool(
@@ -5177,6 +5222,11 @@ def build_app(
                     offset=offset,
                     count_cache=_candle_count_cache,
                     generation=_summary_cache.generation,
+                    # The AUTHORITATIVE registry strike chain for the F&O ATM±N grid
+                    # (DEC-MONEYNESS-REGISTRY-STEP-001) — memoised behind the SAME
+                    # count cache + generation; absent registry ⇒ the lake-observed
+                    # step with its honest "observed" low-confidence label.
+                    registry_path=registry_path_for(store_path),
                 )
             )
         except ValueError as exc:
