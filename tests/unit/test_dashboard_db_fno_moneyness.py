@@ -38,6 +38,7 @@ from brutex.dashboard.db_view import (
     query_candles,
 )
 from brutex.data.models import CandleBar
+from brutex.data.moneyness import StepConfidence
 from brutex.data.parquet_writer import ParquetWriter
 
 _T1 = datetime(2025, 6, 2, 9, 15, tzinfo=UTC)
@@ -128,21 +129,23 @@ class TestFnoDerivedColumns:
 class TestFnoStrikeStep:
     def test_derives_min_gap_ignoring_fut(self, tmp_path: Path) -> None:
         _seed_option_lake(tmp_path)
-        step = _fno_strike_step(tmp_path, exchange="NSE", symbol="NSE-NIFTY-30Jun25-24000-CE")
-        assert step == Decimal("50")
+        resolved = _fno_strike_step(tmp_path, exchange="NSE", symbol="NSE-NIFTY-30Jun25-24000-CE")
+        assert resolved.step == Decimal("50")
+        # No registry chain supplied → the lake-observed ladder, honestly labelled.
+        assert resolved.confidence is StepConfidence.OBSERVED
 
     def test_no_fno_dir_is_none(self, tmp_path: Path) -> None:
-        assert (
-            _fno_strike_step(tmp_path, exchange="NSE", symbol="NSE-NIFTY-30Jun25-24000-CE") is None
-        )
+        resolved = _fno_strike_step(tmp_path, exchange="NSE", symbol="NSE-NIFTY-30Jun25-24000-CE")
+        assert resolved.step is None
+        assert resolved.confidence is None
 
     def test_single_sibling_strike_is_none(self, tmp_path: Path) -> None:
         _write(
             tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-24000-CE", bars=[_bar(_T1, "150")]
         )
-        assert (
-            _fno_strike_step(tmp_path, exchange="NSE", symbol="NSE-NIFTY-30Jun25-24000-CE") is None
-        )
+        resolved = _fno_strike_step(tmp_path, exchange="NSE", symbol="NSE-NIFTY-30Jun25-24000-CE")
+        assert resolved.step is None
+        assert resolved.confidence is None
 
     def test_undecodable_sibling_dir_is_skipped(self, tmp_path: Path) -> None:
         # A present-but-undecodable sibling never breaks the step derivation.
@@ -151,7 +154,37 @@ class TestFnoStrikeStep:
         _write(tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-BADX-CE", bars=[_bar(_T1, "1")])
         assert _fno_strike_step(
             tmp_path, exchange="NSE", symbol="NSE-NIFTY-30Jun25-24000-CE"
-        ) == Decimal("50")
+        ).step == Decimal("50")
+
+    def test_registry_chain_corrects_a_sparse_lake_overestimate(self, tmp_path: Path) -> None:
+        # DEC-MONEYNESS-REGISTRY-STEP-001 (fails before the fix — the observed-only
+        # derivation read 100): only alternate strikes were pulled (24000/24100 —
+        # observed min gap 100), but the AUTHORITATIVE vendor chain carries the full
+        # 50-grid → the registry step wins with high confidence.
+        _write(tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-24000-CE", bars=[_bar(_T1, "1")])
+        _write(tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-24100-CE", bars=[_bar(_T1, "1")])
+        chain = [Decimal("24000"), Decimal("24050"), Decimal("24100")]
+        resolved = _fno_strike_step(
+            tmp_path,
+            exchange="NSE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            registry_strikes=chain,
+        )
+        assert resolved.step == Decimal("50")
+        assert resolved.confidence is StepConfidence.REGISTRY
+
+    def test_unusable_registry_chain_falls_back_to_observed(self, tmp_path: Path) -> None:
+        # A degenerate (single-strike) registry chain cannot size the grid → the
+        # observed ladder resolves it, still labelled low-confidence.
+        _seed_option_lake(tmp_path)
+        resolved = _fno_strike_step(
+            tmp_path,
+            exchange="NSE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            registry_strikes=[Decimal("24000")],
+        )
+        assert resolved.step == Decimal("50")
+        assert resolved.confidence is StepConfidence.OBSERVED
 
 
 # ── _underlying_spot_close_by_ts ────────────────────────────────────────────
@@ -261,7 +294,7 @@ class TestFnoDerivedRows:
     ) -> None:
         _seed_option_lake(tmp_path)
         raw = [(_T1, Decimal("150")), (_T2, Decimal("210"))]
-        rows = _fno_derived_rows(
+        rows, step_conf = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -277,12 +310,14 @@ class TestFnoDerivedRows:
             ("OTM +2", "23900.00", "0.00", "150.00", 28),
             ("ITM -4", "24200.00", "200.00", "10.00", 28),
         ]
+        # No registry chain wired → the observed lake ladder, honestly labelled.
+        assert step_conf is StepConfidence.OBSERVED
 
     def test_future_is_na_with_days_to_expiry(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         raw = [(_T1,), (_T2,)]
-        rows = _fno_derived_rows(
+        rows, step_conf = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -293,12 +328,13 @@ class TestFnoDerivedRows:
         )
         # A future: "—" + None value columns (no spot read), but days_to_expiry resolves.
         assert rows == [("—", None, None, None, 28), ("—", None, None, None, 28)]
+        assert step_conf is None  # a future presents no strike grid — nothing to qualify
 
     def test_undecodable_symbol_is_na_and_dte_none(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         raw = [(_T1,)]
-        rows = _fno_derived_rows(
+        rows, step_conf = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -308,6 +344,7 @@ class TestFnoDerivedRows:
             out_columns=["timestamp"],
         )
         assert rows == [("—", None, None, None, None)]
+        assert step_conf is None
 
     def test_option_without_spot_is_unknown(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -318,7 +355,7 @@ class TestFnoDerivedRows:
             tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-24000-CE", bars=[_bar(_T1, "150")]
         )
         raw = [(_T1, Decimal("150"))]
-        rows = _fno_derived_rows(
+        rows, step_conf = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -328,6 +365,7 @@ class TestFnoDerivedRows:
             out_columns=["timestamp", "close"],
         )
         assert rows == [("?", None, None, None, 28)]
+        assert step_conf is None  # a single-strike ladder has no derivable grid
 
     def test_no_timestamp_projection_is_unknown(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -336,7 +374,7 @@ class TestFnoDerivedRows:
         # join key for days_to_expiry either → None.
         _seed_option_lake(tmp_path)
         raw = [(Decimal("150"),), (Decimal("210"),)]
-        rows = _fno_derived_rows(
+        rows, step_conf = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -346,6 +384,7 @@ class TestFnoDerivedRows:
             out_columns=["close"],
         )
         assert rows == [("?", None, None, None, None), ("?", None, None, None, None)]
+        assert step_conf is StepConfidence.OBSERVED
 
     def test_spot_present_but_close_not_projected_time_value_none(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -354,7 +393,7 @@ class TestFnoDerivedRows:
         # projection → spot/intrinsic still compute, time_value is None (no close to net).
         _seed_option_lake(tmp_path)
         raw = [(_T1,)]
-        rows = _fno_derived_rows(
+        rows, step_conf = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -364,6 +403,7 @@ class TestFnoDerivedRows:
             out_columns=["timestamp"],  # no "close"
         )
         assert rows == [("OTM +2", "23900.00", "0.00", None, 28)]
+        assert step_conf is StepConfidence.OBSERVED
 
     def test_put_intrinsic_is_strike_minus_spot(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -378,7 +418,7 @@ class TestFnoDerivedRows:
             bars=[_bar(_T1, "150"), _bar(_T2, "90")],
         )
         raw = [(_T1, Decimal("150")), (_T2, Decimal("90"))]
-        rows = _fno_derived_rows(
+        rows, step_conf = _fno_derived_rows(
             conn,
             tmp_path,
             exchange="NSE",
@@ -393,6 +433,7 @@ class TestFnoDerivedRows:
             ("ITM", "100.00", "50.00"),
             ("OTM", "0.00", "90.00"),
         ]
+        assert step_conf is StepConfidence.OBSERVED
 
 
 # ── query_candles integration ───────────────────────────────────────────────
@@ -444,6 +485,9 @@ class TestQueryCandlesFnoMoneyness:
         )
         assert out["rows"] == []
         assert out["columns"] == [*CANDLE_COLUMNS, *SPOT_DERIVED_COLUMNS, *FNO_DERIVED_COLUMNS]
+        # The strike-step honesty field is present-but-None on an empty F&O page
+        # (stable key set; no step presented — DEC-MONEYNESS-REGISTRY-STEP-001).
+        assert out["strike_step_confidence"] is None
 
     def test_spot_page_has_no_moneyness_columns(
         self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
@@ -460,3 +504,250 @@ class TestQueryCandlesFnoMoneyness:
             limit=50,
         )
         assert out["columns"] == [*CANDLE_COLUMNS, *SPOT_DERIVED_COLUMNS]
+        # No strike grid on a spot page → no honesty field at all (byte-stable payload).
+        assert "strike_step_confidence" not in out
+
+    def test_spot_empty_page_has_no_strike_step_field(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        out = query_candles(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-RELIANCE",
+            interval="1minute",
+            limit=50,
+        )
+        assert out["rows"] == []
+        assert "strike_step_confidence" not in out
+
+
+# ── the AUTHORITATIVE registry step in query_candles (DEC-MONEYNESS-REGISTRY-STEP-001) ──
+
+
+def _seed_sparse_ce_lake(lake: Path) -> None:
+    """ONLY alternate strikes pulled (24000 / 24100 — observed gap 100) + the spot.
+
+    The true vendor grid is 50 (24000/24050/24100); the 24050 candles were never
+    pulled, so the lake-observed derivation overestimates the step 2×.
+    """
+    _write(lake, segment="FNO", symbol="NSE-NIFTY-30Jun25-24000-CE", bars=[_bar(_T1, "150")])
+    _write(lake, segment="FNO", symbol="NSE-NIFTY-30Jun25-24100-CE", bars=[_bar(_T1, "110")])
+    _write(lake, segment="INDEX", symbol="NIFTY", bars=[_bar(_T1, "23900", oi=None)])
+
+
+def _seed_registry_chain(registry_path: Path) -> None:
+    """The FULL vendor chain for NIFTY 30-Jun-25: strikes 24000/24050/24100 (grid 50)."""
+    from datetime import date
+
+    from brutex.data.registry_store import RegistryStore
+
+    now = datetime(2025, 6, 1, tzinfo=UTC)
+    with RegistryStore.open(registry_path) as reg:
+        for strike in (24000.0, 24050.0, 24100.0):
+            reg.upsert_contract(
+                "NSE",
+                "NIFTY",
+                date(2025, 6, 30),
+                f"NSE-NIFTY-30Jun25-{int(strike)}-CE",
+                side="CE",
+                strike=strike,
+                run_id="r1",
+                fetched_at=now,
+            )
+
+
+class TestQueryCandlesRegistryStep:
+    """query_candles + the registry chain: the corrected step + the honesty label."""
+
+    def test_registry_chain_corrects_the_sparse_step(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # REGRESSION (fails before the fix): spot 23900, strike 24000. The observed
+        # ladder (24000/24100) reads step 100 → "OTM +1"; the AUTHORITATIVE chain
+        # restores the 50 grid → "OTM +2" + the high-confidence label.
+        _seed_sparse_ce_lake(tmp_path)
+        registry_path = tmp_path / "registry.duckdb"
+        _seed_registry_chain(registry_path)
+        out = query_candles(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            interval="1minute",
+            limit=50,
+            registry_path=registry_path,
+        )
+        m_idx = out["columns"].index("moneyness")
+        assert [r[m_idx] for r in out["rows"]] == ["OTM +2"]
+        assert out["strike_step_confidence"] == "registry"
+
+    def test_without_registry_the_sparse_step_overestimates_with_honest_label(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # The pre-fix behaviour is PRESERVED (graceful fallback) but no longer
+        # silent: the payload carries the "observed" low-confidence label.
+        _seed_sparse_ce_lake(tmp_path)
+        out = query_candles(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            interval="1minute",
+            limit=50,
+            registry_path=tmp_path / "registry.duckdb",  # absent → graceful fallback
+        )
+        m_idx = out["columns"].index("moneyness")
+        assert [r[m_idx] for r in out["rows"]] == ["OTM +1"]  # the overestimated depth
+        assert out["strike_step_confidence"] == "observed"
+
+    def test_no_registry_path_wired_keeps_the_observed_label(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _seed_sparse_ce_lake(tmp_path)
+        out = query_candles(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            interval="1minute",
+            limit=50,
+        )
+        assert out["strike_step_confidence"] == "observed"
+
+    def test_future_page_confidence_is_none(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _write(tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-FUT", bars=[_bar(_T1, "24000")])
+        out = query_candles(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jun25-FUT",
+            interval="1minute",
+            limit=50,
+        )
+        assert out["strike_step_confidence"] is None
+
+    def test_chain_is_memoised_per_generation(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Two pages at ONE generation share a single registry read (the injected
+        # generation-stamped cache); a generation bump re-reads (never stale).
+        from brutex.dashboard import db_view as db_view_module
+        from brutex.dashboard.movers_cache import MoversSnapshotCache
+
+        _seed_sparse_ce_lake(tmp_path)
+        registry_path = tmp_path / "registry.duckdb"
+        _seed_registry_chain(registry_path)
+        calls: list[str] = []
+        real_loader = db_view_module.load_registry_strike_chain
+
+        def _counting_loader(*args: object, **kwargs: object) -> object:
+            calls.append("load")
+            return real_loader(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(db_view_module, "load_registry_strike_chain", _counting_loader)
+        cache = MoversSnapshotCache()
+
+        def _page(generation: int) -> dict[str, object]:
+            return query_candles(
+                conn,
+                tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY-30Jun25-24000-CE",
+                interval="1minute",
+                limit=50,
+                count_cache=cache,
+                generation=generation,
+                registry_path=registry_path,
+            )
+
+        first = _page(1)
+        second = _page(1)  # a paging click within one generation → O(1) chain hit
+        assert len(calls) == 1
+        assert first["strike_step_confidence"] == second["strike_step_confidence"] == "registry"
+        _page(2)  # a pull bumped the generation → the chain is re-read, never stale
+        assert len(calls) == 2
+
+    def test_registry_chain_key_shape(self) -> None:
+        from datetime import date
+
+        from brutex.dashboard.db_view import fno_strike_chain_key
+
+        key = fno_strike_chain_key("NSE", "NIFTY", date(2025, 6, 30))
+        assert key == "strikechain|NSE|NIFTY|2025-06-30"
+
+    def test_registry_chain_helper_none_paths(self, tmp_path: Path) -> None:
+        # The direct None guards: no registry wired / an undecodable expiry.
+        from datetime import date
+
+        from brutex.dashboard.db_view import _registry_strike_chain
+
+        assert (
+            _registry_strike_chain(
+                None,
+                exchange="NSE",
+                underlying="NIFTY",
+                expiry=date(2025, 6, 30),
+                count_cache=None,
+                generation=0,
+            )
+            is None
+        )
+        assert (
+            _registry_strike_chain(
+                tmp_path / "registry.duckdb",
+                exchange="NSE",
+                underlying="NIFTY",
+                expiry=None,
+                count_cache=None,
+                generation=0,
+            )
+            is None
+        )
+
+    def test_registry_chain_helper_absent_registry_inline(self, tmp_path: Path) -> None:
+        # No injected cache (the pure default) + an absent registry → inline None.
+        from datetime import date
+
+        from brutex.dashboard.db_view import _registry_strike_chain
+
+        assert (
+            _registry_strike_chain(
+                tmp_path / "registry.duckdb",
+                exchange="NSE",
+                underlying="NIFTY",
+                expiry=date(2025, 6, 30),
+                count_cache=None,
+                generation=0,
+            )
+            is None
+        )
+
+    def test_registry_chain_helper_reads_one_chain_inline(self, tmp_path: Path) -> None:
+        from datetime import date
+
+        from brutex.dashboard.db_view import _registry_strike_chain
+
+        registry_path = tmp_path / "registry.duckdb"
+        _seed_registry_chain(registry_path)
+        chain = _registry_strike_chain(
+            registry_path,
+            exchange="NSE",
+            underlying="NIFTY",
+            expiry=date(2025, 6, 30),
+            count_cache=None,
+            generation=0,
+        )
+        assert chain is not None
+        assert sorted(chain) == [Decimal("24000"), Decimal("24050"), Decimal("24100")]
