@@ -377,6 +377,86 @@ def test_concurrent_mark_dirty_and_get_are_thread_safe() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# revision_probe — cross-process freshness (DEC-HARDENING-LEFTOVERS-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _MutableProbe:
+    """A revision probe whose token the test mutates between reads."""
+
+    def __init__(self, token: str | None) -> None:
+        self.token = token
+        self.calls = 0
+
+    def __call__(self) -> str | None:
+        self.calls += 1
+        return self.token
+
+
+def test_probe_baseline_recorded_without_bump() -> None:
+    """The FIRST non-None token is a baseline — recorded, generation NOT bumped."""
+    probe = _MutableProbe("t1")
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=probe)
+    assert cache.generation == 0
+    assert probe.calls == 1
+
+
+def test_probe_same_token_never_bumps() -> None:
+    """Repeated reads with an unchanged token leave the generation alone."""
+    probe = _MutableProbe("t1")
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=probe)
+    assert cache.generation == 0
+    assert cache.generation == 0
+    assert cache.generation == 0
+    assert probe.calls == 3
+
+
+def test_probe_token_change_bumps_exactly_once() -> None:
+    """A token CHANGE bumps the generation exactly once (then stays put)."""
+    probe = _MutableProbe("t1")
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=probe)
+    assert cache.generation == 0  # baseline
+    probe.token = "t2"  # the CLI-process ledger checkpoint moved the token
+    assert cache.generation == 1
+    assert cache.generation == 1  # same token → no further bump
+
+
+def test_probe_none_is_noop_then_baseline() -> None:
+    """``None`` ("no signal") is a no-op; the first REAL token is the baseline."""
+    probe = _MutableProbe(None)
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=probe)
+    assert cache.generation == 0  # None → no-op, no baseline yet
+    probe.token = "t1"
+    assert cache.generation == 0  # first non-None → baseline, still no bump
+    probe.token = "t2"
+    assert cache.generation == 1  # change past the baseline → bump
+
+
+def test_probe_interplay_with_mark_dirty() -> None:
+    """mark_dirty is unchanged; probe bumps stack on top (double-bump is harmless)."""
+    probe = _MutableProbe("t1")
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=probe)
+    assert cache.generation == 0  # baseline
+    cache.mark_dirty()  # the dashboard's own in-process write signal
+    assert cache.generation == 1
+    probe.token = "t2"  # ...and the ledger moved too (a dashboard pull does both)
+    assert cache.generation == 2
+
+
+def test_probe_reconciles_inside_get_or_refresh() -> None:
+    """A token change dirties the SPOT/OPTIONS entries themselves — no
+    ``generation`` read or ``mark_dirty`` needed (the CLI-write path)."""
+    probe = _MutableProbe("t1")
+    cache = SummaryCache(clock=_FakeClock(), ttl_floor_s=0.0, revision_probe=probe)
+    rc = _CountingRecompute()
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]  # seeds + baseline
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]  # clean hit
+    probe.token = "t2"  # a CLI checkpoint in another process
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 2}]  # dirty → rescanned
+    assert rc.calls == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
 # CoverageCounters — incremental, idempotent O(1) tally
 # ────────────────────────────────────────────────────────────────────────
 
