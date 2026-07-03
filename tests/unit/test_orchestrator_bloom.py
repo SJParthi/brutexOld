@@ -221,6 +221,25 @@ class TestCapacityGate:
         # Reads still work.
         assert bf.might_contain(h) is True
 
+    def test_capacity_exceeded_message_names_operator_knob(self) -> None:
+        """R2-SL-F4-F5 knob surface: the FAIL_CLOSED message is ACTIONABLE.
+
+        The capacity limit is the constructor's ``capacity`` — for the sweep
+        dedup cache an operator knob — so the raise names the tunables
+        (``--sweep-cache-bloom-capacity`` / ``BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY``)
+        alongside the reached limit. Doc/message surface only — the gate's
+        math + FAIL_CLOSED semantics are byte-unchanged (the sibling tests
+        above).
+        """
+        bf = BloomFilter(capacity=1, fpr_target=1e-6)
+        bf.add(hashlib.sha256(b"a").digest())
+        with pytest.raises(BloomCapacityExceeded) as excinfo:
+            bf.add(hashlib.sha256(b"b").digest())
+        msg = str(excinfo.value)
+        assert "capacity 1 reached" in msg
+        assert "--sweep-cache-bloom-capacity" in msg
+        assert "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY" in msg
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Empirical FPR + unique-count estimator
