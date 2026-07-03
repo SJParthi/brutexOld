@@ -18,7 +18,7 @@ _LOG = structlog.get_logger("brutex.dashboard.movers")
 
 
 def movers_read_skip_errors() -> tuple[type[BaseException], ...]:
-    """Exception types that mean a single instrument's Parquet is unreadable → skip it.
+    """Exception types that mean a single instrument's stored data is unreadable → skip it.
 
     ``polars`` raises a :class:`polars.exceptions.PolarsError` (e.g. ``ComputeError`` on
     a corrupt / version-incompatible file — confirmed against polars 1.41), ``duckdb``
@@ -32,18 +32,29 @@ def movers_read_skip_errors() -> tuple[type[BaseException], ...]:
     :class:`duckdb.Error` because the ``/movers`` candidate loops read via ``polars``
     while the ``/db`` candle pager
     (:func:`brutex.dashboard.db_view._execute_parquet_resilient`) reads via ``duckdb`` —
-    so the union covers BOTH engines from one place, no copy-pasted set. NARROW on
-    purpose: a genuine code bug (``ValueError`` / ``KeyError`` / …) still propagates, so
-    a logic error is never silently swallowed as a "skipped symbol" (Golden Rule #1).
+    so the union covers BOTH engines from one place, no copy-pasted set.
+
+    :class:`~brutex.data.errors.ResampleInputError` is ALSO in the set
+    (DEC-LAKE-WRITE-UNIQUE-001, blast-radius hardening): the ``/movers`` read paths
+    resample the stored 1-minute inside the same per-instrument guard, and the
+    resampler's input tripwire (DEC-RESAMPLER-INPUT-GUARD-001) raises it on a
+    POISONED partition (duplicate / out-of-order stored timestamps). That is a
+    per-symbol DATA fault exactly like a corrupt file — one poisoned symbol must be
+    skipped + counted, never a 500 for the whole screen (before this it was not in
+    the set, so ONE poisoned symbol 500'd every ``/movers`` open until manually
+    quarantined). Still NARROW on purpose: a genuine code bug (``ValueError`` /
+    ``KeyError`` / …) propagates, and :class:`~brutex.data.errors.LakeWriteHalt`
+    (a different ``DataLakeError`` subclass) is NOT included, so a logic error is
+    never silently swallowed as a "skipped symbol" (Golden Rule #1).
     ``duckdb`` is imported inside the call (not at module load) to keep this tiny helper
     module importable without paying the import cost — both consumers import the engines
     anyway.
     """
     import duckdb
 
-    from brutex.data.errors import parquet_read_skip_errors
+    from brutex.data.errors import ResampleInputError, parquet_read_skip_errors
 
-    return (*parquet_read_skip_errors(), duckdb.Error)
+    return (*parquet_read_skip_errors(), duckdb.Error, ResampleInputError)
 
 
 def log_movers_skip(*, source: str, symbol: str, error: str) -> None:

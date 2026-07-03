@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from brutex.data.errors import ResampleInputError
 from brutex.data.timeframe_materialize import PrebuildKind
 
 if TYPE_CHECKING:
@@ -49,6 +50,21 @@ if TYPE_CHECKING:
     from brutex.models import Instrument
 
 _LOG = structlog.get_logger(__name__)
+
+#: The per-symbol DATA-fault quarantine set for the gated phases
+#: (DEC-PREBUILD-SELECT-001; widened by DEC-LAKE-WRITE-UNIQUE-001).
+#: ``ValueError`` / ``OSError`` are the materialise core's historical data-error
+#: surface; :class:`~brutex.data.errors.ResampleInputError` is the canonical
+#: resampler's input tripwire (DEC-RESAMPLER-INPUT-GUARD-001) — raised when ONE
+#: symbol's stored 1-minute partition is POISONED (duplicate / out-of-order
+#: timestamps). Before the widening that error escaped the per-symbol catch and
+#: ABORTED the whole pre-build stage (and 500'd the derive-timeframes route);
+#: now the poisoned symbol is quarantined + reported in ``failed`` and every
+#: other symbol still runs. DELIBERATELY the narrow subclass, NOT
+#: ``DataLakeError`` broadly: :class:`~brutex.data.errors.LakeWriteHalt` (a
+#: sibling ``DataLakeError`` — disk-full / OOM, a pull-wide global stop) must
+#: STILL propagate, never be miscounted as a per-symbol failure.
+_PER_SYMBOL_DATA_ERRORS: tuple[type[Exception], ...] = (ValueError, OSError, ResampleInputError)
 
 #: The instrument-type token the F&O candle lake's decoded ``instrument_type``
 #: carries for a future (:func:`brutex.data.fno_symbol.parse_fno_symbol`).
@@ -218,9 +234,12 @@ def _run_spot_phase(
     """SPOT phase: materialise each selected underlying's spot intraday.
 
     Each underlying is materialised independently — one that RAISES a data error
-    (``ValueError`` / ``OSError``) is recorded in ``failed`` (the rest still run,
-    so ALL failures are named); a genuine bug (``KeyError`` / ``TypeError`` / …)
-    PROPAGATES (never miscounted as a data failure). The GATE is applied by
+    (:data:`_PER_SYMBOL_DATA_ERRORS` — ``ValueError`` / ``OSError`` / the
+    resampler's :class:`~brutex.data.errors.ResampleInputError` on a poisoned
+    stored partition) is recorded in ``failed`` (the rest still run, so ALL
+    failures are named); a genuine bug (``KeyError`` / ``TypeError`` / …) or a
+    pull-wide :class:`~brutex.data.errors.LakeWriteHalt` PROPAGATES (never
+    miscounted as a per-symbol data failure). The GATE is applied by
     :func:`run_gated_prebuild` on a non-empty ``failed``.
     """
     attempted = tuple(inst.symbol_name for inst in underlyings)
@@ -230,7 +249,7 @@ def _run_spot_phase(
     for inst in underlyings:
         try:
             result = materialize_spot(inst)
-        except (ValueError, OSError) as exc:
+        except _PER_SYMBOL_DATA_ERRORS as exc:
             _LOG.warning(
                 "universe.prebuild.spot_failed",
                 symbol=inst.symbol_name,
@@ -264,9 +283,9 @@ def _run_futures_phase(
     ``attempted`` / ``succeeded`` / ``failed`` are keyed by CONTRACT symbol (not
     underlying), so a partial-failure names the exact contract. An underlying
     with NO discovered futures contributes nothing — an honest skip, never a
-    fabricated bar. A data error (``ValueError`` / ``OSError``) in discovery OR
-    materialise is recorded as a failure (the rest still run); a genuine bug
-    propagates.
+    fabricated bar. A data error (:data:`_PER_SYMBOL_DATA_ERRORS`) in discovery
+    OR materialise is recorded as a failure (the rest still run); a genuine bug
+    (and a pull-wide :class:`~brutex.data.errors.LakeWriteHalt`) propagates.
     """
     attempted: list[str] = []
     succeeded: list[str] = []
@@ -275,7 +294,7 @@ def _run_futures_phase(
     for inst in underlyings:
         try:
             contracts = futures_contracts_for(inst)
-        except (ValueError, OSError) as exc:
+        except _PER_SYMBOL_DATA_ERRORS as exc:
             _LOG.warning(
                 "universe.prebuild.futures_discovery_failed",
                 underlying=inst.symbol_name,
@@ -288,7 +307,7 @@ def _run_futures_phase(
             attempted.append(contract)
             try:
                 result = materialize_future(contract)
-            except (ValueError, OSError) as exc:
+            except _PER_SYMBOL_DATA_ERRORS as exc:
                 _LOG.warning(
                     "universe.prebuild.futures_failed",
                     underlying=inst.symbol_name,
