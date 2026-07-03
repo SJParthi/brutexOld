@@ -329,6 +329,32 @@ def _patch_spines_capturing(
     return spot_calls, metadata_calls
 
 
+def _patch_spines_capturing_historical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Wire the offline fakes, RECORDING the spot AND historical phases' kwargs.
+
+    Returns ``(spot_calls, historical_calls)`` so a test can assert BOTH that the
+    spot phase received the operator dates verbatim AND that the F&O historical
+    phase received them as the parsed EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001).
+    """
+    spot_calls: list[dict[str, Any]] = []
+    historical_calls: list[dict[str, Any]] = []
+
+    def _spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        spot_calls.append(dict(kwargs))
+        return _fake_spot(*args, **kwargs)
+
+    def _historical(*args: Any, **kwargs: Any) -> CompositePullReport:
+        historical_calls.append(dict(kwargs))
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _historical)
+    return spot_calls, historical_calls
+
+
 def test_pull_pipeline_blank_dates_thread_none_to_spot(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -447,6 +473,58 @@ def test_pull_pipeline_whitespace_dates_behave_as_blank(
     assert spot_calls[0]["from_date"] is None
     assert spot_calls[0]["to_date"] is None
     assert metadata_calls[0]["years"][0] == 2020
+
+
+# ── F&O expiry scoping via the operator dates (DEC-FNO-EXPIRY-SCOPE-001) ─────
+
+
+def test_pull_pipeline_explicit_dates_spot_verbatim_and_historical_expiry_scope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Permutation (i): SPOT still gets from/to VERBATIM; historical gets the SCOPE.
+
+    Explicit valid dates thread UNCHANGED to the spot phase (the pre-existing
+    DEC-UNIVERSE-PULL-DATERANGE-001 contract — pinned so the scoping change can
+    never disturb it) AND reach the F&O historical phase as the PARSED expiry
+    scope bounds (``scope_start`` / ``scope_end`` as ``date`` objects) — never as
+    the window-reshaping ``from_date`` / ``to_date``.
+    """
+    _pin_creds_present(monkeypatch)
+    spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2021-03-01", "to_date": "2022-04-15"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    # SPOT: the raw strings, verbatim (unchanged by the scoping feature).
+    assert spot_calls[0]["from_date"] == "2021-03-01"
+    assert spot_calls[0]["to_date"] == "2022-04-15"
+    # HISTORICAL: the parsed EXPIRY scope — and NO window-reshaping dates.
+    assert len(historical_calls) == 1
+    assert historical_calls[0]["scope_start"] == date(2021, 3, 1)
+    assert historical_calls[0]["scope_end"] == date(2022, 4, 15)
+    assert "from_date" not in historical_calls[0]
+    assert "to_date" not in historical_calls[0]
+
+
+def test_pull_pipeline_blank_dates_thread_unbounded_scope_to_historical(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blank dates ⇒ the historical phase gets an UNBOUNDED (None/None) expiry scope.
+
+    DEFAULT-PRESERVATION (DEC-FNO-EXPIRY-SCOPE-001): a no-date pull threads
+    ``scope_start=None`` / ``scope_end=None`` — byte-identical to the unscoped
+    pull (every expiry in scope).
+    """
+    _pin_creds_present(monkeypatch)
+    _spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert len(historical_calls) == 1
+    assert historical_calls[0]["scope_start"] is None
+    assert historical_calls[0]["scope_end"] is None
 
 
 # ── the movers PREBUILD GATE binding (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2) ──

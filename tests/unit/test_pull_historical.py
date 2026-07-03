@@ -2374,3 +2374,308 @@ class TestMassEmptyHaltVerdictFnoRoute:
         assert report.verdict.kind == "clean"
         assert report.verdict.needs_operator is False
         assert report.to_dict()["mass_empty_cause"] is None
+
+
+# ── DEC-FNO-EXPIRY-SCOPE-001: expiry-level date scoping ───────────────────────────────
+
+
+def _seed_feb_weeklies(registry: RegistryStore) -> dict[date, str]:
+    """Seed a NIFTY February 2024 weekly + monthly CE calendar; return expiry → symbol."""
+    seeded: dict[date, str] = {}
+    for expiry in (
+        date(2024, 2, 1),
+        date(2024, 2, 8),
+        date(2024, 2, 15),
+        date(2024, 2, 22),
+        date(2024, 2, 29),  # the monthly
+    ):
+        symbol = f"NSE-NIFTY-{expiry.strftime('%d%b%y')}-22000-CE"
+        registry.upsert_contract(
+            "NSE",
+            "NIFTY",
+            expiry,
+            symbol,
+            side="CE",
+            strike=22000.0,
+            run_id=_RUN_ID,
+            fetched_at=_FETCHED,
+        )
+        seeded[expiry] = symbol
+    return seeded
+
+
+class TestExpiryScope:
+    """DEC-FNO-EXPIRY-SCOPE-001 — the pull-level expiry-scoping permutations."""
+
+    def test_scope_expiry_equal_to_end_pulled_with_default_window_law(
+        self, registry: RegistryStore
+    ) -> None:
+        """Permutation (a): ``expiry == to_date`` is IN — and keeps the 30d/60d window law.
+
+        The NIFTY chain (expiry 2024-01-25 == scope_end) is pulled with its NORMAL
+        per-type default window (CE/PE ``expiry − 30d``, FUT ``expiry − 60d`` — the
+        scope selects WHICH expiries, it never reshapes windows); the RELIANCE
+        2024-02-29 expiry is out.
+        """
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts()  # 3 NIFTY legs + 1 RELIANCE leg
+        report = pull_contract_candles(
+            selected,
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1minute",),
+            registry=registry,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            scope_start=date(2024, 1, 1),
+            scope_end=date(2024, 1, 25),  # == the NIFTY chain's expiry (inclusive IN)
+        )
+        nifty = {r.contract_symbol for r in selected if r.underlying == "NIFTY"}
+        assert set(sdk.candle_symbols) == nifty  # RELIANCE never fetched
+        # The WINDOW LAW is untouched by the scope: expiry−30d for the option,
+        # expiry−60d for the future (never a scope-reshaped window).
+        assert report.start_dates["NSE-NIFTY-25Jan24-21000-CE"] == "2023-12-26"
+        assert report.start_dates["NSE-NIFTY-25Jan24-FUT"] == "2023-11-26"
+        assert report.contracts_selected == 3
+        assert report.expiries_out_of_scope == 1
+        assert report.contracts_out_of_scope == 1
+        assert ", 1 expiries out of scope skipped" in report.note
+
+    def test_scope_expiry_one_day_past_end_zero_calls_zero_ledger_one_log(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        """Permutation (b): ``expiry == to_date + 1 day`` is OUT — fetched not at all.
+
+        LIVE-shaped pull: the RELIANCE 2024-02-29 expiry (scope_end 2024-02-28 + 1
+        day) costs ZERO vendor calls, leaves ZERO window-ledger rows (nothing
+        PLANNED — a stray row would make every later pull re-attempt it), and is
+        logged EXACTLY once as ``fno.expiry_out_of_scope``.
+        """
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts()
+        with capture_logs() as logs:
+            report = pull_contract_candles(
+                selected,
+                lake_root=tmp_lake,
+                dry_run=False,
+                intervals=("1minute",),
+                registry=registry,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+                scope_end=date(2024, 2, 28),  # RELIANCE expiry 2024-02-29 == to+1 → OUT
+            )
+        reliance = "NSE-RELIANCE-29Feb24-2800-CE"
+        assert reliance not in sdk.candle_symbols  # zero vendor calls
+        nifty = {r.contract_symbol for r in selected if r.underlying == "NIFTY"}
+        assert set(sdk.candle_symbols) == nifty
+        ledger_symbols = {rec.security_id for rec in load_window_ledger(tmp_lake).records()}
+        assert reliance not in ledger_symbols  # zero ledger rows (no stray PLANNED)
+        assert nifty <= ledger_symbols
+        events = [e for e in logs if e["event"] == "fno.expiry_out_of_scope"]
+        assert len(events) == 1  # exactly ONE honest line for the one expiry group
+        assert events[0]["underlying"] == "RELIANCE"
+        assert events[0]["expiry"] == "2024-02-29"
+        assert events[0]["scope_start"] is None
+        assert events[0]["scope_end"] == "2024-02-28"
+        assert events[0]["contracts_skipped"] == 1
+        assert report.expiries_out_of_scope == 1
+        assert report.contracts_out_of_scope == 1
+        assert report.to_dict()["expiries_out_of_scope"] == 1
+        assert report.to_dict()["contracts_out_of_scope"] == 1
+
+    def test_scope_weekly_monthly_mix_pulls_exactly_the_in_range_subset(
+        self, registry: RegistryStore
+    ) -> None:
+        """Permutation (c): weeklies + the monthly in one month, scope a subset.
+
+        February 2024 carries 4 weeklies + the 29-Feb monthly; the
+        ``[2024-02-05, 2024-02-16]`` scope pulls EXACTLY the 08-Feb + 15-Feb
+        weeklies. Out groups: the Jan-25 base chain + 01-Feb + 22-Feb + 29-Feb.
+        """
+        seeded = _seed_feb_weeklies(registry)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts(underlying="NIFTY")  # 3 Jan legs + 5 Feb legs
+        report = pull_contract_candles(
+            selected,
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1minute",),
+            registry=registry,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            scope_start=date(2024, 2, 5),
+            scope_end=date(2024, 2, 16),
+        )
+        expected = {seeded[date(2024, 2, 8)], seeded[date(2024, 2, 15)]}
+        assert set(sdk.candle_symbols) == expected  # exactly the in-range subset
+        assert report.contracts_selected == 2
+        assert report.expiries_out_of_scope == 4  # Jan-25 chain + Feb 01/22/29
+        assert report.contracts_out_of_scope == 6  # 3 Jan legs + 3 Feb legs
+
+    def test_scope_single_expiry_selection_pulls_exactly_that_expiry(
+        self, registry: RegistryStore
+    ) -> None:
+        """Permutation (f): ``from == to == expiry`` selects exactly that expiry's chain."""
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts()
+        report = pull_contract_candles(
+            selected,
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1minute",),
+            registry=registry,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            scope_start=date(2024, 1, 25),
+            scope_end=date(2024, 1, 25),
+        )
+        nifty = {r.contract_symbol for r in selected if r.underlying == "NIFTY"}
+        assert set(sdk.candle_symbols) == nifty  # the 2024-01-25 chain, nothing else
+        assert report.contracts_selected == 3
+        assert report.expiries_out_of_scope == 1  # RELIANCE 2024-02-29
+
+    def test_scope_start_after_all_expiries_clean_noop_with_honest_note(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        """Permutation (g): a scope starting AFTER every expiry pulls NOTHING, cleanly.
+
+        Zero vendor calls, zero ledger rows, an HONEST all-out-of-scope note
+        (never the misleading "no contracts selected — pull expiries + contracts
+        first"), and the report carries NO failure signal (the pipeline gate
+        still reads it ok).
+        """
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts()
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            scope_start=date(2030, 1, 1),
+        )
+        assert sdk.candle_symbols == []  # zero vendor calls
+        assert sink.appends == []  # nothing written
+        assert load_window_ledger(tmp_lake).records() == []  # zero ledger rows
+        assert report.contracts_selected == 0
+        assert report.contracts_out_of_scope == 4
+        assert report.expiries_out_of_scope == 2  # (NIFTY, Jan-25) + (RELIANCE, Feb-29)
+        # No failure signal — the pull is a clean, honest no-op.
+        assert report.failed_pairs == 0
+        assert report.still_failed_windows == 0
+        assert report.auth_aborted is False
+        assert report.note == (
+            "all 4 selected contract(s) across 2 expiry(ies) fall outside the "
+            "requested expiry scope — nothing pulled (already-stored bars untouched)"
+        )
+
+    def test_default_scope_plans_byte_identical_windows(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Permutation (h): no dates ⇒ ALL contracts in scope, SAME windows as before.
+
+        A spy captures every ``run_groww_option_ingest`` call's contracts +
+        ``contract_windows``: with the default (unbounded) scope the union of
+        ingested contracts is the WHOLE selection and the per-contract window map
+        equals the pre-change ``_resolve_minute_windows`` law exactly.
+        """
+        captured: list[tuple[frozenset[str], dict[str, tuple[date, date]] | None]] = []
+
+        def _spy_ingest(
+            *_args: object,
+            contracts: Sequence[DerivativeContract],
+            contract_windows: dict[str, tuple[date, date]] | None = None,
+            **_kw: object,
+        ) -> GrowwOptionIngestReport:
+            captured.append((frozenset(c.symbol for c in contracts), contract_windows))
+            return _empty_ingest_report()
+
+        monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts()
+        report = pull_contract_candles(
+            selected,
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1minute",),
+            registry=registry,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+        # The union of ingested contracts == the WHOLE selection (nothing scoped out).
+        ingested = frozenset().union(*(symbols for symbols, _ in captured))
+        assert ingested == {r.contract_symbol for r in selected}
+        # The planned windows == the pre-change default law, byte-identical
+        # (envelope [2020-01-01, prev-day+1) resolved from the injected _NOW).
+        expected = hp._resolve_minute_windows(
+            rebuilt=hp._rebuild_contracts(selected),
+            explicit_dates=False,
+            start=date(2020, 1, 1),
+            end=date(2026, 6, 14),
+        )
+        for _symbols, windows in captured:
+            assert windows == expected
+        assert report.expiries_out_of_scope == 0
+        assert report.contracts_out_of_scope == 0
+        assert "out of scope" not in report.note
+
+    def test_out_of_scope_expiry_already_stored_bars_survive(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        """Permutation (j): scoping OUT an expiry NEVER deletes its stored lake bars.
+
+        Pull 1 (unscoped) lands real RELIANCE 1-minute bars on a REAL
+        ``ParquetBarSink``; pull 2 scopes the RELIANCE expiry OUT — after it, the
+        RELIANCE partition files still exist byte-for-byte and were never
+        re-fetched.
+        """
+        import hashlib
+
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_lake))
+        reliance_rows = list(registry.list_contracts(underlying="RELIANCE"))
+        seed_sdk = _FakeSDK()
+        pull_contract_candles(
+            reliance_rows,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(seed_sdk, sink),
+            now=_NOW,
+        )
+        stored = sorted(tmp_lake.glob("bars/*/FNO/NSE-RELIANCE-29Feb24-2800-CE/**/*.parquet"))
+        assert stored, "the seed pull must land real RELIANCE bars"
+        before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in stored}
+
+        scoped_sdk = _FakeSDK()
+        pull_contract_candles(
+            registry.list_contracts(),
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            client_factory=lambda _root: _factory(scoped_sdk, sink),
+            now=_NOW,
+            scope_start=date(2024, 1, 1),
+            scope_end=date(2024, 1, 31),  # RELIANCE 2024-02-29 OUT
+        )
+        assert "NSE-RELIANCE-29Feb24-2800-CE" not in scoped_sdk.candle_symbols
+        after = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in stored}
+        assert after == before, "an out-of-scope expiry's stored bars must never change"

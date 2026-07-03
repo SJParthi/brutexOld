@@ -403,12 +403,19 @@ def _complete_note(
     skipped_clause = (
         f", skipped {skipped} already-pulled window(s) (no vendor hit)" if skipped else ""
     )
+    # Expiry scoping visibility (DEC-FNO-EXPIRY-SCOPE-001): a scoped-out expiry is
+    # NAMED in the pipeline note, never a silent shrink of the historical pull.
+    scope_clause = (
+        f", {hist.expiries_out_of_scope} expiries out of scope skipped"
+        if hist is not None and hist.expiries_out_of_scope
+        else ""
+    )
     return (
         f"{prefix}pipeline complete — spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
         f"contracts, historical {bars} bars over {contracts} contract(s)"
-        f"{skipped_clause}{_prebuild_note_clause(prebuild)}"
+        f"{scope_clause}{skipped_clause}{_prebuild_note_clause(prebuild)}"
         f"{_movers_note_clause(segment_movers_warmed)}"
     )
 

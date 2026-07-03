@@ -82,6 +82,10 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno_window_opens_on
 from brutex.adapters.groww.contracts import parse_contract_symbol
+from brutex.adapters.groww.expiry_scope import (
+    log_out_of_scope_expiries,
+    partition_contracts_by_scope,
+)
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
@@ -230,6 +234,16 @@ class HistoricalPullReport:
     settled_skipped: int = 0
     """Windows THIS pull newly settled as terminal ``SKIPPED`` (the per-pull ledger
     tally) — the honest-verdict count (never "no action" over a settling pull)."""
+    expiries_out_of_scope: int = 0
+    """Distinct ``(underlying, expiry)`` groups EXCLUDED by the operator's expiry
+    scope (DEC-FNO-EXPIRY-SCOPE-001): an out-of-scope expiry is fetched not at
+    all — zero vendor calls, zero ledger rows, one ``fno.expiry_out_of_scope``
+    log per group; already-stored bars are never touched. Always 0 under the
+    default unbounded scope."""
+    contracts_out_of_scope: int = 0
+    """Contract legs excluded by the expiry scope (the per-leg sum over
+    :attr:`expiries_out_of_scope` groups). These never enter
+    :attr:`contracts_selected` — the pull workload counts in-scope legs only."""
 
     @property
     def verdict(self) -> PullVerdict:
@@ -279,6 +293,8 @@ class HistoricalPullReport:
             "note": self.note,
             "mass_empty_cause": self.mass_empty_cause,
             "settled_skipped": self.settled_skipped,
+            "expiries_out_of_scope": self.expiries_out_of_scope,
+            "contracts_out_of_scope": self.contracts_out_of_scope,
             "verdict": self.verdict.to_dict(),
         }
 
@@ -660,6 +676,8 @@ def _build_note(
     contracts_not_yet_in_window: int = 0,
     windows_skipped: int = 0,
     ledger_load_failed: bool = False,
+    expiries_out_of_scope: int = 0,
+    contracts_out_of_scope: int = 0,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -682,6 +700,14 @@ def _build_note(
     settled-window skip engaging; a failed ledger reload prepends "window ledger
     reload FAILED — running full re-verify pull (no skip); " so a lost cross-run
     memory is announced, never silent. The defaults render byte-identically to before.
+
+    *expiries_out_of_scope* / *contracts_out_of_scope* (DEC-FNO-EXPIRY-SCOPE-001):
+    a scoped-out expiry appends ", N expiries out of scope skipped" to whichever
+    base is built; an ALL-out-of-scope selection (nothing left to pull) gets its
+    OWN honest base — never the misleading "no contracts selected — pull expiries
+    + contracts first" (the registry IS populated; the operator's scope excluded
+    everything). Stored bars are never touched — the note says so. The zero
+    defaults render byte-identically to before.
     """
     prefix = (
         "window ledger reload FAILED — running full re-verify pull (no skip); "
@@ -693,7 +719,18 @@ def _build_note(
         if windows_skipped
         else ""
     )
-    if contracts_selected == 0:
+    scope_suffix = (
+        f", {expiries_out_of_scope} expiries out of scope skipped"
+        if expiries_out_of_scope and contracts_selected
+        else ""
+    )
+    if contracts_selected == 0 and contracts_out_of_scope:
+        base = (
+            f"all {contracts_out_of_scope} selected contract(s) across "
+            f"{expiries_out_of_scope} expiry(ies) fall outside the requested expiry "
+            "scope — nothing pulled (already-stored bars untouched)"
+        )
+    elif contracts_selected == 0:
         base = (
             "no contracts selected — pull expiries + contracts first (the registry is "
             "empty for this selection), then pick a contract / chain / underlying to pull"
@@ -734,7 +771,7 @@ def _build_note(
             f"pulled {windows} windows across {contracts_completed}/{contracts_selected} "
             f"contract(s){skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
         )
-    return f"{prefix}{base}{suffix}"
+    return f"{prefix}{base}{suffix}{scope_suffix}"
 
 
 def _mark_complete(
@@ -1188,6 +1225,8 @@ def pull_contract_candles(
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
     run_parallel: RunParallel | None = None,
+    scope_start: date | None = None,
+    scope_end: date | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -1277,6 +1316,17 @@ def pull_contract_candles(
         :class:`~brutex.orchestrator.parallel.PoolRunParallel` from the session
         controller (:func:`_option_run_parallel`) — a dry-run / no-controller pull then
         keeps the byte-identical serial default; tests inject a synchronous fake.
+    scope_start, scope_end
+        OPTIONAL inclusive EXPIRY-scope bounds (DEC-FNO-EXPIRY-SCOPE-001): only
+        contracts whose expiry lies within ``[scope_start, scope_end]`` are
+        pulled; an out-of-scope expiry is skipped ENTIRELY — zero vendor calls,
+        zero ledger rows (the partition runs strictly BEFORE any planning), one
+        honest ``fno.expiry_out_of_scope`` log per ``(underlying, expiry)``
+        group, stored bars untouched. The scope selects WHICH expiries — it
+        NEVER reshapes windows (in-scope contracts keep the normal 30d/60d
+        default window law over the standard envelope). ``None``/``None`` (the
+        default) is byte-identical to the unscoped pull. Distinct from
+        *from_date*/*to_date*, which reshape every contract's fetch WINDOW.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -1340,7 +1390,15 @@ def pull_contract_candles(
     write_pool = (
         None if fetch_pipeline is not None else _build_write_consumer(sink, dry_run=dry_run)
     )
-    rebuilt = _rebuild_contracts(contracts)
+    # Expiry-level date scoping (DEC-FNO-EXPIRY-SCOPE-001): partition the selection
+    # STRICTLY BEFORE the contract rebuild + window planning, so an out-of-scope
+    # expiry never reaches plan_contract_windows (zero PLANNED ledger rows — a stray
+    # row would make every later pull re-attempt it) and never costs a vendor call.
+    # The default (None, None) scope keeps every contract — byte-identical to before.
+    # Stored lake bars for a scoped-out expiry are NEVER touched.
+    scoped = partition_contracts_by_scope(contracts, scope_start=scope_start, scope_end=scope_end)
+    log_out_of_scope_expiries(scoped, scope_start=scope_start, scope_end=scope_end)
+    rebuilt = _rebuild_contracts(scoped.in_scope)
 
     # Per-contract 1-minute window (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): explicit operator
     # dates OVERRIDE (every contract uses the resolved range); else each contract's DEFAULT
@@ -1468,6 +1526,8 @@ def pull_contract_candles(
         contracts_not_yet_in_window=contracts_not_yet_in_window,
         windows_skipped=minute.skipped_windows,
         ledger_load_failed=minute.ledger_load_failed,
+        expiries_out_of_scope=scoped.expiries_out_of_scope,
+        contracts_out_of_scope=scoped.contracts_out_of_scope,
     )
     return HistoricalPullReport(
         dry_run=dry_run,
@@ -1493,6 +1553,9 @@ def pull_contract_candles(
         # the honest settle tally ride the report (see `HistoricalPullReport.verdict`).
         mass_empty_cause=minute.mass_empty_cause,
         settled_skipped=minute.settled_skipped,
+        # DEC-FNO-EXPIRY-SCOPE-001: the honest out-of-scope tallies (0/0 unscoped).
+        expiries_out_of_scope=scoped.expiries_out_of_scope,
+        contracts_out_of_scope=scoped.contracts_out_of_scope,
     )
 
 

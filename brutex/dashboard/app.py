@@ -2615,10 +2615,15 @@ def build_app(
         DEC-UNIVERSE-PULL-CONSOLIDATE-001 had removed as inert): they scope the
         SPOT pull window AND narrow the metadata-pull YEAR grid. **Blank ⇒ the
         canonical default** ``[2020-01-01, previous trading day]`` (byte-identical
-        to the pre-picker behaviour). The F&O HISTORICAL phase deliberately does
-        NOT receive these dates — it keeps its per-contract smart default lookback
-        (futures ``expiry − 60d`` / options ``expiry − 30d``) so a wide explicit
-        range can never over-pull the whole options chain. The range is validated
+        to the pre-picker behaviour). The F&O HISTORICAL phase receives the dates
+        as an **EXPIRY scope** (DEC-FNO-EXPIRY-SCOPE-001): only expiries within
+        ``[from_date, to_date]`` (both inclusive) are candle-pulled — an
+        out-of-scope expiry is fetched not at all (zero vendor calls, zero
+        ledger rows, one ``fno.expiry_out_of_scope`` log per expiry; stored
+        bars untouched) — while each IN-scope contract keeps its per-contract
+        smart default WINDOW law (futures ``expiry − 60d`` / options
+        ``expiry − 30d`` over the standard envelope), so a wide explicit range
+        still can never over-pull a contract's window. The range is validated
         EAGERLY via :func:`~brutex.dashboard.pull_controller.resolve_candle_range`
         — a reversed / below-2020 / non-ISO range is a clean 400, never a silent
         empty pull.
@@ -2646,6 +2651,12 @@ def build_app(
                 year=None,
                 now=datetime.now(UTC),
             )
+            # The F&O EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): the SAME operator
+            # dates, parsed ONCE inside the same fail-fast guard (a bad date is a
+            # clean 400, never a 500). Blank ⇒ None ⇒ unbounded ⇒ byte-identical
+            # to the unscoped pull.
+            fno_scope_start = _parse_iso_date_arg(from_date, "from_date") if from_date else None
+            fno_scope_end = _parse_iso_date_arg(to_date, "to_date") if to_date else None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
@@ -2745,7 +2756,9 @@ def build_app(
                 # FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001); the coarse
                 # "historical" label is REFINED to futures-vs-options by the live ledger
                 # counts in build_phase_progress (fno_current_phase_from_counts), so no
-                # segment tag is threaded through the F&O spine.
+                # segment tag is threaded through the F&O spine. The operator's from/to
+                # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
+                # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
                 _pull_job.set_phase("historical")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
@@ -2760,6 +2773,8 @@ def build_app(
                         on_progress=_phase_progress,
                         session_rate=_session_rate,
                         until_clean=True,
+                        scope_start=fno_scope_start,
+                        scope_end=fno_scope_end,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:

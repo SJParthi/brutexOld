@@ -91,7 +91,14 @@ def _metadata(*, expiry_failures: int = 0, contract_failures: int = 0) -> Metada
 
 
 def _historical_inner(
-    *, auth_aborted: bool = False, still_failed_windows: int = 0, failed_pairs: int = 0
+    *,
+    auth_aborted: bool = False,
+    still_failed_windows: int = 0,
+    failed_pairs: int = 0,
+    expiries_out_of_scope: int = 0,
+    contracts_out_of_scope: int = 0,
+    phase1_complete: tuple[str, ...] = ("RELIANCE25JAN3000CE",),
+    start_dates: dict[str, str] | None = None,
 ) -> HistoricalPullReport:
     """Build the inner :class:`HistoricalPullReport` (the candle sub-report)."""
     return HistoricalPullReport(
@@ -106,10 +113,12 @@ def _historical_inner(
         auth_aborted=auth_aborted,
         note="ok",
         phase1_clean=not (auth_aborted or still_failed_windows or failed_pairs),
-        phase1_complete=("RELIANCE25JAN3000CE",),
-        start_dates={"RELIANCE25JAN3000CE": "2024-10-01"},
+        phase1_complete=phase1_complete,
+        start_dates=({"RELIANCE25JAN3000CE": "2024-10-01"} if start_dates is None else start_dates),
         minute_requested=True,
         minute_skipped=False,
+        expiries_out_of_scope=expiries_out_of_scope,
+        contracts_out_of_scope=contracts_out_of_scope,
     )
 
 
@@ -883,3 +892,33 @@ def test_pipeline_note_announces_historical_ledger_reload_failure() -> None:
     assert report.note.startswith(
         "window ledger reload FAILED — running full re-verify pull (no skip); "
     )
+
+
+# --------------------------------------------------------------------------- #
+# pipeline note — expiry scope visibility (DEC-FNO-EXPIRY-SCOPE-001)
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_note_names_out_of_scope_expiries() -> None:
+    """A scoped-out expiry count is NAMED in the pipeline complete-note."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(
+            _composite(
+                historical=_historical_inner(expiries_out_of_scope=3, contracts_out_of_scope=9)
+            )
+        ),
+    )
+    assert report.stopped_after is None
+    assert ", 3 expiries out of scope skipped" in report.note
+
+
+def test_pipeline_note_zero_out_of_scope_renders_no_clause() -> None:
+    """The unscoped default renders byte-identically — no scope clause."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+    )
+    assert "out of scope" not in report.note
