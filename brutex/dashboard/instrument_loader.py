@@ -1011,13 +1011,19 @@ def load_instrument_master(
     -------
     dict[str, Any]
         ``{"parsed", "persisted", "legs_dropped", "filtered", "quarantined",
-        "index_count", "stock_count", "total", "ntm"}`` — the load accounting
+        "security_id_collisions", "index_count", "stock_count", "total",
+        "ntm"}`` — the load accounting
         plus the index/stock split from :func:`universe_summary` over the stored
         universe underlyings. ``filtered`` is always ``0`` (the Groww parser
         skips out-of-scope MCX / COMMODITY rows BEFORE they reach the index, so
         ``parsed`` already counts only in-scope rows) and ``quarantined`` is
         always ``0`` (the Groww parser **fails closed** on a malformed in-scope
-        row — Golden Rule #1 — rather than quarantining). ``ntm`` is the
+        row — Golden Rule #1 — rather than quarantining).
+        ``security_id_collisions`` is the write-boundary identity-collision
+        count from :class:`~brutex.data.instrument_store.UpsertResult` —
+        DISTINCT-``symbol_name`` rows dropped by the store's
+        ``(security_id, exch_id, segment)`` dedup (``0`` for a clean master;
+        DEC-MAPPING-COLLISION-HONESTY-001). ``ntm`` is the
         NIFTY-Total-Market admission note (``{"admitted": bool, ...}`` —
         DEC-NTM-GROWW-REPOINT-001).
 
@@ -1107,7 +1113,10 @@ def load_instrument_master(
         # IDX / EQ row carries only its cash placeholder. This also keeps
         # ``has_placeholder_stock_economics`` False so the auto-heal does not loop.
         lean = _fold_leg_economics(lean, build_underlying_economics(index.universe))
-        store.upsert_many(
+        # Capture the UpsertResult so the write-boundary identity-collision count
+        # (DEC-MAPPING-COLLISION-HONESTY-001) rides the load report — the store
+        # already WARNs per drop; this surfaces the aggregate to the operator.
+        upsert = store.upsert_many(
             lean,
             snapshot_date=date.today(),
             run_id=run_id,
@@ -1143,6 +1152,7 @@ def load_instrument_master(
         index_count=summary["index_count"],
         stock_count=summary["stock_count"],
         ntm_reference=ntm_note.get("reference", 0),
+        security_id_collisions=upsert.security_id_collisions,
     )
     return {
         "parsed": parsed,
@@ -1153,6 +1163,12 @@ def load_instrument_master(
         "filtered": 0,
         # Groww fails closed on a malformed in-scope row — no quarantine bucket.
         "quarantined": 0,
+        # Write-boundary identity collisions (DEC-MAPPING-COLLISION-HONESTY-001):
+        # rows the store's (security_id, exch_id, segment) dedup DROPPED because a
+        # DISTINCT symbol_name shared the identity — the observed "13, NSE, CASH"
+        # case. 0 for a clean master; each drop is also logged at WARNING by the
+        # store naming BOTH symbols.
+        "security_id_collisions": upsert.security_id_collisions,
         "index_count": summary["index_count"],
         "stock_count": summary["stock_count"],
         "total": summary["total"],

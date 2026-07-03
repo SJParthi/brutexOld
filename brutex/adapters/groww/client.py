@@ -55,6 +55,20 @@ if TYPE_CHECKING:
 #: pull's true latency is finally measurable rather than assumed.
 _LOG = structlog.get_logger("brutex.adapters.groww.client")
 
+#: Small pause (seconds) before the post-re-auth retry (DEC-GROWW-AUTH-HALT-001 FP-1
+#: hardening). At the 06:00 IST daily-token rotation the freshly minted / freshly
+#: re-read token may not be fleet-valid the instant we hold it (a vendor-side
+#: propagation lag — UNVERIFIED, treated as possible per Golden Rule #1: the log
+#: evidence shows the rotation window is the auth-failure hot spot). An INSTANT
+#: retry against a not-yet-valid token burns one bounded ``max_reauths`` slot on a
+#: transient 401 — with the old budget of 1 that FALSE-exhausted the budget into a
+#: terminal ``GrowwAuthError`` and (post-halt) killed the whole overnight pull.
+#: 1.5 s is negligible against a once-daily event yet generous for token
+#: propagation; it flows through the INJECTABLE ``self.sleep`` so tests pass a
+#: recorder and no real time passes. Deliberately NOT the rate-limit ladder's
+#: ``backoff_seconds`` — a re-auth is not a 429 and must not couple to that tuning.
+REAUTH_RETRY_BACKOFF_SECONDS: float = 1.5
+
 
 def _noop_pace() -> None:
     """Default rate-bucket hook — no-op until a controller is injected."""
@@ -64,10 +78,12 @@ def _noop_hook() -> None:
     """Default decrement/recover feedback hook — no-op until a controller is injected."""
 
 
-def _noop_sleep(_seconds: float) -> None:  # pragma: no cover — replaced in tests + by real backoff
-    """Default backoff sleeper (injected in tests so no real time passes)."""
-    import time
+def _noop_sleep(_seconds: float) -> None:
+    """Default backoff sleeper — same ``(seconds)`` shape as :func:`time.sleep`.
 
+    Tests inject a recorder instead so no real time passes; the default-binding
+    regression test drives THIS body through the re-auth backoff (arity-pinned).
+    """
     time.sleep(_seconds)
 
 
@@ -92,7 +108,13 @@ class GrowwClient:
 
     sdk: GrowwSDK
     pace: Callable[[], None] = _noop_pace
-    sleep: Callable[[float], None] = _noop_sleep
+    #: Bound via ``field(default=...)`` (NOT a bare class-body default, mirroring
+    #: :attr:`on_rate_limit` / :attr:`on_success`) so static analysis never models the
+    #: plain function as an unbound method whose implicit ``self`` consumes the
+    #: ``seconds`` slot — the CodeQL ``py/call/wrong-arity`` false positive on
+    #: ``self.sleep(REAUTH_RETRY_BACKOFF_SECONDS)``. Runtime was always correct: a
+    #: dataclass default lands as an INSTANCE attribute, a plain function never binds.
+    sleep: Callable[[float], None] = field(default=_noop_sleep)
     on_rate_limit: Callable[[], None] = field(default=_noop_hook)
     on_success: Callable[[], None] = field(default=_noop_hook)
     max_attempts: int = 6
@@ -256,6 +278,13 @@ class GrowwClient:
                         reauth=reauths,
                         generation=new_generation,
                     )
+                    # FP-1 hardening (DEC-GROWW-AUTH-HALT-001): give the fresh token a
+                    # beat to become fleet-valid before the retry — an INSTANT retry at
+                    # the 06:00 IST rotation edge can 401 against a not-yet-propagated
+                    # token and burn a bounded ``max_reauths`` slot on a transient
+                    # (propagation lag is vendor-UNVERIFIED; treated as possible).
+                    # Rides the injectable ``self.sleep`` so tests stay instant.
+                    self.sleep(REAUTH_RETRY_BACKOFF_SECONDS)
                     continue
                 if is_retryable(err) and attempt < self.max_attempts:
                     base = (
@@ -457,6 +486,7 @@ ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
 
 
 __all__ = [
+    "REAUTH_RETRY_BACKOFF_SECONDS",
     "GrowwClient",
     "GrowwClientProtocol",
     "GrowwSDK",
