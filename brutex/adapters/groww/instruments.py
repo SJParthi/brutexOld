@@ -246,7 +246,16 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
 
     A duplicate ``groww_symbol`` keeps the first occurrence (the master
     occasionally repeats a key); the dedup is O(1) per row via ``dict`` membership
-    — never a nested scan.
+    — never a nested scan. The ``(exchange, trading_symbol)`` pair maps
+    (``by_exchange_symbol`` + ``groww_symbol_by_pair``) are **also first-wins** and
+    kept in lockstep (consistent with ``by_groww_symbol``): a second row colliding
+    on the same pair is DROPPED — never silently last-wins — and the collision is
+    logged at WARNING naming BOTH the kept and the dropped groww_symbol (Golden
+    Rule #1). A row with a BLANK — or whitespace-only — ``trading_symbol`` cannot
+    key a pair (blank rows would collapse onto ``(exchange, "")``, whitespace-only
+    ones onto ``(exchange, " ")``): it stays pullable via
+    ``by_groww_symbol`` but is excluded from the pair maps + counted, so the junk
+    vendor row is visible in ``/logs`` rather than shadowing a real pair key.
 
     Index surrogate-collision detection (DEC-INDEX-SURROGATE-COLLISION-DETECT-001):
     a non-numeric index ``exchange_token`` becomes a deterministic 32-bit blake2b
@@ -272,6 +281,7 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
     # Reverse map: which gsym FIRST claimed each INDEX (exchange, security_id)
     # identity — the surrogate-collision detector's O(1) membership probe.
     index_identity_owner: dict[tuple[Exchange, int], str] = {}
+    blank_symbol_skipped = 0
     for gsym, instrument in pairs:
         if gsym in by_groww:
             continue  # first-wins dedup, O(1)
@@ -296,15 +306,46 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
                 continue
             index_identity_owner[identity] = gsym
         by_groww[gsym] = instrument
-        pair_key = (instrument.exch_id, instrument.symbol_name)
+        universe.append(instrument)
+        symbol = instrument.symbol_name
+        if not symbol.strip():
+            # A blank trading_symbol cannot key the pair maps — every blank-symbol
+            # row would collapse onto ``(exchange, "")`` and shadow the others. Keep
+            # the row pullable by its groww_symbol (already in by_groww/universe) but
+            # EXCLUDE it from the pair maps + COUNT it, so the junk vendor row is
+            # visible in /logs instead of silently polluting a pair key.
+            # Whitespace-ONLY counts as blank too (defense-in-depth: the CSV parser
+            # strips, but a hand-built Instrument can carry ``" "`` and would
+            # otherwise key ``(exchange, " ")``).
+            blank_symbol_skipped += 1
+            continue
+        pair_key = (instrument.exch_id, symbol)
+        existing_gsym = gsym_by_pair.get(pair_key)
+        if existing_gsym is not None:
+            # First-wins on the ``(exchange, trading_symbol)`` pair too — CONSISTENT
+            # with the by_groww_symbol dedup above. The prior last-wins silently
+            # dropped the FIRST row and could diverge the resolved instrument from
+            # the sent groww_symbol. Keep the first; make the collision LOUD.
+            _LOG.warning(
+                "instrument_master.pair_key_collision",
+                exchange=instrument.exch_id.value,
+                trading_symbol=symbol,
+                kept_groww_symbol=existing_gsym,
+                dropped_groww_symbol=gsym,
+            )
+            continue
         by_pair[pair_key] = instrument
         # The master's REAL groww_symbol for this pair — used verbatim at fetch time
         # so a verbose-symbol index (NIFTY MID SELECT → NSE-MIDCPNIFTY) is never
         # mis-reconstructed (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). Kept in lockstep
-        # with ``by_pair`` (same key, same last-wins assignment) so the resolved
+        # with ``by_pair`` (same key, same first-wins assignment) so the resolved
         # instrument and the sent groww_symbol can never diverge.
         gsym_by_pair[pair_key] = gsym
-        universe.append(instrument)
+    if blank_symbol_skipped:
+        _LOG.warning(
+            "instrument_master.blank_symbol_pair_skipped",
+            count=blank_symbol_skipped,
+        )
     return InstrumentIndex(
         by_groww_symbol=by_groww,
         by_exchange_symbol=by_pair,

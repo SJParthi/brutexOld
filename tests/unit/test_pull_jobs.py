@@ -39,13 +39,22 @@ def _disable_account_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pull_jobs, "_default_lake_root_resolver", lambda: None)
 
 
-class _FakeClock:
-    def __init__(self) -> None:
-        self._t = 0.0
+def _ticking_clock() -> Callable[[], float]:
+    """A deterministic, monotonically-increasing injected clock.
 
-    def __call__(self) -> float:
-        self._t += 1.0
-        return self._t
+    A plain ``def`` closure over a mutable holder — NOT a callable class — so
+    CodeQL's cross-function points-to analysis can prove the production
+    ``clock()`` call sites callable (the callable-class fixture pattern
+    false-positives ``py/call-to-non-callable`` on production lines; see the
+    team playbook).
+    """
+    state = {"t": 0.0}
+
+    def clock() -> float:
+        state["t"] += 1.0
+        return state["t"]
+
+    return clock
 
 
 def _sync_spawn(fn: Callable[[], None]) -> None:
@@ -54,7 +63,7 @@ def _sync_spawn(fn: Callable[[], None]) -> None:
 
 
 def _job() -> BackgroundPullJob:
-    return BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+    return BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
 
 
 def test_successful_job_advances_then_finishes() -> None:
@@ -178,6 +187,284 @@ def test_generic_worker_error_does_not_fire_pull_halt_alert(
     assert halts == []  # a generic worker error NEVER fires the pull-halt alert
 
 
+def test_terminal_auth_failure_fires_pull_halt_alert_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TERMINAL GrowwAuthError (dead credential) → error state AND the CRITICAL alert fires once.
+
+    DEC-GROWW-AUTH-HALT-001 regression: a dead credential previously quarantined every
+    symbol one by one — the dashboard pull "completed" all-failed with NO alert (the
+    silent-for-days shape). Now the spines propagate it and ``_is_pull_halt`` reads it
+    as a pull-wide global stop, so the operator learns in REAL TIME.
+    """
+    from brutex.adapters.groww.errors import GrowwAuthError
+
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+
+    def work(_on_progress: ProgressHook) -> None:
+        raise GrowwAuthError("bad credential — re-mint budget exhausted")
+
+    assert job.start(work, total=1) is True
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR  # error state byte-unchanged
+    assert "GrowwAuthError" in snap.detail
+    assert len(halts) == 1  # the CRITICAL pull-halt alert fired EXACTLY once
+    assert isinstance(halts[0], GrowwAuthError)
+
+
+def test_retryable_auth_shapes_never_fire_pull_halt_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The RETRYABLE GrowwAuthError subclasses NEVER read as a pull halt (no alert).
+
+    DEC-GROWW-AUTH-HALT-001 carve-out: a throttled token mint / a stale read-only
+    re-read are transient by design — even if one escapes to the job layer the halt
+    alert must stay silent (the error state still reports honestly).
+    """
+    from brutex.adapters.groww.errors import (
+        GrowwTokenIssuanceThrottled,
+        GrowwTokenStillStaleError,
+    )
+
+    for exc in (
+        GrowwTokenIssuanceThrottled("mint throttled"),
+        GrowwTokenStillStaleError("same dead token"),
+    ):
+        halts: list[BaseException] = []
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+        job = _job()
+
+        def work(_on_progress: ProgressHook, _exc: BaseException = exc) -> None:
+            raise _exc
+
+        assert job.start(work, total=1) is True
+        assert job.snapshot().state == STATE_ERROR  # still honestly reported as an error
+        assert halts == []  # but NEVER the CRITICAL pull-halt alert
+
+
+def test_transient_auth_expiry_with_successful_remint_pull_continues_zero_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """END-TO-END self-heal regression: the 06:00 IST token reset must NEVER halt.
+
+    DEC-GROWW-AUTH-HALT-001 requirement (2): a pull whose FIRST vendor call dies on an
+    auth expiry that the ``SdkRefresher`` single-flight re-mint heals (DEC-GROWW-TOKEN-
+    REAUTH-001) completes NORMALLY — the healed auth error never escapes
+    ``client._call``, so the job finishes DONE with ZERO pull-halt alerts. Drives the
+    REAL ``GrowwClient`` reauth branch + the REAL ``fetch_candle_windows`` through a
+    ``BackgroundPullJob`` — the same layers a dashboard pull crosses.
+    """
+    from datetime import date
+
+    from brutex.adapters.groww.candles import fetch_candle_windows
+    from brutex.adapters.groww.client import GrowwClient
+
+    class GrowwAPIAuthenticationException(Exception):
+        """Fake SDK auth exception (named so from_groww_exception maps it)."""
+
+    class _SDK:
+        def __init__(self, raises: Exception | None) -> None:
+            self._raises = raises
+            self.calls = 0
+
+        def get_historical_candles(self, **_kw: object) -> dict[str, object]:
+            self.calls += 1
+            if self._raises is not None:
+                raise self._raises
+            return {"candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 5, None]]}
+
+        def get_expiries(self, **_kw: object) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+        def get_contracts(self, **_kw: object) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+    class _Refresher:
+        """Single-leaf fake SdkRefresher: the re-mint swaps the stale SDK for the fresh one."""
+
+        def __init__(self, stale: _SDK, fresh: _SDK) -> None:
+            self._sdks = [stale, fresh]
+            self._index = 0
+            self.generation = 0
+            self.reauth_calls = 0
+
+        def sdk_at(self, _index: int) -> _SDK:
+            return self._sdks[self._index]
+
+        def current_generation(self) -> int:
+            return self.generation
+
+        def reauth(self, seen_generation: int) -> int:
+            del seen_generation
+            self.reauth_calls += 1
+            self._index = 1
+            self.generation += 1
+            return self.generation
+
+    stale = _SDK(GrowwAPIAuthenticationException("token expired or invalid"))
+    fresh = _SDK(None)
+    refresher = _Refresher(stale, fresh)
+    client = GrowwClient(
+        sdk=stale,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+    fetched: list[int] = []
+
+    def work(_on_progress: ProgressHook) -> None:
+        bars = fetch_candle_windows(
+            client,
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            drop_volume=True,
+        )
+        fetched.append(len(bars))
+
+    assert job.start(work, total=1) is True
+    assert job.snapshot().state == STATE_DONE  # the pull CONTINUED to completion
+    assert fetched == [1]  # the healed retry served real bars
+    assert refresher.reauth_calls == 1  # exactly one single-flight re-mint
+    assert halts == []  # ZERO pull-halt alerts — the self-heal never reaches the halt path
+
+
+def test_rotation_lag_double_401_two_remints_pull_continues_zero_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FP-1 e2e regression (DEC-GROWW-AUTH-HALT-001): the 06:00 IST rotation-lag
+    shape — refresh adopts the fresh token, the FIRST post-refresh retry 401s
+    (fleet-propagation lag, vendor-UNVERIFIED), the SECOND re-auth + retry
+    succeeds — completes DONE with ZERO pull-halt alerts under the production
+    ``GROWW_MAX_REAUTHS = 2`` budget. With the old budget of 1 the second 401
+    exhausted the budget → terminal ``GrowwAuthError`` → the halt killed the
+    whole overnight pull.
+    """
+    from datetime import date
+
+    from brutex.adapters.groww.candles import fetch_candle_windows
+    from brutex.adapters.groww.client import GrowwClient
+    from brutex.adapters.groww.constants import GROWW_MAX_REAUTHS
+
+    class GrowwAPIAuthenticationException(Exception):
+        """Fake SDK auth exception (named so from_groww_exception maps it)."""
+
+    class _SDK:
+        def __init__(self, raises: Exception | None) -> None:
+            self._raises = raises
+            self.calls = 0
+
+        def get_historical_candles(self, **_kw: object) -> dict[str, object]:
+            self.calls += 1
+            if self._raises is not None:
+                raise self._raises
+            return {"candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 5, None]]}
+
+        def get_expiries(self, **_kw: object) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+        def get_contracts(self, **_kw: object) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+    class _LaggingRefresher:
+        """Each re-auth advances the SDK queue: stale → fresh-but-lagging → valid."""
+
+        def __init__(self, sdks: list[_SDK]) -> None:
+            self._sdks = sdks
+            self._index = 0
+            self.generation = 0
+            self.reauth_calls = 0
+
+        def sdk_at(self, _index: int) -> _SDK:
+            return self._sdks[self._index]
+
+        def current_generation(self) -> int:
+            return self.generation
+
+        def reauth(self, seen_generation: int) -> int:
+            del seen_generation
+            self.reauth_calls += 1
+            self._index = min(self._index + 1, len(self._sdks) - 1)
+            self.generation += 1
+            return self.generation
+
+    stale = _SDK(GrowwAPIAuthenticationException("token expired or invalid"))
+    lagging = _SDK(GrowwAPIAuthenticationException("fresh token not fleet-valid yet"))
+    valid = _SDK(None)
+    refresher = _LaggingRefresher([stale, lagging, valid])
+    client = GrowwClient(
+        sdk=stale,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_reauths=GROWW_MAX_REAUTHS,  # the production live-build-site budget (2)
+    )
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+    fetched: list[int] = []
+
+    def work(_on_progress: ProgressHook) -> None:
+        bars = fetch_candle_windows(
+            client,
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            drop_volume=True,
+        )
+        fetched.append(len(bars))
+
+    assert job.start(work, total=1) is True
+    assert job.snapshot().state == STATE_DONE  # the pull CONTINUED to completion
+    assert fetched == [1]  # the second healed retry served real bars
+    assert refresher.reauth_calls == 2  # the rotation lag absorbed within the budget
+    assert halts == []  # ZERO pull-halt alerts — no false halt at the rotation edge
+    # And the TRUE-dead-credential case still halts after the budget: an SDK fleet
+    # that NEVER validates exhausts GROWW_MAX_REAUTHS and the terminal auth error
+    # escapes to the job layer, firing the CRITICAL alert exactly once.
+    dead = [
+        _SDK(GrowwAPIAuthenticationException("dead")),
+        _SDK(GrowwAPIAuthenticationException("still dead")),
+        _SDK(GrowwAPIAuthenticationException("never valid")),
+    ]
+    dead_refresher = _LaggingRefresher(dead)
+    dead_client = GrowwClient(
+        sdk=dead[0],
+        refresher=dead_refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_reauths=GROWW_MAX_REAUTHS,
+    )
+    dead_halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", dead_halts.append)
+    dead_job = _job()
+
+    def dead_work(_on_progress: ProgressHook) -> None:
+        fetch_candle_windows(
+            dead_client,
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            drop_volume=True,
+        )
+
+    assert dead_job.start(dead_work, total=1) is True
+    assert dead_job.snapshot().state == STATE_ERROR  # the dead credential HALTS
+    assert dead_refresher.reauth_calls == GROWW_MAX_REAUTHS  # bounded, never a loop
+    assert len(dead_halts) == 1  # the CRITICAL pull-halt alert fired exactly once
+
+
 def test_prebuild_global_stop_escapes_guard_and_fires_halt_alert_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -240,7 +527,7 @@ def test_single_flight_blocks_second_start() -> None:
     # so a second start must be a no-op returning False.
     captured: list[Callable[[], None]] = []
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=captured.append,
     )
     first = job.start(lambda _h: None, total=1)
@@ -273,7 +560,7 @@ def test_real_daemon_thread_end_to_end() -> None:
     # Exercise the default daemon spawner (the pragma path is the lambda only;
     # here we use a real thread + join to prove the engine works off-thread).
     done = threading.Event()
-    progress = PullProgress(clock=_FakeClock())
+    progress = PullProgress(clock=_ticking_clock())
 
     def spawn(fn: Callable[[], None]) -> None:
         t = threading.Thread(target=fn)
@@ -291,7 +578,7 @@ def test_real_daemon_thread_end_to_end() -> None:
 def test_snapshot_running_state_before_completion() -> None:
     # With a capturing spawner the tracker is started but not yet finished.
     captured: list[Callable[[], None]] = []
-    job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=captured.append)
+    job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=captured.append)
     job.start(lambda _h: None, total=3, detail="warming")
     snap = job.snapshot()
     assert snap.state == STATE_RUNNING
@@ -333,7 +620,7 @@ def test_write_funnel_feeds_coverage_counters() -> None:
 def test_injected_counters_are_used() -> None:
     counters = CoverageCounters()
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, counters=counters
+        progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn, counters=counters
     )
     job.start(lambda on_progress: on_progress("X 1minute", 9, False, False), total=1)
     assert job.counters is counters
@@ -352,7 +639,7 @@ def test_duplicate_repull_zero_bars_leaves_counter_unchanged() -> None:
 def test_summary_cache_invalidated_once_per_window() -> None:
     cache = _SpyCache()
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, summary_cache=cache
+        progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn, summary_cache=cache
     )
 
     def work(on_progress: ProgressHook) -> None:
@@ -389,7 +676,7 @@ class TestLedgerSynced:
     def test_sync_from_ledger_sets_absolute_bar(self) -> None:
         cache = _Cache()
         job = BackgroundPullJob(
-            progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, summary_cache=cache
+            progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn, summary_cache=cache
         )
 
         def work(_on_progress: ProgressHook) -> None:
@@ -408,7 +695,7 @@ class TestLedgerSynced:
     def test_synced_mode_per_pair_hook_only_sets_label_not_completed(self) -> None:
         # In ledger-synced mode the per-pair hook must NOT advance completed (the bar
         # comes from the ledger sync); it only refreshes the "current" label + counters.
-        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
 
         def work(on_progress: ProgressHook) -> None:
             on_progress("NIFTY 1day", 500, False, False)  # a finished pair
@@ -423,13 +710,13 @@ class TestLedgerSynced:
 
     def test_default_mode_still_advances_per_pair(self) -> None:
         # ledger_synced defaults to False → the per-pair advance is byte-unchanged.
-        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
         job.start(lambda h: h("NIFTY 1day", 5, False, False), total=2)
         assert job.snapshot().completed == 1
 
     def test_sync_from_ledger_without_cache_is_a_noop_on_dirty(self) -> None:
         # No summary cache wired → sync still updates the bar, just no mark_dirty.
-        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
         job.start(
             lambda _h: job.sync_from_ledger(completed=3, total=10, bars=30),
             total=10,
@@ -477,21 +764,26 @@ class TestOnHung:
         def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
             captured.append(on_hung)
             return PullWatchdog(
-                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
             )
 
         def _capture_only(_fn: Callable[[], None]) -> None:
             """Capture-only spawner: never runs the worker, so the run stays in flight."""
 
         return BackgroundPullJob(
-            progress=PullProgress(clock=_FakeClock()),
+            progress=PullProgress(clock=_ticking_clock()),
             spawn=_capture_only,
             watchdog_factory=factory,
         )
 
-    def test_on_hung_marks_failed_and_clears_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A HUNG edge while THIS run is current: progress → failed, _running cleared,
-        # and a best-effort halt alert fires (monkeypatched so no real notifier runs).
+    def test_on_hung_marks_stalled_suspect_and_holds_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A HUNG edge while THIS run is current (DEC-PIPELINE-STALL-HEARTBEAT-001):
+        # progress → STALLED-SUSPECT (state stays running, never a false FAILED), the
+        # single-flight flag stays HELD (the worker thread may still be alive — releasing
+        # here was the forensically-proven double-run race), and a best-effort halt alert
+        # fires (monkeypatched so no real notifier runs).
         alerts: list[BaseException] = []
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
         captured: list[Callable[[WorkerEvent], None]] = []
@@ -506,10 +798,12 @@ class TestOnHung:
         captured[0](_hung_event())  # fire the HUNG edge directly
 
         snap = job.snapshot()
-        assert snap.state == STATE_ERROR  # _on_hung marked the run failed
-        assert "stalled" in snap.detail  # the stall detail is surfaced
-        assert job.running is False  # identity gate matched → _running cleared
-        assert len(alerts) == 1  # one best-effort halt alert
+        assert snap.state == STATE_RUNNING  # NOT failed — an honest DEGRADED marker only
+        assert snap.stalled is True
+        assert "stalled-suspect" in snap.stall_detail
+        assert snap.detail == "stalled-pull"  # the start detail is untouched
+        assert job.running is True  # single-flight HELD while the worker may be alive
+        assert len(alerts) == 1  # one best-effort halt alert (still detected + reported)
         assert isinstance(alerts[0], TimeoutError)
 
     def test_on_hung_late_fire_does_not_clobber_a_newer_run(
@@ -527,14 +821,15 @@ class TestOnHung:
         # Supersede the run: a newer watchdog now owns the job's identity, so the OLD
         # on_hung must see `self._watchdog is watchdog` as False (the ->exit branch).
         newer = PullWatchdog(
-            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
         )
         job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
 
         stale_on_hung(_hung_event())  # the late fire
-        # progress.fail still ran (best-effort), but the identity gate refused to
-        # touch _running (it belongs to the newer run now).
+        # The identity gate refused to touch the newer run: no stalled marker, no alert
+        # side effects on the current run's tracker.
         assert job._watchdog is newer  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is False
 
     def test_on_hung_body_is_best_effort_and_swallows_errors(
         self, monkeypatch: pytest.MonkeyPatch
@@ -560,16 +855,16 @@ def test_run_finally_skips_clearing_running_when_superseded() -> None:
     must NOT clear ``_running`` (the ``self._watchdog is watchdog`` ->exit branch)."""
     captured: list[Callable[[], None]] = []
     newer = PullWatchdog(
-        on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+        on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
     )
 
     def factory(_on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
         return PullWatchdog(
-            on_hung=_on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            on_hung=_on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
         )
 
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=captured.append,  # capture the worker so we can supersede before it runs
         watchdog_factory=factory,
     )
@@ -586,7 +881,7 @@ def test_run_finally_skips_clearing_running_when_superseded() -> None:
 def test_beat_is_a_noop_when_no_watchdog_wired() -> None:
     """``_beat`` short-circuits (the ``self._watchdog is not None`` ->exit branch) when
     no watchdog is wired — e.g. before any ``start`` built one."""
-    job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+    job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
     assert job._watchdog is None  # pyright: ignore[reportPrivateUsage]
     job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the None guard
 
@@ -663,3 +958,116 @@ class TestFinishDetailFromWorkNote:
         snap = job.snapshot()
         assert snap.state == STATE_ERROR
         assert snap.detail == "RuntimeError: boom"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-PIPELINE-STALL-HEARTBEAT-001: the recovery edge + the pair-progress
+# per-pair advance (the frozen-counter fix's job-layer branch).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _recovery_event() -> WorkerEvent:
+    return WorkerEvent(
+        worker_name="dashboard-pull",
+        new_state=WorkerState.HEALTHY,
+        last_beat_seconds_ago=1.0,
+        timeout_seconds=30.0,
+    )
+
+
+class TestOnRecovered:
+    """``BackgroundPullJob._on_recovered``: the HUNG→HEALTHY edge clears the marker."""
+
+    def _job_and_watchdogs(self) -> tuple[BackgroundPullJob, list[PullWatchdog]]:
+        built: list[PullWatchdog] = []
+
+        def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            wd = PullWatchdog(
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
+            )
+            built.append(wd)
+            return wd
+
+        def _capture_only(_fn: Callable[[], None]) -> None:
+            """Capture-only spawner: the worker stays in flight."""
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_capture_only,
+            watchdog_factory=factory,
+        )
+        return job, built
+
+    def test_recovery_clears_the_stalled_marker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        job, built = self._job_and_watchdogs()
+        assert job.start(lambda _h: None, total=1) is True
+        job._on_hung(_hung_event(), built[0])  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is True
+        # start() wired the watchdog's on_recovery to _on_recovered — fire it.
+        assert built[0].on_recovery is not None
+        built[0].on_recovery(_recovery_event())
+        assert job.snapshot().stalled is False
+        assert job.running is True  # the run itself was never touched
+
+    def test_stale_recovery_for_superseded_run_is_gated_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        job, built = self._job_and_watchdogs()
+        job.start(lambda _h: None, total=1)
+        stale = built[0]
+        # Supersede the run identity: a newer watchdog owns the job now.
+        newer = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
+        )
+        job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
+        job._on_hung(_hung_event(), newer)  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is True
+        # The STALE run's recovery edge must NOT clear the current run's marker.
+        job._on_recovered(_recovery_event(), stale)  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is True
+
+    def test_on_recovered_swallows_a_raising_clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+
+        class _BoomProgress(PullProgress):
+            def clear_stalled(self) -> None:
+                raise RuntimeError("clear boom")
+
+        built: list[PullWatchdog] = []
+
+        def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            wd = PullWatchdog(
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
+            )
+            built.append(wd)
+            return wd
+
+        job = BackgroundPullJob(
+            progress=_BoomProgress(clock=_ticking_clock()),
+            spawn=lambda _fn: None,
+            watchdog_factory=factory,
+        )
+        job.start(lambda _h: None, total=1)
+        # Must NOT raise out of the best-effort recovery body (swallowed + logged).
+        job._on_recovered(_recovery_event(), built[0])  # pyright: ignore[reportPrivateUsage]
+        assert job.running is True
+
+
+def test_pair_progress_phase_advances_open_ended_counters() -> None:
+    """The ledger-synced + pair_progress branch of ``_on_progress`` (frozen-counter fix)."""
+    job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=lambda fn: fn())
+
+    def work(on_progress: ProgressHook) -> None:
+        job.sync_from_ledger(completed=45, total=45, bars=None)  # the metadata freeze shape
+        job.set_phase("historical", pair_progress=True)
+        on_progress("NSE-NIFTY-25Jun26-FUT 1minute", 1_000, False, False)
+        on_progress("NSE-NIFTY-25Jun26-22000-CE 1minute", 500, True, False)
+        snap = job.snapshot()
+        assert snap.completed == 47 and snap.total == 47  # units MOVE past 45/45
+        assert snap.bars == 1_500  # cumulative bars — never frozen at 0
+        assert snap.failed == 1
+
+    assert job.start(work, total=45, ledger_synced=True) is True
+    assert job.snapshot().state == STATE_DONE

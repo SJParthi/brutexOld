@@ -176,6 +176,25 @@ GROWW_RATE_LIMIT_PER_MIN: Final[int] = 500
 #: one constant if 8 only burns 429-retries without a throughput gain (the #906 trap).
 GROWW_RATE_LIMIT_RPS_CEILING: Final[float] = 8.0
 
+#: Bounded mid-pull re-auth budget injected at the PRODUCTION live build sites
+#: (``build_live_client`` / ``build_live_pool`` — the DEC-GROWW-AUTH-HALT-001 FP-1
+#: hardening). The :class:`~brutex.adapters.groww.client.GrowwClient` DEFAULT stays
+#: ``1`` (offline / unit-test back-compat, untouched); production injects ``2`` so
+#: the 06:00 IST daily-token rotation (verified from production logs 2026-06-23 —
+#: DEC-GROWW-TOKEN-REAUTH-001) cannot FALSE-halt a pull: at the rotation edge a
+#: worker's re-read may adopt the Lambda's FRESH token while that token is not yet
+#: fleet-valid (a propagation lag — vendor-UNVERIFIED, treated as possible per
+#: Golden Rule #1), so the immediate post-refresh retry can 401 once more; with a
+#: budget of 1 that second 401 exhausted the budget → a TERMINAL ``GrowwAuthError``
+#: → the new pull-wide halt killed the whole ~750-symbol overnight pull where the
+#: pre-halt behaviour quarantined one pair. A budget of 2 (paired with the small
+#: :data:`~brutex.adapters.groww.client.REAUTH_RETRY_BACKOFF_SECONDS` pause before
+#: each post-refresh retry) absorbs exactly that one-rotation lag, while a
+#: genuinely-dead credential still exhausts the bounded budget and halts LOUDLY
+#: (never an infinite loop — the halt semantics of DEC-GROWW-AUTH-HALT-001 are
+#: preserved, just not hair-triggered on the daily rotation).
+GROWW_MAX_REAUTHS: Final[int] = 2
+
 #: Hard per-call wall-clock deadline (seconds) for a single historical-candles SDK
 #: call — the pull FREEZE GUARD (DEC-GROWW-PULL-CALL-DEADLINE-001). The Groww
 #: ``get_historical_candles`` call has no inherent timeout, so a stalled connection
@@ -447,6 +466,7 @@ __all__ = [
     "GROWW_HTTP_READ_TIMEOUT_S",
     "GROWW_INSTRUMENT_CSV_URL",
     "GROWW_INSTRUMENT_TYPES",
+    "GROWW_MAX_REAUTHS",
     "GROWW_OPTION_COVERAGE_MARKET",
     "GROWW_POOL_SIZE_ENV",
     "GROWW_PULL_CALL_TIMEOUT_S",

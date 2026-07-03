@@ -1405,6 +1405,8 @@ class TestIsPoolIsolatable:
         # consumer processes BOTH the spot tail (run_ingest) AND the F&O/option tail
         # (option_ingest), each of which carves out its OWN `_GLOBAL_STOP_ERRORS`; a divergence in
         # either would silently swallow that spine's pull-wide stop, so both are pinned here.
+        # (A bare instance of every member — incl. the base `GrowwAuthError`, whose TERMINAL
+        # shape joined the set per DEC-GROWW-AUTH-HALT-001 — must trip the pool.)
         from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
         from brutex.adapters.groww.option_ingest import (
             _GLOBAL_STOP_ERRORS as _OPTION_GLOBAL_STOP_ERRORS,
@@ -1415,3 +1417,20 @@ class TestIsPoolIsolatable:
             assert _is_pool_isolatable(cls("x")) is False, cls
         for cls in _OPTION_GLOBAL_STOP_ERRORS:
             assert _is_pool_isolatable(cls("x")) is False, cls
+        assert _SPOT_GLOBAL_STOP_ERRORS == _OPTION_GLOBAL_STOP_ERRORS  # the two spines in lockstep
+
+    def test_terminal_auth_trips_the_pool_but_retryable_auth_shapes_stay_isolatable(self) -> None:
+        # DEC-GROWW-AUTH-HALT-001: a TERMINAL GrowwAuthError (dead credential / re-mint
+        # exhausted) fails every remaining window identically → pull-wide halt. The two
+        # RETRYABLE GrowwAuthError SUBCLASSES are transient by design and must NEVER trip
+        # the pool — the carve-out the `is_terminal_auth_failure` predicate encodes.
+        from brutex.adapters.groww.errors import (
+            GrowwAuthError,
+            GrowwTokenIssuanceThrottled,
+            GrowwTokenStillStaleError,
+        )
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+
+        assert _is_pool_isolatable(GrowwAuthError("dead credential")) is False
+        assert _is_pool_isolatable(GrowwTokenIssuanceThrottled("mint throttled")) is True
+        assert _is_pool_isolatable(GrowwTokenStillStaleError("same dead token")) is True
