@@ -19,6 +19,7 @@ from brutex.universe_constituents import (
     resolve_constituents,
     resolve_reference_security_ids,
 )
+from structlog.testing import capture_logs
 
 
 def _inst(
@@ -160,6 +161,63 @@ class TestResolveConstituents:
         assert report.security_ids == (30, 10, 20)
 
 
+class TestDuplicateKeyCollisionWarnings:
+    """A duplicate ISIN / ticker collapse keeps the lowest-``security_id`` winner
+    but is now LOUD, naming BOTH candidate rows (fail-before: the old code chose
+    silently)."""
+
+    def test_isin_collision_warns_naming_both_rows(self) -> None:
+        isin = "INE002A01018"
+        instruments = [
+            _inst(2885, "RELIANCE INDUSTRIES LTD", isin),
+            _inst(1000, "RELIANCE DUP", isin),  # lower id → kept (deterministic)
+        ]
+        with capture_logs() as logs:
+            report = resolve_constituents([ConstituentRow("RELIANCE", isin)], instruments)
+        assert report.security_ids == (1000,)  # deterministic choice unchanged
+        warns = [
+            e for e in logs if e.get("event") == "universe_constituents.duplicate_key_collapsed"
+        ]
+        assert len(warns) == 1  # only the ISIN collides (the two symbols differ)
+        entry = warns[0]
+        assert entry["log_level"] == "warning"
+        assert entry["key_kind"] == "isin"
+        assert entry["key"] == isin
+        assert entry["kept_security_id"] == 1000
+        assert entry["kept_symbol"] == "RELIANCE DUP"
+        assert entry["dropped_security_id"] == 2885
+        assert entry["dropped_symbol"] == "RELIANCE INDUSTRIES LTD"
+
+    def test_ticker_collision_warns_naming_both_rows(self) -> None:
+        instruments = [
+            _inst(777, "ACME", None),
+            _inst(222, "ACME", None),  # lower id → kept
+        ]
+        with capture_logs() as logs:
+            report = resolve_constituents([ConstituentRow("ACME", None)], instruments)
+        assert report.security_ids == (222,)
+        warns = [
+            e for e in logs if e.get("event") == "universe_constituents.duplicate_key_collapsed"
+        ]
+        assert len(warns) == 1  # no ISIN key (both None) → only the ticker collides
+        entry = warns[0]
+        assert entry["key_kind"] == "ticker"
+        assert entry["key"] == "ACME"
+        assert entry["kept_security_id"] == 222
+        assert entry["dropped_security_id"] == 777
+
+    def test_clean_master_emits_no_collision_warning(self) -> None:
+        instruments = [
+            _inst(1, "RELIANCE", "INE002A01018"),
+            _inst(2, "TCS", "INE467B01029"),
+        ]
+        with capture_logs() as logs:
+            resolve_constituents([ConstituentRow("RELIANCE", "INE002A01018")], instruments)
+        assert [
+            e for e in logs if e.get("event") == "universe_constituents.duplicate_key_collapsed"
+        ] == []
+
+
 class TestMatchReport:
     def test_summary_all_matched(self) -> None:
         instruments = [_inst(2885, "RELIANCE INDUSTRIES LTD", "INE002A01018")]
@@ -285,3 +343,26 @@ class TestHeldMembers:
             held_members([], [_inst(1, "RELIANCE", "INE002A01018")], held_symbols=["RELIANCE"])
             == []
         )
+
+    def test_cross_segment_security_id_collision_returns_correct_name(self) -> None:
+        # A cash EQUITY and an INDEX share the numeric security_id 13 (the observed
+        # cross-segment collision). The name lookup must return the CASH-equity name
+        # (the partition every match resolves from), NOT the index that happened to
+        # last-write id 13 in an un-partitioned map. Fail-before: the old
+        # {inst.security_id: inst.symbol_name for inst in instruments} last-wins to
+        # "NIFTY" (id 13 not held → dropped), returning [] instead of ["RELIANCE"].
+        cash_reliance = _inst(13, "RELIANCE", "INE002A01018")
+        index_collider = _inst(
+            13,
+            "NIFTY",
+            None,
+            segment=Segment.INDEX,
+            instrument=InstrumentType.IDX,
+        )
+        members = held_members(
+            [ConstituentRow("RELIANCE", "INE002A01018")],
+            # index row AFTER the cash row → old un-partitioned map would clobber id 13.
+            [cash_reliance, index_collider],
+            held_symbols=["RELIANCE"],
+        )
+        assert members == ["RELIANCE"]
