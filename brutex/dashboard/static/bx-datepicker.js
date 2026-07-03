@@ -45,9 +45,17 @@
       ["30D", function () { var s = new Date(maxD); s.setDate(s.getDate() - 30); return [s, maxD]; }]
     ];
     function setTrig() {
-      trig.innerHTML = single
-        ? '<span aria-hidden="true">📅</span> <b>' + fmt(start) + '</b> <span class="dp-car">▾</span>'
-        : '<span aria-hidden="true">📅</span> <b>' + fmt(start) + '</b> <span class="dp-sep">→</span> <b>' + fmt(end) + '</b> <span class="dp-car">▾</span>';
+      /* An EMPTY backing input renders NO date ("—"), never today's date — an
+         empty filter must not masquerade as a live one-day filter (the
+         inert-filter illusion; DEC-DB-UX-PACK-001 Feature 2). The internal
+         `start`/`end` defaults are only the calendar's navigation position. */
+      var sTxt = fromInput.value ? fmt(start) : "—";
+      if (single) {
+        trig.innerHTML = '<span aria-hidden="true">📅</span> <b>' + sTxt + '</b> <span class="dp-car">▾</span>';
+        return;
+      }
+      var eTxt = toInput.value ? fmt(end) : "—";
+      trig.innerHTML = '<span aria-hidden="true">📅</span> <b>' + sTxt + '</b> <span class="dp-sep">→</span> <b>' + eTxt + '</b> <span class="dp-car">▾</span>';
     }
     function decade(y) { return y - (y % 20); }
     function headLabel() { if (level == "days") return MON[view.getMonth()] + " " + view.getFullYear(); if (level == "mons") return "" + view.getFullYear(); var d = decade(view.getFullYear()); return d + " - " + (d + 19); }

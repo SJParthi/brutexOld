@@ -498,8 +498,12 @@
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
-    <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options fan
-      <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
+    <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options pull
+      <b>ALL vendor-listed strikes</b> per expiry — the vendor chain (<code>get_expiries</code> → <code>get_contracts</code>) returns <b>every listed strike, not relative-to-spot</b> · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
+      <!-- DEC-DB-UX-PACK-001 Feature 5: replaces the FALSE fixed-fan claim (a ±10-strike fan for
+           indices / ±3 for stocks was never the pull rule). Verified: CLAUDE.md §6 "Options
+           contract resolution" — get_contracts returns "all listed strikes, not
+           relative-to-spot" (brutex/adapters/groww/contracts.py). -->
       Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b>; by default the intraday ones are computed on demand, <b>NOT written to your drive</b>. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) The pipeline's FINAL stage pre-builds the intraday timeframes for <b>SPOT and FUTURES</b> once the fetch fully succeeds (futures keep open-interest); <b>OPTIONS intraday stays on-demand</b> (TB-scale — the engine never reads option intraday). The <b>⚙ Pre-build timeframes</b> button below is an on-demand re-warm.</div>
     <!-- The ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001): selection-aware — pulls the
          TICKED instruments, or the WHOLE universe when none are ticked — via the SHARED
