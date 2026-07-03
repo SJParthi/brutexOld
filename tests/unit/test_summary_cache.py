@@ -456,6 +456,60 @@ def test_probe_reconciles_inside_get_or_refresh() -> None:
     assert rc.calls == 2
 
 
+def test_stalled_probe_never_blocks_mark_dirty() -> None:
+    """DEC-SURFACE-TRIAL-001 regression (MINOR-1): the probe stat runs OUTSIDE
+    the cache lock, so a probe WEDGED on a stalled external volume can never
+    block the pull's ``mark_dirty`` write funnel (or hold the lock at all).
+
+    Before the fix the probe ran under ``self._lock`` inside ``generation``;
+    a blocked probe held the lock indefinitely and this test deadlocked.
+    """
+    probe_entered = threading.Event()
+    probe_release = threading.Event()
+
+    def _stalled_probe() -> str | None:
+        probe_entered.set()
+        # Simulate a wedged os.stat on a stalled volume (bounded for safety).
+        assert probe_release.wait(timeout=10.0), "test harness release never fired"
+        return "t1"
+
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=_stalled_probe)
+    reader = threading.Thread(target=lambda: cache.generation, daemon=True)
+    reader.start()
+    assert probe_entered.wait(timeout=5.0), "the generation read never reached the probe"
+
+    # While the probe is STALLED, mark_dirty must complete promptly — it only
+    # needs the lock, which the stalled probe must NOT be holding.
+    dirtier = threading.Thread(target=cache.mark_dirty, daemon=True)
+    dirtier.start()
+    dirtier.join(timeout=2.0)
+    stalled = dirtier.is_alive()
+    # Unwedge the probe before asserting so a failure never leaks a live thread.
+    probe_release.set()
+    reader.join(timeout=5.0)
+    assert not stalled, "mark_dirty blocked behind the stalled revision probe"
+    # The stalled read's token lands as the baseline; the mark_dirty bump held.
+    assert cache.generation == 1
+
+
+def test_out_of_order_probe_tokens_over_invalidate_never_miss() -> None:
+    """DEC-SURFACE-TRIAL-001 (MINOR-1 thread-safety envelope): tokens probed
+    outside the lock may reconcile out of order — the documented worst case is
+    a SPURIOUS extra bump (over-invalidation), never a missed change, and the
+    generation stays monotonic. Deterministically replays the interleaving:
+    baseline B → stale A applied late → B re-applied.
+    """
+    probe = _MutableProbe("B")
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=probe)
+    seen = [cache.generation]  # B → baseline, no bump
+    probe.token = "A"  # a STALE pre-write token applied after the fresh one
+    seen.append(cache.generation)  # A ≠ B → bump (the spurious extra bump)
+    probe.token = "B"  # the final on-disk state re-observed
+    seen.append(cache.generation)  # B ≠ A → bump — the real change is NEVER missed
+    assert seen == [0, 1, 2]
+    assert seen == sorted(seen)  # monotonic — never decreases
+
+
 # ────────────────────────────────────────────────────────────────────────
 # CoverageCounters — incremental, idempotent O(1) tally
 # ────────────────────────────────────────────────────────────────────────
