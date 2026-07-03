@@ -1285,6 +1285,105 @@ def test_cmd_fetch_alerts_then_reraises_on_breaker_trips(
     assert halts == [halt]
 
 
+def test_cmd_fetch_alerts_then_reraises_on_terminal_auth_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A TERMINAL GrowwAuthError HALTS the CLI pull with the CRITICAL alert, then re-raises.
+
+    DEC-GROWW-AUTH-HALT-001 — the CLI twin of the dashboard ``_is_pull_halt`` wiring: a
+    dead credential fails every remaining symbol identically, so it fires the pull-halt
+    alert exactly once and re-raises (non-zero exit preserved) instead of quarantining
+    symbol-by-symbol into a silent all-failed "completion".
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.adapters.groww.errors import GrowwAuthError
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+
+    def fake_ingest(*_a: Any, **_k: Any) -> Any:
+        """Simulate a dead-credential terminal auth failure escaping the spine."""
+        raise GrowwAuthError("bad credential — re-mint budget exhausted")
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    halts: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", halts.append)
+
+    with pytest.raises(GrowwAuthError):
+        cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=False,
+            rows_per_chunk=5,
+        )
+    assert len(halts) == 1  # the CRITICAL alert fired exactly once, then it re-raised
+    assert isinstance(halts[0], GrowwAuthError)
+
+
+def test_cmd_fetch_retryable_auth_shape_reraises_without_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A RETRYABLE GrowwAuthError subclass re-raises UNCHANGED with NO pull-halt alert.
+
+    DEC-GROWW-AUTH-HALT-001 carve-out at the CLI except site: a stale read-only
+    re-read (``GrowwTokenStillStaleError``) is transient by design — it propagates
+    exactly as it did before the ``GrowwAuthError`` tuple membership caught it,
+    never firing the CRITICAL alert.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.adapters.groww.errors import GrowwTokenStillStaleError
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+
+    def fake_ingest(*_a: Any, **_k: Any) -> Any:
+        """Simulate a retryable auth-family shape escaping the spine terminally."""
+        raise GrowwTokenStillStaleError("re-read returned the same dead token")
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    halts: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", halts.append)
+
+    with pytest.raises(GrowwTokenStillStaleError):
+        cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=False,
+            rows_per_chunk=5,
+        )
+    assert halts == []  # transient auth-family shape → NO CRITICAL alert, ever
+
+
 def test_emit_pull_halt_alert_surfaces_lake_write_halt_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

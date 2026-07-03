@@ -220,7 +220,9 @@ def _real_sdk_factory(token: str) -> GrowwSDK:  # pragma: no cover — needs gro
     a half-open / dead socket fails in seconds (the env-tunable connect 10 s / read 30 s)
     instead of burning the 45 s wall-clock guard, which stays as belt-and-suspenders.
     """
-    from growwapi import GrowwAPI  # type: ignore[import-not-found, unused-ignore]
+    # No inline import ignore: the growwapi dual-env hygiene lives in the
+    # ``[[tool.mypy.overrides]]`` per-module table (DEC-MYPY-GROWWAPI-STUBS-001).
+    from growwapi import GrowwAPI
 
     from brutex.adapters.groww.http_timeout import apply_default_timeout
 

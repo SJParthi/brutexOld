@@ -141,9 +141,13 @@ def is_pull_halt(exc: BaseException) -> bool:
     """True iff *exc* is a pull-wide global-stop (halts every window), not a per-symbol failure.
 
     Mirrors the ingest spines' ``_GLOBAL_STOP_ERRORS`` set (DEC-LAKE-WRITE-HALT-001 /
-    quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 / DEC-VENDOR-DOWN-BREAKER-001 — the
-    vendor-down error-storm + dead-credential stops). The error classes are imported
-    INSIDE the call — not at module top — so
+    quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 / the TERMINAL Groww auth failure — a
+    dead credential / an exhausted re-mint budget, DEC-GROWW-AUTH-HALT-001, consulted
+    via :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` so the RETRYABLE
+    auth-family subclasses NEVER read as a halt / DEC-VENDOR-DOWN-BREAKER-001 — the
+    vendor-down error-storm + dead-credential stops, ``GrowwCredentialDeadError`` being
+    the TERMINAL auth escalation the predicate also matches). The error classes are
+    imported INSIDE the call — not at module top — so
     :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
     part of the heavy PyO3 chain), and this check only runs on the rare
     worker-exception path.
@@ -158,7 +162,7 @@ def is_pull_halt(exc: BaseException) -> bool:
     """
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
-    from brutex.adapters.groww.errors import GrowwCredentialDeadError
+    from brutex.adapters.groww.errors import is_terminal_auth_failure
     from brutex.data.errors import LakeWriteHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
@@ -170,9 +174,8 @@ def is_pull_halt(exc: BaseException) -> bool:
             QuotaInvariantError,
             MassEmptySettleHalt,
             VendorDownError,
-            GrowwCredentialDeadError,
         ),
-    )
+    ) or is_terminal_auth_failure(exc)
 
 
 class _Invalidatable(Protocol):

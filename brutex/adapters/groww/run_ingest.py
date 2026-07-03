@@ -20,11 +20,16 @@ rate bucket (the injected ``pace``) is the governor.
 
 **Divergences from a latched, gap-aware spine (deliberate, Golden Rule #1):**
 
-* **No auth fail-fast latch.** Some vendors carry a shared ``AuthGuard`` + an
-  ``auth_aborted`` / ``auth_cause`` report field for a mid-pull token death.
-  The Groww adapter provides no such latch, so a Groww auth failure is
-  a plain TERMINAL per-pair quarantine — recorded + re-tried next pull, like any
-  other terminal error. The report carries no auth-abort fields.
+* **No auth fail-fast latch — but a TERMINAL auth failure HALTS (DEC-GROWW-AUTH-HALT-001).**
+  Some vendors carry a shared ``AuthGuard`` + an ``auth_aborted`` / ``auth_cause``
+  report field for a mid-pull token death. The Groww adapter provides no such
+  latch; instead a TERMINAL ``GrowwAuthError`` (a dead credential / an exhausted
+  re-mint budget — every remaining symbol would fail identically) is a
+  :data:`_GLOBAL_STOP_ERRORS` member and PROPAGATES as a pull-wide halt (reaching
+  the CRITICAL Telegram pull-halt alert), never a symbol-by-symbol quarantine
+  that "completes" all-failed in silence. The RETRYABLE auth-family subclasses
+  (a throttled mint / a stale read-only re-read) stay per-pair quarantinable,
+  and the mid-pull re-mint self-heal (DEC-GROWW-TOKEN-REAUTH-001) is untouched.
 * **No known-gap branch.** Some vendors special-case a "no data" 400 as a
   benign KNOWN_GAP. Groww has no such marker (Golden Rule #1 — no invented vendor
   code), so every terminal Groww error is a uniform quarantine.
@@ -56,7 +61,13 @@ from brutex.adapters.empty_circuit_breaker import (
 )
 from brutex.adapters.error_storm_breaker import ErrorStormBreaker, VendorDownError
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
-from brutex.adapters.groww.errors import GrowwCredentialDeadError, GrowwError, is_auth_failure
+from brutex.adapters.groww.errors import (
+    GrowwAuthError,
+    GrowwCredentialDeadError,
+    GrowwError,
+    is_auth_failure,
+    is_terminal_auth_failure,
+)
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
@@ -87,16 +98,29 @@ from brutex.orchestrator.universe_phases import RunParallel
 #: mass-empty circuit breaker means EVERY remaining window is fetching into the same
 #: suspected soft-throttle / mis-addressing episode — settling on would poison the
 #: ledger pull-wide, so the pull halts loudly instead of quarantining one symbol.
+#: ``GrowwAuthError`` joins it (DEC-GROWW-AUTH-HALT-001): a TERMINAL auth failure — a
+#: dead credential / an exhausted re-mint budget — fails every remaining symbol
+#: identically, so quarantining symbol-by-symbol would "complete" an all-failed pull
+#: with NO critical alert (the silent-for-days shape). NOTE the drain check carves the
+#: two RETRYABLE ``GrowwAuthError`` subclasses (``GrowwTokenIssuanceThrottled`` /
+#: ``GrowwTokenStillStaleError``) BACK OUT via
+#: :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure`, so a transient
+#: auth-family shape stays a per-symbol quarantine and the mid-pull re-mint self-heal
+#: (DEC-GROWW-TOKEN-REAUTH-001, which never raises out of ``client._call``) is untouched.
 #: ``VendorDownError`` + ``GrowwCredentialDeadError`` join it
 #: (DEC-VENDOR-DOWN-BREAKER-001): a tripped vendor-down error-storm breaker means the
 #: VENDOR (or the network path to it) is down — every remaining window would burn its
 #: whole retry ladder identically; a dead-credential escalation means every remaining
-#: fetch is auth-stalled against the SAME dead token. Both halt, never quarantine.
+#: fetch is auth-stalled against the SAME dead token. Both halt, never quarantine
+#: (``GrowwCredentialDeadError`` is a TERMINAL ``GrowwAuthError`` subclass, so it also
+#: satisfies the ``is_terminal_auth_failure`` carve-out — listed explicitly as the
+#: DEC-VENDOR-DOWN-BREAKER-001 escalation member).
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
     MassEmptySettleHalt,
+    GrowwAuthError,
     VendorDownError,
     GrowwCredentialDeadError,
 )
@@ -520,12 +544,18 @@ def run_groww_spot_ingest(
         exc = outcome.exc
         if exc is None:  # pragma: no cover — a failed outcome always carries exc
             continue
-        if isinstance(exc, _GLOBAL_STOP_ERRORS):
-            # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT a
-            # per-symbol failure — re-raise so it propagates to the controller's
-            # quota handling (DEC-SPOT-QUOTA-MIDROUND-001) instead of being
+        if isinstance(exc, _GLOBAL_STOP_ERRORS) and (
+            not isinstance(exc, GrowwAuthError) or is_terminal_auth_failure(exc)
+        ):
+            # A GLOBAL stop (quota exhausted / quota-ledger invariant / disk-full /
+            # a TERMINAL dead-credential auth failure, DEC-GROWW-AUTH-HALT-001) is NOT
+            # a per-symbol failure — re-raise so it propagates to the controller's
+            # halt handling (DEC-SPOT-QUOTA-MIDROUND-001) instead of being
             # quarantined as one pair (the carve-out from the broad BruteXError
-            # quarantine — DEC-GROWW-QUARANTINE-BRUTEX-001).
+            # quarantine — DEC-GROWW-QUARANTINE-BRUTEX-001). The RETRYABLE
+            # ``GrowwAuthError`` subclasses (a throttled mint / a stale read-only
+            # re-read) are carved BACK OUT here: transient by design, they fall
+            # through to the ordinary per-symbol quarantine below, never a halt.
             raise exc
         if not isinstance(exc, BruteXError):
             # A genuine CODE bug (a Python builtin: ValueError / AttributeError /

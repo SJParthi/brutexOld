@@ -65,6 +65,7 @@ from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
+from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.pull_pipeline import (
     build_fetch_pipeline as _build_fetch_pipeline,
@@ -83,6 +84,7 @@ from brutex.adapters.groww.pull_pipeline import (
 )
 from brutex.adapters.groww.run_ingest import (
     GrowwIngestReport,
+    PairFailure,
     ProgressHook,
     run_groww_spot_ingest,
     run_groww_spot_ingest_with_retry,
@@ -1671,6 +1673,12 @@ def pull_all_spot(
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
             nonlocal final_mass_empty_cause
             passes: list[SpotIngestWithRetry] = []
+            # Synthesized quarantine rows for a TERMINAL mid-pass auth halt
+            # (DEC-GROWW-AUTH-HALT-001): the spine now RAISES a dead-credential
+            # auth error before returning its report, so the aborted pass never
+            # lands in ``passes`` — these stand in for the per-pair FAILED rows the
+            # pre-halt quarantine produced (empty on every non-auth path).
+            auth_failures: tuple[PairFailure, ...] = ()
 
             def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
                 """Run ONE full pull-pass-with-auto-retry over the SHARED window ledger.
@@ -1838,10 +1846,56 @@ def pull_all_spot(
                         "committed work kept; un-settled windows stay retryable"
                     ),
                 )
+            except GrowwAuthError as exc:
+                # A TERMINAL dead-credential auth failure HALTED the spine mid-phase
+                # (DEC-GROWW-AUTH-HALT-001 — the spine's ``_GLOBAL_STOP_ERRORS`` raise).
+                # Like the quota / mass-empty stops above, it is CAUGHT here and mapped
+                # to the existing loud ``auth_expired`` verdict (the graceful abort the
+                # pre-halt quarantine produced) instead of escaping as a generic job
+                # error; the RETRYABLE auth-family subclasses (a throttled mint / a
+                # stale read-only re-read) never reach here from the spine and re-raise
+                # unchanged if they somehow do. Because the halt is CAUGHT (it never
+                # escapes to the job layer's ``_is_pull_halt`` path), the CRITICAL
+                # Telegram pull-halt alert fires HERE — parity with the mass-empty
+                # handler + the CLI ``_pull_halt_errors`` set
+                # (DEC-TELEGRAM-PULL-HALT-001; best-effort by construction).
+                if not is_terminal_auth_failure(exc):
+                    raise
+                emit_pull_halt_alert(exc)
+                final_auth_aborted = True
+                final_still_failed += passes[-1].report.still_failed_windows if passes else 0
+                # Synthesize the per-pair quarantine rows the pre-halt spine reported
+                # (every phase pair FAILED against the dead credential — the halt
+                # rationale). HONEST envelope: a symbol that completed BEFORE the
+                # mid-pass death is conservatively reported failed here (its outcome
+                # is unknowable once the pass aborted); the window LEDGER — not this
+                # summary — stays the retry authority, and its settled windows are
+                # skipped by the next pull (Golden Rule #7 idempotence).
+                auth_failures = tuple(
+                    PairFailure(
+                        symbol=inst.symbol_name,
+                        interval=phase_interval,
+                        error=str(exc),
+                        auth_failure=True,
+                    )
+                    for inst in phase_instruments
+                    for phase_interval in phase_intervals
+                )
+                _LOG.warning(
+                    "universe.pull_all.auth_halt",
+                    pull_id=pid,
+                    error_type=type(exc).__name__,
+                    rounds_completed=len(passes),
+                    note=(
+                        "terminal Groww auth failure — dead credential / re-mint budget "
+                        "exhausted; committed work kept; re-pull after re-auth"
+                    ),
+                )
             # The per-symbol rollup reads each phase's FIRST pass; an absent (no pass
-            # completed) phase contributes an empty report.
+            # completed) phase contributes an empty report — except a terminal auth
+            # halt, whose synthesized quarantine rows preserve the pre-halt shape.
             phase_reports.append(
-                passes[0].report if passes else GrowwIngestReport(pairs={}, failures=())
+                passes[0].report if passes else GrowwIngestReport(pairs={}, failures=auth_failures)
             )
 
         try:
@@ -2294,32 +2348,55 @@ def pull_candles(
         ) -> GrowwIngestReport:
             """Run ONE phase's single ingest pass over the shared ledger; fold its report."""
             nonlocal phase_auth_aborted
-            phase_report = run_groww_spot_ingest(
-                adapter,
-                sink,
-                instruments=[instrument],
-                intervals=phase_intervals,
-                start=start.date(),
-                end=end.date(),
-                pace=pace,
-                on_rate_limit=on_rate_limit,
-                on_timeout=on_timeout,
-                on_success=on_success,
-                on_progress=_progress_then_flush,
-                ledger=ledger,
-                run_parallel=run_parallel,
-                on_window=window_observer,
-                symbol_windows=phase_windows,
-                write_pool=_write_consumer,
-                fetch_pipeline=_fetch_pipeline,
-                # Real production Groww pull → OPT IN to the data-completeness re-pull demotion
-                # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001). A dense INDEX
-                # 1-minute window with a confirmed interior hole / trailing truncation is
-                # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
-                # false-red on the synthetic adapter's first-day-only bars.
-                detect_completeness_gaps=True,
-                storm_breaker=_storm_breaker,
-            )
+            try:
+                phase_report = run_groww_spot_ingest(
+                    adapter,
+                    sink,
+                    instruments=[instrument],
+                    intervals=phase_intervals,
+                    start=start.date(),
+                    end=end.date(),
+                    pace=pace,
+                    on_rate_limit=on_rate_limit,
+                    on_timeout=on_timeout,
+                    on_success=on_success,
+                    on_progress=_progress_then_flush,
+                    ledger=ledger,
+                    run_parallel=run_parallel,
+                    on_window=window_observer,
+                    symbol_windows=phase_windows,
+                    write_pool=_write_consumer,
+                    fetch_pipeline=_fetch_pipeline,
+                    # Real production Groww pull → OPT IN to the data-completeness re-pull demotion
+                    # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001). A dense INDEX
+                    # 1-minute window with a confirmed interior hole / trailing truncation is
+                    # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
+                    # false-red on the synthetic adapter's first-day-only bars.
+                    detect_completeness_gaps=True,
+                    storm_breaker=_storm_breaker,
+                )
+            except GrowwAuthError as exc:
+                # A TERMINAL dead-credential auth failure HALTED the spine mid-phase
+                # (DEC-GROWW-AUTH-HALT-001): map it to the SAME graceful auth-abort the
+                # pre-halt quarantine produced — the phase's pairs read FAILED, the
+                # global-stop guard below skips the remaining phase(s), and because the
+                # halt is CAUGHT here (it never escapes to the job layer's
+                # ``_is_pull_halt`` path) the CRITICAL Telegram pull-halt alert fires
+                # HERE (DEC-TELEGRAM-PULL-HALT-001 parity). A RETRYABLE auth-family
+                # shape (throttled mint / stale read-only re-read) re-raises unchanged.
+                if not is_terminal_auth_failure(exc):
+                    raise
+                emit_pull_halt_alert(exc)
+                phase_auth_aborted = True
+                failure_keys.update((symbol, phase_interval) for phase_interval in phase_intervals)
+                _LOG.warning(
+                    "universe.pull.phase_auth_halt",
+                    pull_id=pid,
+                    symbol=symbol,
+                    intervals=list(phase_intervals),
+                    error_type=type(exc).__name__,
+                )
+                return GrowwIngestReport(pairs={}, failures=())
             merged_pairs.update(phase_report.pairs)
             failure_keys.update((f.symbol, f.interval) for f in phase_report.failures)
             phase_auth_aborted = phase_auth_aborted or phase_report.auth_aborted

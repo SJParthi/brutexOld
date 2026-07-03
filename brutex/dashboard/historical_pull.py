@@ -83,6 +83,7 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno_window_opens_on
 from brutex.adapters.groww.contracts import parse_contract_symbol
+from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
 from brutex.adapters.groww.expiry_scope import (
     log_out_of_scope_expiries,
     partition_contracts_by_scope,
@@ -921,40 +922,71 @@ def _run_phase(
             by_market.items(),
             key=lambda kv: (_MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
         ):
-            report: GrowwOptionIngestReport = run_groww_option_ingest(
-                client,
-                sink,
-                contracts=[contract for _row, contract in bucket],
-                intervals=(interval,),
-                start=start,
-                end=end,
-                pace=pace,
-                ledger=ledger,
-                on_rate_limit=on_rate_limit,
-                on_timeout=on_timeout,
-                on_success=on_success,
-                on_progress=_progress,
-                market=market,
-                contract_windows=contract_windows,
-                empty_retry_by_symbol=empty_retry_by_symbol,
-                run_parallel=run_parallel,
-                capture_hook_factory=capture_hook_factory,
-                write_pool=write_pool,
-                fetch_pipeline=fetch_pipeline,
-                storm_breaker=storm_breaker,
-            )
-            pass_bars += report.bars_appended
-            pass_windows += report.windows
-            pass_failed_pairs += report.failed_pairs
-            pass_still_failed += report.still_failed_windows
-            pass_skipped += report.skipped_windows
-            pass_auth = pass_auth or report.auth_aborted
-            clean |= _clean_symbols(report)
-            # Fold this bucket's per-pair reports + quarantines into the phase-wide merge so the
-            # async post-drain reconcile can override the deferred counts (no-op synchronously).
-            merged_pairs.update(report.pairs)
-            failure_symbols.update(f.symbol for f in report.failures)
+            try:
+                report: GrowwOptionIngestReport = run_groww_option_ingest(
+                    client,
+                    sink,
+                    contracts=[contract for _row, contract in bucket],
+                    intervals=(interval,),
+                    start=start,
+                    end=end,
+                    pace=pace,
+                    ledger=ledger,
+                    on_rate_limit=on_rate_limit,
+                    on_timeout=on_timeout,
+                    on_success=on_success,
+                    on_progress=_progress,
+                    market=market,
+                    contract_windows=contract_windows,
+                    empty_retry_by_symbol=empty_retry_by_symbol,
+                    run_parallel=run_parallel,
+                    capture_hook_factory=capture_hook_factory,
+                    write_pool=write_pool,
+                    fetch_pipeline=fetch_pipeline,
+                    storm_breaker=storm_breaker,
+                )
+            except GrowwAuthError as exc:
+                # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
+                # bucket (DEC-GROWW-AUTH-HALT-001 — the spine's ``_GLOBAL_STOP_ERRORS``
+                # raise). Map it to the SAME graceful auth-abort the pre-halt quarantine
+                # produced — the pass reports ``auth_aborted`` (the "auth token expired"
+                # verdict/note), remaining buckets are stopped (every one would fail
+                # identically), committed work + the ledger survive via the outer
+                # finally. Because the halt is CAUGHT here (it never escapes to the job
+                # layer's ``_is_pull_halt`` path), the CRITICAL Telegram pull-halt alert
+                # fires HERE (DEC-TELEGRAM-PULL-HALT-001 parity with the mass-empty
+                # handler below; best-effort by construction). A RETRYABLE auth-family
+                # shape (throttled mint / stale read-only re-read) re-raises unchanged.
+                if not is_terminal_auth_failure(exc):
+                    raise
+                emit_pull_halt_alert(exc)
+                pass_auth = True
+                _LOG.warning(
+                    "historical.pull.auth_halt",
+                    market=market,
+                    error_type=type(exc).__name__,
+                    rounds_completed=len(passes),
+                    note=(
+                        "terminal Groww auth failure — dead credential / re-mint budget "
+                        "exhausted; committed work kept; re-pull after re-auth"
+                    ),
+                )
+            else:
+                pass_bars += report.bars_appended
+                pass_windows += report.windows
+                pass_failed_pairs += report.failed_pairs
+                pass_still_failed += report.still_failed_windows
+                pass_skipped += report.skipped_windows
+                pass_auth = pass_auth or report.auth_aborted
+                clean |= _clean_symbols(report)
+                # Fold this bucket's per-pair reports + quarantines into the phase-wide merge so
+                # the async post-drain reconcile can override the deferred counts (no-op
+                # synchronously).
+                merged_pairs.update(report.pairs)
+                failure_symbols.update(f.symbol for f in report.failures)
             if pass_auth:
+                # Dead token (a terminal halt above, or a RETRYABLE-auth quarantine
+                # derived by the report) — every remaining bucket fails identically.
                 break
         result = _PassResult(
             bars=pass_bars,

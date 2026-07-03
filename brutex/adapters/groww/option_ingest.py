@@ -90,11 +90,13 @@ from brutex.adapters.groww.contracts import (
     option_contracts,
 )
 from brutex.adapters.groww.errors import (
+    GrowwAuthError,
     GrowwCredentialDeadError,
     GrowwError,
     is_auth_failure,
     is_rate_limit,
     is_retryable,
+    is_terminal_auth_failure,
 )
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.ingest import IngestReport
@@ -179,16 +181,29 @@ _MAX_BACKOFF_S: float = 8.0
 #: ``MassEmptySettleHalt`` joins it (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a tripped
 #: mass-empty circuit breaker means every remaining contract is fetching into the
 #: same suspected soft-throttle / mis-addressing episode — halt, don't settle.
+#: ``GrowwAuthError`` joins it (DEC-GROWW-AUTH-HALT-001): a TERMINAL auth failure —
+#: a dead credential / an exhausted re-mint budget — fails every remaining contract
+#: identically, so quarantining contract-by-contract would "complete" an all-failed
+#: pull with NO critical alert. The drain check carves the two RETRYABLE
+#: ``GrowwAuthError`` subclasses (``GrowwTokenIssuanceThrottled`` /
+#: ``GrowwTokenStillStaleError``) BACK OUT via
+#: :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` — a transient
+#: auth-family shape stays a per-contract quarantine, and the mid-pull re-mint
+#: self-heal (DEC-GROWW-TOKEN-REAUTH-001) never raises out of ``client._call`` at all.
 #: ``VendorDownError`` + ``GrowwCredentialDeadError`` join it
 #: (DEC-VENDOR-DOWN-BREAKER-001): a tripped vendor-down error-storm breaker means the
 #: VENDOR (or the network path to it) is down — every remaining contract would burn
 #: its whole retry ladder identically; a dead-credential escalation means every
-#: remaining fetch is auth-stalled against the SAME dead token. Both halt.
+#: remaining fetch is auth-stalled against the SAME dead token. Both halt
+#: (``GrowwCredentialDeadError`` is a TERMINAL ``GrowwAuthError`` subclass, so it also
+#: satisfies the ``is_terminal_auth_failure`` carve-out — listed explicitly as the
+#: DEC-VENDOR-DOWN-BREAKER-001 escalation member).
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
     MassEmptySettleHalt,
+    GrowwAuthError,
     VendorDownError,
     GrowwCredentialDeadError,
 )
@@ -437,9 +452,14 @@ def ingest_option_contract(
     if client_self_paces(client):
         pace = None
     attempt = 0
-    # Vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001) —
-    # counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
-    # ``in_pull_fetches`` exposes the in-pull retry the per-attempt DEBUG log hid.
+    # LOGICAL vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001)
+    # — counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
+    # ``in_pull_fetches`` exposes the in-pull retry the per-attempt DEBUG log hid. HONEST
+    # accounting note: this is the LOGICAL count — for an ``&``-symbol whose plain form
+    # returns clean-empty, ONE logical fetch here can issue up to 2× PHYSICAL SDK calls
+    # (the `%26` fallback inside ``fetch_candle_windows`` —
+    # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001); each physical call still rides
+    # ``client.pace`` + the call meter, so rate admission sees every real call.
     fetch_count = 0
     raw_bars: list[CandleBar] = []
     # Outer EMPTY-retry loop (DEC-OPTION-EMPTY-RETRY-001): each pass runs the inner
@@ -1695,11 +1715,17 @@ def run_groww_option_ingest(
         exc = outcome.exc
         if exc is None:  # pragma: no cover — a failed outcome always carries exc
             continue
-        if isinstance(exc, _GLOBAL_STOP_ERRORS):
-            # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT one
-            # contract's problem — re-raise so it propagates to the caller's quota
+        if isinstance(exc, _GLOBAL_STOP_ERRORS) and (
+            not isinstance(exc, GrowwAuthError) or is_terminal_auth_failure(exc)
+        ):
+            # A GLOBAL stop (quota exhausted / quota-ledger invariant / disk-full / a
+            # TERMINAL dead-credential auth failure, DEC-GROWW-AUTH-HALT-001) is NOT one
+            # contract's problem — re-raise so it propagates to the caller's halt
             # handling (DEC-SPOT-QUOTA-MIDROUND-001) instead of being quarantined as a
             # single pair (the carve-out from the broad BruteXError quarantine below).
+            # The RETRYABLE ``GrowwAuthError`` subclasses (a throttled mint / a stale
+            # read-only re-read) are carved BACK OUT here: transient by design, they
+            # fall through to the ordinary per-contract quarantine, never a halt.
             raise exc
         if not isinstance(exc, BruteXError):
             # A genuine CODE bug (a Python builtin: ValueError / KeyError / TypeError
