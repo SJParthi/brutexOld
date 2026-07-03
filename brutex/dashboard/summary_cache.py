@@ -266,11 +266,13 @@ class SummaryCache:
     def generation(self) -> int:
         """The current monotonic generation counter — O(1).
 
-        Reconciles against the ``revision_probe`` first (one O(1) ``stat``,
-        taken OUTSIDE the lock so a stalled volume can never block the write
-        funnel — DEC-SURFACE-TRIAL-001), so a ledger checkpoint written by
-        ANOTHER process (a CLI ``brutex fetch``) advances the generation on
-        the very next read.
+        Reconciles against the ``revision_probe`` first (one O(1) ledger
+        ``stat`` plus the O(dirs) sweeps-tree digest —
+        DEC-RESULTS-SURFACE-HONESTY-001 — taken OUTSIDE the lock so a stalled
+        volume can never block the write funnel — DEC-SURFACE-TRIAL-001), so a
+        ledger checkpoint OR a sweep-store write from ANOTHER process (a CLI
+        ``brutex fetch`` / ``sweep-all``) advances the generation on the very
+        next read.
         """
         token = self._probe_token()
         with self._lock:

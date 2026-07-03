@@ -2185,6 +2185,35 @@ def _start_lake_heal_sweep(
     ).start()
 
 
+def _build_liveproof_autorun(lake_root: Path) -> Any:
+    """Construct the zero-command live-proof autorun holder for *lake_root*.
+
+    A dedicated seam (DEC-DOCTOR-LIVE-AUTORUN-001) so the dashboard-boot unit
+    tests can stub construction hermetically (mirroring
+    :func:`_start_instrument_autoload` / :func:`_start_auto_resume_on_boot`)
+    while this body stays directly testable offline — constructing
+    :class:`~brutex.doctor_autorun.LiveProofAutorun` only reads the two small
+    verdict caches; it spawns no thread and makes no network call.
+    """
+    from brutex.doctor_autorun import LiveProofAutorun
+
+    return LiveProofAutorun(lake_root)
+
+
+def _start_liveproof_preflight(liveproof: Any, log: Any) -> None:
+    """Kick the ZERO-COMMAND startup preflight (DEC-DOCTOR-LIVE-AUTORUN-001).
+
+    ``start_preflight`` is O(1): it only spawns the holder's daemon worker
+    (single-flight; a ``BRUTEX_AUTORUN_LIVEPROOF=0`` escape hatch or an
+    already-running preflight returns ``False``), so the uvicorn port bind is
+    never blocked — the same instant-launch discipline as the instrument
+    autoload (DEC-DASHBOARD-INSTANT-LAUNCH-001). The verdict lands on the
+    dashboard's persistent live-proof banner; the operator runs NOTHING.
+    """
+    started = liveproof.start_preflight()
+    log.info("liveproof.autorun_preflight", started=started)
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
@@ -2310,7 +2339,29 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # — build_app attaches it only when it default-constructs the cache, so an injected
     # cache must carry its own probe or a CLI `brutex fetch` write would go undetected.
     summary_cache = SummaryCache(revision_probe=_lake_revision_probe_or_none(store))
-    app = build_app(state, instrument_store=store, summary_cache=summary_cache)
+    # ZERO-COMMAND live-proof autorun (DEC-DOCTOR-LIVE-AUTORUN-001): build the
+    # holder for THIS lake root so the app can serve /api/v1/liveproof, mirror
+    # credential refusals onto the banner, and auto-run the one-time probes on
+    # the first REAL pull. Best-effort on the BIND path (Golden Rule #10 —
+    # never crash boot): a construction failure logs and the dashboard still
+    # starts (the banner honestly reads "present: false").
+    liveproof: Any = None
+    try:
+        liveproof = _build_liveproof_autorun(_resolve_lake_root(lake_root))
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+        _log.warning("liveproof.build_failed", error=str(exc))
+    app = build_app(
+        state, instrument_store=store, summary_cache=summary_cache, liveproof=liveproof
+    )
+    # Auto-run the CHEAP preflight stages in the holder's background daemon
+    # thread — the operator starts BruteX as always and the health proof runs
+    # ITSELF (the hard operator law). Guarded like the auto-resume launch so
+    # even a spawn failure only logs.
+    if liveproof is not None:
+        try:
+            _start_liveproof_preflight(liveproof, _log)
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+            _log.warning("liveproof.launch_failed", error=str(exc))
     # Opt-in boot-time auto-resume (DEC-AUTO-RESUME-ON-BOOT-001): if
     # BRUTEX_AUTO_RESUME_ON_BOOT is truthy AND the durable window ledger shows an
     # in-progress pull (PLANNED / FAILED windows), auto-continue it by spawning

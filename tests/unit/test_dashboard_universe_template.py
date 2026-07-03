@@ -67,14 +67,17 @@ def test_spot_date_pickers_readded_and_tokens_filled() -> None:
 def test_spot_interval_dropdown_is_retired() -> None:
     """DEC-1MINUTE-ONLY-DERIVE-1DAY-001: the granularity dropdown is RETIRED.
 
-    1-minute is the ONLY granularity fetched from Groww (1-day is derived from it), so the
-    ``#spotInterval`` select + its ``&spot_interval=`` threading are gone — the pull bar
-    shows a static "1-minute (1-day derived)" label instead."""
+    1-minute is the ONLY granularity fetched from Groww (1-day is derived from it), so
+    the ``#spotInterval`` select + its ``&spot_interval=`` threading are gone. The
+    static "granularity · 1-minute (1-day derived)" chip that replaced the dropdown
+    is ALSO gone (DEC-UNIVERSE-UI-POLISH-002 — dead UI noise: no route param ever
+    read it, and the hero copy already states the 1-minute-only contract)."""
     html = _render_universe_html()
     assert 'id="spotInterval"' not in html  # the dropdown is removed
     assert "spot_interval=" not in html  # no longer threaded into any query string
-    # The static label tells the operator the fixed granularity.
-    assert "1-minute</b> (1-day derived)" in html
+    # The chip is gone too; the hero copy still explains the fixed granularity.
+    assert "1-minute</b> (1-day derived)" not in html
+    assert "1-minute is the <b>only</b> granularity fetched" in html
 
 
 def test_instrument_rows_render_contract_economics() -> None:

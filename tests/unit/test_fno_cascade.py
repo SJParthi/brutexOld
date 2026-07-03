@@ -13,6 +13,7 @@ from typing import Any
 from brutex.dashboard.fno_cascade import (
     FnoCascadeCache,
     FnoContract,
+    build_expiry_counts,
     build_fno_cascade,
     contract_to_json,
 )
@@ -207,6 +208,65 @@ def test_fractional_strike_sorts_numerically() -> None:
     )
     labels = [c.label for c in idx.contracts("X", "2020-02-06")]
     assert labels == ["99 CE", "100 CE", "100.5 CE"]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# build_expiry_counts — per-expiry "listed N with data M" rows
+# (DEC-DB-UX-PACK-001 Feature 6; pure, aligned with FnoCascadeIndex.expiries)
+# ─────────────────────────────────────────────────────────────────────────
+def test_build_expiry_counts_listed_none_when_registry_absent() -> None:
+    # No registry calendar (None) → an honest "with data M" chip, never "listed 0".
+    idx = build_fno_cascade(
+        [
+            _opt("NSE-NIFTY-02Jan25-24000-CE", "NIFTY", "2025-01-02", "24000", "CE"),
+            _opt("NSE-NIFTY-02Jan25-24000-PE", "NIFTY", "2025-01-02", "24000", "PE"),
+        ]
+    )
+    rows = build_expiry_counts(idx, "NIFTY", None)
+    assert rows == [{"expiry": "2025-01-02", "listed": None, "with_data": 2}]
+
+
+def test_build_expiry_counts_young_chain_listed_exceeds_with_data() -> None:
+    # Only ONE strike has candle data, but the vendor listed THREE → "listed 3 with data 1".
+    idx = build_fno_cascade(
+        [_opt("NSE-NIFTY-02Jan25-24000-CE", "NIFTY", "2025-01-02", "24000", "CE")]
+    )
+    rows = build_expiry_counts(idx, "NIFTY", {"2025-01-02": 3})
+    assert rows == [{"expiry": "2025-01-02", "listed": 3, "with_data": 1}]
+
+
+def test_build_expiry_counts_listed_equals_with_data() -> None:
+    idx = build_fno_cascade(
+        [
+            _opt("NSE-NIFTY-02Jan25-24000-CE", "NIFTY", "2025-01-02", "24000", "CE"),
+            _opt("NSE-NIFTY-02Jan25-24000-PE", "NIFTY", "2025-01-02", "24000", "PE"),
+        ]
+    )
+    rows = build_expiry_counts(idx, "NIFTY", {"2025-01-02": 2})
+    assert rows == [{"expiry": "2025-01-02", "listed": 2, "with_data": 2}]
+
+
+def test_build_expiry_counts_unknown_underlying_is_empty() -> None:
+    idx = build_fno_cascade(
+        [_opt("NSE-NIFTY-02Jan25-24000-CE", "NIFTY", "2025-01-02", "24000", "CE")]
+    )
+    assert build_expiry_counts(idx, "NOPE", {"2025-01-02": 3}) == []
+
+
+def test_build_expiry_counts_rows_align_with_expiries_order() -> None:
+    # Rows follow FnoCascadeIndex.expiries ascending-ISO order; an expiry the
+    # registry does not know reads listed=None while its sibling reads the count.
+    idx = build_fno_cascade(
+        [
+            _opt("NSE-NIFTY-30Jan25-24000-CE", "NIFTY", "2025-01-30", "24000", "CE"),
+            _opt("NSE-NIFTY-02Jan25-24000-CE", "NIFTY", "2025-01-02", "24000", "CE"),
+        ]
+    )
+    rows = build_expiry_counts(idx, "NIFTY", {"2025-01-30": 5})
+    assert rows == [
+        {"expiry": "2025-01-02", "listed": None, "with_data": 1},
+        {"expiry": "2025-01-30", "listed": 5, "with_data": 1},
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────
