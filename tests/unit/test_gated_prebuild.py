@@ -1,15 +1,20 @@
-"""Gated multi-symbol pre-build orchestrator tests (DEC-PREBUILD-SELECT-001).
+"""Multi-symbol pre-build orchestrator tests (DEC-PREBUILD-SELECT-001 + DEC-PIPELINE-AUTOPREBUILD-001).
 
 100% line+branch over ``brutex.dashboard.gated_prebuild``: the SPOT → FUTURES →
-OPTIONS gated order, the halt-on-failure gate (a failing phase stops the run,
-later phases never start), the FUTURES-contract discovery from the F&O candle
-lake cascade, the explicit OPTIONS on-demand no-op, the per-phase
-attempted/succeeded/failed accounting, the underlying-token matching, and the
-report ``to_dict`` / ``ok`` / ``total_bars`` projections.
+OPTIONS phase order, the NON-HALTING per-symbol quarantine
+(DEC-PIPELINE-AUTOPREBUILD-001 — "one bad symbol never aborts a stage": a
+per-symbol failure is recorded, the phase continues to the next symbol AND the
+chain continues to the later phases; the old halt-on-first-phase-failure gate +
+its ``halted_after`` field are REMOVED), the FUTURES + OPTIONS contract
+discovery from the F&O candle-lake cascade, the real OPTIONS phase (and its
+reported no-op when the options callables are not injected), the per-phase
+attempted/succeeded/failed accounting, the underlying-token matching, the
+global-stop propagation boundary, and the report ``to_dict`` / ``ok`` /
+``total_bars`` projections.
 
 Pure — injected ``materialize_spot`` / ``futures_contracts_for`` /
-``materialize_future`` fakes (return a ``MaterializeResult`` or raise). No lake /
-DuckDB / FastAPI.
+``materialize_future`` / ``options_contracts_for`` / ``materialize_option``
+fakes (return a ``MaterializeResult`` or raise). No lake / DuckDB / FastAPI.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from brutex.dashboard.gated_prebuild import (
     GatedPrebuildReport,
     PhasePrebuildReport,
     discover_futures_contracts,
+    discover_option_contracts,
     run_gated_prebuild,
     underlying_match_tokens,
 )
@@ -54,12 +60,12 @@ def _ok(bars: int) -> MaterializeResult:
     return MaterializeResult(written={"5m": bars}, skipped=())
 
 
-def _no_futures(_inst: Instrument) -> list[str]:
+def _no_contracts(_inst: Instrument) -> list[str]:
     return []
 
 
-def _raise_future(_c: str) -> MaterializeResult:  # pragma: no cover — only used as an unused arg
-    raise AssertionError("materialize_future should not be called")
+def _raise_contract(_c: str) -> MaterializeResult:  # pragma: no cover — only used as an unused arg
+    raise AssertionError("contract materialise should not be called")
 
 
 # ── phase order ────────────────────────────────────────────────────────────
@@ -94,11 +100,11 @@ class TestUnderlyingMatchTokens:
         assert "NIFTY" in tokens
 
 
-# ── futures discovery from the cascade ─────────────────────────────────────
+# ── futures + options discovery from the cascade ───────────────────────────
 
 
 def _fno_datasets() -> list[dict[str, object]]:
-    """Two NIFTY futures (two expiries) + one option, across 1m + 1d intervals."""
+    """Two NIFTY futures (two expiries) + a CE and a PE, across 1m intervals."""
     return [
         {
             "symbol": "NSE-NIFTY-30Jan25-FUT",
@@ -130,6 +136,16 @@ def _fno_datasets() -> list[dict[str, object]]:
             "instrument_type": "CE",
             "interval": "1minute",
         },
+        {
+            "symbol": "NSE-NIFTY-30Jan25-20000-PE",
+            "exchange": "NSE",
+            "underlying": "NIFTY",
+            "expiry": "2025-01-30",
+            "strike": "20000",
+            "option_type": "PE",
+            "instrument_type": "PE",
+            "interval": "1minute",
+        },
     ]
 
 
@@ -151,13 +167,37 @@ class TestDiscoverFuturesContracts:
         assert discover_futures_contracts(_spot("NSE-NIFTY"), cascade) == ()
 
 
-# ── the gated run ──────────────────────────────────────────────────────────
+class TestDiscoverOptionContracts:
+    """DEC-PIPELINE-AUTOPREBUILD-001: CE/PE discovery, the futures twin."""
+
+    def test_finds_only_ce_pe_for_underlying(self) -> None:
+        cascade = build_fno_cascade(_fno_datasets())
+        found = discover_option_contracts(_spot("NSE-NIFTY"), cascade)
+        symbols = {c.symbol for c in found}
+        assert symbols == {"NSE-NIFTY-30Jan25-20000-CE", "NSE-NIFTY-30Jan25-20000-PE"}
+        assert all(c.instrument_type in ("CE", "PE") for c in found)
+
+    def test_never_returns_futures(self) -> None:
+        cascade = build_fno_cascade(_fno_datasets())
+        found = discover_option_contracts(_spot("NSE-NIFTY"), cascade)
+        assert all(c.instrument_type != "FUT" for c in found)
+
+    def test_unknown_underlying_returns_empty(self) -> None:
+        cascade = build_fno_cascade(_fno_datasets())
+        assert discover_option_contracts(_spot("NSE-BANKNIFTY"), cascade) == ()
+
+    def test_empty_cascade_returns_empty(self) -> None:
+        assert discover_option_contracts(_spot("NSE-NIFTY"), build_fno_cascade([])) == ()
+
+
+# ── the run: all phases, non-halting quarantine ────────────────────────────
 
 
 def test_all_phases_run_when_everything_succeeds() -> None:
     underlyings = [_spot("NSE-NIFTY")]
     spot_calls: list[str] = []
     fut_calls: list[str] = []
+    opt_calls: list[str] = []
 
     def materialize_spot(inst: Instrument) -> MaterializeResult:
         spot_calls.append(inst.symbol_name)
@@ -170,17 +210,25 @@ def test_all_phases_run_when_everything_succeeds() -> None:
         fut_calls.append(contract)
         return _ok(4)
 
+    def options_for(_inst: Instrument) -> list[str]:
+        return ["NSE-NIFTY-30Jan25-20000-CE"]
+
+    def materialize_option(contract: str) -> MaterializeResult:
+        opt_calls.append(contract)
+        return _ok(2)
+
     report = run_gated_prebuild(
         underlyings=underlyings,
         materialize_spot=materialize_spot,
         futures_contracts_for=futures_for,
         materialize_future=materialize_future,
-        source="selection",
+        options_contracts_for=options_for,
+        materialize_option=materialize_option,
+        source="pipeline",
     )
 
     assert report.ok
-    assert report.halted_after is None
-    assert report.source == "selection"
+    assert report.source == "pipeline"
     assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
     spot, futures, options = report.phases
     assert spot.succeeded == ("NSE-NIFTY",)
@@ -188,38 +236,52 @@ def test_all_phases_run_when_everything_succeeds() -> None:
     assert futures.attempted == ("NSE-NIFTY-30Jan25-FUT", "NSE-NIFTY-27Feb25-FUT")
     assert futures.succeeded == ("NSE-NIFTY-30Jan25-FUT", "NSE-NIFTY-27Feb25-FUT")
     assert fut_calls == ["NSE-NIFTY-30Jan25-FUT", "NSE-NIFTY-27Feb25-FUT"]
-    assert options.attempted == ("NSE-NIFTY",)
-    assert options.succeeded == ()
-    assert options.total_bars == 0
-    assert "on-demand" in options.note
-    assert report.total_bars == 10 + 4 + 4
+    assert options.attempted == ("NSE-NIFTY-30Jan25-20000-CE",)
+    assert options.succeeded == ("NSE-NIFTY-30Jan25-20000-CE",)
+    assert opt_calls == ["NSE-NIFTY-30Jan25-20000-CE"]
+    assert options.total_bars == 2
+    assert report.total_bars == 10 + 4 + 4 + 2
 
 
-def test_spot_failure_halts_before_futures_and_options() -> None:
+def test_spot_failure_does_not_halt_futures_or_options() -> None:
+    """REGRESSION PIN (DEC-PIPELINE-AUTOPREBUILD-001): a failing SPOT phase no
+    longer halts the chain — FUTURES + OPTIONS still run, the failure stays
+    honestly reported in the spot phase's ``failed``.
+
+    Under the superseded DEC-PREBUILD-SELECT-001 gate this exact scenario
+    stopped after spot (``halted_after == "spot"``, later phases absent).
+    """
     fut_called = {"n": 0}
+    opt_called = {"n": 0}
 
     def materialize_spot(inst: Instrument) -> MaterializeResult:
         raise ValueError("no stored 1minute bars")
 
-    def futures_for(_inst: Instrument) -> list[str]:  # pragma: no cover — never reached
+    def futures_for(_inst: Instrument) -> list[str]:
         fut_called["n"] += 1
-        return ["X"]
+        return []
+
+    def options_for(_inst: Instrument) -> list[str]:
+        opt_called["n"] += 1
+        return []
 
     report = run_gated_prebuild(
         underlyings=[_spot("BAD")],
         materialize_spot=materialize_spot,
         futures_contracts_for=futures_for,
-        materialize_future=_raise_future,
+        materialize_future=_raise_contract,
+        options_contracts_for=options_for,
+        materialize_option=_raise_contract,
     )
 
     assert not report.ok
-    assert report.halted_after == "spot"
-    assert [p.phase for p in report.phases] == ["spot"]
-    assert fut_called["n"] == 0  # futures phase never started (the gate)
+    assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
+    assert fut_called["n"] == 1  # the chain CONTINUED to futures
+    assert opt_called["n"] == 1  # ... and to options
     assert report.phases[0].failed == (("BAD", "ValueError: no stored 1minute bars"),)
 
 
-def test_spot_collects_all_failures_then_halts() -> None:
+def test_spot_collects_all_failures_and_chain_continues() -> None:
     def materialize_spot(inst: Instrument) -> MaterializeResult:
         if inst.symbol_name in ("A", "C"):
             raise OSError(f"bad {inst.symbol_name}")
@@ -228,18 +290,21 @@ def test_spot_collects_all_failures_then_halts() -> None:
     report = run_gated_prebuild(
         underlyings=[_spot("A"), _spot("B"), _spot("C")],
         materialize_spot=materialize_spot,
-        futures_contracts_for=_no_futures,
-        materialize_future=_raise_future,
+        futures_contracts_for=_no_contracts,
+        materialize_future=_raise_contract,
     )
 
     spot = report.phases[0]
     assert spot.attempted == ("A", "B", "C")
     assert spot.succeeded == ("B",)
     assert [s for s, _ in spot.failed] == ["A", "C"]
-    assert report.halted_after == "spot"
+    # All three phases still ran (non-halting).
+    assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
 
 
-def test_futures_contract_failure_halts_before_options() -> None:
+def test_futures_contract_failure_does_not_halt_options() -> None:
+    opt_calls: list[str] = []
+
     def futures_for(_inst: Instrument) -> list[str]:
         return ["FUT-OK", "FUT-BAD"]
 
@@ -248,20 +313,26 @@ def test_futures_contract_failure_halts_before_options() -> None:
             raise OSError("lake read fault")
         return _ok(7)
 
+    def materialize_option(contract: str) -> MaterializeResult:
+        opt_calls.append(contract)
+        return _ok(1)
+
     report = run_gated_prebuild(
         underlyings=[_spot("NSE-NIFTY")],
         materialize_spot=lambda _i: _ok(3),
         futures_contracts_for=futures_for,
         materialize_future=materialize_future,
+        options_contracts_for=lambda _i: ["OPT-1"],
+        materialize_option=materialize_option,
     )
 
     assert not report.ok
-    assert report.halted_after == "futures"
-    assert [p.phase for p in report.phases] == ["spot", "futures"]
+    assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
     futures = report.phases[1]
     assert futures.attempted == ("FUT-OK", "FUT-BAD")
     assert futures.succeeded == ("FUT-OK",)
     assert futures.failed == (("FUT-BAD", "OSError: lake read fault"),)
+    assert opt_calls == ["OPT-1"]  # the OPTIONS phase still ran + materialised
 
 
 def test_futures_discovery_failure_is_recorded() -> None:
@@ -272,20 +343,20 @@ def test_futures_discovery_failure_is_recorded() -> None:
         underlyings=[_spot("NSE-NIFTY")],
         materialize_spot=lambda _i: _ok(3),
         futures_contracts_for=futures_for,
-        materialize_future=_raise_future,
+        materialize_future=_raise_contract,
     )
 
-    assert report.halted_after == "futures"
     futures = report.phases[1]
     assert futures.failed == (("NSE-NIFTY", "ValueError: cascade build failed"),)
+    assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
 
 
 def test_no_futures_found_is_clean_skip_with_note() -> None:
     report = run_gated_prebuild(
         underlyings=[_spot("NSE-NIFTY")],
         materialize_spot=lambda _i: _ok(3),
-        futures_contracts_for=_no_futures,
-        materialize_future=_raise_future,
+        futures_contracts_for=_no_contracts,
+        materialize_future=_raise_contract,
     )
 
     assert report.ok
@@ -294,7 +365,6 @@ def test_no_futures_found_is_clean_skip_with_note() -> None:
     assert futures.succeeded == ()
     assert futures.total_bars == 0
     assert "no futures contracts found" in futures.note
-    # OPTIONS still runs (gate not tripped).
     assert report.phases[-1].phase == "options"
 
 
@@ -306,8 +376,8 @@ def test_spot_genuine_bug_propagates_not_swallowed() -> None:
         run_gated_prebuild(
             underlyings=[_spot("X")],
             materialize_spot=materialize_spot,
-            futures_contracts_for=_no_futures,
-            materialize_future=_raise_future,
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
         )
 
 
@@ -324,13 +394,107 @@ def test_futures_genuine_bug_propagates() -> None:
         )
 
 
+# ── the REAL options phase (DEC-PIPELINE-AUTOPREBUILD-001) ─────────────────
+
+
+class TestOptionsPhase:
+    def test_options_noop_when_callables_not_injected(self) -> None:
+        """Back-compat: no options callables ⇒ an explicit, REPORTED no-op."""
+        report = run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(3),
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+        )
+        options = report.phases[-1]
+        assert options.phase == "options"
+        assert options.attempted == ("NSE-NIFTY",)
+        assert options.succeeded == ()
+        assert options.total_bars == 0
+        assert "not injected" in options.note
+
+    def test_options_noop_when_only_discovery_injected(self) -> None:
+        """EITHER callable missing ⇒ the no-op (never a half-wired crash)."""
+        report = run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(3),
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+            options_contracts_for=lambda _i: ["OPT-1"],
+            materialize_option=None,
+        )
+        assert "not injected" in report.phases[-1].note
+
+    def test_options_contract_quarantine_continues_phase(self) -> None:
+        """One bad option contract never aborts the options stage."""
+
+        def materialize_option(contract: str) -> MaterializeResult:
+            if contract == "OPT-BAD":
+                raise ValueError("poisoned option partition")
+            return _ok(2)
+
+        report = run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(3),
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+            options_contracts_for=lambda _i: ["OPT-A", "OPT-BAD", "OPT-B"],
+            materialize_option=materialize_option,
+        )
+        options = report.phases[-1]
+        assert options.attempted == ("OPT-A", "OPT-BAD", "OPT-B")
+        assert options.succeeded == ("OPT-A", "OPT-B")
+        assert options.failed == (("OPT-BAD", "ValueError: poisoned option partition"),)
+        assert options.total_bars == 4
+
+    def test_options_discovery_failure_is_recorded(self) -> None:
+        def options_for(_inst: Instrument) -> list[str]:
+            raise OSError("options cascade read fault")
+
+        report = run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(3),
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+            options_contracts_for=options_for,
+            materialize_option=lambda _c: _ok(1),
+        )
+        options = report.phases[-1]
+        assert options.failed == (("NSE-NIFTY", "OSError: options cascade read fault"),)
+
+    def test_no_options_found_is_clean_skip_with_note(self) -> None:
+        report = run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(3),
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+            options_contracts_for=_no_contracts,
+            materialize_option=lambda _c: _ok(1),
+        )
+        options = report.phases[-1]
+        assert options.attempted == ()
+        assert "no option contracts found" in options.note
+
+    def test_options_genuine_bug_propagates(self) -> None:
+        def materialize_option(_c: str) -> MaterializeResult:
+            raise TypeError("genuine option bug")
+
+        with pytest.raises(TypeError, match="genuine option bug"):
+            run_gated_prebuild(
+                underlyings=[_spot("NSE-NIFTY")],
+                materialize_spot=lambda _i: _ok(1),
+                futures_contracts_for=_no_contracts,
+                materialize_future=_raise_contract,
+                options_contracts_for=lambda _i: ["OPT-X"],
+                materialize_option=materialize_option,
+            )
+
+
 # ── poisoned-partition quarantine + global-stop boundary (DEC-LAKE-WRITE-UNIQUE-001) ──
 
 
 def test_spot_resample_input_error_is_quarantined_not_stage_abort() -> None:
-    """FAILS on unfixed main: ResampleInputError escaped the (ValueError, OSError)
-    catch and ABORTED the whole pre-build stage — now the poisoned symbol is
-    quarantined + reported and every other symbol still runs."""
+    """A poisoned symbol is quarantined + reported; every other symbol still runs."""
     from brutex.data.errors import ResampleInputError
 
     def materialize_spot(inst: Instrument) -> MaterializeResult:
@@ -341,15 +505,16 @@ def test_spot_resample_input_error_is_quarantined_not_stage_abort() -> None:
     report = run_gated_prebuild(
         underlyings=[_spot("GOOD-A"), _spot("POISONED"), _spot("GOOD-B")],
         materialize_spot=materialize_spot,
-        futures_contracts_for=_no_futures,
-        materialize_future=_raise_future,
+        futures_contracts_for=_no_contracts,
+        materialize_future=_raise_contract,
     )
 
     spot = report.phases[0]
     assert spot.attempted == ("GOOD-A", "POISONED", "GOOD-B")
     assert spot.succeeded == ("GOOD-A", "GOOD-B")  # the healthy symbols still built
     assert spot.failed == (("POISONED", "ResampleInputError: ts_utc must be STRICTLY increasing"),)
-    assert report.halted_after == "spot"  # the gate still holds on a failing phase
+    # Non-halting (DEC-PIPELINE-AUTOPREBUILD-001): the later phases still ran.
+    assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
 
 
 def test_futures_resample_input_error_is_quarantined() -> None:
@@ -382,7 +547,7 @@ def test_futures_discovery_resample_input_error_is_quarantined() -> None:
         underlyings=[_spot("NSE-NIFTY")],
         materialize_spot=lambda _i: _ok(3),
         futures_contracts_for=futures_for,
-        materialize_future=_raise_future,
+        materialize_future=_raise_contract,
     )
 
     futures = report.phases[1]
@@ -390,7 +555,7 @@ def test_futures_discovery_resample_input_error_is_quarantined() -> None:
 
 
 def test_lake_write_halt_propagates_through_spot_phase() -> None:
-    """Regression pin: the widened per-symbol quarantine catches the NARROW
+    """Regression pin: the per-symbol quarantine catches the NARROW
     ResampleInputError subclass, NOT DataLakeError broadly — LakeWriteHalt
     (disk-full / OOM, a pull-wide global stop) STILL propagates."""
     from brutex.data.errors import LakeWriteHalt
@@ -402,8 +567,8 @@ def test_lake_write_halt_propagates_through_spot_phase() -> None:
         run_gated_prebuild(
             underlyings=[_spot("X")],
             materialize_spot=materialize_spot,
-            futures_contracts_for=_no_futures,
-            materialize_future=_raise_future,
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
         )
 
 
@@ -422,15 +587,31 @@ def test_lake_write_halt_propagates_through_futures_phase() -> None:
         )
 
 
+def test_lake_write_halt_propagates_through_options_phase() -> None:
+    from brutex.data.errors import LakeWriteHalt
+
+    def materialize_option(_c: str) -> MaterializeResult:
+        raise LakeWriteHalt("disk_full")
+
+    with pytest.raises(LakeWriteHalt, match="disk_full"):
+        run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(1),
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+            options_contracts_for=lambda _i: ["OPT-X"],
+            materialize_option=materialize_option,
+        )
+
+
 def test_empty_selection_runs_three_empty_phases() -> None:
     report = run_gated_prebuild(
         underlyings=[],
         materialize_spot=lambda _i: _ok(1),
-        futures_contracts_for=_no_futures,
-        materialize_future=_raise_future,
+        futures_contracts_for=_no_contracts,
+        materialize_future=_raise_contract,
     )
     assert report.ok
-    assert report.halted_after is None
     assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
     assert all(p.attempted == () for p in report.phases)
     assert report.total_bars == 0
@@ -465,20 +646,21 @@ class TestReportProjections:
     def test_report_to_dict_round_trips(self) -> None:
         report = GatedPrebuildReport(
             phases=(PhasePrebuildReport("spot", ("A",), ("A",), (), 4),),
-            halted_after=None,
             source="single",
         )
         d = report.to_dict()
         assert d["ok"] is True
-        assert d["halted_after"] is None
         assert d["source"] == "single"
         assert d["total_bars"] == 4
         assert d["phases"][0]["phase"] == "spot"
+        assert "halted_after" not in d  # the halt gate is removed (AUTOPREBUILD-001)
 
-    def test_report_ok_false_when_halted_even_if_phases_ok(self) -> None:
+    def test_report_ok_false_when_any_phase_failed(self) -> None:
         report = GatedPrebuildReport(
-            phases=(PhasePrebuildReport("spot", ("A",), ("A",), (), 1),),
-            halted_after="futures",
+            phases=(
+                PhasePrebuildReport("spot", ("A",), ("A",), (), 1),
+                PhasePrebuildReport("futures", ("F",), (), (("F", "ValueError: x"),), 0),
+            ),
         )
         assert report.ok is False
 

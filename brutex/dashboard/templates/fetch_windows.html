@@ -211,10 +211,23 @@ function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 function winStatus(r) {
   const v = String(r.status == null ? "" : r.status).toUpperCase();
   const color = v === "SUCCESS" ? "#34d399" : v === "FAILED" ? "#f87171" : "#9aa4b2";
-  /* EMPTY rows show the genuine clean-empty streak vs the promotion threshold
-     (window_ledger R1): an interleaved FAILED (429/timeout) PRESERVES the streak
-     (a rate-limit is not evidence of data), only a SUCCESS resets it, so
-     "attempts 2, EMPTY 2/3" is by-design retrying, not a stuck row. */
+  /* Honesty label (empty-vs-failed, server-derived `status_label` — ONE common
+     backend function feeds both payload paths): EMPTY/SKIPPED spell out
+     "vendor confirmed no trades (N clean attempt(s)[ — settled])" and FAILED
+     spells out "FAILED (will re-pull)". When the label differs from the bare
+     status it renders as the muted detail and REPLACES the old x/3 streak span
+     (the label already carries the same clean-attempt count — never printed
+     twice); a SUCCESS/PLANNED label equals the status, so nothing doubles. */
+  const label = r.status_label == null ? "" : String(r.status_label);
+  if (label && label !== v) {
+    return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>"
+      + ' <span style="color:#9aa4b2;font-weight:400;">' + esc(label) + "</span>";
+  }
+  /* Fallback (an older payload without status_label): EMPTY rows keep the
+     genuine clean-empty streak vs the promotion threshold (window_ledger R1):
+     an interleaved FAILED (429/timeout) PRESERVES the streak (a rate-limit is
+     not evidence of data), only a SUCCESS resets it, so "attempts 2, EMPTY 2/3"
+     is by-design retrying, not a stuck row. */
   const streak = v === "EMPTY" && r.empty_streak != null
     ? ' <span style="color:#9aa4b2;font-weight:400;">' + esc(r.empty_streak) + "/" + esc(emptyThreshold) + "</span>"
     : "";

@@ -52,20 +52,21 @@ class PreflightReport:
     def remediation(self) -> str:
         """The exact operator remedy for each class of missing pair.
 
-        Derived timeframes are missing because they were never
-        materialized (the remedy is the derive route / the
-        ``BRUTEX_AUTO_DERIVE_TFS=1`` opt-in, DEC-TF-MATERIALIZE-002);
-        fetched intervals (``1minute``/``1day``) are missing because the
-        pull never covered them (the remedy is a pull).
+        Derived timeframes are missing because the pipeline's automatic
+        FINAL prebuild stage never ran over the symbol
+        (DEC-PIPELINE-AUTOPREBUILD-001 — derived data is written ONLY by
+        that stage; the remedy is a full-pipeline pull); fetched intervals
+        (``1minute``/``1day``) are missing because the pull never covered
+        them (the remedy is a pull).
         """
         derived = sorted({i for _, i in self.missing if i not in _FETCHED_INTERVALS})
         fetched = sorted({i for _, i in self.missing if i in _FETCHED_INTERVALS})
         lines: list[str] = []
         if derived:
             lines.append(
-                f"derived TFs never materialized ({', '.join(derived)}): run "
-                "POST /api/v1/universe/derive-timeframes per symbol (or enable "
-                "BRUTEX_AUTO_DERIVE_TFS=1 so every pull settles them automatically)"
+                f"derived TFs never materialized ({', '.join(derived)}): run the "
+                "dashboard's ▶ Pull · full pipeline — its automatic final prebuild "
+                "stage writes every derived timeframe (DEC-PIPELINE-AUTOPREBUILD-001)"
             )
         if fetched:
             lines.append(

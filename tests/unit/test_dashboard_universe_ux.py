@@ -127,11 +127,14 @@ def test_multi_select_wiring_present() -> None:
 
 
 def test_timeframe_storage_is_explained_honestly() -> None:
-    """The page explains 1-minute-only fetch + that 1-day / intraday TFs are derived, not stored.
+    """The page explains 1-minute-only fetch + the auto-prebuild storage envelope.
 
-    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: 1-minute is the ONLY granularity fetched from Groww;
-    1-day + the 19 intraday timeframes are DERIVED from it. The page copy explains this and
-    that the intraday TFs are computed on demand (not written to the drive by default).
+    DEC-1MINUTE-ONLY-DERIVE-1DAY-001: 1-minute is the ONLY granularity fetched
+    from Groww; 1-day + the 19 intraday timeframes are DERIVED from it.
+    DEC-PIPELINE-AUTOPREBUILD-001: the derived timeframes are WRITTEN (only) by
+    the pipeline's automatic final pre-build stage — covering SPOT + FUTURES +
+    OPTIONS — and the page states the operator-accepted ~2-3× options storage
+    cost honestly (Golden Rule #10).
     """
     html = _render_universe_html()
     assert "1-minute is the <b>only</b> granularity fetched from Groww" in html, (
@@ -140,80 +143,61 @@ def test_timeframe_storage_is_explained_honestly() -> None:
     assert "1-day is DERIVED" in html, (
         "the page must explain that 1-day is derived from the 1-minute base, not fetched"
     )
-    assert "NOT written to your drive" in html, (
-        "the page must state the intraday timeframes are derived on demand, not materialised; "
-        "pre-materialising is a future external-drive (BRUTEX_LAKE_ROOT) step"
+    assert "automatic FINAL pre-build stage" in html, (
+        "the page must state derived TFs are written only by the automatic prebuild"
     )
+    assert "SPOT, FUTURES and OPTIONS" in html, "the full prebuild coverage must be stated"
+    assert "2–3×" in html, "the ~2-3× options-lake storage cost must be stated (honesty)"
     assert "BRUTEX_LAKE_ROOT" in html, "the external-drive config knob must be named"
 
 
-def test_intrusive_tf_dropdown_stays_removed_but_clean_button_replaces_it() -> None:
-    """The intrusive auto-appearing TF *dropdown* stays GONE; a single clean
-    "⚙ Pre-build timeframes" button replaces it (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001
-    amends DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001).
+def test_manual_prebuild_surface_removed() -> None:
+    """The manual "⚙ Pre-build timeframes" surface is GONE (DEC-PIPELINE-AUTOPREBUILD-001).
 
-    History: the operator first hit a confusing, intrusive ``TFs`` multi-select +
-    "⚙ Derive timeframes" button that auto-appeared in the pull bar the moment an
-    instrument was selected ("why suddenly this small tfs ... just remove that")
-    → it was removed, keeping the materialise *backend*
-    (``/api/v1/universe/derive-timeframes`` + ``timeframe_materialize``,
-    DEC-TF-MATERIALIZE-001). The operator then explicitly asked for a
-    pre-build-timeframes affordance back — so this adds ONE always-present,
-    non-intrusive ``matbtn`` button (NOT the auto-appearing ``tfsel``/``derivetfs``
-    dropdown). This guard pins BOTH halves: the dropdown cannot creep back, and
-    the clean button is wired to the route.
+    REGRESSION FLIP of the old pin (which required ``matbtn`` + the
+    ``derive-timeframes`` POST handlers): derived timeframes are written ONLY by
+    the pipeline's automatic prebuild stage, so the button, its handlers, and
+    every reference to the deleted route must stay removed — no dead JS. The
+    even older intrusive TF *dropdown* (DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001)
+    stays removed too.
     """
     html = _render_universe_html()
-    # The intrusive dropdown + its auto-appearing widgets stay removed.
+    # The old intrusive dropdown stays removed.
     for gone in ('id="derivebtn"', 'id="tfsel"', 'id="derivetfs"', "⚙ Derive timeframes"):
+        assert gone not in html, f"the intrusive dropdown control {gone!r} must stay removed"
+    # The manual pre-build button + its handlers + the deleted route are gone.
+    for gone in (
+        'id="matbtn"',
+        "⚙ Pre-build timeframes",
+        "runMaterialize",
+        "runGatedMaterialize",
+        "matSelection",
+        "matInFlight",
+        "_matPanelStart",
+        "derive-timeframes",
+        'getElementById("matbtn")',
+    ):
         assert gone not in html, (
-            f"the intrusive derive-timeframes dropdown control {gone!r} must stay removed "
-            "(DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001)"
+            f"the manual pre-build surface {gone!r} must stay removed "
+            "(DEC-PIPELINE-AUTOPREBUILD-001 — the pipeline prebuilds automatically)"
         )
-    assert 'getElementById("derivebtn")' not in html, (
-        "no code may reference the removed dropdown button (would throw at load)"
-    )
-    # The clean replacement button IS present + wired to the (kept) backend route.
-    assert 'id="matbtn"' in html, "the single '⚙ Pre-build timeframes' button must be present"
-    assert "⚙ Pre-build timeframes" in html, "the clean materialise button label is missing"
-    assert "function matSelection" in html, (
-        "the one-or-many materialise selection helper is missing"
-    )
-    assert "matInFlight" in html, "the materialise double-click re-entrancy guard is missing"
-    assert "derive-timeframes?symbol=" in html, (
-        "the clean button must POST the (kept) materialise route"
-    )
 
 
-def test_prebuild_tooltip_is_segment_accurate() -> None:
-    """The ⚙ Pre-build tooltip + hero blurb tell the TRUTH (DEC-PREBUILD-SELECT-001).
+def test_prebuild_copy_is_segment_accurate() -> None:
+    """The hero blurb tells the TRUTH about the auto-prebuild scope.
 
-    The pre-DEC-PREBUILD-SELECT-001 tooltip wrongly claimed pre-build covered
-    "both spot AND F&O via the shared resampler". The corrected copy must:
-
-    * NO longer claim "both spot AND F&O" / "shared resampler";
-    * state intraday pre-build is SPOT and FUTURES only;
-    * state OPTIONS intraday stays on-demand.
+    DEC-PIPELINE-AUTOPREBUILD-001 flips the old "OPTIONS intraday stays
+    on-demand" honesty: the prebuild now covers OPTIONS too, so the OLD copy
+    must be gone and the storage cost stated instead.
     """
     html = _render_universe_html()
-    # The inaccurate claim is gone.
-    assert "both spot AND F&amp;O via the shared resampler" not in html
-    assert "shared resampler" not in html
-    # The accurate scope is stated (in the matbtn tooltip + the hero blurb).
-    assert "SPOT and FUTURES" in html, "the honest spot+futures intraday scope is missing"
-    assert "on-demand" in html, "the options-on-demand honesty is missing"
-    assert "OPTIONS intraday stays on-demand" in html
-
-
-def test_prebuild_button_wires_gated_multi_symbol() -> None:
-    """A multi-symbol selection POSTs ONCE to ?symbols= (gated backend order)."""
-    html = _render_universe_html()
-    assert "derive-timeframes?symbols=" in html, (
-        "multi-symbol pre-build must POST the gated ?symbols= form (DEC-PREBUILD-SELECT-001)"
+    assert "OPTIONS intraday stays on-demand" not in html, (
+        "the superseded options-on-demand claim must be gone (options now prebuild)"
     )
-    assert "runGatedMaterialize" in html, "the gated multi-symbol handler is missing"
-    # The single-symbol path is still wired (back-compat).
-    assert "derive-timeframes?symbol=" in html
+    assert "SPOT and FUTURES</b> once the fetch fully succeeds" not in html, (
+        "the old spot+futures-only prebuild scope claim must be gone"
+    )
+    assert "SPOT, FUTURES and OPTIONS" in html
 
 
 def test_universe_visual_upgrade_present() -> None:

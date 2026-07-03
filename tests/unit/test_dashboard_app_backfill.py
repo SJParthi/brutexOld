@@ -42,7 +42,6 @@ from brutex.dashboard.app import (
 from brutex.dashboard.db_view import ALLOWED_OPERATORS, KNOWN_TABLES
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.partition import VALID_INTERVALS
-from brutex.data.timeframe_materialize import MaterializeResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -538,54 +537,20 @@ def test_pull_all_requires_a_selection_form(client: TestClient) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Manual derived-TF materialise (DEC-TF-MATERIALIZE-001)
+# Manual derived-TF materialise route — REMOVED (DEC-PIPELINE-AUTOPREBUILD-001)
 # ────────────────────────────────────────────────────────────────────────
 
 
-def test_derive_timeframes_unknown_symbol_400(client: TestClient) -> None:
-    """An unknown ?symbol= on derive-timeframes fails closed with the real reason."""
-    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbol": "NOPE"})
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "unknown security_id 'NOPE' — not in the instrument store"
+def test_derive_timeframes_route_is_gone(client: TestClient) -> None:
+    """The manual ``POST /api/v1/universe/derive-timeframes`` route stays DELETED.
 
-
-def test_derive_timeframes_without_1m_bars_maps_to_400(client: TestClient) -> None:
-    """With no stored 1m bars, the reader's ValueError surfaces as a typed 400."""
-    resp = client.post("/api/v1/universe/derive-timeframes", params={"symbol": "NIFTY"})
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == (
-        "ValueError: no stored 1minute bars for NSE/CASH/NIFTY — "
-        "pull the 1-minute spot first, then derive timeframes"
-    )
-
-
-def test_derive_timeframes_success_reports_written_and_skipped(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A successful materialise reports written/skipped/total_bars per the core result."""
-    received: list[tuple[str, ...]] = []
-
-    def _fake_materialize(
-        *,
-        lake_root: Any,
-        exchange: str,
-        segment: str,
-        symbol: str,
-        kind: Any,
-        tfs: tuple[str, ...] = (),
-    ) -> MaterializeResult:
-        received.append(tuple(tfs))
-        return MaterializeResult(written={"5m": 3, "15m": 1}, skipped=("bogus",))
-
-    monkeypatch.setattr(app_module, "materialize_lake_timeframes", _fake_materialize)
-    resp = client.post(
-        "/api/v1/universe/derive-timeframes",
-        params={"symbol": "NIFTY", "tfs": "5m, 15m,,bogus"},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"written": {"5m": 3, "15m": 1}, "skipped": ["bogus"], "total_bars": 4}
-    # The comma list is parsed with blanks dropped before reaching the core.
-    assert received == [("5m", "15m", "bogus")]
+    DEC-PIPELINE-AUTOPREBUILD-001: derived timeframes are written ONLY by the
+    pipeline's automatic prebuild stage — the manual route (and its button) are
+    removed, so the path must 404 for every request shape it used to serve.
+    """
+    for params in ({"symbol": "NIFTY"}, {"symbols": "NIFTY"}, {}):
+        resp = client.post("/api/v1/universe/derive-timeframes", params=params)
+        assert resp.status_code == 404, "the manual derive-timeframes route must stay deleted"
 
 
 # ────────────────────────────────────────────────────────────────────────

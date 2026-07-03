@@ -28,11 +28,13 @@ pytest.importorskip("pyarrow")
 pytest.importorskip("fastapi")
 
 import duckdb
+import polars as pl
 from brutex.dashboard.db_view import query_candles
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
 from brutex.data.timeframe_materialize import (
+    DAILY_TF_LABEL,
     PrebuildKind,
     materialize_lake_timeframes,
 )
@@ -248,3 +250,151 @@ def test_futures_oi_preserved_through_materialize(tmp_path: Path) -> None:
         assert int(row[oi_idx]) == expected, f"bucket {bucket} OI not carried"
     # Sanity: at least one bucket carries a real non-zero OI (proves not all-zero).
     assert any(int(r[oi_idx]) > 0 for r in rows)
+
+
+# ── OPTIONS materialisation + daily-in-prebuild (DEC-PIPELINE-AUTOPREBUILD-001) ──
+
+_OPT_SYMBOL = "NSE-NIFTY-30Jan25-20000-CE"
+
+
+def _write_option_1m_bars(lake_root: Path, n: int = 30) -> list[CandleBar]:
+    """Write *n* OPTION 1-minute bars carrying open_interest."""
+    bars = [
+        CandleBar(
+            timestamp=_SESSION_OPEN_UTC + timedelta(minutes=i),
+            open=Decimal(str(50.0 + i)),
+            high=Decimal(str(55.0 + i)),
+            low=Decimal(str(45.0 + i)),
+            close=Decimal(str(52.0 + i)),
+            volume=20 + i,
+            open_interest=2000 + 7 * i,
+        )
+        for i in range(n)
+    ]
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    sink.append(
+        exchange=_FNO_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_OPT_SYMBOL,
+        interval="1minute",
+        bars=bars,
+    )
+    return bars
+
+
+def test_options_materialize_writes_intraday_and_daily_with_oi(tmp_path: Path) -> None:
+    """REGRESSION FLIP (DEC-PIPELINE-AUTOPREBUILD-001): OPTIONS now materialise.
+
+    The old pin was ``pytest.raises(ValueError, match="on-demand")`` — options
+    were never materialised. Now an option contract's 1-minute round-trips
+    through the OI-aware F&O path into a derived 5minute partition AND (with
+    ``include_daily=True``) a derived carry-last-OI ``1day`` partition.
+    """
+    src = _write_option_1m_bars(tmp_path, n=30)
+    result = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_FNO_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_OPT_SYMBOL,
+        kind=PrebuildKind.OPTIONS,
+        tfs=("5m",),
+        include_daily=True,
+        daily_before=datetime(2021, 6, 1, tzinfo=UTC).date(),
+    )
+    assert result.skipped == ()
+    assert result.written["5m"] == 6  # 30 / 5 buckets
+    assert result.written[DAILY_TF_LABEL] == 1  # one complete session → one daily bar
+
+    # Intraday OI preserved (the OI-aware F&O resampler, same as futures).
+    part_5m = tmp_path / "bars" / _FNO_EXCHANGE / _FNO_SEGMENT / _OPT_SYMBOL / "5minute"
+    df_5m = pl.read_parquet(part_5m.as_posix() + "/**/*.parquet").sort("timestamp")
+    assert df_5m.height == 6
+    expected_bucket_oi = [src[b * 5 + 4].open_interest for b in range(6)]
+    assert df_5m.get_column("open_interest").to_list() == expected_bucket_oi
+
+    # Daily carries the LAST-of-day OI (carry-last snapshot, never summed).
+    part_1d = tmp_path / "bars" / _FNO_EXCHANGE / _FNO_SEGMENT / _OPT_SYMBOL / "1day"
+    df_1d = pl.read_parquet(part_1d.as_posix() + "/**/*.parquet")
+    assert df_1d.height == 1
+    assert df_1d.get_column("open_interest").to_list() == [src[-1].open_interest]
+
+
+def test_spot_include_daily_writes_midnight_ist_daily(tmp_path: Path) -> None:
+    """SPOT ``include_daily=True`` derives the midnight-IST spot daily (OI null path → 0-stored)."""
+    _write_1m_bars(tmp_path, n=120)
+    result = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        include_daily=True,
+        daily_before=datetime(2021, 6, 1, tzinfo=UTC).date(),
+    )
+    assert result.written["5m"] == 24
+    assert result.written[DAILY_TF_LABEL] == 1
+    part_1d = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1day"
+    df_1d = pl.read_parquet(part_1d.as_posix() + "/**/*.parquet")
+    assert df_1d.height == 1
+    # Midnight-IST stamp == 18:30 UTC of the PREVIOUS calendar day (the vendor identity).
+    ts = df_1d.get_column("timestamp").to_list()[0]
+    assert (ts.hour, ts.minute) == (18, 30)
+
+
+def test_futures_include_daily_and_second_run_adds_zero_net_new(tmp_path: Path) -> None:
+    """FUTURES daily-in-prebuild + the rerun-safety pin (CLAUDE.md §2 Rule 7):
+    a second identical materialise adds ZERO net-new bars — the intraday
+    partitions are keep-first byte-identical and the latest-wins derived daily
+    is a silent no-op on identical values."""
+    _write_fno_1m_bars(tmp_path, n=30)
+    before = datetime(2021, 6, 1, tzinfo=UTC).date()
+
+    def _run() -> dict[str, int]:
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_FNO_EXCHANGE,
+            segment=_FNO_SEGMENT,
+            symbol=_FNO_SYMBOL,
+            kind=PrebuildKind.FUTURES,
+            tfs=("5m",),
+            include_daily=True,
+            daily_before=before,
+        )
+        return dict(result.written)
+
+    first = _run()
+    assert first["5m"] == 6
+    assert first[DAILY_TF_LABEL] == 1
+
+    contract_root = tmp_path / "bars" / _FNO_EXCHANGE / _FNO_SEGMENT / _FNO_SYMBOL
+    files = sorted(p for p in contract_root.rglob("*.parquet"))
+    bytes_before = {p: p.read_bytes() for p in files}
+    rows_before = {
+        p: pl.read_parquet(p.as_posix()).height for p in files if "1minute" not in str(p)
+    }
+
+    _run()  # second, identical materialise
+
+    files_after = sorted(p for p in contract_root.rglob("*.parquet"))
+    assert files_after == files, "a rerun must not add partition files"
+    for p in files_after:
+        assert p.read_bytes() == bytes_before[p], f"{p} changed on an idempotent rerun"
+    for p, rows in rows_before.items():
+        assert pl.read_parquet(p.as_posix()).height == rows  # 0 net-new bars
+
+
+def test_include_daily_default_before_covers_none_branch(tmp_path: Path) -> None:
+    """``daily_before=None`` (production) resolves to today IST — the 2021
+    fixture sessions are all complete, so the daily still derives."""
+    _write_1m_bars(tmp_path, n=120)
+    result = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        include_daily=True,
+    )
+    assert result.written[DAILY_TF_LABEL] == 1
