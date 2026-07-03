@@ -125,7 +125,14 @@ def shard_path(lake_root: Path, groww_symbol: str) -> Path:
 
 
 def _record_to_json(record: RawIntegrityRecord) -> str:
-    """Serialise one record to a single compact JSON line (no embedded newline)."""
+    """Serialise one record to a single compact JSON line (no embedded newline).
+
+    ``issued_symbol`` (DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001) is written ONLY
+    when set — a divergent-form fetch (the ``%26`` fallback recovery) — so the
+    common plain-form record line stays BYTE-IDENTICAL to the pre-field format
+    (back-compat both ways: old readers ignore the extra key, new readers default
+    an absent key to ``None``).
+    """
     payload = {
         "exchange": record.exchange,
         "segment": record.segment,
@@ -138,6 +145,8 @@ def _record_to_json(record: RawIntegrityRecord) -> str:
         "algorithm": record.algorithm,
         "captured_at": (record.captured_at.isoformat() if record.captured_at is not None else None),
     }
+    if record.issued_symbol is not None:
+        payload["issued_symbol"] = record.issued_symbol
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -236,6 +245,11 @@ def _record_from_obj(obj: object) -> RawIntegrityRecord | None:
                 captured_at = datetime.fromisoformat(captured_raw)
             except ValueError:
                 captured_at = None
+        # LEGACY records carry no ``issued_symbol`` key → ``None`` (the issued form
+        # IS the key symbol; DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001 back-compat) —
+        # a non-string value is treated the same (provenance-adjacent, never fatal).
+        issued_raw = obj.get("issued_symbol")
+        issued_symbol = issued_raw if isinstance(issued_raw, str) else None
         return RawIntegrityRecord(
             exchange=str(obj["exchange"]),
             segment=str(obj["segment"]),
@@ -247,6 +261,7 @@ def _record_from_obj(obj: object) -> RawIntegrityRecord | None:
             row_count=int(obj["row_count"]),
             algorithm=str(obj.get("algorithm", HASH_ALGORITHM)),
             captured_at=captured_at,
+            issued_symbol=issued_symbol,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -333,7 +348,7 @@ def append_records(records: Iterable[RawIntegrityRecord], lake_root: Path) -> in
 
 def make_capture_hook(
     lake_root: Path, *, exchange: str, segment: str, groww_symbol: str
-) -> Callable[[Mapping[str, object], str, str, str], None]:
+) -> Callable[[Mapping[str, object], str, str, str, str], None]:
     """Return a BEST-EFFORT raw-payload capture hook for one instrument's fetch.
 
     The function the ingest layer injects as
@@ -341,8 +356,13 @@ def make_capture_hook(
     On each fetched window it (1) builds the integrity record
     (:func:`~brutex.data.raw_integrity.build_record` — hash of the RAW payload at
     capture) for the bound ``(exchange, segment, groww_symbol)`` plus the per-call
-    ``(interval, window_start, window_end)`` the hook receives, and (2) APPENDS it
-    to the sidecar (:func:`append_record`).
+    ``(interval, window_start, window_end, issued_symbol)`` the hook receives, and
+    (2) APPENDS it to the sidecar (:func:`append_record`). *issued_symbol* is the
+    symbol form the fetch was PHYSICALLY issued with
+    (DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001): on a ``%26`` fallback recovery it
+    diverges from the bound key symbol, and recording it is what lets the verify
+    path re-issue the byte-identical call; ``build_record`` normalises the common
+    identical case to ``None`` so plain-form records stay byte-identical.
 
     **It can NEVER halt or corrupt a pull** (the hard requirement): every error —
     a malformed payload (:class:`~brutex.data.raw_integrity.RawIntegrityError`) or
@@ -355,7 +375,11 @@ def make_capture_hook(
     """
 
     def _capture(
-        payload: Mapping[str, object], interval: str, window_start: str, window_end: str
+        payload: Mapping[str, object],
+        interval: str,
+        window_start: str,
+        window_end: str,
+        issued_symbol: str,
     ) -> None:
         try:
             record = build_record(
@@ -366,6 +390,7 @@ def make_capture_hook(
                 interval=interval,
                 window_start=window_start,
                 window_end=window_end,
+                issued_symbol=issued_symbol,
             )
             append_record(record, lake_root)
         except (RawIntegrityError, OSError) as exc:
@@ -394,7 +419,7 @@ def make_capture_hook(
 #: paths call it with each resolved symbol, building the correctly-attributed
 #: per-symbol hook at the point the symbol is known.
 CaptureHookFactory = Callable[
-    [str, str, str], Callable[[Mapping[str, object], str, str, str], None]
+    [str, str, str], Callable[[Mapping[str, object], str, str, str, str], None]
 ]
 
 
@@ -414,7 +439,7 @@ def make_capture_hook_factory(lake_root: Path) -> CaptureHookFactory:
 
     def _factory(
         exchange: str, segment: str, groww_symbol: str
-    ) -> Callable[[Mapping[str, object], str, str, str], None]:
+    ) -> Callable[[Mapping[str, object], str, str, str, str], None]:
         return make_capture_hook(
             lake_root, exchange=exchange, segment=segment, groww_symbol=groww_symbol
         )

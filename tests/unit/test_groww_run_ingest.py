@@ -129,28 +129,62 @@ def test_terminal_error_quarantines_pair_and_continues(monkeypatch: pytest.Monke
     assert report.bars_appended == 5
 
 
-def test_auth_failure_sets_derived_auth_aborted(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Groww divergence: no fail-fast latch — auth_aborted is DERIVED from the
-    # quarantined failures' captured auth_failure flag.
+def test_terminal_auth_failure_halts_pull_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TERMINAL auth failure (dead credential) HALTS the spot pull — never a quarantine.
+
+    DEC-GROWW-AUTH-HALT-001 regression: previously a dead token quarantined EVERY
+    symbol one by one and the pull "completed" all-failed with no critical alert
+    (the silent-for-days shape). ``GrowwAuthError`` is now a ``_GLOBAL_STOP_ERRORS``
+    member, so it PROPAGATES to the caller's halt handling (and the CRITICAL
+    Telegram pull-halt alert upstream) instead of blending into the failures list.
+    """
+
     def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
         raise GrowwAuthError("token expired")
 
     monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
-    with capture_logs() as logs:
-        report = run_groww_spot_ingest(
+    with capture_logs() as logs, pytest.raises(GrowwAuthError, match="token expired"):
+        run_groww_spot_ingest(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
-            instruments=[_index("NIFTY")],
+            instruments=[_index("NIFTY"), _index("BANKNIFTY", token=2)],
             intervals=["1minute"],
             start=_START,
             end=_END,
         )
-    assert report.failed_pairs == 1
-    assert report.failures[0].auth_failure is True
-    assert report.auth_aborted is True
-    # A Groww auth failure quarantines like any terminal error (no special alert).
-    (quarantine,) = _events(logs, "ingest.quarantine")
-    assert quarantine["error"] == "token expired"
+    # Never silently quarantined — the halt propagated instead.
+    assert _events(logs, "ingest.quarantine") == []
+
+
+def test_retryable_auth_subclass_quarantines_not_halts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A RETRYABLE auth-family shape stays a per-pair quarantine — never a pull halt.
+
+    DEC-GROWW-AUTH-HALT-001 carve-out: ``GrowwTokenStillStaleError`` (and the
+    throttled-mint twin) are ``GrowwAuthError`` SUBCLASSES but transient by design —
+    even when one escapes a worker terminally the drain check carves it back out of
+    the global-stop membership, so the pull continues and the pair re-pulls later.
+    The derived ``auth_aborted`` flag keeps working for the retry engine.
+    """
+    from brutex.adapters.groww.errors import GrowwTokenStillStaleError
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        if instrument.symbol_name == "NIFTY":
+            raise GrowwTokenStillStaleError("re-read returned the same dead token")
+        return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    report = run_groww_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("NIFTY"), _index("BANKNIFTY", token=2)],
+        intervals=["1minute"],
+        start=_START,
+        end=_END,
+    )
+    assert report.failed_pairs == 1  # quarantined, not halted
+    assert ("BANKNIFTY", "1minute") in report.pairs  # the pull continued
+    assert report.failures[0].auth_failure is True  # honestly flagged auth-family
+    assert report.auth_aborted is True  # derived flag preserved for the retry engine
 
 
 def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
