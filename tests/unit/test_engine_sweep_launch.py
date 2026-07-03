@@ -44,7 +44,7 @@ from brutex.engine.sweep_launch import (
     sweep_abort_alert,
 )
 from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe, bloom_capacity_hint
-from brutex.engine.sweep_run import ComboDedup
+from brutex.engine.sweep_run import ComboDedup, DedupSink
 from brutex.models import BruteXError
 from brutex.strategies.types import Side
 
@@ -103,10 +103,21 @@ def test_error_hierarchy() -> None:
 # ────── DigestPathNoDedup — the no-alloc raising sink ──────
 
 
-def test_no_dedup_sink_is_a_combo_dedup() -> None:
-    """The sink IS-A ComboDedup, so run_supervised_grid's annotation admits it."""
+def test_no_dedup_sink_satisfies_dedup_sink_not_combo_dedup() -> None:
+    """The sink rides the structural DedupSink seam and is NOT a ComboDedup.
+
+    REGRESSION (CodeQL py/missing-call-to-init, code-scanning alert #533):
+    the sink previously subclassed ``ComboDedup`` but skipped
+    ``super().__init__()`` (the parent REQUIRES a real ``OptionDedupIndex``
+    — the exact allocation the sink exists to avoid), leaving a
+    half-initialised parent. It is now a standalone class satisfying the
+    runtime-checkable :class:`~brutex.engine.sweep_run.DedupSink` Protocol
+    the ``run_supervised_grid`` / ``run_sweep_grid`` annotations accept.
+    """
     sink = DigestPathNoDedup()
-    assert isinstance(sink, ComboDedup)
+    assert isinstance(sink, DedupSink)
+    assert not isinstance(sink, ComboDedup)
+    assert type(sink).__mro__ == (DigestPathNoDedup, object)
 
 
 def test_no_dedup_sink_seen_raises() -> None:
@@ -204,6 +215,7 @@ def test_legacy_path_threads_injected_exact_tier() -> None:
     """An injected exact backing (the LMDB seam) receives the marked identities."""
     exact: set[bytes] = set()
     sink = plan_launch_dedup(_grid(), digest_path=False, exact=exact)
+    assert isinstance(sink, ComboDedup)  # narrows DedupSink → the real class
     sink.mark("cd" * 32)
     assert bytes.fromhex("cd" * 32) in exact
 
@@ -277,7 +289,7 @@ def test_no_dedup_sink_preserves_digest_path_output(tmp_path: Path) -> None:
 
     grid = _grid()
 
-    def _run(root: Path, dedup: ComboDedup) -> SweepGridSummary:
+    def _run(root: Path, dedup: DedupSink) -> SweepGridSummary:
         with AuditWriter.open(root / "audit.jsonl") as audit:
             return run_sweep_grid(
                 grid,

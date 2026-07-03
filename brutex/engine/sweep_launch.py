@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from brutex.engine.sweep_run import ComboDedup
+from brutex.engine.sweep_run import ComboDedup, DedupSink
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only imports
@@ -94,30 +94,32 @@ class SweepLaunchUsageError(SweepLaunchError):
     """
 
 
-class DigestPathNoDedup(ComboDedup):
+class DigestPathNoDedup:
     """A no-alloc dedup stand-in for the production DIGEST launch path.
 
     Substitutes for the eager ``ComboDedup(OptionDedupIndex(...))`` the CLI
     launchers used to build: it allocates NO Bloom bit array, NO
     ``OptionDedupIndex``, and needs NO LMDB exact tier — because the digest
     path provably never consults ``seen`` / ``mark`` / ``mark_many``
-    (R2-SL-F1). It IS-A :class:`~brutex.engine.sweep_run.ComboDedup` so the
-    nominally-annotated ``run_supervised_grid(dedup: ComboDedup)`` accepts it
-    unchanged; every probe raises :class:`SweepLaunchUsageError`.
+    (R2-SL-F1). Deliberately a STANDALONE class, NOT a
+    :class:`~brutex.engine.sweep_run.ComboDedup` subclass:
+    ``ComboDedup.__init__`` REQUIRES a real
+    :class:`~brutex.data.option_dedup.OptionDedupIndex` (Bloom + exact tier)
+    — the exact allocation this sink exists to avoid — so the earlier
+    subclass had to skip ``super().__init__()`` entirely, which CodeQL
+    rightly flags as ``py/missing-call-to-init`` (a half-initialised parent
+    with no honest cheap sentinel to hand it). The sink instead satisfies
+    the runners' structural :class:`~brutex.engine.sweep_run.DedupSink`
+    Protocol (``seen`` + ``mark_many`` — the same seam the parallel driver's
+    private ``_NoDedup`` rides), so the ``DedupSink``-annotated
+    ``run_supervised_grid`` / ``run_sweep_grid`` accept it unchanged; every
+    probe raises :class:`SweepLaunchUsageError`. Construction stays O(1) and
+    alloc-free: no state at all (the implicit ``object.__init__``).
 
     COMMON note (CLAUDE.md §11): this mirrors the parallel driver's private
     ``_NoDedup`` (``brutex/engine/sweep_parallel.py``); promoting that symbol
     to a shared public sink is a flagged follow-up owned by that module.
     """
-
-    def __init__(self) -> None:
-        """Build the sink — deliberately WITHOUT the parent's index (no alloc).
-
-        ``ComboDedup.__init__`` is intentionally NOT called: the whole point
-        of this sink is that no :class:`~brutex.data.option_dedup.OptionDedupIndex`
-        (Bloom + exact tier) exists behind it. Every inherited method that
-        would touch the index is overridden to raise.
-        """
 
     def seen(self, run_id_hex: str) -> bool:
         """RAISE — the digest path must never consult ``dedup.seen``.
@@ -200,7 +202,7 @@ def plan_launch_dedup(
     *,
     digest_path: bool,
     exact: ExactMembership | None = None,
-) -> ComboDedup:
+) -> DedupSink:
     """Plan the launch dedup sink for one grid — no-alloc on the digest path.
 
     The ONE launch-dedup decision point for the ``sweep-all`` /
@@ -230,8 +232,12 @@ def plan_launch_dedup(
 
     Returns
     -------
-    ComboDedup
-        The sink to inject into ``run_supervised_grid`` / ``run_sweep_grid``.
+    DedupSink
+        The sink to inject into ``run_supervised_grid`` / ``run_sweep_grid``:
+        the no-alloc :class:`DigestPathNoDedup` on the digest path, a real
+        grid-sized :class:`~brutex.engine.sweep_run.ComboDedup` on the
+        legacy arm (both satisfy the structural
+        :class:`~brutex.engine.sweep_run.DedupSink` seam).
 
     Raises
     ------

@@ -109,7 +109,8 @@ from brutex.engine.sweep_watchdog import SweepWatchdog
 
 if TYPE_CHECKING:
     # Annotation-only — keep the `fastbloom_rs` / `lmdb` PyO3 wheels (pulled by
-    # ComboDedup→OptionDedupIndex and AuditWriter→bloom) and the CandleBar import
+    # the DedupSink impls' ComboDedup→OptionDedupIndex and AuditWriter→bloom)
+    # and the CandleBar import
     # out of this module's runtime import graph, exactly as sweep_orchestrator /
     # sweep_run do, so the strict per-module `--cov=brutex.engine` gate stays
     # clean. All five G&A objects + the dedup + the audit writer are *received*,
@@ -119,7 +120,7 @@ if TYPE_CHECKING:
     from brutex.data.models import CandleBar
     from brutex.engine.results_store import ResultsStore
     from brutex.engine.sweep_audit import SweepAuditWriter
-    from brutex.engine.sweep_run import ComboDedup, SweepRunSummary
+    from brutex.engine.sweep_run import DedupSink, SweepRunSummary
     from brutex.orchestrator.audit import AuditWriter
 
 _LOG = structlog.get_logger("brutex.engine.sweep_supervisor")
@@ -471,7 +472,7 @@ def run_supervised_grid(
     *,
     bars_for: Callable[[str, str], Sequence[CandleBar]],
     store_for: Callable[[SweepTuple], ResultsStore],
-    dedup: ComboDedup,
+    dedup: DedupSink,
     ingest_audit: AuditWriter,
     guards: SweepGuards,
     skip_empty: bool = True,
@@ -529,8 +530,8 @@ def run_supervised_grid(
     Honest envelope (Golden Rule #10): every per-tuple op is O(1); the grid is
     O(T) tuples × O(Nᵢ) masks; this driver's memory is O(1) in ``T`` (scalar
     tallies only). Watchdog detection is inter-tuple only (see the module
-    docstring); mask-level dedup lives in ``dedup`` (``ComboDedup``), the cache is
-    a coarser tuple-level gate.
+    docstring); mask-level dedup lives in ``dedup`` (a ``DedupSink``), the cache
+    is a coarser tuple-level gate.
 
     Parameters
     ----------
@@ -542,7 +543,11 @@ def run_supervised_grid(
         ``tuple -> ResultsStore`` factory (use
         :func:`~brutex.engine.sweep_orchestrator.make_store_for`).
     dedup
-        The shared mask-level :class:`~brutex.engine.sweep_run.ComboDedup`.
+        The shared mask-level :class:`~brutex.engine.sweep_run.DedupSink` —
+        a real :class:`~brutex.engine.sweep_run.ComboDedup` on the legacy
+        no-digest path, or the launch planner's no-alloc raising
+        :class:`~brutex.engine.sweep_launch.DigestPathNoDedup` on the
+        production digest path (never consulted there — ``bypass_dedup``).
     ingest_audit
         The per-tuple engine :class:`~brutex.orchestrator.audit.AuditWriter`
         (the ``SWEEP_*`` chain ``run_persisted_sweep`` emits; distinct from the

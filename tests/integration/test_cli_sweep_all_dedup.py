@@ -153,7 +153,9 @@ def test_sweep_all_injects_no_alloc_digest_sink(
     rc = _sweep_all(lake_root, catalog_path, results_root)
 
     assert rc == 0
-    # The injected sink is the no-alloc digest stand-in (IS-A ComboDedup).
+    # The injected sink is the no-alloc digest stand-in (a standalone class
+    # riding the structural DedupSink seam — NOT a ComboDedup subclass, per
+    # CodeQL py/missing-call-to-init alert #533).
     assert isinstance(captured["dedup"], DigestPathNoDedup)
     # The dead per-mask combo-dedup LMDB store is GONE from the results root …
     assert not (results_root / "combo-dedup").exists()
