@@ -93,6 +93,7 @@ import contextlib
 import hashlib
 import itertools
 import time
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -390,6 +391,48 @@ class WriteResult:
     bytes_written: int
     bars_added: int = 0
     conflicts: tuple[BarConflict, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionHealResult:
+    """Outcome of one :meth:`ParquetWriter.heal_partition` call (DEC-LAKE-HEAL-001).
+
+    Attributes
+    ----------
+    path
+        The partition file the heal targeted.
+    changed
+        ``False`` when the file was left byte-untouched — the idempotence
+        oracle: a second heal of a healed partition changes nothing. Also
+        ``False`` on a footer-probe failure (the #1067 "never guess" pin —
+        poison persists, logged, re-found on the next scan).
+    kept
+        Rows remaining in the partition after the heal (``0`` when the file
+        was quarantine-moved away).
+    dropped_duplicates
+        Physically-duplicated stored rows collapsed keep-FIRST.
+    dropped_removed
+        ``remove_timestamps`` entries actually present and dropped (the
+        foreign-row reassignment hook).
+    raw_hash_before
+        sha256 of the ORIGINAL stored bytes (what the quarantine copy holds).
+    raw_hash_after
+        sha256 of the rewritten bytes; equal to :attr:`raw_hash_before` when
+        unchanged; ``None`` iff the file was quarantine-MOVED (emptied).
+    write
+        The rewrite's :class:`WriteResult` (feeds
+        :meth:`ParquetWriter.make_catalog_entry` unmodified); ``None`` when
+        unchanged or quarantine-moved.
+    """
+
+    path: Path
+    changed: bool
+    kept: int
+    dropped_duplicates: int
+    dropped_removed: int
+    raw_hash_before: str
+    raw_hash_after: str | None
+    write: WriteResult | None
 
 
 class ParquetWriter:
@@ -866,6 +909,210 @@ class ParquetWriter:
             first_ts=result.first_ts,
             last_ts=result.last_ts,
             fetched_at=datetime.now(UTC),
+        )
+
+    def read_partition_bars(self, dest: Path) -> dict[datetime, CandleBar]:
+        """Read one stored partition into ``{timestamp: CandleBar}`` under the write locks.
+
+        DEC-LAKE-HEAL-001: the healer's consistent-read entry — the reassignment
+        and drift-merge heals need the stored bars of a SOURCE partition before
+        moving them home through :meth:`write`. Takes the SAME two locks in the
+        SAME order as :meth:`write` (in-process partition lock, then the
+        cross-process flock) so the read can never interleave a concurrent
+        writer's read-modify-write, and delegates to the existing
+        overlay-preserving decode (:meth:`_read_existing_bars` — a 17-column
+        Greeks-enriched option file round-trips intact, and a physically
+        duplicated stored timestamp collapses keep-FIRST, logged). A vanished /
+        unreadable file raises the quarantinable
+        :class:`~brutex.data.errors.WriterError` the read privates already map.
+
+        Parameters
+        ----------
+        dest
+            The partition file to read.
+
+        Returns
+        -------
+        dict[datetime, CandleBar]
+            The stored bars keyed by timestamp (keep-first collapsed).
+        """
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_PARTITION_LOCKS.acquire(dest))
+            stack.enter_context(partition_write_lock(self._lake_root, dest))
+            existing_bytes = self._read_existing_bytes(dest)
+            return self._read_existing_bars(dest, existing_bytes)
+
+    def heal_partition(
+        self,
+        dest: Path,
+        *,
+        remove_timestamps: AbstractSet[datetime] = frozenset(),
+        quarantine_to: Path | None = None,
+    ) -> PartitionHealResult:
+        """Heal ONE stored partition in place: keep-FIRST dedup + row removal (DEC-LAKE-HEAL-001).
+
+        The public heal entry the lake healer (:mod:`brutex.data.lake_heal`)
+        drives — a SETTLED month nobody re-pulls never takes a merge touch, so
+        the #1139 self-heal-on-touch cannot reach it; this method applies the
+        SAME mode-independent keep-FIRST collapse through the SAME in-module
+        privates (zero duplication: locks in :meth:`write`'s order, the
+        overlay-preserving :meth:`_read_existing_bars` decode, the P9
+        :meth:`_assert_strictly_increasing` tripwire, the deterministic
+        :meth:`_render_bytes` + :meth:`_atomic_write`). STRICTLY row-removing —
+        kept rows keep their exact stored values (never value-editing).
+
+        Steps: read the stored bytes → keep-first collapse → footer row-count
+        probe (a probe failure returns ``changed=False`` — poison persists,
+        logged, NEVER guessed, the #1067 pin) → drop *remove_timestamps* (the
+        foreign-row reassignment hook) → if nothing changed, return with the
+        file byte-untouched → quarantine-copy the ORIGINAL bytes to
+        *quarantine_to* (MANDATORY before any rewrite; via
+        :func:`~brutex.data.atomic_io.atomic_write_via` so an ENOSPC/OOM during
+        the copy raises :class:`~brutex.data.errors.LakeWriteHalt` with the
+        original partition untouched) → rewrite, or — when EVERY row was
+        removed (a wholly-foreign file) — quarantine-MOVE it (``unlink`` +
+        prune the now-empty ``<yyyy>/`` parent; the writer NEVER renders an
+        empty partition, :meth:`write`'s own law).
+
+        Parameters
+        ----------
+        dest
+            The partition file to heal.
+        remove_timestamps
+            Stored timestamps to DROP (whole rows) — the reassignment heal
+            moves them to their canonical month file first, then removes them
+            here. Absent timestamps are ignored.
+        quarantine_to
+            Where the ORIGINAL bytes are copied before any mutation. Required
+            whenever the heal would change the file (``WriterError`` otherwise
+            — never rewrite without the safety copy).
+
+        Returns
+        -------
+        PartitionHealResult
+            The heal outcome; ``result.write`` feeds
+            :meth:`make_catalog_entry` so the rotated ``raw_hash`` reaches the
+            catalog + ``data_snapshot_hash`` (Golden Rule #4).
+
+        Raises
+        ------
+        WriterError
+            Vanished/corrupt file, or a changing heal with no *quarantine_to*.
+        LakeWriteHalt
+            Disk-full / OOM during the quarantine copy or the rewrite.
+        PartitionLockTimeout
+            The cross-process lock could not be acquired in time (a transient
+            defer — the finding is re-found on the next scan).
+        """
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_PARTITION_LOCKS.acquire(dest))
+            stack.enter_context(partition_write_lock(self._lake_root, dest))
+            return self._heal_partition_locked(
+                dest, remove_timestamps=remove_timestamps, quarantine_to=quarantine_to
+            )
+
+    def _heal_partition_locked(
+        self,
+        dest: Path,
+        *,
+        remove_timestamps: AbstractSet[datetime],
+        quarantine_to: Path | None,
+    ) -> PartitionHealResult:
+        """The :meth:`heal_partition` body, run under BOTH partition locks."""
+        existing_bytes = self._read_existing_bytes(dest)
+        raw_hash_before = hashlib.sha256(existing_bytes).hexdigest()
+        merged = self._read_existing_bars(dest, existing_bytes)
+        stored_unique = len(merged)
+        physical = self._stored_physical_rows(dest, existing_bytes)
+        if physical is None:
+            # The #1067 pin: a failed footer probe SKIPS the heal — the
+            # poison persists (already logged) rather than being guessed at.
+            return PartitionHealResult(
+                path=dest,
+                changed=False,
+                kept=stored_unique,
+                dropped_duplicates=0,
+                dropped_removed=0,
+                raw_hash_before=raw_hash_before,
+                raw_hash_after=raw_hash_before,
+                write=None,
+            )
+        dropped_duplicates = physical - stored_unique
+        dropped_removed = 0
+        for ts in sorted(remove_timestamps):
+            if ts in merged:
+                del merged[ts]
+                dropped_removed += 1
+        if dropped_duplicates == 0 and dropped_removed == 0:
+            return PartitionHealResult(
+                path=dest,
+                changed=False,
+                kept=stored_unique,
+                dropped_duplicates=0,
+                dropped_removed=0,
+                raw_hash_before=raw_hash_before,
+                raw_hash_after=raw_hash_before,
+                write=None,
+            )
+        if quarantine_to is None:
+            raise WriterError(
+                f"heal of {dest} requires a quarantine destination — "
+                f"refusing to rewrite without the safety copy"
+            )
+        # Quarantine-copy the ORIGINAL bytes BEFORE any mutation. A full disk
+        # here raises LakeWriteHalt with dest untouched (graceful halt).
+        with lake_write_guard():
+            quarantine_to.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_via(quarantine_to, lambda tmp: tmp.write_bytes(existing_bytes))
+        if not merged:
+            # Every row removed (a wholly-foreign file): quarantine-MOVE —
+            # the writer never renders an empty partition (write()'s law).
+            dest.unlink()
+            with contextlib.suppress(OSError):
+                dest.parent.rmdir()  # prune the now-empty <yyyy>/ dir
+            return PartitionHealResult(
+                path=dest,
+                changed=True,
+                kept=0,
+                dropped_duplicates=dropped_duplicates,
+                dropped_removed=dropped_removed,
+                raw_hash_before=raw_hash_before,
+                raw_hash_after=None,
+                write=None,
+            )
+        merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
+        # P9 tripwire — unreachable post-dedup by construction, a genuine
+        # invariant assert exactly as on the write paths.
+        self._assert_strictly_increasing(dest, merged_sorted)
+        content_bytes = self._render_bytes(merged_sorted)
+        self._atomic_write(dest, content_bytes)
+        if dropped_duplicates > 0:
+            # Reuse the PINNED heal event (same fields as the merge self-heal).
+            _LOG.warning(
+                "lake.partition.dedup_healed",
+                partition=str(dest),
+                kept=stored_unique,
+                dropped=dropped_duplicates,
+            )
+        write = WriteResult(
+            path=dest,
+            row_count=len(merged_sorted),
+            raw_hash=hashlib.sha256(content_bytes).hexdigest(),
+            first_ts=merged_sorted[0].timestamp,
+            last_ts=merged_sorted[-1].timestamp,
+            bytes_written=len(content_bytes),
+            bars_added=0,  # a heal never adds bars (Golden Rule #1)
+            conflicts=(),
+        )
+        return PartitionHealResult(
+            path=dest,
+            changed=True,
+            kept=len(merged_sorted),
+            dropped_duplicates=dropped_duplicates,
+            dropped_removed=dropped_removed,
+            raw_hash_before=raw_hash_before,
+            raw_hash_after=write.raw_hash,
+            write=write,
         )
 
     # ── Private ────────────────────────────────────────────────────

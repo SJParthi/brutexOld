@@ -205,6 +205,50 @@ class Catalog:
             fetched_at=row[10],
         )
 
+    def delete_partition(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        year: int,
+        month: int,
+    ) -> bool:
+        """DELETE the row for one partition; ``True`` iff a row existed.
+
+        DEC-LAKE-HEAL-001: a heal can quarantine-MOVE a partition file away (a
+        wholly-foreign file) or merge a drifted legacy dir out of existence — a
+        dangling catalog row would make :meth:`get_bars` raise on the missing
+        file and poison ``data_snapshot_hash`` (Golden Rule #4), so the healer
+        deletes the row explicitly. Runs the single ``DELETE ... RETURNING``
+        statement under the internal lock; idempotent (a second delete of the
+        same coordinates returns ``False``).
+
+        Parameters
+        ----------
+        exchange, segment, symbol, interval, year, month
+            The six-coordinate primary key of the row to delete.
+
+        Returns
+        -------
+        bool
+            ``True`` iff a row existed (and was deleted).
+        """
+        if self._closed:
+            raise CatalogError("Catalog is closed")
+        with self._lock:
+            deleted = self._conn.execute(  # type: ignore[attr-defined]
+                """
+                DELETE FROM partitions
+                WHERE exchange = ? AND segment = ? AND symbol = ?
+                  AND interval = ? AND year = ? AND month = ?
+                RETURNING 1
+                """,
+                [exchange, segment, symbol, interval, year, month],
+            ).fetchall()
+        return len(deleted) > 0
+
     def list_partitions(
         self,
         *,
