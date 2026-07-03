@@ -128,8 +128,8 @@ def test_small_file_absolute_cost_bound(tmp_path: Path) -> None:
 
 def test_scan_read_calls_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """At bench scale a CLEAN lake pays exactly ONE key-column read per file."""
-    import brutex.data.lake_invariants as li
     import polars as pl
+    from brutex.data import lake_invariants as li
 
     _build_lake(tmp_path, _DEEP_FILES, _ROWS_PER_FILE)
     calls: list[Path] = []

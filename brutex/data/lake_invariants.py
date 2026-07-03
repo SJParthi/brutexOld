@@ -175,6 +175,11 @@ class OptionIntraFileDup:
     unique_keys: int
 
 
+#: Union of every finding kind one scan can emit. Importable by name
+#: (``from brutex.data.lake_invariants import LakeFinding``) but intentionally
+#: NOT listed in ``__all__``: it is a PEP 695 ``type`` statement, which some
+#: static analysers (CodeQL) do not yet model as an ``__all__`` binding, and
+#: type aliases are idiomatically not part of the ``import *`` surface anyway.
 type LakeFinding = IntraFileDup | ForeignMonthRows | LegacyKeyDrift | OptionIntraFileDup
 
 
@@ -899,7 +904,6 @@ __all__ = [
     "ForeignMonthRows",
     "IntraFileDup",
     "LakeCensus",
-    "LakeFinding",
     "LakeScanReport",
     "LegacyKeyDrift",
     "OptionIntraFileDup",

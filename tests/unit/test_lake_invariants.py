@@ -29,8 +29,8 @@ from structlog.testing import capture_logs
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
-import brutex.data.lake_invariants as li
 import polars as pl
+from brutex.data import lake_invariants as li
 from brutex.data.lake_invariants import (
     ENGINE_INDEX_COORDS,
     ForeignMonthRows,

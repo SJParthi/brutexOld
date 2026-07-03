@@ -495,7 +495,7 @@ def test_derive_bounds_reconcile_passes_check_invariants_false(
     can never silently regress). The sweep-start / CLI-verify reconcile sites
     deliberately KEEP the default checking.
     """
-    import brutex.data.catalog_reconcile as cr
+    from brutex.data import catalog_reconcile as cr
 
     seen: list[dict[str, Any]] = []
     real = cr.reconcile_catalog_from_lake

@@ -567,7 +567,7 @@ class TestEmitLakeHealAlert:
                 calls.append(kwargs)
                 return True
 
-        import brutex.notifications.sweep_alerts as mod
+        from brutex.notifications import sweep_alerts as mod
 
         monkeypatch.setattr(mod, "SweepAlerter", _FakeAlerter)
         emit_lake_heal_alert(self._report(), scope="pull:xyz")
@@ -589,7 +589,7 @@ class TestEmitLakeHealAlert:
             def lake_heal_report(self, **_kwargs: object) -> bool:
                 raise AssertionError("a zero-findings report must not reach the alerter")
 
-        import brutex.notifications.sweep_alerts as mod
+        from brutex.notifications import sweep_alerts as mod
 
         monkeypatch.setattr(mod, "SweepAlerter", _BoomAlerter)
         report = FakeHealReport(mode="auto", findings=0, healed=0, actions=())
@@ -602,7 +602,7 @@ class TestEmitLakeHealAlert:
             def lake_heal_report(self, **_kwargs: object) -> bool:
                 raise RuntimeError("simulated alert failure")
 
-        import brutex.notifications.sweep_alerts as mod
+        from brutex.notifications import sweep_alerts as mod
 
         monkeypatch.setattr(mod, "SweepAlerter", _RaisingAlerter)
         emit_lake_heal_alert(self._report(), scope="reconcile")  # must not raise
@@ -638,7 +638,7 @@ class TestEmitLakeHealAlert:
             recall=None,
         )
         fake = FakeNotifier()
-        import brutex.notifications.sweep_alerts as mod
+        from brutex.notifications import sweep_alerts as mod
 
         monkeypatch.setattr(mod, "SweepAlerter", lambda: SweepAlerter(notifier=fake))
         emit_lake_heal_alert(report, scope="reconcile")

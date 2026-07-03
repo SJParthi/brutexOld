@@ -2028,9 +2028,12 @@ class TestLakeHealAuditContext:
             def close(self) -> None:
                 closed.append(True)
 
+        def _boom() -> None:
+            raise RuntimeError("boom")
+
         monkeypatch.setattr(lake_heal, "open_lake_heal_audit", lambda _root: _Sink())
         with pytest.raises(RuntimeError, match="boom"), lake_heal.lake_heal_audit(tmp_path):
-            raise RuntimeError("boom")
+            _boom()  # raising via a helper keeps the assert below reachable to CodeQL
         assert closed == [True]
 
 

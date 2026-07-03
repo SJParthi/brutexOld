@@ -114,6 +114,11 @@ _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
 #: The heal-mode env var (``auto`` | ``observe``; default ``auto``).
 LAKE_HEAL_ENV: Final[str] = "BRUTEX_LAKE_HEAL"
 
+#: The two heal modes. Importable by name
+#: (``from brutex.data.lake_heal import LakeHealMode``) but intentionally
+#: NOT listed in ``__all__``: it is a PEP 695 ``type`` statement, which some
+#: static analysers (CodeQL) do not yet model as an ``__all__`` binding, and
+#: type aliases are idiomatically not part of the ``import *`` surface anyway.
 type LakeHealMode = Literal["auto", "observe"]
 
 #: Default heal mode — AUTO-ON per the DEC-LAKE-HEAL-001 operator decision.
@@ -1748,7 +1753,6 @@ __all__ = [
     "HealAction",
     "HealReport",
     "LakeAuditSink",
-    "LakeHealMode",
     "RecallReport",
     "StartupSweepResult",
     "StartupSweeper",
