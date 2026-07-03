@@ -64,6 +64,7 @@ from brutex.adapters.protocol import (
     single_instrument_page,
 )
 from brutex.data.models import CandleBar
+from brutex.data.window_ledger import CONFIRMED_EMPTY_MIN_FETCHES
 from brutex.models import Exchange, Instrument
 
 if TYPE_CHECKING:
@@ -1601,13 +1602,13 @@ def run_until_clean(
 #: empty-retry of DEC-EMPTY-INPULL-RETRY-001). 3 mirrors the spot candle default.
 DEFAULT_EMPTY_RETRY_ATTEMPTS: Final[int] = 3
 
-#: Minimum in-pull vendor fetches an empty window must have made before its empty is trusted
-#: as "confirmed" for the OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001). ``2`` means the
-#: window was re-hit by the in-pull empty retry at least once and STAYED empty — a single
-#: glitch-prone fetch (``1``) is NOT enough, which also excludes the degenerate
-#: ``empty_retry_attempts <= 1`` single-fetch case. Both spines compare ``fetch_count`` to
-#: this (CLAUDE.md §11 COMMON — one source of truth).
-CONFIRMED_EMPTY_MIN_FETCHES: int = 2
+# CONFIRMED_EMPTY_MIN_FETCHES (the old-gap fast-settle confirmation threshold,
+# DEC-OLD-GAP-FAST-SETTLE-001) is RE-EXPORTED above from its canonical home in
+# :mod:`brutex.data.window_ledger` (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): the ledger's
+# ``record`` now applies the BUDGET-AWARE cumulative cross-pull settle against it, and
+# this module already imports from ``brutex.data`` (the reverse import would be a
+# cycle). Both spines keep importing it from HERE — one source of truth, one surface
+# (CLAUDE.md §11 COMMON).
 
 #: Old-gap fast-settle horizon (days) — DEC-OLD-GAP-FAST-SETTLE-001. A fetch window whose
 #: ``window_end`` is more than this many days in the PAST can never gain vendor data: Groww

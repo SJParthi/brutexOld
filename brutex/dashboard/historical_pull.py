@@ -1540,7 +1540,14 @@ def pull_contract_candles(
     # double-warn). Reuses the SAME COMMON ``emit_underlying_all_empty`` (fully guarded — can NEVER
     # break the pull). Observe-only: no return/ledger/engine change; ENGINE stays NIFTY/BANKNIFTY/SENSEX.
     if fetch_pipeline is not None:
-        emit_underlying_all_empty(minute.merged_pairs, [contract for _row, contract in rebuilt])
+        # ``failed_symbols`` (DEC-SILENT-VANISH-LOWLEG-001): the phase's terminally
+        # quarantined contract symbols, so the LOW-LEG Tier B rule can disqualify a
+        # 1-2-leg underlying with a quarantined sibling (quarantines never enter pairs).
+        emit_underlying_all_empty(
+            minute.merged_pairs,
+            [contract for _row, contract in rebuilt],
+            failed_symbols=minute.failure_symbols,
+        )
 
     # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the mid-pull F&O 1-day derivation that ran
     # here (``_derive_daily_from_minute``) is REMOVED — derived data (intraday TFs +
