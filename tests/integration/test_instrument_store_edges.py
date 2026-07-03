@@ -602,9 +602,11 @@ class TestUpsertManyEdges:
         assert entry["kept_symbol"] == "NIFTY 50"
 
     def test_exact_duplicate_identity_is_not_a_collision(self, tmp_path: Path) -> None:
-        """A byte-identical re-list (SAME identity AND SAME symbol_name) is a benign
-        idempotent duplicate — collapsed silently, NOT counted or warned (covers the
-        ``symbol_name ==`` short-circuit arm so a clean master keeps ``0``)."""
+        """A same-identity re-list with the SAME symbol_name is the benign arm —
+        collapsed silently, NOT counted or warned (covers the ``symbol_name ==``
+        short-circuit so a clean master keeps ``0``). Only the NAME is compared:
+        the fixture differs in display_name, and same-name rows differing in
+        economics (lot/tick) would still collapse last-wins silently by design."""
         nifty_a = _idx("NIFTY")
         nifty_dup = replace(nifty_a, display_name="Nifty (re-listed, same symbol)")
         assert nifty_a.security_id == nifty_dup.security_id

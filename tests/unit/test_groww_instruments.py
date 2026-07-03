@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -465,3 +466,39 @@ def test_clean_master_has_no_blank_symbol_warning() -> None:
     assert [
         e for e in logs if e.get("event") == "instrument_master.blank_symbol_pair_skipped"
     ] == []
+
+
+def test_whitespace_only_trading_symbol_excluded_from_pair_maps() -> None:
+    """A WHITESPACE-only ``symbol_name`` is treated as blank for the pair maps.
+
+    Not reachable via the CSV parser (which strips every cell), but a hand-built
+    :class:`~brutex.models.Instrument` can carry ``" "`` / ``"\\t"`` — the old
+    ``if not symbol:`` guard let it through and keyed the pair maps on
+    ``(exchange, " ")`` (defense-in-depth fold,
+    DEC-MAPPING-COLLISION-HONESTY-001 hostile-review NIT).
+    """
+    ((nifty_gsym, nifty),) = gi.parse_instrument_csv(_csv(_NIFTY))
+    space_sym = replace(nifty, symbol_name=" ")
+    tab_sym = replace(nifty, symbol_name="\t")
+    with capture_logs() as logs:
+        index = gi.build_index(
+            [(nifty_gsym, nifty), ("NSE-WSONLY", space_sym), ("NSE-TABONLY", tab_sym)]
+        )
+    # Neither whitespace key enters either pair map (fail-before: the old guard
+    # stored (NSE, " ") and (NSE, "\t")).
+    assert (Exchange.NSE, " ") not in index.by_exchange_symbol
+    assert (Exchange.NSE, "\t") not in index.by_exchange_symbol
+    assert (Exchange.NSE, " ") not in index.groww_symbol_by_pair
+    assert (Exchange.NSE, "\t") not in index.groww_symbol_by_pair
+    # Both rows stay pullable by their own groww_symbol + in the universe (they
+    # are only excluded from the PAIR maps, exactly like the blank-symbol rows).
+    assert gi.resolve(index, "NSE-WSONLY").symbol_name == " "
+    assert gi.resolve(index, "NSE-TABONLY").symbol_name == "\t"
+    assert len(index.universe) == 3
+    # A clean-keyed row is unaffected.
+    assert index.groww_symbol_by_pair[(Exchange.NSE, "NIFTY")] == "NSE-NIFTY"
+    # COUNTED in the ONE aggregate warning, exactly like the blank rows.
+    warns = [e for e in logs if e.get("event") == "instrument_master.blank_symbol_pair_skipped"]
+    assert len(warns) == 1
+    assert warns[0]["log_level"] == "warning"
+    assert warns[0]["count"] == 2

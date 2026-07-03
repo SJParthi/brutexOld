@@ -385,6 +385,9 @@ class UpsertResult:
     #: DISTINCT security (a different ``symbol_name``) shared their
     #: ``(security_id, exch_id, segment)`` identity — the "13, NSE, CASH"
     #: collision. ``0`` for a clean master. Each drop is also logged at WARNING.
+    #: A same-identity re-list with the SAME ``symbol_name`` is NOT counted —
+    #: only the name is compared, so two same-name rows differing in economics
+    #: (lot/tick) still collapse last-wins silently by design.
     security_id_collisions: int = 0
 
 
@@ -1071,6 +1074,11 @@ class InstrumentStore(metaclass=_StoreMeta):
                 # INSERT can't hit a PK violation) but make the drop LOUD + counted
                 # instead of silent (Golden Rule #1); the count rides the
                 # UpsertResult so the caller/load report SEES it.
+                # The BENIGN arm (not counted, not warned) is a re-list with the
+                # SAME identity AND the SAME ``symbol_name`` — NOT necessarily an
+                # exact duplicate: two same-name rows differing only in economics
+                # (lot/tick) still collapse last-wins SILENTLY by design
+                # (unchanged from main; only the name is compared here).
                 security_id_collisions += 1
                 _LOG.warning(
                     "instrument_store.security_id_collision",

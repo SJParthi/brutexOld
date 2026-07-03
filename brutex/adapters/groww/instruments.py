@@ -251,8 +251,9 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
     kept in lockstep (consistent with ``by_groww_symbol``): a second row colliding
     on the same pair is DROPPED — never silently last-wins — and the collision is
     logged at WARNING naming BOTH the kept and the dropped groww_symbol (Golden
-    Rule #1). A row with a BLANK ``trading_symbol`` cannot key a pair (it would
-    collapse every blank-symbol row onto ``(exchange, "")``): it stays pullable via
+    Rule #1). A row with a BLANK — or whitespace-only — ``trading_symbol`` cannot
+    key a pair (blank rows would collapse onto ``(exchange, "")``, whitespace-only
+    ones onto ``(exchange, " ")``): it stays pullable via
     ``by_groww_symbol`` but is excluded from the pair maps + counted, so the junk
     vendor row is visible in ``/logs`` rather than shadowing a real pair key.
     """
@@ -267,12 +268,15 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
         by_groww[gsym] = instrument
         universe.append(instrument)
         symbol = instrument.symbol_name
-        if not symbol:
+        if not symbol.strip():
             # A blank trading_symbol cannot key the pair maps — every blank-symbol
             # row would collapse onto ``(exchange, "")`` and shadow the others. Keep
             # the row pullable by its groww_symbol (already in by_groww/universe) but
             # EXCLUDE it from the pair maps + COUNT it, so the junk vendor row is
             # visible in /logs instead of silently polluting a pair key.
+            # Whitespace-ONLY counts as blank too (defense-in-depth: the CSV parser
+            # strips, but a hand-built Instrument can carry ``" "`` and would
+            # otherwise key ``(exchange, " ")``).
             blank_symbol_skipped += 1
             continue
         pair_key = (instrument.exch_id, symbol)
