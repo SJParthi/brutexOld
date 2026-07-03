@@ -239,9 +239,13 @@ class TradeInput:
 class TradeCostBreakdown:
     """Per-component charge breakdown + roll-ups.
 
-    Per `CALCULATOR_SPEC.md §11 API surface` schema. Every field is
-    int64 paise (1 INR = 100 paise). The byte-exact worked examples
-    in `COSTS_VERIFIED.md §5` are the test oracles.
+    Per `CALCULATOR_SPEC.md §11 API surface` schema. Every numeric field
+    is int64 paise (1 INR = 100 paise). The worked examples in
+    `COSTS_VERIFIED.md §5` (Examples 1-4 — regenerated 2026-07-03 from
+    the REAL calculator's output) are byte-exact test oracles, enforced
+    by ``tests/golden/test_costs_verified_examples.py``; Example 5
+    (Muhurat brokerage waiver) is spec-only — ``compute_trade_cost`` has
+    no Muhurat branch yet, so it is NOT an enforced oracle.
 
     Parameters
     ----------
@@ -299,6 +303,19 @@ class TradeCostBreakdown:
         Per CALCULATOR_SPEC §6b iceberg slicing. 1 unless the
         freeze quantity is exceeded (Track 2 with n_lots=1
         never triggers this).
+    lot_size_basis : Literal["trade_date"]
+        Which basis keyed the lot-size lookup. Always ``"trade_date"``
+        today: the lot is the one in effect on ``entry_dt_ist.date()``
+        per ``brutex.options.lot_size_history``, NOT the CONTRACT's
+        vintage. DOCUMENTED LIMITATION (COSTS_VERIFIED.md §20): a real
+        exchange lot revision applies per-contract from a specific
+        expiry onward, so in a transition window the two bases disagree
+        — e.g. NIFTY 2024-11-19 → lot 25 vs 2024-11-20 → lot 75 (SEBI
+        ₹15L notional revision), a 3× sizing difference keyed purely on
+        the trade date. The per-circular contract-level rollout dates
+        are UNVERIFIED offline, so a ``"contract_vintage"`` basis is
+        deliberately NOT faked (Golden Rule #1); this field makes the
+        basis explicit so downstream consumers can audit it.
     """
 
     n_shares_per_lot: int
@@ -320,3 +337,4 @@ class TradeCostBreakdown:
     net_pnl_paisa: int
     used_exercise_branch: bool
     n_orders_per_leg: int
+    lot_size_basis: Literal["trade_date"] = "trade_date"
