@@ -477,8 +477,8 @@ def _complete_note(
     quarantined: … — …", :func:`_quarantine_clause`) so a per-symbol failure is
     NEVER hidden behind a bare "pipeline complete"; a fully-clean pull keeps
     the prior wording byte-identically. A WHOLE-pass Greeks-enrichment failure
-    on the candle sub-report appends ", Greeks enrichment FAILED — overlay
-    re-attempted next pull" (DEC-GREEKS-ENRICH-OBSERVE-001; absent when the
+    on the candle sub-report appends ", Greeks enrichment FAILED (<ErrorType>)
+    — overlay re-attempted next pull" (DEC-GREEKS-ENRICH-OBSERVE-001; absent when the
     pass completed, never ran, or there was no candle sub-report). Appends a
     pre-build clause ONLY when the gated prebuild phase ran
     (:func:`_prebuild_note_clause` — built count + bars + capped failure
@@ -513,9 +513,13 @@ def _complete_note(
     # Greeks-enrichment honesty (DEC-GREEKS-ENRICH-OBSERVE-001): a WHOLE-pass
     # enrichment failure is NAMED in the pipeline note (the overlay is re-derivable
     # — the next pull re-attempts it), never a swallowed log line. `hist is None`
-    # (a metadata-only / no-candle run) honestly carries no clause.
+    # (a metadata-only / no-candle run) honestly carries no clause. The clause
+    # carries the same <ErrorType> class as the historical note (hostile-review
+    # fold — one uniform operator-facing string).
     greeks_clause = (
-        ", Greeks enrichment FAILED — overlay re-attempted next pull"
+        f", Greeks enrichment FAILED "
+        f"({(hist.greeks_enrich_error or 'error').split(':', 1)[0]}) "
+        "— overlay re-attempted next pull"
         if hist is not None and hist.greeks_enrich_ok is False
         else ""
     )

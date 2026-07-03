@@ -19,8 +19,10 @@ series drains in bounded passes and is never re-fetched.
 > runbook keyed the whole detection recipe on the vendor error string
 > `DH-905` and cited `groww/errors.py` for it. **`DH-905` is a prior-vendor
 > (Dhan) error code** — it appears NOWHERE in the Groww adapter and survives
-> only as legacy commentary (`data/window_ledger.py:64,556,558`,
-> `orchestrator/watchdog.py:403`, `dashboard/pull_progress.py:54`). A filter
+> only as legacy commentary (representative, NOT exhaustive:
+> `data/window_ledger.py:64,556,558`, `orchestrator/watchdog.py:403`,
+> `dashboard/pull_progress.py:54,175`, `dashboard/pull_jobs.py`,
+> `dashboard/templates/universe.html`). A filter
 > on `"DH-905" in last_error` matches **ZERO** rows of a Groww-era ledger; the
 > Groww-era settle keys on the clean-empty confirmation machinery above, and
 > the honest detection key is the row **`status == "SKIPPED"`** itself.

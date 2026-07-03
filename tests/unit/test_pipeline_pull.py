@@ -353,7 +353,10 @@ def test_pipeline_complete_note_names_greeks_enrich_failure() -> None:
         ),
     )
     assert report.stopped_after is None
-    assert ", Greeks enrichment FAILED — overlay re-attempted next pull" in report.note
+    # The clause carries the ErrorType class, uniform with the historical note.
+    assert (
+        ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next pull" in report.note
+    )
 
 
 def test_pipeline_complete_note_has_no_greeks_clause_when_pass_completed() -> None:

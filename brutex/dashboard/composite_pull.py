@@ -427,8 +427,12 @@ def pull_historical_for_underlyings(
     # DEC-GREEKS-ENRICH-OBSERVE-001: a WHOLE-pass Greeks-enrichment failure is NAMED
     # in the composite note (the overlay is re-derivable — the next pull re-attempts
     # it), never a swallowed log line. Per-target quarantines never flip the verdict.
+    # The clause carries the same <ErrorType> class as the historical note
+    # (hostile-review fold — one uniform operator-facing string).
     greeks_suffix = (
-        ", Greeks enrichment FAILED — overlay re-attempted next pull"
+        f", Greeks enrichment FAILED "
+        f"({(historical.greeks_enrich_error or 'error').split(':', 1)[0]}) "
+        "— overlay re-attempted next pull"
         if historical.greeks_enrich_ok is False
         else ""
     )

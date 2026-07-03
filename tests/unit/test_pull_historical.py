@@ -2273,6 +2273,60 @@ class TestGreeksEnrichWiring:
         assert outcome.errored_targets == 2
         assert [r for r in logs if r["event"] == "fno.greeks_enrich.error"] == []
 
+    def test_per_target_quarantine_tally_reaches_the_report(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        """The NONZERO ``errored_targets`` tally survives to the PUBLIC report.
+
+        Hostile-review fold (SURVIVED mutation probe): hardcoding
+        ``greeks_targets_errored=0`` in the report construction passed every
+        test, because the nonzero tally was pinned only on the private
+        helper's return. This runs the FULL ``pull_contract_candles`` with the
+        same errored=2 driver fake and asserts the last-mile kwarg into the
+        public report — the field's entire purpose.
+        """
+        pytest.importorskip("trading_core")
+        import brutex.data.greeks_enrich as ge
+
+        monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)
+        monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)  # the fixed-6.5% default
+
+        def _fake_enrich(*, targets: object, lake_root: Path, rate_source: object) -> object:
+            del targets, lake_root, rate_source
+            return ge.GreeksEnrichReport(
+                enriched=1,
+                already_current=0,
+                futures_skipped=0,
+                undecodable=0,
+                no_bars=0,
+                errored=2,
+                bars_written=1,
+                bars_solved=1,
+                bars_null=0,
+                bars_reused=0,
+            )
+
+        monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        report = pull_contract_candles(
+            registry.list_contracts(underlying="NIFTY"),
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+        assert report.greeks_enrich_ok is True  # the pass COMPLETED
+        assert report.greeks_enrich_error is None
+        assert report.greeks_targets_errored == 2  # the tally reaches the report
+        payload = report.to_dict()
+        assert payload["greeks_targets_errored"] == 2
+        assert "Greeks enrichment FAILED" not in report.note  # quarantines never flip ok
+
 
 # ── DEC-WINDOW-LEDGER-RESCUE-001: the lost-ledger rescue actually rescues ─────
 

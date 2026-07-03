@@ -23,7 +23,7 @@ name or re-point `BRUTEX_LAKE_ROOT`.
 | `window_ledger/ledger.parquet` | THE durable pull ledger — every production pull checkpoints it per window | `data/window_ledger_store.py:80-81,117-120` |
 | `instruments.duckdb` | lean instrument master | `data/instrument_store.py:153` (`DEFAULT_DB_NAME`) |
 | `registry.duckdb` | expiry/contract registry cache (sibling of the master) | `dashboard/db_view.py:211` (`REGISTRY_DB_NAME`) |
-| `catalog.duckdb` | Parquet-partition catalog | `brutex catalog --help` ("default `<lake-root>/catalog.duckdb`") |
+| `catalog.duckdb` | Parquet-partition catalog | `cli.py:1379` (`Catalog.open(resolved / "catalog.duckdb")`); the "default `<lake-root>/catalog.duckdb`" phrase is the `--catalog` flag help of `brutex run --help` etc. |
 | `sweeps/<instrument>/<tf>/*.parquet` | per-tuple sweep-results tree | `dashboard/lake_revision.py:22-31` |
 | `audit/` | hash-chained audit JSONL (retry give-ups etc.) | `brutex fetch --help` (`--max-retry-minutes`: "audit rows under `<lake>/audit/`") |
 

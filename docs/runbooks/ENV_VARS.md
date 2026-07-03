@@ -112,10 +112,11 @@ CLAUDE.md §6 (verified Groww facts).
 > **code constants, not env vars.**
 
 **Honest envelope (Golden Rule #10):** the legacy
-`brutex.orchestrator.adaptive_rate_limiter` ([4..8] r/s) still reads the
-vendor-neutral `BRUTEX_RATE_MIN_RPS` / `_MAX_RPS` / `_INITIAL_RPS` /
-`_STEP_DOWN_HITS` / `_STEP_DOWN_WINDOW` / `_STEP_UP_CLEAN_WINDOW` /
-`_RECHECK_INTERVAL` vars (`adaptive_rate_limiter.py:50-56`), and `brutex.wipe`
+`brutex.orchestrator.adaptive_rate_limiter` (the retired [3..5] r/s design)
+still reads the vendor-neutral `BRUTEX_RATE_MIN_RPS` / `_MAX_RPS` /
+`_INITIAL_RPS` / `_STEP_DOWN_HITS` / `_STEP_DOWN_WINDOW` /
+`_STEP_UP_CLEAN_WINDOW` / `_RECHECK_INTERVAL` vars
+(`adaptive_rate_limiter.py:59-65`), and `brutex.wipe`
 reads `BRUTEX_TOKEN_PATH` (`wipe.py:42`) — these are residue **NOT on the
 live Groww pull path** (which uses `rate_common` above). Retiring/renaming that
 module is a tracked follow-up (DEC-DHAN-DOC-RECONCILE-001). A live pull needs

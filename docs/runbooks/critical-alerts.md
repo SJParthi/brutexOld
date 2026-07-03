@@ -50,7 +50,7 @@ Setup walkthrough: `docs/runbooks/telegram-setup.md`. Behavioural contract:
 - **The halt set:** `LakeWriteHalt`, `DailyQuotaExceeded`,
   `QuotaInvariantError`, `MassEmptySettleHalt` (CLI `_pull_halt_errors`,
   `cli.py:2872-2878`) **plus a TERMINAL Groww auth failure** — a dead
-  credential / an exhausted re-mint budget (DEC-GROWW-AUTH-HALT-001; the
+  credential / an exhausted reauth budget (DEC-GROWW-AUTH-HALT-001; the
   dashboard predicate `pull_jobs.is_pull_halt` at `pull_jobs.py:140-169`
   consults `is_terminal_auth_failure`, so RETRYABLE auth blips never alert).
 - **Threshold:** none — event-driven; fires once per distinct reason.
@@ -174,10 +174,16 @@ Setup walkthrough: `docs/runbooks/telegram-setup.md`. Behavioural contract:
 
 - **`auth_renew_failed`** — 🔑 ERROR (`AUTH_RENEW_FAILED`,
   `sweep_alerts.py:375-387`, 300 s dedupe): a refused vendor token renew.
-  The 06:00 IST daily token reset itself normally self-heals via the
-  mid-pull re-mint, logging `groww.token.reauth`
-  (DEC-GROWW-TOKEN-REAUTH-001 #909) — no operator action unless a TERMINAL
-  auth failure escalates to the §1 `pull_halted` push.
+  The 06:00 IST daily token reset itself normally self-heals mid-pull by
+  RE-READING the Lambda-minted token from SSM and adopting it — production
+  resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth`
+  takes the `readonly_reread` branch, logging `groww.token.reauth` then
+  `groww.token.reread`; **BruteX never mints on the read-only broker**
+  (DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 /
+  DEC-REAUTH-COLDSTART-READONLY-001 #1092, over the #909 reauth seam). A
+  persistently-stale token is fixed by re-deploying the Lambda minter
+  (`deploy/aws_token_minter/deploy.sh`) — no other operator action unless a
+  TERMINAL auth failure escalates to the §1 `pull_halted` push.
 - **Sweep lifecycle pushes** (`sweep_complete` INFO/⚠️, phase events) are
   informational — see `docs/runbooks/pilot-sweep-runday.md`.
 
@@ -190,4 +196,6 @@ Setup walkthrough: `docs/runbooks/telegram-setup.md`. Behavioural contract:
 - DEC-SUSPICIOUS-EMPTY-FLAG-001 (#919) +
   DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001 (#1014) — the all-empty detector.
 - DEC-RATE-STORM-WATCHDOG-001 — the retry-storm give-up guard.
-- DEC-GROWW-TOKEN-REAUTH-001 (#909) — the self-healing token re-mint.
+- DEC-GROWW-TOKEN-REAUTH-001 (#909) — the self-healing reauth seam; on the
+  production read-only broker the heal is an SSM RE-READ, not a mint
+  (DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072).

@@ -20,7 +20,7 @@ traceable to the cited file).
 > **✅ Live-CLI verified (2026-07-03):** the `fetch` flag list + the §3–§4
 > runtime behaviour in this runbook were captured from
 > `python -m brutex --help` / `python -m brutex fetch --help` and exercised
-> end-to-end (`fetch --dry-run`) on this build (commit `3914b478…`) — see
+> end-to-end (`fetch --dry-run`) on the branch-base commit (`3914b478…`) — see
 > `## Verification evidence` below. This supersedes the
 > "§3–§4 flags pending re-verification" banner of DEC-DHAN-DOC-RECONCILE-001
 > (2026-06-02). The authoritative LIVE-pull surface remains the dashboard
@@ -110,11 +110,13 @@ DEC-CLONE-RUN-002 (MIGRATION #297).
 Defaults for the index pull (no flags needed for the run-day ask):
 - **symbols:** the 3 brute-force indices (`brutex/universe.py:118`
   `BRUTE_FORCE_INDICES`)
-- **interval:** `all` → `1minute` + the derived `1day` ONLY. `--interval`
-  accepts exactly `1minute` / `1day` / `1m` / `1d` / `all`; anything else
-  errors (`cli.py:2267` `_resolve_fetch_intervals`). The 19 intraday TFs are
-  DERIVED from the stored 1-minute, never separately vendor-fetched
-  (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — NOT "every native Groww timeframe".
+- **interval:** `all` → `1minute` + `1day`, BOTH vendor-FETCHED on this
+  vestigial CLI path (`cli.py:2267` `_resolve_fetch_intervals` — its own
+  comment: the DASHBOARD pipeline is what fetches 1-minute ONLY and DERIVES
+  `1day`, DEC-1MINUTE-ONLY-DERIVE-1DAY-001; `brutex fetch` never derives
+  mid-pull). `--interval` accepts exactly `1minute` / `1day` / `1m` / `1d` /
+  `all`; anything else errors. The 19 intraday TFs are DERIVED from the
+  stored 1-minute, never vendor-fetched — NOT "every native Groww timeframe".
 - **start:** `2020-01-01` — the pull floor `GROWW_HISTORY_FLOOR`
   (`pull_controller.py:137`; DEC-PULL-FLOOR-2020-001), applied at
   `cli.py:2886-2893`. The `--start` parser help still says "Jan 1 of this
@@ -220,9 +222,9 @@ write no real data and pace no real account requests).
 
 ---
 
-## 7. Verification evidence (2026-07-03, this build)
+## 7. Verification evidence (2026-07-03, branch-base capture)
 
-Captured on commit `3914b478…` with a python-3.12 venv +
+Captured on the branch-base commit `3914b478…` with a python-3.12 venv +
 locally-built `trading_core` / `fno_math` wheels (`PYTHONPATH=<repo root>`):
 
 - `python -m brutex --help` → subcommands

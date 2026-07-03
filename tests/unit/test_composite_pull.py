@@ -712,7 +712,10 @@ def test_composite_note_names_greeks_enrich_failure(
     )
     assert report.historical is not None
     assert report.historical.greeks_enrich_ok is False
-    assert ", Greeks enrichment FAILED — overlay re-attempted next pull" in report.note
+    # The clause carries the ErrorType class, uniform with the historical note.
+    assert (
+        ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next pull" in report.note
+    )
 
 
 def test_composite_note_has_no_greeks_clause_on_a_clean_pass(

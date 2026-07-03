@@ -106,7 +106,13 @@ def test_auth_docs_carry_aws_credential_flow() -> None:
     for doc in (_REPO_ROOT / "README.md", _REPO_ROOT / "docs" / "runbooks" / "ENV_VARS.md"):
         text = doc.read_text(encoding="utf-8")
         for marker in _AWS_CONTRACT_MARKERS:
-            assert marker in text, f"{doc.name} is missing the AWS credential marker {marker}"
+            # Boundary-pinned, not a bare substring (hostile-review fold): a
+            # suffix/prefix rename (e.g. ``BRUTEX_TOKEN_PARAM_TOTP_SECRET_GONE``)
+            # must NOT satisfy the marker — only the exact live name does.
+            pattern = rf"(?<![\w-]){re.escape(marker)}(?![\w-])"
+            assert re.search(pattern, text), (
+                f"{doc.name} is missing the AWS credential marker {marker}"
+            )
 
 
 def test_operator_docs_have_no_retired_groww_auth_vars() -> None:
