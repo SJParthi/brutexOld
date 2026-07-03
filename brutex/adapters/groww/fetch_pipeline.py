@@ -127,10 +127,14 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
     is per-symbol-quarantinable (isolate to its own series, re-pull next pull) UNLESS it is
     a pull-wide STOP — a :class:`~brutex.data.errors.LakeWriteHalt` (disk-full / OOM), a
     quota stop (:class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` /
-    ``QuotaInvariantError``), or a tripped mass-empty circuit breaker
+    ``QuotaInvariantError``), a tripped mass-empty circuit breaker
     (:class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`,
-    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001), which fail/poison every remaining window
-    identically and so MUST halt the whole pull. A non-``BruteXError`` (a genuine code bug) is NEVER isolatable — it
+    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001), or a TERMINAL Groww auth failure
+    (:func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` — a dead credential
+    / an exhausted re-mint budget, DEC-GROWW-AUTH-HALT-001), which fail/poison every
+    remaining window identically and so MUST halt the whole pull. The RETRYABLE
+    ``GrowwAuthError`` subclasses (a throttled mint / a stale read-only re-read) stay
+    isolatable — transient by design, never a halt. A non-``BruteXError`` (a genuine code bug) is NEVER isolatable — it
     trips the pool so the bug is surfaced, never silently swallowed.
 
     The heavy ``quota_tracker`` import is LAZY (inside the function) so this module stays
@@ -146,8 +150,14 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
     if isinstance(exc, LakeWriteHalt):
         return False  # disk-full / OOM → pull-wide halt
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+    from brutex.adapters.groww.errors import is_terminal_auth_failure
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
+    if is_terminal_auth_failure(exc):
+        # A TERMINAL dead-credential auth failure (DEC-GROWW-AUTH-HALT-001) fails every
+        # remaining window identically → pull-wide halt. The retryable auth-family
+        # subclasses return False from the predicate and stay isolatable below.
+        return False
     # A quota stop OR a tripped mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-
     # BREAKER-001 — a suspected soft-throttle/mis-addressing episode poisons every
     # remaining window identically) → pull-wide halt; anything else is a per-symbol-
