@@ -1442,10 +1442,12 @@ def test_run_capture_hook_factory_builds_per_contract_hook() -> None:
 
     def _factory(
         exchange: str, segment: str, symbol: str
-    ) -> Callable[[Mapping[str, object], str, str, str], None]:
+    ) -> Callable[[Mapping[str, object], str, str, str, str], None]:
         built.append((exchange, segment, symbol))
 
-        def _hook(_payload: Mapping[str, object], _e: str, _s: str, _sym: str) -> None:
+        def _hook(
+            _payload: Mapping[str, object], _e: str, _s: str, _sym: str, _issued: str
+        ) -> None:
             return None
 
         return _hook

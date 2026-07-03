@@ -287,12 +287,19 @@ def test_ampersand_empty_range_no_fallback_no_calls() -> None:
 
 
 def test_ampersand_fallback_fires_raw_payload_hook_for_both_forms() -> None:
-    """The raw-integrity hook captures the fallback fetch too (every physical window)."""
-    sdk = _FormFakeSDK({"NSE-M%26M": [_CANDLE_PAYLOAD]})
-    captured: list[tuple[Mapping[str, object], str, str, str]] = []
+    """The raw-integrity hook captures the fallback fetch too (every physical window).
 
-    def _hook(payload: Mapping[str, object], interval: str, start: str, end: str) -> None:
-        captured.append((payload, interval, start, end))
+    Fix-1 of the hostile review: each capture carries the ISSUED symbol form, so
+    the fallback recovery's surviving (latest-wins) record can be verified by
+    re-issuing the byte-identical ENCODED call, never the plain-form miss.
+    """
+    sdk = _FormFakeSDK({"NSE-M%26M": [_CANDLE_PAYLOAD]})
+    captured: list[tuple[Mapping[str, object], str, str, str, str]] = []
+
+    def _hook(
+        payload: Mapping[str, object], interval: str, start: str, end: str, issued: str
+    ) -> None:
+        captured.append((payload, interval, start, end, issued))
 
     bars = fetch_candle_windows(
         _form_client(sdk),
@@ -309,3 +316,60 @@ def test_ampersand_fallback_fires_raw_payload_hook_for_both_forms() -> None:
     assert len(captured) == 2  # the plain (empty) AND the encoded (winning) fetch
     assert captured[0][0] == {"candles": []}
     assert captured[1][0] == _CANDLE_PAYLOAD
+    # Each physical fetch is captured with the symbol form it was ISSUED with.
+    assert captured[0][4] == "NSE-M&M"
+    assert captured[1][4] == "NSE-M%26M"
+
+
+# ── terminal error on the ENCODED form — never worse-than-before (Fix 2) ──
+
+
+# Named like the SDK exception so from_groww_exception maps it to the TERMINAL
+# GrowwBadRequestError (mirrors tests/unit/test_groww_errors.py).
+class GrowwAPIBadRequestException(Exception):
+    """Fake SDK 400 (mapped terminal by class name)."""
+
+
+class _EncodedRaisesSDK(_FormFakeSDK):
+    """Plain form returns clean-empty; the ENCODED form raises the given error."""
+
+    def __init__(self, encoded_error: Exception) -> None:
+        super().__init__()
+        self._encoded_error = encoded_error
+
+    def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+        if "%26" in str(kw["groww_symbol"]):
+            self.symbols.append(str(kw["groww_symbol"]))
+            raise self._encoded_error
+        return super().get_historical_candles(**kw)
+
+
+def test_ampersand_terminal_error_on_encoded_form_returns_plain_empty() -> None:
+    """A TERMINAL error from the SPECULATIVE `%26` attempt is swallowed to the
+    plain form's honest clean-empty (logged) — never a per-contract quarantine.
+
+    Fix-2 of the hostile review: before this, a terminal ``GrowwBadRequestError``
+    raised by the encoded attempt propagated into the per-contract quarantine —
+    converting a pre-fallback honest-empty window into a perpetual FAILED window,
+    contradicting the module's no-worse-than-before law.
+    """
+    sdk = _EncodedRaisesSDK(GrowwAPIBadRequestException("bad request"))
+    with capture_logs() as logs:
+        bars = _fetch_mm(_form_client(sdk))
+    assert bars == []  # the plain form's clean-empty result — same as pre-fallback
+    assert sdk.symbols == ["NSE-M&M", "NSE-M%26M"]  # both forms attempted once
+    events = [e for e in logs if e["event"] == "groww.candles.symbol_form_fallback_error"]
+    assert len(events) == 1
+    assert events[0]["log_level"] == "warning"
+    assert events[0]["error_type"] == "GrowwBadRequestError"
+    assert events[0]["fallback_symbol"] == "NSE-M%26M"
+
+
+def test_ampersand_retryable_error_on_encoded_form_still_propagates() -> None:
+    """A RETRYABLE error from the encoded attempt keeps propagating (rides the
+    existing retry ladders — unchanged, already-reviewed behaviour)."""
+    sdk = _EncodedRaisesSDK(GrowwAPIRateLimitException("Rate limit has breached"))
+    with pytest.raises(GrowwRateLimitError):
+        # max_attempts=1 → the client's own fast-retry never fires; the raise is direct.
+        _fetch_mm(_form_client(sdk, max_attempts=1))
+    assert sdk.symbols == ["NSE-M&M", "NSE-M%26M"]  # the encoded attempt raised out

@@ -1905,6 +1905,10 @@ class TestPullAllSpotDecouple:
         # The 1-day phase dies on a Groww auth error → the GLOBAL-STOP guard SKIPS the
         # 1-minute phase entirely (the token is dead — no point), reported loudly. This
         # guard is RETAINED by the decouple (it is not the 1-day-coverage coupling).
+        # DEC-GROWW-AUTH-HALT-001: the spine now RAISES the terminal auth error as a
+        # pull-wide global stop; pull_all_spot CATCHES it and maps it to this SAME
+        # graceful auth_expired verdict (the pre-halt shape), firing the CRITICAL
+        # pull-halt alert at the catch site (the halt never escapes to the job layer).
         with capture_logs() as logs:
             report = pull_all_spot(
                 [_index("13")],
@@ -1922,6 +1926,34 @@ class TestPullAllSpotDecouple:
         assert stop and stop[0]["auth_aborted"] is True
         # The 1-minute phase never ran — only the 1day quarantine surfaces.
         assert report.total_failed == 1  # the 1day auth quarantine
+
+    def test_retryable_auth_shape_escaping_spine_propagates_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-GROWW-AUTH-HALT-001 carve-out: the graceful auth-abort catch in
+        # pull_all_spot maps ONLY the TERMINAL shape; a RETRYABLE auth-family error
+        # (a stale read-only re-read) that somehow escapes the spine re-raises
+        # UNCHANGED — never a fake auth_expired verdict, never a halt alert.
+        from brutex.adapters.groww.errors import GrowwTokenStillStaleError
+
+        def _raise_still_stale(*_a: object, **_k: object) -> object:
+            raise GrowwTokenStillStaleError("same dead token", safe_message="stale")
+
+        monkeypatch.setattr(
+            "brutex.dashboard.pull_controller.run_groww_spot_ingest_with_retry",
+            _raise_still_stale,
+        )
+        with pytest.raises(GrowwTokenStillStaleError):
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date=_SPOT_FROM,
+                to_date=_SPOT_TO,
+                intervals=("1day",),
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
 
     def test_dry_run_minute_pulls_full_range(self, tmp_path: Path) -> None:
         # A dry-run ``both`` pull: the minute phase runs the full range too (decoupled —
@@ -2027,6 +2059,31 @@ class TestPullCandlesDecouple:
         assert report.total_failed == 1  # the 1day auth quarantine
         assert report.total_skipped == 1  # the 1minute phase skipped → SKIPPED cell
         assert report.total_no_data == 0  # never queried → NOT labeled vendor-empty
+
+    def test_retryable_auth_shape_escaping_spine_propagates_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-GROWW-AUTH-HALT-001 carve-out (single-symbol twin): a RETRYABLE
+        # auth-family error escaping the spine re-raises UNCHANGED out of
+        # pull_candles — never mapped to the graceful terminal-auth abort.
+        from brutex.adapters.groww.errors import GrowwTokenStillStaleError
+
+        def _raise_still_stale(*_a: object, **_k: object) -> object:
+            raise GrowwTokenStillStaleError("same dead token", safe_message="stale")
+
+        monkeypatch.setattr(
+            "brutex.dashboard.pull_controller.run_groww_spot_ingest", _raise_still_stale
+        )
+        with pytest.raises(GrowwTokenStillStaleError):
+            pull_candles(
+                _index(),
+                lake_root=tmp_path,
+                dry_run=False,
+                from_date=_SPOT_FROM,
+                to_date=_SPOT_TO,
+                intervals=("1day",),
+                adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+            )
 
     def test_dry_run_minute_request_pulls_full_range(self, tmp_path: Path) -> None:
         # A dry-run ``both`` request: the minute phase runs the full range too (decoupled

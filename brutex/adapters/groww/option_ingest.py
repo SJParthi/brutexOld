@@ -434,9 +434,14 @@ def ingest_option_contract(
     if client_self_paces(client):
         pace = None
     attempt = 0
-    # Vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001) —
-    # counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
-    # ``in_pull_fetches`` exposes the in-pull retry the per-attempt DEBUG log hid.
+    # LOGICAL vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001)
+    # — counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
+    # ``in_pull_fetches`` exposes the in-pull retry the per-attempt DEBUG log hid. HONEST
+    # accounting note: this is the LOGICAL count — for an ``&``-symbol whose plain form
+    # returns clean-empty, ONE logical fetch here can issue up to 2× PHYSICAL SDK calls
+    # (the `%26` fallback inside ``fetch_candle_windows`` —
+    # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001); each physical call still rides
+    # ``client.pace`` + the call meter, so rate admission sees every real call.
     fetch_count = 0
     raw_bars: list[CandleBar] = []
     # Outer EMPTY-retry loop (DEC-OPTION-EMPTY-RETRY-001): each pass runs the inner

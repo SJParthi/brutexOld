@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import pytest
-from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.client import REAUTH_RETRY_BACKOFF_SECONDS, GrowwClient
 from brutex.adapters.groww.errors import GrowwRateLimitError, GrowwTimeoutError
 from structlog.testing import capture_logs
 
@@ -641,7 +641,10 @@ def test_auth_error_triggers_reauth_then_succeeds() -> None:
     assert refresher.reauth_calls == 1  # exactly one re-mint
     assert stale.calls == 1  # the stale sdk was hit once (the auth failure)
     assert fresh.calls == 1  # the refreshed sdk served the retry
-    assert slept == []  # a re-auth retry does NOT spend a backoff sleep
+    # A re-auth retry does NOT spend the rate-limit backoff ladder — it pays ONLY the
+    # small fixed propagation-lag pause (DEC-GROWW-AUTH-HALT-001 FP-1 hardening: give
+    # the fresh token a beat to become fleet-valid before retrying).
+    assert slept == [REAUTH_RETRY_BACKOFF_SECONDS]
 
 
 def test_auth_error_bounded_reauths_then_raises_terminally() -> None:
@@ -702,6 +705,53 @@ def test_default_max_reauths_is_one() -> None:
     with pytest.raises(GrowwAuthError):
         client.expiries(exchange="NSE", underlying_symbol="NIFTY")
     assert refresher.reauth_calls == 1  # exactly the default single re-mint
+
+
+def test_rotation_lag_second_reauth_heals_within_production_budget() -> None:
+    """FP-1 regression (DEC-GROWW-AUTH-HALT-001): the 06:00 IST rotation lag self-heals.
+
+    The rotation-edge shape: the refresh ADOPTS the Lambda's fresh token, but the
+    first post-refresh retry still 401s (the fresh token is not yet fleet-valid —
+    a propagation lag, vendor-UNVERIFIED). With the production budget
+    ``GROWW_MAX_REAUTHS = 2`` the SECOND re-auth + retry succeeds and the pull
+    CONTINUES — no terminal ``GrowwAuthError``, no pull-wide halt. With the old
+    budget of 1 the second 401 exhausted the budget and (post-halt) killed the
+    whole overnight pull. Each post-refresh retry pays the small fixed
+    propagation-lag backoff via the injectable ``sleep``.
+    """
+    from brutex.adapters.groww.constants import GROWW_MAX_REAUTHS
+
+    stale = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
+    # The refresh adopted the FRESH token, but the fleet hasn't propagated it yet:
+    # the first retry 401s once more; the second re-auth lands on a valid view.
+    fresh_lagging = _FakeSDK(raises=[GrowwAPIAuthenticationException("not fleet-valid yet")])
+    fresh_valid = _FakeSDK(payload={"candles": [[1, 2, 3, 4, 5, 6, None]]})
+    refresher = _FakeRefresher([stale, fresh_lagging, fresh_valid])
+    slept: list[float] = []
+    client = GrowwClient(
+        sdk=stale,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=slept.append,
+        max_reauths=GROWW_MAX_REAUTHS,  # the production live-build-site budget (2)
+    )
+    out = client.historical_candles(
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-NIFTY",
+        interval="1minute",
+        start="2024-01-01 09:15:00",
+        end="2024-01-02 15:30:00",
+    )
+    assert out == {"candles": [[1, 2, 3, 4, 5, 6, None]]}  # the pull CONTINUES
+    assert refresher.reauth_calls == 2  # rotation lag absorbed within the budget
+    assert stale.calls == 1 and fresh_lagging.calls == 1 and fresh_valid.calls == 1
+    # One propagation-lag pause per post-refresh retry — never the 429 ladder.
+    assert slept == [REAUTH_RETRY_BACKOFF_SECONDS, REAUTH_RETRY_BACKOFF_SECONDS]
+
+
+def test_reauth_backoff_constant_is_small_and_positive() -> None:
+    """The propagation-lag pause is a small fixed beat — never a minutes-scale stall."""
+    assert 0.0 < REAUTH_RETRY_BACKOFF_SECONDS <= 5.0
 
 
 def test_auth_error_whose_remint_times_out_surfaces_retryable_timeout() -> None:

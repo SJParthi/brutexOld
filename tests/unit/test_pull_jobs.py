@@ -327,6 +327,135 @@ def test_transient_auth_expiry_with_successful_remint_pull_continues_zero_alerts
     assert halts == []  # ZERO pull-halt alerts — the self-heal never reaches the halt path
 
 
+def test_rotation_lag_double_401_two_remints_pull_continues_zero_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FP-1 e2e regression (DEC-GROWW-AUTH-HALT-001): the 06:00 IST rotation-lag
+    shape — refresh adopts the fresh token, the FIRST post-refresh retry 401s
+    (fleet-propagation lag, vendor-UNVERIFIED), the SECOND re-auth + retry
+    succeeds — completes DONE with ZERO pull-halt alerts under the production
+    ``GROWW_MAX_REAUTHS = 2`` budget. With the old budget of 1 the second 401
+    exhausted the budget → terminal ``GrowwAuthError`` → the halt killed the
+    whole overnight pull.
+    """
+    from datetime import date
+
+    from brutex.adapters.groww.candles import fetch_candle_windows
+    from brutex.adapters.groww.client import GrowwClient
+    from brutex.adapters.groww.constants import GROWW_MAX_REAUTHS
+
+    class GrowwAPIAuthenticationException(Exception):
+        """Fake SDK auth exception (named so from_groww_exception maps it)."""
+
+    class _SDK:
+        def __init__(self, raises: Exception | None) -> None:
+            self._raises = raises
+            self.calls = 0
+
+        def get_historical_candles(self, **_kw: object) -> dict[str, object]:
+            self.calls += 1
+            if self._raises is not None:
+                raise self._raises
+            return {"candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 5, None]]}
+
+        def get_expiries(self, **_kw: object) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+        def get_contracts(self, **_kw: object) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+    class _LaggingRefresher:
+        """Each re-auth advances the SDK queue: stale → fresh-but-lagging → valid."""
+
+        def __init__(self, sdks: list[_SDK]) -> None:
+            self._sdks = sdks
+            self._index = 0
+            self.generation = 0
+            self.reauth_calls = 0
+
+        def sdk_at(self, _index: int) -> _SDK:
+            return self._sdks[self._index]
+
+        def current_generation(self) -> int:
+            return self.generation
+
+        def reauth(self, seen_generation: int) -> int:
+            del seen_generation
+            self.reauth_calls += 1
+            self._index = min(self._index + 1, len(self._sdks) - 1)
+            self.generation += 1
+            return self.generation
+
+    stale = _SDK(GrowwAPIAuthenticationException("token expired or invalid"))
+    lagging = _SDK(GrowwAPIAuthenticationException("fresh token not fleet-valid yet"))
+    valid = _SDK(None)
+    refresher = _LaggingRefresher([stale, lagging, valid])
+    client = GrowwClient(
+        sdk=stale,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_reauths=GROWW_MAX_REAUTHS,  # the production live-build-site budget (2)
+    )
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+    fetched: list[int] = []
+
+    def work(_on_progress: ProgressHook) -> None:
+        bars = fetch_candle_windows(
+            client,
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            drop_volume=True,
+        )
+        fetched.append(len(bars))
+
+    assert job.start(work, total=1) is True
+    assert job.snapshot().state == STATE_DONE  # the pull CONTINUED to completion
+    assert fetched == [1]  # the second healed retry served real bars
+    assert refresher.reauth_calls == 2  # the rotation lag absorbed within the budget
+    assert halts == []  # ZERO pull-halt alerts — no false halt at the rotation edge
+    # And the TRUE-dead-credential case still halts after the budget: an SDK fleet
+    # that NEVER validates exhausts GROWW_MAX_REAUTHS and the terminal auth error
+    # escapes to the job layer, firing the CRITICAL alert exactly once.
+    dead = [
+        _SDK(GrowwAPIAuthenticationException("dead")),
+        _SDK(GrowwAPIAuthenticationException("still dead")),
+        _SDK(GrowwAPIAuthenticationException("never valid")),
+    ]
+    dead_refresher = _LaggingRefresher(dead)
+    dead_client = GrowwClient(
+        sdk=dead[0],
+        refresher=dead_refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_reauths=GROWW_MAX_REAUTHS,
+    )
+    dead_halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", dead_halts.append)
+    dead_job = _job()
+
+    def dead_work(_on_progress: ProgressHook) -> None:
+        fetch_candle_windows(
+            dead_client,
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-NIFTY",
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            drop_volume=True,
+        )
+
+    assert dead_job.start(dead_work, total=1) is True
+    assert dead_job.snapshot().state == STATE_ERROR  # the dead credential HALTS
+    assert dead_refresher.reauth_calls == GROWW_MAX_REAUTHS  # bounded, never a loop
+    assert len(dead_halts) == 1  # the CRITICAL pull-halt alert fired exactly once
+
+
 def test_failed_unit_flag_is_forwarded() -> None:
     job = _job()
     job.start(lambda on_progress: on_progress("BAD 1minute", 0, True, False), total=1)
