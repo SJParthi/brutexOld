@@ -260,15 +260,18 @@
   /* The from→to .daterange group is RE-ADDED + properly wired
      (DEC-UNIVERSE-PULL-DATERANGE-001) — it scopes the SPOT history phase of the
      ▶ Pull · full pipeline button (F&O keeps its per-contract default lookback).
-     Shares the chip shape with the static .ctl-field granularity chip. */
-  .daterange, .ctl-field { display:inline-flex; align-items:center; gap:7px;
+     The static .ctl-field "granularity · 1-minute" chip that shared this shape
+     is REMOVED (DEC-UNIVERSE-UI-POLISH-002): since DEC-1MINUTE-ONLY-DERIVE-1DAY-001
+     1-minute is the ONLY fetched granularity, so the chip was dead UI noise —
+     the hero copy already explains the 1-minute-only / 1-day-derived contract. */
+  .daterange { display:inline-flex; align-items:center; gap:7px;
     min-height:var(--ctl-h); padding:0 12px; background:var(--surface-2);
     border:1px solid var(--border-strong); border-radius:var(--r-md);
     color:var(--muted); font-size:12px; transition:.15s var(--ease); }
-  .daterange:focus-within, .ctl-field:focus-within { border-color:var(--blue);
+  .daterange:focus-within { border-color:var(--blue);
     box-shadow:0 0 0 3px rgba(91,141,239,.16); }
   .daterange .dr-sep { color:var(--border-strong); }
-  .daterange input[type="date"], .ctl-field select { color-scheme:dark; }
+  .daterange input[type="date"] { color-scheme:dark; }
   /* Every pull-bar button shares ONE height + shape so the toolbar reads as a
      single aligned row instead of mismatched chips (the alignment report). */
   .pullbtn, .loadbtn { min-height:var(--ctl-h); display:inline-flex; align-items:center;
@@ -463,6 +466,7 @@
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
+<script defer src="/static/bx-liveproof.js"></script>
 </head>
 <body>
   <header>
@@ -498,8 +502,12 @@
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
-    <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options fan
-      <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
+    <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options pull
+      <b>ALL vendor-listed strikes</b> per expiry — the vendor chain (<code>get_expiries</code> → <code>get_contracts</code>) returns <b>every listed strike, not relative-to-spot</b> · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
+      <!-- DEC-DB-UX-PACK-001 Feature 5: replaces the FALSE fixed-fan claim (a ±10-strike fan for
+           indices / ±3 for stocks was never the pull rule). Verified: CLAUDE.md §6 "Options
+           contract resolution" — get_contracts returns "all listed strikes, not
+           relative-to-spot" (brutex/adapters/groww/contracts.py). -->
       Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b> and written <b>only</b> by the pipeline's automatic FINAL pre-build stage once the fetch fully succeeds — covering <b>SPOT, FUTURES and OPTIONS</b> (F&amp;O keeps open-interest). Heads-up on storage: a fully pre-built options lake is roughly <b>2–3× its 1-minute footprint</b> (DEC-PIPELINE-AUTOPREBUILD-001, operator-accepted; the lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>). There is no manual pre-build button — the pipeline runs it itself.</div>
     <!-- The ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001): selection-aware — pulls the
          TICKED instruments, or the WHOLE universe when none are ticked — via the SHARED
@@ -556,11 +564,14 @@
         <span class="dr-sep" aria-hidden="true">→</span>
         <label title="Inclusive end date for the SPOT history pull — defaults to the previous trading day (pick today to include it). F&amp;O is unaffected (per-contract default lookback).">to <input type="date" id="pipeTo" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
       </div>
+      <!-- The static "granularity · 1-minute (1-day derived)" chip is REMOVED
+           (DEC-UNIVERSE-UI-POLISH-002): 1-minute is the ONLY granularity
+           (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, backend-fixed via
+           resolve_fetch_intervals — no route param ever read the chip), so it
+           was dead UI noise; the hero copy above already states the contract. -->
       <span class="pull-div" aria-hidden="true"></span>
-      <span class="ctl-field" title="1-minute is the ONLY granularity fetched from Groww; 1-day + the 19 intraday timeframes are derived from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).">granularity · <b>1-minute</b> (1-day derived)</span>
-      <span class="pull-div" aria-hidden="true"></span>
-      <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
-      <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
+      <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown in THIS list only (respects the search filter; ticks on the other Index/Stocks tab are kept)">✓ all shown</button>
+      <button class="loadbtn" id="clrselbtn" title="Untick all selected — across BOTH the Index and Stocks lists">✗ clear</button>
       <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's constituent stocks — ALL of them, or only F&amp;O-eligible when 'F&amp;O only' is on (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
     </div>
   </div>
@@ -721,10 +732,15 @@ function buildTabs(summary) {
     t.onclick = () => {
       filter = k;
       document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.k === k));
-      // A tab switch changes the universe — carrying ticks from the hidden
-      // tab into the next pull was the operator's "it pulled things I can't
-      // even see" bug (DEC-UNIVERSE-SELECTION-PRECISE-001).
-      selMulti.clear();
+      // CROSS-LIST SELECTION (DEC-UNIVERSE-UI-POLISH-002): a tab switch KEEPS
+      // the ticks, so one combined selection spans BOTH the Index and Stocks
+      // lists (the operator's ADANIENT + NIFTY pull). This SUPERSEDES the
+      // tab-switch selMulti.clear() of DEC-UNIVERSE-SELECTION-PRECISE-001 —
+      // that clear existed because a hidden tick was INVISIBLE; invisibility
+      // is now solved the honest way: the pull-bar lead NAMES every ticked
+      // symbol across both lists (updateSelectionLead), so nothing unseen can
+      // ride into a pull. "✗ clear" still empties BOTH lists; "✓ all shown"
+      // still ticks only the VISIBLE list.
       updateMultiBtn();
       loadInstruments();
     };
@@ -1163,9 +1179,7 @@ async function selectInstrument(i) {
   ilist.querySelectorAll(".inst").forEach(n => {
     if (n.dataset.symbol === i.symbol) n.classList.add("sel");
   });
-  document.getElementById("pulllead").innerHTML =
-    `Selected <b>${esc(i.symbol)}</b> — tick more rows to scope the pull, or hit ▶ Pull · full pipeline above`;
-  updateMultiBtn();  // scope the pipeline button label to the selection
+  updateMultiBtn();  // lead + label: names the ticks, or this single highlight
   /* "⊕ tick its constituents" is meaningful only for an INDEX
      (DEC-UNIVERSE-NSE-CONSTITUENTS-001) — a stock has no constituents. */
   document.getElementById("tickconstbtn").disabled = (i.kind !== "index");
@@ -1336,8 +1350,37 @@ function toggleMulti(i, on) {
   if (on) selMulti.set(i.symbol, i); else selMulti.delete(i.symbol);
   updateMultiBtn();
 }
+/* The pull-bar lead's default instruction text, captured once at load so
+   updateSelectionLead can restore it when the selection empties. */
+const DEFAULT_PULL_LEAD = (document.getElementById("pulllead") || {}).textContent || "";
+/* CROSS-LIST SELECTION LEAD (DEC-UNIVERSE-UI-POLISH-002): the lead NAMES every
+   ticked symbol across BOTH the Index and Stocks lists — "Selected: ADANIENT,
+   NIFTY (2)" — so a tick on the hidden tab is never invisible (the honesty
+   guarantee that lets the tab switch KEEP the selection; supersedes the
+   tab-switch clear of DEC-UNIVERSE-SELECTION-PRECISE-001). Built with
+   textContent ONLY — never innerHTML (the CodeQL XSS guard). selMulti keys on
+   the master's unique trading_symbol, so one Map spans both lists collision-free. */
+const LEAD_MAX_NAMED = 12;   // name up to 12 symbols, then an honest "+N more"
+function updateSelectionLead() {
+  const lead = document.getElementById("pulllead");
+  if (!lead) return;
+  const n = selMulti.size;
+  if (n > 0) {
+    const syms = [...selMulti.keys()];
+    const named = syms.slice(0, LEAD_MAX_NAMED).join(", ");
+    const more = syms.length > LEAD_MAX_NAMED ? ` +${syms.length - LEAD_MAX_NAMED} more` : "";
+    lead.textContent = `Selected: ${named}${more} (${n}) — one combined selection across the `
+      + `Index + Stocks lists. Hit ▶ Pull · full pipeline above (✗ clear unticks both lists).`;
+  } else if (selInst) {
+    lead.textContent = `Selected ${selInst} — tick more rows to scope the pull, `
+      + `or hit ▶ Pull · full pipeline above`;
+  } else {
+    lead.textContent = DEFAULT_PULL_LEAD;
+  }
+}
 function updateMultiBtn() {
-  // Drives the ONE selection-aware control left: the pipeline button's label.
+  // Drives the TWO selection-aware surfaces: the pipeline button's label + the
+  // pull-bar lead (which names every ticked symbol across both lists).
   // (The manual pre-build button is REMOVED — the pipeline's
   // automatic FINAL prebuild stage writes the derived timeframes itself,
   // DEC-PIPELINE-AUTOPREBUILD-001.) The button is ALWAYS enabled (no ticks ⇒
@@ -1345,6 +1388,7 @@ function updateMultiBtn() {
   const n = selMulti.size;
   const lbl = document.getElementById("pullPipelineLabel");
   if (lbl) lbl.textContent = n > 0 ? `Pull · ${n} selected — full pipeline` : "Pull · full pipeline";
+  updateSelectionLead();
 }
 document.getElementById("selallbtn").onclick = () => {
   // EXACTLY the rendered rows — search AND F&O-only composed

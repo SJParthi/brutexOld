@@ -1,22 +1,29 @@
-"""Tests for `brutex.dashboard.lake_revision` (DEC-HARDENING-LEFTOVERS-001).
+"""Tests for `brutex.dashboard.lake_revision` (DEC-HARDENING-LEFTOVERS-001 +
+the sweeps-tree component of DEC-RESULTS-SURFACE-HONESTY-001).
 
-100% line + branch on the O(1) cross-process lake freshness token:
+100% line + branch on the cross-process lake freshness token:
 
-* a lake with NO window ledger yields the stable :data:`ABSENT_TOKEN` (and the
-  sentinel is stable across repeat probes — no oscillation);
-* a present ledger yields the ``"<mtime_ns>:<size>"`` stat token, which CHANGES
-  after a writer touches the ledger (the CLI-checkpoint signal);
-* any non-missing-file :class:`OSError` (e.g. permissions) maps to ``None`` —
-  "unknown, no signal" — never a raise, never a spurious invalidation.
+* a lake with NO window ledger AND no sweeps tree yields the stable composite
+  ``"absent|absent"`` (and it is stable across repeat probes — no oscillation);
+* a present ledger contributes the ``"<mtime_ns>:<size>"`` stat component,
+  which CHANGES after a writer touches the ledger (the CLI-checkpoint signal);
+* the NEW sweeps component (:func:`sweeps_revision`) changes when a results
+  store lands in an EXISTING ``<sweeps>/<instrument>/<tf>/`` directory — the
+  out-of-band CLI ``sweep-all`` write the #1069 ledger-only probe was blind to;
+* any non-missing-file :class:`OSError` (permissions, mid-scan fault) maps to
+  ``None`` — "unknown, no signal" — never a raise, never a spurious
+  invalidation, for EITHER component.
 """
 
+# The drift-pin tests read module-private constants deliberately.
+# pyright: reportPrivateUsage=none
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
 import pytest
-from brutex.dashboard.lake_revision import ABSENT_TOKEN, lake_revision
+from brutex.dashboard.lake_revision import ABSENT_TOKEN, lake_revision, sweeps_revision
 from brutex.data.window_ledger_store import ledger_path
 
 
@@ -28,43 +35,197 @@ def _write_ledger_bytes(lake_root: Path, payload: bytes) -> Path:
     return target
 
 
-def test_absent_ledger_returns_stable_sentinel(tmp_path: Path) -> None:
-    """No ledger file → the stable ``absent`` sentinel, on every probe."""
-    assert lake_revision(tmp_path) == ABSENT_TOKEN
-    # Stable: a second probe of the same absent lake returns the SAME token
-    # (the sentinel never oscillates a generation).
-    assert lake_revision(tmp_path) == ABSENT_TOKEN
+def _write_store_file(lake_root: Path, instrument: str, tf: str, name: str) -> Path:
+    """Land a store file the way every repo writer does: tempfile + ``os.replace``.
+
+    The parent-directory mtime move caused by the ``os.replace`` rename is the
+    exact signal :func:`sweeps_revision` keys on.
+    """
+    dest_dir = lake_root / "sweeps" / instrument / tf
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    tmp = dest_dir / (name + ".tmp")
+    tmp.write_bytes(b"parquet-stand-in")
+    dest = dest_dir / name
+    os.replace(tmp, dest)
+    return dest
 
 
-def test_present_ledger_token_matches_stat(tmp_path: Path) -> None:
-    """A present ledger yields the exact ``"<mtime_ns>:<size>"`` stat token."""
-    target = _write_ledger_bytes(tmp_path, b"v1")
-    st = os.stat(target)
-    assert lake_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}"
+def _bump_dir_mtime(path: Path, *, ns: int) -> None:
+    """Force a DISTINCT directory mtime (deterministic — no timer-granularity flake)."""
+    os.utime(path, ns=(ns, ns))
 
 
-def test_token_changes_after_a_ledger_write(tmp_path: Path) -> None:
-    """A writer touching the ledger (the CLI checkpoint) moves the token."""
-    _write_ledger_bytes(tmp_path, b"v1")
-    first = lake_revision(tmp_path)
-    # A second checkpoint with different content — size (and mtime) move.
-    _write_ledger_bytes(tmp_path, b"v2-longer")
-    second = lake_revision(tmp_path)
-    assert first is not None and second is not None
-    assert second != first
-    # And the absent→present transition also moved the token.
-    assert first != ABSENT_TOKEN
+class TestLedgerComponent:
+    """The window-ledger half of the composite (the #1069 behaviour, preserved)."""
+
+    def test_absent_everything_returns_stable_composite_sentinel(self, tmp_path: Path) -> None:
+        """No ledger + no sweeps tree → the stable ``absent|absent`` composite."""
+        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        # Stable: a second probe of the same absent lake returns the SAME token
+        # (the sentinel never oscillates a generation).
+        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+
+    def test_present_ledger_component_matches_stat(self, tmp_path: Path) -> None:
+        """A present ledger contributes the exact ``"<mtime_ns>:<size>"`` component."""
+        target = _write_ledger_bytes(tmp_path, b"v1")
+        st = os.stat(target)
+        assert lake_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}|{ABSENT_TOKEN}"
+
+    def test_token_changes_after_a_ledger_write(self, tmp_path: Path) -> None:
+        """A writer touching the ledger (the CLI checkpoint) moves the token."""
+        _write_ledger_bytes(tmp_path, b"v1")
+        first = lake_revision(tmp_path)
+        # A second checkpoint with different content — size (and mtime) move.
+        _write_ledger_bytes(tmp_path, b"v2-longer")
+        second = lake_revision(tmp_path)
+        assert first is not None and second is not None
+        assert second != first
+        # And the absent→present transition also moved the token.
+        assert first != f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+
+    def test_unreadable_ledger_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError (permissions) → ``None`` ("no signal")."""
+        target = _write_ledger_bytes(tmp_path, b"v1")
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(target):
+                raise PermissionError(13, "denied", str(target))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert lake_revision(tmp_path) is None
 
 
-def test_unreadable_ledger_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-missing-file OSError (permissions) → ``None`` ("no signal")."""
-    target = _write_ledger_bytes(tmp_path, b"v1")
-    real_stat = os.stat
+class TestSweepsComponent:
+    """The sweeps-tree half (DEC-RESULTS-SURFACE-HONESTY-001) — the CLI ``sweep-all`` signal."""
 
-    def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
-        if str(path) == str(target):
-            raise PermissionError(13, "denied", str(target))
-        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+    def test_absent_sweeps_tree_returns_stable_sentinel(self, tmp_path: Path) -> None:
+        """No ``<lake>/sweeps`` directory → the stable ``absent`` sentinel."""
+        assert sweeps_revision(tmp_path) == ABSENT_TOKEN
+        assert sweeps_revision(tmp_path) == ABSENT_TOKEN
 
-    monkeypatch.setattr(os, "stat", _denying_stat)
-    assert lake_revision(tmp_path) is None
+    def test_store_write_into_existing_tf_dir_moves_the_token(self, tmp_path: Path) -> None:
+        """The exact #1069 blind spot: a store landing in an EXISTING ``<tf>/`` dir.
+
+        A root-only ``os.stat`` cannot see it (directory mtimes move only for
+        DIRECT children) — the two-level dir digest must.
+        """
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
+        tf_dir = tmp_path / "sweeps" / "NIFTY" / "5m"
+        _bump_dir_mtime(tf_dir, ns=1_000_000_000)
+        first = sweeps_revision(tmp_path)
+        assert first is not None and first != ABSENT_TOKEN
+
+        # The out-of-band "CLI sweep-all" writes a SECOND store into the SAME
+        # tf directory; the dir mtime is pinned to a distinct value so the test
+        # is deterministic on coarse filesystem timestamp granularity.
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k2_" + "b" * 16 + ".parquet")
+        _bump_dir_mtime(tf_dir, ns=2_000_000_000)
+        second = sweeps_revision(tmp_path)
+        assert second is not None
+        assert second != first
+
+    def test_new_instrument_dir_moves_the_token(self, tmp_path: Path) -> None:
+        """A first store for a NEW instrument (new depth-1 dir) moves the token."""
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
+        first = sweeps_revision(tmp_path)
+        _write_store_file(tmp_path, "BANKNIFTY", "15m", "bear_k1_" + "c" * 16 + ".parquet")
+        second = sweeps_revision(tmp_path)
+        assert first is not None and second is not None
+        assert second != first
+
+    def test_non_directory_entries_are_ignored(self, tmp_path: Path) -> None:
+        """A stray FILE at depth 1 (e.g. a cascade JSON) does not enter the digest."""
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
+        root_mtime_ns = os.stat(tmp_path / "sweeps").st_mtime_ns
+        first = sweeps_revision(tmp_path)
+        stray = tmp_path / "sweeps" / "stray.json"
+        stray.write_text("{}")
+        # Only DIRECTORY entries are digested; creating the file moved the root
+        # dir's own mtime though — pin it back so the assertion isolates the
+        # is_dir filter (the root mtime IS deliberately part of the digest).
+        _bump_dir_mtime(tmp_path / "sweeps", ns=root_mtime_ns)
+        second = sweeps_revision(tmp_path)
+        assert second == first
+
+    def test_empty_sweeps_root_yields_a_token(self, tmp_path: Path) -> None:
+        """An empty ``sweeps/`` dir (no stores yet) yields a real, stable token."""
+        (tmp_path / "sweeps").mkdir()
+        first = sweeps_revision(tmp_path)
+        assert first is not None and first != ABSENT_TOKEN
+        assert sweeps_revision(tmp_path) == first
+
+    def test_unreadable_sweeps_root_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError on the root stat → ``None`` ("no signal")."""
+        (tmp_path / "sweeps").mkdir()
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(tmp_path / "sweeps"):
+                raise PermissionError(13, "denied", str(path))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert sweeps_revision(tmp_path) is None
+
+    def test_scan_fault_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An OSError DURING the dir scan (dir vanished mid-walk) → ``None``."""
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
+
+        def _raising_scandir(path: object) -> object:
+            raise OSError(5, "I/O error", str(path))
+
+        monkeypatch.setattr(os, "scandir", _raising_scandir)
+        assert sweeps_revision(tmp_path) is None
+
+
+class TestComposite:
+    """The composite ``ledger|sweeps`` join semantics."""
+
+    def test_sweep_write_moves_the_composite_without_a_ledger_touch(self, tmp_path: Path) -> None:
+        """The defect under test: an out-of-band sweep write MUST bump the token."""
+        _write_ledger_bytes(tmp_path, b"v1")
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
+        tf_dir = tmp_path / "sweeps" / "NIFTY" / "5m"
+        _bump_dir_mtime(tf_dir, ns=1_000_000_000)
+        first = lake_revision(tmp_path)
+        # A CLI sweep-all writes a store; the ledger is NOT touched.
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k2_" + "b" * 16 + ".parquet")
+        _bump_dir_mtime(tf_dir, ns=2_000_000_000)
+        second = lake_revision(tmp_path)
+        assert first is not None and second is not None
+        assert second != first
+        # The ledger component itself did not move — only the sweeps half did.
+        assert first.split("|", 1)[0] == second.split("|", 1)[0]
+
+    def test_sweeps_probe_failure_maps_the_composite_to_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ledger fine + sweeps probe faulting → ``None`` (no half-signal token)."""
+        _write_ledger_bytes(tmp_path, b"v1")
+        (tmp_path / "sweeps").mkdir()
+
+        def _raising_scandir(path: object) -> object:
+            raise OSError(5, "I/O error", str(path))
+
+        monkeypatch.setattr(os, "scandir", _raising_scandir)
+        assert lake_revision(tmp_path) is None
+
+    def test_sweeps_dirname_pinned_to_the_results_view_constant(self) -> None:
+        """The not-imported dirname copy cannot drift from the ONE definition.
+
+        ``lake_revision`` deliberately does NOT import ``sweep_results_view``
+        (that module pulls the engine/Rust-wheel import graph; the probe must
+        stay stdlib-lean) — this pin is the drift guard, the
+        ``trial_stats._TUPLE_DIGEST_LEN`` precedent.
+        """
+        pytest.importorskip("polars", reason="sweep_results_view imports the engine store")
+        from brutex.dashboard import lake_revision as probe_mod
+        from brutex.dashboard.sweep_results_view import SWEEPS_DIRNAME
+
+        assert probe_mod._SWEEPS_DIRNAME == SWEEPS_DIRNAME

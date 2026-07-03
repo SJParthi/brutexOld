@@ -62,6 +62,7 @@ def test_every_diagnostic_is_register_cross_referenced_or_infra() -> None:
             "token.smoke_failed",  # the untagged generic arm of M1/M2/R8
             "token.mint_anyway",  # operator-invoked hazard warning, not a register row
             "bhavcopy.unreachable",  # external dependency, honestly untagged
+            "bhavcopy.wiring",  # kit-INTERNAL wiring bug (mis-wired getter), not a register row
             "bhavcopy.unmapped",
             "bhavcopy.no_row",
             "bhavcopy.no_daily_bar",

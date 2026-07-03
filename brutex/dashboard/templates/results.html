@@ -94,6 +94,10 @@
   .pnl.pos { color:var(--green); } .pnl.neg { color:var(--red); }
   .cond { color:var(--text); font-size:12px; max-width:420px; }
   .cond.none { color:var(--muted); font-style:italic; }
+  .erabanner { display:none; margin:12px 24px 0; padding:10px 14px; border:1px solid var(--yellow);
+    border-radius:var(--r-md); background:rgba(255,183,77,.09); color:var(--yellow);
+    font-size:13px; line-height:1.6; }
+  .erabanner.show { display:block; }
   .empty { color:var(--muted); font-size:14px; padding:40px 20px; text-align:center; line-height:1.7; }
   .empty .ei { font-size:30px; display:block; margin-bottom:10px; opacity:.65; }
   #status { padding:4px 24px 12px; font-size:12px; color:var(--muted); }
@@ -119,6 +123,7 @@
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
+<script defer src="/static/bx-liveproof.js"></script>
 </head>
 <body>
   <header>
@@ -170,6 +175,11 @@
     <button class="refreshbtn" id="refreshBtn" title="Re-read the sweep leaderboard">&#x21bb; Refresh</button>
   </div>
 
+  <!-- Snapshot-era honesty banner (DEC-RESULTS-SURFACE-HONESTY-001): shown ONLY
+       when the co-ranked rows span more than one data_snapshot_hash era. The
+       message is set via textContent (never innerHTML — the repo XSS law). -->
+  <div class="erabanner" id="eraBanner" role="alert"></div>
+
   <div class="cards" id="cards"></div>
   <div id="status"></div>
 
@@ -190,6 +200,7 @@
    manual Refresh and renders the ranked sweep winners as a click-to-sort table, with
    an honest empty-state when no sweep has been run yet. Escape-before-innerHTML (XSS). */
 const cardsEl = document.getElementById("cards");
+const eraBanner = document.getElementById("eraBanner");
 const panel = document.getElementById("panel");
 const statusEl = document.getElementById("status");
 const liveTxt = document.getElementById("livetxt");
@@ -319,6 +330,21 @@ async function load() {
     if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
     const board = await r.json();
     renderCards(board);
+    /* Snapshot-era honesty (DEC-RESULTS-SURFACE-HONESTY-001): when the ranked
+       rows span more than one data era, say so LOUDLY. textContent only — the
+       era hashes come from the server, never trusted into innerHTML. */
+    const eras = board.snapshot_hashes || [];
+    if (board.mixed_snapshot_eras) {
+      eraBanner.textContent = "⚠ results span " + eras.length + " data eras ("
+        + eras.map((h) => String(h).slice(0, 12)).join(", ")
+        + ") — old-era and new-era backtest results are co-ranked in this one table;"
+        + " census/heal pending (dup-train PR-3). Per-row era details are in the API"
+        + " payload (snapshot_era).";
+      eraBanner.classList.add("show");
+    } else {
+      eraBanner.textContent = "";
+      eraBanner.classList.remove("show");
+    }
     fillSelect(fInstrument, board.instruments);
     fillSelect(fTf, board.timeframes);
     fillSelect(fDirection, board.directions);
@@ -329,6 +355,10 @@ async function load() {
       ? num((board.rows || []).length) + " of " + num(board.total_rows) + " combos shown · ranked by "
         + esc(board.rank_by) + " · " + num(board.store_count) + " sweep file(s)"
         + (board.skipped ? " · " + num(board.skipped) + " skipped (unreadable)" : "")
+        + (board.run_id_conflicts
+          ? " · " + num(board.run_id_conflicts)
+            + " run-id conflict(s) — duplicate run_ids with different metrics (first-wins, logged)"
+          : "")
       : "no sweep has been run yet — run one from the dashboard";
     liveTxt.textContent = board.available ? "live · " + num((board.rows || []).length) + " rows" : "no data";
   } catch (e) {
