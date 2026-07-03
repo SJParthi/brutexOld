@@ -71,6 +71,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "greeks",
         "minute_of_session",
         "resolve_near_month",
+        "seconds_of_day",
         "spec_canonical_bytes",
         "total_conditions",
         "version",
