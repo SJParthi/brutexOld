@@ -44,6 +44,7 @@ import structlog
 
 from brutex.data.errors import ResampleInputError
 from brutex.data.timeframe_materialize import PrebuildKind
+from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -283,6 +284,11 @@ def _run_spot_phase(
     failed: list[tuple[str, str]] = []
     total_bars = 0
     for inst in underlyings:
+        # Liveness beat per underlying (DEC-PIPELINE-STALL-HEARTBEAT-001): the prebuild
+        # phase runs minutes-to-hours with NO fetch heartbeat, so without this the pull
+        # stall watchdog false-declared a HEALTHY pipeline HUNG (forensically proven).
+        # No-op outside a dashboard pull; best-effort; O(1).
+        emit_progress_beat()
         try:
             result = materialize_spot(inst)
         except _PER_SYMBOL_DATA_ERRORS as exc:
@@ -346,6 +352,9 @@ def _run_contract_phase(
             continue
         for contract in contracts:
             attempted.append(contract)
+            # Liveness beat per contract (DEC-PIPELINE-STALL-HEARTBEAT-001) — see the
+            # spot phase's beat; the contract fan-out is the prebuild's long tail.
+            emit_progress_beat()
             try:
                 result = materialize_contract(contract)
             except _PER_SYMBOL_DATA_ERRORS as exc:

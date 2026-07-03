@@ -67,6 +67,7 @@ from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
 from brutex.data.spot_daily_resample import ist_span_partition_files
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
+from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.greeks import T_FLOOR_YEARS, GreeksInputError, compute_greeks
 from brutex.options.risk_free import (
     RISK_FREE_SOURCE_VERSION,
@@ -855,6 +856,11 @@ def enrich_greeks_for_targets(
     enriched = already_current = futures_skipped = undecodable = no_bars = errored = 0
     bars_written = bars_solved = bars_null = bars_reused = 0
     for target in targets:
+        # Liveness beat per contract (DEC-PIPELINE-STALL-HEARTBEAT-001): the Greeks
+        # enrichment pass runs minutes-to-hours AFTER the last fetch heartbeat, so
+        # without this the pull stall watchdog false-declared a HEALTHY pipeline HUNG
+        # (forensically proven). No-op outside a dashboard pull; best-effort; O(1).
+        emit_progress_beat()
         try:
             parts = parse_fno_symbol(target.symbol)
             if parts is None:
