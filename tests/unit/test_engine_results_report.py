@@ -417,6 +417,65 @@ class TestCascadeSidecar:
         assert "pool PBO not recorded (pre-sidecar report)" in out
         assert "skipped" not in out
 
+    # ── Provisional pool-N passes (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F4) ──
+
+    @staticmethod
+    def _verdict(*, passed: bool, provisional: bool | None) -> dict[str, object]:
+        v: dict[str, object] = {"candidate_id": "c" * 64, "passed": passed}
+        if provisional is not None:
+            v["provisional"] = provisional
+        return v
+
+    def test_provisional_pass_renders_counted_label(self, tmp_path: Path) -> None:
+        group = _group(0.25, dsr=("pool", 3))
+        report = group["report"]
+        assert isinstance(report, dict)
+        report["verdicts"] = [
+            self._verdict(passed=True, provisional=True),
+            self._verdict(passed=False, provisional=False),
+        ]
+        _write_sidecar(tmp_path, _sidecar_json([group]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "provisional=1 (pool-N DSR pass — not proven at leaderboard N)" in out
+
+    def test_leaderboard_group_renders_no_provisional_label(self, tmp_path: Path) -> None:
+        group = _group(0.25, dsr=("leaderboard", 841))
+        report = group["report"]
+        assert isinstance(report, dict)
+        report["verdicts"] = [self._verdict(passed=True, provisional=False)]
+        _write_sidecar(tmp_path, _sidecar_json([group]))
+        assert "provisional=" not in render_cascade_sidecar(tmp_path)
+
+    def test_pre_provisional_report_renders_without_error(self, tmp_path: Path) -> None:
+        # Three-state absent-key convention: a pre-change report whose verdict
+        # dicts LACK the provisional key renders unchanged — never a KeyError.
+        group = _group(0.25, dsr=("pool", 3))
+        report = group["report"]
+        assert isinstance(report, dict)
+        report["verdicts"] = [self._verdict(passed=True, provisional=None)]
+        _write_sidecar(tmp_path, _sidecar_json([group]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "dsr N=3 source=pool" in out
+        assert "provisional=" not in out
+
+    def test_report_without_verdict_list_renders_without_error(self, tmp_path: Path) -> None:
+        # The _group helper writes no verdicts key at all — the note must
+        # degrade silently (a best-effort render surface).
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.25, dsr=("pool", 3))]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "dsr N=3 source=pool" in out
+        assert "provisional=" not in out
+
+    def test_provisional_flag_on_rejection_only_is_not_counted(self, tmp_path: Path) -> None:
+        # A (malformed) provisional=True on a REJECTED verdict is not a pass —
+        # the counted label stays absent (the n_provisional == 0 arm).
+        group = _group(0.25, dsr=("pool", 3))
+        report = group["report"]
+        assert isinstance(report, dict)
+        report["verdicts"] = [self._verdict(passed=False, provisional=True)]
+        _write_sidecar(tmp_path, _sidecar_json([group]))
+        assert "provisional=" not in render_cascade_sidecar(tmp_path)
+
     def test_corrupt_json_is_loud(self, tmp_path: Path) -> None:
         path = _write_sidecar(tmp_path, "{not json")
         out = render_cascade_sidecar(tmp_path)

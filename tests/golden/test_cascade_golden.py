@@ -99,8 +99,22 @@ def test_golden_cascade() -> None:
         "monte_carlo": 2,
     }
     by = {v.candidate_id: v for v in rep.verdicts}
-    assert by["alpha"].passed and by["alpha"].composite_score == 0.0
-    assert by["beta"].passed and by["beta"].composite_score == 0.0
+    # DEC-STATS-GATE-INTEGRITY-001 (R2-SR-F5): the composite's lockbox term now
+    # reads each survivor's MEASURED filter-#8 lockbox Sharpe (alpha
+    # 4.086626678022204 vs beta 2.932208319049763 — recomputed independently
+    # in-repo via lockbox_evaluation + fmean/pstdev z-scores), so the two
+    # scores split ±(0.05 · z) instead of the pre-fix 0.0/0.0 (the old code fed
+    # the IDENTICAL training_sharpe=0.1 to both → a zero-variance z column).
+    # Every other raw column is identical across the pair, so the composite is
+    # exactly the weighted lockbox z-term: 0.05 × (±1 up to 1 ulp).
+    assert by["alpha"].passed and by["alpha"].composite_score == 0.050000000000000024
+    assert by["beta"].passed and by["beta"].composite_score == -0.04999999999999999
+    # R2-SR-F4: a pool-N-deflated pass is stamped PROVISIONAL (dsr_n_source
+    # is "pool" below); the rejected verdict stays False (pass-scoped flag).
+    assert by["alpha"].provisional is True
+    assert by["beta"].provisional is True
+    assert by["junk"].provisional is False
+    assert rep.provisional_pass_ids == rep.survivor_ids
     assert by["junk"].rejected_at is FilterStage.HARD_GATES
     assert by["junk"].composite_score is None
     # DEC-PBO-SIDECAR-001: the measured pool PBO is now SURFACED on the report

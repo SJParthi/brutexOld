@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-from brutex.metrics.lockbox import LockboxStatus, lockbox_evaluation
+from brutex.metrics.lockbox import LockboxStatus, lockbox_evaluation, resolve_lockbox_window
 from brutex.metrics.monte_carlo import monte_carlo_permutation_test
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -66,6 +66,70 @@ def test_lockbox_invariants(
         assert result.n_trades >= min_trades
     # Purity / determinism (Golden Rule #4): no RNG, same input → same result.
     assert lockbox_evaluation(returns, days, **kw) == result  # type: ignore[arg-type]
+
+
+@given(
+    series=_trade_series(),
+    min_trades=st.integers(min_value=1, max_value=20),
+    window=st.integers(min_value=1, max_value=50),
+)
+@_SETTINGS
+def test_resolver_none_evidence_equals_legacy_window(
+    series: tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]],
+    min_trades: int,
+    window: int,
+) -> None:
+    # DEC-STATS-GATE-INTEGRITY-001 (R2-SR-F1): with evidence_days=None the
+    # shared resolver must reproduce the legacy inline window logic (the
+    # fields lockbox_evaluation reports) for EVERY valid input.
+    returns, days = series
+    resolved = resolve_lockbox_window(days, default_window_days=window, min_trades=min_trades)
+    result = lockbox_evaluation(
+        returns,
+        days,
+        training_sharpe=0.0,
+        training_max_drawdown=1.0,
+        min_trades=min_trades,
+        default_window_days=window,
+    )
+    assert resolved.window_start == result.window_start_day
+    assert resolved.extended == result.extended
+    assert resolved.n_evidence_in_window == result.n_trades
+
+
+@given(
+    series=_trade_series(),
+    n_evidence=st.integers(min_value=0, max_value=10),
+    min_trades=st.integers(min_value=1, max_value=20),
+    window=st.integers(min_value=1, max_value=50),
+    seed=st.integers(min_value=0, max_value=2**31 - 1),
+)
+@_SETTINGS
+def test_resolver_with_evidence_is_deterministic_and_consistent(
+    series: tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]],
+    n_evidence: int,
+    min_trades: int,
+    window: int,
+    seed: int,
+) -> None:
+    # Evidence mode (R2-SR-F2): deterministic, count-consistent, and the
+    # boundary always lies within the days span.
+    _, days = series
+    rng = np.random.default_rng(seed)
+    evidence = np.sort(rng.integers(int(days[0]), int(days[-1]) + 1, size=n_evidence))
+    resolved = resolve_lockbox_window(
+        days, evidence_days=evidence, default_window_days=window, min_trades=min_trades
+    )
+    assert resolved == resolve_lockbox_window(
+        days, evidence_days=evidence, default_window_days=window, min_trades=min_trades
+    )
+    assert resolved.n_evidence_in_window == int(np.count_nonzero(evidence >= resolved.window_start))
+    assert resolved.window_start <= int(days[-1])
+    if resolved.n_evidence_in_window < min_trades:
+        # Below the floor the window must span everything (the caller's
+        # count gate — not a shrunken window — does the rejecting).
+        assert resolved.window_start == int(days[0])
+        assert resolved.extended is True
 
 
 def _mean_pos(positions: npt.NDArray[np.intp]) -> float:
