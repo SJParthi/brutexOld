@@ -15,8 +15,11 @@ It is a **signal-only** spot simulator (``TRACK1_BACKTEST_SPEC.md`` lines
 the index has no order book, so there is **no slippage, no brokerage, no STT**
 and money stays in **int64 paisa** end-to-end. It deliberately does **not**
 import :class:`brutex.execution.simulator.ExecutionSimulator` (which fills at
-bar CLOSE and applies 5 bps slippage + ₹20 brokerage in ``Decimal`` — correct
-for tradable Track-2 options, wrong for spot). P&L is the per-unit directional
+bar CLOSE and applies 5 bps slippage + ₹20 brokerage in ``Decimal`` via the
+dormant, stale ``brutex.execution.costs`` model — wrong for spot, and NOT the
+Track-2 cost authority either: the authoritative options cost model is
+:func:`brutex.costs.calculator.compute_trade_cost` per DEC-COST-001; the stale
+execution-costs model is deprecated). P&L is the per-unit directional
 price move in paisa (no position sizing — spot is research, not execution).
 
 ## Fill conventions (configurable — :class:`FillPolicy`)
@@ -207,14 +210,20 @@ class TradeSimWalker:
     walker is single-position: while a position is open, entry signals are
     ignored (Track 1 is non-overlapping — ``time_in_market_pct`` assumes it).
 
-    Feed contract: the walker opens an armed entry at the *very next bar's* open
-    regardless of any calendar gap between bars, so the caller must supply a
-    contiguous intraday feed for one instrument (the lake /
-    :class:`~brutex.feed.replay.ReplayFeed` already do). The session forced exit
-    (15:20 IST on a regular day, close − 10min on a half-day / Muhurat session)
-    means an entry signal on a session's last usable bar is dropped (its next
-    bar is a forced-exit bar), so signals are not expected to arm across a
-    trading-day boundary.
+    Feed contract: the caller supplies a chronologically ordered intraday feed
+    for one instrument (the lake / :class:`~brutex.feed.replay.ReplayFeed`
+    already do). An armed entry fills at the *very next bar's* open ONLY when
+    that bar falls on the SAME IST session date the signal armed on: a pending
+    entry whose fill bar lands on a LATER session date (the feed stepped across
+    a trading-day boundary — an overnight gap) is DROPPED, never filled at the
+    next session's open (R2-OC-2). The session identity is the bar's IST
+    calendar date — exactly the key the session forced-exit resolution uses
+    (:meth:`_forced_exit_seconds` / :func:`~brutex.calendars.nse.get_session`)
+    — so the two session notions can never diverge. Within a session, the
+    forced exit (15:20 IST on a regular day, close − 10min on a half-day /
+    Muhurat session) additionally drops an entry signal armed on the session's
+    last usable bar (its next bar is a forced-exit bar), so no entry can open
+    at or after the forced-exit instant.
 
     Parameters
     ----------
@@ -281,6 +290,14 @@ class TradeSimWalker:
         self._reference_stamper = reference_stamper
         self._position: _OpenPosition | None = None
         self._pending_entry = False
+        # The IST session date the pending entry ARMED on (``None`` while no
+        # entry is pending). An armed entry may only fill on a bar of the SAME
+        # IST session date — a fill bar on a later date is an overnight-gap
+        # fill and is dropped, never opened (R2-OC-2). The IST calendar date is
+        # exactly the key the session forced-exit resolution uses
+        # (``_forced_exit_seconds`` / ``get_session``), so the drop rule and
+        # the forced-exit rule share ONE session notion (CLAUDE.md §11 COMMON).
+        self._pending_entry_day: date | None = None
         self._pending_exit: _ExitReason | None = None
         self._index = -1
         # Session-aware forced-exit boundary cache (DEC-SESSION-FORCED-EXIT-001).
@@ -384,8 +401,10 @@ class TradeSimWalker:
             The next bar in chronological order (UTC timestamp, Decimal rupees).
         entry_signal
             ``True`` iff an entry fired on this bar (enter at the NEXT bar's
-            open). Ignored while a position is open, and ignored on a bar where
-            a position just closed (the exit bar is consumed).
+            open — dropped, never filled, if that bar falls on a LATER IST
+            session date or is a forced-exit bar). Ignored while a position is
+            open, and ignored on a bar where a position just closed (the exit
+            bar is consumed).
         exit_signal
             ``True`` iff a Mode-B signal exit fired on this bar (exit at the
             NEXT bar's open). Only meaningful while a position is open.
@@ -403,18 +422,26 @@ class TradeSimWalker:
         need_forced = self._position is not None or self._pending_entry
         if need_forced:
             ts_ist = bar.timestamp.astimezone(IST)
+            bar_day_ist: date | None = ts_ist.date()
             forced = is_forced_exit_bar(
                 ts_ist.time(),
                 self._tf_minutes,
                 self._forced_exit_seconds(ts_ist.date()),
             )
         else:
+            bar_day_ist = None
             forced = False
 
-        # (A) Open a pending entry at THIS bar's open (cannot open at/after 15:20).
+        # (A) Open a pending entry at THIS bar's open — only within the SAME IST
+        # session date the signal armed on (a fill bar on a LATER session date is
+        # an overnight-gap fill and is DROPPED, R2-OC-2) and never on a forced
+        # bar (cannot open at/after the session's forced-exit instant).
+        # ``bar_day_ist`` is always resolved here (``need_forced`` was True).
         if self._position is None and self._pending_entry:
             self._pending_entry = False
-            if not forced:
+            same_session = bar_day_ist == self._pending_entry_day
+            self._pending_entry_day = None
+            if not forced and same_session:
                 self._open_position(bar, i)
 
         # (B) Manage an open position on this bar.
@@ -424,9 +451,17 @@ class TradeSimWalker:
                 self._position, bar, i, forced=forced, exit_signal=exit_signal
             )
 
-        # (C) While flat (and not on a bar a trade just closed), arm the next entry.
+        # (C) While flat (and not on a bar a trade just closed), arm the next
+        # entry, recording THIS bar's IST session date — the fill gate for (A).
+        # The session identity of bar i derives from bar i's own timestamp, so
+        # it is knowable AT bar i (P-06: no future access). Reuse the date
+        # already resolved for the forced check when present (O(1) discipline —
+        # no second UTC→IST conversion on a bar that needed the forced check).
         if self._position is None and closed is None and entry_signal:
             self._pending_entry = True
+            self._pending_entry_day = (
+                bar_day_ist if bar_day_ist is not None else bar.timestamp.astimezone(IST).date()
+            )
 
         return closed
 

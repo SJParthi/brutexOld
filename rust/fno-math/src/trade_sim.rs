@@ -20,16 +20,29 @@
 //!
 //! ## Bit-exactness (Golden Rule #4)
 //!
-//! The price→paisa conversion (`_price_to_paisa`, `ROUND_HALF_UP`) and the
-//! timeframe-aware 15:20-IST forced-exit detection (`is_forced_exit_bar`) stay in
-//! Python — the single source of truth (CLAUDE.md §11 COMMON) — and their
-//! pre-computed results (`open/high/low/close` paisa + `is_forced` flags) are
-//! handed to this kernel. The kernel therefore depends on NEITHER the Decimal
-//! rounding rule NOR the IST timezone math (the two functions a port would most
+//! The price→paisa conversion (`_price_to_paisa`, `ROUND_HALF_UP`), the
+//! timeframe-aware 15:20-IST forced-exit detection (`is_forced_exit_bar`) and the
+//! per-bar IST session identity (the bar's IST calendar date — the same key the
+//! session forced-exit resolution uses) stay in Python — the single source of
+//! truth (CLAUDE.md §11 COMMON) — and their pre-computed results
+//! (`open/high/low/close` paisa + `is_forced` flags + `session_idx` day ordinals)
+//! are handed to this kernel. The kernel therefore depends on NEITHER the Decimal
+//! rounding rule NOR the IST timezone math (the functions a port would most
 //! easily get wrong); it reproduces only the Python state machine's branch order,
 //! which it does EXACTLY. For the same `(bars, mask, direction, sl, tp, policy)`
 //! it emits byte-identical trades to `simulate_trades(...)`; a golden cross-check
 //! asserts this field-by-field over hypothesis-generated inputs.
+//!
+//! ## No cross-session pending entry (R2-OC-2)
+//!
+//! A pending entry may only fill on a bar of the SAME session (`session_idx`
+//! equal) it armed on. When the feed steps across a trading-day boundary — the
+//! armed bar was a session's last stored bar — the fill bar's `session_idx`
+//! differs and the pending entry is DROPPED, never filled at the next session's
+//! open (that would be an ~18h-stale fill capturing the overnight gap at zero
+//! slippage). Mirrors the Python walker's `_pending_entry_day` gate exactly.
+//! The session identity of bar `i` derives from bar `i`'s own timestamp, so it
+//! is knowable at bar `i` (P-06: no look-ahead).
 //!
 //! ## Exit precedence (the traps, from the hostile port review)
 //!
@@ -123,6 +136,11 @@ struct Walker {
     policy: FillPolicy,
     position: Option<OpenPosition>,
     pending_entry: bool,
+    /// The `session_idx` of the bar the pending entry ARMED on — only meaningful
+    /// while `pending_entry` is true. A pending entry may only fill on a bar of
+    /// the SAME session; a differing fill-bar session drops it (R2-OC-2).
+    /// Mirrors the Python walker's `_pending_entry_day`.
+    pending_entry_session: i64,
     /// True iff a next-open exit (SL/TP NEXT_OPEN, or Mode-B signal) is scheduled.
     /// The Python walker stores the reason too, but the emitted trade carries no
     /// reason, so a bool is sufficient + bit-identical.
@@ -138,6 +156,7 @@ impl Walker {
             policy,
             position: None,
             pending_entry: false,
+            pending_entry_session: 0,
             pending_exit: false,
         }
     }
@@ -314,6 +333,7 @@ impl Walker {
     }
 
     /// Advance one bar — mirrors `push`. Returns a trade iff a position closed.
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         open_paisa: i64,
@@ -321,6 +341,7 @@ impl Walker {
         low_paisa: i64,
         idx: usize,
         forced_raw: bool,
+        session: i64,
         entry_signal: bool,
         exit_signal: bool,
     ) -> Option<TradeRecord> {
@@ -329,12 +350,15 @@ impl Walker {
         let need_forced = self.position.is_some() || self.pending_entry;
         let forced = need_forced && forced_raw;
 
-        // (A) Open a pending entry at THIS bar's open (cannot open at/after 15:20;
-        // the pending flag is cleared UNCONDITIONALLY — an entry landing on a
-        // forced bar is dropped).
+        // (A) Open a pending entry at THIS bar's open — only within the SAME
+        // session it armed on (a fill bar on a LATER session is an overnight-gap
+        // fill and is DROPPED, R2-OC-2) and never on a forced bar (cannot open
+        // at/after the session's forced-exit instant). The pending flag is
+        // cleared UNCONDITIONALLY. Mirrors the Python (A) branch exactly.
         if self.position.is_none() && self.pending_entry {
             self.pending_entry = false;
-            if !forced {
+            let same_session = session == self.pending_entry_session;
+            if !forced && same_session {
                 self.open_position(open_paisa, idx);
             }
         }
@@ -354,9 +378,11 @@ impl Walker {
         }
 
         // (C) While flat (and NOT on a bar a trade just closed — the exit bar
-        // consumes the entry signal), arm the next entry.
+        // consumes the entry signal), arm the next entry, recording THIS bar's
+        // session — the fill gate for (A). Knowable at bar `idx` (no look-ahead).
         if self.position.is_none() && closed.is_none() && entry_signal {
             self.pending_entry = true;
+            self.pending_entry_session = session;
         }
 
         closed
@@ -423,6 +449,10 @@ pub struct ResidentSweepSim {
     low: Vec<i64>,
     close: Vec<i64>,
     is_forced: Vec<bool>,
+    /// Per-bar session identity — the bar's IST calendar-date ordinal, computed
+    /// in Python from bar `i`'s own timestamp (P-06: no look-ahead). A pending
+    /// entry only fills on a bar with the SAME value it armed on (R2-OC-2).
+    session_idx: Vec<i64>,
     bar_bits: Vec<u64>,
 }
 
@@ -437,6 +467,7 @@ impl ResidentSweepSim {
         low: Vec<i64>,
         close: Vec<i64>,
         is_forced: Vec<bool>,
+        session_idx: Vec<i64>,
         bar_bits: Vec<u64>,
     ) -> Result<Self, String> {
         let n = open.len();
@@ -444,16 +475,18 @@ impl ResidentSweepSim {
             || low.len() != n
             || close.len() != n
             || is_forced.len() != n
+            || session_idx.len() != n
             || bar_bits.len() != n
         {
             return Err(format!(
                 "ResidentSweepSim: column length mismatch — open={}, high={}, low={}, close={}, \
-                 is_forced={}, bar_bits={} (all must be equal)",
+                 is_forced={}, session_idx={}, bar_bits={} (all must be equal)",
                 n,
                 high.len(),
                 low.len(),
                 close.len(),
                 is_forced.len(),
+                session_idx.len(),
                 bar_bits.len(),
             ));
         }
@@ -463,6 +496,7 @@ impl ResidentSweepSim {
             low,
             close,
             is_forced,
+            session_idx,
             bar_bits,
         })
     }
@@ -490,6 +524,7 @@ impl ResidentSweepSim {
                 self.low[i],
                 i,
                 self.is_forced[i],
+                self.session_idx[i],
                 entry_signal,
                 false,
             ) {
@@ -506,9 +541,11 @@ impl ResidentSweepSim {
 #[pymethods]
 impl ResidentSweepSim {
     /// Build the resident buffer. The ONE-TIME `O(N_bars)` Python→Rust copy of the
-    /// 5 price columns + flags + bar_bits is paid here via the `Vec` extracts.
-    /// Unequal column lengths raise a clean `ValueError` (never a panic that would
-    /// SIGABRT under `panic=abort`).
+    /// price columns + forced flags + per-bar session ordinals + bar_bits is paid
+    /// here via the `Vec` extracts. `session_idx[i]` is bar `i`'s IST calendar-date
+    /// ordinal (the session identity gating pending-entry fills, R2-OC-2). Unequal
+    /// column lengths raise a clean `ValueError` (never a panic that would SIGABRT
+    /// under `panic=abort`).
     #[new]
     fn new(
         open: Vec<i64>,
@@ -516,9 +553,11 @@ impl ResidentSweepSim {
         low: Vec<i64>,
         close: Vec<i64>,
         is_forced: Vec<bool>,
+        session_idx: Vec<i64>,
         bar_bits: Vec<u64>,
     ) -> PyResult<Self> {
-        Self::build(open, high, low, close, is_forced, bar_bits).map_err(PyValueError::new_err)
+        Self::build(open, high, low, close, is_forced, session_idx, bar_bits)
+            .map_err(PyValueError::new_err)
     }
 
     /// Number of resident bars (the only exposed view of the buffer).
@@ -612,7 +651,9 @@ mod tests {
         }
     }
 
-    /// Build a sim with explicit per-column data and no forced bars (test helper).
+    /// Build a sim with explicit per-column data, no forced bars, and every bar
+    /// in ONE session (test helper — the single-session case is byte-identical
+    /// to the pre-session-gate kernel).
     fn sim(
         open: Vec<i64>,
         high: Vec<i64>,
@@ -621,7 +662,7 @@ mod tests {
         bar_bits: Vec<u64>,
     ) -> ResidentSweepSim {
         let n = open.len();
-        ResidentSweepSim::build(open, high, low, close, vec![false; n], bar_bits)
+        ResidentSweepSim::build(open, high, low, close, vec![false; n], vec![0; n], bar_bits)
             .expect("equal-length test data")
     }
 
@@ -734,8 +775,10 @@ mod tests {
         let low: Vec<i64> = open.iter().map(|&o| o - 50).collect();
         let close: Vec<i64> = open.iter().map(|&o| o + 10).collect();
         let is_forced: Vec<bool> = (0..n).map(|i| i % 375 == 374).collect();
+        // A realistic multi-session shape: one synthetic 375-bar day per session.
+        let session_idx: Vec<i64> = (0..n).map(|i| (i / 375) as i64).collect();
         let bar_bits: Vec<u64> = (0..n as u64).map(|i| (i & 0x3) | 0x1).collect();
-        let s = ResidentSweepSim::build(open, high, low, close, is_forced, bar_bits)
+        let s = ResidentSweepSim::build(open, high, low, close, is_forced, session_idx, bar_bits)
             .expect("equal-length stress window");
 
         let policy = policy_default();
@@ -761,6 +804,7 @@ mod tests {
                 vec![1, 2],
                 vec![1, 2],
                 vec![false, false],
+                vec![0, 0],
                 vec![0, 0]
             )
             .is_err()
@@ -774,13 +818,27 @@ mod tests {
         // (under `&&` a single-column mismatch would wrongly pass).
         let ok2 = || vec![0i64; 2];
         let okf = || vec![false; 2];
+        let oks = || vec![0i64; 2];
         let okb = || vec![0u64; 2];
         // open is the reference `n`; mismatching a later column individually.
-        assert!(ResidentSweepSim::build(ok2(), vec![0], ok2(), ok2(), okf(), okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), vec![0], ok2(), okf(), okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), vec![0], okf(), okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), vec![false], okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), okf(), vec![0u64]).is_err());
+        assert!(
+            ResidentSweepSim::build(ok2(), vec![0], ok2(), ok2(), okf(), oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), vec![0], ok2(), okf(), oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), vec![0], okf(), oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), vec![false], oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), okf(), vec![0i64], okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), okf(), oks(), vec![0u64]).is_err()
+        );
     }
 
     #[test]
@@ -792,6 +850,7 @@ mod tests {
             vec![2, 3],
             vec![false, false],
             vec![0, 0],
+            vec![0, 0],
         )
         .expect("equal lengths must build");
         assert_eq!(r.n_bars(), 2);
@@ -799,7 +858,7 @@ mod tests {
 
     #[test]
     fn build_empty_is_ok() {
-        let r = ResidentSweepSim::build(vec![], vec![], vec![], vec![], vec![], vec![])
+        let r = ResidentSweepSim::build(vec![], vec![], vec![], vec![], vec![], vec![], vec![])
             .expect("empty ok");
         assert_eq!(r.n_bars(), 0);
     }
@@ -965,6 +1024,7 @@ mod tests {
             vec![55, 105, 128],
             vec![false, false, true],
             vec![0, 0, 0],
+            vec![0, 0, 0],
         )
         .unwrap();
         let out = s.simulate_one(0, true, Some(50), Some(20), policy_default());
@@ -985,6 +1045,7 @@ mod tests {
             vec![40, 95, 118],
             vec![55, 105, 125],
             vec![false, true, false],
+            vec![0, 0, 0],
             vec![1, 0, 0],
         )
         .unwrap();
@@ -992,6 +1053,75 @@ mod tests {
             s.simulate_one(1, true, None, None, policy_default()),
             Vec::<TradeRecord>::new()
         );
+    }
+
+    // ── cross-session pending-entry drop (R2-OC-2) ──────────────────────────
+
+    #[test]
+    fn cross_session_pending_entry_dropped() {
+        // mask=1 fires ONLY on bar1 — the LAST bar of session 0 (e.g. 15:29 IST).
+        // bar2 is the FIRST bar of session 1 (next day 09:15, an overnight gap):
+        // the pending entry must be DROPPED, never filled at session 1's open.
+        // Pre-fix this produced one trade entering at open[2]=11900.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 11900, 11950],
+            vec![10100, 10100, 12000, 12050],
+            vec![9900, 9900, 11800, 11850],
+            vec![10000, 10000, 11900, 11950],
+            vec![false, false, false, false],
+            vec![0, 0, 1, 1],
+            vec![0, 1, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(
+            s.simulate_one(1, true, None, None, policy_default()),
+            Vec::<TradeRecord>::new()
+        );
+    }
+
+    #[test]
+    fn same_session_pending_entry_still_fills() {
+        // The SAME feed shape but with every bar in one session: the pending
+        // entry armed on bar1 fills at open[2] as before (the gate only drops
+        // CROSS-session fills; kills a `==`→`!=` mutant on the session compare).
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 11900, 11950],
+            vec![10100, 10100, 12000, 12050],
+            vec![9900, 9900, 11800, 11850],
+            vec![10000, 10000, 11900, 11950],
+            vec![false, false, false, false],
+            vec![0, 0, 0, 0],
+            vec![0, 1, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out.len(), 1);
+        let (pnl, _mfe, _mae, holding, entry_idx, exit_idx) = out[0];
+        assert_eq!(entry_idx, 2); // fill at open[2]=11900, same session
+        assert_eq!(exit_idx, 3); // end-of-data close at close[3]=11950
+        assert_eq!(pnl, 50);
+        assert_eq!(holding, 2);
+    }
+
+    #[test]
+    fn cross_session_drop_then_rearm_fills_next_bar() {
+        // Signal fires on bar1 (session 0's last bar → dropped at bar2) AND on
+        // bar2 (session 1's first bar → legitimately fills at bar3's open):
+        // the drop must not eat a genuine next-session signal.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 11900, 11950, 11960],
+            vec![10100, 10100, 12000, 12050, 12060],
+            vec![9900, 9900, 11800, 11850, 11860],
+            vec![10000, 10000, 11900, 11950, 11960],
+            vec![false, false, false, false, false],
+            vec![0, 0, 1, 1, 1],
+            vec![0, 1, 1, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out.len(), 1);
+        let (_pnl, _mfe, _mae, _holding, entry_idx, _exit_idx) = out[0];
+        assert_eq!(entry_idx, 3); // opened at bar3 (session 1), NOT bar2
     }
 
     // ── next-open fills ──
@@ -1023,6 +1153,7 @@ mod tests {
             vec![40, 98, 85, 78],
             vec![55, 100, 90, 81],
             vec![false, false, false, true],
+            vec![0, 0, 0, 0],
             vec![0, 0, 0, 0],
         )
         .unwrap();
