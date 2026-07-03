@@ -50,6 +50,20 @@ FNO_INSTRUMENT_TYPES: Final[frozenset[str]] = OPTION_TYPES | {FUTURE_TYPE}
 #: shared with :mod:`brutex.dashboard.movers_options` (CLAUDE.md §11 COMMON).
 EXPIRY_DATE_FORMAT: Final[str] = "%d%b%y"
 
+#: Sanity window for the RESOLVED expiry calendar year (both endpoints inclusive) —
+#: DEC-FNO-EXPIRY-YEAR-PIVOT-001. ``strptime``'s ``%y`` applies the POSIX 2-digit-year
+#: pivot (``00–68`` → 2000–2068, ``69–99`` → 1969–1999), so a junk/corrupt lake
+#: directory token like ``30Jun75`` silently decoded to a *plausible-looking* 1975
+#: "expiry" and flowed into expiry tiers / days-to-expiry / moneyness. Any resolved
+#: year outside ``[2019, 2059]`` is now rejected (→ ``None``): 2019 gives one year of
+#: slack under the 2020 lake floor (``GROWW_HISTORY_FLOOR``, CLAUDE.md §3); 2059 caps
+#: the future so every pivot-ambiguous 2-digit year (``60–68`` → 206x, ``69–99`` →
+#: 19xx) is rejected by the same window. This is a sanity guard on OUR lake directory
+#: names — the claim that the live vendor never lists such expiries is UNVERIFIED
+#: from this environment (Golden Rule #1).
+EXPIRY_YEAR_MIN: Final[int] = 2019
+EXPIRY_YEAR_MAX: Final[int] = 2059
+
 #: Minimum hyphen-token count of a derivative symbol: ``EXCH-SYMBOL-EXPIRY-FUT`` (4)
 #: for a future; an option inserts a STRIKE token (``…-STRIKE-TYPE``) → 5.
 _MIN_FUTURE_TOKENS: Final[int] = 4
@@ -93,18 +107,48 @@ class FnoSymbolParts:
         return self.option_type is not None
 
 
+def expiry_year_in_window(year: int) -> bool:
+    """Return ``True`` iff *year* is a sane F&O expiry calendar year.
+
+    The ONE window predicate (CLAUDE.md §11 COMMON) shared by
+    :func:`parse_expiry_token` and the shape-stricter futures-movers twin
+    (:mod:`brutex.dashboard.movers_futures`), so the two parsers can never again
+    diverge on which resolved years are junk (DEC-FNO-EXPIRY-YEAR-PIVOT-001).
+
+    Parameters
+    ----------
+    year
+        A resolved 4-digit calendar year (after any 2-digit-year pivot).
+
+    Returns
+    -------
+    bool
+        ``True`` when ``EXPIRY_YEAR_MIN <= year <= EXPIRY_YEAR_MAX`` (both
+        inclusive), else ``False``.
+    """
+    return EXPIRY_YEAR_MIN <= year <= EXPIRY_YEAR_MAX
+
+
 def parse_expiry_token(token: str) -> date | None:
     """Parse a ``DDMmmYY`` expiry token (``30Jun25``) into a date, or ``None``.
 
     Any other shape, an unknown month, or an out-of-range day raises
     :class:`ValueError` inside :meth:`~datetime.datetime.strptime`, caught and
     reported as ``None`` so the caller skips the malformed contract (never raising —
-    Golden Rule #1).
+    Golden Rule #1). A token whose POSIX-``%y``-pivot-resolved year falls outside
+    the ``[EXPIRY_YEAR_MIN, EXPIRY_YEAR_MAX]`` sanity window is likewise rejected
+    as ``None`` — ``30Jun75`` is junk, NOT a 1975 expiry
+    (DEC-FNO-EXPIRY-YEAR-PIVOT-001; the rejection rides the callers' existing
+    ``None`` handling, e.g. the ``greeks_enrich.target_undecodable`` counter+log
+    and the ``/db`` cascade ``unparsed`` bucket — this module stays pure/log-free).
     """
     try:
-        return datetime.strptime(token, EXPIRY_DATE_FORMAT).date()
+        parsed = datetime.strptime(token, EXPIRY_DATE_FORMAT).date()
     except ValueError:
         return None
+    if not expiry_year_in_window(parsed.year):
+        return None
+    return parsed
 
 
 def parse_strike_token(token: str) -> Decimal | None:
@@ -183,10 +227,13 @@ def parse_fno_symbol(symbol: str) -> FnoSymbolParts | None:
 
 __all__ = [
     "EXPIRY_DATE_FORMAT",
+    "EXPIRY_YEAR_MAX",
+    "EXPIRY_YEAR_MIN",
     "FNO_INSTRUMENT_TYPES",
     "FUTURE_TYPE",
     "OPTION_TYPES",
     "FnoSymbolParts",
+    "expiry_year_in_window",
     "parse_expiry_token",
     "parse_fno_symbol",
     "parse_strike_token",
