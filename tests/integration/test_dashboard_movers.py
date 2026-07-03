@@ -195,8 +195,12 @@ class TestReadSessionBars:
                 _min_bar(hour=9, minute=20, close="200", volume=10),  # next 5m bucket
             ],
         )
-        # 5-minute buckets: 09:15 (label 555) and 09:20 (label 560). cutoff 559
-        # keeps ONLY the 09:15 bucket (close=105, volume=20).
+        # Unified raw-1m semantic (DEC-HARDENING-LEFTOVERS-001): cutoff 559 keeps
+        # the RAW minutes 09:15 + 09:16 (minute-of-day ≤ 559) and EXCLUDES the raw
+        # 09:20 bar BEFORE resampling, so only the 09:15 5-minute bucket forms
+        # (close=105, volume=20) — the cut is on raw minutes, NOT on the resampled
+        # bucket-open labels (that pre-#1069 mechanism gave the same outcome here
+        # by coincidence).
         bars = _read_session_bars(
             tmp_path,
             exchange=_EXCHANGE,

@@ -573,9 +573,12 @@ def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -
     CLAUDE.md §11 COMMON). The **unified as-of semantic** it owns: keep every
     RAW 1-minute bar whose IST minute-of-day is ``≤ cutoff_min``; intraday
     buckets are then formed only from ELAPSED minutes — a partially-elapsed
-    bucket honestly reflects only the data up to the as-of instant, never a
-    forming-bucket leak of minutes PAST it (Golden Rule #1: an "as of 13:45"
-    snapshot must never include data after 13:45).
+    bucket honestly reflects only the elapsed minutes, never a forming-bucket
+    leak of minute bars PAST the as-of minute (Golden Rule #1: an "as of
+    13:45" snapshot must never include any bar STARTING after 13:45; the
+    inclusive 13:45 bar itself is a bucket-OPEN-stamped 1-minute bar, so it
+    aggregates trades through 13:45:59 — the guarantee is minute-granular,
+    not instant-granular).
 
     Parameters
     ----------
@@ -628,8 +631,9 @@ def _read_session_bars(
     AFTER resampling on the resampled bucket-OPEN minute, so the final kept
     bucket leaked bars PAST the as-of minute (e.g. cutoff 10:00, TF=5m: the
     10:00 bucket included 10:01–10:04). Now the last bucket aggregates only the
-    elapsed minutes ``≤ cutoff_min``, so LTP / volume / value end exactly at the
-    as-of instant.
+    elapsed minutes ``≤ cutoff_min``, so LTP / volume / value end at the close
+    of the as-of MINUTE (the inclusive bucket-open bar aggregates through its
+    final second — minute-granular, not instant-granular).
 
     :func:`~brutex.data.tf_resampler.resample_1m_to_tf` then buckets the kept
     minutes to the chosen timeframe (1minute → no-op). Empty when the symbol has
