@@ -96,8 +96,15 @@ def test_orchestration_per_underlying_cost_is_flat() -> None:
     )
 
 
-def test_options_phase_never_materializes() -> None:
-    """The OPTIONS phase adds zero materialise calls (the no-op honesty)."""
+def test_options_phase_noop_when_not_injected_adds_no_materialize_calls() -> None:
+    """With NO options callables injected the OPTIONS phase is a zero-cost no-op.
+
+    DEC-PIPELINE-AUTOPREBUILD-001 made the OPTIONS phase REAL when its
+    ``options_contracts_for`` / ``materialize_option`` callables are injected;
+    this bench-suite orchestration gate deliberately leaves them out, so the
+    phase must stay the reported no-op with zero materialise calls (the
+    pre-decree behaviour, still the back-compat contract).
+    """
     spot_calls = {"n": 0}
 
     def counting_spot(_inst: Instrument) -> MaterializeResult:
