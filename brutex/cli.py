@@ -4842,6 +4842,25 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 "[brutex] sweep-verify --recount: recorded context does NOT match the "
                 "current environment:\n  " + "\n  ".join(mismatches)
             )
+            # Legacy-era diagnostic (DEC-SNAPSHOT-HASH-FULL-001): a snapshot
+            # mismatch whose RECORDED hash matches the retired v1 SAMPLED
+            # derivation over the SAME fresh slices is a pre-upgrade tree, not
+            # necessarily changed data — name it so the operator knows the
+            # remedy. O(#slices) extra cost, mismatch branch only; the refusal
+            # ladder below is UNCHANGED (a v1 match was never verdict-grade).
+            if snapshot != fresh_snapshot:
+                from brutex.engine.stage3_wire import _data_snapshot_hash_v1
+
+                legacy_v1 = _data_snapshot_hash_v1(
+                    exchange=exchange, segment=segment, start=start, end=end, slices=slices
+                )
+                if snapshot == legacy_v1:
+                    print(
+                        "[brutex] note: the recorded hash matches the LEGACY sampled "
+                        "derivation (pre-DEC-SNAPSHOT-HASH-FULL-001) over the current "
+                        "lake — findings INCONCLUSIVE by design; re-sweep to mint a "
+                        "v2 identity."
+                    )
         if mismatches and not allow_context_mismatch:
             print(
                 "[brutex] recount REFUSED (a recount under changed inputs is not an "
