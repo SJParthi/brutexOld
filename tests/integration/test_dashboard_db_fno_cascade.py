@@ -65,14 +65,23 @@ def test_underlyings_sorted(client: TestClient) -> None:
 
 def test_expiries_scoped_to_underlying(client: TestClient) -> None:
     body = client.get("/api/v1/db/fno/expiries", params={"underlying": "NIFTY"}).json()
-    assert body == {"underlying": "NIFTY", "expiries": ["2025-01-02"]}
+    # `expiry_counts` (DEC-DB-UX-PACK-001 Feature 6): with no sibling registry.duckdb,
+    # `listed` is a null (honest "unknown") and `with_data` counts the 4 seeded NIFTY
+    # legs (FUT + 23000-CE + 24000-CE + 24000-PE) at the single seeded expiry.
+    assert body == {
+        "underlying": "NIFTY",
+        "expiries": ["2025-01-02"],
+        "expiry_counts": [{"expiry": "2025-01-02", "listed": None, "with_data": 4}],
+    }
     bn = client.get("/api/v1/db/fno/expiries", params={"underlying": "BANKNIFTY"}).json()
     assert bn["expiries"] == ["2025-01-30"]
+    assert bn["expiry_counts"] == [{"expiry": "2025-01-30", "listed": None, "with_data": 1}]
 
 
 def test_expiries_unknown_underlying_is_empty(client: TestClient) -> None:
     body = client.get("/api/v1/db/fno/expiries", params={"underlying": "NOPE"}).json()
-    assert body == {"underlying": "NOPE", "expiries": []}  # never a 500
+    # An unknown underlying → no expiries + no counts (never a 500).
+    assert body == {"underlying": "NOPE", "expiries": [], "expiry_counts": []}
 
 
 def test_contracts_futures_first_then_strike_then_type(client: TestClient) -> None:
@@ -102,7 +111,7 @@ def test_no_lake_root_degrades_to_empty_on_all_three_routes() -> None:
     c = TestClient(build_app(DashboardState(), instrument_store=fake))
     assert c.get("/api/v1/db/fno/underlyings").json() == {"underlyings": [], "unparsed": []}
     exp = c.get("/api/v1/db/fno/expiries", params={"underlying": "NIFTY"}).json()
-    assert exp == {"underlying": "NIFTY", "expiries": []}
+    assert exp == {"underlying": "NIFTY", "expiries": [], "expiry_counts": []}
     con = c.get(
         "/api/v1/db/fno/contracts", params={"underlying": "NIFTY", "expiry": "2025-01-02"}
     ).json()

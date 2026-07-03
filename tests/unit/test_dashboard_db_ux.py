@@ -134,20 +134,41 @@ def test_option_dataset_label_rendered_with_raw_series_fallback() -> None:
     )
 
 
-def test_fno_greeks_columns_offered_in_picker() -> None:
-    """The F&O candle browser offers the 10 STORED Greeks overlay columns
-    (DEC-GREEKS-ENGINE-PR3-001): the FNO_GREEKS_COLS list mirrors
-    db_view.FNO_GREEKS_COLUMNS (the backend re-validates), and curCols()
-    branches to CANDLE_COLS + FNO_GREEKS_COLS for an F&O dataset only."""
-    from brutex.dashboard.db_view import FNO_GREEKS_COLUMNS
-
+def test_greeks_render_broker_style_display_only() -> None:
+    """Greeks cells render broker-style decimals at DISPLAY time only
+    (DEC-DB-UX-PACK-001 Feature 4): the payload arrives FULL PRECISION (stored
+    ``iv``/statistics are never rounded — CLAUDE.md §4); ``fmtCell`` formats
+    ``iv`` as PERCENT 2dp (fraction × 100 → "15.23") and delta 3dp / gamma 5dp /
+    theta 2dp / vega 3dp / rho 2dp. The provenance columns (``spot_at_bar`` /
+    ``t_years_used`` / ``rate_used`` / ``greeks_provenance_id``) are excluded by
+    the exact map literal — they render verbatim."""
     html = _render_db_html()
-    assert "const FNO_GREEKS_COLS" in html, "the F&O Greeks column list is missing"
-    for column in FNO_GREEKS_COLUMNS:
-        assert f'"{column}"' in html, f"overlay column {column!r} missing from the picker list"
-    # curCols() offers the overlay set for the F&O kind only (spot stays 7-col;
-    # the expired-options lake keeps OPTION_COLS).
-    assert "CANDLE_COLS.concat(FNO_GREEKS_COLS)" in html, (
-        "curCols() must offer CANDLE_COLS + FNO_GREEKS_COLS for an F&O dataset"
+    # The exact broker-decimals map — its literal excludes the provenance columns.
+    assert "const GREEK_DP = { delta: 3, gamma: 5, theta: 2, vega: 3, rho: 2 };" in html, (
+        "the broker-style Greeks display-decimals map is missing or drifted"
     )
-    assert 'd.kind === "fno"' in html, "curCols() must branch on the fno dataset kind"
+    # iv renders as a PERCENT to 2dp (stored as a fraction).
+    assert 'col === "iv"' in html, "fmtCell must special-case the iv column"
+    assert "(n * 100).toFixed(2)" in html, "iv must render as percent 2dp (fraction × 100)"
+    # Display-only: fmtCell formats at render; the map drives the fixed decimals.
+    assert "n.toFixed(GREEK_DP[col])" in html, "the Greeks must render via the GREEK_DP map"
+
+
+def test_column_picker_stays_removed_everywhere() -> None:
+    """The COLUMNS checkbox strips stay REMOVED on every /db tab
+    (DEC-DB-UX-PACK-001 Feature 1): every column is always visible — no colbox,
+    no column checkboxes, no dead column-visibility state, and no ``column=``
+    projection ever emitted (omitting it returns all columns server-side)."""
+    html = _render_db_html()
+    for gone in (
+        'class="colbox"',
+        ".colbox {",
+        'class="qcol"',
+        'class="ccol"',
+        "curCols",
+        "cstate.cols",
+        "st.cols",
+        '"&column=" + encodeURIComponent',
+        'id="capply"',
+    ):
+        assert gone not in html, f"the removed column picker leaked back: {gone!r}"
