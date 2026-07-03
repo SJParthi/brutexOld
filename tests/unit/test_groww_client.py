@@ -754,6 +754,40 @@ def test_reauth_backoff_constant_is_small_and_positive() -> None:
     assert 0.0 < REAUTH_RETRY_BACKOFF_SECONDS <= 5.0
 
 
+def test_default_sleep_binding_runs_reauth_backoff_with_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CodeQL-arity regression (PR #1070): the DEFAULT sleep binding takes the seconds arg.
+
+    The scan flagged ``self.sleep(REAUTH_RETRY_BACKOFF_SECONDS)`` as "too many
+    arguments; should be no more than 0" — its model binds a bare class-body
+    function default as a method whose implicit ``self`` consumes the ``seconds``
+    parameter. Runtime was always correct (a dataclass default lands as an
+    INSTANCE attribute; a plain function never binds), and the default is now
+    routed through ``field(default=...)`` so the model cannot mis-bind it. This
+    pins the exact flagged configuration: a client built WITHOUT injecting
+    ``sleep`` drives the post-re-mint backoff through the default
+    ``_noop_sleep(seconds)`` — a zero-arg default would ``TypeError`` here, so
+    the arity can never regress silently.
+    """
+    from brutex.adapters.groww.client import (
+        _noop_sleep,  # pyright: ignore[reportPrivateUsage]  — whitebox: pin the DEFAULT binding
+    )
+
+    slept: list[float] = []
+    # Intercept the real time.sleep the default sleeper delegates to (the repo's
+    # standard module-path patch), so no real time passes.
+    monkeypatch.setattr("brutex.adapters.groww.client.time.sleep", slept.append)
+    stale = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
+    fresh = _FakeSDK(payload={"candles": [[1, 2, 3, 4, 5, 6, None]]})
+    refresher = _FakeRefresher([stale, fresh])
+    client = GrowwClient(sdk=stale, refresher=refresher)  # type: ignore[arg-type]
+    assert client.sleep is _noop_sleep  # the DEFAULT binding — not an injected recorder
+    out = client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert out == {"candles": [[1, 2, 3, 4, 5, 6, None]]}  # the pull self-healed
+    assert slept == [REAUTH_RETRY_BACKOFF_SECONDS]  # the flagged call ran, seconds accepted
+
+
 def test_auth_error_whose_remint_times_out_surfaces_retryable_timeout() -> None:
     """A re-mint that HANGS (freeze guard fires) surfaces a RETRYABLE timeout, not a freeze.
 

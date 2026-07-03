@@ -78,10 +78,12 @@ def _noop_hook() -> None:
     """Default decrement/recover feedback hook — no-op until a controller is injected."""
 
 
-def _noop_sleep(_seconds: float) -> None:  # pragma: no cover — replaced in tests + by real backoff
-    """Default backoff sleeper (injected in tests so no real time passes)."""
-    import time
+def _noop_sleep(_seconds: float) -> None:
+    """Default backoff sleeper — same ``(seconds)`` shape as :func:`time.sleep`.
 
+    Tests inject a recorder instead so no real time passes; the default-binding
+    regression test drives THIS body through the re-auth backoff (arity-pinned).
+    """
     time.sleep(_seconds)
 
 
@@ -106,7 +108,13 @@ class GrowwClient:
 
     sdk: GrowwSDK
     pace: Callable[[], None] = _noop_pace
-    sleep: Callable[[float], None] = _noop_sleep
+    #: Bound via ``field(default=...)`` (NOT a bare class-body default, mirroring
+    #: :attr:`on_rate_limit` / :attr:`on_success`) so static analysis never models the
+    #: plain function as an unbound method whose implicit ``self`` consumes the
+    #: ``seconds`` slot — the CodeQL ``py/call/wrong-arity`` false positive on
+    #: ``self.sleep(REAUTH_RETRY_BACKOFF_SECONDS)``. Runtime was always correct: a
+    #: dataclass default lands as an INSTANCE attribute, a plain function never binds.
+    sleep: Callable[[float], None] = field(default=_noop_sleep)
     on_rate_limit: Callable[[], None] = field(default=_noop_hook)
     on_success: Callable[[], None] = field(default=_noop_hook)
     max_attempts: int = 6
