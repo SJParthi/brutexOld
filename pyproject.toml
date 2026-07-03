@@ -299,6 +299,16 @@ module = [
     "fastbloom_rs", "fastbloom_rs.*",  # DEC-P0-047: PyO3-backed Rust Bloom — no Python stubs published
     "boto3", "boto3.*",  # DEC-TOKEN-BROKER-AWS-001: OPTIONAL `token-broker` extra — real client build is `# pragma: no cover`
     "botocore", "botocore.*",  # DEC-TOKEN-BROKER-AWS-001: boto3's transitive dep — same optional extra
+    # DEC-MYPY-GROWWAPI-STUBS-001: the growwapi SDK ships NO py.typed marker, so an env
+    # WITH it installed errors `import-untyped` while an env WITHOUT it needs
+    # `import-not-found` silenced — a per-module override covers BOTH envs at once,
+    # replacing the inline `# type: ignore[import-not-found]` comments that
+    # `warn_unused_ignores` flipped into `unused-ignore` errors the moment the SDK was
+    # present (auth.py / reauth.py). pyotp DOES ship py.typed (types used normally when
+    # installed); it is listed only so the isolated pre-commit hook env — which lacks
+    # the runtime deps — resolves its lazy import without an env-specific ignore.
+    "growwapi", "growwapi.*",
+    "pyotp", "pyotp.*",
     # DEC-P0-055 (PR-N+2): `fno_math` removed — wheel now ships bundled
     # `__init__.pyi` + `py.typed` via maturin's mixed Python+Rust layout.
 ]

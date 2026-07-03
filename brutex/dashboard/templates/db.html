@@ -165,11 +165,13 @@
   .qbar button.apply { background:var(--green-dim); border-color:var(--green-dim);
     color:var(--text-bright); font-weight:700; }
   .qbar button.apply:hover { border-color:var(--green-bright); }
-  .colbox { display:flex; flex-wrap:wrap; gap:4px 12px; max-height:74px; overflow:auto;
-    padding:6px 8px; border:1px solid var(--border); border-radius:8px; background:var(--surface);
-    flex:1; }
-  .colbox label { font-size:11.5px; color:var(--text); display:flex; align-items:center; gap:5px;
-    font-family:"SF Mono",Menlo,Consolas,monospace; }
+  /* The honest applied-range chip (DEC-DB-UX-PACK-001 Feature 2) + the per-expiry
+     "listed N · with data M" chip (Feature 6). (The COLUMNS checkbox strip and its
+     .colbox styles were REMOVED — Feature 1: every column is always visible.) */
+  .rangechip, .expchip { font-size:11px; font-weight:700; padding:3px 10px;
+    border-radius:20px; font-family:"SF Mono",Menlo,Consolas,monospace;
+    color:var(--blue); background:rgba(91,141,239,.13); white-space:nowrap; }
+  .expchip { color:var(--yellow); background:rgba(255,183,77,.13); }
   .frow { display:flex; align-items:center; gap:6px; }
   .frow .rm { color:var(--red); padding:6px 10px; }
   .qerr { color:var(--red); font-size:12px; }
@@ -207,6 +209,7 @@
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
+<script defer src="/static/bx-liveproof.js"></script>
 </head>
 <body>
   <header>
@@ -263,8 +266,10 @@ let counts = {};
 let dbOffset = 0;  /* current page offset for the selected table (DEC-DB-PAGINATION-001) */
 let mode = "table";  /* "table" | "candles" */
 
-/* Per-table structured-query state (DEC-DB-QUERY-001). cols=null → all. */
-const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], orderBy:"", desc:false} } */
+/* Per-table structured-query state (DEC-DB-QUERY-001). Every column is ALWAYS
+   visible — the column-visibility picker was removed (DEC-DB-UX-PACK-001
+   Feature 1); `allCols` remains only to feed the filter/sort dropdowns. */
+const qstate = {};  /* { table: {allCols:[], filters:[{c,op,v}], orderBy:"", desc:false} } */
 /* Candle-viewer state. `kind` ("spot"|"fno"|"option") is the active Candle-lake
    row: the spot bars (`bars/` non-FNO), the F&O candle lake (`bars/<exch>/FNO/…`,
    DEC-FNO-CANDLE-LAKE-001), and the dedicated expired-options table (`options/`)
@@ -272,11 +277,13 @@ const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], 
    row's datasets (never more than one at once). The selected dataset's `kind`
    drives which API + column set is used; spot AND fno share the candle API + the
    7 OHLCV columns (DEC-EXPIRED-OPTIONS-TABLE-001 / options-in-db-viewer). */
-const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: null, desc: false, offset: 0,
+const cstate = { datasets: [], key: null, kind: null, start: "", end: "", desc: false, offset: 0,
   /* F&O cascade substate (DEC-DB-FNO-CASCADE-001): lazy symbol→expiry→contract picker.
      `unds`/`exps`/`cons` are the three level lists; `und`/`exp`/`con` the current
-     selections. Only used when kind === "fno"; spot/option keep the flat dropdown. */
-  fno: { unds: [], und: "", exps: [], exp: "", cons: [], con: "" },
+     selections; `counts` the per-expiry "listed N with data M" rows aligned with
+     `exps` (DEC-DB-UX-PACK-001 Feature 6). Only used when kind === "fno";
+     spot/option keep the flat dropdown. */
+  fno: { unds: [], und: "", exps: [], exp: "", counts: [], cons: [], con: "" },
   /* SPOT cascade substate (DEC-DB-SPOT-CASCADE-001): symbol→interval picker.
      `syms` is the symbols-with-intervals list; `sym` the current selection
      (an "exchange|segment|symbol" composite). Only used when kind === "spot";
@@ -295,7 +302,7 @@ const OPS = [["eq","="],["ne","≠"],["lt","<"],["le","≤"],["gt",">"],["ge","�
 
 /* Server-computed derived %-columns appended to every spot candle page
    (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
-   They are NOT real Parquet columns (never in the column picker / CANDLE_COLS);
+   They are NOT real Parquet columns;
    the backend joins them per bar from the prior trading day's LAST 1-minute
    close (the engine is 1-minute-based, so the baseline is the 1-min feed it
    sweeps, not the 1d official close — DEC-SPOT-PREVCLOSE-1MIN-001). Values
@@ -303,13 +310,25 @@ const OPS = [["eq","="],["ne","≠"],["lt","<"],["le","≤"],["gt",">"],["ge","�
    §4); we render 2 decimals at DISPLAY only via fmtCell. */
 const PCT_COLS = new Set(["change_pct", "open_gap_pct"]);
 
-/* Display formatter: the two derived %-columns render to exactly 2 decimals
-   (display-only rounding); every other cell renders verbatim. A blank (null)
-   cell is handled by the caller before fmtCell is reached. */
+/* Broker-style Greeks display decimals (DEC-DB-UX-PACK-001 Feature 4) —
+   DISPLAY-ONLY, like PCT_COLS above: the payload arrives FULL PRECISION (stored
+   iv/statistics are NEVER rounded — CLAUDE.md §4). `iv` is stored as a FRACTION
+   and renders as PERCENT to 2dp (0.1523 → "15.23"); delta 3dp · gamma 5dp ·
+   theta 2dp · vega 3dp · rho 2dp. The provenance columns (spot_at_bar /
+   t_years_used / rate_used / greeks_provenance_id) are deliberately NOT in this
+   map — they render verbatim. */
+const GREEK_DP = { delta: 3, gamma: 5, theta: 2, vega: 3, rho: 2 };
+
+/* Display formatter: the two derived %-columns render to exactly 2 decimals,
+   `iv` renders as percent 2dp, and the five Greeks render broker-style fixed
+   decimals (all display-only rounding); every other cell renders verbatim. A
+   blank (null) cell is handled by the caller before fmtCell is reached. */
 function fmtCell(col, cell) {
-  if (PCT_COLS.has(col)) {
-    const n = Number(cell);
-    return Number.isFinite(n) ? n.toFixed(2) : cell;
+  const n = Number(cell);
+  if (PCT_COLS.has(col)) return Number.isFinite(n) ? n.toFixed(2) : cell;
+  if (col === "iv") return Number.isFinite(n) ? (n * 100).toFixed(2) : cell;
+  if (Object.prototype.hasOwnProperty.call(GREEK_DP, col)) {
+    return Number.isFinite(n) ? n.toFixed(GREEK_DP[col]) : cell;
   }
   return cell;
 }
@@ -697,18 +716,11 @@ function updateRegistryBadges(counts) {
   set("contracts", counts.contracts);
 }
 
-const CANDLE_COLS = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"];
-/* Expired-option columns: OHLCV+OI PLUS the per-bar option stamps (mirrors
-   db_view.OPTION_CANDLE_COLUMNS — the backend re-validates). */
-const OPTION_COLS = ["timestamp", "open", "high", "low", "close", "volume", "open_interest", "side", "strike", "spot", "iv"];
-/* F&O STORED Greeks overlay columns (mirrors db_view.FNO_GREEKS_COLUMNS /
-   models.GREEKS_OVERLAY_FIELDS — the backend re-validates): the per-1-minute-bar
-   Greeks the Phase-2b enrichment stores alongside each option bar
-   (DEC-GREEKS-ENGINE-PR2B-001), selectable on F&O candle pages only
-   (DEC-GREEKS-ENGINE-PR3-001). A legacy pre-Greeks partition renders honest
-   null cells (the backend substitutes typed NULLs), never a fabricated Greek. */
-const FNO_GREEKS_COLS = ["iv", "delta", "gamma", "theta", "vega", "rho",
-  "spot_at_bar", "t_years_used", "rate_used", "greeks_provenance_id"];
+/* Every column is ALWAYS visible (DEC-DB-UX-PACK-001 Feature 1): no `column=`
+   projection is ever sent, so the backend returns EVERY stored column (spot
+   OHLCV, the expired-option stamps, the stored F&O Greeks overlay where the
+   partition holds it) plus its derived columns. The per-lake column-picker
+   lists and their helper were deleted with the COLUMNS strip. */
 
 /* Shared grid + Prev/Next pager HTML (used by both table + candle views).
    The pager buttons get ids dbprev/dbnext; each view wires its own offset. */
@@ -761,7 +773,7 @@ async function selectTable(name) {
   selected = name;
   dbOffset = 0;
   markSelected(name);
-  if (!qstate[name]) qstate[name] = { allCols: [], cols: null, filters: [], orderBy: "", desc: false };
+  if (!qstate[name]) qstate[name] = { allCols: [], filters: [], orderBy: "", desc: false };
   if (!qstate[name].allCols.length) {
     try {
       const rc = await fetch(DB_API + "/columns/" + encodeURIComponent(name));
@@ -773,9 +785,10 @@ async function selectTable(name) {
 
 function buildTableUrl(name) {
   const st = qstate[name];
+  /* No `column=` projection is ever sent — omitting it returns EVERY column
+     (DEC-DB-UX-PACK-001 Feature 1: all columns always visible). */
   let u = DB_API + "/query/" + encodeURIComponent(name)
     + "?limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(dbOffset);
-  if (st.cols) st.cols.forEach(c => { u += "&column=" + encodeURIComponent(c); });
   st.filters.forEach(f => { if (f.c && f.op) u += "&f=" + encodeURIComponent(f.c + ":" + f.op + ":" + f.v); });
   if (st.orderBy) u += "&order_by=" + encodeURIComponent(st.orderBy) + "&desc=" + (st.desc ? "true" : "false");
   return u;
@@ -804,11 +817,6 @@ async function runTableQuery(name, gridOnly) {
 function tableControlsHtml(name) {
   const st = qstate[name];
   const cols = st.allCols;
-  const colChecks = cols.map(c => {
-    const on = st.cols === null || st.cols.has(c);
-    return '<label><input type="checkbox" class="qcol" value="' + esc(c) + '"' + (on ? " checked" : "") + '>' + esc(c) + '</label>';
-  }).join("");
-  const opOpts = OPS.map(o => '<option value="' + o[0] + '">' + esc(o[1]) + '</option>').join("");
   const filterRows = st.filters.map(f =>
     '<div class="frow">'
     + '<select class="fcol"><option value="">column…</option>'
@@ -818,7 +826,6 @@ function tableControlsHtml(name) {
     + '<button class="rm" title="remove filter">✕</button></div>'
   ).join("");
   return '<div class="qbar">'
-    + '<div class="qrow"><span class="lab">Columns</span><div class="colbox">' + colChecks + '</div></div>'
     + '<div class="qrow"><span class="lab">Filters</span>'
     + '<div id="filters" style="display:flex;flex-direction:column;gap:6px">' + filterRows + '</div>'
     + '<button id="addf">+ filter</button></div>'
@@ -832,9 +839,6 @@ function tableControlsHtml(name) {
 
 function readControlsInto(name) {
   const st = qstate[name];
-  const checked = Array.from(document.querySelectorAll(".qcol:checked")).map(c => c.value);
-  const all = document.querySelectorAll(".qcol").length;
-  st.cols = checked.length === 0 || checked.length === all ? null : new Set(checked);
   st.filters = Array.from(document.querySelectorAll("#filters .frow")).map(row => ({
     c: row.querySelector(".fcol").value,
     op: row.querySelector(".fop").value,
@@ -904,15 +908,6 @@ function dsKey(d) {
   return "spot:" + [d.exchange, d.segment, d.symbol, d.interval].join("|");
 }
 function curDataset() { return cstate.datasets.find(d => dsKey(d) === cstate.key) || null; }
-/* Columns available for the currently-selected dataset. Spot uses the 7 OHLCV
-   CANDLE_COLS; F&O additionally offers the 10 STORED Greeks overlay columns
-   (DEC-GREEKS-ENGINE-PR3-001); only the expired-options lake uses OPTION_COLS. */
-function curCols() {
-  const d = curDataset();
-  if (d && d.kind === "option") return OPTION_COLS;
-  if (d && d.kind === "fno") return CANDLE_COLS.concat(FNO_GREEKS_COLS);
-  return CANDLE_COLS;
-}
 /* Friendly decoded label for an F&O contract dataset (underlying · expiry ·
    strike+CE/PE or FUT · interval), falling back to the raw groww_symbol when the
    directory name didn't decode (DEC-FNO-CANDLE-LAKE-001). Display-only — dsKey() /
@@ -929,9 +924,9 @@ async function selectCandles(kind) {
   mode = "candles";
   selected = null;
   /* Switching between the spot lake and the expired-options lake resets the
-     per-lake view (selected dataset / projection / page) so the two dedicated
-     rows never leak each other's columns or pager position. */
-  if (kind !== cstate.kind) { cstate.kind = kind; cstate.key = null; cstate.cols = null; }
+     per-lake view (selected dataset / page) so the two dedicated rows never
+     leak each other's pager position. */
+  if (kind !== cstate.kind) { cstate.kind = kind; cstate.key = null; }
   cstate.offset = 0;
   markCandles();
   const isOpt = cstate.kind === "option";
@@ -948,7 +943,7 @@ async function selectCandles(kind) {
     const r = await fetch("/api/v1/db/candles/datasets");
     const body = await r.json();
     /* Only the expired-options lake reaches here (spot + F&O returned early to their
-       cascades) — tag each so curCols()/buildCandleUrl() pick the option schema. */
+       cascades) — tag each so buildCandleUrl() picks the option query route. */
     cstate.datasets = (body.options || []).map(d => ({ kind: "option", ...d }));
     if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
     if (cstate.datasets.length) runCandleQuery(false);
@@ -970,7 +965,7 @@ async function _fnoFetch(url) {
 async function loadFnoCascade() {
   const body = await _fnoFetch("/api/v1/db/fno/underlyings");
   cstate.fno = { unds: (body && body.underlyings) || [],
-                 und: "", exps: [], exp: "", cons: [], con: "" };
+                 und: "", exps: [], exp: "", counts: [], cons: [], con: "" };
   cstate.datasets = []; cstate.key = null;
   if (!cstate.fno.unds.length) {
     renderCandleView(null, "No F&O candle data yet — pull an instrument's futures/options history on /universe first.");
@@ -979,11 +974,14 @@ async function loadFnoCascade() {
   renderCandleView(null, "pick an underlying → expiry → contract");
 }
 async function onFnoUnderlyingChange(und) {
-  cstate.fno.und = und; cstate.fno.exp = ""; cstate.fno.exps = [];
+  cstate.fno.und = und; cstate.fno.exp = ""; cstate.fno.exps = []; cstate.fno.counts = [];
   cstate.fno.con = ""; cstate.fno.cons = []; cstate.datasets = []; cstate.key = null;
   if (und) {
     const body = await _fnoFetch("/api/v1/db/fno/expiries?underlying=" + encodeURIComponent(und));
     cstate.fno.exps = (body && body.expiries) || [];
+    /* Per-expiry "listed N with data M" rows, aligned with `expiries`
+       (DEC-DB-UX-PACK-001 Feature 6). */
+    cstate.fno.counts = (body && body.expiry_counts) || [];
   }
   renderCandleView(null, "pick an expiry");
 }
@@ -1008,7 +1006,7 @@ function onFnoContractChange(symbol) {
     kind: "fno", exchange: con.exchange, segment: "FNO", symbol: con.symbol, interval: iv,
     underlying: cstate.fno.und, expiry: cstate.fno.exp,
     strike: con.strike, instrument_type: con.instrument_type, option_type: con.option_type }));
-  cstate.cols = null; cstate.offset = 0;
+  cstate.offset = 0;
   /* Default to 1-minute (the fetched granularity an operator most wants for an F&O
      contract); fall back to the first available interval otherwise. */
   const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
@@ -1043,7 +1041,7 @@ function onSpotSymbolChange(key) {
   if (!s) { cstate.datasets = []; cstate.key = null; renderCandleView(null, "pick a symbol"); return; }
   cstate.datasets = (s.intervals || []).map(iv => ({
     kind: "spot", exchange: s.exchange, segment: s.segment, symbol: s.symbol, interval: iv }));
-  cstate.cols = null; cstate.offset = 0;
+  cstate.offset = 0;
   const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
   if (cstate.key) runCandleQuery(false); else renderCandleView(null, "pick a symbol");
@@ -1060,11 +1058,12 @@ function buildCandleUrl() {
       + "&segment=" + encodeURIComponent(d.segment) + "&symbol=" + encodeURIComponent(d.symbol)
       + "&interval=" + encodeURIComponent(d.interval);
   }
+  /* No `column=` projection is ever sent — omitting it returns EVERY stored
+     column (DEC-DB-UX-PACK-001 Feature 1: all columns always visible). */
   u += "&limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(cstate.offset)
     + "&desc=" + (cstate.desc ? "true" : "false");
   if (cstate.start) u += "&start=" + encodeURIComponent(cstate.start);
   if (cstate.end) u += "&end=" + encodeURIComponent(cstate.end);
-  if (cstate.cols) cstate.cols.forEach(c => { u += "&column=" + encodeURIComponent(c); });
   return u;
 }
 
@@ -1107,13 +1106,11 @@ function candleControlsHtml() {
     return '<option value="' + esc(k) + '"' + (k === cstate.key ? " selected" : "") + '>'
       + esc(label) + '</option>';
   }).join("");
-  const colChecks = curCols().map(c => {
-    const on = cstate.cols === null || cstate.cols.has(c);
-    return '<label><input type="checkbox" class="ccol" value="' + c + '"' + (on ? " checked" : "") + '>' + c + '</label>';
-  }).join("");
   /* F&O shows the symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001); SPOT shows
      the symbol→interval cascade (DEC-DB-SPOT-CASCADE-001); only the expired-options
-     lake keeps the single flat dataset dropdown. */
+     lake keeps the single flat dataset dropdown. Every control AUTO-APPLIES on
+     change (DEC-DB-UX-PACK-001 Feature 2) — there is no Apply button and no
+     COLUMNS strip (Feature 1: every column is always visible). */
   const picker = cstate.kind === "fno"
     ? fnoCascadeHtml()
     : cstate.kind === "spot"
@@ -1123,11 +1120,36 @@ function candleControlsHtml() {
     + '<div class="qrow">' + picker
     + '<span class="lab">From</span><input type="date" id="cstart" min="2020-01-01" value="' + esc(cstate.start) + '">'
     + '<span class="lab">To</span><input type="date" id="cend" min="2020-01-01" value="' + esc(cstate.end) + '"></div>'
-    + '<div class="qrow"><span class="lab">Columns</span><div class="colbox">' + colChecks + '</div></div>'
     + '<div class="qrow"><span class="lab">Sort</span>'
-    + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select>'
-    + '<button class="apply" id="capply">Apply query</button></div>'
+    + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select></div>'
     + '</div>';
+}
+
+/* Per-expiry "listed N · with data M" text (DEC-DB-UX-PACK-001 Feature 6), from
+   the /api/v1/db/fno/expiries `expiry_counts` rows. `listed` is null when the
+   vendor registry is absent / does not know the underlying — that renders an
+   HONEST "with data M" alone, never a misleading "listed 0". `prefix` (the
+   expiry itself in the dropdown, "" for the chip) keeps ONE formatter for both
+   surfaces; a missing counts row degrades to the bare prefix. */
+function fnoExpiryCountsText(expiry, prefix) {
+  const row = (cstate.fno.counts || []).find(r => r && r.expiry === expiry);
+  if (!row) return prefix;
+  const m = (Number(row.with_data) || 0).toLocaleString();
+  const counts = row.listed == null
+    ? "with data " + m
+    : "listed " + (Number(row.listed) || 0).toLocaleString() + " · with data " + m;
+  return prefix ? prefix + " — " + counts : counts;
+}
+
+/* The per-expiry chip beside the expiry select — the SELECTED expiry's
+   "listed N · with data M" so a young live chain (vendor lists dozens, only a
+   few pulled yet) is self-explanatory at a glance (DEC-DB-UX-PACK-001 Feature 6). */
+function fnoExpiryChipHtml() {
+  const txt = cstate.fno.exp ? fnoExpiryCountsText(cstate.fno.exp, "") : "";
+  if (!txt) return "";
+  return '<span class="expchip" id="cexpchip"'
+    + ' title="contracts the vendor lists for this expiry vs contracts with pulled candle data">'
+    + esc(txt) + '</span>';
 }
 
 /* The F&O cascade picker markup: three dependent selects (underlying → expiry →
@@ -1139,11 +1161,13 @@ function fnoCascadeHtml() {
   const opt = (v, sel, label) => '<option value="' + esc(v) + '"'
     + (v === sel ? " selected" : "") + '>' + esc(label || v) + '</option>';
   const undOpts = '<option value="">— underlying —</option>' + f.unds.map(u => opt(u, f.und)).join("");
-  const expOpts = '<option value="">— expiry —</option>' + f.exps.map(e => opt(e, f.exp)).join("");
+  const expOpts = '<option value="">— expiry —</option>'
+    + f.exps.map(e => opt(e, f.exp, fnoExpiryCountsText(e, e))).join("");
   const conOpts = '<option value="">— contract —</option>'
     + f.cons.map(c => opt(c.symbol, f.con, c.label)).join("");
   let h = '<span class="lab">Underlying</span><select id="cund">' + undOpts + '</select>'
     + '<span class="lab">Expiry</span><select id="cexp"' + (f.und ? "" : " disabled") + '>' + expOpts + '</select>'
+    + fnoExpiryChipHtml()
     + '<span class="lab">Contract</span><select id="ccon"' + (f.exp ? "" : " disabled") + '>' + conOpts + '</select>';
   const d = curDataset();
   const intervals = cstate.datasets.map(x => x.interval);
@@ -1179,18 +1203,33 @@ function spotCascadeHtml() {
 
 function readCandleControls() {
   const ds = document.getElementById("cds");
-  /* On a dataset switch the on-page column checkboxes still reflect the OLD
-     dataset's columns, so reset the projection to "all" and skip reading them
-     (the next render rebuilds the checkboxes for the new dataset's columns). */
-  const switched = ds && ds.value !== cstate.key;
   if (ds) cstate.key = ds.value;
   const s = document.getElementById("cstart"); cstate.start = s ? s.value : "";
   const e = document.getElementById("cend"); cstate.end = e ? e.value : "";
   const dir = document.getElementById("cdir"); cstate.desc = dir ? dir.value === "desc" : false;
-  if (switched) { cstate.cols = null; return; }
-  const all = curCols().length;
-  const checked = Array.from(document.querySelectorAll(".ccol:checked")).map(c => c.value);
-  cstate.cols = checked.length === 0 || checked.length === all ? null : new Set(checked);
+}
+
+/* The honest applied-range text (DEC-DB-UX-PACK-001 Feature 2): rendered from
+   the payload's server-resolved `applied_range`, NEVER from the input values —
+   a BLANK input shows the dataset's true default (spot 2020-01-01 → today-IST,
+   an F&O/option contract its full stored life) and an empty partition reads
+   "no stored data". An empty input NEVER renders today's date as if it were a
+   live one-day filter (the inert-filter illusion this closes). */
+function appliedRangeText(body) {
+  const r = body && body.applied_range;
+  if (!r) return "";
+  if (r.start == null && r.end == null) return "no stored data";
+  return "showing " + (r.start || "—") + " → " + (r.end || "—");
+}
+
+/* Update the #crange chip in place via textContent (never innerHTML with data —
+   CodeQL XSS guard); hidden when there is nothing to say (picker/error states). */
+function setRangeChip(body) {
+  const rc = document.getElementById("crange");
+  if (!rc) return;
+  const txt = appliedRangeText(body);
+  rc.textContent = txt;
+  rc.style.display = txt ? "" : "none";
 }
 
 /* The grid title + "N bars match" sub for the current dataset/page. */
@@ -1203,7 +1242,9 @@ function candleHeadHtml(body) {
   if (d && d.kind === "option") { title = esc(d.label || (d.series + " · " + d.interval)); icon = "🅾"; }
   else if (d && d.kind === "fno") { title = esc(fnoLabel(d)); icon = "📊"; }
   else if (d) { title = esc(d.symbol + " · " + d.interval); }
-  return '<div class="datahead"><span class="dt">' + icon + ' ' + title + '</span><span class="sub">' + esc(sub) + '</span></div>';
+  /* #crange is filled via setRangeChip (textContent) right after each render. */
+  return '<div class="datahead"><span class="dt">' + icon + ' ' + title + '</span><span class="sub">' + esc(sub) + '</span>'
+    + '<span class="rangechip" id="crange" style="display:none"></span></div>';
 }
 
 /* The grid + pager body (or the error message). */
@@ -1224,15 +1265,24 @@ function wireCandlePager(body) {
 
 /* FULL render: head + control bar + grid container. Used on entering candle mode
    and on a dataset switch (the option-vs-spot column set can change). The control
-   listeners (Apply, dataset change) are wired ONCE here; paging/sort/apply
-   afterwards update only #dbgrid via updateCandleGrid — leaving the controls (and
-   their date pickers) untouched. */
+   listeners (auto-apply dates/sort, dataset change) are wired ONCE here;
+   paging/sort/date changes afterwards update only #dbgrid via updateCandleGrid —
+   leaving the controls (and their date pickers) untouched. */
 function renderCandleView(body, err) {
   dataEl.innerHTML = candleHeadHtml(body) + candleControlsHtml()
     + '<div id="dbgrid">' + candleGridHtml(body, err) + '</div>';
+  setRangeChip(body);
   const dir = document.getElementById("cdir"); if (dir) dir.value = cstate.desc ? "desc" : "asc";
-  const ap = document.getElementById("capply");
-  if (ap) ap.addEventListener("click", () => { readCandleControls(); cstate.offset = 0; runCandleQuery(true); });
+  /* AUTO-APPLY (DEC-DB-UX-PACK-001 Feature 2): the date inputs + the sort select
+     re-run the query the moment they change — the two-stage "pick a date, then
+     ALSO click Apply query" trap is gone. The shared bx-datepicker Go-to
+     dispatches exactly this `change` event on the hidden native inputs, so a
+     Go-to pick queries immediately (the event finally has a consumer). */
+  const autoApply = () => { readCandleControls(); cstate.offset = 0; runCandleQuery(true); };
+  ["cstart", "cend", "cdir"].forEach(cid => {
+    const el = document.getElementById(cid);
+    if (el) el.addEventListener("change", autoApply);
+  });
   const ds = document.getElementById("cds");
   if (ds) ds.addEventListener("change", () => { readCandleControls(); cstate.offset = 0; runCandleQuery(false); });
   /* F&O cascade handlers (DEC-DB-FNO-CASCADE-001): each level fetches the next; the
@@ -1266,6 +1316,7 @@ function updateCandleGrid(body, err) {
   grid.innerHTML = candleGridHtml(body, err);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
+  setRangeChip(body);
   wireCandlePager(body);
 }
 

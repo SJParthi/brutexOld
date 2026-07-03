@@ -514,7 +514,12 @@ class Stage1AMatrixBuilder:
         # auction exclusion — is computed IN RUST by ``trading_core.VwapState`` (this
         # builder only feeds the bar in and reads the resolved level out). ``None``
         # during warm-up → the bits do not fire. O(1) per bar, O(1) Rust-side state.
-        tod_seconds = ts_ist.hour * 3600 + ts_ist.minute * 60 + ts_ist.second
+        # tod_seconds comes from the SAME shared Rust seam the vocabulary
+        # evaluator uses (DEC-TOD-SECONDS-RUST-SEAM-001) — no inline `h*3600`
+        # arithmetic on the eval path. KNOWN deferred debt: the evaluator
+        # re-derives the same value for this bar (+1 crossing) — threading one
+        # value through is a larger refactor, out of scope here.
+        tod_seconds = int(trading_core.seconds_of_day(ts_ist.hour, ts_ist.minute, ts_ist.second))
         typical_paisa = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
         vwap_paisa = self._vwap.update(
             typical_paisa,

@@ -46,21 +46,27 @@ def test_only_one_pull_button_remains() -> None:
 
 
 def test_kept_controls_are_present() -> None:
-    """The selection helpers + granularity stay (the manual pre-build button is gone).
+    """The selection helpers stay (the manual pre-build + granularity chips are gone).
 
     DEC-PIPELINE-AUTOPREBUILD-001 removed the ``matbtn`` manual pre-build — the
     pipeline's automatic prebuild stage replaces it, so it is pinned ABSENT here
     (the removed-surface pins live in test_dashboard_universe_ux.py).
+    DEC-UNIVERSE-UI-POLISH-002 removed the static "granularity · 1-minute
+    (1-day derived)" chip — 1-minute is the ONLY granularity
+    (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so the chip was dead UI noise; its
+    absence is pinned here + in ``test_dashboard_universe_crosslist_select.py``.
     """
     html = _render_universe_html()
     for needle in (
         'id="selallbtn"',  # ✓ all shown
         'id="clrselbtn"',  # ✗ clear
         'id="tickconstbtn"',  # ⊕ tick its constituents
-        "granularity · <b>1-minute</b> (1-day derived)",  # granularity display
     ):
         assert needle in html, f"kept control missing: {needle}"
     assert 'id="matbtn"' not in html, "the manual pre-build button must stay removed"
+    assert "granularity · <b>1-minute</b>" not in html, (
+        "the dead granularity chip must stay removed (DEC-UNIVERSE-UI-POLISH-002)"
+    )
 
 
 def test_spot_date_range_picker_is_readded_and_wired() -> None:

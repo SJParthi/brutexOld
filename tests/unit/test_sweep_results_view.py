@@ -6,6 +6,8 @@ the rank-by fall-back + clamp, the cross-store run_id dedup, the malformed-file
 skip (a real corrupt Parquet), and the money / full-precision-metric projection.
 """
 
+# The drift-pin tests read module-private constants deliberately.
+# pyright: reportPrivateUsage=none
 from __future__ import annotations
 
 from decimal import Decimal
@@ -298,10 +300,16 @@ def test_to_dict_shape(tmp_path: Path) -> None:
         "instruments",
         "timeframes",
         "directions",
+        "snapshot_hashes",
+        "mixed_snapshot_eras",
+        "run_id_conflicts",
         "rows",
     }
     assert isinstance(payload["rows"], list)
     assert isinstance(payload["instruments"], list)
+    assert isinstance(payload["snapshot_hashes"], list)
+    assert payload["mixed_snapshot_eras"] is False
+    assert payload["run_id_conflicts"] == 0
 
 
 def test_module_constants() -> None:
@@ -310,3 +318,259 @@ def test_module_constants() -> None:
     assert MAX_TOP_N == 500
     assert DEFAULT_RANK_BY in RANKABLE_COLUMNS
     assert "net_pnl_paisa" in RANKABLE_COLUMNS
+
+
+# ── DEC-RESULTS-SURFACE-HONESTY-001 — snapshot-era markers + run_id conflicts ──
+
+
+def _write_sweep_start_audit(
+    lake_root: Path, payloads: list[dict[str, object]], *, noise_action: bool = False
+) -> Path:
+    """Write a REAL hash-chained audit log with one ``SWEEP_START`` per payload.
+
+    Uses the production :class:`brutex.orchestrator.audit.AuditWriter` at the
+    SAME ``<sweeps>/audit/sweep-all.jsonl`` path every ``sweep-all`` entry point
+    writes, so the era scan is exercised against genuine chain bytes.
+    """
+    from brutex.orchestrator.audit import AuditWriter
+
+    audit_path = lake_root / "sweeps" / "audit" / "sweep-all.jsonl"
+    with AuditWriter.open(audit_path, resume=audit_path.exists()) as writer:
+        if noise_action:
+            # A non-SWEEP_START entry the era scan must skip.
+            writer.append(action="SWEEP_COMPLETE", subject="sweep:noise", payload={"ok": True})
+        for payload in payloads:
+            writer.append(action="SWEEP_START", subject="sweep:test", payload=payload)
+    return audit_path
+
+
+def _start_payload(
+    *,
+    instrument: str = "NIFTY",
+    tf: str = "5m",
+    direction: str = "bull",
+    mode: str = "A",
+    k: int = 1,
+    snapshot: str,
+) -> dict[str, object]:
+    """A ``SWEEP_START`` payload shaped like ``sweep_run``'s (context keys included)."""
+    return {
+        "instrument": instrument,
+        "tf": tf,
+        "direction": direction,
+        "mode": mode,
+        "k": k,
+        "data_snapshot_hash": snapshot,
+        "indicator_version": "test-iv-1",
+        "code_commit_sha": "c" * 40,
+    }
+
+
+class TestSnapshotEraHonesty:
+    """Mixed-era co-ranking is MARKED, never hidden (and never a row exclusion)."""
+
+    def test_mixed_eras_across_two_real_stores(self, tmp_path: Path) -> None:
+        """Two stores swept under DIFFERENT data eras → loud payload markers.
+
+        Vacuity guard: BOTH eras must have persisted ≥1 ranked row — asserting
+        ``mixed_snapshot_eras`` alone could pass on a tree where one era
+        contributed nothing.
+        """
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, mask_bits=1)],
+        )
+        _write_store(
+            tmp_path,
+            instrument="BANKNIFTY",
+            tf="15m",
+            direction="bear",
+            rows=[_row(seed=2, instrument="BANKNIFTY", tf="15m", direction="bear", mask_bits=1)],
+        )
+        era_a, era_b = "a" * 64, "b" * 64
+        _write_sweep_start_audit(
+            tmp_path,
+            [
+                _start_payload(snapshot=era_a),
+                _start_payload(instrument="BANKNIFTY", tf="15m", direction="bear", snapshot=era_b),
+            ],
+            noise_action=True,
+        )
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.mixed_snapshot_eras is True
+        assert board.snapshot_hashes == (era_a, era_b)
+        # NO row exclusion — the honest-marker approach (exclusion without
+        # PR-3's census could hide legitimate multi-era research).
+        assert board.total_rows == 2
+        eras_seen = {r["snapshot_era"] for r in board.rows}
+        assert eras_seen == {era_a, era_b}  # both eras persisted ≥1 ranked row
+        payload = board.to_dict()
+        assert payload["mixed_snapshot_eras"] is True
+        assert payload["snapshot_hashes"] == [era_a, era_b]
+
+    def test_single_era_reads_false_and_stamps_every_row(self, tmp_path: Path) -> None:
+        """One recorded era → ``mixed_snapshot_eras`` False, rows stamped with it."""
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, mask_bits=1)],
+        )
+        era = "a" * 64
+        _write_sweep_start_audit(tmp_path, [_start_payload(snapshot=era)])
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.mixed_snapshot_eras is False
+        assert board.snapshot_hashes == (era,)
+        assert [r["snapshot_era"] for r in board.rows] == [era]
+
+    def test_single_era_payload_compatible_otherwise(self, tmp_path: Path) -> None:
+        """Apart from the three new keys + per-row marker, the payload is unchanged."""
+        rows = [_row(seed=1, mask_bits=1), _row(seed=2, sharpe=2.0, mask_bits=1)]
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=rows)
+        era = "a" * 64
+        _write_sweep_start_audit(tmp_path, [_start_payload(snapshot=era)])
+        payload = build_sweep_leaderboard(tmp_path).to_dict()
+        new_top_level = {"snapshot_hashes", "mixed_snapshot_eras", "run_id_conflicts"}
+        legacy = {k: v for k, v in payload.items() if k not in new_top_level}
+        for row in legacy["rows"]:
+            row.pop("snapshot_era")
+        assert legacy == {
+            "available": True,
+            "total_rows": 2,
+            "store_count": 1,
+            "skipped": 0,
+            "rank_by": DEFAULT_RANK_BY,
+            "instruments": ["NIFTY"],
+            "timeframes": ["5m"],
+            "directions": ["bull"],
+            "rows": legacy["rows"],  # shape asserted by the pre-existing tests
+        }
+
+    def test_no_audit_chain_marks_rows_unknown(self, tmp_path: Path) -> None:
+        """An audit-less tree → empty hashes + honest ``unknown`` rows, never a guess."""
+        from brutex.dashboard.sweep_results_view import SNAPSHOT_ERA_UNKNOWN
+
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, mask_bits=1)],
+        )
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.snapshot_hashes == ()
+        assert board.mixed_snapshot_eras is False
+        assert [r["snapshot_era"] for r in board.rows] == [SNAPSHOT_ERA_UNKNOWN]
+
+    def test_reswept_coordinates_read_ambiguous(self, tmp_path: Path) -> None:
+        """The SAME tuple coordinates swept under two eras → per-row ``ambiguous``.
+
+        Per-FILE recorded hashes do not exist (the filename digest is one-way
+        BLAKE3), so the row's own era honestly cannot be pinned — that is
+        PR-3's census, not this marker.
+        """
+        from brutex.dashboard.sweep_results_view import SNAPSHOT_ERA_AMBIGUOUS
+
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, mask_bits=1)],
+        )
+        era_a, era_b = "a" * 64, "b" * 64
+        _write_sweep_start_audit(
+            tmp_path, [_start_payload(snapshot=era_a), _start_payload(snapshot=era_b)]
+        )
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.mixed_snapshot_eras is True
+        assert board.snapshot_hashes == (era_a, era_b)
+        assert [r["snapshot_era"] for r in board.rows] == [SNAPSHOT_ERA_AMBIGUOUS]
+
+    def test_corrupt_audit_chain_degrades_to_unknown(self, tmp_path: Path) -> None:
+        """A corrupt chain → logged era-scan failure + ``unknown`` rows, never a 500."""
+        from brutex.dashboard.sweep_results_view import SNAPSHOT_ERA_UNKNOWN
+        from structlog.testing import capture_logs
+
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, mask_bits=1)],
+        )
+        audit_path = tmp_path / "sweeps" / "audit" / "sweep-all.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text("this is not a committed audit line\n")
+        with capture_logs() as logs:
+            board = build_sweep_leaderboard(tmp_path)
+        assert board.snapshot_hashes == ()
+        assert board.mixed_snapshot_eras is False
+        assert [r["snapshot_era"] for r in board.rows] == [SNAPSHOT_ERA_UNKNOWN]
+        assert any(log["event"] == "sweep_results.era_scan_failed" for log in logs)
+
+    def test_malformed_sweep_start_payload_is_skipped(self, tmp_path: Path) -> None:
+        """A ``SWEEP_START`` missing the needed keys contributes no signal (no crash)."""
+        from brutex.dashboard.sweep_results_view import SNAPSHOT_ERA_UNKNOWN
+
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[_row(seed=1, mask_bits=1)],
+        )
+        broken = _start_payload(snapshot="a" * 64)
+        del broken["k"]
+        _write_sweep_start_audit(tmp_path, [broken])
+        board = build_sweep_leaderboard(tmp_path)
+        assert board.snapshot_hashes == ()
+        assert [r["snapshot_era"] for r in board.rows] == [SNAPSHOT_ERA_UNKNOWN]
+
+    def test_audit_relpath_pinned_to_the_engine_convention(self) -> None:
+        """The not-imported audit relpath copy cannot drift from the engine reader's."""
+        from brutex.dashboard import sweep_results_view as view_mod
+        from brutex.engine import results_report as report_mod
+
+        assert view_mod._AUDIT_RELPATH == report_mod._AUDIT_RELPATH
+
+
+class TestRunIdConflicts:
+    """Duplicate run_ids with DIFFERENT metrics are counted + logged, never silent."""
+
+    def test_divergent_duplicate_counts_and_warns_first_wins(self, tmp_path: Path) -> None:
+        """The metric-divergent duplicate: deterministic first-wins + count + WARNING."""
+        from structlog.testing import capture_logs
+
+        first_wins = _row(seed=7, sharpe=1.0)
+        divergent = _row(seed=7, sharpe=9.9)
+        # Sorted store-path order: "15m" < "5m" lexicographically, so the 15m
+        # store loads FIRST and its row deterministically wins.
+        _write_store(tmp_path, instrument="NIFTY", tf="15m", direction="bull", rows=[first_wins])
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[divergent])
+        with capture_logs() as logs:
+            board = build_sweep_leaderboard(tmp_path)
+        assert board.run_id_conflicts == 1
+        assert board.total_rows == 1
+        assert [r["sharpe_ratio"] for r in board.rows] == [1.0]  # first-wins, not 9.9
+        conflict_logs = [log for log in logs if log["event"] == "sweep_results.run_id_conflict"]
+        assert len(conflict_logs) == 1
+        assert conflict_logs[0]["run_id"] == _run_id(7)
+        assert board.to_dict()["run_id_conflicts"] == 1
+
+    def test_identical_duplicate_is_not_a_conflict(self, tmp_path: Path) -> None:
+        """A byte-identical duplicate stays the silent, conflict-free dedup."""
+        from structlog.testing import capture_logs
+
+        shared = _row(seed=7)
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[shared])
+        _write_store(tmp_path, instrument="NIFTY", tf="15m", direction="bull", rows=[shared])
+        with capture_logs() as logs:
+            board = build_sweep_leaderboard(tmp_path)
+        assert board.run_id_conflicts == 0
+        assert board.total_rows == 1
+        assert not [log for log in logs if log["event"] == "sweep_results.run_id_conflict"]

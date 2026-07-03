@@ -9,6 +9,10 @@ Synthetic-fixture / calendar-driven — proves the LOGIC; the real-data run is o
 the operator's machine.
 """
 
+# The tod-seam delegation tests drive the private ``_seconds_of_day`` /
+# ``_session_open_seconds`` helpers deliberately (their delegation + branch
+# split IS the contract under test); repo convention for whitebox suites.
+# pyright: reportPrivateUsage=none
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
@@ -262,3 +266,29 @@ def test_property_is_expiry_day_iff_date_equals_expiry(d: date) -> None:
         circuit_halt=False,
     )
     assert m.is_expiry_day == (d == JUN_EXPIRY)
+
+
+class TestTodSecondsRustSeamDelegation:
+    """DEC-TOD-SECONDS-RUST-SEAM-001: the module's tod helpers ride the seam."""
+
+    def test_seconds_of_day_delegates_to_the_shared_seam(self) -> None:
+        # Oracle: the independent inline expression (deliberately kept —
+        # its independence from the seam under test is the point).
+        from brutex.feed.bar_metadata import _seconds_of_day
+
+        for hour, minute, second in [(0, 0, 0), (9, 15, 0), (15, 29, 59), (23, 59, 59)]:
+            assert _seconds_of_day(hour, minute, second) == hour * 3600 + minute * 60 + second
+
+    def test_session_open_seconds_regular_uses_hoisted_constant(self) -> None:
+        from brutex.calendars.nse import SESSION_OPEN_IST
+        from brutex.feed.bar_metadata import _REGULAR_OPEN_SECONDS, _session_open_seconds
+
+        assert _session_open_seconds(SESSION_OPEN_IST) == _REGULAR_OPEN_SECONDS == 33_300
+
+    def test_session_open_seconds_custom_open_derives_dynamically(self) -> None:
+        from datetime import time
+
+        from brutex.feed.bar_metadata import _session_open_seconds
+
+        # A Muhurat-style 18:15 open takes the dynamic branch.
+        assert _session_open_seconds(time(18, 15)) == 18 * 3600 + 15 * 60

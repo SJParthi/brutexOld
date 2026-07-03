@@ -146,10 +146,77 @@ class TestProbeBuilder:
     def test_wired_store_probe_stats_the_ledger(self, store: InstrumentStore) -> None:
         probe = _lake_revision_probe_or_none(store)
         assert probe is not None
-        # No ledger yet → the stable absent sentinel.
-        assert probe() == ABSENT_TOKEN
+        # No ledger + no sweeps tree yet → the stable absent|absent composite.
+        assert probe() == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
         # A checkpoint moves the token.
         lake_root = Path(store.path).parent
         save_window_ledger(WindowLedger(), lake_root)
         token = probe()
-        assert token is not None and token != ABSENT_TOKEN
+        assert token is not None and token != f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+
+
+class TestCliSweepFreshness:
+    """DEC-RESULTS-SURFACE-HONESTY-001: an out-of-band ``ResultsStore`` write
+    (a CLI ``sweep-all`` in another process) is served fresh on the next poll.
+
+    The #1069 probe statted ONLY the window ledger, so a CLI sweep never bumped
+    the generation — the ``/results`` leaderboard stayed stale on its cached
+    keys (and INCONSISTENT: a never-polled filter key computed fresh rows while
+    the polled key served pre-write data) until a dashboard restart.
+    """
+
+    @staticmethod
+    def _write_sweep_store(lake_root: Path, *, seed: int, sharpe: float, name: str) -> None:
+        """A CLI-style per-tuple store write: production ``ResultsStore`` flush
+        (tempfile + ``os.replace``), NO dashboard object touched."""
+        from decimal import Decimal
+
+        from brutex.engine.results_store import ResultRow, ResultsStore
+
+        dest = lake_root / "sweeps" / "NIFTY" / "5m" / f"bull_k1_{name}.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        results = ResultsStore(path=dest)
+        results.append(
+            ResultRow(
+                run_id=f"{seed:064x}",
+                instrument="NIFTY",
+                tf="5m",
+                direction="bull",
+                mode="A",
+                mask_bits=0,
+                net_pnl_paisa=100_00,
+                gross_profit_paisa=200_00,
+                gross_loss_paisa=100_00,
+                max_drawdown_paisa=50_00,
+                expectancy_paisa=10_00,
+                total_trades=10,
+                winning_trades=6,
+                losing_trades=4,
+                sharpe_ratio=sharpe,
+                sortino_ratio=1.2,
+                calmar_ratio=0.9,
+                profit_factor=2.0,
+                win_rate=0.6,
+                max_drawdown_pct=0.05,
+                avg_entry_price=Decimal("100.00"),
+                avg_exit_price=Decimal("101.00"),
+            )
+        )
+        results.flush()
+
+    def test_out_of_band_sweep_store_refreshes_leaderboard_same_cache_key(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """Write store → the NEXT poll of the SAME leaderboard cache key shows it."""
+        self._write_sweep_store(tmp_path, seed=1, sharpe=1.0, name="a" * 16)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        first = client.get("/api/v1/sweep/leaderboard").json()
+        assert first["total_rows"] == 1
+
+        # The "CLI sweep-all" lands a SECOND store into the SAME
+        # <instrument>/<tf>/ directory — no ledger touch, no mark_dirty, no
+        # restart. The sweeps-tree revision component must bump the generation.
+        self._write_sweep_store(tmp_path, seed=2, sharpe=2.0, name="b" * 16)
+        second = client.get("/api/v1/sweep/leaderboard").json()
+        assert second["total_rows"] == 2
+        assert [r["run_id"] for r in second["rows"]] == [f"{2:064x}", f"{1:064x}"]

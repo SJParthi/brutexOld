@@ -203,6 +203,13 @@ def _stub_dashboard_runtime(
     # asserted in TestDashboardLakeHealSweep below; the sweeper's own lifecycle is
     # tested with the 100%-covered synchronous ``run_sync`` in test_lake_heal.
     monkeypatch.setattr(cli, "_start_lake_heal_sweep", lambda *args, **kwargs: None)
+    # HERMETIC (DEC-DOCTOR-LIVE-AUTORUN-001): stub the live-proof autorun builder to
+    # ``None`` so these dashboard-boot tests never construct the real holder (whose
+    # preflight worker would resolve AWS credentials) nor spawn its daemon thread —
+    # the autorun's own behaviour is tested in isolation (test_doctor_autorun + the
+    # dedicated cmd_dashboard wiring tests). ``None`` takes the honest "not wired"
+    # path (the /api/v1/liveproof route then reads ``present: false``).
+    monkeypatch.setattr(cli, "_build_liveproof_autorun", lambda _root: None)
 
 
 def test_dashboard_missing_uvicorn_is_user_error(
@@ -368,6 +375,14 @@ def test_dashboard_autoload_runs_off_the_bind_path(
 
     obs_logging = importlib.import_module("brutex.observability.logging")
     monkeypatch.setattr(obs_logging, "configure_logging", lambda **kwargs: tmp_path / "brutex.log")
+    # HERMETIC (hostile-review MAJOR-5 on DEC-DOCTOR-LIVE-AUTORUN-001): this
+    # test deliberately does NOT ride _stub_dashboard_runtime (it needs the
+    # REAL _start_instrument_autoload thread), so it must stub the live-proof
+    # builder itself — otherwise cmd_dashboard constructs a REAL holder whose
+    # preflight daemon thread resolves credentials (AWS/env seams) and, when
+    # creds exist, fires real vendor calls from a unit test.
+    monkeypatch.setattr(cli, "_build_liveproof_autorun", lambda _root: None)
+    monkeypatch.setattr(cli, "_start_auto_resume_on_boot", lambda *args, **kwargs: None)
 
     autoload_started = threading.Event()
     release = threading.Event()

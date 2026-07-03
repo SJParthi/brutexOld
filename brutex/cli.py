@@ -2185,6 +2185,35 @@ def _start_lake_heal_sweep(
     ).start()
 
 
+def _build_liveproof_autorun(lake_root: Path) -> Any:
+    """Construct the zero-command live-proof autorun holder for *lake_root*.
+
+    A dedicated seam (DEC-DOCTOR-LIVE-AUTORUN-001) so the dashboard-boot unit
+    tests can stub construction hermetically (mirroring
+    :func:`_start_instrument_autoload` / :func:`_start_auto_resume_on_boot`)
+    while this body stays directly testable offline — constructing
+    :class:`~brutex.doctor_autorun.LiveProofAutorun` only reads the two small
+    verdict caches; it spawns no thread and makes no network call.
+    """
+    from brutex.doctor_autorun import LiveProofAutorun
+
+    return LiveProofAutorun(lake_root)
+
+
+def _start_liveproof_preflight(liveproof: Any, log: Any) -> None:
+    """Kick the ZERO-COMMAND startup preflight (DEC-DOCTOR-LIVE-AUTORUN-001).
+
+    ``start_preflight`` is O(1): it only spawns the holder's daemon worker
+    (single-flight; a ``BRUTEX_AUTORUN_LIVEPROOF=0`` escape hatch or an
+    already-running preflight returns ``False``), so the uvicorn port bind is
+    never blocked — the same instant-launch discipline as the instrument
+    autoload (DEC-DASHBOARD-INSTANT-LAUNCH-001). The verdict lands on the
+    dashboard's persistent live-proof banner; the operator runs NOTHING.
+    """
+    started = liveproof.start_preflight()
+    log.info("liveproof.autorun_preflight", started=started)
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
@@ -2310,7 +2339,27 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # — build_app attaches it only when it default-constructs the cache, so an injected
     # cache must carry its own probe or a CLI `brutex fetch` write would go undetected.
     summary_cache = SummaryCache(revision_probe=_lake_revision_probe_or_none(store))
-    app = build_app(state, instrument_store=store, summary_cache=summary_cache)
+    # ZERO-COMMAND live-proof autorun (DEC-DOCTOR-LIVE-AUTORUN-001): build the
+    # holder for THIS lake root so the app can serve /api/v1/liveproof, mirror
+    # credential refusals onto the banner, and auto-run the one-time probes on
+    # the first REAL pull. Best-effort on the BIND path (Golden Rule #10 —
+    # never crash boot): a construction failure logs and the dashboard still
+    # starts (the banner honestly reads "present: false").
+    liveproof: Any = None
+    try:
+        liveproof = _build_liveproof_autorun(_resolve_lake_root(lake_root))
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+        _log.warning("liveproof.build_failed", error=str(exc))
+    app = build_app(state, instrument_store=store, summary_cache=summary_cache, liveproof=liveproof)
+    # Auto-run the CHEAP preflight stages in the holder's background daemon
+    # thread — the operator starts BruteX as always and the health proof runs
+    # ITSELF (the hard operator law). Guarded like the auto-resume launch so
+    # even a spawn failure only logs.
+    if liveproof is not None:
+        try:
+            _start_liveproof_preflight(liveproof, _log)
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+            _log.warning("liveproof.launch_failed", error=str(exc))
     # Opt-in boot-time auto-resume (DEC-AUTO-RESUME-ON-BOOT-001): if
     # BRUTEX_AUTO_RESUME_ON_BOOT is truthy AND the durable window ledger shows an
     # in-progress pull (PLANNED / FAILED windows), auto-continue it by spawning
@@ -2973,13 +3022,18 @@ def cmd_fetch(
         return EXIT_OK
 
     # The pull-wide global stops that HALT every remaining window (disk-full/OOM, a
-    # quota stop, or a tripped mass-empty circuit breaker) — distinct from a per-symbol
-    # quarantine. Mirrors the ingest spine's `_GLOBAL_STOP_ERRORS` carve-out
+    # quota stop, a tripped mass-empty circuit breaker, or a TERMINAL dead-credential
+    # auth failure — DEC-GROWW-AUTH-HALT-001) — distinct from a per-symbol quarantine.
+    # Mirrors the ingest spine's `_GLOBAL_STOP_ERRORS` carve-out
     # (DEC-LAKE-WRITE-HALT-001 / quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001); each
     # fires a best-effort CRITICAL Telegram pull-halt alert then re-raises
-    # (DEC-TELEGRAM-PULL-HALT-001).
+    # (DEC-TELEGRAM-PULL-HALT-001). The RETRYABLE `GrowwAuthError` subclasses (a
+    # throttled mint / a stale read-only re-read) never alert — carved back out via
+    # `is_terminal_auth_failure` at the except site (they re-raise unchanged, exactly
+    # as they propagated before this tuple caught them).
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
+    from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
     from brutex.adapters.groww.pull_pipeline import (
         build_fetch_pipeline,
         build_write_consumer,
@@ -3010,6 +3064,7 @@ def cmd_fetch(
         DailyQuotaExceeded,
         QuotaInvariantError,
         MassEmptySettleHalt,
+        GrowwAuthError,
     )
 
     resolved = _resolve_lake_root(lake_root)
@@ -3375,12 +3430,17 @@ def cmd_fetch(
                     detect_completeness_gaps=not dry_run,
                 )
             except _pull_halt_errors as exc:
-                # A pull-wide global stop (disk-full/OOM LakeWriteHalt, or a quota stop)
+                # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
+                # a TERMINAL dead-credential GrowwAuthError — DEC-GROWW-AUTH-HALT-001)
                 # HALTS every remaining window, unlike a per-symbol quarantine — fire a
                 # best-effort CRITICAL Telegram alert so the operator knows the pull
                 # STOPPED, then re-raise so the existing halt handling (controller
                 # verdict / non-zero exit) is byte-unchanged (DEC-TELEGRAM-PULL-HALT-001).
-                _emit_pull_halt_alert(exc)
+                # A RETRYABLE GrowwAuthError subclass (throttled mint / stale read-only
+                # re-read) is NOT a halt — it re-raises unchanged with NO alert, exactly
+                # as it propagated before this tuple caught it.
+                if not isinstance(exc, GrowwAuthError) or is_terminal_auth_failure(exc):
+                    _emit_pull_halt_alert(exc)
                 raise
 
         until_outcome = None

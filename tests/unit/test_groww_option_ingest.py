@@ -319,6 +319,90 @@ def test_fetch_option_candles_is_fno_and_keeps_volume_oi() -> None:
     assert bars[0].open_interest == 99
 
 
+class _AmpersandFormSDK:
+    """A fake that answers ONLY the ``%26``-encoded form with data (plain form clean-empty)."""
+
+    def __init__(self) -> None:
+        self.symbols: list[str] = []
+
+    def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+        symbol = str(kw["groww_symbol"])
+        self.symbols.append(symbol)
+        return _candles() if "%26" in symbol else {"candles": []}
+
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+
+def _mm_ce() -> DerivativeContract:
+    """An M&M option contract — the ampersand rides INSIDE the full groww_symbol."""
+    return DerivativeContract(
+        underlying_symbol="M&M",
+        expiry=date(2025, 1, 2),
+        symbol="NSE-M&M-02Jan25-2000-CE",
+        contract_type="CE",
+        strike=2000.0,
+    )
+
+
+def test_fetch_option_candles_ampersand_contract_falls_back_to_encoded_form() -> None:
+    """An ``&`` CONTRACT whose plain-form fetch is clean-empty retries `%26`-encoded ONCE.
+
+    DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001 — the CANDLE-fetch twin of the #898
+    resolution fallback: M&M contracts RESOLVE fine but their candles silently read
+    empty when the raw ``&`` is sent un-encoded. The shared ``fetch_candle_windows``
+    seam recovers them; first non-empty form wins.
+    """
+    sdk = _AmpersandFormSDK()
+    bars = fetch_option_candles(
+        GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1),
+        contract=_mm_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert len(bars) == 1  # the encoded form's bars came back through the option path
+    assert sdk.symbols == ["NSE-M&M-02Jan25-2000-CE", "NSE-M%26M-02Jan25-2000-CE"]
+
+
+def test_ampersand_fallback_stays_one_logical_fetch_for_ledger_accounting() -> None:
+    """The `%26` fallback happens INSIDE one logical fetch — ledger accounting unchanged.
+
+    DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001 accounting contract: an all-empty ``&``
+    contract with ``empty_retry_attempts=2`` records ``in_pull_fetches == 2`` (the
+    LOGICAL count the empty-retry / confirmed-empty math keys on) while the vendor
+    saw 4 physical calls (plain + encoded per logical attempt) — the physical calls
+    still ride ``client.pace`` + the call meter, never the ledger's fetch semantics.
+    """
+
+    class _AllEmptySDK(_AmpersandFormSDK):
+        def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+            self.symbols.append(str(kw["groww_symbol"]))
+            return {"candles": []}  # BOTH forms empty — the honest-empty double-check
+
+    all_empty = _AllEmptySDK()
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        GrowwClient(sdk=all_empty, sleep=lambda _s: None, max_attempts=1),
+        _Sink(),
+        contract=_mm_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        empty_retry_attempts=2,
+        ledger=ledger,
+        # A recent clock so the old-gap fast-settle does not fire (mirrors the
+        # bounded-empty-retry test above).
+        now_ist=lambda: datetime(2024, 1, 10, 8, 0, tzinfo=UTC),
+    )
+    assert report.windows == 1 and report.bars_appended == 0
+    assert len(all_empty.symbols) == 4  # 2 logical fetches × (plain + encoded)
+    assert ledger.records()[0].in_pull_fetches == 2  # LOGICAL count — semantics unchanged
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # ingest_option_contract — happy / skip / clamp
 # ─────────────────────────────────────────────────────────────────────────
@@ -1358,10 +1442,12 @@ def test_run_capture_hook_factory_builds_per_contract_hook() -> None:
 
     def _factory(
         exchange: str, segment: str, symbol: str
-    ) -> Callable[[Mapping[str, object], str, str, str], None]:
+    ) -> Callable[[Mapping[str, object], str, str, str, str], None]:
         built.append((exchange, segment, symbol))
 
-        def _hook(_payload: Mapping[str, object], _e: str, _s: str, _sym: str) -> None:
+        def _hook(
+            _payload: Mapping[str, object], _e: str, _s: str, _sym: str, _issued: str
+        ) -> None:
             return None
 
         return _hook
@@ -1384,20 +1470,67 @@ def test_run_capture_hook_factory_builds_per_contract_hook() -> None:
     }
 
 
-def test_run_auth_failure_sets_auth_aborted() -> None:
-    bad = _ce()
+def test_run_terminal_auth_failure_halts_pull_loudly() -> None:
+    """A TERMINAL auth failure (dead credential) HALTS the option pull — never a quarantine.
+
+    DEC-GROWW-AUTH-HALT-001 regression: previously a dead token quarantined EVERY
+    contract one by one and the pull "completed" all-failed with no critical alert
+    (the silent-for-days shape). It is now a ``_GLOBAL_STOP_ERRORS`` member and
+    propagates so the halt-alert machinery fires upstream. The GOOD contract that
+    was going to be pulled after the bad one is NOT silently consumed into a
+    fake-complete report.
+    """
+    from brutex.adapters.groww.errors import GrowwAuthError
+
+    bad, ok = _ce(), _ce2()
     sdk = _FakeSDK(raise_for={bad.symbol: GrowwAPIAuthenticationException("dead token")})
+    with pytest.raises(GrowwAuthError):
+        run_groww_option_ingest(
+            _client(sdk),
+            _Sink(),
+            contracts=[bad, ok],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+        )
+
+
+def test_run_retryable_auth_subclass_quarantines_not_halts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A RETRYABLE auth-family shape (stale read-only re-read) stays a per-contract quarantine.
+
+    DEC-GROWW-AUTH-HALT-001 carve-out: ``GrowwTokenStillStaleError`` is a
+    ``GrowwAuthError`` SUBCLASS but transient by design — it must NEVER halt the
+    pull, even when it escapes a worker terminally (the client raises it once its
+    bounded retry budget is spent). The drain check carves it back out of the
+    ``GrowwAuthError`` global-stop membership.
+    """
+    from brutex.adapters.groww.errors import GrowwTokenStillStaleError
+
+    bad, ok = _ce(), _ce2()
+
+    def _fake_ingest(client, sink, *, contract, interval, start, end, **_kw):
+        del client, sink, interval, start, end
+        if contract.symbol == bad.symbol:
+            raise GrowwTokenStillStaleError("re-read returned the same dead token")
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(_oi, "ingest_option_contract", _fake_ingest)
     report = run_groww_option_ingest(
-        _client(sdk),
+        _client(_FakeSDK(payload=_candles())),
         _Sink(),
-        contracts=[bad],
+        contracts=[bad, ok],
         intervals=["1day"],
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
         now_ist=_now,
     )
-    assert report.failed_pairs == 1 and report.auth_aborted
-    assert report.failures[0].auth_failure is True
+    assert report.failed_pairs == 1  # the ONE contract quarantined, the pull continued
+    assert (ok.symbol, "1day") in report.pairs
+    assert report.failures[0].auth_failure is True  # still honestly flagged as auth-family
+    assert report.auth_aborted is True  # the derived flag keeps working for the retry engine
 
 
 def test_run_non_brutex_error_propagates() -> None:
