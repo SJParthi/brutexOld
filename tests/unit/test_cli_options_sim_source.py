@@ -128,6 +128,36 @@ def _signal(expiry: date, *, entry: datetime = _ENTRY, exit_: datetime = _EXIT) 
     )
 
 
+def _seam_frame(ts: datetime, *, opens: list[float]) -> pl.DataFrame:
+    """A hand-rolled expired-options frame at the ``_row_at`` seam.
+
+    One row per entry of *opens*, every row at *ts* under the SAME series key
+    ``(WEEK, 0)`` — the shape the production writer can never emit (it dedups
+    the composite key on write), used to pin the read-side duplicate gate.
+    """
+    n = len(opens)
+    return pl.DataFrame(
+        {
+            "expiry_flag": [_EXPIRY_FLAG_WEEKLY] * n,
+            "expiry_code": [0] * n,
+            "timestamp": [ts] * n,
+            "open": opens,
+            "high": opens,
+            "low": opens,
+            "close": opens,
+            "volume": [10] * n,
+            "open_interest": [1000] * n,
+            "strike": [24000.0] * n,
+            "spot": [None] * n,
+            "iv": [None] * n,
+        }
+    ).with_columns(
+        pl.col("open_interest").cast(pl.Int64),
+        pl.col("spot").cast(pl.Float64),
+        pl.col("iv").cast(pl.Float64),
+    )
+
+
 def _load(
     lake_root: Path,
     expiry: date,
@@ -441,26 +471,46 @@ class TestExpirySeriesSelection:
         # A tz-naive stored timestamp is stamped UTC on the way out (the
         # defensive ternary in the row build).
         naive_ts = datetime(2025, 1, 2, 3, 46)  # naive == already-UTC wall time
-        df = pl.DataFrame(
-            {
-                "expiry_flag": [_EXPIRY_FLAG_WEEKLY],
-                "expiry_code": [0],
-                "timestamp": [naive_ts],
-                "open": [150.0],
-                "high": [150.0],
-                "low": [150.0],
-                "close": [150.0],
-                "volume": [10],
-                "open_interest": [1000],
-                "strike": [24000.0],
-                "spot": [None],
-                "iv": [None],
-            }
-        ).with_columns(
-            pl.col("open_interest").cast(pl.Int64),
-            pl.col("spot").cast(pl.Float64),
-            pl.col("iv").cast(pl.Float64),
-        )
+        df = _seam_frame(naive_ts, opens=[150.0])
         bar = _LakeOptionBarSource._row_at(df, naive_ts, "CE", series=((_EXPIRY_FLAG_WEEKLY, 0),))
         assert bar is not None
         assert bar.timestamp == naive_ts.replace(tzinfo=UTC)
+
+    def test_same_series_physical_duplicate_keeps_first_and_warns(self) -> None:
+        # A poisoned-era physical duplicate of ONE series key with IDENTICAL
+        # values keeps the FIRST physical row and is WARNED via the COMMON
+        # read gate — never silent (DEC-LAKE-READ-UNIQUE-001 composed with
+        # the R2-OC-1 series filter). The production writer dedups the
+        # composite key on write, so the fixture is hand-rolled at the
+        # `_row_at` seam.
+        from brutex.data.lake_read import DUPLICATES_DROPPED_EVENT
+        from structlog.testing import capture_logs
+
+        naive_ts = datetime(2025, 1, 2, 3, 46)
+        df = _seam_frame(naive_ts, opens=[150.0, 150.0])
+        with capture_logs() as logs:
+            bar = _LakeOptionBarSource._row_at(
+                df, naive_ts, "CE", series=((_EXPIRY_FLAG_WEEKLY, 0),)
+            )
+        assert bar is not None
+        assert bar.open == Decimal("150.0")
+        events = [log for log in logs if log["event"] == DUPLICATES_DROPPED_EVENT]
+        assert len(events) == 1
+        assert events[0]["dropped"] == 1
+        assert events[0]["conflict_count"] == 0
+
+    def test_same_series_conflicting_duplicate_is_ambiguous_none(self) -> None:
+        # A poisoned duplicate whose values DISAGREE takes the ambiguity
+        # reject (None → NO_DATA) — never keep-first pricing from an
+        # arbitrary row(0) (R2-OC-1 precedence over the read gate's
+        # keep-first: a disagreeing survivor is untrustworthy either way).
+        from structlog.testing import capture_logs
+
+        naive_ts = datetime(2025, 1, 2, 3, 46)
+        df = _seam_frame(naive_ts, opens=[150.0, 999.0])
+        with capture_logs() as logs:
+            bar = _LakeOptionBarSource._row_at(
+                df, naive_ts, "CE", series=((_EXPIRY_FLAG_WEEKLY, 0),)
+            )
+        assert bar is None
+        assert any(log["event"] == "options_sim.ambiguous_option_rows" for log in logs)
