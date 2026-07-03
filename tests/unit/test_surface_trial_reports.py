@@ -392,7 +392,10 @@ def test_month_sheets_only_nonempty(tmp_path: Path) -> None:
 
 def _minute_client(tmp_path: Path) -> TestClient:
     """MINSYM: daily calendar Mar 1/4/5/6; 1-minute windows Mar 1, 5, 6 (Mar 4
-    minute window MISSING while its daily bar exists — the hole)."""
+    minute window MISSING while its daily bar exists — the hole). Mar 5 — the
+    day that ANCHORS the one asserted row (Mar 6) — carries TWO minute bars
+    with DISTINCT closes, so the 311.00 prev-close assertion genuinely proves
+    the LAST-close law (last vs first is distinguishable)."""
     writer = ParquetWriter(lake_root=tmp_path)
     _daily(
         writer,
@@ -405,13 +408,21 @@ def _minute_client(tmp_path: Path) -> TestClient:
         ],
     )
     minute_bars = [
-        # Mar 1: TWO bars — the prev-close law must take the LAST close (300.00),
-        # not the first (299.50).
+        # Mar 1: two bars — but Mar 1 anchors ONLY Mar 4, whose row is
+        # deliberately absent (the hole), so these bars prove nothing about
+        # the last-close law; they only exercise the hole skip on a
+        # multi-bar first session.
         _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="299.00", close="299.50"),
         _bar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), open_="299.50", close="300.00"),
         # Mar 4: MISSING (the minute-window hole; the daily bar exists).
-        # Mar 5: present — but its PRIOR session (Mar 4) has no minute data.
-        _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="310.00", close="311.00"),
+        # Mar 5: TWO bars with DISTINCT closes. This day anchors the asserted
+        # Mar 6 row, so asserting 311.00 below proves the prev-close law takes
+        # the day's LAST close (311.00, arg_max(close, timestamp)) and NOT its
+        # first (310.50) — mutating production to arg_min fails this test.
+        # (Mar 5's own row is still SKIPPED: its prior session Mar 4 has no
+        # minute data.)
+        _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="310.00", close="310.50"),
+        _bar(datetime(2024, 3, 5, 4, 0, tzinfo=UTC), open_="310.50", close="311.00"),
         # Mar 6: present — prior session Mar 5 HAS minute data → the one real row.
         _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="306.00", close="305.00"),
     ]
@@ -432,7 +443,8 @@ def test_minute_basis_last_close_anchor_and_hole_skip(tmp_path: Path) -> None:
     # its prior session Mar 4 has a daily bar but NO minute window (anchoring
     # on Mar 1's 300.00 would be the stale-jump bug the contiguity law kills).
     assert [(r[0][0], r[1][0]) for r in rows] == [("2024-03-06", "MINSYM")]
-    # PREV. CLOSE = Mar 5's LAST 1-minute close (311.00); IEP = the 09:15 open.
+    # PREV. CLOSE = Mar 5's LAST 1-minute close (311.00 — NOT its first,
+    # 310.50, so last-vs-first is genuinely distinguished); IEP = the 09:15 open.
     assert [v for v, _s in rows[0]] == _expected_cells(
         date(2024, 3, 6), "MINSYM", "311.00", "306.00"
     )

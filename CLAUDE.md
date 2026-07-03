@@ -249,7 +249,9 @@ hostile-review pass._
   `float(2**60)==float(2**60+1)` teeth fixture; run_id tie-break; dedup totals; top-slice invariance; CHNG/%CHNG law +
   contiguity/first-session skips; ±0.005 half-up cells; abs-max/inclusive-min_pct/alphabetical-tie top-mover; fills
   from the FULL-precision sign incl. the pinned "displays 0.00 but fills green" sub-boundary edge; minute-basis
-  last-close anchor + hole skip) — the 13-test trial suite is the permanent regression net
+  last-close anchor — the ANCHORED prior day now carries 2 bars with distinct closes so an arg_max→arg_min mutation
+  of the prev-close read is verified KILLED (review round-1 fix: the original fixture's 2-bar day was unanchored and
+  the mutation survived) — + hole skip) — the 13-test trial suite is the permanent regression net
   (`tests/unit/test_surface_trial_results.py` + `test_surface_trial_reports.py`; `/operator` confirmed a nav alias of
   `/`, not a route). Leftover folds: **MINOR-1 FIXED** — the `SummaryCache` revision-probe `os.stat` is hoisted
   OUTSIDE the cache lock (`_probe_token` no-lock + `_reconcile_revision_locked` under it) so a probe wedged on a
