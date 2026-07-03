@@ -1,4 +1,4 @@
-"""Manual derived-timeframe **materialiser** — the testable core (DEC-TF-MATERIALIZE-001).
+"""Derived-timeframe **materialiser** — the testable core (DEC-TF-MATERIALIZE-001).
 
 The brute-force sweep evaluates strategies at all 21 timeframes (CLAUDE.md §1).
 Only the **1-minute** base is fetched from the vendor; the 19 derived intraday
@@ -9,15 +9,16 @@ This module **materialises** a selected derived timeframe **once** — writing i
 as its own stored interval partition — so the sweep then reads a 5m / 15m / 60m
 bar in **O(1)** (a direct Parquet read), CLAUDE.md §5.
 
-## Manual route + automatic pull-settle trigger
+## The ONE automatic prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001)
 
-The original surface is the manual ``POST /api/v1/universe/derive-timeframes``
-route (DEC-TF-MATERIALIZE-001). DEC-TF-MATERIALIZE-002 adds an AUTOMATIC
-trigger: when a spot pull settles with new 1-minute bars, the pull
-controller re-materialises the settled symbols through this same core —
-gated behind the ``BRUTEX_AUTO_DERIVE_TFS=1`` opt-in (default OFF; storage
-stays operator-approved, external-drive-backed via ``$BRUTEX_LAKE_ROOT``).
-See :mod:`brutex.data.tf_autoderive` for the planner.
+The manual ``POST /api/v1/universe/derive-timeframes`` route
+(DEC-TF-MATERIALIZE-001) and the ``BRUTEX_AUTO_DERIVE_TFS`` pull-settle
+auto-derive (DEC-TF-MATERIALIZE-002) are both RETIRED: derived timeframes are
+now written ONLY by the pipeline's automatic FINAL prebuild phase
+(:mod:`brutex.dashboard.pipeline_prebuild`), which runs strictly AFTER a
+fully-successful 1-minute fetch and covers SPOT + FUTURES + **OPTIONS**, each
+with the 19 intraday timeframes AND the derived ``1day`` partition
+(``include_daily=True`` on :func:`materialize_lake_timeframes`). Never mid-pull.
 
 ## Pure core, injected I/O (CLAUDE.md §11 COMMON / §4 testability)
 
@@ -57,10 +58,12 @@ from brutex.data.timeframes import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+    from datetime import date
     from pathlib import Path
 
     import polars as pl
 
+    from brutex.data.models import CandleBar
     from brutex.models import Instrument
 
 #: Canonical TF-label → lake partition interval map for ALL 19 derived
@@ -79,19 +82,20 @@ INTRADAY_TF_INTERVALS: Final[dict[str, str]] = {
 }
 
 #: The materialisable timeframe labels, in canonical (ascending-minutes) order —
-#: the route's default selection when the caller omits ``tfs``.
+#: the default selection when the caller omits ``tfs``.
 MATERIALIZABLE_TFS: Final[tuple[str, ...]] = tuple(INTRADAY_TF_INTERVALS)
+
+#: The lake interval label of the DERIVED daily partition — the key
+#: ``materialize_lake_timeframes(include_daily=True)`` reports its daily bar
+#: count under in :attr:`MaterializeResult.written` (DEC-PIPELINE-AUTOPREBUILD-001).
+DAILY_TF_LABEL: Final[str] = "1day"
 
 
 class PrebuildKind(Enum):
-    """How an instrument's 19 derived intraday timeframes are pre-built (DEC-PREBUILD-SELECT-001).
+    """How an instrument's derived timeframes are pre-built (DEC-PREBUILD-SELECT-001).
 
-    The intraday pre-build is SEGMENT-AWARE — the lake stores OI for F&O but
-    never for spot, so the two surfaces use a DIFFERENT resampler, and OPTIONS
-    intraday is deliberately NOT materialised at all (it is TB-scale and the
-    brute-force engine — NIFTY/BANKNIFTY/SENSEX — never reads option intraday;
-    it stays on-demand via :func:`brutex.data.fno_resample.resample_session_to_tf`
-    on the ``/movers`` read path).
+    The pre-build is SEGMENT-AWARE — the lake stores OI for F&O but never for
+    spot, so the two surfaces use a DIFFERENT resampler.
 
     Members
     -------
@@ -104,8 +108,13 @@ class PrebuildKind(Enum):
         :func:`brutex.data.fno_resample.derive_fno_intraday_tfs` so the
         ``open_interest`` snapshot is preserved per bar.
     OPTIONS
-        An ``FNO`` ``CE`` / ``PE`` contract. Intraday is NEVER materialised —
-        an explicit, honest no-op (on-demand only).
+        An ``FNO`` ``CE`` / ``PE`` contract. Materialised OI-aware exactly like
+        FUTURES (option bars are OI-carrying F&O bars) since
+        DEC-PIPELINE-AUTOPREBUILD-001, which SUPERSEDES the earlier on-demand
+        design (DEC-PREBUILD-SELECT-001's explicit no-op). Honest storage
+        envelope (Golden Rule #10): once all 19 intraday + the ``1day``
+        partitions exist, the options lake costs **~2-3× its 1-minute
+        footprint** — an operator-accepted cost of the decree.
     """
 
     SPOT = "spot"
@@ -119,7 +128,8 @@ def prebuild_kind_for(instrument: Instrument) -> PrebuildKind:
     Pure (no I/O) — derives the kind from the instrument's
     :class:`~brutex.models.Segment` + :class:`~brutex.models.InstrumentType`:
 
-    * ``FNO`` ``CE`` / ``PE`` → :attr:`PrebuildKind.OPTIONS` (no intraday).
+    * ``FNO`` ``CE`` / ``PE`` → :attr:`PrebuildKind.OPTIONS` (OI-aware, like
+      FUTURES — DEC-PIPELINE-AUTOPREBUILD-001).
     * ``FNO`` ``FUT`` (or any other F&O type) → :attr:`PrebuildKind.FUTURES`
       (OI-aware). The non-CE/PE F&O fallback is FUTURES so a forward-compat F&O
       type can never silently route through the OI-dropping SPOT resampler.
@@ -136,8 +146,8 @@ def prebuild_kind_for(instrument: Instrument) -> PrebuildKind:
 
 def intraday_resampler_for(
     kind: PrebuildKind,
-) -> Callable[[pl.DataFrame], dict[str, pl.DataFrame]] | None:
-    """Return the intraday resampler for a pre-build *kind*, or ``None`` for OPTIONS.
+) -> Callable[[pl.DataFrame], dict[str, pl.DataFrame]]:
+    """Return the intraday resampler for a pre-build *kind*.
 
     The single COMMON routing point (CLAUDE.md §11) from a
     :class:`PrebuildKind` to the canonical resampler:
@@ -145,20 +155,46 @@ def intraday_resampler_for(
     * :attr:`PrebuildKind.SPOT` → :func:`brutex.data.spot_resample.derive_intraday_tfs`
       (byte-identical to the pre-DEC-PREBUILD-SELECT-001 default — spot output
       is unchanged).
-    * :attr:`PrebuildKind.FUTURES` → :func:`brutex.data.fno_resample.derive_fno_intraday_tfs`
-      (OI-aware — preserves ``open_interest``).
-    * :attr:`PrebuildKind.OPTIONS` → ``None`` (intraday is on-demand, never
-      materialised).
+    * :attr:`PrebuildKind.FUTURES` **and** :attr:`PrebuildKind.OPTIONS` →
+      :func:`brutex.data.fno_resample.derive_fno_intraday_tfs` (OI-aware —
+      preserves ``open_interest``; option bars are OI-carrying F&O bars, same
+      as futures). OPTIONS returned ``None`` (on-demand only) before
+      DEC-PIPELINE-AUTOPREBUILD-001 enabled option materialisation.
     """
     if kind is PrebuildKind.SPOT:
         from brutex.data.spot_resample import derive_intraday_tfs
 
         return derive_intraday_tfs
-    if kind is PrebuildKind.FUTURES:
-        from brutex.data.fno_resample import derive_fno_intraday_tfs
+    from brutex.data.fno_resample import derive_fno_intraday_tfs
 
-        return derive_fno_intraday_tfs
-    return None
+    return derive_fno_intraday_tfs
+
+
+def daily_resample_fn_for(
+    kind: PrebuildKind,
+) -> Callable[[pl.DataFrame, date], list[CandleBar]]:
+    """Return the positional 1-minute → ``1day`` resampler for a pre-build *kind*.
+
+    The single COMMON routing point (CLAUDE.md §11) from a :class:`PrebuildKind`
+    to the canonical daily derivation — EXTRACTED from the (now removed)
+    mid-pull ``historical_pull._derive_daily_from_minute`` OI-selection so the
+    prebuild phase is the ONE place the choice lives
+    (DEC-PIPELINE-AUTOPREBUILD-001):
+
+    * :attr:`PrebuildKind.SPOT` →
+      :func:`brutex.data.spot_daily_resample.resample_1m_to_daily_default`
+      (spot/index daily bars carry ``open_interest=None``).
+    * :attr:`PrebuildKind.FUTURES` / :attr:`PrebuildKind.OPTIONS` →
+      :func:`brutex.data.fno_daily_resample.resample_1m_to_fno_daily_positional`
+      (carry-last OI — DEC-FNO-TF-DERIVE-OI-001).
+    """
+    if kind is PrebuildKind.SPOT:
+        from brutex.data.spot_daily_resample import resample_1m_to_daily_default
+
+        return resample_1m_to_daily_default
+    from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
+
+    return resample_1m_to_fno_daily_positional
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,10 +259,10 @@ def materialize_timeframes(
         The ``df_1m -> {tf_label: frame}`` intraday derivation (SEGMENT-AWARE,
         DEC-PREBUILD-SELECT-001). ``None`` (the default) selects the SPOT
         resampler so an un-parametrised call is byte-for-byte unchanged; an
-        F&O futures caller passes the OI-aware
+        F&O futures/options caller passes the OI-aware
         :func:`brutex.data.fno_resample.derive_fno_intraday_tfs` (typically via
-        :func:`intraday_resampler_for`). OPTIONS never reach this function —
-        their intraday is on-demand.
+        :func:`intraday_resampler_for` — options materialise like futures per
+        DEC-PIPELINE-AUTOPREBUILD-001).
 
     Returns
     -------
@@ -267,55 +303,95 @@ def materialize_lake_timeframes(
     symbol: str,
     kind: PrebuildKind,
     tfs: Iterable[str] = MATERIALIZABLE_TFS,
+    include_daily: bool = False,
+    daily_before: date | None = None,
 ) -> MaterializeResult:
-    """SEGMENT-AWARE materialise of ONE lake partition's intraday TFs (DEC-PREBUILD-SELECT-001).
+    """SEGMENT-AWARE materialise of ONE lake partition's derived TFs (DEC-PREBUILD-SELECT-001).
 
-    The ONE shared primitive (CLAUDE.md §11 COMMON) behind every pre-build call
-    site — the manual ``/universe/derive-timeframes`` route, the pipeline's gated
-    final pre-build, and the pull-settle auto-derive — replacing the byte-near
-    copies that each rebuilt the read/write builders + chose the resampler inline.
-    Given a lake partition's coordinates + its :class:`PrebuildKind`, it:
+    The ONE shared primitive (CLAUDE.md §11 COMMON) behind the pipeline's
+    automatic final prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001 — the manual
+    route + the pull-settle auto-derive are retired). Given a lake partition's
+    coordinates + its :class:`PrebuildKind`, it:
 
     * picks the resampler via :func:`intraday_resampler_for`
-      (SPOT → OI-dropping spot resampler; FUTURES → OI-aware F&O resampler);
-    * reads the 1-minute base with the OI column ONLY for FUTURES
-      (``with_open_interest=kind is PrebuildKind.FUTURES``), so a spot partition's
-      output is byte-identical to before;
-    * writes each derived TF (the writer carries OI when the frame has it).
+      (SPOT → OI-dropping spot resampler; FUTURES/OPTIONS → OI-aware F&O
+      resampler — option materialisation enabled by
+      DEC-PIPELINE-AUTOPREBUILD-001, which supersedes the on-demand-only
+      design; honest cost: a fully-materialised options lake is **~2-3× its
+      1-minute footprint**, operator-accepted);
+    * reads the 1-minute base ONCE, with the OI column for FUTURES + OPTIONS
+      (``with_open_interest=kind is not PrebuildKind.SPOT``), so a spot
+      partition's output is byte-identical to before;
+    * writes each derived intraday TF (the writer carries OI when the frame
+      has it);
+    * with ``include_daily=True``, ALSO derives the symbol's ``1day`` partition
+      from the SAME 1-minute frame — the spot midnight-IST daily for SPOT, the
+      carry-last-OI F&O daily for FUTURES/OPTIONS
+      (:func:`daily_resample_fn_for`) — written through the SHARED
+      :func:`~brutex.data.spot_daily_resample.make_lake_write_1day` writer
+      (latest-wins on the derived ``1day``, 2-dp tick snap at the sink). The
+      daily bar count joins the result under :data:`DAILY_TF_LABEL`.
 
-    Raises :class:`ValueError` for :attr:`PrebuildKind.OPTIONS` — option intraday
-    is on-demand and must never be materialised; the gated orchestrator skips
-    OPTIONS before reaching here, so this is a defensive guard for a misuse.
+    ``daily_before`` is the forming-session cutoff (an IST date); ``None``
+    (production) resolves to today IST, so a still-forming session is never
+    written as a final daily bar (no look-ahead). Rerun-safe: the intraday
+    partitions are keep-first idempotent and the derived daily is latest-wins
+    (a re-derivation of identical data is a silent no-op) — CLAUDE.md §2 Rule 7.
 
-    Returns the per-TF written counts. Raw lake I/O is composed from the
-    ``# pragma: no cover`` builders; integration-tested by the round-trip test.
+    Cost: one O(bars) partition read + one O(bars) resample per timeframe —
+    NOT an O(1)-total claim (Golden Rule #10). Returns the per-TF written
+    counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
+    integration-tested by the round-trip tests.
     """
+    read_1m = make_lake_read_1m(
+        lake_root=lake_root,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        with_open_interest=kind is not PrebuildKind.SPOT,
+    )
+    write_tf = make_lake_write_tf(
+        lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+    )
     resampler = intraday_resampler_for(kind)
-    if resampler is None:
-        raise ValueError(
-            f"{symbol}: options intraday is on-demand (TB-scale) and is never materialised"
+    if not include_daily:
+        return materialize_timeframes(
+            tfs=tfs, read_1m=read_1m, write_tf=write_tf, resampler=resampler
         )
-    return materialize_timeframes(
-        tfs=tfs,
-        read_1m=make_lake_read_1m(
-            lake_root=lake_root,
-            exchange=exchange,
-            segment=segment,
-            symbol=symbol,
-            with_open_interest=kind is PrebuildKind.FUTURES,
-        ),
-        write_tf=make_lake_write_tf(
+
+    from datetime import UTC, datetime
+
+    from brutex.calendars.nse import IST
+    from brutex.data.spot_daily_resample import fill_daily_from_minute, make_lake_write_1day
+
+    # Read the 1-minute base ONCE and share the frame between the intraday
+    # derivation and the daily derivation (halves the partition I/O).
+    df_1m = read_1m()
+    intraday = materialize_timeframes(
+        tfs=tfs, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
+    )
+    before = daily_before if daily_before is not None else datetime.now(UTC).astimezone(IST).date()
+    daily = fill_daily_from_minute(
+        read_1m=lambda: df_1m,
+        write_1day=make_lake_write_1day(
             lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
         ),
-        resampler=resampler,
+        before=before,
+        resample_fn=daily_resample_fn_for(kind),
+    )
+    return MaterializeResult(
+        written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
+        skipped=intraday.skipped,
     )
 
 
 __all__ = [
+    "DAILY_TF_LABEL",
     "INTRADAY_TF_INTERVALS",
     "MATERIALIZABLE_TFS",
     "MaterializeResult",
     "PrebuildKind",
+    "daily_resample_fn_for",
     "intraday_resampler_for",
     "make_lake_read_1m",
     "make_lake_write_tf",
