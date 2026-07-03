@@ -226,6 +226,7 @@ def make_deps(tmp_path: Path, **overrides: Any) -> tuple[dl.KitDeps, dict[str, H
         "real_totp_minter": _unexpected_mint_totp,
         "controller_factory": _controller,
         "http_get": _http_get_ok,
+        "nse_http_get": _http_get_ok,
         "probe_day": lambda: _PROBE_DAY,
     }
     defaults.update(overrides)
@@ -305,6 +306,10 @@ class TestInfrastructure:
         assert dl.compute_call_budget(dl.KitOptions(depth_bisect=True)) == 100
         assert dl.compute_call_budget(dl.KitOptions(rate_probe=True)) == 520
         assert dl.compute_call_budget(dl.KitOptions(depth_bisect=True, rate_probe=True)) == 580
+        # auto_bisect (the autorun's zero-command mode) grants the SAME bisect
+        # extension — and never double-grants it alongside --depth-bisect.
+        assert dl.compute_call_budget(dl.KitOptions(auto_bisect=True)) == 100
+        assert dl.compute_call_budget(dl.KitOptions(auto_bisect=True, depth_bisect=True)) == 100
 
     def test_report_format_json_and_exit_codes(self, tmp_path: Path) -> None:
         ok = dl.StageOutcome(stage=0, name="env", status=dl.STATUS_PASS, lines=("PASS env: x",))
@@ -1032,6 +1037,76 @@ class TestStageDepth:
         assert outcome.status == dl.STATUS_FAIL
         assert all(line.startswith("FAIL depth: ") for line in outcome.lines)
 
+    def test_auto_bisect_reports_found_floor_as_warn_never_a_command(self, tmp_path: Path) -> None:
+        """DEC-DOCTOR-KIT-HONESTY-001 fix 1 (zero-command law): an empty boundary
+        window under ``auto_bisect`` bisects the true floor ITSELF and reports
+        it as an advisory WARN naming the floor — never a FAIL instructing the
+        operator to run ``--depth-bisect``. FAILS before the fix (the autorun
+        path had ``depth_bisect=False`` → a FAIL prescribing the command)."""
+        deps, ctx, box = prepare_client(tmp_path, auto_bisect=True)
+        box["handler"] = _depth_handler(date(2021, 6, 14))
+        outcome = dl.stage_depth(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        assert any(
+            "1-minute depth floor for BSE-SENSEX: 2021-06-14" in line for line in outcome.lines
+        )
+        assert all("--depth-bisect" not in line for line in outcome.lines)
+        assert all("re-run" not in line for line in outcome.lines)
+        assert all(not line.startswith("FAIL") for line in outcome.lines)
+
+    def test_auto_bisect_never_bisects_a_passing_symbol(self, tmp_path: Path) -> None:
+        """Only the FAILING symbol pays bisect calls — a boundary hit costs
+        exactly ONE vendor call per passing symbol (no wasted vendor spend)."""
+        deps, ctx, box = prepare_client(tmp_path, auto_bisect=True)
+        counts: dict[str, int] = {}
+        shallow = _depth_handler(date(2021, 6, 14))
+
+        def _sensex_only_shallow(kwargs: dict[str, object]) -> Mapping[str, object]:
+            symbol = str(kwargs.get("groww_symbol"))
+            counts[symbol] = counts.get(symbol, 0) + 1
+            if symbol == "BSE-SENSEX":
+                return shallow(kwargs)
+            return default_handler(kwargs)
+
+        box["handler"] = _sensex_only_shallow
+        outcome = dl.stage_depth(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        assert len(outcome.lines) == 1
+        assert "1-minute depth floor for BSE-SENSEX: 2021-06-14" in outcome.lines[0]
+        # Passing symbols: ONE boundary call each, never a bisect.
+        assert counts["NSE-NIFTY"] == 1
+        assert counts["NSE-BANKNIFTY"] == 1
+        # The failing symbol's bisect stays inside the per-symbol hard cap.
+        assert 2 <= counts["BSE-SENSEX"] <= 20
+        # Budget honesty: every call was spent through the (extended) budget.
+        assert ctx.budget.limit == 100  # 40 default + 60 auto-bisect extension
+        assert ctx.budget.used == 1 + sum(counts.values())  # smoke + depth calls
+
+    def test_auto_bisect_no_data_anywhere_fails_without_prescribing_a_command(
+        self, tmp_path: Path
+    ) -> None:
+        deps, ctx, box = prepare_client(tmp_path, auto_bisect=True)
+        box["handler"] = lambda _kwargs: {"candles": []}
+        outcome = dl.stage_depth(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert all("no probed 1m data at all" in line for line in outcome.lines)
+        assert all("--depth-bisect" not in line for line in outcome.lines)
+        assert all("re-run with" not in line for line in outcome.lines)
+
+    def test_manual_depth_bisect_verdict_is_byte_unchanged_even_with_auto(
+        self, tmp_path: Path
+    ) -> None:
+        """An EXPLICIT --depth-bisect keeps the manual FAIL diagnosis (the
+        operator asked for the probe — the shallow-floor hazard stays loud)."""
+        deps, ctx, box = prepare_client(tmp_path, depth_bisect=True, auto_bisect=True)
+        box["handler"] = _depth_handler(date(2021, 6, 14))
+        outcome = dl.stage_depth(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert any(
+            line.startswith("FAIL depth[R6]: BSE-SENSEX 1m actually starts 2021-06-14")
+            for line in outcome.lines
+        )
+
     def test_budget_exhaustion_raises_for_runner(self, tmp_path: Path) -> None:
         deps, ctx, _box = prepare_client(tmp_path)
         ctx.budget.spend(ctx.budget.remaining, label="drain")
@@ -1151,7 +1226,7 @@ class TestStageBhavcopy:
             return _BHAVCOPY_DRIFTED if "ind_close_all" in url else _master_csv()
 
         deps, ctx, _box = _spot_pass(tmp_path)
-        deps.http_get = _http
+        deps.nse_http_get = _http
         outcome = dl.stage_bhavcopy(deps, ctx)
         assert outcome.status == dl.STATUS_FAIL
         assert outcome.lines[0].startswith("FAIL bhavcopy[M12/M15]: derived close 100.5 vs 106.95")
@@ -1170,7 +1245,7 @@ class TestStageBhavcopy:
             return _master_csv()
 
         deps, ctx, _box = _spot_pass(tmp_path)
-        deps.http_get = _http
+        deps.nse_http_get = _http
         outcome = dl.stage_bhavcopy(deps, ctx)
         assert outcome.status == dl.STATUS_WARN
         assert outcome.lines[0] == dl.render_diagnostic(
@@ -1182,7 +1257,7 @@ class TestStageBhavcopy:
             return "A,B\n1,2\n" if "ind_close_all" in url else _master_csv()
 
         deps, ctx, _box = _spot_pass(tmp_path)
-        deps.http_get = _http
+        deps.nse_http_get = _http
         outcome = dl.stage_bhavcopy(deps, ctx)
         assert outcome.status == dl.STATUS_WARN
         assert "unrecognised NSE indices snapshot header" in outcome.lines[0]
@@ -1194,7 +1269,7 @@ class TestStageBhavcopy:
             return snapshot if "ind_close_all" in url else _master_csv()
 
         deps, ctx, _box = _spot_pass(tmp_path)
-        deps.http_get = _http
+        deps.nse_http_get = _http
         outcome = dl.stage_bhavcopy(deps, ctx)
         assert outcome.status == dl.STATUS_WARN
         assert outcome.lines[0] == dl.render_diagnostic(
@@ -1207,6 +1282,60 @@ class TestStageBhavcopy:
         outcome = dl.stage_bhavcopy(deps, ctx)
         assert outcome.status == dl.STATUS_WARN
         assert outcome.lines[0] == dl.render_diagnostic("bhavcopy.no_daily_bar", day="2026-06-30")
+
+    def test_stage_fetches_via_the_nse_getter_not_the_groww_shim(self, tmp_path: Path) -> None:
+        """DEC-DOCTOR-KIT-HONESTY-001 fix 2: stage 8 must route through
+        ``KitDeps.nse_http_get`` — the Groww instrument-master getter is never
+        called for the NSE archive (its allowlist would block it)."""
+
+        def _groww_only(_url: str) -> str:
+            raise AssertionError("stage 8 must not use the Groww http_get shim")
+
+        deps, ctx, _box = _spot_pass(tmp_path)
+        deps.http_get = _groww_only
+        outcome = dl.stage_bhavcopy(deps, ctx)
+        assert outcome.status == dl.STATUS_PASS
+
+    def test_groww_allowlist_refusal_is_a_kit_wiring_fail_not_external(
+        self, tmp_path: Path
+    ) -> None:
+        """The operator's red-banner mislabel (log 23c543ba): the Groww shim's
+        SSRF allowlist blocking archives.nseindia.com rendered as 'external
+        dependency'. It is OUR wiring — now an internal-kit-bug FAIL. FAILS
+        before the fix (the generic except mapped it to bhavcopy.unreachable)."""
+        from brutex.adapters.groww.instrument_loader import GrowwInstrumentFetchError
+
+        def _groww_shim(_url: str) -> str:
+            raise GrowwInstrumentFetchError(
+                "instrument-master host not allowlisted "
+                "(growwapi-assets.groww.in): 'archives.nseindia.com'"
+            )
+
+        deps, ctx, _box = _spot_pass(tmp_path)
+        deps.nse_http_get = _groww_shim
+        outcome = dl.stage_bhavcopy(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert outcome.lines[0].startswith(
+            "FAIL bhavcopy: kit wiring: URL blocked by local allowlist"
+        )
+        assert "external dependency" not in outcome.lines[0]
+
+    def test_bhavcopy_own_allowlist_refusal_is_also_a_wiring_fail(self, tmp_path: Path) -> None:
+        from brutex.data.bhavcopy import BhavcopyError
+
+        def _refusing(url: str) -> str:
+            raise BhavcopyError(
+                f"refusing non-allowlisted bhavcopy URL {url!r} — allowed hosts: "
+                "['archives.nseindia.com', 'nsearchives.nseindia.com'] over https"
+            )
+
+        deps, ctx, _box = _spot_pass(tmp_path)
+        deps.nse_http_get = _refusing
+        outcome = dl.stage_bhavcopy(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert outcome.lines[0].startswith(
+            "FAIL bhavcopy: kit wiring: URL blocked by local allowlist"
+        )
 
 
 # ── stage 9 · resample ──────────────────────────────────────────────────

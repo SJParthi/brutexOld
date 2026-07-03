@@ -66,3 +66,31 @@ def test_bare_app_reports_not_wired() -> None:
     the widget then renders nothing (never a fabricated verdict)."""
     with TestClient(build_app(DashboardState())) as client:
         assert client.get("/api/v1/liveproof").json() == {"present": False}
+
+
+def test_pill_headline_is_flow_scoped_worst_of_never_preflight_only() -> None:
+    """DEC-DOCTOR-KIT-HONESTY-001 fix 3: the pill headline is ONE flow-scoped
+    worst-of line ("live-proof — preflight: PASS · probes: FAIL — depth[R6]")
+    so the two flows sharing one pill can never read as a contradictory
+    PASS-then-FAIL toast sequence. FAILS before the fix (the headline was the
+    preflight summary alone — ``text.textContent = pre.text``)."""
+    js = (
+        Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static" / "bx-liveproof.js"
+    ).read_text(encoding="utf-8")
+    # The unified headline exists and is what the pill text renders.
+    assert "function unifiedHeadline(data)" in js
+    assert "text.textContent = unifiedHeadline(data)" in js
+    assert '"live-proof — preflight: "' in js
+    assert '" · probes: "' in js
+    # Flow-scoped short labels + failing-stage pointers ("depth[R6]" style).
+    assert "KIND_LABEL" in js
+    assert "function failingStageLabels(verdict)" in js
+    # The OLD contradictory preflight-only headline is gone.
+    assert "text.textContent = pre.text" not in js
+    # The pill DOT worst-of logic is untouched (not re-implemented).
+    assert "worstClass(pre.cls" in js
+    # The #1076 never-occlude auto-collapse is preserved alongside this fix.
+    assert "AUTO_MIN_MS" in js
+    assert "bxlp-min" in js
+    # textContent-only rendering stays absolute (CodeQL XSS gate).
+    assert "innerHTML" not in js

@@ -63,6 +63,10 @@ DEFAULT_TICK_TOLERANCE: Final[Decimal] = Decimal("0.05")
 #: An injected keyless HTTP text getter (mirrors ``instrument_loader.HttpGet``).
 HttpGet = Callable[[str], str]
 
+#: Whole-download timeout (seconds) for :func:`urllib_http_get_nse` (mirrors
+#: ``instrument_loader._DOWNLOAD_TIMEOUT`` — the sibling Groww shim's bound).
+_DOWNLOAD_TIMEOUT: Final[float] = 60.0
+
 
 class BhavcopyError(BruteXError):
     """A bhavcopy fetch/parse failure (network, SSRF refusal, or header drift)."""
@@ -81,6 +85,29 @@ def _check_url(url: str) -> None:
             f"refusing non-allowlisted bhavcopy URL {url!r} — allowed hosts: "
             f"{sorted(BHAVCOPY_ALLOWED_HOSTS)} over https"
         )
+
+
+def urllib_http_get_nse(url: str) -> str:  # pragma: no cover — real network shim
+    """SSRF-guarded ``urllib`` GET for the NSE archive hosts (the live default getter).
+
+    The NSE twin of :func:`brutex.adapters.groww.instrument_loader.urllib_http_get`
+    — it REUSES this module's :func:`_check_url` / :data:`BHAVCOPY_ALLOWED_HOSTS`
+    allowlist (never a copy, CLAUDE.md §11 COMMON), so the doctor kit's stage-8
+    bhavcopy cross-check is never blocked by the GROWW shim's allowlist (which
+    admits only ``growwapi-assets.groww.in`` — the mislabelled "external
+    dependency" failure DEC-DOCTOR-KIT-HONESTY-001 closes). A plain browser-ish
+    ``User-Agent`` is sent because the NSE archive is known to refuse default
+    library agents; any network/HTTP failure propagates for the caller to map
+    to its honest "cross-check skipped, NOT passed" WARN.
+    """
+    import urllib.request
+
+    _check_url(url)
+    request = urllib.request.Request(  # noqa: S310 — https + host allowlisted by _check_url
+        url, headers={"User-Agent": "Mozilla/5.0 (BruteX doctor bhavcopy cross-check)"}
+    )
+    with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT) as resp:  # nosec B310 — https + host allowlisted by _check_url  # noqa: S310
+        return str(resp.read().decode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,4 +258,5 @@ __all__ = [
     "fetch_index_bhavcopy",
     "nse_index_name_for",
     "parse_index_bhavcopy",
+    "urllib_http_get_nse",
 ]

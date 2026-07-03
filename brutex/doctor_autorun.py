@@ -18,12 +18,22 @@ dashboard app instance — no module-global mutable state, CLAUDE.md §4):
    network fetches total (1 authenticated vendor call + 1 keyless master CSV).
    The verdict lands in memory + on disk and the dashboard shows it as a
    persistent status element (``/api/v1/liveproof`` + ``bx-liveproof.js``).
-2. **First-real-pull probes** — the one-time expensive probes
-   (:data:`PROBE_STAGES`: 2020 1-minute depth [R6], VIX availability [R5 —
-   the ADR-0009 §3.2 hard gate], 1-day derivation + NSE bhavcopy cross-check
-   [G7], riding the creds/token/spot-1m prerequisites) auto-run ONCE around
+2. **First-real-pull probes** — the one-time probes
+   (:data:`PROBE_STAGES`: VIX availability [R5 — the ADR-0009 §3.2 hard
+   gate], riding the creds/token/spot-1m prerequisites) auto-run ONCE around
    the first REAL pull attempt (the loud-refusal gate's success path —
-   DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001). The verdict PERSISTS under
+   DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001). **The 2020 1-minute depth probe
+   [R6] and the NSE bhavcopy cross-check [G7] are EXCLUDED from the autorun
+   by operator decree (2026-07-03, DEC-DOCTOR-KIT-HONESTY-001 amendment):
+   the autorun makes ZERO depth-probe vendor calls and ZERO NSE bhavcopy
+   fetches, so neither a depth red banner nor a bhavcopy warning can appear
+   at startup by construction. Both stages remain fully available on the
+   MANUAL CLI path only (``brutex doctor --live`` runs all stages;
+   ``--stage 6,8`` / ``--depth-bisect`` unchanged). HONEST trade-off
+   (operator-accepted): a genuinely shallow vendor floor or a vendor 1m
+   stream drifting from the NSE close is NO LONGER flagged automatically —
+   catching those requires an explicit manual run.** The verdict PERSISTS
+   under
    ``<lake_root>/_liveproof/autorun/``; later startups/pulls read the cached
    verdict instead of re-probing. A failed/corrupt cache re-probes on the
    next pull — bounded: single-flight, at most one attempt per pull trigger,
@@ -126,10 +136,24 @@ _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 #: ONE authenticated smoke call / instrument master. ≤ 2 network fetches.
 PREFLIGHT_STAGES: Final[frozenset[int]] = frozenset({0, 1, 2, 3, 4})
 
-#: The one-time expensive probes + their prerequisites: creds (1) → token (3)
-#: → spot-1m (5) → depth (6) + VIX (7) + bhavcopy (8). ≤ ~10 vendor calls,
-#: all inside the kit's default 40-call budget.
-PROBE_STAGES: Final[frozenset[int]] = frozenset({1, 3, 5, 6, 7, 8})
+#: The one-time probes + their prerequisites: creds (1) → token (3) →
+#: spot-1m (5) → VIX (7). A handful of vendor calls on the clean path, all
+#: inside the kit's plain 40-call budget. The 2020 depth probe (6) and the
+#: NSE bhavcopy cross-check (8) are DELIBERATELY ABSENT — operator decree
+#: 2026-07-03 (DEC-DOCTOR-KIT-HONESTY-001 amendment): the autorun never
+#: probes depth (zero boundary/bisect vendor calls, zero red SENSEX banner)
+#: and never fetches a bhavcopy snapshot; both stages stay manual-CLI-only
+#: (``brutex doctor --live``).
+PROBE_STAGES: Final[frozenset[int]] = frozenset({1, 3, 5, 7})
+
+#: The kit's stage id for the 2020 1-minute depth probe (stage 6) — the ONE
+#: stage whose failure triggers the automatic bounded bisect, so
+#: :func:`run_kit_stages` grants the bisect budget ONLY to runs that include
+#: it. Since the operator decree removed stage 6 from :data:`PROBE_STAGES`,
+#: NO autorun run carries the extension (every autorun run keeps the plain
+#: default budget); the guard remains for any caller that explicitly selects
+#: stage 6 through :func:`run_kit_stages`.
+DEPTH_STAGE_ID: Final[int] = 6
 
 #: Stage names whose genuine PASS/WARN is REQUIRED before a preflight verdict
 #: may read better than ``fail`` — ``token`` is the stage whose authenticated
@@ -137,8 +161,10 @@ PROBE_STAGES: Final[frozenset[int]] = frozenset({1, 3, 5, 6, 7, 8})
 PREFLIGHT_REQUIRED: Final[frozenset[str]] = frozenset({"token"})
 
 #: Stage names whose genuine PASS/WARN is REQUIRED for a probes verdict —
-#: the three questions the probes exist to answer.
-PROBES_REQUIRED: Final[frozenset[str]] = frozenset({"depth", "vix", "bhavcopy"})
+#: the ONE question the autorun probes still answer (the VIX hard gate).
+#: ``depth`` / ``bhavcopy`` are no longer autorun stages (operator decree
+#: 2026-07-03), so they can no longer be required here.
+PROBES_REQUIRED: Final[frozenset[str]] = frozenset({"vix"})
 
 #: Per-second ceiling injected into PROBE runs (the rate ladder's deep floor)
 #: so probe traffic stacked on an in-flight pull adds ≤ 1 r/s. Overriding the
@@ -638,7 +664,20 @@ def run_kit_stages(
     deps = (build_real_deps if deps_factory is None else deps_factory)()
     if controller_factory is not None:
         deps.controller_factory = controller_factory
-    options = KitOptions(lake_root=lake_root, stages=stages, keep_going=True)
+    options = KitOptions(
+        lake_root=lake_root,
+        stages=stages,
+        keep_going=True,
+        # ZERO-COMMAND law (DEC-DOCTOR-KIT-HONESTY-001): when the depth stage
+        # runs, a FAILing boundary probe auto-bisects the true floor for that
+        # symbol only (bounded; a passing symbol costs 1 call) and reports it
+        # as an advisory WARN naming the floor — never a FAIL instructing the
+        # operator to run --depth-bisect. Since the 2026-07-03 operator decree
+        # removed stage 6 from BOTH autorun stage sets, no autorun run grants
+        # the bisect extension (plain 40-call budget); the guard fires only
+        # for a caller that explicitly selects stage 6.
+        auto_bisect=DEPTH_STAGE_ID in stages,
+    )
     return run_live_doctor(deps, options)
 
 
@@ -955,6 +994,7 @@ __all__ = [
     "AUTORUN_PROBE_CEILING_PER_MIN",
     "AUTORUN_PROBE_CEILING_RPS",
     "AUTORUN_WARN_RECHECK_DAYS",
+    "DEPTH_STAGE_ID",
     "HEADLINES",
     "KIND_ERROR",
     "KIND_FAIL",

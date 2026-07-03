@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from brutex.config.credentials_types import CredentialsError, GrowwFileCredentia
 from tests.unit.test_doctor_live import (
     _BHAVCOPY_DRIFTED,
     _SECRET,
+    _depth_handler,
     make_deps,
 )
 
@@ -83,10 +84,12 @@ def _pass_preflight_report() -> dl.KitReport:
 
 
 def _pass_probes_report() -> dl.KitReport:
+    """Mirrors the post-decree autorun probes run: creds→token→spot-1m→vix."""
     return _report(
-        _outcome(6, "depth", dl.STATUS_PASS, "PASS depth: ok"),
+        _outcome(1, "creds", dl.STATUS_PASS, "PASS creds: ok"),
+        _outcome(3, "token", dl.STATUS_PASS, "PASS token: ok"),
+        _outcome(5, "spot-1m", dl.STATUS_PASS, "PASS spot-1m: ok"),
         _outcome(7, "vix", dl.STATUS_PASS, "PASS vix: ok"),
-        _outcome(8, "bhavcopy", dl.STATUS_PASS, "PASS bhavcopy: ok"),
     )
 
 
@@ -317,12 +320,16 @@ def test_summarize_warn_stage_is_warn_kind() -> None:
 
 
 def test_summarize_required_warn_counts_as_proven() -> None:
-    """A WARN-degradable required stage (bhavcopy unreachable) → warn, not fail."""
-    warn_line = dl.render_diagnostic("bhavcopy.unreachable", error="timeout")
+    """A WARN on the required proof stage still counts as proven → warn, not fail.
+
+    Pure-summarizer contract (the ``in (PASS, WARN)`` acceptance branch): a
+    required stage that genuinely ran but degraded to WARN never reads as an
+    unproven ``fail``.
+    """
+    warn_line = "WARN vix: degraded evidence"
     report = _report(
-        _outcome(6, "depth", dl.STATUS_PASS, "PASS depth: ok"),
-        _outcome(7, "vix", dl.STATUS_PASS, "PASS vix: ok"),
-        _outcome(8, "bhavcopy", dl.STATUS_WARN, warn_line),
+        _outcome(1, "creds", dl.STATUS_PASS, "PASS creds: ok"),
+        _outcome(7, "vix", dl.STATUS_WARN, warn_line),
     )
     verdict = da.summarize_report(report, required=da.PROBES_REQUIRED, now=_NOW)
     assert verdict.kind == da.KIND_WARN
@@ -704,11 +711,7 @@ def test_first_real_pull_runs_probes_once_then_caches(tmp_path: Path) -> None:
 
     def _probes() -> dl.KitReport:
         runs.append("probe")
-        return _report(
-            _outcome(6, "depth", dl.STATUS_PASS, "PASS depth: ok"),
-            _outcome(7, "vix", dl.STATUS_PASS, "PASS vix: ok"),
-            _outcome(8, "bhavcopy", dl.STATUS_PASS, "PASS bhavcopy: ok"),
-        )
+        return _pass_probes_report()
 
     holder = _holder(tmp_path, probes_runner=_probes)
     assert holder.on_real_pull() is True
@@ -1089,14 +1092,89 @@ def test_e2e_probes_green_over_benign_fakes(tmp_path: Path) -> None:
     assert holder.on_real_pull() is True
     verdict = holder.status()["probes"]["verdict"]
     assert verdict["kind"] == da.KIND_PASS
+    # Operator decree 2026-07-03: depth + bhavcopy are NOT autorun stages.
     assert [row["name"] for row in verdict["stages"]] == [
         "creds",
         "token",
         "spot-1m",
-        "depth",
         "vix",
-        "bhavcopy",
     ]
+
+
+def test_e2e_probes_never_probe_depth_even_when_the_floor_is_shallow(tmp_path: Path) -> None:
+    """Operator decree 2026-07-03 (DEC-DOCTOR-KIT-HONESTY-001 amendment): the
+    autorun no longer runs the depth stage AT ALL. A Groww clean-empty at the
+    2020 boundary for BSE-SENSEX — the exact case that used to render the red
+    depth[R6] banner — now leaves the startup verdict a clean PASS with ZERO
+    vendor calls for that symbol (SENSEX is touched ONLY by stage 6) and no
+    depth row/line anywhere. FAILS before the fix (the probes ran stage 6 →
+    a WARN naming the floor). The stage IMPLEMENTATION is kept for the
+    manual CLI (``brutex doctor --live``), pinned via the kit registry."""
+    shallow = _depth_handler(date(2021, 6, 14))
+    counts: dict[str, int] = {}
+
+    def _deps() -> dl.KitDeps:
+        deps, box = make_deps(tmp_path)
+
+        def _sensex_only_shallow(kwargs: dict[str, object]) -> Mapping[str, object]:
+            symbol = str(kwargs.get("groww_symbol"))
+            counts[symbol] = counts.get(symbol, 0) + 1
+            if symbol == "BSE-SENSEX":
+                return shallow(kwargs)
+            from tests.unit.test_doctor_live import default_handler
+
+            return default_handler(kwargs)
+
+        box["handler"] = _sensex_only_shallow
+        return deps
+
+    holder = _e2e_holder(tmp_path, _deps)
+    assert holder.on_real_pull() is True
+    verdict = holder.status()["probes"]["verdict"]
+    # Clean PASS — no red banner, no advisory WARN, no depth lines at all.
+    assert verdict["kind"] == da.KIND_PASS
+    assert verdict["lines"] == []
+    assert all(row["name"] != "depth" for row in verdict["stages"])
+    # ZERO depth-probe vendor calls: only stage 6 addresses BSE-SENSEX.
+    assert counts.get("BSE-SENSEX", 0) == 0
+    # The stage implementation is NOT deleted — the manual CLI (default: all
+    # stages) still carries depth (6) + bhavcopy (8).
+    registry = {stage: name for stage, name, _fn in dl.STAGES}
+    assert registry[6] == "depth"
+    assert registry[8] == "bhavcopy"
+
+
+def test_run_kit_stages_grants_auto_bisect_only_to_depth_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bisect budget extension is scoped to runs that include stage 6
+    (:data:`da.DEPTH_STAGE_ID`). Post-decree BOTH autorun stage sets exclude
+    stage 6, so BOTH the probes and the preflight runs keep the plain
+    40-call budget with ``auto_bisect`` off; only an EXPLICIT stage-6
+    selection (the manual/diagnostic path) carries ``auto_bisect`` and the
+    40 + 60 = 100 extension — the honest call-budget split."""
+    captured: dict[str, object] = {}
+
+    def _capturing_run(deps: dl.KitDeps, options: dl.KitOptions) -> dl.KitReport:
+        captured["auto_bisect"] = options.auto_bisect
+        captured["budget"] = dl.compute_call_budget(options)
+        return dl.run_live_doctor(deps, options, transcript_sink=lambda _line: None)
+
+    deps, _box = make_deps(tmp_path)
+    monkeypatch.setattr(da, "run_live_doctor", _capturing_run)
+    assert da.DEPTH_STAGE_ID not in da.PROBE_STAGES  # the decree, pinned
+    assert da.DEPTH_STAGE_ID not in da.PREFLIGHT_STAGES
+    da.run_kit_stages(da.PROBE_STAGES, lake_root=tmp_path / "lake", deps_factory=lambda: deps)
+    assert captured == {"auto_bisect": False, "budget": 40}
+    da.run_kit_stages(da.PREFLIGHT_STAGES, lake_root=tmp_path / "lake", deps_factory=lambda: deps)
+    assert captured == {"auto_bisect": False, "budget": 40}
+    # An explicit stage-6 selection still gets the honest bisect budget.
+    da.run_kit_stages(
+        da.PROBE_STAGES | frozenset({da.DEPTH_STAGE_ID}),
+        lake_root=tmp_path / "lake",
+        deps_factory=lambda: deps,
+    )
+    assert captured == {"auto_bisect": True, "budget": 100}
 
 
 @pytest.mark.parametrize(
@@ -1225,24 +1303,32 @@ def test_e2e_probes_vix_absent_is_fail_with_the_hard_gate_line(tmp_path: Path) -
     assert tuple(verdict["lines"]) == _kit_lines(_deps, da.PROBE_STAGES, tmp_path / "lake")
 
 
-def test_e2e_probes_bhavcopy_mismatch_is_fail(tmp_path: Path) -> None:
-    """A derived-vs-NSE OHLC drift fails the probes with the M12/M15 line."""
+def test_e2e_probes_never_fetch_bhavcopy_even_when_drifted(tmp_path: Path) -> None:
+    """Operator decree 2026-07-03 (DEC-DOCTOR-KIT-HONESTY-001 amendment): the
+    autorun no longer runs the bhavcopy cross-check AT ALL. A derived-vs-NSE
+    OHLC drift — the exact case that used to FAIL the probes with the
+    M12/M15 line — now leaves the verdict a clean PASS, with ZERO NSE-archive
+    fetches (the ``nse_http_get`` seam is only stage 8's). FAILS before the
+    fix (the probes ran stage 8 → kind ``fail``). The manual CLI keeps the
+    cross-check (stage 8 stays in the kit registry, pinned above)."""
+    nse_fetches: list[str] = []
 
     def _http_drifted(url: str) -> str:
-        if "ind_close_all" in url:
-            return _BHAVCOPY_DRIFTED
-        from tests.unit.test_doctor_live import _master_csv
-
-        return _master_csv()
+        nse_fetches.append(url)
+        return _BHAVCOPY_DRIFTED
 
     def _deps() -> dl.KitDeps:
-        return make_deps(tmp_path, http_get=_http_drifted)[0]
+        # The NSE-archive getter is the stage-8 seam (KitDeps.nse_http_get,
+        # DEC-DOCTOR-KIT-HONESTY-001) — nothing else may call it.
+        return make_deps(tmp_path, nse_http_get=_http_drifted)[0]
 
     holder = _e2e_holder(tmp_path, _deps)
     holder.on_real_pull()
     verdict = holder.status()["probes"]["verdict"]
-    assert verdict["kind"] == da.KIND_FAIL
-    assert any(line.startswith("FAIL bhavcopy[M12/M15]:") for line in verdict["lines"])
+    assert verdict["kind"] == da.KIND_PASS
+    assert verdict["lines"] == []
+    assert all(row["name"] != "bhavcopy" for row in verdict["stages"])
+    assert nse_fetches == []  # ZERO NSE-archive fetches at startup/first pull
 
 
 def test_e2e_probes_persist_and_second_pull_skips(tmp_path: Path) -> None:
