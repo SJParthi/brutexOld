@@ -145,8 +145,10 @@ def resample_bars(
         timestamp, or — on the down-sampling path (``target > source``) —
         a bar's timestamp is not strictly greater than the previous
         bar's (an out-of-order or duplicate bar; bars must be strictly
-        increasing). The ``target == source`` identity passthrough
-        returns early and does not run the monotonic guard.
+        increasing). The ``target == source`` identity passthrough runs
+        the SAME tz + monotonic guard before returning the copy
+        (DEC-LAKE-READ-UNIQUE-001 — it previously skipped the guard, so a
+        duplicated bar rode through the identity path silently).
     """
     _validate_interval(source_interval, which="source")
     _validate_interval(target_interval, which="target")
@@ -161,6 +163,14 @@ def resample_bars(
             f"undefined without an interpolation model"
         )
     if tgt_s == src_s:
+        # Identity passthrough is NOT guard-exempt (DEC-LAKE-READ-UNIQUE-001):
+        # the same O(1)-per-bar tz + strictly-increasing feed-integrity check
+        # runs here too, so a duplicate/out-of-order bar is rejected loudly on
+        # EVERY resample path — previously this early return skipped the guard
+        # and a duplicated bar flowed through the identity path silently.
+        identity_prev: datetime | None = None
+        for bar in bars:
+            identity_prev = _guard_bar_order(bar, identity_prev)
         return list(bars)
     if tgt_s % src_s != 0:
         raise ResampleError(
@@ -184,17 +194,7 @@ def resample_bars(
     prev_ts: datetime | None = None
 
     for bar in bars:
-        if bar.timestamp.tzinfo is None:
-            raise ResampleError(
-                f"resample_bars requires tz-aware timestamps, got naive {bar.timestamp!r}"
-            )
-        if prev_ts is not None and bar.timestamp <= prev_ts:
-            raise ResampleError(
-                f"resample_bars requires strictly-increasing timestamps, got "
-                f"{bar.timestamp.isoformat()} <= previous {prev_ts.isoformat()} "
-                f"(an out-of-order or duplicate bar mis-buckets the aggregate)"
-            )
-        prev_ts = bar.timestamp
+        prev_ts = _guard_bar_order(bar, prev_ts)
         bucket_start = _bucket_start(bar.timestamp, tgt_s)
         if current_bucket_start is None or bucket_start != current_bucket_start:
             if bucket:
@@ -213,6 +213,33 @@ def resample_bars(
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────
+
+
+def _guard_bar_order(bar: CandleBar, prev_ts: datetime | None) -> datetime:
+    """Run the O(1) tz + strictly-increasing feed-integrity guard on one bar.
+
+    The ONE guard body (CLAUDE.md §11 COMMON) shared by the down-sampling loop
+    AND the ``target == source`` identity passthrough (DEC-LAKE-READ-UNIQUE-001):
+    only the PREVIOUS bar's timestamp is tracked, so the check costs O(1) time +
+    O(1) space per bar. Returns the bar's timestamp as the next ``prev_ts``.
+
+    Raises
+    ------
+    ResampleError
+        On a naive timestamp, or a timestamp not strictly greater than the
+        previous bar's (an out-of-order or duplicate bar).
+    """
+    if bar.timestamp.tzinfo is None:
+        raise ResampleError(
+            f"resample_bars requires tz-aware timestamps, got naive {bar.timestamp!r}"
+        )
+    if prev_ts is not None and bar.timestamp <= prev_ts:
+        raise ResampleError(
+            f"resample_bars requires strictly-increasing timestamps, got "
+            f"{bar.timestamp.isoformat()} <= previous {prev_ts.isoformat()} "
+            f"(an out-of-order or duplicate bar mis-buckets the aggregate)"
+        )
+    return bar.timestamp
 
 
 def _validate_interval(interval: str, *, which: str) -> None:

@@ -54,6 +54,8 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.lake_read import bars_by_ts_first
+
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
 
@@ -92,9 +94,11 @@ class ReferenceSeries:
         """Build a :class:`ReferenceSeries` from a chronological bar feed.
 
         The series shares the index's calendar + timeframe, so it is aligned by
-        bar ``timestamp``. A duplicate timestamp keeps the **last** bar (the
-        normal lake feed has unique timestamps; this is a defensive tie-break,
-        not an expected path).
+        bar ``timestamp``. A duplicate timestamp keeps the **first** bar and is
+        WARNED, never silent — the COMMON keep-FIRST read gate
+        (:func:`brutex.data.lake_read.bars_by_ts_first`,
+        DEC-LAKE-READ-UNIQUE-001; previously a silent last-wins dict, so a
+        poisoned-era duplicate re-statement silently replaced the real close).
 
         Parameters
         ----------
@@ -109,7 +113,8 @@ class ReferenceSeries:
         ReferenceSeries
             The O(1)-lookup series.
         """
-        return cls(name=name, close_by_ts={bar.timestamp: bar.close for bar in bars})
+        first_by_ts = bars_by_ts_first(bars, source=f"reference_series:{name}")
+        return cls(name=name, close_by_ts={ts: bar.close for ts, bar in first_by_ts.items()})
 
     def level_at(self, ts: datetime) -> Decimal | None:
         """Return the series' close at ``ts``, or ``None`` if no bar exists there.

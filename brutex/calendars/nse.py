@@ -239,6 +239,18 @@ HOLIDAYS_2025 = frozenset(
     ]
 )
 
+# HONESTY NOTE (DEC-HARDENING-LEFTOVERS-001, Golden Rule #1) — vendor-observed
+# Jan-2026 session-count drift, UNVERIFIED: a live Groww pull served **20**
+# distinct Jan-2026 trading sessions while this calendar derives **21**
+# (22 Jan-2026 weekdays minus the sole listed January holiday, Republic Day
+# 2026-01-26) — implying EXACTLY ONE additional Jan-2026 NSE holiday this list
+# lacks. No source in this repo names that date, so it is deliberately NOT
+# fabricated here (no behavioral change); the gap is closable ONLY by the
+# official NSE 2026 trading-holiday circular or a live vendor probe of the
+# Jan-2026 session dates. (A separately-reported claim that the 2026-02-01
+# Sunday Budget session was "missing" is REFUTED: date(2026, 2, 1) is already a
+# verified entry in SPECIAL_WEEKEND_TRADING_SESSIONS below, added by
+# DEC-CALENDAR-2020-BUDGET-SATURDAY-001.)
 HOLIDAYS_2026 = frozenset(
     [
         date(2026, 1, 26),  # Republic Day
