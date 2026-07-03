@@ -89,9 +89,10 @@ PHASE_SPOT = "spot"
 PHASE_METADATA = "metadata"
 PHASE_HISTORICAL = "historical"
 #: The OPTIONAL gated movers phase: warm the movers snapshots ONLY after every
-#: fetch phase succeeds AND the prebuild ran (DEC-PIPELINE-AUTOPREBUILD-001 —
-#: movers read the DERIVED timeframes, which only the prebuild writes now, so a
-#: pre-prebuild warm would read stale/absent partitions).
+#: fetch phase succeeds AND the prebuild SUCCEEDED (``PrebuildOutcome.ok`` —
+#: DEC-PIPELINE-AUTOPREBUILD-001 chunk 2; movers read the DERIVED timeframes,
+#: which only the prebuild writes now, so a pre-prebuild or failed-prebuild
+#: warm would read stale/absent partitions).
 PHASE_MOVERS = "movers"
 #: The gated PREBUILD phase (DEC-PIPELINE-AUTOPREBUILD-001, superseding the
 #: DEC-UNIVERSE-PULL-CONSOLIDATE-001 shape): pre-build ALL derived timeframes
@@ -239,7 +240,8 @@ class PipelinePullReport:
     segment_movers_warmed
         The per-segment warmed-count map (:data:`SEGMENT_SPOT` / :data:`SEGMENT_FUTURES`
         / :data:`SEGMENT_OPTIONS` → count) for every segment whose warmer was injected
-        AND whose warm gate passed (a clean fetch AND a run prebuild). A segment that
+        AND whose warm gate passed (a clean fetch AND a SUCCESSFUL prebuild —
+        ``PrebuildOutcome.ok``, the chunk-2 tightening). A segment that
         did not warm is ABSENT from the map (never a fabricated count, Golden Rule #1).
         Empty when no segment warmed.
     prebuild_built
@@ -453,9 +455,12 @@ def run_full_pipeline(
     timeframes, which the prebuild alone writes now, so warming earlier would
     read stale/absent partitions. This SUPERSEDES the early spot-segment warm
     of DEC-PIPELINE-SEGMENT-MOVERS-001 (removed): all three segment warmers
-    fire together, gated on ``fetch_clean AND the prebuild ran`` — with no
-    ``run_prebuild`` injected NO warmer fires (there is no fresh derived data
-    to warm over). A warmed segment records its count in
+    fire together, gated on ``fetch_clean AND the prebuild SUCCEEDED``
+    (``PrebuildOutcome.ok`` — the chunk-2 tightening of the chunk-1
+    "prebuild ran" gate: an ``ok=False`` prebuild is still RECORDED in the
+    report but warms NOTHING, since its derived partitions may be stale or
+    absent) — with no ``run_prebuild`` injected NO warmer fires (there is no
+    fresh derived data to warm over). A warmed segment records its count in
     :attr:`PipelinePullReport.segment_movers_warmed` (``0`` is an honest "ran,
     warmed nothing"); :attr:`PipelinePullReport.movers_warmed` is the SUM
     (``None`` when no segment warmed). Neither the prebuild nor any warm ever
@@ -481,8 +486,9 @@ def run_full_pipeline(
         :class:`~brutex.dashboard.composite_pull.CompositePullReport` (phase 3).
     warm_spot_movers
         OPTIONAL zero-arg callable that warms the SPOT movers snapshots and
-        returns how many were warmed; fired ONLY after a clean fetch AND a run
-        prebuild. ``None`` skips the spot warm.
+        returns how many were warmed; fired ONLY after a clean fetch AND a
+        SUCCESSFUL prebuild (``PrebuildOutcome.ok``). ``None`` skips the spot
+        warm.
     warm_futures_movers
         OPTIONAL zero-arg callable warming the FUTURES movers snapshots; same
         gate. ``None`` skips the futures warm.
@@ -533,9 +539,12 @@ def run_full_pipeline(
         prebuild = run_prebuild()
     # 2) MOVERS WARM — strictly AFTER the prebuild (movers read the derived
     #    timeframes the prebuild just wrote); gated on fetch_clean AND the
-    #    prebuild having run.
+    #    prebuild having SUCCEEDED (`PrebuildOutcome.ok` — chunk 2 of
+    #    DEC-PIPELINE-AUTOPREBUILD-001 tightened the chunk-1 "prebuild ran"
+    #    gate: a failed/partial prebuild leaves stale/absent derived
+    #    partitions, so warming over them would cache a wrong snapshot).
     segment_movers_warmed: dict[str, int] = {}
-    if fetch_clean and prebuild is not None:
+    if fetch_clean and prebuild is not None and prebuild.ok:
         warmers: tuple[tuple[str, Callable[[], int] | None], ...] = (
             (SEGMENT_SPOT, warm_spot_movers),
             (SEGMENT_FUTURES, warm_futures_movers),

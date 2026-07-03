@@ -647,11 +647,13 @@ def test_pipeline_no_prebuild_phase_when_not_injected() -> None:
     assert report.to_dict()["prebuild_total_bars"] is None
 
 
-def test_pipeline_failed_prebuild_outcome_still_recorded_and_warms() -> None:
-    # An ok=False outcome (e.g. the guarded crash path, or per-symbol failures)
-    # is still folded into the report — the prebuild RAN, so the movers warm
-    # still fires (chunk 2 will gate the warm on prebuild SUCCESS; chunk 1 pins
-    # the honest recording + the order).
+def test_pipeline_failed_prebuild_outcome_recorded_but_no_warm() -> None:
+    # CHUNK-2 FLIP of `test_pipeline_failed_prebuild_outcome_still_recorded_and_warms`
+    # (DEC-PIPELINE-AUTOPREBUILD-001): the warm gate is TIGHTENED from "the prebuild
+    # RAN" to "the prebuild SUCCEEDED" (`PrebuildOutcome.ok`). An ok=False outcome
+    # (the guarded crash path, or per-symbol failures) is STILL folded into the
+    # report honestly — but NO movers warm fires (a failed prebuild's derived
+    # partitions may be stale/absent, so warming would cache a wrong snapshot).
     w_spot = _Spy(2)
     report = run_full_pipeline(
         run_spot=_Spy(_spot()),
@@ -662,9 +664,26 @@ def test_pipeline_failed_prebuild_outcome_still_recorded_and_warms() -> None:
             _outcome(symbols_built=0, total_bars=0, failed=(), failed_count=0, ok=False)
         ),
     )
-    assert report.prebuild_built == 0
+    assert report.prebuild_built == 0  # the ok=False outcome is still RECORDED
+    assert report.prebuild_total_bars == 0
+    assert w_spot.called is False  # …but the warm did NOT fire (chunk-2 gate)
+    assert report.segment_movers_warmed == {}
+    assert report.movers_warmed is None
+
+
+def test_pipeline_successful_prebuild_warms() -> None:
+    # The positive twin of the chunk-2 gate: an ok=True prebuild DOES warm.
+    w_spot = _Spy(2)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        warm_spot_movers=w_spot,
+        run_prebuild=_Spy(_outcome(symbols_built=3, total_bars=30, ok=True)),
+    )
     assert w_spot.called is True
     assert report.segment_movers_warmed == {"spot": 2}
+    assert report.movers_warmed == 2
 
 
 def test_pipeline_warms_movers_and_prebuilds_together() -> None:
