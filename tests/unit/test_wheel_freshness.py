@@ -31,7 +31,14 @@ from typing import Any
 import pytest
 import trading_core
 from brutex.doctor import DoctorReport, check_wheel_freshness, main, run_doctor
-from trading_core import _EXPECTED_COMPILED_SYMBOLS, _assert_compiled_surface, _trading_core
+
+# ONE import style only for trading_core (CodeQL py/import-and-import-from):
+# the private handshake internals are read off the module object — the SAME
+# installed-package surface the prior from-import bound, so nothing the tests
+# probe is weakened. Local aliases keep every test body unchanged.
+_EXPECTED_COMPILED_SYMBOLS = trading_core._EXPECTED_COMPILED_SYMBOLS
+_assert_compiled_surface = trading_core._assert_compiled_surface
+_trading_core = trading_core._trading_core
 
 REPO_FINGERPRINT = (
     Path(__file__).resolve().parents[2]

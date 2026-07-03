@@ -498,7 +498,10 @@ def check_wheel_freshness(
 
         # Friend access to the compiled submodule: the whole point of this
         # stage is fingerprinting the installed .so itself, not the shim.
-        from trading_core import _trading_core as compiled  # pyright: ignore[reportPrivateUsage]
+        # ONE import style only (CodeQL py/import-and-import-from) — a plain
+        # submodule import still raises ImportError on a missing/stale .so,
+        # so the WARN arm below is behavior-identical.
+        import trading_core._trading_core as compiled  # pyright: ignore[reportPrivateUsage]
     except ImportError as exc:
         return CheckResult(
             name="wheel_freshness",
