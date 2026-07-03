@@ -55,6 +55,7 @@ from brutex.data.timeframes import (
     LAKE_INTERVAL_LABELS,
     TF_LABELS,
 )
+from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -286,6 +287,11 @@ def materialize_timeframes(
     written: dict[str, int] = {}
     skipped: list[str] = []
     for tf in requested:
+        # Liveness beat per derived timeframe (DEC-PIPELINE-STALL-HEARTBEAT-001):
+        # a deep-history symbol's 20-timeframe materialise can run minutes — beat
+        # WITHIN the symbol so the pull stall watchdog never false-declares a
+        # healthy prebuild HUNG. No-op outside a dashboard pull; O(1).
+        emit_progress_beat()
         frame = derived.get(tf)
         if frame is None:
             skipped.append(tf)
