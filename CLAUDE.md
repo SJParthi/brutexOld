@@ -493,7 +493,7 @@ hostile-review pass._
   strike is never reduced; "if uncertain, fetch" (`< 1` clamps UP to 1). RE-PULL NET: a reduced-budget empty makes
   `fetch_count == 1 < CONFIRMED_EMPTY_MIN_FETCHES(2)` so the OLD-gap fast-settle does NOT fire — the window stays
   re-fetchable on a later idempotent pull (keep-first sink + durable ledger), so even a vendor-bug 200-empty is
-  recoverable [SETTLE-RECONCILE — DEC-DEAD-STRIKE-LEDGER-SETTLE-001, MIGRATION.md #1165–#1166: SUPERSEDED for an OLD window —
+  recoverable [SETTLE-RECONCILE — DEC-DEAD-STRIKE-LEDGER-SETTLE-001, MIGRATION.md #1166 (pack #1171): SUPERSEDED for an OLD window —
   the old-gap settle is now BUDGET-AWARE, accumulating clean-EMPTY confirmations ACROSS pulls (`prior.empty_streak +
   in_pull_fetches` vs the SAME 2-confirmation bar), so TWO independent pulls' clean empties settle a reduced-budget old
   window SKIPPED; a repeated vendor-bug 200-empty on an OLD window is thereafter recoverable via `brutex
@@ -761,7 +761,7 @@ hostile-review pass._
   `UnderlyingEmptyReport`/`AllEmptyScan` + a guarded `_log_underlying_all_empty` (capped 20, `repr()`-named) + ONE
   best-effort `try/except` wiring line in `run_groww_option_ingest`. HONEST: pure DETECT+WARN — no return/ledger/engine
   change, no auto-recovery; false-positive-guarded (skip/transient/empty-clamp excluded so a re-pull never flags)
-  [LOWLEG-RECONCILE — DEC-SILENT-VANISH-LOWLEG-001, MIGRATION.md #1165–#1167: the original "a 1-2-leg illiquid name never
+  [LOWLEG-RECONCILE — DEC-SILENT-VANISH-LOWLEG-001, MIGRATION.md #1167 (pack #1171): the original "a 1-2-leg illiquid name never
   flags" clause is SUPERSEDED — a 1-2-clean-fetch underlying whose EVERY pair was a clean empty, with ZERO non-clean
   AND ZERO terminally-quarantined siblings, NOW flags marked `low_leg=True`; every other #919 false-positive guard
   (skip/transient/empty-clamp/quarantined sibling → disqualified) is regression-pinned; observe-only WARN unchanged];
