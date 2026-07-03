@@ -301,7 +301,10 @@ class TestCheckAuditReplayConsistency:
 class TestRunDoctor:
     """End-to-end aggregator behaviour."""
 
-    def test_all_skip_returns_ok(self, tmp_path: Path) -> None:
+    def test_all_skip_returns_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Skip the wheel-freshness stage via its env override so this
+        # aggregate test stays hermetic (all-SKIP regardless of wheel state).
+        monkeypatch.setenv("BRUTEX_SKIP_WHEEL_FRESHNESS", "1")
         report = run_doctor(
             audit_file=None,
             audit_dir=tmp_path / "no_audit",
@@ -309,9 +312,9 @@ class TestRunDoctor:
             lake_root=tmp_path / "no_lake",
         )
         assert report.ok is True
-        # 5 checks: audit_chain + runtime_file + audit_replay + derived_freshness
-        # + lake_uniqueness (DEC-LAKE-HEAL-001)
-        assert len(report.checks) == 5
+        # 6 checks: audit_chain + runtime_file + audit_replay + derived_freshness
+        # + lake_uniqueness (DEC-LAKE-HEAL-001) + wheel_freshness (R2-CC-G1)
+        assert len(report.checks) == 6
         statuses = {c.name: c.status for c in report.checks}
         assert statuses == {
             "audit_chain": "SKIP",
@@ -319,6 +322,7 @@ class TestRunDoctor:
             "audit_replay": "SKIP",
             "derived_freshness": "SKIP",
             "lake_uniqueness": "SKIP",
+            "wheel_freshness": "SKIP",
         }
 
     def test_audit_pass_runtime_skip(self, good_audit_log: Path, tmp_path: Path) -> None:
