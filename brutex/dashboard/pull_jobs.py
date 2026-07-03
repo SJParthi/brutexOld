@@ -25,10 +25,10 @@ real threads.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 import structlog
 
@@ -56,7 +56,11 @@ _LOG = structlog.get_logger(__name__)
 #: DH-905 no-data boundary (NOT a failure — DEC-DHAN-NO-DATA-GAP-COUNT-001).
 ProgressHook = Callable[[str, int, bool, bool], None]
 
-#: The injected pull work — given the progress hook, run the pull (return ignored).
+#: The injected pull work — given the progress hook, run the pull. The return
+#: value is inspected ONLY for the completion headline: a Mapping with a
+#: non-empty string ``"note"`` (a pull-report ``to_dict``) becomes the finish
+#: detail (:func:`_finish_detail`); anything else keeps the ``"done"``
+#: back-compat (DEC-PIPELINE-AUTOPREBUILD-001 chunk 3).
 PullWork = Callable[[ProgressHook], object]
 
 #: An optional zero-arg success callback fired ONCE on the worker thread when the
@@ -107,6 +111,30 @@ def _default_lake_root_resolver() -> Path | None:
     computation; no disk touched).
     """
     return resolve_lake_root()
+
+
+#: Defensive cap on a completion headline taken from a pull's returned note —
+#: the snapshot is polled every few seconds, so an unexpectedly huge note must
+#: never bloat every poll (the pipeline notes are one-liners in practice).
+_FINISH_DETAIL_MAX: Final[int] = 500
+
+
+def _finish_detail(result: object) -> str:
+    """The job's completion headline, derived from the work's return value — pure.
+
+    DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (headline honesty): a pull work that
+    returns a Mapping carrying a non-empty string ``"note"`` (the pull-report
+    ``to_dict`` shape — e.g. the pipeline's "pipeline complete — N symbol(s)
+    quarantined: …") gets THAT note as the finish detail, defensively truncated
+    to :data:`_FINISH_DETAIL_MAX` chars — so a quarantined symbol never hides
+    behind a bare "done". Every other shape (``None``, a non-Mapping, a missing
+    / empty / non-string note) keeps the back-compat ``"done"``.
+    """
+    if isinstance(result, Mapping):
+        note = result.get("note")
+        if isinstance(note, str) and note.strip():
+            return note[:_FINISH_DETAIL_MAX]
+    return "done"
 
 
 def _is_pull_halt(exc: BaseException) -> bool:
@@ -445,7 +473,7 @@ class BackgroundPullJob:
         # ``finally`` so a finished run leaves no stale beat.
         register_progress_beat(self._beat)
         try:
-            work(self._on_progress)
+            result = work(self._on_progress)
         except Exception as exc:  # report ANY failure to the live feed, never crash the thread
             self._progress.fail(f"{type(exc).__name__}: {exc}")
             if _is_pull_halt(exc):
@@ -458,7 +486,11 @@ class BackgroundPullJob:
                 # state already reported above (a generic worker error never alerts).
                 emit_pull_halt_alert(exc)
         else:
-            self._progress.finish(detail="done")
+            # Honest completion headline (DEC-PIPELINE-AUTOPREBUILD-001 chunk 3):
+            # a work returning a report dict with a non-empty "note" surfaces it
+            # (e.g. "pipeline complete — N symbol(s) quarantined: …"); any other
+            # return shape keeps the back-compat "done".
+            self._progress.finish(detail=_finish_detail(result))
             if on_success is not None:
                 # Fire the success-only completion hook (e.g. the sweep route's
                 # mark_dirty). Best-effort: a raising callback is logged + swallowed

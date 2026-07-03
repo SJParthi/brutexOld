@@ -17,10 +17,12 @@ from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
+    MAX_QUARANTINED_NAMES,
     PHASE_METADATA,
     PHASE_PREBUILD,
     PHASE_SPOT,
     PipelinePullReport,
+    derive_quarantined_symbols,
     historical_phase_ok,
     metadata_phase_ok,
     run_full_pipeline,
@@ -922,3 +924,207 @@ def test_pipeline_note_zero_out_of_scope_renders_no_clause() -> None:
         run_historical=_Spy(_composite(historical=_historical_inner())),
     )
     assert "out of scope" not in report.note
+
+
+# --------------------------------------------------------------------------- #
+# quarantined-symbol headline honesty (DEC-PIPELINE-AUTOPREBUILD-001 chunk 3)
+# --------------------------------------------------------------------------- #
+
+
+def _spot_with_failures(*symbols: SymbolPullResult) -> BulkSpotReport:
+    """A spot report carrying an explicit per-symbol result list (gate-clean)."""
+    return BulkSpotReport(
+        dry_run=False,
+        start_date="2020-01-01",
+        end_date="2026-06-20",
+        symbols=list(symbols),
+    )
+
+
+class TestDeriveQuarantinedSymbols:
+    """The pure name derivation — spot / historical / both / dedupe / cap."""
+
+    def test_clean_run_is_empty(self) -> None:
+        assert derive_quarantined_symbols(_spot(), _composite(historical=_historical_inner())) == (
+            (),
+            0,
+        )
+
+    def test_spot_only_failed_symbols_named(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0),
+            SymbolPullResult(symbol="SENSEX", completed=2, failed=0, no_data=0),
+        )
+        assert derive_quarantined_symbols(spot, None) == (("NIFTY",), 1)
+
+    def test_historical_only_unclean_contracts_fold_to_underlyings(self) -> None:
+        hist = _historical_inner(
+            failed_pairs=1,
+            phase1_complete=("NSE-NIFTY-25Jan24-21000-CE",),
+            start_dates={
+                "NSE-NIFTY-25Jan24-21000-CE": "2023-12-26",  # clean — not named
+                "NSE-RELIANCE-29Feb24-2800-CE": "2024-01-30",  # unclean → RELIANCE
+                "NSE-RELIANCE-29Feb24-2800-PE": "2024-01-30",  # same underlying — deduped
+            },
+        )
+        names, count = derive_quarantined_symbols(_spot(), _composite(historical=hist))
+        assert names == ("RELIANCE",)
+        assert count == 1
+
+    def test_undecodable_contract_symbol_kept_raw(self) -> None:
+        hist = _historical_inner(
+            phase1_complete=(),
+            start_dates={"RELIANCE25JAN3000CE": "2024-10-01"},  # no hyphens → undecodable
+        )
+        names, count = derive_quarantined_symbols(_spot(), _composite(historical=hist))
+        assert names == ("RELIANCE25JAN3000CE",)  # reported raw, never dropped
+        assert count == 1
+
+    def test_both_phases_deduped_and_sorted(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="RELIANCE", completed=0, failed=1, no_data=0),
+            SymbolPullResult(symbol="AXISBANK", completed=0, failed=2, no_data=0),
+        )
+        hist = _historical_inner(
+            phase1_complete=(),
+            start_dates={"NSE-RELIANCE-29Feb24-2800-CE": "2024-01-30"},
+        )
+        names, count = derive_quarantined_symbols(spot, _composite(historical=hist))
+        assert names == ("AXISBANK", "RELIANCE")  # deduped across phases, sorted
+        assert count == 2
+
+    def test_cap_at_ten_names_with_true_total(self) -> None:
+        spot = _spot_with_failures(
+            *(
+                SymbolPullResult(symbol=f"SYM{i:02d}", completed=0, failed=1, no_data=0)
+                for i in range(12)
+            )
+        )
+        names, count = derive_quarantined_symbols(spot, None)
+        assert len(names) == MAX_QUARANTINED_NAMES == 10
+        assert names == tuple(f"SYM{i:02d}" for i in range(10))  # sorted, capped
+        assert count == 12  # the TRUE uncapped total
+
+    def test_none_reports_are_empty(self) -> None:
+        assert derive_quarantined_symbols(None, None) == ((), 0)
+
+    def test_composite_without_candle_subreport_is_empty(self) -> None:
+        assert derive_quarantined_symbols(_spot(), _composite(historical=None)) == ((), 0)
+
+
+class TestQuarantinedHeadline:
+    """The complete-note wording + the report fields through run_full_pipeline."""
+
+    def test_complete_note_names_quarantined_symbols(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0)
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert report.stopped_after is None
+        assert "pipeline complete — 1 symbol(s) quarantined: NIFTY — " in report.note
+        assert report.quarantined_symbols == ("NIFTY",)
+        assert report.quarantined_count == 1
+        assert report.to_dict()["quarantined_symbols"] == ["NIFTY"]
+        assert report.to_dict()["quarantined_count"] == 1
+
+    def test_complete_note_caps_names_with_true_remainder(self) -> None:
+        spot = _spot_with_failures(
+            *(
+                SymbolPullResult(symbol=f"SYM{i:02d}", completed=0, failed=1, no_data=0)
+                for i in range(12)
+            )
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert "12 symbol(s) quarantined: " in report.note
+        assert "(+2 more)" in report.note  # true remainder beyond the 10-name cap
+        assert len(report.quarantined_symbols) == 10
+        assert report.quarantined_count == 12
+
+    def test_clean_pull_keeps_current_wording(self) -> None:
+        report = run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert "quarantined" not in report.note  # byte-identical clean wording
+        assert report.note.startswith("pipeline complete — spot ")
+        assert report.quarantined_symbols == ()
+        assert report.quarantined_count == 0
+
+    def test_historical_quarantine_reaches_the_note(self) -> None:
+        hist = _historical_inner(
+            failed_pairs=0,  # gate-clean: a still-failing TRANSIENT residual is 0 too —
+            phase1_complete=(),  # …but the contract did NOT land clean (not marked)
+            start_dates={"NSE-RELIANCE-29Feb24-2800-CE": "2024-01-30"},
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=hist)),
+        )
+        assert "1 symbol(s) quarantined: RELIANCE — " in report.note
+
+    def test_spot_stop_report_still_carries_quarantined_fields(self) -> None:
+        spot = BulkSpotReport(
+            dry_run=False,
+            start_date="2020-01-01",
+            end_date="2026-06-20",
+            symbols=[SymbolPullResult(symbol="NIFTY", completed=0, failed=1, no_data=0)],
+            still_failed_windows=2,  # gate-failing → the chain stops after spot
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert report.stopped_after == PHASE_SPOT
+        assert report.note.startswith("stopped after spot")  # the loud stop note wins
+        assert report.quarantined_symbols == ("NIFTY",)  # the fields still report
+        assert report.quarantined_count == 1
+
+    def test_metadata_stop_report_still_carries_quarantined_fields(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0)
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata(expiry_failures=1)),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert report.stopped_after == PHASE_METADATA
+        assert report.quarantined_symbols == ("NIFTY",)
+        assert report.quarantined_count == 1
+
+
+# --------------------------------------------------------------------------- #
+# LOUD movers-warm logs (DEC-PIPELINE-AUTOPREBUILD-001 — part D completeness)
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_movers_warm_logs_started_and_done() -> None:
+    """The movers-warm phase logs ``pipeline.movers_warm.started`` + ``.done``."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+            warm_spot_movers=lambda: 3,
+            warm_futures_movers=lambda: 1,
+            run_prebuild=_outcome,
+        )
+    started = [e for e in logs if e["event"] == "pipeline.movers_warm.started"]
+    done = [e for e in logs if e["event"] == "pipeline.movers_warm.done"]
+    assert len(started) == 1
+    assert started[0]["segments"] == ["spot", "futures"]
+    assert len(done) == 1
+    assert done[0]["warmed"] == {"spot": 3, "futures": 1}

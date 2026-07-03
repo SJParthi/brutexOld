@@ -563,3 +563,65 @@ def test_set_phase_passthrough_reaches_the_snapshot() -> None:
     assert job.snapshot().to_dict()["phase"] == "spot"
     job.set_phase("historical")  # a later transition overwrites it
     assert job.snapshot().phase == "historical"
+
+
+# ── the honest completion headline (DEC-PIPELINE-AUTOPREBUILD-001 chunk 3) ─────
+
+
+class TestFinishDetailFromWorkNote:
+    """The work's returned report note becomes the finish detail — never a bare
+    "done" hiding a quarantined symbol; every other return shape keeps "done"."""
+
+    def test_mapping_with_note_becomes_the_finish_detail(self) -> None:
+        note = "pipeline complete — 1 symbol(s) quarantined: NIFTY — spot clean"
+        job = _job()
+        assert job.start(lambda _h: {"note": note, "ok": True}, total=1) is True
+        snap = job.snapshot()
+        assert snap.state == STATE_DONE
+        assert snap.detail == note
+
+    def test_none_return_keeps_done(self) -> None:
+        job = _job()
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.snapshot().detail == "done"
+
+    def test_non_mapping_return_keeps_done(self) -> None:
+        job = _job()
+        assert job.start(lambda _h: 42, total=1) is True
+        assert job.snapshot().detail == "done"
+
+    def test_mapping_without_note_keeps_done(self) -> None:
+        job = _job()
+        assert job.start(lambda _h: {"ok": True}, total=1) is True
+        assert job.snapshot().detail == "done"
+
+    def test_empty_or_whitespace_note_keeps_done(self) -> None:
+        job = _job()
+        assert job.start(lambda _h: {"note": "   "}, total=1) is True
+        assert job.snapshot().detail == "done"
+
+    def test_non_string_note_keeps_done(self) -> None:
+        job = _job()
+        assert job.start(lambda _h: {"note": 7}, total=1) is True
+        assert job.snapshot().detail == "done"
+
+    def test_oversized_note_is_truncated_defensively(self) -> None:
+        job = _job()
+        huge = "q" * 5_000
+        assert job.start(lambda _h: {"note": huge}, total=1) is True
+        detail = job.snapshot().detail
+        assert detail == "q" * 500  # _FINISH_DETAIL_MAX
+        assert len(detail) == 500
+
+    def test_failed_run_ignores_the_note_path(self) -> None:
+        # A raising work never reaches the finish-detail branch — the error
+        # detail wins (byte-identical to before).
+        job = _job()
+
+        def work(_h: ProgressHook) -> object:
+            raise RuntimeError("boom")
+
+        assert job.start(work, total=1) is True
+        snap = job.snapshot()
+        assert snap.state == STATE_ERROR
+        assert snap.detail == "RuntimeError: boom"

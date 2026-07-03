@@ -654,3 +654,52 @@ def test_pull_pipeline_dry_run_does_not_gate(
             proceed.set()
         assert _wait_for_job(client)["state"] == "done"
         assert gate.snapshot().runs == 0  # begin() was never called
+
+
+# ── quarantined symbols surface in the finish detail (chunk 3 headline honesty) ──
+
+
+def test_pull_pipeline_quarantined_symbol_shows_in_finish_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-symbol quarantine is NAMED in the job's completion headline.
+
+    End-to-end through the real pipeline composition + BackgroundPullJob: a spot
+    fake whose NIFTY carries a terminally-failed pair passes every phase gate
+    (no pull-wide failure), the pipeline completes, and the /pull-progress
+    ``detail`` reads the honest "pipeline complete — 1 symbol(s) quarantined:
+    NIFTY — …" note instead of the bare "done".
+    """
+    _pin_creds_present(monkeypatch)
+
+    def _spot_with_quarantine(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        return BulkSpotReport(
+            dry_run=kwargs["dry_run"],
+            start_date="2020-01-01",
+            end_date="2026-06-20",
+            symbols=[SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0)],
+        )
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _spot_with_quarantine)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    assert "1 symbol(s) quarantined: NIFTY — " in snap["detail"]
+    assert snap["detail"].startswith("pipeline complete — ")
+
+
+def test_pull_pipeline_clean_run_finish_detail_is_the_complete_note(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean pipeline's headline is the honest complete note (no quarantine)."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    assert snap["detail"].startswith("pipeline complete — spot ")
+    assert "quarantined" not in snap["detail"]

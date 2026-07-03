@@ -73,7 +73,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -81,6 +81,7 @@ from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pull_controller import BulkSpotReport
+from brutex.data.fno_symbol import parse_fno_symbol
 
 _LOG = structlog.get_logger(__name__)
 
@@ -203,6 +204,50 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
     return not hist.auth_aborted and hist.still_failed_windows == 0 and hist.failed_pairs == 0
 
 
+#: How many quarantined symbol NAMES :attr:`PipelinePullReport.quarantined_symbols`
+#: carries (and the note shows) — the TRUE total always rides
+#: :attr:`PipelinePullReport.quarantined_count`, and the note appends an honest
+#: ``(+K more)`` remainder computed from it (Golden Rule #1 — the cap never
+#: hides the real count).
+MAX_QUARANTINED_NAMES: Final[int] = 10
+
+
+def derive_quarantined_symbols(
+    spot: BulkSpotReport | None, historical: CompositePullReport | None
+) -> tuple[tuple[str, ...], int]:
+    """The deduped, sorted quarantined-symbol names + the TRUE total — pure.
+
+    DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (headline honesty): a per-symbol
+    quarantine does NOT stop the pipeline (the phase gates check pull-wide
+    signals), so a completed run could read a bare "pipeline complete" while
+    symbols silently failed. This derives the NAMES from the phase reports:
+
+    * **spot** — every :class:`~brutex.dashboard.pull_controller.SymbolPullResult`
+      with ``failed > 0`` (a terminally-quarantined ``(symbol, interval)`` pair;
+      a pull-wide ``still_failed_windows`` residual stops the chain at the gate
+      and never reaches the complete note).
+    * **historical** — every in-window contract that did NOT land clean
+      (``start_dates`` minus ``phase1_complete`` — quarantined pairs AND
+      still-failing transients), folded to its UNDERLYING via the shared
+      :func:`~brutex.data.fno_symbol.parse_fno_symbol` decode (an undecodable
+      symbol keeps its raw name — reported, never dropped).
+
+    Returns ``(names, true_count)``: *names* deduped + sorted, capped at
+    :data:`MAX_QUARANTINED_NAMES`; *true_count* is the UNCAPPED total so the
+    note's ``(+K more)`` remainder is honest. ``((), 0)`` for a clean run.
+    """
+    names: set[str] = set()
+    if spot is not None:
+        names.update(s.symbol for s in spot.symbols if s.failed > 0)
+    hist = historical.historical if historical is not None else None
+    if hist is not None:
+        for symbol in set(hist.start_dates) - set(hist.phase1_complete):
+            parts = parse_fno_symbol(symbol)
+            names.add(symbol if parts is None else parts.underlying)
+    ordered = tuple(sorted(names))
+    return ordered[:MAX_QUARANTINED_NAMES], len(ordered)
+
+
 @dataclass(slots=True)
 class PipelinePullReport:
     """The honest outcome of one one-click spot→metadata→historical pipeline run.
@@ -259,6 +304,17 @@ class PipelinePullReport:
         The prebuild's failing symbol names (capped at 10 by the producer —
         :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`); empty when
         the phase did not run or had no failures.
+    quarantined_symbols
+        The deduped, sorted names of symbols a phase QUARANTINED per-symbol
+        without stopping the chain (:func:`derive_quarantined_symbols` — spot
+        symbols with terminally-failed pairs + historical underlyings whose
+        contracts did not land clean), capped at
+        :data:`MAX_QUARANTINED_NAMES`. A quarantined symbol is ALWAYS named in
+        the note — never hidden behind a bare "pipeline complete"
+        (DEC-PIPELINE-AUTOPREBUILD-001 chunk 3).
+    quarantined_count
+        The TRUE (uncapped) quarantined-symbol total — the note's ``(+K more)``
+        remainder derives from it, so the cap never lies (Golden Rule #1).
     """
 
     spot: BulkSpotReport | None
@@ -271,6 +327,8 @@ class PipelinePullReport:
     prebuild_built: int | None = None
     prebuild_total_bars: int | None = None
     prebuild_failed: tuple[str, ...] = ()
+    quarantined_symbols: tuple[str, ...] = ()
+    quarantined_count: int = 0
 
     @property
     def ok(self) -> bool:
@@ -300,6 +358,8 @@ class PipelinePullReport:
             "prebuild_built": self.prebuild_built,
             "prebuild_total_bars": self.prebuild_total_bars,
             "prebuild_failed": list(self.prebuild_failed),
+            "quarantined_symbols": list(self.quarantined_symbols),
+            "quarantined_count": self.quarantined_count,
             "spot": self.spot.to_dict() if self.spot is not None else None,
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
@@ -371,20 +431,41 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     return clause
 
 
+def _quarantine_clause(quarantined: tuple[str, ...], quarantined_count: int) -> str:
+    """The ``"N symbol(s) quarantined: A, B (+K more) — "`` headline clause.
+
+    Empty for a clean run (the complete note stays byte-identical). Otherwise
+    names every capped symbol and appends the honest ``(+K more)`` remainder
+    from the TRUE total, so a quarantined symbol can never hide behind a bare
+    "pipeline complete" (DEC-PIPELINE-AUTOPREBUILD-001 chunk 3).
+    """
+    if not quarantined_count:
+        return ""
+    more = quarantined_count - len(quarantined)
+    suffix = f" (+{more} more)" if more > 0 else ""
+    return f"{quarantined_count} symbol(s) quarantined: {', '.join(quarantined)}{suffix} — "
+
+
 def _complete_note(
     spot: BulkSpotReport,
     metadata: MetadataPullReport,
     historical: CompositePullReport,
     segment_movers_warmed: Mapping[str, int],
     prebuild: PrebuildOutcome | None = None,
+    quarantined: tuple[str, ...] = (),
+    quarantined_count: int = 0,
 ) -> str:
     """Build the honest summary note for a fully-run pipeline.
 
-    Appends a pre-build clause ONLY when the gated prebuild phase ran
-    (:func:`_prebuild_note_clause` — built count + bars + capped failure names),
-    THEN a per-segment movers-warm clause ONLY for the segments that actually
-    warmed (:func:`_movers_note_clause`) — the prebuild-then-movers order
-    mirrors the execution order (DEC-PIPELINE-AUTOPREBUILD-001).
+    A non-empty quarantine set leads the note ("pipeline complete — N symbol(s)
+    quarantined: … — …", :func:`_quarantine_clause`) so a per-symbol failure is
+    NEVER hidden behind a bare "pipeline complete"; a fully-clean pull keeps
+    the prior wording byte-identically. Appends a pre-build clause ONLY when
+    the gated prebuild phase ran (:func:`_prebuild_note_clause` — built count +
+    bars + capped failure names), THEN a per-segment movers-warm clause ONLY
+    for the segments that actually warmed (:func:`_movers_note_clause`) — the
+    prebuild-then-movers order mirrors the execution order
+    (DEC-PIPELINE-AUTOPREBUILD-001).
     """
     hist = historical.historical
     bars = hist.bars_appended if hist is not None else 0
@@ -411,7 +492,8 @@ def _complete_note(
         else ""
     )
     return (
-        f"{prefix}pipeline complete — spot {spot.verdict.kind} "
+        f"{prefix}pipeline complete — "
+        f"{_quarantine_clause(quarantined, quarantined_count)}spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
         f"contracts, historical {bars} bars over {contracts} contract(s)"
@@ -517,22 +599,28 @@ def run_full_pipeline(
     """
     spot = run_spot()
     if not spot_phase_ok(spot):
+        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
         return PipelinePullReport(
             spot=spot,
             metadata=None,
             historical=None,
             stopped_after=PHASE_SPOT,
             note=_spot_stop_note(spot),
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
         )
 
     metadata = run_metadata()
     if not metadata_phase_ok(metadata):
+        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
         return PipelinePullReport(
             spot=spot,
             metadata=metadata,
             historical=None,
             stopped_after=PHASE_METADATA,
             note=_metadata_stop_note(metadata),
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
         )
 
     historical = run_historical()
@@ -564,15 +652,29 @@ def run_full_pipeline(
                 if warm is not None:
                     segment_movers_warmed[segment] = warm()
             _LOG.info("pipeline.movers_warm.done", warmed=dict(segment_movers_warmed))
+    # Headline honesty (chunk 3): a per-symbol quarantine passes the phase gates
+    # (they check pull-wide signals), so it must be NAMED in the complete note —
+    # never hidden behind a bare "pipeline complete".
+    quarantined, quarantined_count = derive_quarantined_symbols(spot, historical)
     return PipelinePullReport(
         spot=spot,
         metadata=metadata,
         historical=historical,
         stopped_after=None,
-        note=_complete_note(spot, metadata, historical, segment_movers_warmed, prebuild),
+        note=_complete_note(
+            spot,
+            metadata,
+            historical,
+            segment_movers_warmed,
+            prebuild,
+            quarantined,
+            quarantined_count,
+        ),
         movers_warmed=_total_warmed(segment_movers_warmed),
         segment_movers_warmed=segment_movers_warmed,
         prebuild_built=prebuild.symbols_built if prebuild is not None else None,
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),
+        quarantined_symbols=quarantined,
+        quarantined_count=quarantined_count,
     )
