@@ -184,6 +184,22 @@ def test_end_before_start_raises() -> None:
         resolve_sweep_request(start="2024-01-01", end="2023-12-31", today=_TODAY)
 
 
+def test_out_of_engine_scope_symbol_raises_the_scope_refusal() -> None:
+    """DEC-ENGINE-SCOPE-GUARD-001 Layer 2: an out-of-scope symbol is a ValueError.
+
+    The dashboard resolver refuses an out-of-engine-scope launch with the
+    full ``ScopeReport.refusal_message()`` (symbol + law + remedy) — the
+    route layer maps this ValueError to a 400 (proven separately in
+    ``test_dashboard_sweep_run_route.py``).
+    """
+    with pytest.raises(ValueError, match="sweep REFUSED") as excinfo:
+        resolve_sweep_request(symbols="RELIANCE", today=_TODAY)
+    message = str(excinfo.value)
+    assert "RELIANCE" in message
+    assert f"{DEFAULT_EXCHANGE}/{DEFAULT_SEGMENT}" in message
+    assert "NIFTY/BANKNIFTY/SENSEX" in message  # the law + remedy tail
+
+
 def test_explicit_none_leg_passes_through() -> None:
     req = resolve_sweep_request(sl="NONE", tp="none", today=_TODAY)
     assert req.sl == "none"
