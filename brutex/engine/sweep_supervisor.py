@@ -125,6 +125,10 @@ if TYPE_CHECKING:
 _LOG = structlog.get_logger("brutex.engine.sweep_supervisor")
 
 #: Audit action labels — the supervisor's BLAKE3 chain (one per tuple + brackets).
+#: RESUME emission is asymmetric between the two drivers (Golden Rule #10): the
+#: sequential loop below emits ONE summarising RESUME line per resumed run
+#: (DEC-SWEEP-SCALE-OPERABILITY-001), while :mod:`brutex.engine.sweep_parallel` still
+#: emits one per-tuple RESUME line — batching it is a flagged follow-up.
 _ACTION_START: Final[str] = "SUPERVISOR_START"
 _ACTION_TUPLE_DONE: Final[str] = "TUPLE_DONE"
 _ACTION_TUPLE_CACHE: Final[str] = "TUPLE_SKIPPED_CACHE"
@@ -486,7 +490,12 @@ def run_supervised_grid(
 
     1. ``guards.watchdog.beat`` (heartbeat — the daemon detects a stall here).
     2. If ``index < resume_from`` (the loaded checkpoint high-water + 1): skip as
-       **resumed** (progress + audit, no store touched, no re-record).
+       **resumed**. The whole already-complete prefix is summarised ONCE before
+       the loop — ONE ``TUPLE_SKIPPED_RESUME`` audit line carrying
+       ``resumed_count`` + ``resume_from`` and ONE progress publish
+       (DEC-SWEEP-SCALE-OPERABILITY-001) — so a restart pays O(1) audit/progress disk
+       I/O instead of one fsync'd write per resumed tuple; no store touched,
+       no re-record.
     3. Elif ``guards.cache.seen(tuple key)``: skip as **cached** (progress + audit
        + ``checkpoint.record``).
     4. Else ``run_one_tuple``: a :class:`~brutex.engine.sweep_run.SweepComboError`
@@ -599,7 +608,15 @@ def run_supervised_grid(
     tuples_run = 0
     tuples_skipped_no_bars = 0
     skipped_cache = 0
-    skipped_resume = 0
+    # Batched resume emission (DEC-SWEEP-SCALE-OPERABILITY-001): the already-complete
+    # prefix ``[0, resume_from)`` is accounted ONCE up front — one summarising
+    # audit line + one progress publish inside the ``try`` below — instead of
+    # one flushed audit append + one fsync'd atomic progress write PER resumed
+    # tuple (O(resumed) disk I/O per restart). The ``min`` clamp keeps the
+    # count honest against an oversized checkpoint cursor (never more than the
+    # grid holds); ``skipped_resume`` keeps its exact prior meaning.
+    resume_count = min(resume_from, total)
+    skipped_resume = resume_count
     tuples_failed = 0
     enumerated = 0
     conflict_pruned = 0
@@ -639,19 +656,40 @@ def run_supervised_grid(
             on_progress(guards.progress.snapshot())
 
     try:
+        if resume_count > 0:
+            # ONE in-memory progress batch for the whole resumed prefix (the
+            # ``advance`` calls only mutate counters under a lock — zero disk
+            # I/O; the single ``on_progress`` publish below is the only write),
+            # then ONE summarising hash-chained audit line. The chain stays
+            # verifiable — the summary is an ordinary seq/prev_hash/entry_hash
+            # entry — and its payload reconstructs the skipped set exactly:
+            # the enumeration indices ``[0, resumed_count)`` (Golden Rule #7).
+            for _ in range(resume_count):
+                guards.progress.advance(survived=False, skipped=True)
+            if on_progress is not None:
+                on_progress(guards.progress.snapshot())
+            guards.audit.append(
+                action=_ACTION_TUPLE_RESUME,
+                subject=subject,
+                payload={"resumed_count": resume_count, "resume_from": resume_from},
+            )
+            _LOG.info(
+                "sweep_supervisor.resume_batch",
+                subject=subject,
+                resumed_count=resume_count,
+                resume_from=resume_from,
+            )
         for index, tuple_ in enumerate(iter_sweep_tuples(grid)):
             guards.watchdog.beat(guards.worker_name)
-            label = _tuple_label(tuple_)
 
             if index < resume_from:
-                skipped_resume += 1
-                _advance(current=label, survived=False, skipped=True)
-                guards.audit.append(
-                    action=_ACTION_TUPLE_RESUME,
-                    subject=subject,
-                    payload={"index": index, "tuple": label},
-                )
+                # Already-complete resumed prefix: counted + summarised ONCE
+                # above (DEC-SWEEP-SCALE-OPERABILITY-001) — zero per-tuple audit /
+                # progress / label work here. The generator is still stepped
+                # sequentially (unavoidable) but with no disk I/O.
                 continue
+
+            label = _tuple_label(tuple_)
 
             if guards.cache.seen(
                 tuple_.k,

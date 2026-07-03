@@ -13,7 +13,21 @@
 * a hypothesis property: after ``record``, ``seen`` is always ``True`` (Bloom
   has no false negatives — the dedup correctness guarantee), and a re-open
   reloads the persisted exact-store membership.
+
+R2-SL-F4-F5 additions: the operator knobs (``bloom_capacity`` / ``map_size_mb``
+resolve explicit > env > module default via
+``resolve_sweep_cache_bloom_capacity`` / ``resolve_sweep_cache_map_mb``), the
+actionable FAIL_CLOSED resume-refusal message + the proof the advertised
+larger-knob remedy admits the resume, and the ``record_digest`` exact-first
+durability ordering (a map-full during the L2 write leaves NO phantom L1 Bloom
+entry, so a retry after growing the map neither double-counts nor
+false-positive-skips).
+
+Whitebox: the Bloom-seed / knob / ordering tests reach the private ``_bloom``
+/ ``_exact`` tiers (DEC-P0-017), so the file silences ``reportPrivateUsage``.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -21,14 +35,26 @@ import threading
 from pathlib import Path
 
 import pytest
+from brutex.data.lmdb_membership import (
+    SWEEP_CACHE_MAP_MB_ENV,
+    LmdbMapFullError,
+    LmdbMembership,
+)
 from brutex.engine.sweep_cache import (
+    DEFAULT_BLOOM_CAPACITY,
+    DEFAULT_MAP_SIZE_MB,
+    SWEEP_CACHE_BLOOM_CAPACITY_ENV,
     SweepCache,
     SweepCacheCapacityError,
     SweepCacheError,
     combo_digest,
+    resolve_sweep_cache_bloom_capacity,
+    resolve_sweep_cache_map_mb,
 )
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
+_MIB = 1024 * 1024
 
 #: Frozen golden digests — any change to the canonicalisation breaks these.
 _GOLDEN = "305dd064f60094a485abdccd5fa608bfbc193bf3f3093bda803101186d04317d"
@@ -314,3 +340,266 @@ def test_concurrent_record_admits_digest_exactly_once(tmp_path: Path) -> None:
         assert snap["bloom_insertions"] == 1
         assert snap["records"] == 1
         assert cache.seen_digest(d) is True
+
+
+# ── operator knobs: explicit > env > default (R2-SL-F4-F5) ───────────────────
+
+
+class TestOperatorKnobResolvers:
+    """The two pure resolvers — every arm, injected env (no os.environ leak)."""
+
+    def test_map_mb_default_when_unset(self) -> None:
+        assert resolve_sweep_cache_map_mb(env={}) == DEFAULT_MAP_SIZE_MB
+
+    def test_map_mb_env_wins_over_default(self) -> None:
+        assert resolve_sweep_cache_map_mb(env={SWEEP_CACHE_MAP_MB_ENV: "4096"}) == 4096
+
+    def test_map_mb_explicit_wins_over_env(self) -> None:
+        assert resolve_sweep_cache_map_mb(3, env={SWEEP_CACHE_MAP_MB_ENV: "4096"}) == 3
+
+    def test_map_mb_bad_env_raises_naming_the_var(self) -> None:
+        with pytest.raises(ValueError, match=SWEEP_CACHE_MAP_MB_ENV):
+            resolve_sweep_cache_map_mb(env={SWEEP_CACHE_MAP_MB_ENV: "two-gigs"})
+
+    def test_bloom_capacity_default_when_unset(self) -> None:
+        assert resolve_sweep_cache_bloom_capacity(env={}) == DEFAULT_BLOOM_CAPACITY
+
+    def test_bloom_capacity_env_wins_over_default(self) -> None:
+        got = resolve_sweep_cache_bloom_capacity(env={SWEEP_CACHE_BLOOM_CAPACITY_ENV: "6000000"})
+        assert got == 6_000_000
+
+    def test_bloom_capacity_explicit_wins_over_env(self) -> None:
+        got = resolve_sweep_cache_bloom_capacity(
+            1000, env={SWEEP_CACHE_BLOOM_CAPACITY_ENV: "6000000"}
+        )
+        assert got == 1000
+
+    def test_bloom_capacity_bad_env_raises_naming_the_var(self) -> None:
+        with pytest.raises(ValueError, match=SWEEP_CACHE_BLOOM_CAPACITY_ENV):
+            resolve_sweep_cache_bloom_capacity(env={SWEEP_CACHE_BLOOM_CAPACITY_ENV: "-1"})
+
+
+class TestOpenKnobThreading:
+    """`SweepCache.open` honours the knobs end-to-end (and defaults unchanged)."""
+
+    def test_default_open_keeps_todays_sizing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No knobs set ⇒ byte-identical defaults (5M Bloom / 2 GiB map)."""
+        monkeypatch.delenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, raising=False)
+        monkeypatch.delenv(SWEEP_CACHE_MAP_MB_ENV, raising=False)
+        with SweepCache.open(tmp_path / "c") as cache:
+            assert cache._bloom.capacity == DEFAULT_BLOOM_CAPACITY
+            assert cache._exact._env.info()["map_size"] == DEFAULT_MAP_SIZE_MB * _MIB
+
+    def test_map_env_var_threads_into_exact_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SWEEP_CACHE_MAP_MB_ENV, "1")
+        with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
+            assert cache._exact._env.info()["map_size"] == 1 * _MIB
+
+    def test_explicit_map_wins_over_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SWEEP_CACHE_MAP_MB_ENV, "1")
+        with SweepCache.open(tmp_path / "c", bloom_capacity=1000, map_size_mb=2) as cache:
+            assert cache._exact._env.info()["map_size"] == 2 * _MIB
+
+    def test_bloom_env_var_threads_into_bloom(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "1234")
+        with SweepCache.open(tmp_path / "c") as cache:
+            assert cache._bloom.capacity == 1234
+
+    def test_bad_env_knob_fails_open_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "0")
+        with pytest.raises(ValueError, match=SWEEP_CACHE_BLOOM_CAPACITY_ENV):
+            SweepCache.open(tmp_path / "c")
+
+
+class TestCapacityRefusalRemedy:
+    """The >capacity resume refusal is ACTIONABLE and the remedy works."""
+
+    @staticmethod
+    def _seed(root: Path, count: int) -> None:
+        with SweepCache.open(root, bloom_capacity=1000) as cache:
+            for mask in range(count):
+                assert cache.record(mask, "NIFTY", "5m", "bull") is True
+
+    def test_refusal_message_names_both_knobs(self, tmp_path: Path) -> None:
+        root = tmp_path / "c"
+        self._seed(root, 5)
+        with pytest.raises(SweepCacheCapacityError) as excinfo:
+            SweepCache.open(root, bloom_capacity=3)
+        msg = str(excinfo.value)
+        assert "--sweep-cache-bloom-capacity" in msg
+        assert SWEEP_CACHE_BLOOM_CAPACITY_ENV in msg
+
+    def test_larger_explicit_knob_admits_refused_resume(self, tmp_path: Path) -> None:
+        """The advertised remedy WORKS: refused at 3, admitted at 10.
+
+        Also pins the refusal-path cleanup: the refused ``open`` closes its
+        LMDB env before raising, so the immediate re-open of the SAME path
+        is safe (no second live env on one LMDB directory in-process).
+        """
+        root = tmp_path / "c"
+        self._seed(root, 5)
+        with pytest.raises(SweepCacheCapacityError, match="re-open with a larger"):
+            SweepCache.open(root, bloom_capacity=3)
+        with SweepCache.open(root, bloom_capacity=10) as resumed:
+            for mask in range(5):
+                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+
+    def test_larger_env_knob_admits_refused_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The env-var spelling of the remedy is equivalent to the flag."""
+        root = tmp_path / "c"
+        self._seed(root, 5)
+        monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "3")
+        with pytest.raises(SweepCacheCapacityError, match="persisted exact-store"):
+            SweepCache.open(root)
+        monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "10")
+        with SweepCache.open(root) as resumed:
+            for mask in range(5):
+                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+
+
+# ── record_digest exact-first durability ordering (R2-SL-F4-F5) ──────────────
+
+
+class _MapFullOnceExact:
+    """ExactMembership stub: the FIRST ``add`` raises map-full, later ones land.
+
+    Simulates the L2 store refusing a write (the map-full infra fault) so the
+    ordering contract is testable deterministically: with exact-first, the
+    Bloom must be untouched by the failed attempt and the retry must count
+    exactly once.
+    """
+
+    def __init__(self) -> None:
+        self.keys: set[bytes] = set()
+        self.fail_next = True
+
+    def __contains__(self, key: bytes, /) -> bool:
+        return key in self.keys
+
+    def add(self, key: bytes, /) -> None:
+        if self.fail_next:
+            self.fail_next = False
+            raise LmdbMapFullError("synthetic map full")
+        self.keys.add(key)
+
+    def close(self) -> None:
+        """No-op — satisfies the SweepCache close contract."""
+
+
+class TestRecordDigestExactFirst:
+    def test_map_full_at_exact_add_leaves_no_phantom_bloom_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REGRESSION (ordering wart): exact-first means a failed L2 write
+        leaves the L1 Bloom untouched, and the retry records exactly once.
+
+        Fail-before/pass-after oracle: with the old bloom-first ordering the
+        failed attempt leaves a PHANTOM Bloom entry — ``might_contain`` is
+        already ``True``, ``bloom_insertions`` is already 1, and the retry
+        double-counts the digest against the FAIL_CLOSED capacity (2 total).
+        """
+        with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
+            real_exact = cache._exact
+            stub = _MapFullOnceExact()
+            monkeypatch.setattr(cache, "_exact", stub)
+            d = combo_digest(7, "NIFTY", "5m", "bull", {"sl": 100})
+            with pytest.raises(LmdbMapFullError, match="synthetic map full"):
+                cache.record_digest(d)
+            # The fault propagated with the Bloom UNTOUCHED — no phantom entry.
+            assert cache._bloom.might_contain(d) is False
+            snap = cache.snapshot()
+            assert snap["bloom_insertions"] == 0
+            assert snap["records"] == 0
+            # No false-positive skip: the digest still reads unseen.
+            assert cache.seen_digest(d) is False
+            # Retry after "growing the map": recorded + counted EXACTLY once.
+            assert cache.record_digest(d) is True
+            snap = cache.snapshot()
+            assert snap["bloom_insertions"] == 1
+            assert snap["records"] == 1
+            assert cache.seen_digest(d) is True
+            # Hygiene: the displaced REAL exact store is closed explicitly
+            # (the with-exit close() sees only the stub).
+            real_exact.close()
+
+    def test_real_map_full_end_to_end_then_grow_and_retry(self, tmp_path: Path) -> None:
+        """A GENUINE lmdb map-full through ``record_digest`` — the full story.
+
+        Pre-fills the exact store to the brim of a 1 MiB map, opens the cache
+        over it, records fresh digests until the real ``LmdbMapFullError``
+        propagates (riding the supervisor-abort contract — no swallow, no
+        retry loop), asserts no phantom Bloom entry, then re-opens with a
+        larger ``map_size_mb`` and proves the refused digest records cleanly.
+        """
+        root = tmp_path / "c"
+        root.mkdir(parents=True)
+        with LmdbMembership.open(root / "exact", map_size_mb=1) as pre:
+            filler = 0
+            while True:
+                batch = [n.to_bytes(32, "big") for n in range(filler, filler + 512)]
+                try:
+                    pre.add_many(batch)
+                except LmdbMapFullError:
+                    break
+                filler += 512
+                assert filler < 200_000, "1 MiB map never filled — fixture broken"
+            persisted = len(pre)
+
+        cache = SweepCache.open(root, bloom_capacity=persisted + 8192, map_size_mb=1)
+        try:
+            assert cache.snapshot()["bloom_insertions"] == persisted  # rebuild ran
+            failing, successes, exc = self._record_until_map_full(cache)
+            assert "--sweep-cache-map-mb" in str(exc)  # actionable remedy
+            assert cache._bloom.might_contain(failing) is False  # no phantom
+            assert cache.snapshot()["bloom_insertions"] == persisted + successes
+            assert cache.seen_digest(failing) is False  # never a phantom skip
+        finally:
+            cache.close()
+
+        # Grow the map (the remedy) — the refused digest lands exactly once.
+        with SweepCache.open(root, bloom_capacity=persisted + 8192, map_size_mb=4) as grown:
+            assert grown.seen_digest(failing) is False
+            assert grown.record_digest(failing) is True
+            assert grown.seen_digest(failing) is True
+
+    @staticmethod
+    def _record_until_map_full(cache: SweepCache) -> tuple[bytes, int, LmdbMapFullError]:
+        """Record fresh digests until the map refuses one.
+
+        Returns ``(failing_digest, successes_before_failure, the_error)``.
+        """
+        successes = 0
+        for n in range(4096):
+            digest = combo_digest(n, "NIFTY", "5m", "bull", {"fresh": True})
+            try:
+                cache.record_digest(digest)
+            except LmdbMapFullError as exc:
+                return digest, successes, exc
+            successes += 1
+        raise AssertionError("map never filled within the 4096-record bound")
+
+    def test_map_full_rides_the_sweep_abort_not_the_tuple_skip(self) -> None:
+        """A map-full from ``cache.record`` must ABORT the sweep, never be
+        mis-classified as a skippable per-tuple failure.
+
+        The supervisor's per-tuple quarantine catches ``SweepComboError``
+        only; the fatal infra fault must stay OUTSIDE that hierarchy so it
+        propagates to the whole-sweep abort path (no swallow, no retry loop).
+        """
+        # Imported lazily: sweep_run pulls the Rust-wheel-bound engine chain,
+        # while this module's own tests stay wheel-free (module docstring).
+        from brutex.engine.sweep_run import SweepComboError
+
+        assert not issubclass(LmdbMapFullError, SweepComboError)
