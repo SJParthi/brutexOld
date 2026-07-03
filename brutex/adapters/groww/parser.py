@@ -20,8 +20,12 @@ shorter than ``len(candles)`` (DEC-CANDLE-EMPTY-BAR-001).
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Final
+
+import structlog
 
 from brutex.data.candle_fields import (
     CandleParseError,
@@ -29,9 +33,69 @@ from brutex.data.candle_fields import (
     assemble_candle,
 )
 from brutex.data.models import CandleBar
+from brutex.observability.correlation import current_pull_id
+
+#: Structured logger — the once-per-pull epoch-timestamp anomaly WARNING only
+#: (the parser is otherwise pure vendor decode; per-row events would flood).
+_LOG = structlog.get_logger("brutex.adapters.groww.parser")
 
 #: India Standard Time — a FIXED +05:30 offset (no DST), so no tzdata needed.
 _IST = timezone(timedelta(hours=5, minutes=30))
+
+#: Guards the once-per-pull epoch-timestamp WARNING dedup set below. The parser
+#: is called from PARALLEL window workers (both ingest spines fan out), so the
+#: check-then-add must be atomic or a burst of epoch rows could warn twice.
+_EPOCH_WARN_LOCK: Final[threading.Lock] = threading.Lock()
+
+#: Pull ids that already emitted the epoch-timestamp WARNING — the tiny
+#: module-level warn-once guard (DEC-INGEST-BOUNDARY-INTEGRITY-001; repo
+#: precedent: the process-global MetricRegistry). Keyed on
+#: :func:`~brutex.observability.correlation.current_pull_id` — ``""`` when no
+#: pull scope is bound (a direct/offline parse), which still warns (once per
+#: process until :func:`reset_epoch_timestamp_warnings`). Grows one 12-char id
+#: per pull per process lifetime — O(pulls) memory, honestly bounded by the few
+#: pulls a process ever runs.
+_EPOCH_WARNED_PULL_IDS: set[str] = set()
+
+
+def reset_epoch_timestamp_warnings() -> None:
+    """Clear the once-per-pull epoch-timestamp WARNING dedup — the explicit reset seam.
+
+    Test isolation (and an operator escape hatch): the module-level guard set
+    otherwise persists for the process lifetime, so a test asserting "exactly one
+    WARNING per pull" must reset it between cases. Thread-safe, O(1).
+    """
+    with _EPOCH_WARN_LOCK:
+        _EPOCH_WARNED_PULL_IDS.clear()
+
+
+def _warn_epoch_timestamp_once(raw: object) -> None:
+    """Emit ONE ``groww.parse.epoch_timestamp`` WARNING per pull — thread-safe.
+
+    Fired when the DEFENSIVE epoch branch of :func:`parse_timestamp_ist` is taken:
+    the vendor sent a NUMERIC timestamp where the documented native-IST string is
+    expected. The epoch path assumes **Unix-UTC seconds**; if Groww ever sent
+    IST-naive epoch seconds instead, every bar would silently shift by 5h30m — the
+    vendor's epoch semantics are UNVERIFIED (no probe transcript), so the branch
+    firing at all must be LOUD, but once per pull (a whole epoch payload would
+    otherwise spam one WARNING per row). ``pull_id`` is stamped as an EXPLICIT
+    field (``structlog.testing.capture_logs`` strips contextvars); an unbound
+    scope dedups under the ``""`` key. Never raises; O(1).
+    """
+    pull_id = current_pull_id()
+    with _EPOCH_WARN_LOCK:
+        if pull_id in _EPOCH_WARNED_PULL_IDS:
+            return
+        _EPOCH_WARNED_PULL_IDS.add(pull_id)
+    _LOG.warning(
+        "groww.parse.epoch_timestamp",
+        pull_id=pull_id,
+        sample=repr(raw),
+        assumed="unix-utc-seconds",
+        risk="if the vendor sent IST-naive epochs every bar shifts +05:30 silently",
+    )
+
+
 #: Field count of a FULL Groww candle row
 #: ``[ts, open, high, low, close, volume, open_interest]`` (settled historical bars).
 _CANDLE_ROW_LEN = 7
@@ -52,9 +116,18 @@ def parse_timestamp_ist(raw: object) -> datetime:
 
     Accepts a native-IST string (``"yyyy-MM-ddTHH:mm:ss"`` or with a space
     separator) — localized to IST then converted to UTC — or epoch seconds
-    (int/float, already UTC). Rejects bools, non-finite, and out-of-range values
-    (raises :class:`CandleParseError`), applying the same timestamp-validation
-    guards as the shared candle-field rules.
+    (int/float, **assumed Unix-UTC**). Rejects bools, non-finite, and out-of-range
+    values (raises :class:`CandleParseError`), applying the same
+    timestamp-validation guards as the shared candle-field rules.
+
+    **Epoch honesty (DEC-INGEST-BOUNDARY-INTEGRITY-001):** the numeric branch is
+    DEFENSIVE — Groww documents the native-IST string form; the vendor's epoch
+    semantics are UNVERIFIED (no live probe transcript). The branch assumes
+    Unix-UTC seconds; if the vendor ever sent IST-naive epoch seconds, every bar
+    would silently shift by +05:30. Parsing behaviour is unchanged, but taking
+    the branch now emits ONE loud ``groww.parse.epoch_timestamp`` WARNING per
+    pull (:func:`_warn_epoch_timestamp_once`) so the assumption can never fire
+    silently.
     """
     if isinstance(raw, bool):  # bool is an int subclass — reject explicitly
         raise CandleParseError(f"candle timestamp must not be bool: {raw!r}")
@@ -77,6 +150,10 @@ def parse_timestamp_ist(raw: object) -> datetime:
         except (OverflowError, OSError, ValueError) as exc:
             raise CandleParseError(f"out-of-range candle timestamp: {raw!r}") from exc
     if isinstance(raw, (int, float)):
+        # LOUD once-per-pull anomaly flag — the vendor sent a numeric timestamp
+        # (fires at branch entry: even a non-finite/out-of-range epoch is the
+        # same "vendor sent epochs" anomaly worth flagging).
+        _warn_epoch_timestamp_once(raw)
         epoch = float(raw)
         if not math.isfinite(epoch):
             raise CandleParseError(f"non-finite candle timestamp: {raw!r}")
@@ -166,4 +243,5 @@ __all__ = [
     "EmptyCandleRow",
     "parse_candle_rows",
     "parse_timestamp_ist",
+    "reset_epoch_timestamp_warnings",
 ]
