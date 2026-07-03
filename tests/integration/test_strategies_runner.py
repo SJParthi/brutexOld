@@ -495,8 +495,8 @@ class _DuplicateBarFeed:
     def __iter__(self) -> Any:
         return iter(self._events)
 
-    def ensure_no_lookahead(self, ts: datetime) -> None:
-        del ts
+    def ensure_no_lookahead(self, _ts: datetime) -> None:
+        """No-op guard — the fake feed never enforces look-ahead."""
 
 
 class TestMonotonicFeedAssert:
