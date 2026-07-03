@@ -88,6 +88,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Self
 
+import structlog
+
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.errors import CatalogError
 from brutex.data.fno_candle_lake import register_fno_candle_lake
@@ -98,6 +100,12 @@ from brutex.models import (
     InstrumentType,
     Segment,
 )
+
+#: Store logger — surfaces a silent identity collapse at the write boundary
+#: (two DISTINCT securities sharing one ``(security_id, exch_id, segment)`` — the
+#: observed "13, NSE, CASH" case) so a dropped row is visible in /logs + counted
+#: on the :class:`UpsertResult`, never silently last-wins (Golden Rule #1).
+_LOG = structlog.get_logger("brutex.data.instrument_store")
 
 #: Bump when the schema changes.
 #:
@@ -373,6 +381,14 @@ class UpsertResult:
     rows_replaced: int
     snapshot_date: date
     run_id: str
+    #: How many rows were dropped by the write-boundary identity dedup because a
+    #: DISTINCT security (a different ``symbol_name``) shared their
+    #: ``(security_id, exch_id, segment)`` identity — the "13, NSE, CASH"
+    #: collision. ``0`` for a clean master. Each drop is also logged at WARNING.
+    #: A same-identity re-list with the SAME ``symbol_name`` is NOT counted —
+    #: only the name is compared, so two same-name rows differing in economics
+    #: (lot/tick) still collapse last-wins silently by design.
+    security_id_collisions: int = 0
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1046,8 +1062,33 @@ class InstrumentStore(metaclass=_StoreMeta):
         # crash-proof at the write boundary regardless of caller hygiene
         # (belt-and-braces: select_universe already dedups upstream).
         identity_deduped: dict[tuple[int, Exchange, Segment], Instrument] = {}
+        security_id_collisions = 0
         for instr in instruments:
-            identity_deduped[(instr.security_id, instr.exch_id, instr.segment)] = instr
+            identity = (instr.security_id, instr.exch_id, instr.segment)
+            existing = identity_deduped.get(identity)
+            if existing is not None and existing.symbol_name != instr.symbol_name:
+                # Two DISTINCT securities collapsed onto ONE
+                # (security_id, exch_id, segment) identity — the observed
+                # "13, NSE, CASH" case where the vendor lists one security_id under
+                # two symbols. We KEEP the graceful last-wins dedup (so the bulk
+                # INSERT can't hit a PK violation) but make the drop LOUD + counted
+                # instead of silent (Golden Rule #1); the count rides the
+                # UpsertResult so the caller/load report SEES it.
+                # The BENIGN arm (not counted, not warned) is a re-list with the
+                # SAME identity AND the SAME ``symbol_name`` — NOT necessarily an
+                # exact duplicate: two same-name rows differing only in economics
+                # (lot/tick) still collapse last-wins SILENTLY by design
+                # (unchanged from main; only the name is compared here).
+                security_id_collisions += 1
+                _LOG.warning(
+                    "instrument_store.security_id_collision",
+                    security_id=instr.security_id,
+                    exch_id=instr.exch_id.value,
+                    segment=instr.segment.value,
+                    dropped_symbol=existing.symbol_name,
+                    kept_symbol=instr.symbol_name,
+                )
+            identity_deduped[identity] = instr
         instruments = list(identity_deduped.values())
 
         # Ultra-fast bulk path (DEC-INSTRUMENT-BULK-UPSERT-001). The original
@@ -1157,6 +1198,7 @@ class InstrumentStore(metaclass=_StoreMeta):
             rows_replaced=rows_replaced,
             snapshot_date=snapshot_date,
             run_id=run_id,
+            security_id_collisions=security_id_collisions,
         )
 
     def record_run(self, run: InstrumentRun) -> None:
