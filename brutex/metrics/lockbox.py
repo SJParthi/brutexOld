@@ -46,8 +46,9 @@ Trade-evidence mode (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F2)
 ------------------------------------------------------------
 When the caller's series is *per-bar* (the cascade wire feeds the per-bar
 equity-change series, not per-trade returns), the ``>= min_trades`` count
-gate would count BARS — a ~182-day 1-minute window holds ~68k bars, so the
-DEC-LOCK-001 500-**trade** floor could never bind. The keyword-only
+gate would count BARS — a ~182-calendar-day 1-minute window holds ~47k
+bars (~125 NSE sessions × 375 bars), so the DEC-LOCK-001 500-**trade**
+floor could never bind. The keyword-only
 ``evidence_days`` input fixes that: it carries the TRUE per-trade exit-day
 ordinals, and both the count gate AND the adaptive window extension are
 driven by that evidence while the Sharpe/drawdown are still measured over

@@ -153,8 +153,9 @@ dragged down by the very tail being judged, softening the floor. §6's
 (now historical) same-series convention.
 
 **Pre-change divergence (R2-SR-F2):** the wire's lockbox series is per-BAR,
-so `lockbox_evaluation`'s `>= min_trades` count gate counted BARS (a 182-day
-1-minute window holds ~68k bars) — the DEC-LOCK-001 500-**trade** floor
+so `lockbox_evaluation`'s `>= min_trades` count gate counted BARS (a
+182-calendar-day 1-minute window holds ~47k bars — ~125 NSE sessions ×
+375 bars) — the DEC-LOCK-001 500-**trade** floor
 could never bind in production.
 
 **Resolution (binding):** ONE shared pure resolver —

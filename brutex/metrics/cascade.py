@@ -141,7 +141,7 @@ _FINITE_METRIC_FIELDS: Final[tuple[str, ...]] = (
     "kurtosis",
 )
 
-#: Composite-score weights (spec lines 607-615), summing to 1.0.
+#: Composite-score weights (spec lines 686-697), summing to 1.0.
 _COMPOSITE_WEIGHTS: Final[dict[str, float]] = {
     "sharpe_ratio": 0.25,
     "sortino_ratio": 0.20,
@@ -488,7 +488,7 @@ def _measured_lockbox_sharpe(lb: LockboxResult) -> float:
 def _composite_scores(
     survivors: list[CandidateInput], lockbox_sharpe_by_id: Mapping[str, float]
 ) -> dict[str, float]:
-    """Per-candidate composite score (spec lines 607-615): weighted clamped z-scores.
+    """Per-candidate composite score (spec lines 686-697): weighted clamped z-scores.
 
     Note: the spec's ``normalize(x)`` is a per-(instrument, TF) *leaderboard*
     z-score; here it is taken over the **surviving pool** (a deliberate
@@ -807,7 +807,7 @@ def run_stage4_cascade(
     survivors = kept
     stage_survivors[FilterStage.MONTE_CARLO.value] = len(survivors)
 
-    # ── Composite ranking of survivors (spec 607-615) ──
+    # ── Composite ranking of survivors (spec 686-697) ──
     scores = _composite_scores(survivors, lockbox_sharpe_by_id)
     # Deterministic TOTAL order (DEC-STATS-GATE-INTEGRITY-001 R2-SR-F6,
     # mirroring DEC-RANKING-TIEBREAK-001 in ``brutex.ranking``): primary key is
