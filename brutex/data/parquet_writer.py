@@ -31,24 +31,29 @@ no-op, and a SAME timestamp with DIFFERENT OHLCV is recorded as a
 and returned in :attr:`WriteResult.conflicts` so the caller can log and
 continue (DEC-LAKE-CONFLICT-KEEPFIRST-001). Incremental month-filling and
 full re-pulls are therefore idempotent — the completed partition is
-byte-stable across runs.
+byte-stable across runs. A WITHIN-BATCH duplicate timestamp (a corrupt
+vendor payload repeating a minute inside ONE response) rides the SAME
+per-``merge_mode`` rule on BOTH branches: the merge branch collapses it via
+its timestamp-keyed dict, and the FRESH-partition branch de-duplicates the
+batch before rendering (:meth:`ParquetWriter._dedup_batch`) — so a first
+write can never land two rows for one timestamp
+(DEC-FRESH-WRITE-BATCH-DEDUP-001).
 
 ## Write-side uniqueness invariant (DEC-LAKE-WRITE-UNIQUE-001)
 
 A vendor payload can physically carry DUPLICATE same-timestamp rows (measured:
 135 duplicate 1-minute rows in one ADANIENT January window, reproduced
 deterministically across two pulls). The merge branch always deduped against
-the STORED bars, but the FRESH render stored the batch verbatim (``sorted()``
-preserves duplicates) — so a first write could poison a partition, and the
-no-op merge path returned the poisoned bytes forever. Now EVERY write path
-enforces the same keep-first uniqueness:
+the STORED bars, and the fresh branch now dedups the batch per merge_mode
+(:meth:`ParquetWriter._dedup_batch`, DEC-FRESH-WRITE-BATCH-DEDUP-001 above) —
+but a lake POISONED before that fix never self-healed (the ``added == 0``
+merge path returned the poisoned bytes forever), and every collapse was
+SILENT. This layer completes the invariant:
 
-1. **In-batch dedup** (:meth:`ParquetWriter._dedup_batch`) — the incoming
-   batch is collapsed keyed by timestamp BEFORE the fresh/merge split;
-   first-in-batch wins (``sorted`` is stable, so input order among equal
-   timestamps is preserved), a same-timestamp/different-values pair records a
-   :class:`BarConflict`, and one aggregated ``lake.vendor_duplicate_rows``
-   WARNING per write reports what the vendor sent (never silent).
+1. **Observability** — the duplicate collapse is COUNTED per write batch and
+   reported as one aggregated ``lake.vendor_duplicate_rows`` WARNING
+   (symbol/interval/window/count) on BOTH branches — what the vendor sent is
+   never silently normalised away (Golden Rule #1).
 2. **Merge self-heal** — :meth:`ParquetWriter._merge_write` compares the
    stored file's PHYSICAL row count (Parquet footer, O(footer)) against its
    unique-timestamp count and forces a deduped rewrite even when the merge
@@ -88,7 +93,7 @@ import contextlib
 import hashlib
 import itertools
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -317,14 +322,19 @@ class BarConflict:
     (DEC-LAKE-CONFLICT-KEEPFIRST-001). The STORED bar always wins
     (keep-first — never overwritten, preserving reproducibility per
     CLAUDE.md Golden Rule #7). The caller logs the conflict and continues
-    the pull, then reports exactly what the vendor changed.
+    the pull, then reports exactly what the vendor changed. A WITHIN-BATCH
+    duplicate timestamp with differing values on a FRESH partition write is
+    recorded the same way (DEC-FRESH-WRITE-BATCH-DEDUP-001): ``stored`` is
+    then the KEPT first occurrence in sorted order (the bar that lands in
+    the lake), ``vendor`` the discarded duplicate.
 
     Parameters
     ----------
     timestamp
         The UTC timestamp of the conflicting bar.
     stored
-        The bar currently in the lake (the authoritative value —
+        The bar currently in the lake — or, for a within-batch duplicate on
+        a fresh write, the kept first occurrence (the authoritative value —
         keep-first means this is never replaced).
     vendor
         The bar the vendor just returned (the re-statement that
@@ -355,19 +365,21 @@ class WriteResult:
     bars_added
         Number of incoming bars actually ADDED to the partition by THIS write —
         the DEDUPED count (DEC-SINK-DEDUP-COUNT-001). A fresh partition adds every
-        UNIQUE incoming bar (in-batch vendor duplicates are collapsed keep-first
-        BEFORE the write — DEC-LAKE-WRITE-UNIQUE-001, so a duplicated row is never
-        counted twice); a merge adds only the timestamps not already stored (a re-pull
-        of bars already in the lake adds ``0``); a same-timestamp/different-value
-        keep-first conflict adds ``0`` (the stored bar is kept). Distinct from
-        :attr:`row_count` (the partition's total size after the write) and from the
-        INPUT batch size — this is the honest "how many new bars did this write
-        contribute" count the sink reports as ``bars_appended``.
+        DISTINCT-timestamp incoming bar (a within-batch duplicate collapses to one,
+        DEC-FRESH-WRITE-BATCH-DEDUP-001); a merge adds only the timestamps not
+        already stored (a re-pull of bars already in the lake adds ``0``); a
+        same-timestamp/different-value keep-first conflict adds ``0`` (the stored
+        bar is kept). Distinct from :attr:`row_count` (the partition's total size
+        after the write) and from the INPUT batch size — this is the honest "how
+        many new bars did this write contribute" count the sink reports as
+        ``bars_appended``.
     conflicts
         Vendor re-statements detected during this write: timestamps whose
-        stored bar differed from the incoming bar (DEC-LAKE-CONFLICT-KEEPFIRST-001).
-        The stored bar was kept (keep-first, never overwritten). Empty tuple
-        for a first write or a clean re-pull with no value changes.
+        stored bar differed from the incoming bar (DEC-LAKE-CONFLICT-KEEPFIRST-001)
+        — including a WITHIN-BATCH duplicate timestamp with differing values on a
+        fresh keep-first write (DEC-FRESH-WRITE-BATCH-DEDUP-001). The stored /
+        first-occurrence bar was kept (keep-first, never overwritten). Empty tuple
+        for a duplicate-free first write or a clean re-pull with no value changes.
     """
 
     path: Path
@@ -483,16 +495,15 @@ class ParquetWriter:
             )
         (year, month) = next(iter(partitions))
 
-        # In-batch keep-first dedup (DEC-LAKE-WRITE-UNIQUE-001): a vendor payload can
-        # physically repeat a timestamp (measured live), and the FRESH render used to
-        # store the batch verbatim. `sorted` is STABLE, so among equal timestamps the
-        # first-in-batch bar stays first and `_dedup_batch` keeps exactly it; a
-        # differing pair records a BarConflict (keep-first mode). Dedup runs BEFORE the
-        # fresh/merge split so BOTH paths render from the same unique-timestamp batch.
         sorted_bars = sorted(bars, key=lambda b: b.timestamp)
-        sorted_bars, duplicates_dropped, batch_conflicts = self._dedup_batch(
-            sorted_bars, merge_mode=merge_mode
-        )
+        # Duplicate-timestamp COUNT for the aggregated observability WARNING below
+        # (DEC-LAKE-WRITE-UNIQUE-001): a vendor payload can physically repeat a
+        # timestamp (measured live — 135 duplicate 1-minute rows in one window).
+        # BOTH branches collapse the duplicates — the fresh branch via
+        # `_dedup_batch` (DEC-FRESH-WRITE-BATCH-DEDUP-001), the merge branch via
+        # its timestamp-keyed dict — but neither reported the COUNT, so the
+        # collapse was silent. One O(batch) set sizes it for either branch.
+        duplicates_in_batch = len(sorted_bars) - len({b.timestamp for b in sorted_bars})
         first_ts = sorted_bars[0].timestamp
         last_ts = sorted_bars[-1].timestamp
 
@@ -569,28 +580,37 @@ class ParquetWriter:
 
             write_start = time.perf_counter()
             if dest.exists():
+                # The merge branch needs NO batch pre-dedup: its timestamp-keyed
+                # dict already collapses a within-batch duplicate under the SAME
+                # per-merge_mode rule (the first occurrence lands in `merged`, a
+                # later duplicate hits the `prev is not None` branches) — and it
+                # must see the RAW batch so a same-ts restate keeps conflicting
+                # against the STORED bar, byte-unchanged.
                 result = self._merge_write(dest, sorted_bars, merge_mode=merge_mode)
-                if batch_conflicts:
-                    # In-batch conflicts ride the SAME WriteResult.conflicts channel the
-                    # merge conflicts use (the ingest spines aggregate + log them via the
-                    # existing `ingest.conflict.summary` machinery — no new plumbing).
-                    result = replace(result, conflicts=(*batch_conflicts, *result.conflicts))
             else:
+                # FRESH partition: de-duplicate the batch by timestamp FIRST
+                # (DEC-FRESH-WRITE-BATCH-DEDUP-001). Without this, a corrupt
+                # vendor payload repeating a minute landed BOTH rows in the lake
+                # on the first write — and a settled past month is never
+                # rewritten, so the duplicate persisted. The dedup applies the
+                # SAME per-merge_mode collision rule `_merge_write` uses, so a
+                # fresh write + a re-pull of the same batch stay bit-idempotent.
+                fresh_bars, batch_conflicts = self._dedup_batch(sorted_bars, merge_mode=merge_mode)
                 # P9 tripwire (DEC-LAKE-WRITE-UNIQUE-001): post-dedup the batch MUST be
                 # strictly increasing; a violation is a loud WriterError, never a
                 # silently-poisoned partition.
-                self._assert_strictly_increasing(dest, sorted_bars)
-                content_bytes = self._render_bytes(sorted_bars)
+                self._assert_strictly_increasing(dest, fresh_bars)
+                content_bytes = self._render_bytes(fresh_bars)
                 self._atomic_write(dest, content_bytes)
                 result = WriteResult(
                     path=dest,
-                    row_count=len(sorted_bars),
+                    row_count=len(fresh_bars),
                     raw_hash=hashlib.sha256(content_bytes).hexdigest(),
                     first_ts=first_ts,
                     last_ts=last_ts,
                     bytes_written=len(content_bytes),
-                    bars_added=len(sorted_bars),
-                    conflicts=batch_conflicts,
+                    bars_added=len(fresh_bars),
+                    conflicts=tuple(batch_conflicts),
                 )
             append_ms = (time.perf_counter() - write_start) * 1000.0
 
@@ -606,20 +626,21 @@ class ParquetWriter:
             partition_rows=result.row_count,
             partition=str(dest),
         )
-        if duplicates_dropped:
+        if duplicates_in_batch:
             # ONE aggregated WARNING per write when the vendor sent physically
             # duplicate rows (DEC-LAKE-WRITE-UNIQUE-001) — the batch was collapsed
-            # keep-first above, so nothing corrupt was stored; this names what the
-            # vendor did (never silent, Golden Rule #1). Emitted outside the locks
-            # like the write telemetry (logging is not part of the critical section).
+            # per the merge_mode rule (fresh: `_dedup_batch`, merge: the
+            # timestamp-keyed dict), so nothing corrupt was stored; this names
+            # what the vendor did (never silent, Golden Rule #1). Emitted outside
+            # the locks like the write telemetry (logging is not part of the
+            # serialised critical section).
             _LOG.warning(
                 "lake.vendor_duplicate_rows",
                 symbol=symbol,
                 interval=interval,
                 window_start=first_ts.isoformat(),
                 window_end=last_ts.isoformat(),
-                dropped=duplicates_dropped,
-                conflicting=len(batch_conflicts),
+                dropped=duplicates_in_batch,
                 partition=str(dest),
             )
         return result
@@ -754,6 +775,70 @@ class ParquetWriter:
             conflicts=tuple(conflicts),
         )
 
+    def _dedup_batch(
+        self, sorted_bars: list[CandleBar], *, merge_mode: str
+    ) -> tuple[list[CandleBar], list[BarConflict]]:
+        """Collapse WITHIN-BATCH duplicate timestamps before a FRESH-partition render.
+
+        Forensic-audit finding #11 (DEC-FRESH-WRITE-BATCH-DEDUP-001): the fresh
+        branch rendered ``sorted_bars`` directly, so a corrupt vendor payload
+        carrying the SAME timestamp twice stored BOTH rows on a first write —
+        and a settled past month is never rewritten, so the duplicate persisted.
+        :meth:`_merge_write` was already safe (its timestamp-keyed dict collapses
+        a within-batch duplicate against the stored partition); this applies the
+        SAME per-*merge_mode* collision rule to the fresh batch, one duplicate
+        pair at a time, so BOTH branches see de-duplicated input consistently:
+
+        * an IDENTICAL duplicate (same OHLCV+OI, same overlay) is a silent drop
+          (mirrors the merge no-op);
+        * a DIFFERENT-value duplicate keeps the FIRST occurrence in sorted order
+          under ``"keep-first"`` and records a :class:`BarConflict`
+          (``stored`` = the kept first occurrence — the existing observability
+          surface, logged downstream via ``ingest.conflict.summary``), or is
+          OVERWRITTEN by the later occurrence under ``"latest-wins"`` (no
+          conflict — the intentional restate rule);
+        * a same-OHLCV / DIFFERENT-overlay duplicate keeps the first overlay
+          silently under ``"keep-first"`` and takes the later one under
+          ``"latest-wins"`` (mirrors the merge overlay rule, plan §15.3).
+
+        Mirroring the merge rule per mode (not keep-first unconditionally) is
+        load-bearing for Golden Rule #7: a fresh ``latest-wins`` write followed
+        by a re-pull of the SAME batch must converge on the same bytes the merge
+        path would produce. A duplicate-free batch passes through unchanged, so
+        the rendered bytes are byte-identical to the pre-fix output. O(1) dict
+        lookup per bar; the loop allocates O(batch), so it runs inside
+        ``lake_write_guard`` like the merge loop (DEC-LAKE-MERGE-OOM-HALT-001 —
+        an OOM here halts gracefully, never crashes the pull raw).
+        """
+        deduped: list[CandleBar] = []
+        slot_by_ts: dict[datetime, int] = {}
+        conflicts: list[BarConflict] = []
+        with lake_write_guard():
+            for bar in sorted_bars:
+                slot = slot_by_ts.get(bar.timestamp)
+                if slot is None:
+                    slot_by_ts[bar.timestamp] = len(deduped)
+                    deduped.append(bar)
+                elif not self._bar_values_equal(deduped[slot], bar):
+                    if merge_mode == "latest-wins":
+                        # The later restate wins (no conflict recorded) — the
+                        # same intentional-overwrite rule the merge applies.
+                        deduped[slot] = bar
+                    else:
+                        # Keep the FIRST occurrence (keep-first); record the
+                        # dropped duplicate for the caller's conflict logging.
+                        conflicts.append(
+                            BarConflict(timestamp=bar.timestamp, stored=deduped[slot], vendor=bar)
+                        )
+                elif not _overlay_equal(deduped[slot], bar):
+                    # Identical OHLCV+OI but a DIFFERENT Greeks overlay: the
+                    # later overlay wins ONLY under latest-wins; keep-first
+                    # keeps the first silently — never a BarConflict (mirrors
+                    # the merge overlay rule, plan §15.3).
+                    if merge_mode == "latest-wins":
+                        deduped[slot] = bar
+        return deduped, conflicts
+
     def make_catalog_entry(
         self,
         *,
@@ -809,44 +894,6 @@ class ParquetWriter:
                 return dest.read_bytes()
         except OSError as exc:
             raise WriterError(f"unreadable existing partition {dest}: {exc}") from exc
-
-    @staticmethod
-    def _dedup_batch(
-        sorted_bars: list[CandleBar], *, merge_mode: str
-    ) -> tuple[list[CandleBar], int, tuple[BarConflict, ...]]:
-        """Collapse same-timestamp rows WITHIN one incoming batch, keep-first.
-
-        DEC-LAKE-WRITE-UNIQUE-001: a vendor payload can physically repeat a
-        timestamp (measured live — 135 duplicate 1-minute rows in one window),
-        and the fresh render used to store the batch verbatim. Every write path
-        now builds the same keep-first ``{timestamp: bar}`` map BEFORE the
-        fresh/merge split: the FIRST occurrence in the (stably) sorted batch
-        wins; a same-timestamp pair with DIFFERENT OHLCV+OI records a
-        :class:`BarConflict` in ``keep-first`` mode (the same channel the merge
-        conflicts use, so the ingest spines log it via the existing
-        ``ingest.conflict.summary`` machinery). In ``latest-wins`` mode no
-        conflict is recorded — but the collapse is STILL keep-first: within one
-        batch there is no cross-pull "restate" to prefer, and the derived
-        ``1day`` batch (the only latest-wins caller) is unique by construction
-        (its resampler enforces strictly-increasing buckets), so the branch is
-        defensive, never load-bearing. The dedup-free common case returns the
-        input list unchanged (zero-copy).
-
-        Returns ``(unique_bars, duplicates_dropped, conflicts)``. ``unique_bars``
-        stays timestamp-sorted (dict preserves the sorted insertion order).
-        """
-        unique: dict[datetime, CandleBar] = {}
-        conflicts: list[BarConflict] = []
-        for bar in sorted_bars:
-            prev = unique.get(bar.timestamp)
-            if prev is None:
-                unique[bar.timestamp] = bar
-            elif merge_mode == "keep-first" and not ParquetWriter._bar_values_equal(prev, bar):
-                conflicts.append(BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar))
-        dropped = len(sorted_bars) - len(unique)
-        if dropped == 0:
-            return sorted_bars, 0, ()
-        return list(unique.values()), dropped, tuple(conflicts)
 
     @staticmethod
     def _assert_strictly_increasing(dest: Path, sorted_bars: list[CandleBar]) -> None:

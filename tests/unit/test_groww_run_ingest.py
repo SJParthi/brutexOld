@@ -1066,3 +1066,121 @@ def test_windows_skipped_settled_info_emitted(monkeypatch: pytest.MonkeyPatch) -
     assert info["windows_skipped_settled"] == 2
     assert info["pairs"] == 2
     assert info["log_level"] == "info"
+
+
+class TestEmptyBreakerRunner:
+    """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — per-pass breaker wiring on the spot runner."""
+
+    def test_mass_empty_halt_is_a_global_stop_not_a_quarantine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A worker raising MassEmptySettleHalt must PROPAGATE (every remaining symbol
+        # would poison identically), never be quarantined as one pair's failure.
+        from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+
+        halt = MassEmptySettleHalt(
+            empty_windows=3, observed_windows=3, consecutive_empties=3, trip_rule="consecutive"
+        )
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            raise halt
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with pytest.raises(MassEmptySettleHalt):
+            run_groww_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("NIFTY"), _index("BANKNIFTY")],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+            )
+
+    def test_one_breaker_shared_across_all_pairs_of_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The runner resolves ONE breaker per pass and threads the SAME instance into
+        # every pair — pull-wide counting (a soft-throttle spans symbols).
+        seen: list[object] = []
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):
+            seen.append(kw["empty_breaker"])
+            return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY"), _index("BANKNIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+        )
+        assert len(seen) == 2
+        assert seen[0] is seen[1]  # ONE shared instance
+        assert seen[0] is not None  # the default resolve is ON (never silently off)
+
+    def test_breaker_state_never_leaks_across_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Two sequential passes with NO injected breaker: each resolves a FRESH one
+        # (state isolation across pulls) — the instances differ.
+        seen: list[object] = []
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):
+            seen.append(kw["empty_breaker"])
+            return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        for _ in range(2):
+            run_groww_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("NIFTY")],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+            )
+        assert seen[0] is not seen[1]  # a fresh breaker per pass — no leak
+
+    def test_injected_breaker_is_forwarded_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
+
+        injected = EmptySettleBreaker(consecutive_limit=5)
+        seen: list[object] = []
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):
+            seen.append(kw["empty_breaker"])
+            return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        run_groww_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            empty_breaker=injected,
+        )
+        assert seen == [injected]
+
+    def test_with_retry_forwards_the_breaker_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
+
+        injected = EmptySettleBreaker(consecutive_limit=5)
+        seen: list[object] = []
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):
+            seen.append(kw["empty_breaker"])
+            return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        run_groww_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            empty_breaker=injected,
+        )
+        assert seen == [injected]

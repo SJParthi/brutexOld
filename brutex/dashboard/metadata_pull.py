@@ -568,7 +568,10 @@ def pull_expiries_contracts(
     NEW work: an immutable PAST year already settled in the coverage ledger is
     skipped (Phase 1); an EXPIRED expiry whose contracts are already persisted is
     skipped (Phase 2). The current year + not-yet-expired expiries always re-pull
-    (new expiries/strikes appear as time passes).
+    (new expiries/strikes appear as time passes). A skipped cell's PERSISTED
+    expiries still seed the Phase-2 worklist (DEC-PHASE2-REGISTRY-REBUILD-001), so
+    contracts that FAILED in an earlier run are rebuilt + re-pulled even though
+    their settled ``expiries_only`` cell itself is never re-fetched.
 
     Parameters
     ----------
@@ -643,6 +646,23 @@ def pull_expiries_contracts(
     )
     cells = cells_to_pull(all_cells, settled=expiry_skip, current_year=today.year)
     contract_skip = settled_contract_jobs(registry.list_contract_jobs())
+    # Phase-2 re-pull safety net (DEC-PHASE2-REGISTRY-REBUILD-001): rebuild the contract
+    # worklist from the REGISTRY's persisted expiries as well as this run's in-memory
+    # discoveries. A cell settled ``expiries_only`` in an EARLIER run is skipped by the
+    # Phase-1 incremental skip, so its expiries never enter ``expiries_seen`` — and when
+    # that run's Phase-2 contract jobs FAILED, the failed contracts had NO re-pull path
+    # (the year was lost forever). The persisted expiries give those jobs back;
+    # ``contract_jobs_to_pull`` still drops every already-captured expired job
+    # (``contract_skip`` is built from persisted CONTRACTS, which a failed job never
+    # wrote), so a healthy re-run issues zero extra calls. Grid-restricted so a
+    # selected-symbols pull never resurrects another underlying's jobs; one O(persisted
+    # expiries) read per pull (the pull itself is network-bound).
+    grid_pairs = frozenset(grid)
+    persisted_jobs: tuple[ContractJob, ...] = tuple(
+        (row.exch, row.underlying, row.expiry_date)
+        for row in registry.list_expiries()
+        if (row.exch, row.underlying) in grid_pairs
+    )
 
     # Per-cell expiry tally so the coverage rollup carries the real discovered count
     # (the classify_cell rule keys completeness off expiries_pulled).
@@ -688,12 +708,15 @@ def pull_expiries_contracts(
         """At the Phase-1→2 boundary, grow ``total`` to ``cells + the real job count``.
 
         Reuses the engine's ``contract_jobs_from`` + ``contract_jobs_to_pull`` (the
-        SAME derivation+skip ``run_two_phase`` applies) so the Phase-2 denominator is
+        SAME derivation+skip ``run_two_phase`` applies — including the persisted-expiry
+        union of DEC-PHASE2-REGISTRY-REBUILD-001) so the Phase-2 denominator is
         exactly the jobs it will run — never an estimate (CLAUDE.md §11 COMMON).
         """
         nonlocal progress_total
         jobs = contract_jobs_to_pull(
-            contract_jobs_from(dict(expiries_seen)), settled=contract_skip, today=today
+            contract_jobs_from(dict(expiries_seen), persisted=persisted_jobs),
+            settled=contract_skip,
+            today=today,
         )
         progress_total = len(cells) + len(jobs)
 
@@ -825,6 +848,13 @@ def pull_expiries_contracts(
             # fetcher then conceptually discarded from the lean universe.
             contract_counts[job] = contract_counts.get(job, 0) + count
 
+    # A run whose EVERY Phase-1 cell was skipped can still carry Phase-2 work rebuilt
+    # from the registry's persisted expiries (DEC-PHASE2-REGISTRY-REBUILD-001); with
+    # zero cells Phase 1 never reaches the boundary rescale, so seed the progress total
+    # up-front (an empty rebuilt worklist keeps it 0 — the bar stays honestly at 0/0).
+    if not cells:
+        _rescale_to_phase2()
+
     report = run_two_phase(
         cells,
         fetch_expiries=_fetch_expiries,
@@ -833,6 +863,7 @@ def pull_expiries_contracts(
         on_expiry_cell=_on_expiry_cell,
         on_contract=_on_contract,
         contract_skip=contract_skip,
+        persisted_jobs=persisted_jobs,
         today=today,
     )
 

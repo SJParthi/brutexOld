@@ -451,5 +451,98 @@ class TestSettledContractJobs:
         ]
 
 
+# ────────────────────────────────────────────────────────────────────────
+# persisted-expiry union (DEC-PHASE2-REGISTRY-REBUILD-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestContractJobsFromPersisted:
+    def test_persisted_only_yields_jobs(self) -> None:
+        # A prior run's registry-persisted expiry rebuilds a job with NO in-memory cell.
+        persisted = [("NSE", "NIFTY", _D(2024, 6, 27))]
+        assert contract_jobs_from({}, persisted=persisted) == persisted
+
+    def test_persisted_deduped_against_discovered(self) -> None:
+        # The same expiry in BOTH sources yields ONE job (never fetched twice).
+        shared = _D(2026, 6, 25)
+        by_cell: dict[ExpiryCell, Sequence[date]] = {("NSE", "NIFTY", 2026): [shared]}
+        jobs = contract_jobs_from(by_cell, persisted=[("NSE", "NIFTY", shared)])
+        assert jobs == [("NSE", "NIFTY", shared)]
+
+    def test_union_is_sorted_across_sources(self) -> None:
+        by_cell: dict[ExpiryCell, Sequence[date]] = {("NSE", "ZEEL", 2024): [_D(2024, 1, 25)]}
+        jobs = contract_jobs_from(by_cell, persisted=[("BSE", "AAA", _D(2024, 1, 25))])
+        assert jobs == [
+            ("BSE", "AAA", _D(2024, 1, 25)),
+            ("NSE", "ZEEL", _D(2024, 1, 25)),
+        ]
+
+    def test_default_empty_persisted_unchanged(self) -> None:
+        # The default is byte-identical to the prior in-memory-only derivation.
+        by_cell: dict[ExpiryCell, Sequence[date]] = {("NSE", "NIFTY", 2024): [_D(2024, 1, 25)]}
+        assert contract_jobs_from(by_cell) == contract_jobs_from(by_cell, persisted=())
+
+
+class TestRunTwoPhasePersistedJobs:
+    """The registry-rebuilt Phase-2 worklist wired through run_two_phase."""
+
+    def test_persisted_job_runs_in_phase2_without_a_cell(self) -> None:
+        """THE re-pull path: a persisted expiry with NO Phase-1 cell is still fetched.
+
+        Run-1's cell settled ``expiries_only`` and its contract job FAILED; on the
+        re-run the cell is skipped (zero cells here), so before the fix no contract
+        job was ever rebuilt — the failed contracts had no re-pull path at all.
+        """
+        pulled: list[ContractJob] = []
+        job = ("NSE", "NIFTY", _D(2024, 6, 27))
+        report = run_two_phase(
+            [],  # the settled cell is skipped — Phase 1 has nothing to do
+            fetch_expiries=lambda _c: [],
+            fetch_contracts=lambda j: (pulled.append(j), 2)[1],
+            run_parallel=_sync_run_parallel,
+            on_expiry_cell=lambda *_: None,
+            on_contract=lambda *_: None,
+            persisted_jobs=[job],
+            today=_D(2026, 6, 14),
+        )
+        assert pulled == [job]
+        assert report.contract_jobs == 1
+        assert report.contracts_persisted == 2
+
+    def test_persisted_job_still_skipped_when_settled_and_expired(self) -> None:
+        # Contracts already captured + expiry expired → the union adds no extra call.
+        pulled: list[ContractJob] = []
+        job = ("NSE", "NIFTY", _D(2024, 6, 27))
+        report = run_two_phase(
+            [],
+            fetch_expiries=lambda _c: [],
+            fetch_contracts=lambda j: (pulled.append(j), 2)[1],
+            run_parallel=_sync_run_parallel,
+            on_expiry_cell=lambda *_: None,
+            on_contract=lambda *_: None,
+            contract_skip=frozenset({job}),
+            persisted_jobs=[job],
+            today=_D(2026, 6, 14),
+        )
+        assert pulled == []
+        assert report.contract_jobs == 0
+
+    def test_persisted_job_deduped_against_discovered(self) -> None:
+        # The same expiry discovered THIS run and persisted earlier → ONE fetch.
+        shared = _D(2026, 6, 25)
+        pulled: list[ContractJob] = []
+        run_two_phase(
+            [("NSE", "NIFTY", 2026)],
+            fetch_expiries=lambda _c: [shared],
+            fetch_contracts=lambda j: (pulled.append(j), 1)[1],
+            run_parallel=_sync_run_parallel,
+            on_expiry_cell=lambda *_: None,
+            on_contract=lambda *_: None,
+            persisted_jobs=[("NSE", "NIFTY", shared)],
+            today=_D(2026, 6, 14),
+        )
+        assert pulled == [("NSE", "NIFTY", shared)]
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

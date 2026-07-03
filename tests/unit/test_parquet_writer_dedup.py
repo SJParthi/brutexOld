@@ -7,9 +7,12 @@ two pulls). Before the fix the FRESH render stored the batch verbatim
 already-poisoned file's bytes forever, and ``_read_existing_bars`` collapsed
 stored duplicates silently LAST-wins. This suite pins the whole invariant:
 
-* **In-batch keep-first dedup** on the fresh AND merge paths — first-in-batch
-  wins, a differing pair records a :class:`BarConflict`, one aggregated
-  ``lake.vendor_duplicate_rows`` WARNING per write (never silent);
+* **In-batch dedup observability** on the fresh AND merge paths — the fresh
+  branch collapses via ``_dedup_batch`` (DEC-FRESH-WRITE-BATCH-DEDUP-001, the
+  concurrent main fix this suite builds on), the merge branch via its
+  timestamp-keyed dict; EITHER collapse now emits one aggregated
+  ``lake.vendor_duplicate_rows`` WARNING per write (never silent), and a
+  differing keep-first pair records a :class:`BarConflict`;
 * **Merge self-heal** — a physically-poisoned stored file forces a deduped
   rewrite even when the merge adds nothing (``lake.partition.dedup_healed``),
   keep-FIRST winner proven;
@@ -19,8 +22,8 @@ stored duplicates silently LAST-wins. This suite pins the whole invariant:
   :class:`WriterError` naming the partition (a genuine invariant assert);
 * **Idempotence** — a duplicated batch re-run is byte-identical (Rule #7).
 
-Whitebox: exercises the private ``_dedup_batch`` / ``_assert_strictly_increasing``
-/ ``_stored_physical_rows`` helpers directly (the DEC-P0-017 convention), so the
+Whitebox: exercises the private ``_assert_strictly_increasing`` /
+``_stored_physical_rows`` helpers directly (the DEC-P0-017 convention), so the
 file silences ``reportPrivateUsage``.
 """
 
@@ -162,7 +165,6 @@ class TestFreshWriteDedup:
         warns = _events(logs, "lake.vendor_duplicate_rows")
         assert len(warns) == 1
         assert warns[0]["dropped"] == 1
-        assert warns[0]["conflicting"] == 1
 
     def test_clean_batch_emits_no_duplicate_warning(self, tmp_path: Path) -> None:
         writer = ParquetWriter(lake_root=tmp_path)
@@ -171,13 +173,12 @@ class TestFreshWriteDedup:
         assert result.row_count == 2
         assert _events(logs, "lake.vendor_duplicate_rows") == []
 
-    def test_latest_wins_in_batch_dup_keeps_first_no_conflict(self, tmp_path: Path) -> None:
-        """The latest-wins (derived 1day) mode still collapses keep-first, silently.
-
-        Within ONE batch there is no cross-pull "restate" to prefer, and the
-        1day deriver's resampler emits unique buckets by construction — the
-        branch is defensive. No BarConflict is recorded (latest-wins never
-        records conflicts), but the drop is still counted in the WARNING.
+    def test_latest_wins_in_batch_dup_takes_later_and_warns(self, tmp_path: Path) -> None:
+        """The latest-wins (derived 1day) mode mirrors the merge restate rule for an
+        in-batch duplicate — the LATER occurrence wins, no conflict recorded
+        (DEC-FRESH-WRITE-BATCH-DEDUP-001) — and the collapse is still COUNTED in
+        the aggregated WARNING (the observability this PR adds): defensive only,
+        the 1day deriver emits unique buckets by construction.
         """
         writer = ParquetWriter(lake_root=tmp_path)
         with capture_logs() as logs:
@@ -188,18 +189,10 @@ class TestFreshWriteDedup:
             )
         assert result.row_count == 1
         assert result.conflicts == ()
-        assert _stored_frame(result.path)["close"].to_list() == [100.0]
+        assert _stored_frame(result.path)["close"].to_list() == [999.0]
         warns = _events(logs, "lake.vendor_duplicate_rows")
         assert len(warns) == 1
         assert warns[0]["dropped"] == 1
-        assert warns[0]["conflicting"] == 0
-
-    def test_dedup_batch_helper_zero_copy_on_clean_batch(self) -> None:
-        bars = [_bar(0), _bar(1)]
-        out, dropped, conflicts = ParquetWriter._dedup_batch(bars, merge_mode="keep-first")
-        assert out is bars  # the dedup-free common case returns the input unchanged
-        assert dropped == 0
-        assert conflicts == ()
 
 
 # ── MERGE path in-batch dedup ──────────────────────────────────────────────

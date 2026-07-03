@@ -356,9 +356,11 @@ DIAGNOSTICS: Final[dict[str, str]] = {
     "spot1m.clean_empty": (
         "FAIL spot-1m[R2/R3]: clean-but-EMPTY 200 for {day}, a day NSE definitely traded — "
         "either a throttle-shaped empty-200 or a mis-addressed request (the proven M&M-'&' "
-        "class). Production would count this toward a PERMANENT SKIPPED settle. Do NOT run a "
-        "backfill until explained; re-run this stage in 10 min to separate throttle from "
-        "addressing."
+        "class). Production counts this toward a SKIPPED settle — a pull-wide burst of these "
+        "trips the mass-empty circuit breaker and HALTS the pull "
+        "(DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001), and `brutex reopen-skipped` can re-open "
+        "already-settled windows — but do NOT run a backfill until explained; re-run this "
+        "stage in 10 min to separate throttle from addressing."
     ),
     "spot1m.session_shift": (
         "FAIL spot-1m[M12]: first bar parses to {first_ist} IST and {dropped}/{total} bars "

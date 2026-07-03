@@ -24,8 +24,16 @@ the API-call level on the next click (the incremental skip below).
   until the Phase-1 iterable is fully drained — the ordering guarantee is
   structural, not advisory (asserted by ``test_no_contract_before_all_expiries``).
 * **Phase 2 — contracts.** The ``(exchange, underlying, expiry)`` jobs are
-  derived ONLY from the expiries Phase 1 discovered (handed over in-memory —
-  no store read-back), then run through the same ``run_parallel``.
+  derived from the expiries Phase 1 discovered THIS run (handed over
+  in-memory) UNIONED with the caller-injected *persisted_jobs* — a PRIOR
+  run's registry-persisted expiries — then run through the same
+  ``run_parallel``. The union (DEC-PHASE2-REGISTRY-REBUILD-001) is the
+  re-pull path for contracts that FAILED after their Phase-1 cell settled:
+  a settled past-year cell is skipped by the Phase-1 incremental skip, so
+  its expiries are absent from this run's in-memory discoveries and an
+  in-memory-only derivation would drop those failed jobs FOREVER. Both
+  sources are vendor-discovered expiries (never invented), de-duplicated,
+  and still filtered by the Phase-2 incremental skip below.
 
 ## Incremental skip (the "don't re-fetch what's already pulled" requirement)
 
@@ -212,24 +220,44 @@ def cells_to_pull(
     return [cell for cell in cells if not (cell[2] < current_year and cell in settled)]
 
 
-def contract_jobs_from(expiries_by_cell: dict[ExpiryCell, Sequence[date]]) -> list[ContractJob]:
+def contract_jobs_from(
+    expiries_by_cell: dict[ExpiryCell, Sequence[date]],
+    *,
+    persisted: Iterable[ContractJob] = (),
+) -> list[ContractJob]:
     """Derive the Phase-2 contract worklist from Phase-1's discovered expiries.
 
     A contract job exists for an ``(exchange, underlying, expiry)`` ONLY when
-    Phase 1 actually discovered that expiry — so contracts can never be pulled
-    for an expiry the engine never saw (the operator's "never jump to contracts
-    early" invariant, made structural).
+    Phase 1 actually discovered that expiry — THIS run (*expiries_by_cell*) or a
+    PRIOR run whose discovery was persisted to the registry (*persisted*,
+    DEC-PHASE2-REGISTRY-REBUILD-001) — so contracts can never be pulled for an
+    expiry the engine never saw (the operator's "never jump to contracts early"
+    invariant, made structural for BOTH sources). The *persisted* union is the
+    re-pull path for contracts that FAILED after their cell settled
+    ``expiries_only``: the settled past-year cell is skipped on a re-run
+    (:func:`cells_to_pull`), so its expiries never re-enter *expiries_by_cell*,
+    and without the union the failed jobs would never be rebuilt.
 
     Each ``(exchange, underlying, expiry)`` is emitted once even if two cells
-    (e.g. adjacent pull years) surfaced the same expiry date, so a contract
-    leg-set is never fetched twice in one run (O(1) dedup via a set).
+    (e.g. adjacent pull years) surfaced the same expiry date and/or it also
+    appears in *persisted*, so a contract leg-set is never fetched twice in one
+    run (O(1) dedup via a set).
+
+    Parameters
+    ----------
+    expiries_by_cell
+        This run's Phase-1 discoveries, keyed by their discovering cell.
+    persisted
+        Previously-persisted ``(exchange, underlying, expiry)`` triples (e.g.
+        the registry's expiry rows). Empty (the default) keeps the derivation
+        byte-identical to the in-memory-only behaviour.
 
     Returns
     -------
     list[ContractJob]
         Sorted, de-duplicated ``(exchange, underlying, expiry_date)`` jobs.
     """
-    jobs: set[ContractJob] = set()
+    jobs: set[ContractJob] = set(persisted)
     for (exchange, underlying, _year), expiries in expiries_by_cell.items():
         for expiry in expiries:
             jobs.add((exchange, underlying, expiry))
@@ -342,6 +370,7 @@ def run_two_phase(
     on_expiry_cell: Callable[[ExpiryCell, Sequence[date], BaseException | None], None],
     on_contract: Callable[[ContractJob, int, BaseException | None], None],
     contract_skip: frozenset[ContractJob] = frozenset(),
+    persisted_jobs: Iterable[ContractJob] = (),
     today: date | None = None,
 ) -> TwoPhaseReport:
     """Run Phase 1 (all expiries) to completion, then Phase 2 (all contracts).
@@ -377,6 +406,17 @@ def run_two_phase(
     contract_skip
         ``(exchange, underlying, expiry)`` jobs already pulled — combined with
         *today* to drop immutable expired jobs before the network call.
+    persisted_jobs
+        Previously-persisted ``(exchange, underlying, expiry)`` triples (the
+        registry's expiry rows, injected by the caller — no store read here)
+        UNIONED into the Phase-2 worklist alongside this run's discoveries
+        (DEC-PHASE2-REGISTRY-REBUILD-001). This is the re-pull path for
+        contracts that FAILED after their Phase-1 cell settled ``expiries_only``
+        (the skipped cell contributes no in-memory expiries on a re-run). The
+        union is de-duplicated and *contract_skip* still applies — a job whose
+        contracts are already captured + expired is dropped, so a healthy
+        re-run issues no extra call. Empty (the default) is byte-identical to
+        the prior in-memory-only derivation.
     today
         Current date for the Phase-2 skip; defaults to ``date.today()``. When
         *contract_skip* is empty the value is immaterial (nothing is skipped).
@@ -403,8 +443,8 @@ def run_two_phase(
             on_expiry_cell(e_outcome.item, [], e_outcome.exc)
     # ── Barrier: Phase 1 fully drained above; ONLY now do we build Phase 2 ──
 
-    # ── Phase 2 — contracts, derived solely from discovered expiries ────
-    jobs = contract_jobs_from(expiries_by_cell)
+    # ── Phase 2 — contracts, from discovered ∪ persisted expiries ───────
+    jobs = contract_jobs_from(expiries_by_cell, persisted=persisted_jobs)
     jobs = contract_jobs_to_pull(jobs, settled=contract_skip, today=today or date.today())
     contract_jobs = 0
     contract_failures = 0

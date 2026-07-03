@@ -455,6 +455,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
 
+    # ── reopen-skipped (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) — un-cement settles ──
+    reopen_skipped = sub.add_parser(
+        "reopen-skipped",
+        help=(
+            "Re-open SKIPPED (settled no-data) pull windows so the next pull "
+            "re-verifies them — the un-cement path for windows a vendor "
+            "soft-throttle / mis-addressed request may have faked empty. "
+            "Refuses while a pull is running (the account-wide single-flight "
+            "lock); re-opened windows are breaker-exempt re-checks"
+        ),
+    )
+    reopen_skipped.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    reopen_skipped.add_argument(
+        "--symbol",
+        default=None,
+        help="Only windows of this symbol / contract groww_symbol (default: any)",
+    )
+    reopen_skipped.add_argument(
+        "--market",
+        default=None,
+        help="Only this ledger namespace (e.g. groww / groww-option / groww-future; default: any)",
+    )
+    reopen_skipped.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Bound the re-open to the first N matching windows (default: all matching)",
+    )
+
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
     auth = sub.add_parser(
         "auth",
@@ -601,7 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
             "MANUAL: keep running bounded auto-retry rounds until the coverage "
             "ledger is CLEAN, OR the token dies (stop + auth_expired verdict), OR "
             "the round budget is spent — reuses the same retry engine, rate-safe "
-            "(≤5 r/s), bounded (NOT infinite) (DEC-TOKEN-PREFLIGHT-001)"
+            "(≤8 r/s), bounded (NOT infinite) (DEC-TOKEN-PREFLIGHT-001)"
         ),
     )
     fetch.add_argument(
@@ -1347,6 +1381,86 @@ def cmd_catalog_reconcile(lake_root: Path | None) -> int:
     print(
         f"[brutex] catalog reconcile — partitions={result.partitions_reconciled} "
         f"bars={result.bars_total} skipped={result.skipped} (lake={resolved})"
+    )
+    return EXIT_OK
+
+
+def cmd_reopen_skipped(
+    *,
+    lake_root: Path | None,
+    symbol: str | None,
+    market: str | None,
+    limit: int | None,
+) -> int:
+    """Re-open ``SKIPPED`` (settled no-data) ledger windows for re-verification.
+
+    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the operator "re-open windows" action
+    the divergence register's R2 fix demands: a ``SKIPPED`` settle is no longer
+    permanent-forever. Loads the durable window ledger, demotes every matching
+    ``SKIPPED`` row to a retryable ``FAILED`` (``empty_streak`` reset — the next
+    pull re-fetches it with the FULL fresh confirmation budget; the ``REOPENED``
+    marker makes those re-checks breaker-exempt), and persists the ledger
+    atomically. DATA-SAFE: stored lake bars are untouched; the idempotent
+    keep-first sink absorbs the re-fetch (Golden Rule #7). ``--symbol`` /
+    ``--market`` scope the selection; ``--limit`` bounds it (the bounded-sample
+    re-verify).
+
+    **Single-flight guard (minor M-2):** the load→mutate→save runs INSIDE the
+    account-wide pull single-flight lock
+    (:func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock` —
+    the same ``flock`` a real pull holds for its whole duration). While a pull
+    is running the non-blocking acquire fails and this command REFUSES loudly
+    (exit ``EXIT_USER_ERROR``) instead of racing the pull's own throttled ledger
+    flushes — a mid-pull reopen would be silently overwritten by the pull's next
+    ledger persist (last-writer-wins on the whole file). The lock is held only
+    for the fast local mutation (ms), so a pull starting in that instant simply
+    retries; no vendor call is ever made here.
+    """
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_singleflight_lock,
+    )
+    from brutex.data.window_ledger_store import (
+        ledger_path,
+        load_window_ledger,
+        save_window_ledger,
+    )
+
+    resolved = _resolve_lake_root(lake_root)
+    if not ledger_path(resolved).is_file():
+        print(
+            f"[brutex] no window ledger found at {ledger_path(resolved)} — nothing to re-open "
+            "(run a pull first, or pass the right --lake-root).",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    try:
+        with pull_singleflight_lock(resolved):
+            ledger = load_window_ledger(resolved)
+            reopened = ledger.reopen_skipped(market=market, security_id=symbol, limit=limit)
+            if reopened:
+                save_window_ledger(ledger, resolved)
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] reopen-skipped REFUSED — a pull is currently running against this lake "
+            f"({exc}). Re-opening windows mid-pull would race the pull's own ledger writes "
+            "(the pull's next ledger persist would silently overwrite the re-open). Wait for "
+            "the pull to finish (or stop it), then re-run.",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if reopened == 0:
+        print(
+            "[brutex] reopen-skipped — 0 windows matched (nothing was SKIPPED under "
+            f"symbol={symbol or 'any'} market={market or 'any'}); ledger unchanged."
+        )
+        return EXIT_OK
+    print(
+        f"[brutex] reopen-skipped — re-opened {reopened} window(s) "
+        f"(symbol={symbol or 'any'} market={market or 'any'} limit={limit or 'all'}). "
+        "Re-pull to re-verify them; genuinely-empty windows re-settle honestly, "
+        "throttle-poisoned ones recover their data (re-opened windows are "
+        "breaker-exempt deliberate re-checks — the re-pull cannot re-trip on them)."
     )
     return EXIT_OK
 
@@ -2645,7 +2759,7 @@ def cmd_fetch(
     ``--until-clean-rounds`` OUTER budget is spent. It REUSES
     :func:`~brutex.adapters.ingest_common.run_until_clean` over the SAME retry
     engine (no duplicated round loop); honest envelope (Golden Rule #10): the round
-    count is bounded (NOT infinite), each round is one ``≤ 5 r/s`` pass, and the
+    count is bounded (NOT infinite), each round is one ``≤ 8 r/s`` pass, and the
     work is ``O(failed_windows)`` per round — never an "O(1)-total" claim.
     """
     if max_retry_minutes is not None and max_retry_minutes < 1:
@@ -2668,6 +2782,13 @@ def cmd_fetch(
         print(f"[brutex] lake: {resolved_instruments}")
         return EXIT_OK
 
+    # The pull-wide global stops that HALT every remaining window (disk-full/OOM, a
+    # quota stop, or a tripped mass-empty circuit breaker) — distinct from a per-symbol
+    # quarantine. Mirrors the ingest spine's `_GLOBAL_STOP_ERRORS` carve-out
+    # (DEC-LAKE-WRITE-HALT-001 / quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001); each
+    # fires a best-effort CRITICAL Telegram pull-halt alert then re-raises
+    # (DEC-TELEGRAM-PULL-HALT-001).
+    from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
     from brutex.adapters.groww.pull_pipeline import (
         build_fetch_pipeline,
@@ -2694,11 +2815,12 @@ def cmd_fetch(
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
     from brutex.universe import BRUTE_FORCE_INDICES
 
-    # The pull-wide global stops that HALT every remaining window (disk-full/OOM, or a
-    # quota stop) — distinct from a per-symbol quarantine. Mirrors the ingest spine's
-    # `_GLOBAL_STOP_ERRORS` carve-out (DEC-LAKE-WRITE-HALT-001 / quota); each fires a
-    # best-effort CRITICAL Telegram pull-halt alert then re-raises (DEC-TELEGRAM-PULL-HALT-001).
-    _pull_halt_errors = (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError)
+    _pull_halt_errors = (
+        LakeWriteHalt,
+        DailyQuotaExceeded,
+        QuotaInvariantError,
+        MassEmptySettleHalt,
+    )
 
     resolved = _resolve_lake_root(lake_root)
     try:
@@ -2747,6 +2869,7 @@ def cmd_fetch(
     fetch_instruments: list[Any]
     pace: Any = None
     on_rate_limit: Any = None
+    on_timeout: Any = None
     on_success: Any = None
     # The live pull's RateController (DEC-CLI-RATE-BRIDGE-001): held so the per-window
     # ``on_window`` hook can publish the live rate to the cross-process bridge file. Stays
@@ -2866,11 +2989,12 @@ def cmd_fetch(
             if inspect:
                 sink = NullBarSink()
             # Token-bucket pacing for the live pull. The per-second ceiling is the
-            # operator-DIRECTED 5 r/s (constants.GROWW_RATE_LIMIT_RPS_CEILING,
-            # lowered 8 → 5 on 2026-06-22) — the backtesting per-second cap itself
-            # stays officially UNVERIFIED (Golden Rule #1/#10); 5 is an operator
-            # decision, fed as the controller's CEILING into the existing adaptive
-            # token-bucket MECHANISM rather than a hardcoded verified rate.
+            # operator-DIRECTED 8 r/s (constants.GROWW_RATE_LIMIT_RPS_CEILING,
+            # raised 5 → 8 on 2026-06-24, DEC-GROWW-RATE-CEILING-8-002) — the
+            # backtesting per-second cap itself stays officially UNVERIFIED
+            # (Golden Rule #1/#10); 8 is an operator decision, fed as the
+            # controller's CEILING into the existing adaptive token-bucket
+            # MECHANISM rather than a hardcoded verified rate.
             from brutex.adapters.groww.constants import (
                 GROWW_RATE_LIMIT_PER_MIN,
                 GROWW_RATE_LIMIT_RPS_CEILING,
@@ -2878,11 +3002,12 @@ def cmd_fetch(
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
 
-            # Operator-DIRECTED 5 r/s per-second ceiling (the per-second cap stays
+            # Operator-DIRECTED 8 r/s per-second ceiling (the per-second cap stays
             # officially UNVERIFIED); the operator-confirmed 500/min governor
-            # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 5×60 = 300 < 500,
+            # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 8×60 = 480 < 500,
             # so the per-second ceiling is the binding gate without fighting the
-            # governor; the AIMD ladder still steps DOWN on 429s (lowered 8 → 5 on 2026-06-22).
+            # governor; the AIMD ladder still steps DOWN on 429s (raised 5 → 8 on
+            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002).
             _rate = RateController(
                 ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
                 ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
@@ -2893,6 +3018,13 @@ def cmd_fetch(
             # No-op when Telegram is disabled; never blocks the pull.
             _alerter = SweepAlerter()
             pace, on_success = _rate.pace, _rate.on_success
+            # Bind the controller's OWN timeout ladder too, mirroring the dashboard's
+            # `_live_rate_runtime` hook quad (pace / on_rate_limit / on_timeout /
+            # on_success): without it a sustained 5xx/timeout storm on `brutex fetch`
+            # never reached `RateController.on_timeout`, so the gentle AIMD step-down
+            # (8 → … → TIMEOUT_FLOOR_RPS 1 r/s) was DEAD on the CLI path while the
+            # dashboard pull eased off correctly (forensic-audit finding #16).
+            on_timeout = _rate.on_timeout
             on_rate_limit = _alerter.rate_breach_callback(_rate)
             # Hold the controller for the cross-process rate-bridge publisher
             # (DEC-CLI-RATE-BRIDGE-001) — its per-window snapshot feeds the dashboard widget.
@@ -3038,6 +3170,7 @@ def cmd_fetch(
                     pace=pace,
                     ledger=ledger,
                     on_rate_limit=on_rate_limit,
+                    on_timeout=on_timeout,
                     on_success=on_success,
                     on_progress=storm_progress,
                     on_window=ledger_checkpoint,
@@ -5257,6 +5390,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.catalog_command != "reconcile":
             parser.error(f"unknown catalog subcommand: {args.catalog_command}")
         return cmd_catalog_reconcile(lake_root=args.lake_root)
+    if args.command == "reopen-skipped":
+        return cmd_reopen_skipped(
+            lake_root=args.lake_root,
+            symbol=args.symbol,
+            market=args.market,
+            limit=args.limit,
+        )
     if args.command == "auth":  # pragma: no cover — interactive / thin print shims
         if args.auth_command == "set":
             return cmd_auth_set()

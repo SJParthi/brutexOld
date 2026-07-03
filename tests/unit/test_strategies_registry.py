@@ -136,6 +136,31 @@ class TestStrategyMetaValidation:
                 lookback_bars=-1,
             )
 
+    @pytest.mark.parametrize("reserved_id", ["mask:" + "0" * 32, "spec:deadbeef"])
+    def test_reserved_machine_prefix_rejected(self, reserved_id: str) -> None:
+        # DEC-SPEC-IDENTITY-WIRING-001: a free-form registration may never
+        # enter the machine run-identity namespaces — "mask:%032x"
+        # (DEC-MASK-IDENTITY-001) and "spec:<canonical hex>" — or it could
+        # alias a machine identity in the shared combo_hash strategy_id slot.
+        with pytest.raises(ValueError, match="RESERVED machine-identity prefix"):
+            StrategyMeta(
+                strategy_id=reserved_id,
+                version="0.1.0",
+                symbols=("X",),
+                interval="1minute",
+            )
+
+    def test_ordinary_id_with_colon_is_not_reserved(self) -> None:
+        # Only the two literal machine prefixes are refused; an ordinary id
+        # containing a colon elsewhere stays valid.
+        meta = StrategyMeta(
+            strategy_id="ma:crossover",
+            version="0.1.0",
+            symbols=("X",),
+            interval="1minute",
+        )
+        assert meta.strategy_id == "ma:crossover"
+
 
 class TestRegisterStrategyDecorator:
     """Exercises the module-wide :func:`register_strategy` helper."""
