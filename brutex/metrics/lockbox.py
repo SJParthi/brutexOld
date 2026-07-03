@@ -42,13 +42,36 @@ equity path, in return units — the caller supplies ``training_max_drawdown``
 in the same units. All statistics are full-precision floats and are never
 rounded (DEC-MONEY-2DP-001 is money-display only).
 
+Trade-evidence mode (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F2)
+------------------------------------------------------------
+When the caller's series is *per-bar* (the cascade wire feeds the per-bar
+equity-change series, not per-trade returns), the ``>= min_trades`` count
+gate would count BARS — a ~182-calendar-day 1-minute window holds ~47k
+bars (~125 NSE sessions × 375 bars), so the DEC-LOCK-001 500-**trade**
+floor could never bind. The keyword-only
+``evidence_days`` input fixes that: it carries the TRUE per-trade exit-day
+ordinals, and both the count gate AND the adaptive window extension are
+driven by that evidence while the Sharpe/drawdown are still measured over
+the (bar) ``trade_returns`` inside the resolved window. With
+``evidence_days=None`` the legacy behaviour is byte-identical (the
+observations themselves are counted — honest only when the caller's rows
+ARE trades). :func:`resolve_lockbox_window` is the ONE shared resolver of
+the train/holdout boundary (CLAUDE.md §11 COMMON) so a caller deriving its
+training reference from the complement uses EXACTLY the gate's window.
+
 Honest envelope (Golden Rule #10)
 ---------------------------------
 This is the *gate*, not the data isolation. It is ``O(n_trades)`` (one pass
 for the window mask + Sharpe + drawdown) — fine for an offline Stage-4 batch.
 The 6-month default and the 500-trade floor are the spec's institutional
 defaults (López de Prado / Bailey pattern, spec line 456); no value is
-invented here.
+invented here. Holdout-from-SELECTION is NOT enforced pre-Stage-3
+(DEC-STATS-GATE-INTEGRITY-001, R2-SR-F1): Stage-1A/2 selection evaluates the
+FULL sweep window — lockbox days included — by design (ADR-0007 Amendment
+A2; the sweep window is deliberately unchanged). Filter #8 is the gate, and
+its *training reference* genuinely excludes the holdout tail only when the
+caller computes it over the window complement this module resolves (the
+cascade wire does, via :func:`resolve_lockbox_window`).
 """
 
 from __future__ import annotations
@@ -66,10 +89,13 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 __all__ = [
+    "LOCKBOX_DEFAULT_MIN_TRADES",
     "LOCKBOX_DEFAULT_WINDOW_DAYS",
     "LockboxResult",
     "LockboxStatus",
+    "LockboxWindow",
     "lockbox_evaluation",
+    "resolve_lockbox_window",
 ]
 
 #: ~6 months of trading days — the spec's institutional default window
@@ -87,6 +113,13 @@ LOCKBOX_DEFAULT_WINDOW_DAYS: Final[int] = _DEFAULT_WINDOW_DAYS
 
 #: Hard floor on lockbox trade count (DEC-LOCK-001, spec line 452).
 _DEFAULT_MIN_TRADES: Final[int] = 500
+
+#: Public alias of the default lockbox trade floor (DEC-STATS-GATE-INTEGRITY-001,
+#: the twin of :data:`LOCKBOX_DEFAULT_WINDOW_DAYS`): downstream config defaults
+#: (:class:`brutex.metrics.cascade.CascadeConfig`) and the cascade wire import
+#: THIS constant — one source of truth, never a re-typed literal (CLAUDE.md §11
+#: COMMON).
+LOCKBOX_DEFAULT_MIN_TRADES: Final[int] = _DEFAULT_MIN_TRADES
 
 #: Lockbox Sharpe must stay within 30% of training (spec line 453).
 _DEFAULT_SHARPE_TOLERANCE: Final[float] = 0.30
@@ -129,7 +162,12 @@ class LockboxResult:
         ``True`` iff ``status is LockboxStatus.PASS`` — the single boolean
         the cascade gates on.
     n_trades
-        Number of trades in the (possibly extended) lockbox window.
+        Evidence count in the (possibly extended) lockbox window — the
+        TRADE count when ``evidence_days`` was supplied to
+        :func:`lockbox_evaluation` (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F2),
+        else the number of ``trade_returns`` observations in the window
+        (legacy mode: honest only when the caller's rows are trades — a
+        per-BAR caller without evidence counts bars).
     lockbox_sharpe
         Per-trade Sharpe of the lockbox returns, or ``None`` if undefined
         (fewer than two trades / zero variance).
@@ -208,6 +246,137 @@ def _max_drawdown(returns: npt.NDArray[np.float64]) -> float:
     return float(np.max(running_peak - equity))
 
 
+@dataclass(frozen=True, slots=True)
+class LockboxWindow:
+    """The resolved filter-#8 train/holdout boundary (:func:`resolve_lockbox_window`).
+
+    Attributes
+    ----------
+    window_start
+        Ordinal day the lockbox window starts at (the default-window start,
+        or an earlier day when extended). Every day ``>= window_start`` is
+        holdout; every day strictly before it is the training complement.
+    extended
+        ``True`` iff the default window was extended backwards to reach
+        ``min_trades`` evidence (or could not reach it at all).
+    n_evidence_in_window
+        Count of evidence entries (trades when ``evidence_days`` was
+        supplied, else series observations) on days ``>= window_start``.
+    """
+
+    window_start: int
+    extended: bool
+    n_evidence_in_window: int
+
+
+def resolve_lockbox_window(
+    days: npt.ArrayLike,
+    *,
+    evidence_days: npt.ArrayLike | None = None,
+    default_window_days: int,
+    min_trades: int,
+) -> LockboxWindow:
+    """Resolve the filter-#8 lockbox window boundary — the ONE shared resolver.
+
+    The single source of truth for the train/holdout split
+    (DEC-STATS-GATE-INTEGRITY-001, CLAUDE.md §11 COMMON): both
+    :func:`lockbox_evaluation` (the gate) and the cascade wire's
+    training-reference complement delegate here, so the boundary can never
+    drift between the two sides.
+
+    Semantics: with ``max_day = days[-1]`` the default window starts at
+    ``max_day - default_window_days + 1``. The COUNT source is
+    ``evidence_days`` when supplied (the true per-trade exit-day ordinals,
+    R2-SR-F2), else ``days`` itself (legacy — byte-identical to the
+    pre-resolver window logic). If the default window holds ``>= min_trades``
+    evidence it is kept; else the window extends backwards to the day of the
+    ``min_trades``-th most-recent evidence entry; else (not enough evidence
+    anywhere) it spans all of ``days`` and the caller's count gate rejects.
+
+    Parameters
+    ----------
+    days
+        The series' day ordinals (1-D, non-empty, non-decreasing integers).
+        ``max_day`` is ALWAYS anchored on ``days[-1]``, never on the
+        evidence.
+    evidence_days
+        Optional true-evidence day ordinals (1-D, non-decreasing; may be
+        EMPTY — a zero-trade candidate is legal and simply fails the count
+        gate). When non-empty every value must lie within
+        ``[days[0], days[-1]]`` (evidence cannot exit outside the series
+        span — a violation is caller misalignment, rejected loudly).
+    default_window_days, min_trades
+        The window length and evidence floor; both ``>= 1`` (REQUIRED
+        keywords — no silent default drift between the two delegating
+        sides).
+
+    Returns
+    -------
+    LockboxWindow
+        The resolved boundary + the in-window evidence count.
+
+    Raises
+    ------
+    ValueError
+        On a non-positive ``default_window_days``/``min_trades``, a
+        malformed ``days`` (not 1-D / empty / decreasing), or a malformed
+        ``evidence_days`` (not 1-D / decreasing / outside the ``days``
+        span).
+    """
+    if default_window_days < 1:
+        raise ValueError(f"default_window_days must be >= 1, got {default_window_days}")
+    if min_trades < 1:
+        raise ValueError(f"min_trades must be >= 1, got {min_trades}")
+    days_arr = np.asarray(days, dtype=np.int64)
+    if days_arr.ndim != 1:
+        raise ValueError("days must be 1-D")
+    if days_arr.shape[0] == 0:
+        raise ValueError("days must be non-empty")
+    if bool(np.any(np.diff(days_arr) < 0)):
+        raise ValueError("days must be non-decreasing (chronological)")
+    if evidence_days is None:
+        source = days_arr
+    else:
+        # Same int64 coercion as ``days`` (symmetric — a float ordinal
+        # truncates identically on both axes, never an asymmetric rule).
+        source = np.asarray(evidence_days, dtype=np.int64)
+        if source.ndim != 1:
+            raise ValueError("evidence_days must be 1-D")
+        if bool(np.any(np.diff(source) < 0)):
+            raise ValueError("evidence_days must be non-decreasing (chronological)")
+        if source.shape[0] > 0 and (
+            int(source[0]) < int(days_arr[0]) or int(source[-1]) > int(days_arr[-1])
+        ):
+            raise ValueError(
+                f"evidence_days must lie within the days span "
+                f"[{int(days_arr[0])}, {int(days_arr[-1])}], got "
+                f"[{int(source[0])}, {int(source[-1])}]"
+            )
+
+    max_day = int(days_arr[-1])
+    default_start = max_day - default_window_days + 1
+    n_in_default = int(np.count_nonzero(source >= default_start))
+    n_source = int(source.shape[0])
+    if n_in_default >= min_trades:
+        # The default window already clears the evidence floor.
+        window_start = default_start
+        extended = False
+    elif n_source >= min_trades:
+        # Extend backwards (day-aligned) to the day of the ``min_trades``-th
+        # most-recent evidence entry — the smallest extension reaching the floor.
+        window_start = int(source[n_source - min_trades])
+        extended = True
+    else:
+        # Even every available evidence entry is below the floor → the window
+        # spans everything and the caller's count gate rejects INSUFFICIENT_N.
+        window_start = int(days_arr[0])
+        extended = True
+    n_evidence = int(np.count_nonzero(source >= window_start))
+    return LockboxWindow(
+        window_start=window_start, extended=extended, n_evidence_in_window=n_evidence
+    )
+
+
 def lockbox_evaluation(
     trade_returns: npt.ArrayLike,
     trade_days: npt.ArrayLike,
@@ -218,6 +387,7 @@ def lockbox_evaluation(
     min_trades: int = _DEFAULT_MIN_TRADES,
     sharpe_tolerance: float = _DEFAULT_SHARPE_TOLERANCE,
     mdd_tolerance: float = _DEFAULT_MDD_TOLERANCE,
+    evidence_days: npt.ArrayLike | None = None,
 ) -> LockboxResult:
     """Evaluate a candidate against the held-out lockbox window (spec #8).
 
@@ -243,6 +413,18 @@ def lockbox_evaluation(
         Fractional Sharpe drop tolerated vs training (``0.30`` ⇒ within 30%).
     mdd_tolerance
         Fractional drawdown increase tolerated vs training (``0.50`` ⇒ 50%).
+    evidence_days
+        Optional TRUE-evidence day ordinals (DEC-STATS-GATE-INTEGRITY-001,
+        R2-SR-F2): the per-trade exit-day ordinals when ``trade_returns`` is
+        a per-BAR series. When supplied, the count gate counts evidence
+        entries in-window (real trades, so the DEC-LOCK-001 500-trade floor
+        actually binds) AND the adaptive window extension is driven by the
+        evidence; the Sharpe/drawdown stay measured over ``trade_returns``
+        inside the resolved window. May be EMPTY (a zero-trade candidate ⇒
+        ``INSUFFICIENT_N`` with ``n_trades == 0``, never a crash); when
+        non-empty must be non-decreasing and lie within
+        ``[trade_days[0], trade_days[-1]]``. ``None`` (the default) is the
+        exact legacy behaviour, byte-identical.
 
     Returns
     -------
@@ -253,15 +435,12 @@ def lockbox_evaluation(
     Raises
     ------
     ValueError
-        If the inputs fail :func:`_validate_inputs`, or any of
-        ``default_window_days < 1``, ``min_trades < 1``,
+        If the inputs fail :func:`_validate_inputs` /
+        :func:`resolve_lockbox_window` (incl. ``default_window_days < 1``,
+        ``min_trades < 1``, and a malformed ``evidence_days``), or any of
         ``sharpe_tolerance < 0``, ``mdd_tolerance < 0``, or
         ``training_max_drawdown < 0``.
     """
-    if default_window_days < 1:
-        raise ValueError(f"default_window_days must be >= 1, got {default_window_days}")
-    if min_trades < 1:
-        raise ValueError(f"min_trades must be >= 1, got {min_trades}")
     if sharpe_tolerance < 0.0:
         raise ValueError(f"sharpe_tolerance must be >= 0, got {sharpe_tolerance}")
     if mdd_tolerance < 0.0:
@@ -276,28 +455,21 @@ def lockbox_evaluation(
         )
 
     returns, days = _validate_inputs(trade_returns, trade_days)
-    n_total = int(returns.shape[0])
-    max_day = int(days[-1])
-    default_start = max_day - default_window_days + 1
-
-    n_in_default = int(np.count_nonzero(days >= default_start))
-    if n_in_default >= min_trades:
-        # The default 6-month window already clears the trade floor.
-        window_start = default_start
-        extended = False
-    elif n_total >= min_trades:
-        # Extend backwards (day-aligned) to the day of the ``min_trades``-th
-        # most-recent trade — the smallest extension that reaches the floor.
-        window_start = int(days[n_total - min_trades])
-        extended = True
-    else:
-        # Even every available trade is below the floor → insufficient.
-        window_start = int(days[0])
-        extended = True
-
-    mask = days >= window_start
+    # The ONE shared boundary resolver (DEC-STATS-GATE-INTEGRITY-001):
+    # ``evidence_days=None`` reproduces the legacy window logic byte-for-byte;
+    # supplied evidence drives the count + extension by TRUE trades.
+    window = resolve_lockbox_window(
+        days,
+        evidence_days=evidence_days,
+        default_window_days=default_window_days,
+        min_trades=min_trades,
+    )
+    mask = days >= window.window_start
     lockbox_returns = returns[mask]
-    n_trades = int(lockbox_returns.shape[0])
+    # With evidence: the trade count in-window; without: the observation
+    # count — identical to ``len(lockbox_returns)`` since the count source
+    # was ``days`` itself.
+    n_trades = window.n_evidence_in_window
     lockbox_sharpe = sharpe_of_returns(lockbox_returns)
     lockbox_mdd = _max_drawdown(lockbox_returns)
 
@@ -325,8 +497,8 @@ def lockbox_evaluation(
         lockbox_max_drawdown=lockbox_mdd,
         training_sharpe=training_sharpe,
         training_max_drawdown=training_max_drawdown,
-        window_start_day=window_start,
-        extended=extended,
+        window_start_day=window.window_start,
+        extended=window.extended,
         sharpe_gate_passed=sharpe_gate,
         mdd_gate_passed=mdd_gate,
         count_gate_passed=count_gate,

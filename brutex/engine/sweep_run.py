@@ -608,7 +608,14 @@ def ranked_combo_to_result_row(
     ``mask_bits=rc.mask`` (the machine-readable u64) and — derived from it inside
     :class:`ResultRow` via the single-source-of-truth vocabulary name table — the
     human-readable ``condition_names``; ``rc.deflated_sharpe`` is carried through for
-    leaderboard transparency (``None`` when the pool was not deflatable). The rest of
+    leaderboard transparency (``None`` when the pool was not deflatable). HONEST
+    SCOPE (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F3): the carried figure is
+    **TUPLE-scoped** (``rc.dsr_n_scope == "tuple"`` whenever it is non-``None`` —
+    deflated against ONE grid cell's ``N = len(candidates)``, an inflating
+    under-count vs the true leaderboard N; measured: DSR 0.230 at ``n_trials=1e3``
+    vs 0.003 at ``1e7``); the persisted row's value is superseded by the Stage-4
+    cascade's leaderboard-N DSR gate and is labelled ``dsr@tupleN`` wherever
+    rendered (ADR-0008 condition 7). The rest of
     the mapping is mechanical except two deliberate choices:
 
     * **``None`` metrics → ``0.0``.** ``ResultMetrics`` carries ``sortino_ratio``

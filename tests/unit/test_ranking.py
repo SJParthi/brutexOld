@@ -487,6 +487,20 @@ class TestRankedComboDataclass:
         # (equivalent annotation flip) hides it from mutmut.
         assert self._rc().deflated_sharpe is None
 
+    def test_dsr_n_scope_none_without_deflated_sharpe(self) -> None:
+        # DEC-STATS-GATE-INTEGRITY-001 (R2-SR-F3): no DSR (legacy / abstain /
+        # Stage-3 refined-row construction) ⇒ no scope stamp.
+        assert self._rc().dsr_n_scope is None
+        stage3_style = RankedCombo(mask=1, metrics=_m(), composite_score=0.0, deflated_sharpe=None)
+        assert stage3_style.dsr_n_scope is None
+
+    def test_dsr_n_scope_tuple_with_deflated_sharpe(self) -> None:
+        # A present DSR is ALWAYS the tuple-scoped figure (rank_combos is the
+        # only src site that sets it non-None) — the property derives the
+        # stamp from the value, so the two can never drift.
+        rc = RankedCombo(mask=1, metrics=_m(), composite_score=0.0, deflated_sharpe=0.97)
+        assert rc.dsr_n_scope == "tuple"
+
 
 # ────── risk-efficiency term (DEC-RANKING-RISK-EFFICIENCY-001) ──────
 
@@ -814,6 +828,19 @@ class TestRankCombosOverfit:
         assert {rc.mask for rc in ranked} == {5, 6, 7}
         # Survivors carry their Deflated Sharpe and it cleared the bar.
         assert all(rc.deflated_sharpe is not None and rc.deflated_sharpe >= 0.95 for rc in ranked)
+
+    def test_dsr_n_scope_tuple_on_every_deflated_survivor(self) -> None:
+        # R2-SR-F3 end-to-end: a deflatable overfit run stamps EVERY ranked
+        # combo "tuple" (deflated_sharpe non-None ⇒ scope tuple); an abstain
+        # run (zero-variance pool) stamps None on every combo.
+        deflated = rank_combos(
+            _sharpe_pool([(1, 0.2), (2, 1.0), (3, 2.0), (4, 2.5), (5, 3.0)]), overfit=self._CFG
+        )
+        assert deflated  # fixture sanity: survivors exist
+        assert all(rc.dsr_n_scope == "tuple" for rc in deflated)
+        abstained = rank_combos(_sharpe_pool([(1, 1.0), (2, 1.0)]), overfit=self._CFG)
+        assert abstained
+        assert all(rc.dsr_n_scope is None for rc in abstained)
 
     def test_all_survivors_rejected_yields_empty(self) -> None:
         # Two low-Sharpe survivors deflated against a high-variance pool (padded by
