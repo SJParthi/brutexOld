@@ -628,6 +628,12 @@ def _heal_foreign(finding: ForeignMonthRows, state: _BatchState) -> bool:
     result = state.writer.heal_partition(
         src, remove_timestamps=frozenset(foreign), quarantine_to=state.quarantine_path(src)
     )
+    if not result.changed:
+        # Probe abstain (the #1067 "never guess" pin — mirrors _heal_dup): the
+        # source rows were NOT removed, so do NOT count/audit/touch. The
+        # copy-forward above is keep-first idempotent, the finding stays live,
+        # and the next scan re-runs the reassignment (convergent re-try).
+        return False
     state.quarantined_files += 1
     _LOG.warning(
         "lake_heal.rows_reassigned",
@@ -1443,6 +1449,27 @@ class StartupSweepResult:
     report: HealReport | None
 
 
+def _sentinel_skip_reason(report: HealReport) -> str | None:
+    """Why the L3 sentinel must NOT be stamped, or ``None`` when it may be.
+
+    The sentinel means "this lake content token was swept AND left clean" —
+    stamping it after a refused / observe / errored / partially-healed batch
+    would token-match the NEXT boot past live poison (self-healing + the
+    one-shot alert would silently stop until unrelated lake content moved the
+    token). Stamp ONLY a genuinely-completed auto sweep: every finding healed
+    with zero errors (a zero-finding clean sweep trivially qualifies).
+    """
+    if report.mode != "auto":
+        return "observe_mode"
+    if report.refused_mass_heal:
+        return "mass_heal_refused"
+    if report.errors > 0:
+        return "heal_errors"
+    if report.healed != report.findings:
+        return "unhealed_findings"
+    return None
+
+
 def run_startup_sweep(
     lake_root: Path,
     *,
@@ -1463,9 +1490,14 @@ def run_startup_sweep(
     *per_file_pause*, default ``time.sleep(resolve_sweep_throttle_s())``), one
     :func:`heal_findings` batch, and stamps :data:`SENTINEL_RELPATH` with the
     POST-heal recomputed token (a heal rewrites files, so the pre-scan token is
-    stale by design). Cost honesty (Golden Rule #10): O(files) total with a
-    per-file key-column read that scales with row count — NOT O(1); paid once
-    per lake content token.
+    stale by design). The sentinel is stamped ONLY when the sweep genuinely
+    completed its job — ``mode == "auto"``, not mass-heal-refused, zero
+    ``errors``, and ``healed == findings`` (a zero-finding clean sweep also
+    stamps). A refused / observe-mode / errored / partially-healed sweep SKIPS
+    the stamp (``lake_heal.sweep_sentinel_skipped`` with the reason) so the
+    next boot re-attempts instead of token-matching past live poison. Cost
+    honesty (Golden Rule #10): O(files) total with a per-file key-column read
+    that scales with row count — NOT O(1); paid once per lake content token.
 
     Parameters
     ----------
@@ -1511,21 +1543,34 @@ def run_startup_sweep(
         now=now,
     )
     post_token = lake_content_token(lake_root)
-    sentinel_path = lake_root / SENTINEL_RELPATH
-    sentinel_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {
-            "version": 1,
-            "lake_token": post_token,
-            "completed_utc": now_fn().astimezone(UTC).isoformat(),
-            "files_scanned": files_scanned,
-            "findings": len(scan.findings),
-            "healed": report.healed,
-            "mode": report.mode,
-        },
-        sort_keys=True,
-    )
-    atomic_write_simple(sentinel_path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+    skip_reason = _sentinel_skip_reason(report)
+    if skip_reason is None:
+        sentinel_path = lake_root / SENTINEL_RELPATH
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            {
+                "version": 1,
+                "lake_token": post_token,
+                "completed_utc": now_fn().astimezone(UTC).isoformat(),
+                "files_scanned": files_scanned,
+                "findings": len(scan.findings),
+                "healed": report.healed,
+                "mode": report.mode,
+            },
+            sort_keys=True,
+        )
+        atomic_write_simple(sentinel_path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+    else:
+        # The sweep did NOT complete its job — leave the old sentinel (or none)
+        # in place so the next boot's token check re-attempts the sweep.
+        _LOG.warning(
+            "lake_heal.sweep_sentinel_skipped",
+            reason=skip_reason,
+            mode=report.mode,
+            findings=report.findings,
+            healed=report.healed,
+            errors=report.errors,
+        )
     _LOG.info(
         "lake_heal.sweep_complete",
         files=files_scanned,
@@ -1575,6 +1620,29 @@ def lake_heal_audit(lake_root: Path) -> Generator[LakeAuditSink | None, None, No
         close = getattr(audit, "close", None)
         if callable(close):
             close()
+
+
+def open_lake_catalog(lake_root: Path) -> Catalog | None:
+    """Best-effort open of ``<lake>/catalog.duckdb`` — ONLY when the file exists.
+
+    The L2 post-pull seams' twin of the L3 :class:`StartupSweeper`'s
+    ``catalog_path`` wiring: passing the returned catalog to
+    :func:`heal_after_pull` lets a healed partition's rotated ``raw_hash``
+    reach the catalog (and so ``data_snapshot_hash``, Golden Rule #4)
+    IMMEDIATELY instead of waiting for the next L1 reconcile. A lake with NO
+    catalog file (a CLI-only lake) gets ``None`` — the heal never conjures a
+    catalog into existence; any open error logs
+    ``lake_heal.catalog_open_failed`` and degrades to ``None`` (a catalog
+    problem must never block a pull). The caller owns the close.
+    """
+    path = lake_root / "catalog.duckdb"
+    if not path.exists():
+        return None
+    try:
+        return Catalog.open(path)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort seam
+        _LOG.warning("lake_heal.catalog_open_failed", path=str(path), error=str(exc))
+        return None
 
 
 def _default_spawn(body: Callable[[], None]) -> None:
@@ -1691,6 +1759,7 @@ __all__ = [
     "lake_heal_audit",
     "load_heal_stats",
     "load_last_sweep",
+    "open_lake_catalog",
     "open_lake_heal_audit",
     "resolve_lake_heal_mode",
     "resolve_sweep_throttle_s",

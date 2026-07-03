@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.adapters.groww.constants import OPTION_SEGMENT, TRACK1_DAILY_INTERVAL
@@ -481,6 +482,41 @@ def test_derive_bounds_reconcile_false_reads_prereconciled_catalog(tmp_path: Pat
             reconcile=False,
         )
     assert windows == {sym: (date(2025, 1, 2), date(2025, 1, 31))}
+
+
+def test_derive_bounds_reconcile_passes_check_invariants_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mid-pull HOT window-derivation reconcile passes ``check_invariants=False``.
+
+    This site never heals — its findings would only re-log what the L2
+    post-pull heal handles moments later — so it skips the CPU-only per-file
+    ``n_unique`` piggyback (DEC-LAKE-HEAL-001 fix-pass; spy-pinned so the flip
+    can never silently regress). The sweep-start / CLI-verify reconcile sites
+    deliberately KEEP the default checking.
+    """
+    import brutex.data.catalog_reconcile as cr
+
+    seen: list[dict[str, Any]] = []
+    real = cr.reconcile_catalog_from_lake
+
+    def _spy(**kwargs: Any) -> Any:
+        seen.append(dict(kwargs))
+        return real(**kwargs)
+
+    monkeypatch.setattr(cr, "reconcile_catalog_from_lake", _spy)
+    sym = "NSE-NIFTY-30Jan25-23000-CE"
+    _write_daily(tmp_path, sym, [date(2025, 1, 2)])
+    with Catalog.open(tmp_path / "catalog.duckdb") as catalog:
+        derive_contract_minute_windows(
+            catalog,
+            lake_root=tmp_path,
+            contracts=[_contract(sym, expiry=date(2025, 1, 30))],
+            full_start=_FULL_START,
+            full_end=_FULL_END,
+        )
+    (call,) = seen
+    assert call["check_invariants"] is False
 
 
 def test_derive_bounds_quarantines_malformed_symbol(tmp_path: Path) -> None:

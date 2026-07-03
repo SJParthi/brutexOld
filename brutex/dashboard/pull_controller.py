@@ -2172,30 +2172,40 @@ def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 10
     must halt the pull exactly like any lake write — it reaches the existing
     ``_is_pull_halt`` / ``emit_pull_halt_alert`` handling); every OTHER error
     is swallowed + logged ``lake_heal.post_pull_error`` (a heal bug never
-    fails a successful pull). Marked ``no cover`` per the sibling
-    ``_resample_daily_after_pull`` convention; the core is 100%-unit-tested
-    and the glue contract is pinned by
-    ``tests/integration/test_lake_heal_pull_seam.py``.
+    fails a successful pull). The catalog at ``<lake>/catalog.duckdb`` is
+    opened best-effort WHEN THE FILE EXISTS (the L3 sweeper's convention, via
+    the COMMON :func:`~brutex.data.lake_heal.open_lake_catalog`) so a healed
+    partition's rotated ``raw_hash`` reaches the catalog immediately — an
+    open failure logs + proceeds with ``catalog=None``, never blocking the
+    pull. Marked ``no cover`` per the sibling ``_resample_daily_after_pull``
+    convention; the core is 100%-unit-tested and the glue contract is pinned
+    by ``tests/integration/test_lake_heal_pull_seam.py``.
     """
     from brutex.data.errors import LakeWriteHalt
-    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit
+    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog
     from brutex.notifications.sweep_alerts import emit_lake_heal_alert
 
     scope = f"pull:{pull_id}"
     try:
         with lake_heal_audit(lake_root) as audit:
-            heal_after_pull(
-                lake_root=lake_root,
-                targets=[
-                    (inst.exch_id.value, inst.segment.value, inst.symbol_name)
-                    for inst in instruments
-                ],
-                start=start,
-                end=end,
-                scope=scope,
-                audit=audit,
-                on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
-            )
+            catalog = open_lake_catalog(lake_root)
+            try:
+                heal_after_pull(
+                    lake_root=lake_root,
+                    targets=[
+                        (inst.exch_id.value, inst.segment.value, inst.symbol_name)
+                        for inst in instruments
+                    ],
+                    start=start,
+                    end=end,
+                    scope=scope,
+                    catalog=catalog,
+                    audit=audit,
+                    on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+                )
+            finally:
+                if catalog is not None:
+                    catalog.close()
     except LakeWriteHalt:
         raise
     except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull

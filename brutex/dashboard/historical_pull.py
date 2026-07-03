@@ -1226,9 +1226,14 @@ def _heal_lake_after_pull(
     halts the pull exactly like any lake write); every OTHER error is
     swallowed + logged ``lake_heal.post_pull_error`` (a heal bug never fails
     a successful pull — the ``_enrich_greeks_from_minute`` guard convention).
+    The catalog at ``<lake>/catalog.duckdb`` is opened best-effort WHEN THE
+    FILE EXISTS (the L3 sweeper's convention, via the COMMON
+    :func:`~brutex.data.lake_heal.open_lake_catalog`) so a healed partition's
+    rotated ``raw_hash`` reaches the catalog immediately — an open failure
+    logs + proceeds with ``catalog=None``, never blocking the pull.
     """
     from brutex.data.errors import LakeWriteHalt
-    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit
+    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog
     from brutex.notifications.sweep_alerts import emit_lake_heal_alert
     from brutex.observability.correlation import current_pull_id
 
@@ -1250,15 +1255,21 @@ def _heal_lake_after_pull(
     scope = f"pull:{current_pull_id()}"
     try:
         with lake_heal_audit(lake_root) as audit:
-            heal_after_pull(
-                lake_root=lake_root,
-                targets=targets,
-                start=min(win_start for win_start, _win_end in spans),
-                end=max(win_end for _win_start, win_end in spans),
-                scope=scope,
-                audit=audit,
-                on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
-            )
+            catalog = open_lake_catalog(lake_root)
+            try:
+                heal_after_pull(
+                    lake_root=lake_root,
+                    targets=targets,
+                    start=min(win_start for win_start, _win_end in spans),
+                    end=max(win_end for _win_start, win_end in spans),
+                    scope=scope,
+                    catalog=catalog,
+                    audit=audit,
+                    on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+                )
+            finally:
+                if catalog is not None:
+                    catalog.close()
     except LakeWriteHalt:
         raise
     except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull

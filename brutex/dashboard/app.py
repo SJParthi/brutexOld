@@ -167,7 +167,7 @@ from brutex.dashboard.spot_cascade import (
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.sweep_results_view import (
     DEFAULT_TOP_N as SWEEP_LEADERBOARD_DEFAULT_TOP_N,
 )
@@ -1151,15 +1151,15 @@ def build_app(
     _coverage_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache()
     _mapping_integrity_cache = MoversSnapshotCache()
-    # The /universe lake-uniqueness census cache (DEC-LAKE-HEAL-001): the duplicate
-    # census is a full bounded lake scan — O(files), one key-column read per file —
-    # so it is memoised behind the SAME composite (write-generation, master-revision)
-    # token as the nav-latency caches above. A pull, a materialize, OR a heal (the L3
-    # startup sweeper's `on_healed=summary_cache.mark_dirty`) moves the token →
-    # recompute; a repeat 15 s chip poll within one token is an O(1) handoff. HONEST:
-    # the FIRST compute per token is a real O(files) scan (never claimed O(1) total).
-    # REUSES the COMMON generation-stamped LRU `MoversSnapshotCache` (no new class).
-    _lake_uniqueness_cache = MoversSnapshotCache()
+    # The /universe lake-uniqueness census (DEC-LAKE-HEAL-001) deliberately does
+    # NOT get a `MoversSnapshotCache` here: it is a full bounded lake scan —
+    # O(files), one key-column read per file — and `pull_jobs` bumps the write
+    # generation on EVERY per-pair write tick, so a generation-keyed memo would
+    # re-run the whole-lake scan on every 15 s chip poll during a pull (the #920
+    # regression class). It rides `_summary_cache.get_or_refresh(LAKE_UNIQUENESS,
+    # …)` instead — the COMMON adaptive-TTL-floor path /coverage/spot uses — so
+    # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
+    # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001): the
     # `<lake>/sweeps` discovery + per-tuple Parquet read is O(stores × rows); the
     # ranked leaderboard for a given (instrument, tf, direction, rank_by, top_n) is a
@@ -3909,21 +3909,29 @@ def build_app(
         )
 
     def _build_lake_census_payload_cached() -> dict[str, Any]:
-        """Memoise the lake census behind the COMPOSITE (generation, master-revision) key.
+        """Memoise the lake census behind the ``SummaryCache`` adaptive TTL floor.
 
-        DEC-LAKE-HEAL-001, the mapping-integrity #870 cache pattern: the census is a
-        pure function of the lake bytes, and every lake write path moves the key —
-        a pull/materialize bumps ``_summary_cache.generation``; the L3 startup
-        sweeper's ``on_healed`` bump does the same after an out-of-band heal — so a
-        hit can never serve a pre-heal census (Golden Rule #1). HONEST cost: the
-        first compute per key is a real O(files) scan; the repeat 15 s chip poll is
-        an O(1) handoff.
+        DEC-LAKE-HEAL-001 (hostile-review MAJOR fold): the census rides the SAME
+        ``_summary_cache.get_or_refresh`` path ``/coverage/spot`` uses — NOT a
+        generation-KEYED memo. ``pull_jobs`` bumps the write generation on every
+        per-pair write tick, so a generation-keyed cache re-ran this whole-lake
+        O(files) scan on every 15 s chip poll during a pull (the #920 regression
+        class); the ``SummaryCache`` instead serves the dirty entry until the
+        ADAPTIVE floor — ``max(2 s, the last scan's own duration)`` capped 120 s
+        (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001) — elapses, so an expensive scan
+        self-throttles to a ≤50% duty cycle while an idle lake keeps the snappy
+        2 s floor. Freshness: a pull, a materialize, OR a heal (the L3 sweeper's
+        ``on_healed=summary_cache.mark_dirty``) dirties the entry → one fresh
+        scan once past the floor; staleness is bounded by that floor, never
+        indefinite (Golden Rule #1, stated honestly per Golden Rule #10). The
+        payload dict is byte-identical to the uncached build — only the refresh
+        SCHEDULING changed. (The single-payload dict rides the ``SummaryPayload``
+        list shape as a one-element list.)
         """
-        return _lake_uniqueness_cache.get_or_compute(
-            _nav_latency_key("lake-uniqueness", _require_store()),
-            generation=0,
-            compute=_build_lake_census_payload,
+        rows = _summary_cache.get_or_refresh(
+            LAKE_UNIQUENESS, recompute=lambda: [_build_lake_census_payload()]
         )
+        return rows[0]
 
     @app.get("/api/v1/universe/lake-uniqueness")
     async def api_universe_lake_uniqueness() -> JSONResponse:
@@ -3933,10 +3941,15 @@ def build_app(
         dup/foreign/overlap/drift file counts + the ENGINE-index
         (NIFTY/BANKNIFTY/SENSEX) ``engine_clean`` verdict + the heal mode and
         ``.lake_heal`` stats/sentinel — the ``/universe`` chip's data source.
-        READ-ONLY (never heals). Served from the generation-stamped cache; the
-        first compute per (generation, master-revision) token is honestly
-        O(files) in the lake, every repeat poll an O(1) handoff. No store
-        wired → 503; no resolvable lake root → ``{"present": false}``.
+        READ-ONLY (never heals). Served through the ``SummaryCache`` adaptive
+        TTL floor (the #920 machinery): a repeat poll is an O(1) handoff
+        within the TTL window, and a scan's own cost sets its refresh floor
+        (``max(2 s, scan duration)`` capped 120 s) — so a pull's write-tick
+        generation storm can never amplify the 15 s poll into back-to-back
+        whole-lake scans. HONEST: the refresh itself stays O(files); a dirty
+        census may be served up to one floor window stale — bounded, never
+        indefinite. No store wired → 503; no resolvable lake root →
+        ``{"present": false}``.
         """
         _require_store()
         payload = await run_in_threadpool(_build_lake_census_payload_cached)

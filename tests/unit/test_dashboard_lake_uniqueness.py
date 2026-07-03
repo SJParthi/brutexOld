@@ -1,14 +1,19 @@
 """``GET /api/v1/universe/lake-uniqueness`` + the ``/universe`` chip (DEC-LAKE-HEAL-001).
 
-The census route is memoised behind the COMPOSITE (write-generation,
-master-revision) key — the mapping-integrity #870 cache pattern — so:
+The census route rides the ``SummaryCache`` ADAPTIVE-TTL-FLOOR path (the #920
+machinery ``/coverage/spot`` uses — the hostile-review MAJOR fold; NOT a
+generation-KEYED memo, which a pull's per-write-tick generation bumps would
+re-key on every 15 s chip poll into back-to-back whole-lake scans), so:
 
-* a repeat 15 s chip poll within one token is an O(1) HIT (the O(files)
-  scanner runs exactly once — spy-pinned),
-* a generation bump (``mark_dirty`` — a pull, OR the L3 sweeper's
-  ``on_healed``) MISSES → one fresh scan,
-* an instrument-master change (revision token move, NO generation bump)
-  MISSES → one fresh scan.
+* a repeat 15 s chip poll is an O(1) HIT (the O(files) scanner runs exactly
+  once — spy-pinned),
+* a write-tick STORM of ``mark_dirty`` bumps yields at most ONE scan per
+  adaptive floor window — ``max(2 s, the scan's own duration)`` capped 120 s
+  (the fails-before pin: the old generation-keyed memo re-scanned per poll),
+* a dirty entry past the floor recomputes (a pull / the L3 sweeper's
+  ``on_healed`` is served fresh within one bounded floor window — never
+  indefinitely stale),
+* an instrument-master change is NOT a lake-bytes signal → clean HIT.
 
 Plus the payload shape (clean + engine-poisoned), the honest
 ``{"present": false}`` no-lake-root gate, the 503 no-store contract, and the
@@ -146,6 +151,19 @@ def _make_client(store: InstrumentStore | None, cache: SummaryCache) -> TestClie
     )
 
 
+class _FakeClock:
+    """A manually-advanced monotonic clock driving the SummaryCache TTL floor."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class TestLakeUniquenessRoute:
     """Payload shape + the honest gates."""
 
@@ -207,7 +225,7 @@ class TestLakeUniquenessRoute:
 class TestLakeUniquenessCache:
     """The generation-stamped O(1) repeat-poll contract (DEC-LAKE-HEAL-001)."""
 
-    def test_repeat_poll_is_a_hit_then_generation_and_master_each_miss(
+    def test_repeat_poll_hits_then_dirty_past_floor_rescans_master_is_irrelevant(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls = {"n": 0}
@@ -219,27 +237,73 @@ class TestLakeUniquenessCache:
 
         monkeypatch.setattr(app_module, "scan_lake_invariants", _counting)
 
-        cache = SummaryCache()
+        clock = _FakeClock()
+        cache = SummaryCache(clock=clock)
         client = _make_client(store, cache)
 
         first = client.get("/api/v1/universe/lake-uniqueness")
         assert first.status_code == 200
         second = client.get("/api/v1/universe/lake-uniqueness")
         assert second.status_code == 200
-        # Repeat poll within one generation + master revision → ONE real scan.
+        # Repeat poll within one generation → ONE real scan (clean HIT).
         assert calls["n"] == 1
         # Payload is byte-identical to the uncached first build (only memoised).
         assert second.json() == first.json()
 
-        # A pull OR a heal (`on_healed=mark_dirty`) bumps the generation → fresh scan.
+        # A pull OR a heal (`on_healed=mark_dirty`) dirties the entry; once the
+        # 2 s base floor elapses the next poll runs ONE fresh scan.
         cache.mark_dirty()
+        clock.advance(3.0)
         assert client.get("/api/v1/universe/lake-uniqueness").status_code == 200
         assert calls["n"] == 2
 
-        # An instrument-master change (no generation bump) also MISSES → fresh scan.
+        # An instrument-master change is NOT a lake-bytes signal — the census
+        # scans lake files, never the instrument table — so it stays a clean
+        # HIT (no rescan), even well past the floor.
         _bump_master(store)
+        clock.advance(3.0)
         assert client.get("/api/v1/universe/lake-uniqueness").status_code == 200
-        assert calls["n"] == 3
+        assert calls["n"] == 2
+
+    def test_pull_write_storm_cannot_amplify_the_poll_into_scan_storms(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE hostile-review MAJOR pin (the #920 regression class) — fails before.
+
+        During a pull, ``pull_jobs`` bumps the write generation on EVERY
+        per-pair write tick, so the PRE-FIX generation-KEYED
+        ``MoversSnapshotCache`` memo re-keyed on every bump and re-ran the
+        whole-lake O(files) scan on every 15 s chip poll — on the OLD wiring
+        this test fails with ``calls == 5``. Through the ``SummaryCache``
+        adaptive TTL floor, an expensive scan (30 s on the fake clock) sets
+        its OWN refresh floor: five dirty polls inside that window pay ONE
+        scan, and a poll past the window re-scans (a floor, never a freeze).
+        """
+        calls = {"n": 0}
+        clock = _FakeClock()
+        real = app_module.scan_lake_invariants
+
+        def _slow_scan(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            clock.advance(30.0)  # the fake slow scanner: each scan "takes" 30 s
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(app_module, "scan_lake_invariants", _slow_scan)
+        cache = SummaryCache(clock=clock)
+        client = _make_client(store, cache)
+
+        for _ in range(5):  # five chip polls, each preceded by a pull write tick
+            cache.mark_dirty()  # pull_jobs' per-pair generation bump
+            assert client.get("/api/v1/universe/lake-uniqueness").status_code == 200
+            clock.advance(1.0)
+        # ONE scan within the adaptive floor window — max(2 s, its own 30 s).
+        assert calls["n"] == 1
+
+        # Past the floor the dirty entry refreshes — bounded staleness, not a freeze.
+        clock.advance(30.0)
+        cache.mark_dirty()
+        assert client.get("/api/v1/universe/lake-uniqueness").status_code == 200
+        assert calls["n"] == 2
 
 
 class TestStartupSweepChipFreshness:
@@ -254,14 +318,17 @@ class TestStartupSweepChipFreshness:
         ``on_healed=summary_cache.mark_dirty`` + ``catalog_path`` — but through
         the injectable ``spawn`` seam so the sweep body runs synchronously under
         coverage (no real thread). Proves the generation-bump seam end-to-end:
-        the pre-sweep poisoned census is NOT served stale after the heal.
+        the post-heal census is served within ONE bounded adaptive-floor
+        window (``max(2 s, scan duration)`` — the honest freshness contract of
+        the SummaryCache TTL-floor wiring; never indefinitely stale).
         """
         monkeypatch.delenv("BRUTEX_LAKE_HEAL", raising=False)
         from brutex.data.lake_heal import StartupSweeper
 
         lake_root = store.path.parent
         _poison_engine_partition(lake_root)
-        cache = SummaryCache()
+        clock = _FakeClock()
+        cache = SummaryCache(clock=clock)
         client = _make_client(store, cache)
 
         before = client.get("/api/v1/universe/lake-uniqueness").json()
@@ -284,7 +351,9 @@ class TestStartupSweepChipFreshness:
         # The heal bumped the SAME generation every dashboard cache keys on…
         assert cache.generation > gen_before
 
-        # …so the very next poll recomputes and serves the HEALED census.
+        # …so the first poll past the adaptive floor (2 s base here — the fake
+        # clock never ticked during the scan) recomputes → the HEALED census.
+        clock.advance(3.0)
         after = client.get("/api/v1/universe/lake-uniqueness").json()
         assert after["engine_clean"] is True
         assert after["findings_total"] == 0

@@ -65,6 +65,14 @@ class _FakeSDK:
     def get_historical_candles(self, **_kw: object) -> dict[str, object]:
         return {"candles": [["2024-01-15T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
 
+    def get_expiries(self, **_kw: object) -> dict[str, object]:
+        """Protocol completeness only — the candle pull never resolves expiries."""
+        return {"expiries": []}
+
+    def get_contracts(self, **_kw: object) -> dict[str, object]:
+        """Protocol completeness only — the candle pull never resolves contracts."""
+        return {"contracts": []}
+
 
 class _RecordingSink:
     """A minimal recording ``BarSink`` (the ingest writes stay off the lake)."""
@@ -385,3 +393,104 @@ class TestSpotGlue:
         events = [e for e in logs if e["event"] == "lake_heal.post_pull_error"]
         assert len(events) == 1
         assert events[0]["pull_id"] == "pid-3"
+
+
+# ── L2 catalog rotation (fix-pass: the seams open <lake>/catalog.duckdb) ─────
+
+
+def _catalog_row(catalog_path: Path, **coords: Any) -> Any:
+    from brutex.data.catalog import Catalog
+
+    with Catalog.open(catalog_path) as cat:
+        return cat.get(**coords)
+
+
+class TestL2CatalogRotation:
+    """The L2 seams mirror the L3 sweeper's catalog convention (fix-pass).
+
+    When ``<lake>/catalog.duckdb`` EXISTS, both glue functions open it
+    best-effort (:func:`brutex.data.lake_heal.open_lake_catalog`) and pass it
+    to ``heal_after_pull`` — so a healed partition's rotated ``raw_hash``
+    reaches the catalog IMMEDIATELY, not at the next L1 reconcile. Fails
+    before the seams were wired (they passed ``catalog=None`` and the stale
+    pre-heal hash survived the heal).
+    """
+
+    def test_fno_glue_rotates_the_healed_partitions_catalog_row(self, tmp_lake: Path) -> None:
+        import hashlib
+
+        from brutex.data.catalog import Catalog
+        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+
+        dest = _poisoned_fno_dest(tmp_lake)
+        catalog_path = tmp_lake / "catalog.duckdb"
+        coords = {
+            "exchange": "NSE",
+            "segment": "FNO",
+            "symbol": _CE_SYMBOL,
+            "interval": "1minute",
+            "year": 2024,
+            "month": 1,
+        }
+        with Catalog.open(catalog_path) as cat:  # register the POISONED bytes' hash
+            reconcile_catalog_from_lake(lake_root=tmp_lake, catalog=cat, check_invariants=False)
+        before = _catalog_row(catalog_path, **coords)
+        assert before is not None
+        assert before.raw_hash == hashlib.sha256(dest.read_bytes()).hexdigest()
+
+        rebuilt = cast(Any, [(None, _contract())])
+        windows = {_CE_SYMBOL: (date(2024, 1, 1), date(2024, 1, 20))}
+        hp._heal_lake_after_pull(rebuilt=rebuilt, windows=windows, lake_root=tmp_lake)
+
+        assert _stored_timestamps(dest) == [_fno_ts(16), _fno_ts(17)]  # healed
+        after = _catalog_row(catalog_path, **coords)
+        assert after is not None
+        assert after.raw_hash != before.raw_hash  # rotated AT the L2 seam
+        assert after.raw_hash == hashlib.sha256(dest.read_bytes()).hexdigest()
+
+    def test_spot_glue_rotates_the_healed_partitions_catalog_row(self, tmp_lake: Path) -> None:
+        import hashlib
+
+        from brutex.data.catalog import Catalog
+        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+
+        dest = build_partition_path(
+            lake_root=tmp_lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            year=2024,
+            month=6,
+        )
+        _poison_partition(
+            dest,
+            [(_spot_ts(16), 100.0, 10), (_spot_ts(16), 999.0, 99), (_spot_ts(17), 101.0, 11)],
+        )
+        catalog_path = tmp_lake / "catalog.duckdb"
+        coords = {
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbol": "NIFTY",
+            "interval": "1minute",
+            "year": 2024,
+            "month": 6,
+        }
+        with Catalog.open(catalog_path) as cat:
+            reconcile_catalog_from_lake(lake_root=tmp_lake, catalog=cat, check_invariants=False)
+        before = _catalog_row(catalog_path, **coords)
+        assert before is not None
+
+        pc._heal_after_pull(
+            instruments=[_instrument()],
+            lake_root=tmp_lake,
+            start=date(2024, 6, 1),
+            end=date(2024, 6, 30),
+            pull_id="pid-cat",
+        )
+
+        assert _stored_timestamps(dest) == [_spot_ts(16), _spot_ts(17)]  # healed
+        after = _catalog_row(catalog_path, **coords)
+        assert after is not None
+        assert after.raw_hash != before.raw_hash
+        assert after.raw_hash == hashlib.sha256(dest.read_bytes()).hexdigest()

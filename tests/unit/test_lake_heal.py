@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 from brutex.data import lake_heal
 from brutex.data.catalog import Catalog
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import LakeWriteHalt, WriterError
 from brutex.data.lake_heal import (
     AUDIT_HEAL_BATCH,
     AUDIT_HEAL_DEDUP,
@@ -738,6 +738,62 @@ class TestForeignRowReassignment:
         )
         assert report.healed == 0
         assert report.skipped == 2
+
+    def test_reassign_probe_abstain_does_not_count_audit_or_touch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``changed=False`` heal_partition (probe abstain) on the removal
+        step is a SKIP — no quarantine counter, no ``LAKE_HEAL_REASSIGN``
+        audit line, no recall touch (mirrors ``_heal_dup``'s guard) — and the
+        finding stays LIVE for the next scan (convergent re-try). Fails
+        before the ``result.changed`` guard was added to ``_heal_foreign``.
+        """
+        from brutex.data.parquet_writer import PartitionHealResult
+
+        lake = tmp_path / "lake"
+        _may, june = self._seed_reassign_lake(lake)
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, ForeignMonthRows)
+
+        def _abstain(self: ParquetWriter, dest: Path, **_kw: Any) -> PartitionHealResult:
+            # The footer-probe-failure path: byte-untouched abstain (#1067 pin).
+            return PartitionHealResult(
+                path=dest,
+                changed=False,
+                kept=0,
+                dropped_duplicates=0,
+                dropped_removed=0,
+                raw_hash_before="0" * 64,
+                raw_hash_after="0" * 64,
+                write=None,
+            )
+
+        monkeypatch.setattr(ParquetWriter, "heal_partition", _abstain)
+        audit = _FakeAudit()
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                audit=audit,
+                recall=True,
+                now=_now,
+            )
+        # Counted a SKIP, never a heal — and the counter/audit/touch stayed silent.
+        assert report.healed == 0
+        assert report.skipped == 1
+        assert report.errors == 0
+        assert report.actions == ()
+        assert report.quarantine_root is None  # quarantined_files never bumped
+        assert report.recall is None  # no 1minute touch → no recall
+        assert AUDIT_HEAL_REASSIGN not in audit.actions()
+        assert _events(logs, "lake_heal.rows_reassigned") == []
+        assert load_heal_stats(lake) == {}  # healed == 0 → no stats bump
+        # The source rows were NOT removed → the finding is re-detected live.
+        rescan = scan_lake_invariants(lake)
+        assert any(isinstance(f, ForeignMonthRows) and f.path == june for f in rescan.findings)
 
 
 # ── legacy-key drift merge ─────────────────────────────────────────────────
@@ -1732,6 +1788,106 @@ class TestRunStartupSweep:
         assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
 
 
+class TestSentinelStampGate:
+    """The sentinel stamps ONLY a genuinely-completed auto sweep (fix-pass).
+
+    A refused / observe / errored / partially-healed sweep must SKIP the stamp
+    (``lake_heal.sweep_sentinel_skipped``) so the next boot re-attempts —
+    stamping would token-match past live poison and silently stop L3
+    self-healing + its one-shot alert. The stamp cases (zero-finding clean
+    sweep, healed-all sweep) are pinned by ``TestRunStartupSweep``.
+    """
+
+    def _skip_events(self, logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+        return _events(logs, "lake_heal.sweep_sentinel_skipped")
+
+    def test_observe_sweep_skips_sentinel_and_reattempts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert load_last_sweep(lake) is None  # NOT stamped
+        (skip,) = self._skip_events(logs)
+        assert skip["reason"] == "observe_mode"
+        assert skip["log_level"] == "warning"
+        # The next boot re-attempts (no sentinel → no token match).
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_refused_mass_heal_skips_sentinel_and_reattempts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        monkeypatch.setattr(lake_heal, "MASS_HEAL_MIN_FILES", 1)
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.refused_mass_heal is True
+        assert load_last_sweep(lake) is None
+        (skip,) = self._skip_events(logs)
+        assert skip["reason"] == "mass_heal_refused"
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_errored_sweep_skips_sentinel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+
+        def _boom(self: ParquetWriter, dest: Path, **_kw: Any) -> Any:
+            raise WriterError("simulated per-finding heal failure")
+
+        monkeypatch.setattr(ParquetWriter, "heal_partition", _boom)
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.errors == 1
+        assert load_last_sweep(lake) is None
+        (skip,) = self._skip_events(logs)
+        assert skip["reason"] == "heal_errors"
+
+    def test_partially_healed_sweep_skips_sentinel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A probe-abstain leaves ``healed < findings`` → no stamp (re-attempt)."""
+        from brutex.data.parquet_writer import PartitionHealResult
+
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+
+        def _abstain(self: ParquetWriter, dest: Path, **_kw: Any) -> PartitionHealResult:
+            return PartitionHealResult(
+                path=dest,
+                changed=False,
+                kept=0,
+                dropped_duplicates=0,
+                dropped_removed=0,
+                raw_hash_before="0" * 64,
+                raw_hash_after="0" * 64,
+                write=None,
+            )
+
+        monkeypatch.setattr(ParquetWriter, "heal_partition", _abstain)
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.healed == 0
+        assert result.report.skipped == 1
+        assert load_last_sweep(lake) is None
+        (skip,) = self._skip_events(logs)
+        assert skip["reason"] == "unhealed_findings"
+
+
 class TestStartupSweeper:
     def test_run_sync_success_with_catalog_and_audit(self, tmp_path: Path) -> None:
         """The full production body: real audit chain, real catalog opened at
@@ -1876,6 +2032,49 @@ class TestLakeHealAuditContext:
         with pytest.raises(RuntimeError, match="boom"), lake_heal.lake_heal_audit(tmp_path):
             raise RuntimeError("boom")
         assert closed == [True]
+
+
+class TestOpenLakeCatalog:
+    """The L2 seams' best-effort catalog opener (DEC-LAKE-HEAL-001 fix-pass)."""
+
+    def test_missing_file_returns_none_and_creates_nothing(self, tmp_path: Path) -> None:
+        assert lake_heal.open_lake_catalog(tmp_path) is None
+        assert not (tmp_path / "catalog.duckdb").exists()  # never conjured
+
+    def test_existing_file_opens_a_usable_catalog(self, tmp_path: Path) -> None:
+        path = tmp_path / "catalog.duckdb"
+        Catalog.open(path).close()  # a real pre-existing catalog file
+        catalog = lake_heal.open_lake_catalog(tmp_path)
+        assert isinstance(catalog, Catalog)
+        assert (
+            catalog.get(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                year=2024,
+                month=6,
+            )
+            is None
+        )  # usable (open, queryable) — the caller owns the close
+        catalog.close()
+
+    def test_open_error_degrades_to_none_and_logs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "catalog.duckdb").write_text("present", encoding="utf-8")
+
+        class _BoomCatalog:
+            @staticmethod
+            def open(_path: Path) -> Any:
+                raise RuntimeError("simulated catalog open failure")
+
+        monkeypatch.setattr(lake_heal, "Catalog", _BoomCatalog)
+        with capture_logs() as logs:
+            assert lake_heal.open_lake_catalog(tmp_path) is None
+        (warn,) = _events(logs, "lake_heal.catalog_open_failed")
+        assert warn["log_level"] == "warning"
+        assert "simulated catalog open failure" in str(warn["error"])
 
 
 class TestSentinelShape:

@@ -57,11 +57,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-#: The two summary kinds the cache stores — the spot candle lake summary and the
-#: expired-option lake summary. A :meth:`SummaryCache.get_or_refresh` call names
-#: exactly one of these.
+#: The summary kinds the cache stores — the spot candle lake summary, the
+#: expired-option lake summary, and the lake duplicate-census (the ``/universe``
+#: lake-uniqueness chip, DEC-LAKE-HEAL-001 — a full bounded lake scan whose own
+#: duration drives the adaptive TTL floor, exactly the #920 machinery). A
+#: :meth:`SummaryCache.get_or_refresh` call names exactly one of these.
 SPOT: Final[str] = "spot"
 OPTIONS: Final[str] = "options"
+LAKE_UNIQUENESS: Final[str] = "lake_uniqueness"
 
 #: The minimum number of seconds between two real recomputes of the SAME kind
 #: while the cache is dirty. A 200-symbol write fan-out bumps the generation
@@ -370,6 +373,7 @@ class CoverageCountersSnapshot:
 
 __all__ = [
     "DEFAULT_TTL_FLOOR_S",
+    "LAKE_UNIQUENESS",
     "MAX_ADAPTIVE_FLOOR_S",
     "OPTIONS",
     "SPOT",

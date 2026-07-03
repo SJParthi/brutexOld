@@ -146,13 +146,18 @@ def reconcile_catalog_from_lake(
         DEC-LAKE-HEAL-001 free L1 detection (default on): classify each file's
         ALREADY-READ timestamp column via
         :func:`~brutex.data.lake_invariants.classify_bar_keys` (intra-file dup +
-        foreign-month; ZERO extra reads — only an O(rows) ``n_unique`` hash pass,
-        stated honestly) and run
-        :func:`~brutex.data.lake_invariants.detect_legacy_drift` over the coords
-        already parsed. Findings are LOGGED (the ``lake.invariant.*`` events) +
-        returned on ``ReconcileResult.findings``; reconcile itself NEVER heals
-        (a read-side walk must not mutate mid-walk). ``False`` restores the
-        pre-DEC-LAKE-HEAL-001 behaviour byte-identically.
+        foreign-month). ZERO extra I/O — the ``n_unique`` uniqueness pass runs
+        on the timestamp column this loop already read for ``first_ts``/
+        ``last_ts``, so the added cost is a CPU-only O(rows) hash pass per
+        file, never a second read (stated honestly, Golden Rule #10) — plus
+        :func:`~brutex.data.lake_invariants.detect_legacy_drift` over the
+        coords already parsed. Findings are LOGGED (the ``lake.invariant.*``
+        events) + returned on ``ReconcileResult.findings``; reconcile itself
+        NEVER heals (a read-side walk must not mutate mid-walk). ``False``
+        restores the pre-DEC-LAKE-HEAL-001 behaviour byte-identically — used
+        by mid-pull HOT call sites that never heal (the F&O window
+        derivation), where the findings would only re-log what the L2
+        post-pull heal handles moments later.
 
     Returns
     -------
