@@ -249,38 +249,53 @@ def test_pull_pipeline_unknown_selection_fails_closed_400(
     assert "99999" in resp.json()["detail"]
 
 
-# ── the gated FINAL pre-build stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ────────
+# ── the gated auto-prebuild stage (DEC-PIPELINE-AUTOPREBUILD-001) ──────────────
 
 
-def test_pull_pipeline_runs_prebuild_as_final_stage_on_clean_fetch(
+def test_pull_pipeline_runs_prebuild_after_clean_fetch(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fully-successful offline pipeline runs the FINAL pre-build stage.
+    """A fully-successful offline pipeline runs the automatic prebuild stage.
 
-    The route binds ``run_prebuild`` to a materialiser driven through
-    ``brutex.data.tf_autoderive.run_autoderive`` (lazily imported inside the job
-    body). We spy on it: a clean fetch (the offline fakes are all clean) must invoke
-    it ONCE over the pulled target(s), proving the unified pre-build runs as the
-    pipeline's automatic final stage — the operator never clicks it manually.
+    The route binds ``run_prebuild`` to the pure crash-guarded
+    ``run_pipeline_prebuild_guarded`` (DEC-PIPELINE-AUTOPREBUILD-001 — the old
+    ``run_autoderive`` binding is gone). We spy on the app-module binding: a
+    clean fetch (the offline fakes are all clean) must invoke it ONCE over the
+    pulled target(s) with the target-shaped materialiser + cascade builder,
+    proving the prebuild runs automatically — the operator never clicks it.
     """
-    from brutex.data import tf_autoderive
+    from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 
     seen: list[tuple[str, ...]] = []
-    real_report = tf_autoderive.AutoderiveReport(outcomes=())
 
-    def _spy_run_autoderive(*, symbols: Any, materialize_one: Any) -> Any:
-        seen.append(tuple(symbols))
-        return real_report
+    def _spy_prebuild(
+        *, instruments: Any, cascade_or_error: Any, materialize: Any, **kwargs: Any
+    ) -> PrebuildOutcome:
+        seen.append(tuple(inst.symbol_name for inst in instruments))
+        return PrebuildOutcome(symbols_built=1, total_bars=9, failed=(), failed_count=0, ok=True)
 
-    monkeypatch.setattr(tf_autoderive, "run_autoderive", _spy_run_autoderive)
+    monkeypatch.setattr(app_module, "run_pipeline_prebuild_guarded", _spy_prebuild)
     _pin_creds_present(monkeypatch)
     _patch_spines(monkeypatch)
     resp = client.post("/api/v1/universe/pull-pipeline")
     assert resp.status_code == 200
     assert _wait_for_job(client)["state"] == "done"
-    # The FINAL pre-build stage ran exactly once over the pulled target (NIFTY).
+    # The prebuild stage ran exactly once over the pulled target (NIFTY).
     assert len(seen) == 1, "the pre-build stage must run once on a clean fetch"
     assert "NIFTY" in seen[0], "pre-build must cover the pulled target symbol"
+
+
+def test_pull_pipeline_prebuild_crash_never_fails_the_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL guarded prebuild runs over an empty lake (NIFTY has no stored
+    1-minute) — its per-symbol failure is quarantined, and the already-successful
+    fetch job still settles ``done`` (the prebuild can never kill the job)."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
 
 
 # ── spot from/to date range (DEC-UNIVERSE-PULL-DATERANGE-001) ─────────────────
