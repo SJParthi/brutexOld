@@ -379,7 +379,8 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                     status="FAIL",
                     detail=(
                         f"{symbol}: stored derived TFs drift from a fresh re-derivation: "
-                        f"{stale} — re-derive via POST /api/v1/universe/derive-timeframes"
+                        f"{stale} — re-derive via the pipeline's automatic prebuild "
+                        "stage (▶ Pull · full pipeline, DEC-PIPELINE-AUTOPREBUILD-001)"
                     ),
                 )
             return CheckResult(

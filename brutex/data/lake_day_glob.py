@@ -40,11 +40,16 @@ the symbol-aware :func:`read_day_intraday_frame` does, and the callers go throug
 The derived daily bar is stamped at **midnight IST** (``00:00 IST = 18:30 UTC the
 prior day`` — :mod:`brutex.data.spot_daily_resample`), so an IST day's 1-day bar
 can sit in the PRIOR UTC month's file (e.g. IST ``2026-07-01`` ⇒ ``2026-06``).
-This helper is therefore used ONLY by the **intraday 1-minute** session readers;
-the ``1day`` prior-close / daily-snapshot readers keep their whole-partition read
-(a daily series is tiny — at most ``years × ~250`` rows — so it is not a hot
-path). Mis-applying this to ``1day`` would silently drop month-boundary days, so
-the contract is documented here and the callers are 1-minute only.
+This helper is therefore used ONLY by the **intraday** session readers — the
+1-minute base AND the prebuilt derived intraday-TF partitions
+(``2minute`` … ``4hour``, whose bucket labels share the bar's own IST date by
+the fixed-arithmetic session anchor, DEC-RESAMPLE-ANCHOR-002 — so the same
+one-month-file argument holds; DEC-PIPELINE-AUTOPREBUILD-001 chunk 2's
+stored-first movers read rides it). The ``1day`` prior-close / daily-snapshot
+readers keep their whole-partition read (a daily series is tiny — at most
+``years × ~250`` rows — so it is not a hot path). Mis-applying this to ``1day``
+would silently drop month-boundary days, so the contract is documented here and
+the callers are intraday-interval only.
 """
 
 from __future__ import annotations

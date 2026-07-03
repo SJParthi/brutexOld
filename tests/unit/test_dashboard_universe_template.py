@@ -33,18 +33,17 @@ def test_beam_is_hidden_by_default_and_gated_on_running() -> None:
 
 
 def test_js_flags_running_at_start_and_clears_it_on_finish() -> None:
-    """Both pull paths set ``.running`` at start and clear it when settled."""
+    """The (one remaining) pull path sets ``.running`` at start and clears it settled.
+
+    Was ``>= 2`` when the manual pre-build panel (``_matPanelStart`` /
+    ``runMaterialize``) was the second path; DEC-PIPELINE-AUTOPREBUILD-001
+    removed that surface, so the single pipeline pull path remains.
+    """
     html = _render_universe_html()
     added = html.count('"on", "running"') + html.count("'on', 'running'")
-    assert added >= 2, (
-        "both the per-symbol spot path and the bulk/options path must add the "
-        "'running' class at pull start"
-    )
+    assert added >= 1, "the pipeline pull path must add the 'running' class at pull start"
     cleared = html.count('classList.remove("running")') + html.count("classList.remove('running')")
-    assert cleared >= 2, (
-        "the 'running' class must be cleared when a pull finishes "
-        "(runMaterialize finally + finishLive)"
-    )
+    assert cleared >= 1, "the 'running' class must be cleared when a pull finishes (finishLive)"
 
 
 def test_spot_date_pickers_readded_and_tokens_filled() -> None:
