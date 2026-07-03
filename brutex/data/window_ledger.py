@@ -272,6 +272,24 @@ class WindowLedger:
     _reopened: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
+    #: Keys :meth:`record` DEMOTED ``SUCCESS`` → ``FAILED`` for a DATA-COMPLETENESS
+    #: reason (``degraded=True`` — an interior multi-session hole / trailing
+    #: truncation, DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001)
+    #: during THIS process's lifetime (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001 ×
+    #: the DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save). The merge-on-save's
+    #: same-key conflict rule prefers the MORE-SETTLED status, so without this
+    #: tombstone a concurrent pull's on-disk ``SUCCESS`` copy (rank 3) would beat
+    #: the demoted ``FAILED`` row (rank 1) on the very next save and SILENTLY UNDO
+    #: the demotion — the window would read settled/skippable forever WITH the
+    #: confirmed gap, exactly the resurrect-from-disk class the ``_reopened``
+    #: tombstones close for the operator re-open. For a key in this set the
+    #: IN-MEMORY row wins the merge outright. The accept-gap ``SKIPPED`` settle at
+    #: the threshold is deliberately NOT tombstoned (it is a legitimately terminal
+    #: rank-3 row a concurrent ``SUCCESS`` may honestly displace). Never serialised
+    #: (per-instance lifetime — the window between load and save).
+    _degraded: set[tuple[str, str, str, str, str]] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -454,6 +472,14 @@ class WindowLedger:
         demotion only RE-OPENS the window for completion, never deletes data. ``degraded``
         is IGNORED for a ``FAILED`` (already re-pullable) or an ``EMPTY`` (no bars to be
         incomplete); the default ``False`` is byte-identical to the prior behaviour.
+        Each demoted key is tombstoned in :meth:`degraded_keys`
+        (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001) so the
+        DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save cannot resurrect a concurrent
+        pull's on-disk ``SUCCESS`` copy over the demotion (its more-settled rank
+        would otherwise silently re-mask the confirmed gap on the very next flush)
+        — exactly as :meth:`reopen_skipped` tombstones its ``SKIPPED`` → ``FAILED``
+        demotions. The accept-gap ``SKIPPED`` settle at the threshold is NOT
+        tombstoned (a legitimately terminal row).
 
         *suppress_settle* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) marks an ``EMPTY``
         outcome as **UNTRUSTED** — recorded while the pull's mass-empty circuit
@@ -529,6 +555,15 @@ class WindowLedger:
                 status = SKIPPED
             elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
+            if degraded_success and status == FAILED:
+                # Tombstone the demotion (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001):
+                # the merge-on-save must keep this in-memory FAILED outright, or a
+                # concurrent pull's on-disk SUCCESS (more-settled rank) would silently
+                # re-mask the confirmed gap on the very next flush. The guard is exact:
+                # ``degraded_success`` selects the clean-SUCCESS-forced-to-FAILED case,
+                # and ``status == FAILED`` excludes the accept-gap SKIPPED settle above
+                # (legitimately terminal — never wrongly pinned against a SUCCESS).
+                self._degraded.add(wk)
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             if status == SKIPPED and (prior is None or prior.status != SKIPPED):
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): count every
@@ -689,6 +724,23 @@ class WindowLedger:
         """
         with self._lock:
             return frozenset(self._reopened)
+
+    def degraded_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
+        """The keys :meth:`record` demoted ``SUCCESS`` → ``FAILED`` — thread-safe snapshot.
+
+        DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001 × DEC-WINDOW-LEDGER-RESCUE-001.
+        Consumed by the merge-on-save
+        (:func:`~brutex.data.window_ledger_store.save_window_ledger`) so a
+        data-completeness demotion (``degraded=True`` — a confirmed interior gap /
+        trailing truncation recorded ``FAILED`` for re-pull) is not resurrected to
+        a concurrent pull's on-disk ``SUCCESS`` copy by the more-settled-status
+        conflict rule (which would silently re-mask the gap); for these keys the
+        in-memory row wins the merge outright. The third instance of the
+        per-decision tombstone shape (:meth:`pruned_keys` / :meth:`reopened_keys`).
+        O(degraded) copy under the lock.
+        """
+        with self._lock:
+            return frozenset(self._degraded)
 
     def prune_superseded(
         self, planned_tiles: Mapping[tuple[str, str, str], Mapping[str, str]]

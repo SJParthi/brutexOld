@@ -300,6 +300,7 @@ def merge_ledger_rows(
     *,
     pruned_keys: frozenset[_RowKey] = frozenset(),
     reopened_keys: frozenset[_RowKey] = frozenset(),
+    degraded_keys: frozenset[_RowKey] = frozenset(),
 ) -> list[LedgerRow]:
     """Merge the in-memory rows with the on-disk rows per window key — pure.
 
@@ -328,7 +329,18 @@ def merge_ledger_rows(
       silently undo the operator's re-open (the ``brutex reopen-skipped`` CLI runs
       under the account-wide pull single-flight lock, so no concurrent pull is
       mid-flight while it saves; a re-verify pull's later genuine outcome then wins
-      normally on ITS save).
+      normally on ITS save). Likewise a key in *degraded_keys* (a clean SUCCESS THIS
+      ledger demoted to a re-pullable ``FAILED`` for a DATA-COMPLETENESS reason —
+      a confirmed interior gap / trailing truncation, ``record(degraded=True)``,
+      DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001) keeps the IN-MEMORY row outright:
+      without it a CONCURRENT pull's on-disk ``SUCCESS`` (rank 3) would beat the
+      demoted ``FAILED`` (rank 1) on this writer's own save and silently re-mask
+      the gap forever. A genuine later fill still surfaces correctly — the filling
+      pull records ``SUCCESS`` with an EMPTY tombstone set, so ITS save keeps the
+      ``SUCCESS`` (honest residual: a concurrent writer that does not itself run
+      the gap detector can re-mask under the more-settled rule on ITS flush — a
+      pre-existing property of the merge rule; a real persistent gap re-demotes on
+      the next gap-checking pull).
 
     Output is sorted by window key (the same order :meth:`WindowLedger.to_rows`
     emits), so a merge with an empty/absent disk side is byte-row-identical to the
@@ -342,8 +354,8 @@ def merge_ledger_rows(
             if key not in pruned_keys:
                 merged[key] = row
             continue
-        if key in reopened_keys:
-            continue  # a deliberate re-open — the in-memory demotion wins outright
+        if key in reopened_keys or key in degraded_keys:
+            continue  # a deliberate demotion (re-open / degraded) — the in-memory row wins
         if _row_preference(row) > _row_preference(mine):
             merged[key] = row
     return sorted(merged.values(), key=_row_key)
@@ -359,8 +371,11 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     a corrupt/absent file merges as empty), (2) merges it with the in-memory rows via
     :func:`merge_ledger_rows` (per-key, preferring the more-settled status →
     newer ``last_attempt_at`` → higher ``attempts``; a row this ledger deliberately
-    PRUNED is dropped, not resurrected, and a row it deliberately RE-OPENED via
-    ``reopen_skipped`` keeps the in-memory demotion), then (3) serialises the merged rows to a
+    PRUNED is dropped, not resurrected, and a row it deliberately DEMOTED — RE-OPENED
+    via ``reopen_skipped`` or degraded-demoted via ``record(degraded=True)``
+    (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001) — keeps the in-memory demotion,
+    so a concurrent disk ``SUCCESS`` can never silently re-mask a confirmed
+    interior gap), then (3) serialises the merged rows to a
     Parquet table with the fixed :data:`_COLUMNS` schema and atomically replaces the
     file. Two concurrent pulls on one lake therefore NEVER clobber each other's rows
     (the later writer reads AFTER the earlier writer's ``os.replace``). The ledger
@@ -395,6 +410,7 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
                 disk_rows,
                 pruned_keys=ledger.pruned_keys(),
                 reopened_keys=ledger.reopened_keys(),
+                degraded_keys=ledger.degraded_keys(),
             )
             # Build per-column arrays in the fixed order so the schema is stable.
             by_col: dict[str, list[Any]] = {name: [] for name in _COLUMNS}

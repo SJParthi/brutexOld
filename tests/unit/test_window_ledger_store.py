@@ -1222,6 +1222,7 @@ def _row(
     attempts: int = 1,
     last_attempt: str | None = "2026-06-08T12:00:00+00:00",
     bars: int = 5,
+    last_error: str | None = None,
 ) -> LedgerRow:
     """One serialised ledger row (the exact 13-field ``to_rows`` shape)."""
     return (
@@ -1233,7 +1234,7 @@ def _row(
         status,
         bars,
         attempts,
-        None,
+        last_error,
         "2026-06-01T00:00:00+00:00",
         last_attempt,
         0,
@@ -1310,6 +1311,59 @@ class TestMergeLedgerRows:
         assert merge_ledger_rows([demoted], [settled]) == [settled]
         # WITH the tombstone the deliberate demotion survives the merge:
         assert merge_ledger_rows([demoted], [settled], reopened_keys=frozenset({key})) == [demoted]
+
+    def test_merge_keeps_degraded_over_disk_success(self) -> None:
+        # BUG-REGRESSION (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001, FAIL-BEFORE/
+        # PASS-AFTER): a `record(degraded=True)` interior-gap demotion (SUCCESS →
+        # FAILED in memory) must NOT be undone by a CONCURRENT pull's on-disk
+        # SUCCESS copy's more-settled rank — for a degraded key the in-memory row
+        # wins outright, exactly as a reopened key does.
+        demoted = _row(status=FAILED, attempts=2, last_error="INTERIOR_GAP")
+        settled = _row(status=SUCCESS, attempts=2)
+        key = (demoted[0], demoted[1], demoted[2], demoted[3], demoted[4])
+        # TEETH — WITHOUT the tombstone the disk SUCCESS wins (the silent-override bug):
+        assert merge_ledger_rows([demoted], [settled]) == [settled]
+        # WITH the tombstone the demotion survives the merge (reopened stays empty —
+        # this pins the `or`'s second operand: reopened False → degraded True):
+        assert merge_ledger_rows(
+            [demoted],
+            [settled],
+            reopened_keys=frozenset(),
+            degraded_keys=frozenset({key}),
+        ) == [demoted]
+
+    def test_merge_reopened_still_wins(self) -> None:
+        # The `or`'s FIRST operand short-circuits: a reopened key keeps the
+        # in-memory row even with an EMPTY degraded set alongside it.
+        demoted = _row(status=FAILED, attempts=2)
+        settled = _row(status=SKIPPED, attempts=2)
+        key = (demoted[0], demoted[1], demoted[2], demoted[3], demoted[4])
+        assert merge_ledger_rows(
+            [demoted],
+            [settled],
+            reopened_keys=frozenset({key}),
+            degraded_keys=frozenset(),
+        ) == [demoted]
+
+    def test_merge_no_tombstone_uses_preference(self) -> None:
+        # BOTH tombstone sets explicitly empty → the ordinary more-settled
+        # preference resolves the conflict (the disk SUCCESS wins).
+        demoted = _row(status=FAILED, attempts=2, last_error="INTERIOR_GAP")
+        settled = _row(status=SUCCESS, attempts=2)
+        assert merge_ledger_rows(
+            [demoted],
+            [settled],
+            reopened_keys=frozenset(),
+            degraded_keys=frozenset(),
+        ) == [settled]
+
+    def test_merge_default_degraded_keys_omitted(self) -> None:
+        # The new kwarg defaults to an empty frozenset — a call that omits it is
+        # byte-identical to the pre-fix merge (back-compat pin).
+        demoted = _row(status=FAILED, attempts=2, last_error="INTERIOR_GAP")
+        settled = _row(status=SUCCESS, attempts=2)
+        assert merge_ledger_rows([demoted], [settled]) == [settled]
+        assert merge_ledger_rows([settled], [demoted]) == [settled]
 
 
 # --- DEC-WINDOW-LEDGER-RESCUE-001: cross-process-safe save (flock + read-merge-write) --
@@ -1392,6 +1446,36 @@ class TestSaveMergeCrossProcess:
         restored = load_window_ledger(tmp_path)
         assert restored.count == 1
         assert restored.records()[0].status == FAILED  # the demotion persisted
+        assert restored.is_skippable(_key()) is False  # the next pull re-fetches it
+
+    def test_save_preserves_degraded_demotion(self, tmp_path: Path) -> None:
+        # BUG-REGRESSION (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001, FAIL-BEFORE/
+        # PASS-AFTER): a CONCURRENT pull has already written a clean SUCCESS for W
+        # to disk; THIS pull's gap detector demotes W (record(degraded=True) →
+        # FAILED "INTERIOR_GAP") and saves. Before the fix the merge-on-save let
+        # the disk SUCCESS (more-settled rank) silently override the demotion, so
+        # W read skippable forever WITH the confirmed gap; with the degraded-keys
+        # tombstone the demotion survives its own save durably.
+        concurrent = WindowLedger()
+        concurrent.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(concurrent, tmp_path)  # the disk SUCCESS copy
+        demoter = load_window_ledger(tmp_path)
+        status = demoter.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert status == FAILED
+        save_window_ledger(demoter, tmp_path)  # exercises the degraded_keys= wire line
+        restored = load_window_ledger(tmp_path)
+        assert restored.count == 1
+        rec = restored.records()[0]
+        assert rec.status == FAILED  # the demotion persisted over the disk SUCCESS
+        assert rec.last_error == "INTERIOR_GAP"
         assert restored.is_skippable(_key()) is False  # the next pull re-fetches it
 
     def test_save_lock_timeout_skips_and_warns(
