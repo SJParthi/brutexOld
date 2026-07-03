@@ -661,10 +661,18 @@ def _read_daily_partition(
     """
     import polars as pl
 
+    from brutex.data.lake_read import dedup_bars_frame
+
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return None
-    return pl.read_parquet(base.as_posix() + "/**/*.parquet")
+    # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): a poisoned-era duplicated
+    # 1-day partition would otherwise double-serve a day — warned, never silent.
+    frame, _dropped = dedup_bars_frame(
+        pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+        source=f"movers_daily:{exchange}/{segment}/{symbol}",
+    )
+    return frame
 
 
 def _read_daily_bars(
