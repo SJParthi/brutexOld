@@ -74,7 +74,7 @@ from datetime import date, datetime, time
 
 import trading_core
 
-from brutex.calendars.nse import IST, SESSION_OPEN_IST, get_session, is_forced_exit_bar
+from brutex.calendars.nse import IST, SESSION_OPEN_IST, get_session_checked, is_forced_exit_bar
 from brutex.data.futures_roll import FuturesContract
 
 __all__ = [
@@ -258,10 +258,15 @@ def stamp_bar(
     ------
     ValueError
         If ``ts`` is naive.
+    brutex.calendars.nse.HolidayDataUnavailableError
+        If the bar is dated on a weekday OUTSIDE the published holiday span —
+        the session open (and thus the minute-of-session) cannot be verified,
+        so the stamp REFUSES loudly (Golden Rule #1) instead of silently
+        assuming a regular 09:15 session for a possibly-unlisted holiday.
     """
     ist = _ist_datetime(ts)
     trade_date = ist.date()
-    session = get_session(trade_date)
+    session = get_session_checked(trade_date)
     session_open = session.open_time_ist if session is not None else SESSION_OPEN_IST
     # Delegate the full eval-path derivation (tod_seconds / weekday / minute-of-
     # session / is-expiry-day) to the shared Rust core so this stamp is

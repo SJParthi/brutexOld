@@ -37,6 +37,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Final
 
+import structlog
+
 from brutex.adapters.synthetic.constants import (
     ANCHOR_MINUTES,
     EPOCH,
@@ -44,9 +46,11 @@ from brutex.adapters.synthetic.constants import (
     NOISE_OCTAVES,
     SyntheticSymbolSpec,
 )
-from brutex.calendars import IST, get_session
+from brutex.calendars import IST, get_session, is_holiday_data_available
 from brutex.data.models import CandleBar
 from brutex.money import round_money
+
+_LOG = structlog.get_logger(__name__)
 
 #: Field separator hashed between parts so ``("a", "bc")`` and ``("ab", "c")``
 #: never collide to the same digest.
@@ -127,6 +131,15 @@ def bar_timestamps(interval: str, start: date, end: date) -> Iterator[datetime]:
     session close. ``1day`` (375-minute step) therefore yields exactly one bar
     per session. A range with no trading sessions yields nothing.
 
+    Out-of-coverage honesty (calendar-correctness pack): the generator
+    DELIBERATELY stays on the unguarded :func:`~brutex.calendars.get_session`
+    — it fabricates data by design, and any-date deterministic generation is
+    its purpose — but when the requested span reaches OUTSIDE the published
+    holiday coverage it emits ONE ``synthetic.calendar_coverage_exceeded``
+    structlog warning per call: out-of-coverage weekdays are all treated as
+    regular sessions (an unlisted real-world holiday would still get bars),
+    stated loudly instead of silently.
+
     Raises
     ------
     ValueError
@@ -135,6 +148,22 @@ def bar_timestamps(interval: str, start: date, end: date) -> Iterator[datetime]:
     """
     if interval not in INTERVAL_TO_MINUTES:
         raise ValueError(f"unsupported synthetic interval: {interval!r}")
+    last_day = end - timedelta(days=1)
+    if start <= last_day and not (
+        is_holiday_data_available(start) and is_holiday_data_available(last_day)
+    ):
+        # Coverage is one contiguous year span, so the two endpoints decide
+        # whether ANY requested day falls outside it. One warning per call.
+        _LOG.warning(
+            "synthetic.calendar_coverage_exceeded",
+            start=start.isoformat(),
+            end=end.isoformat(),
+            detail=(
+                "requested synthetic range reaches outside the published holiday "
+                "coverage; out-of-coverage weekdays are generated as regular "
+                "sessions (synthetic-by-design, never real data)"
+            ),
+        )
     step = timedelta(minutes=INTERVAL_TO_MINUTES[interval])
     day = start
     while day < end:

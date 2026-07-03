@@ -1798,3 +1798,35 @@ class TestDefensiveArms:
         assert outcome.status == dl.STATUS_WARN
         assert outcome.lines[0].startswith("EVIDENCE rate[R4/M6]:")
         assert len(outcome.lines) == 1  # no abort line — the burst never sustained
+
+
+class TestResolveProbeDay:
+    """The extracted, loud probe-day walk (calendar-correctness pack).
+
+    ``build_real_deps`` is ``pragma: no cover`` by design, so the walk-back it
+    used to inline was invisible to the suite; ``resolve_probe_day`` is the
+    module-level, directly-tested extraction.
+    """
+
+    def test_prior_trading_day_returned_directly(self) -> None:
+        # Thu 2026-07-02 is a covered regular session before Fri 2026-07-03.
+        assert dl.resolve_probe_day(date(2026, 7, 3)) == date(2026, 7, 2)
+
+    def test_weekend_and_holiday_stepped_over(self) -> None:
+        # Mon 2024-01-29: the weekend + Republic Day (Fri 2024-01-26) are
+        # stepped over down to Thu 2024-01-25.
+        assert dl.resolve_probe_day(date(2024, 1, 29)) == date(2024, 1, 25)
+
+    def test_coverage_exhausted_warns_once_and_degrades(self) -> None:
+        # From 2027-01-02 (Saturday) the walk crosses the 2026 ceiling: Fri
+        # 2027-01-01 is an out-of-coverage weekday, so the checked calendar
+        # raises; the helper emits ONE calendar.coverage_exhausted warning and
+        # returns that weekday as the best-effort probe day — the OLD silent
+        # guess is GONE (it is now loudly flagged), and the doctor never crashes.
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            assert dl.resolve_probe_day(date(2027, 1, 2)) == date(2027, 1, 1)
+        events = [log for log in logs if log["event"] == "calendar.coverage_exhausted"]
+        assert len(events) == 1
+        assert events[0]["probe_day"] == "2027-01-01"

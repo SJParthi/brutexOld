@@ -91,6 +91,7 @@ from brutex.adapters.groww.probe import (
 from brutex.adapters.groww.token_cache import CachedToken, current_session
 from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
 from brutex.adapters.rate_common import RateController
+from brutex.calendars.nse import HolidayDataUnavailableError, is_trading_day_checked
 from brutex.config.credentials import resolve_groww_aws_credentials
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
 from brutex.config.dotenv import parse_dotenv
@@ -2426,6 +2427,57 @@ def run_live_doctor(
     return KitReport(run_id=run_id, transcript_path=transcript_path, outcomes=tuple(outcomes))
 
 
+def resolve_probe_day(today: date) -> date:
+    """Latest trading day STRICTLY BEFORE *today* — loud when coverage runs out.
+
+    The kit's vendor probe fetches candles for "the most recent completed
+    trading session", resolved by walking back one calendar day at a time from
+    ``today - 1`` using the STRICT
+    :func:`brutex.calendars.nse.is_trading_day_checked` (weekends + listed
+    holidays stepped over; special weekend sessions honoured). Extracted from
+    ``build_real_deps`` (which is ``pragma: no cover`` by design) so the walk
+    itself is directly unit-testable.
+
+    LOUD out-of-coverage handling: once the walk reaches a weekday OUTSIDE the
+    published holiday span (from 2027-01-01 on, until the list is extended),
+    the checked calendar raises rather than silently guessing "trading day".
+    This helper catches that, emits ONE ``calendar.coverage_exhausted``
+    structlog warning, and returns that weekday as the BEST-EFFORT probe day —
+    explicitly flagged degraded (it may be an unlisted holiday, in which case
+    the probe reads an empty session), never a silent guess and never a crash
+    of the whole doctor run.
+
+    Parameters
+    ----------
+    today
+        The current IST calendar date (injected for deterministic tests).
+
+    Returns
+    -------
+    date
+        The latest verified trading day before *today*, or — degraded, after
+        one warning — the latest out-of-coverage weekday.
+    """
+    day = today - timedelta(days=1)
+    while True:
+        try:
+            if is_trading_day_checked(day):
+                return day
+        except HolidayDataUnavailableError:
+            _LOG.warning(
+                "calendar.coverage_exhausted",
+                probe_day=day.isoformat(),
+                detail=(
+                    "holiday list exhausted while resolving the vendor probe day; "
+                    "using this weekday as a BEST-EFFORT probe day — it may be an "
+                    "unlisted holiday (extend the calendar to restore a verified "
+                    "probe day)"
+                ),
+            )
+            return day
+        day -= timedelta(days=1)
+
+
 def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/clock composition
     """Compose the REAL dependencies (network, git, boto3, SDK) for the CLI.
 
@@ -2450,7 +2502,6 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
     from brutex.adapters.groww.instrument_loader import urllib_http_get
     from brutex.adapters.groww.live import installed_growwapi_version
     from brutex.adapters.groww.reauth import _real_sdk_factory
-    from brutex.calendars.nse import is_trading_day
     from brutex.data.bhavcopy import urllib_http_get_nse
 
     def _git(*args: str) -> str | None:
@@ -2496,10 +2547,9 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         return (datetime.now(UTC) - server).total_seconds()
 
     def _probe_day() -> date:
-        day = datetime.now(UTC).astimezone(IST).date() - timedelta(days=1)
-        while not is_trading_day(day):
-            day -= timedelta(days=1)
-        return day
+        # The loud, coverage-aware walk lives in the module-level (and
+        # unit-tested) ``resolve_probe_day`` — this shim only supplies the clock.
+        return resolve_probe_day(datetime.now(UTC).astimezone(IST).date())
 
     def _controller() -> RateController:
         return RateController(
