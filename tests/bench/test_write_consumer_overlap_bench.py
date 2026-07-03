@@ -49,6 +49,7 @@ on a deterministic, real-write scenario so the refutation is reproducible.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Sequence
@@ -57,6 +58,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -72,6 +74,32 @@ from brutex.data.write_consumer import (
     WriteConsumerSink,
     WriteRequest,
 )
+
+#: Env-var gate (DEC-HARDENING-LEFTOVERS-001 — the exact sibling idiom of
+#: ``test_throughput_absolute.py``). The two A/B tests below assert cross-arm
+#: wall-clock MEDIAN comparisons; on shared GHA runners GIL contention +
+#: scheduler noise put both margins within measurement noise, so they flip
+#: intermittently. Set to "1" on the M4 Pro self-hosted runner; left unset on
+#: shared GHA so the timing tests skip without flaking. The deterministic
+#: byte-parity / settle-after-durable / thread-leak oracles in this file stay
+#: UNGUARDED — they are the real correctness coverage for ``write_consumer.py``.
+_ENV_M4PRO_ABS: Final[str] = "BRUTEX_M4PRO_ABS"
+
+
+def _m4pro_gate_active() -> bool:
+    """Return True iff ``BRUTEX_M4PRO_ABS=1`` is set."""
+    return os.environ.get(_ENV_M4PRO_ABS, "").strip() == "1"
+
+
+skip_unless_m4pro = pytest.mark.skipif(
+    not _m4pro_gate_active(),
+    reason=(
+        f"{_ENV_M4PRO_ABS}=1 not set — A/B wall-clock throughput gate runs "
+        "only on the M4 Pro self-hosted runner (skipping on shared GHA "
+        "to avoid chronic flake per DEC-P0-020 honest-envelope)"
+    ),
+)
+
 
 #: The original merge gate's absolute floor (r/s) — the synchronous-path ceiling from the
 #: #910 evidence (~3.2 r/s). The full gate ALSO required beating sync; the refutation below
@@ -211,6 +239,7 @@ def _median(values: list[float]) -> float:
 
 
 @pytest.mark.slow
+@skip_unless_m4pro
 def test_write_consumer_ab_records_no_go(tmp_path: Path) -> None:
     """A/B: achieved_rps(None) vs W=2 vs W=4 — records the NO-GO refutation.
 
@@ -277,6 +306,7 @@ def test_write_consumer_ab_records_no_go(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
+@skip_unless_m4pro
 def test_batched_write_consumer_ab_beats_serial(tmp_path: Path) -> None:
     """A/B: the COALESCING batched writer beats the synchronous path on the deep month.
 
