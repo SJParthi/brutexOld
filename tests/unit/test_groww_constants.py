@@ -84,6 +84,15 @@ def test_instrument_master_url_matches_allowlist_host() -> None:
     assert c.GROWW_INSTRUMENT_CSV_URL.startswith("https://")
 
 
+def test_max_reauths_production_budget_is_two_and_bounded() -> None:
+    # FP-1 hardening (DEC-GROWW-AUTH-HALT-001): the production re-auth budget is 2 —
+    # one slot for the 06:00 IST rotation, one for its possible propagation lag —
+    # and stays a SMALL bound (a dead credential must still halt promptly, never loop).
+    assert c.GROWW_MAX_REAUTHS == 2
+    assert 1 <= c.GROWW_MAX_REAUTHS <= 3
+    assert "GROWW_MAX_REAUTHS" in c.__all__
+
+
 def test_http_socket_timeouts_are_below_the_wall_clock_cap() -> None:
     # DEC-GROWW-HTTP-SOCKET-TIMEOUT-001: the SDK per-request connect + read socket
     # timeouts MUST sit comfortably BELOW the 45 s wall-clock FREEZE GUARD so a dead
