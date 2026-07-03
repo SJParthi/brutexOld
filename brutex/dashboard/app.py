@@ -4603,7 +4603,7 @@ def build_app(
         request runs the SAME ``cmd_sweep_all`` engine the CLI uses on the
         **single-flight** background job (poll the live tick at
         ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
-        the ``INDEX`` segment over ``2021-01-01 → today``. A second click while a
+        the ``INDEX`` segment over ``2020-01-01 → today``. A second click while a
         pull OR sweep is already running is a no-op (``{"started": false}``) — one
         lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
 

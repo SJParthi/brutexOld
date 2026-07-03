@@ -105,7 +105,7 @@ def test_default_params_start_job(client: TestClient, monkeypatch: pytest.Monkey
     assert body["started"] is True
     assert body["symbols"] == "NIFTY,BANKNIFTY"
     assert body["intervals"] == "1minute,5minute,15minute"
-    assert body["start"] == "2021-01-01"
+    assert body["start"] == "2020-01-01"
     assert body["exchange"] == "NSE"
     assert body["segment"] == "INDEX"
     assert _wait_for_job(client)["state"] == "done"

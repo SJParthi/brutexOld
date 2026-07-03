@@ -108,7 +108,7 @@ def test_reports_date_pickers_prefilled_with_canonical_default() -> None:
 
 
 def test_resolve_report_dates_defaults_blanks_to_canonical_range() -> None:
-    """A blank from/to falls back to the canonical [2021-01-01, previous day]."""
+    """A blank from/to falls back to the canonical [2020-01-01, previous day]."""
     from datetime import date
 
     from brutex.dashboard.app import _resolve_report_dates

@@ -53,8 +53,9 @@ DEFAULT_MODE: Final[str] = "A"
 #: Default lake exchange / segment partition for the index sweep.
 DEFAULT_EXCHANGE: Final[str] = "NSE"
 DEFAULT_SEGMENT: Final[str] = "INDEX"
-#: Default Track-1 history start (the rolling ``2021-01-01 → today`` range).
-DEFAULT_START: Final[str] = "2021-01-01"
+#: Default Track-1 history start (the rolling ``2020-01-01 → today`` range —
+#: GROWW_HISTORY_FLOOR, DEC-PULL-FLOOR-2020-001).
+DEFAULT_START: Final[str] = "2020-01-01"
 
 #: Accepted direction tokens (upper-cased before the check).
 _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
