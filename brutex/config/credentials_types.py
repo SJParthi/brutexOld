@@ -37,10 +37,11 @@ class GrowwFileCredentials:
     Attributes
     ----------
     api_key
-        The Groww TOTP api key (``BRUTEX_GROWW_API_KEY``).
+        The Groww TOTP api key (SSM ``/tickvault/prod/groww/api-key`` —
+        DEC-AWS-ONLY-CREDS-001).
     totp_secret
-        The Groww TOTP shared secret (``BRUTEX_GROWW_TOTP_SECRET``), held only to mint the
-        6-digit code.
+        The Groww TOTP shared secret (SSM ``/tickvault/prod/groww/totp-secret`` —
+        DEC-AWS-ONLY-CREDS-001), held only to mint the 6-digit code.
     """
 
     api_key: str

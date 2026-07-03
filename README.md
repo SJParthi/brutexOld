@@ -200,11 +200,22 @@ tools on a bare machine — a process cannot install the interpreter it runs on.
 > and working; the data-browser routes (`/api/v1/instruments` etc.)
 > return `503` until you start with `--lake-root <populated-lake>`.
 
-**Optional — Groww credentials for live data pulls:**
+**Optional — Groww credentials for live data pulls (AWS-SSM-only,
+DEC-AWS-ONLY-CREDS-001):** the Groww api-key, TOTP secret AND the daily
+access token live ONLY in AWS Systems Manager Parameter Store — SecureStrings
+`/tickvault/prod/groww/api-key`, `/tickvault/prod/groww/totp-secret`,
+`/tickvault/prod/groww/access-token` in region `ap-south-1`. There is NO
+secret env var, NO credentials file, and NO in-app credentials page — the
+read is fail-fast. A live pull therefore needs usable AWS credentials
+(`aws configure` / `AWS_PROFILE` / an instance role); the SSM paths + region
+are overridable via `BRUTEX_TOKEN_PARAM_API_KEY` /
+`BRUTEX_TOKEN_PARAM_TOTP_SECRET` / `BRUTEX_TOKEN_PARAM_ACCESS_TOKEN` /
+`BRUTEX_TOKEN_AWS_REGION` (defaults above). Full setup:
+`docs/runbooks/aws-token-broker.md`; var reference:
+`docs/runbooks/ENV_VARS.md` §5.
 
 ```bash
-export BRUTEX_GROWW_API_KEY="<api-key-from-the-groww-trade-api-console>"
-export BRUTEX_GROWW_TOTP_SECRET="<your-groww-totp-shared-secret>"
+aws configure       # or export AWS_PROFILE=<profile-with-ssm-read-access>
 export BRUTEX_LAKE_ROOT=/path/to/large/ssd/brutex-lake
 brutex version      # verify install
 ```

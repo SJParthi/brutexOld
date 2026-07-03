@@ -40,9 +40,12 @@ from brutex.adapters.groww.errors import (
 
 _LOG = structlog.get_logger("brutex.adapters.groww.auth")
 
-#: Env var carrying the Groww TOTP api key.
+#: RETIRED env-var NAME for the Groww TOTP api key (DEC-AWS-ONLY-CREDS-001: nothing
+#: reads it for auth — creds come from AWS SSM ``/tickvault/prod/groww/api-key``; the
+#: constant survives only for the doctor's secret-redaction belt + back-compat exports).
 ENV_API_KEY: Final[str] = "BRUTEX_GROWW_API_KEY"
-#: Env var carrying the Groww TOTP shared secret (used to mint the 6-digit code).
+#: RETIRED env-var NAME for the Groww TOTP shared secret (DEC-AWS-ONLY-CREDS-001: nothing
+#: reads it for auth — creds come from AWS SSM ``/tickvault/prod/groww/totp-secret``).
 ENV_TOTP_SECRET: Final[str] = "BRUTEX_GROWW_TOTP_SECRET"  # noqa: S105  # env var name, not a secret
 
 

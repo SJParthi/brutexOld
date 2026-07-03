@@ -49,11 +49,19 @@ Per operator decree 2026-05-26 + CLAUDE.md §11 AUTOMATED rule ("ZERO clicks per
 
 ### 2.1 Required env vars
 
+> **⚠️ RETIRED (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065):** the first three rows below
+> are the ORIGINAL spec's env-var/file design and are NO LONGER the credential contract —
+> the api-key, TOTP secret AND the daily access token now live ONLY in AWS Parameter
+> Store (SecureStrings `/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region
+> `ap-south-1`; fail-fast, no env/file fallback). Live reference:
+> `docs/runbooks/ENV_VARS.md` §5 + `docs/runbooks/aws-token-broker.md`. The table is
+> kept as the historical spec record.
+
 | Env var | Type | Default | Purpose |
 |---|---|---|---|
-| `BRUTEX_GROWW_API_KEY` | string | — | TOTP token (16-byte base32 secret) |
-| `BRUTEX_GROWW_TOTP_SECRET` | string | — | TOTP secret (32-char base32) |
-| `BRUTEX_GROWW_TOKEN_PATH` | path | `~/.brutex/groww/access_token.json` | Cached access_token file (mode 0600, mirrors prior-broker pattern) |
+| `BRUTEX_GROWW_API_KEY` (RETIRED) | string | — | TOTP token (16-byte base32 secret) |
+| `BRUTEX_GROWW_TOTP_SECRET` (RETIRED) | string | — | TOTP secret (32-char base32) |
+| `BRUTEX_GROWW_TOKEN_PATH` (RETIRED) | path | `~/.brutex/groww/access_token.json` | Cached access_token file (mode 0600, mirrors prior-broker pattern) |
 | `BRUTEX_GROWW_SMOKE` | flag | unset (off) | Set to `1` to enable smoke tests against real Groww API |
 
 ### 2.2 Auth lifecycle
