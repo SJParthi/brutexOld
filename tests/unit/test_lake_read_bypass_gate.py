@@ -3,15 +3,24 @@
 DEC-LAKE-READ-UNIQUE-001 wires every lake reader through the ONE read-side
 dedup gate (:mod:`brutex.data.lake_read`). This grep-based gate (the house
 banned-pattern-scan style, ``scripts/ci/scan-banned-patterns.sh``) makes
-bypassing it STRUCTURALLY impossible: a new ``pl.read_parquet(`` /
-``pl.scan_parquet(`` / DuckDB-SQL ``read_parquet(`` call site on the bar /
-options lake appearing in a file OUTSIDE the explicit allowlist fails CI, so
-the author must either route through :mod:`brutex.data.lake_read` or
-consciously extend the allowlist (with a dedup wiring + a reason) in the same
-PR — never silently.
+bypassing it STRUCTURALLY impossible for every parquet-read spelling the
+repo's stack exposes: polars ``read_parquet(`` / ``scan_parquet(``, DuckDB-SQL
+``read_parquet(`` / the legacy alias ``parquet_scan(``, and pyarrow
+``read_table(`` / ``ParquetFile(``. A call site appearing in a file OUTSIDE
+the explicit allowlist fails CI, so the author must either route through
+:mod:`brutex.data.lake_read` or consciously extend the allowlist (with a dedup
+wiring + a reason) in the same PR — never silently.
 
 The allowlist is FILE-level with a mandatory reason per entry; a stale entry
 (file no longer matches) ALSO fails, so the list can never rot.
+
+Honest envelope (Golden Rule #10): the gate is TEXTUAL — a read spelled
+through an exotic indirection (a bare-path DuckDB ``FROM 'x.parquet'`` string
+literal, a pandas ``pd.read_parquet`` (pandas is banned from hot paths by
+CLAUDE.md §4 anyway), or an aliased/getattr-built call) cannot be caught by
+grep; those spellings are ALSO banned by this decision and are left to
+review. The five function names above cover every reader the repo actually
+uses (verified by the sweep that built this allowlist).
 """
 
 from __future__ import annotations
@@ -20,8 +29,11 @@ import re
 from pathlib import Path
 from typing import Final
 
-#: The banned raw-read pattern — any polars or DuckDB-SQL parquet scan call.
-_RAW_READ_RE: Final[re.Pattern[str]] = re.compile(r"\b(?:read_parquet|scan_parquet)\s*\(")
+#: The banned raw-read pattern — every polars / DuckDB-SQL / pyarrow parquet
+#: read spelling the repo's stack exposes (see the module-docstring envelope).
+_RAW_READ_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:read_parquet|scan_parquet|parquet_scan|read_table|ParquetFile)\s*\("
+)
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
@@ -30,7 +42,10 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 #: gate in the same function, or a documented non-bar-lake / write-side use).
 ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/lake_read.py": "the chokepoint itself (docstrings + SQL fragments)",
-    "brutex/data/parquet_writer.py": "write-side merge read; keep-first collapse (#1067)",
+    "brutex/data/parquet_writer.py": (
+        "write-side merge read; keep-first collapse + the pq.ParquetFile footer "
+        "row-count probe (metadata-only, no bar rows served) — DEC-LAKE-WRITE-UNIQUE-001"
+    ),
     "brutex/data/option_parquet_writer.py": "write-side merge read; (side,ts) dedup (#1067)",
     "brutex/data/catalog.py": "wired: get_bars routes through dedup_bars_frame",
     "brutex/data/lake_day_glob.py": "wired: both day readers route through dedup_bars_frame",
@@ -57,6 +72,10 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/options/lake_source.py": "wired: _contract_bars dedups before the bar map build",
     "brutex/doctor.py": "wired: check_derived_freshness _read dedups",
     "brutex/engine/results_store.py": "results-tree Parquet (run_id-keyed), not the bar lake",
+    "brutex/data/window_ledger_store.py": (
+        "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
+        "bar/options lake — dedup identity does not apply"
+    ),
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"
     ),
@@ -94,9 +113,17 @@ class TestLakeReadBypassGate:
             f"parquet read — remove them): {sorted(stale)}"
         )
 
-    def test_pattern_catches_both_polars_and_sql_forms(self) -> None:
+    def test_pattern_catches_every_stack_spelling(self) -> None:
+        # polars
         assert _RAW_READ_RE.search("pl.read_parquet(path)")
         assert _RAW_READ_RE.search("pl.scan_parquet(glob)")
+        # DuckDB SQL — modern name + the legacy alias
         assert _RAW_READ_RE.search('conn.execute("SELECT 1 FROM read_parquet(?)")')
-        assert not _RAW_READ_RE.search("a_read_parquet(x)")  # word boundary
+        assert _RAW_READ_RE.search('conn.execute("SELECT 1 FROM parquet_scan(?)")')
+        # pyarrow — the reviewer-proved bypass spellings (hostile-review F1)
+        assert _RAW_READ_RE.search("pq.read_table(bars_path)")
+        assert _RAW_READ_RE.search("pq.ParquetFile(dest)")
+        # word boundaries — no false positives on lookalikes
+        assert not _RAW_READ_RE.search("a_read_parquet(x)")
+        assert not _RAW_READ_RE.search("my_read_table(x)")
         assert not _RAW_READ_RE.search("read parquet")
