@@ -233,6 +233,34 @@ class TestAlerts:
         assert escape_markdown_v2("disk_full") in ev.message
         assert escape_markdown_v2("Pull HALTED") in ev.message
 
+    def test_vendor_down(self) -> None:
+        """vendor_down (DEC-VENDOR-DOWN-BREAKER-001): CRITICAL, WAIT-worded, deduped."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).vendor_down(failed_windows=30, distinct_symbols=4)
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "vendor-down"
+        assert escape_markdown_v2("VENDOR DOWN") in ev.message
+        assert escape_markdown_v2("WAIT") in ev.message
+        assert escape_markdown_v2("NOT our credential") in ev.message
+        assert "30" in ev.message and "4" in ev.message
+        # The vendor-down wording must never read as the credential-dead alert.
+        assert escape_markdown_v2("LAMBDA BROKER DEAD") not in ev.message
+
+    def test_credential_dead(self) -> None:
+        """credential_dead (DEC-VENDOR-DOWN-BREAKER-001): CRITICAL, operator-action-worded."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).credential_dead(reason="GrowwCredentialDeadError")
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "credential-dead:GrowwCredentialDeadError"
+        assert escape_markdown_v2("OUR CREDENTIAL / LAMBDA BROKER DEAD") in ev.message
+        assert escape_markdown_v2("OPERATOR ACTION NEEDED") in ev.message
+        # The credential-dead wording must never read as the vendor-down alert.
+        assert escape_markdown_v2("VENDOR DOWN") not in ev.message
+
     def test_pull_degraded(self) -> None:
         """pull_degraded mirrors rate_breach: WARN, deduped per rule, carries the detail."""
         fake = FakeNotifier()

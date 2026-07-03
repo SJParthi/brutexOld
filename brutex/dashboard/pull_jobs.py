@@ -141,7 +141,9 @@ def is_pull_halt(exc: BaseException) -> bool:
     """True iff *exc* is a pull-wide global-stop (halts every window), not a per-symbol failure.
 
     Mirrors the ingest spines' ``_GLOBAL_STOP_ERRORS`` set (DEC-LAKE-WRITE-HALT-001 /
-    quota). The error classes are imported INSIDE the call — not at module top — so
+    quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 / DEC-VENDOR-DOWN-BREAKER-001 — the
+    vendor-down error-storm + dead-credential stops). The error classes are imported
+    INSIDE the call — not at module top — so
     :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
     part of the heavy PyO3 chain), and this check only runs on the rare
     worker-exception path.
@@ -155,11 +157,21 @@ def is_pull_halt(exc: BaseException) -> bool:
     benign "built 0" outcome.
     """
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+    from brutex.adapters.error_storm_breaker import VendorDownError
+    from brutex.adapters.groww.errors import GrowwCredentialDeadError
     from brutex.data.errors import LakeWriteHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     return isinstance(
-        exc, (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError, MassEmptySettleHalt)
+        exc,
+        (
+            LakeWriteHalt,
+            DailyQuotaExceeded,
+            QuotaInvariantError,
+            MassEmptySettleHalt,
+            VendorDownError,
+            GrowwCredentialDeadError,
+        ),
     )
 
 

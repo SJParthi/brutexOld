@@ -67,6 +67,11 @@ from time import sleep as _time_sleep
 import structlog
 
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
+from brutex.adapters.error_storm_breaker import (
+    ErrorStormBreaker,
+    observe_window_failure,
+    observe_window_success,
+)
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.client import client_self_paces
 from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
@@ -287,6 +292,7 @@ def ingest_spot(
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -360,6 +366,19 @@ def ingest_spot(
         global stop — the pull halts loudly instead of settling poisoned windows), and a
         tripped breaker suppresses every remaining EMPTY settle at ledger-record time.
         ``None`` (unit-test / legacy callers) observes nothing — byte-identical behaviour.
+    storm_breaker
+        Optional per-pull :class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`
+        (DEC-VENDOR-DOWN-BREAKER-001) — the vendor-down error-storm breaker + the
+        dead-credential StillStale escalator, shared by every window worker of the
+        pull. Each window's LADDER-EXHAUSTED transport outcome is observed (a clean
+        fetch — bars or vendor-confirmed empty — is a SUCCESS that resets both
+        streaks); a sustained zero-success storm RAISES
+        :class:`~brutex.adapters.error_storm_breaker.VendorDownError` and a dead
+        credential :class:`~brutex.adapters.groww.errors.GrowwCredentialDeadError`
+        (both global stops — the pull halts loudly). ``None`` (the default — every
+        dry-run / synthetic / unit-test caller) observes nothing; ONLY the
+        real-vendor production sites arm it (the ``detect_completeness_gaps``
+        gating pattern).
 
     Returns
     -------
@@ -439,6 +458,7 @@ def ingest_spot(
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
                 empty_breaker=empty_breaker,
+                storm_breaker=storm_breaker,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -571,6 +591,7 @@ def _ingest_one_window(
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -611,6 +632,7 @@ def _ingest_one_window(
         empty_retry_backoff=empty_retry_backoff,
         old_cutoff=old_cutoff,
         empty_breaker=empty_breaker,
+        storm_breaker=storm_breaker,
     )
     if raw is None:
         # Producer-resolved (skip / transient / terminal-raised): never touches the tail.
@@ -713,6 +735,7 @@ def _fetch_window_raw(
     empty_retry_backoff: Callable[[int], None],
     old_cutoff: date | None,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> tuple[_WindowOutcome, _RawWindow | None]:
     """The PRODUCER half — pace + fetch + EMPTY-retry + controller feedback. STAYS on the fetch thread.
 
@@ -817,6 +840,16 @@ def _fetch_window_raw(
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
                     )
+                # Vendor-down error-storm breaker + dead-credential StillStale escalation
+                # (DEC-VENDOR-DOWN-BREAKER-001): this window's whole bounded retry ladder
+                # (the client's max_attempts fast-retry) is exhausted — feed the per-pull
+                # breaker AFTER the ledger record (the window stays re-pullable). A
+                # sustained zero-success storm across distinct symbols RAISES
+                # VendorDownError here on the producer thread — a GLOBAL stop; K
+                # consecutive StillStale outcomes over T minutes RAISE
+                # GrowwCredentialDeadError (also a global stop). None (dry-run /
+                # synthetic / tests) observes nothing.
+                observe_window_failure(storm_breaker, symbol=instrument.symbol_name, exc=exc)
                 return (
                     _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__),
                     None,
@@ -851,6 +884,12 @@ def _fetch_window_raw(
     # evidence — observed but never counted (`is_expected_empty_recheck`). Observed BEFORE
     # the fast-settle math below so a poisoned window can never settle on the very call
     # that trips the breaker.
+    # Vendor-down error-storm breaker (DEC-VENDOR-DOWN-BREAKER-001): a clean fetch —
+    # bars OR a vendor-confirmed empty 200 — is a transport SUCCESS (the vendor answered:
+    # it is ALIVE), so it resets BOTH the vendor-down storm and the StillStale streak.
+    # Observed before the mass-EMPTY breaker feed (which may itself raise on a poisoned
+    # empty — a separate, content-level verdict).
+    observe_window_success(storm_breaker, symbol=instrument.symbol_name)
     if empty_breaker is not None:
         series = f"{instrument.symbol_name}:{interval}"
         if raw_bars:

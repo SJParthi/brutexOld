@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
@@ -878,6 +879,12 @@ def _run_phase(
     # records a hash of EXACTLY what Groww sent. Skipped for a dry-run (no real
     # vendor bytes to attest); best-effort inside the hook — it can never halt a pull.
     capture_hook_factory = None if dry_run else make_capture_hook_factory(lake_root)
+    # Vendor-down error-storm breaker + dead-credential StillStale escalation
+    # (DEC-VENDOR-DOWN-BREAKER-001): ONE per-phase breaker shared by every market
+    # bucket / until-clean round (any success resets it, so a recovering vendor never
+    # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
+    # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
+    storm_breaker = None if dry_run else resolve_error_storm_breaker()
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional)."""
@@ -934,6 +941,7 @@ def _run_phase(
                 capture_hook_factory=capture_hook_factory,
                 write_pool=write_pool,
                 fetch_pipeline=fetch_pipeline,
+                storm_breaker=storm_breaker,
             )
             pass_bars += report.bars_appended
             pass_windows += report.windows
