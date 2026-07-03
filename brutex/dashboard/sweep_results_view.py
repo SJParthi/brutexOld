@@ -430,6 +430,12 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
     client-side sorting. The full-precision metrics (Sharpe / sortino / calmar /
     profit factor / win-rate / max-drawdown-pct / deflated Sharpe) are passed
     through UNROUNDED — rounding them would corrupt the ranking (CLAUDE.md §4).
+    HONEST SCOPE of ``deflated_sharpe`` (DEC-STATS-GATE-INTEGRITY-001,
+    R2-SR-F3): the persisted figure is **TUPLE-scoped** — deflated against one
+    grid cell's rank-time ``N = len(candidates)``, an inflating under-count
+    (measured: DSR 0.230 at ``n_trials=1e3`` vs 0.003 at ``1e7``) — and is
+    superseded by the Stage-4 cascade's leaderboard-N DSR gate (its N/V stamp
+    lives run-level on the cascade report sidecar).
     ``conditions`` is the human-readable decode the store already derived from
     ``mask_bits`` (empty string ⇒ the "enters every bar" no-condition combo).
     ``snapshot_era`` is the row's honest data-era marker — the recorded

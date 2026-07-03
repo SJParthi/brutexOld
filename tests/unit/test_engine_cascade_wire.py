@@ -638,6 +638,194 @@ class TestBuildCandidateInput:
         assert new_corrected < old_overstated
 
 
+# ── Lockbox train/holdout split + trade evidence (DEC-STATS-GATE-INTEGRITY-001) ──
+
+
+class TestLockboxTrainingSplit:
+    """R2-SR-F1 (train-complement training refs) + R2-SR-F2 (trade evidence)."""
+
+    _WINDOW = 3
+    _MIN_TRADES = 1
+
+    def _build(self, bars: list[CandleBar], **overrides: object) -> Any:
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        kwargs: dict[str, object] = {
+            "run_id": _rid(1),
+            "mask": 0,
+            "bars": bars,
+            "bar_bits": bar_bits,
+            "direction_label": "bull",
+            "tf_minutes": 1,
+            "sl_paisa": None,
+            "tp_paisa": None,
+            "start_equity_paisa": 10_000_000,
+            "lockbox_default_window_days": self._WINDOW,
+            "lockbox_min_trades": self._MIN_TRADES,
+        }
+        kwargs.update(overrides)
+        return cw.build_candidate_input(**kwargs)  # type: ignore[arg-type]
+
+    def test_training_refs_are_the_train_complement_not_the_full_series(self) -> None:
+        """THE R2-SR-F1 regression (fails before the fix).
+
+        Over a 12-day history with a 3-day lockbox window, the training
+        Sharpe/MDD must equal the values independently recomputed over ONLY
+        the per-bar returns strictly BEFORE the resolved window start — and
+        must DIFFER from the full-series values the old code fed (the
+        contaminated reference that contained the holdout tail).
+        """
+        from brutex.calendars.nse import IST
+        from brutex.metrics.cpcv import sharpe_of_returns
+        from brutex.metrics.lockbox import resolve_lockbox_window
+
+        bars = _fib_anchor_history()
+        # SL/TP legs so trades CLOSE throughout the 12-day history (with no
+        # legs the single mask-0 position holds to end_of_data and the
+        # complement equity is flat — the fallback case tested separately).
+        cand = self._build(bars, sl_paisa=500, tp_paisa=500)
+
+        # Independent recompute of the exact reconstruction chain.
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        trades = simulate_trades(
+            bars,
+            mask_to_entry_signals(bar_bits, 0),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=500,
+            take_profit_paisa=500,
+        )
+        equity = build_equity_curve(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        per_bar = cw._per_bar_returns(equity.equity_paisa, 10_000_000)
+        day_ordinals = [b.timestamp.astimezone(IST).date().toordinal() for b in bars]
+        trade_days = tuple(sorted(t.exit_ts.astimezone(IST).date().toordinal() for t in trades))
+        window = resolve_lockbox_window(
+            day_ordinals,
+            evidence_days=trade_days,
+            default_window_days=self._WINDOW,
+            min_trades=self._MIN_TRADES,
+        )
+        train = [r for r, d in zip(per_bar, day_ordinals, strict=True) if d < window.window_start]
+        expected_sharpe = sharpe_of_returns(train)
+        assert expected_sharpe is not None  # fixture sanity: a REAL complement
+        full_sharpe = sharpe_of_returns(per_bar)
+        assert full_sharpe is not None
+        assert expected_sharpe != full_sharpe  # the fixture separates the two
+
+        assert cand.training_sharpe == expected_sharpe
+        assert cand.training_sharpe != full_sharpe  # the OLD (contaminated) value
+        # The MDD reference is the complement's too (fed as ONE pair with the
+        # Sharpe). In THIS fixture the deepest drawdown happens to lie inside
+        # the complement, so the full-series MDD coincides numerically — the
+        # Sharpe inequality above is what pins the old-code regression.
+        assert cand.training_max_drawdown == cw._max_drawdown_return_units(train)
+        assert cand.training_max_drawdown <= cw._max_drawdown_return_units(per_bar)
+
+    def test_lockbox_trade_days_are_sorted_ist_exit_ordinals(self) -> None:
+        # R2-SR-F2: the evidence is the sorted per-trade EXIT-day IST ordinals,
+        # one per closed trade, every value inside the bar-day span.
+        from brutex.calendars.nse import IST
+
+        bars = _session_bars()
+        cand = cw.candidates_for_spec(_spec(sl_paisa=50, tp_paisa=50), bars)[0]
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        trades = simulate_trades(
+            bars,
+            mask_to_entry_signals(bar_bits, 0),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+            take_profit_paisa=50,
+        )
+        expected = tuple(sorted(t.exit_ts.astimezone(IST).date().toordinal() for t in trades))
+        assert cand.lockbox_trade_days == expected
+        assert len(cand.lockbox_trade_days) == cand.total_trades > 0
+        day_ordinals = [b.timestamp.astimezone(IST).date().toordinal() for b in bars]
+        assert all(day_ordinals[0] <= d <= day_ordinals[-1] for d in cand.lockbox_trade_days)
+
+    def test_degenerate_complement_falls_back_to_full_series_loudly(self) -> None:
+        # Review A3: a single-session slice puts EVERY trade inside the lockbox
+        # window → the train complement is empty → the training refs fall back
+        # to the legacy FULL-series pair AS ONE UNIT, with ONE loud warning.
+        bars = _session_bars()
+        with capture_logs() as logs:
+            cand = self._build(bars)
+        events = [e for e in logs if e["event"] == "cascade_wire.training_ref_fallback"]
+        assert len(events) == 1
+        # Legacy-equal refs: the full per-bar series pair.
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        trades = simulate_trades(
+            bars,
+            mask_to_entry_signals(bar_bits, 0),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=None,
+            take_profit_paisa=None,
+        )
+        equity = build_equity_curve(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        per_bar = cw._per_bar_returns(equity.equity_paisa, 10_000_000)
+        from brutex.metrics.cpcv import sharpe_of_returns
+
+        assert cand.training_sharpe == cw._finite(sharpe_of_returns(per_bar))
+        assert cand.training_max_drawdown == cw._max_drawdown_return_units(per_bar)
+
+    def test_zero_trade_candidate_has_empty_evidence_and_legacy_refs(self) -> None:
+        # A mask whose bit never fires under PREV_DAY → zero entries → zero
+        # trades → empty evidence tuple + the legacy (flat-series) refs.
+        bars = _fib_anchor_history()
+        with capture_logs() as logs:
+            cand = self._build(bars, mask=1 << _ROLLING_ONLY_FIB_BIT)
+        assert cand.lockbox_trade_days == ()
+        assert cand.total_trades == 0
+        # Flat equity → full-series Sharpe undefined → _finite(None) == 0.0.
+        assert cand.training_sharpe == 0.0
+        assert cand.training_max_drawdown == 0.0
+        assert [e for e in logs if e["event"] == "cascade_wire.training_ref_fallback"]
+
+    def test_config_lockbox_params_thread_into_the_resolver(self) -> None:
+        # Review A1 (the config-threading regression): a NON-default lockbox
+        # window/floor on the CascadeConfig must reach the wire's resolver call
+        # — a hard-coded module default here would re-introduce the
+        # train/holdout mismatch for any non-default config.
+        captured: list[tuple[int, int]] = []
+        real = cw.resolve_lockbox_window
+
+        def spy(days: object, **kwargs: object) -> object:
+            captured.append(
+                (int(kwargs["default_window_days"]), int(kwargs["min_trades"]))  # type: ignore[arg-type, call-overload]
+            )
+            return real(days, **kwargs)  # type: ignore[arg-type]
+
+        config = cw.cascade_config_for_sweep(
+            "a" * 64, overrides={"lockbox_default_window_days": 11, "lockbox_min_trades": 7}
+        )
+        original = cw.resolve_lockbox_window
+        cw.resolve_lockbox_window = spy  # type: ignore[assignment]
+        try:
+            cw.run_cascade_over_specs(
+                [_spec()],
+                bars_for=_bars_for(_session_bars()),
+                config=config,
+                sweep_id="a" * 64,
+            )
+        finally:
+            cw.resolve_lockbox_window = original  # type: ignore[assignment]
+        assert captured == [(11, 7)]
+
+    def test_complete_log_carries_n_provisional(self) -> None:
+        # R2-SR-F4: the summary structlog event surfaces the provisional count
+        # (0 here — the lone reconstructed candidate dies at the hard gates).
+        with capture_logs() as logs:
+            report = cw.run_cascade_over_specs(
+                [_spec()],
+                bars_for=_bars_for(_session_bars()),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+            )
+        (event,) = [e for e in logs if e["event"] == "cascade_wire.complete"]
+        assert event["n_provisional"] == 0
+        assert report.n_provisional == 0
+
+
 # ── The shared pure core ──────────────────────────────────────────────────────
 
 
@@ -692,6 +880,12 @@ def _manual_report() -> cw.CascadeWireReport:
                 rejected_at=None,
                 detail="survived all Stage-4 filters",
                 composite_score=0.75,
+                # R2-SR-F4: a provisional=True pass here vs the default-False
+                # rejected verdict below, so the serializer is value-pinned for
+                # BOTH flag states (hostile C1 — never only the default). A
+                # hand-built serializer fixture: the leaderboard dsr stamp
+                # below is not cross-validated against the flag.
+                provisional=True,
             ),
             CandidateVerdict(
                 candidate_id=_rid(2),
@@ -769,11 +963,25 @@ class TestReportSerialisation:
         report = _manual_report()
         assert cw.serialize_wire_report(report) == cw.serialize_wire_report(report)
 
+    def test_provisional_serialises_both_states(self) -> None:
+        # R2-SR-F4: the ADDITIVE per-verdict provisional flag round-trips for
+        # BOTH states (True on the pass, default False on the rejection).
+        payload = cw.wire_report_to_dict(_manual_report())
+        verdicts = payload["groups"][0]["report"]["verdicts"]  # type: ignore[index]
+        assert verdicts[0]["provisional"] is True
+        assert verdicts[1]["provisional"] is False
+        raw = cw.serialize_wire_report(_manual_report())
+        assert b'"provisional":true' in raw
+        assert b'"provisional":false' in raw
+
     def test_report_properties(self) -> None:
         report = _manual_report()
         assert report.n_input == 2
         assert report.n_survived == 1
         assert report.survivor_ids == (_rid(1),)
+        # R2-SR-F4: the aggregate counts the flagged pass in the first group
+        # (the skipped second group contributes zero).
+        assert report.n_provisional == 1
 
 
 # ── Manifest serialisation ────────────────────────────────────────────────────
