@@ -1661,8 +1661,13 @@ jobs:
           # DEC-CATALOG-RECONCILE-WIRE-001: the lake→catalog reconciler ships at
           # 100% line+branch from the start (read-side fix that makes an
           # already-pulled lake sweep-able with no re-pull).
+          # DEC-LAKE-HEAL-001: the free L1 invariant piggyback (`check_invariants`
+          # branches + the findings/drift paths) is covered by the dedicated
+          # tests/unit/test_catalog_reconcile_invariants.py suite, so this gate
+          # runs BOTH files (same pattern as the pull_controller gate above) —
+          # the base file alone reads 89.47% on the module.
           if compgen -G "tests/unit/test_catalog_reconcile.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py
+            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py tests/unit/test_catalog_reconcile_invariants.py
           else
             echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
           fi
