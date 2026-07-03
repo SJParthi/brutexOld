@@ -27,7 +27,7 @@ file get the catalog's existing missing-file error, unchanged.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -37,6 +37,13 @@ import structlog
 
 from brutex.data.catalog import Catalog
 from brutex.data.errors import PartitionError, parquet_read_skip_errors
+from brutex.data.lake_invariants import (
+    LakeFinding,
+    PartitionCoords,
+    classify_bar_keys,
+    detect_legacy_drift,
+    log_lake_finding,
+)
 from brutex.data.models import CatalogEntry
 from brutex.data.partition import BAR_DIR_NAME, parse_partition_path
 
@@ -63,11 +70,22 @@ class ReconcileResult:
         valid partition path, held zero rows, or were UNREADABLE (corrupt /
         version-incompatible Parquet — logged ``catalog.reconcile.parquet_skip``
         and skipped instead of crashing the whole reconcile, GAP #9).
+    findings
+        Lake invariant findings detected by the free L1 piggyback
+        (DEC-LAKE-HEAL-001, ``check_invariants=True``): intra-file duplicate
+        timestamps + foreign-month rows classified from the SAME timestamp
+        column reconcile already reads (zero extra reads;
+        ``overlap_rows=None`` — the free path skips the canonical-sibling
+        read), plus #911 legacy-key dir drift derived from the coords already
+        parsed. Reconcile itself NEVER heals — healing is the caller's
+        one-liner (``lake_heal.heal_after_reconcile``). Defaulted ``()`` so
+        the pre-existing three-counter construction stays compatible.
     """
 
     partitions_reconciled: int
     bars_total: int
     skipped: int
+    findings: tuple[LakeFinding, ...] = ()
 
 
 def _partition_files(
@@ -100,6 +118,7 @@ def reconcile_catalog_from_lake(
     segment: str | None = None,
     symbol: str | None = None,
     interval: str | None = None,
+    check_invariants: bool = True,
 ) -> ReconcileResult:
     """Upsert one catalog row per on-disk Parquet partition under *lake_root*.
 
@@ -123,11 +142,23 @@ def reconcile_catalog_from_lake(
     exchange, segment, symbol, interval
         Optional coordinate filters; ``None`` reconciles every value for
         that coordinate.
+    check_invariants
+        DEC-LAKE-HEAL-001 free L1 detection (default on): classify each file's
+        ALREADY-READ timestamp column via
+        :func:`~brutex.data.lake_invariants.classify_bar_keys` (intra-file dup +
+        foreign-month; ZERO extra reads — only an O(rows) ``n_unique`` hash pass,
+        stated honestly) and run
+        :func:`~brutex.data.lake_invariants.detect_legacy_drift` over the coords
+        already parsed. Findings are LOGGED (the ``lake.invariant.*`` events) +
+        returned on ``ReconcileResult.findings``; reconcile itself NEVER heals
+        (a read-side walk must not mutate mid-walk). ``False`` restores the
+        pre-DEC-LAKE-HEAL-001 behaviour byte-identically.
 
     Returns
     -------
     ReconcileResult
-        Counts of reconciled partitions, total bars, and skipped files.
+        Counts of reconciled partitions, total bars, and skipped files, plus
+        the L1 invariant ``findings``.
     """
     files = _partition_files(
         lake_root,
@@ -139,12 +170,18 @@ def reconcile_catalog_from_lake(
     reconciled = 0
     bars_total = 0
     skipped = 0
+    findings: list[LakeFinding] = []
+    symbol_dirs: dict[tuple[str, str], set[str]] = {}
     for path in files:
         try:
             coords = parse_partition_path(path, lake_root=lake_root)
         except PartitionError:
             skipped += 1
             continue
+        if check_invariants:
+            symbol_dirs.setdefault(
+                (cast(str, coords["exchange"]), cast(str, coords["segment"])), set()
+            ).add(cast(str, coords["symbol"]))
         # GAP #9: a single corrupt / version-incompatible Parquet file (a polars
         # PolarsError, or an OSError fault) must NOT crash the whole reconcile — which
         # runs at the START of every sweep load + F&O window derivation. Log + skip that
@@ -164,6 +201,23 @@ def reconcile_catalog_from_lake(
             _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1
             continue
+        if check_invariants:
+            # DEC-LAKE-HEAL-001 L1: classification rides the timestamp column this
+            # loop ALREADY read — zero extra I/O (spy-pinned), only the n_unique
+            # hash pass. overlap_rows stays None (no canonical-sibling read here).
+            partition_coords = PartitionCoords(
+                exchange=cast(str, coords["exchange"]),
+                segment=cast(str, coords["segment"]),
+                symbol=cast(str, coords["symbol"]),
+                interval=cast(str, coords["interval"]),
+                year=cast(int, coords["year"]),
+                month=cast(int, coords["month"]),
+            )
+            for finding in classify_bar_keys(partition_coords, timestamps):
+                if finding is not None:
+                    located = replace(finding, path=path)
+                    log_lake_finding(located)
+                    findings.append(located)
         entry = CatalogEntry(
             exchange=cast(str, coords["exchange"]),
             segment=cast(str, coords["segment"]),
@@ -180,10 +234,21 @@ def reconcile_catalog_from_lake(
         catalog.upsert(entry)
         reconciled += 1
         bars_total += row_count
+    if check_invariants:
+        # DEC-LAKE-HEAL-001 L1 drift pass: derived from the coords already parsed
+        # (no Parquet reads; a drifted dir pays one directory listing for its
+        # interval/file profile — anomaly-only).
+        for drift in detect_legacy_drift(
+            {key: sorted(names) for key, names in symbol_dirs.items()},
+            lake_root=lake_root,
+        ):
+            log_lake_finding(drift)
+            findings.append(drift)
     return ReconcileResult(
         partitions_reconciled=reconciled,
         bars_total=bars_total,
         skipped=skipped,
+        findings=tuple(findings),
     )
 
 
