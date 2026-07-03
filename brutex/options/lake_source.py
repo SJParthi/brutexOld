@@ -181,6 +181,8 @@ class LakeOptionBarSource:
             return cached
         import polars as pl
 
+        from brutex.data.lake_read import dedup_bars_frame
+
         base = self._lake_root / "bars" / exchange / _FNO_SEGMENT / symbol / _INTERVAL
         bars: dict[datetime, OptionBar] = {}
         if base.is_dir() and any(base.rglob("*.parquet")):
@@ -194,6 +196,11 @@ class LakeOptionBarSource:
                 missing_columns="insert",
                 extra_columns="ignore",
             ).collect()
+            # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): the dict build
+            # below was LAST-wins on a poisoned-era duplicate timestamp, so a
+            # re-stated bar silently replaced the real leg price. Collapse the
+            # frame first (warned, never silent) so the FIRST stored bar wins.
+            frame, _dropped = dedup_bars_frame(frame, source=f"option_lake:{symbol}")
             strike_dec = Decimal(strike)
             for row in frame.iter_rows(named=True):
                 bar = _row_to_option_bar(row, side=option_type, strike=strike_dec)

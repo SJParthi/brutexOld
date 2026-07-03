@@ -5080,16 +5080,32 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
 
     @staticmethod
     def _row_at(df: Any, ts_utc: datetime, side: str) -> Any:  # pragma: no cover — lake I/O
-        """Build the ``OptionBar`` whose timestamp matches *ts_utc*, or ``None``."""
+        """Build the ``OptionBar`` whose timestamp matches *ts_utc*, or ``None``.
+
+        A poisoned-era duplicate ``(side, timestamp)`` row keeps the FIRST
+        physical row and is WARNED via the COMMON read gate — previously a
+        SILENT first-wins (DEC-LAKE-READ-UNIQUE-001; the write side dedups on
+        the same composite key, ``option_parquet_writer``).
+        """
         from decimal import Decimal
 
         import polars as pl
 
+        from brutex.data.lake_read import log_read_duplicates
         from brutex.data.models import OptionBar
 
         hit = df.filter(pl.col("timestamp") == ts_utc)
         if hit.height == 0:
             return None
+        if hit.height > 1:
+            # Keep-FIRST + one aggregated WARNING, never silent: `row(0)` below
+            # already takes the first physical row; the conflict count is how
+            # many distinct value-rows exist beyond the kept one.
+            log_read_duplicates(
+                source=f"options_sim:{side}@{ts_utc.isoformat()}",
+                dropped=hit.height - 1,
+                conflicts=max(0, hit.unique(maintain_order=True).height - 1),
+            )
         r = hit.row(0, named=True)
 
         def _dec(value: object) -> Decimal | None:
@@ -5179,7 +5195,17 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
     trades = simulate_trades(bars, entry_signals, direction=side, tf_minutes=tf_minutes)
-    open_by_ts = {bar.timestamp: bar.open for bar in bars}
+    # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
+    # is LAST-wins on a duplicated timestamp — the COMMON gate keeps the first
+    # bar + WARNs (the catalog gate upstream already collapses; belt-and-braces).
+    from brutex.data.lake_read import bars_by_ts_first
+
+    open_by_ts = {
+        ts: bar.open
+        for ts, bar in bars_by_ts_first(
+            bars, source=f"options_sim_spot:{row.instrument}/{row.tf}"
+        ).items()
+    }
     return signals_from_spot_trades(
         trades,
         instrument=underlying,

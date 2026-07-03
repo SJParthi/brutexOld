@@ -866,9 +866,17 @@ def _prev_day_oi(
     """
     import polars as pl
 
+    from brutex.data.lake_read import dedup_bars_frame
+
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
     if base.is_dir() and any(base.rglob("*.parquet")):
-        df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): the `.tail(1)` below
+        # would otherwise pick a poisoned-era duplicate re-statement over the
+        # first stored bar — warned, never silent.
+        df, _dropped = dedup_bars_frame(
+            pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+            source=f"movers_futures_oi:{exchange}/{segment}/{symbol}",
+        )
         prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
             "timestamp"
         )

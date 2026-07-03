@@ -56,6 +56,12 @@ from brutex.data.fno_candle_lake import (
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.lake_read import (
+    DEDUP_PARQUET_SOURCE_SQL,
+    DEDUP_STAR_SELECT_SQL,
+    dedup_qualify_sql,
+    distinct_count_sql,
+)
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
 from brutex.data.moneyness import derive_strike_step, moneyness_view
 from brutex.data.partition import (
@@ -1196,10 +1202,13 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         # Resilient read: a single unreadable Parquet file degrades this dataset
         # to its readable subset (or 0 bars), never a 500 (DEC-COVERAGE-PARQUET-
         # RESILIENT-001).
+        # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
+        # poisoned-era duplicated partition cannot inflate the coverage/
+        # completeness bar counts above what the deduped readers actually serve.
         agg_rows = _aggregate_parquet_resilient(
             conn,
             lake_root / "bars" / exchange / segment / symbol / interval,
-            'SELECT COUNT(*), MIN("timestamp"), MAX("timestamp") '
+            f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp") '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
             "FROM read_parquet(?, union_by_name=true)",
             source=f"spot:{exchange}/{segment}/{symbol}/{interval}",
         )
@@ -1260,13 +1269,17 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
     # the outer rolls up per underlying, so COUNT(*) is the series count.
     # Resilient read: one corrupt Parquet file is SKIPPED (logged), never a 500
     # (DEC-COVERAGE-PARQUET-RESILIENT-001).
+    # The inner per-series bar count is DISTINCT timestamps (the group key
+    # already fixes `side`, so `(side, timestamp)` reduces to `timestamp` here) —
+    # a poisoned-era duplicate cannot inflate it (DEC-LAKE-READ-UNIQUE-001).
     rows = _aggregate_parquet_resilient(
         conn,
         options,
-        "SELECT exch_id, underlying_symbol, COUNT(*) AS series, "  # nosec B608 - static SQL, parameter-bound path
+        "SELECT exch_id, underlying_symbol, COUNT(*) AS series, "  # noqa: S608  # nosec B608 - static SQL + hardcoded-key dedup fragment; path bound
         "SUM(bars) AS bars, MIN(first_ts) AS first_ts, MAX(last_ts) AS last_ts FROM ("
         "  SELECT exch_id, underlying_symbol, expiry_flag, expiry_code, strike_offset, "
-        '         side, strike, COUNT(*) AS bars, MIN("timestamp") AS first_ts, '
+        f"         side, strike, {distinct_count_sql(('timestamp',))} AS bars, "
+        '         MIN("timestamp") AS first_ts, '
         '         MAX("timestamp") AS last_ts '
         "  FROM read_parquet(?, union_by_name=true) "
         "  GROUP BY exch_id, underlying_symbol, expiry_flag, expiry_code, strike_offset, side, strike"
@@ -1618,6 +1631,14 @@ def query_candles(
     source = "read_parquet(?, union_by_name=true)"
     order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
     skip_source = f"candle:{exchange}/{segment}/{symbol}/{interval}"
+    # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): a partition poisoned
+    # before the write-side uniqueness fix can physically carry duplicate
+    # timestamps. The PAGE query collapses them keep-FIRST in the same single
+    # scan (QUALIFY over filename + file_row_number order — deterministic), and
+    # the TOTAL counts DISTINCT timestamps so it equals what the deduped pages
+    # actually serve. A clean partition is byte-identical.
+    page_source = DEDUP_PARQUET_SOURCE_SQL
+    qualify_sql = dedup_qualify_sql(("timestamp",))
 
     # A requested Greeks overlay column may be physically ABSENT from a legacy
     # (pre-Greeks) partition tree — substitute a typed NULL projection so the
@@ -1641,7 +1662,7 @@ def query_candles(
         rows = _execute_parquet_resilient(
             conn,
             base,
-            f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+            f"SELECT {distinct_count_sql(('timestamp',))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
             list(where_params),
             source=skip_source,
         )
@@ -1657,10 +1678,13 @@ def query_candles(
         )
     # Fetch ONCE: the rendered rows AND the derived %-change columns are both
     # built from the same page (DEC-DB-CANDLE-DERIVED-001).
+    # A `*` projection must exclude the two synthetic dedup-ordering columns so
+    # the page schema stays byte-identical to the plain read (Golden Rule #7).
+    page_select = DEDUP_STAR_SELECT_SQL if select == "*" else select
     out_columns, raw_rows = _execute_candle_page_resilient(
         conn,
         base,
-        f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
+        f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
         [*where_params, safe_limit, safe_offset],
         source=skip_source,
     )
@@ -2436,11 +2460,18 @@ def query_option_candles(
     # bound parameter and every date/page value is parameter-bound.
     source = "read_parquet(?, union_by_name=true)"
     order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
+    # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): the expired-options
+    # rolling identity is the COMPOSITE ``(side, timestamp)`` — the SAME key the
+    # writer itself dedups on (option_parquet_writer). The page collapses
+    # poisoned-era duplicates keep-FIRST in one scan; the total counts DISTINCT
+    # composite keys so it equals what the deduped pages serve.
+    page_source = DEDUP_PARQUET_SOURCE_SQL
+    qualify_sql = dedup_qualify_sql(("side", "timestamp"))
 
     def _count_total() -> int:
-        """Run the O(files) ``COUNT(*)`` footer-scan over the whole series glob."""
+        """Run the O(files) deduped-total footer-scan over the whole series glob."""
         total_row = conn.execute(
-            f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+            f"SELECT {distinct_count_sql(('side', 'timestamp'))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
             [glob, *where_params],
         ).fetchone()
         return int(total_row[0]) if total_row else 0
@@ -2457,8 +2488,9 @@ def query_option_candles(
             generation=generation,
             compute=_count_total,
         )
+    page_select = DEDUP_STAR_SELECT_SQL if select == "*" else select
     cursor = conn.execute(
-        f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
+        f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
         [glob, *where_params, safe_limit, safe_offset],
     )
     description = cursor.description or []
