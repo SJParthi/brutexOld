@@ -1,11 +1,18 @@
-"""Adaptive rate-limit state machine for the vendor Data API.
+"""Adaptive rate-limit state machine — DORMANT (no production caller).
 
-Per ``docs/MIGRATION.md`` entry #246 (DEC-VENDOR-PIVOT-001) the Groww
-Data API caps at **5 req/s + 100,000/day** (single Data bucket; the
-5 r/s cap policy is owned locally and mirrors the verified ceiling). The
-adapter runs an adaptive **[3..5] r/s** token bucket. This module is the
-orchestrator-side analog that **trends the rate within ``[min, max]``**
-via a 4-state machine:
+HISTORY: designed per ``docs/MIGRATION.md`` entry #246 (DEC-VENDOR-PIVOT-001)
+against the RETIRED prior vendor's "5 req/s + 100,000/day" model; the planned
+Phase-1 adapter wiring never landed. Production rate governance is instead
+:class:`~brutex.adapters.rate_common.RateController` (AIMD per-second ladder +
+the operator-confirmed HARD 500 req/min governor), injected at both live build
+sites — see CLAUDE.md §6 "Adapter effective cap". CURRENT vendor facts
+(CLAUDE.md §6): the Groww backtesting per-SECOND cap is UNVERIFIED (Phase-0
+probe gate), the hard limit is **500 req/min** and there is **NO daily quota**
+(DEC-GROWW-RATE-PERMIN-001, 2026-06-13). This module stays a pure-logic
+4-state machine with no importer outside its unit tests
+(``tests/unit/test_adaptive_rate_limiter.py``); its ``BRUTEX_RATE_*`` env vars
+are documented as tracked residue in ``docs/runbooks/ENV_VARS.md``. It
+**trends a rate within ``[min, max]``** via a 4-state machine:
 
 * ``PROBING_UP`` — actively trying to raise the rate by 1 r/s every
   ``step_up_clean_window`` seconds of zero rate-limit hits.
@@ -46,8 +53,9 @@ how to space outgoing requests, and listens to :attr:`on_transition`
 to wire audit-log entries + Telegram events per the DEC-VENDOR-PIVOT-001
 matrix.
 
-All thresholds are env-overridable per MIGRATION entry #246. Defaults
-match the ``[3..5]`` r/s envelope (cap 5 r/s):
+All thresholds are env-overridable per MIGRATION entry #246. The defaults
+below are MODULE defaults inherited from the retired [3..5] r/s design —
+NOT current Groww limits (per-second cap UNVERIFIED, CLAUDE.md §6):
 
 * ``BRUTEX_RATE_MIN_RPS`` (default ``3.0``)
 * ``BRUTEX_RATE_MAX_RPS`` (default ``5.0``)
@@ -64,9 +72,10 @@ synthetic clock so all timing is deterministic + side-effect-free.
 
 ## Decision
 
-DEC-ADAPTIVE-RATE-LIMITER-001 (MIGRATION entry #249). Pure-logic
-module; the vendor-adapter wiring lands in Phase 1 after the operator
-runs the Phase 0b empirical probe (DEC-VENDOR-PIVOT-001 hard gate).
+DEC-ADAPTIVE-RATE-LIMITER-001 (MIGRATION entry #249). Pure-logic module;
+the Phase-1 vendor-adapter wiring was SUPERSEDED by
+``brutex/adapters/rate_common.py::RateController`` — this module has no
+production caller and is retained as tested, dormant logic.
 """
 
 from __future__ import annotations

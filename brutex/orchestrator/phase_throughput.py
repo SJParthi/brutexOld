@@ -1,7 +1,7 @@
 """O(1)-space throughput telemetry for the two-phase universe pull.
 
 The expiries / contracts phases fan a fetch out across a worker pool under a
-shared token bucket (``rate_limiter`` + ``adaptive_rate_limiter``). Whether the
+shared token bucket (``rate_common`` + ``rate_limiter``). Whether the
 phase actually reaches the bucket's target r/s depends on whether the pool is
 kept saturated: if every worker is blocked on a slow network round-trip, the
 achieved rate sits *below* the bucket ceiling (the live 2026-05-30 expiries run
