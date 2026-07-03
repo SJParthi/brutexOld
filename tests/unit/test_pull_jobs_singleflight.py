@@ -38,13 +38,22 @@ from brutex.dashboard.pull_stall import PullWatchdog
 from brutex.observability.watchdog import WorkerEvent, WorkerState
 
 
-class _FakeClock:
-    def __init__(self) -> None:
-        self._t = 0.0
+def _ticking_clock() -> Callable[[], float]:
+    """A deterministic, monotonically-increasing injected clock.
 
-    def __call__(self) -> float:
-        self._t += 1.0
-        return self._t
+    A plain ``def`` closure over a mutable holder — NOT a callable class — so
+    CodeQL's cross-function points-to analysis can prove the production
+    ``clock()`` call sites callable (the callable-class fixture pattern
+    false-positives ``py/call-to-non-callable`` on production lines; see the
+    team playbook).
+    """
+    state = {"t": 0.0}
+
+    def clock() -> float:
+        state["t"] += 1.0
+        return state["t"]
+
+    return clock
 
 
 def _sync_spawn(fn: Callable[[], None]) -> None:
@@ -96,7 +105,7 @@ def test_default_guard_is_active_and_held_for_the_run(tmp_path: Path) -> None:
             held_during_run["peer_acquired"] = False
 
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=_capture_spawn(captured),
         lake_root_resolver=lambda: tmp_path,
         singleflight_factory=pull_singleflight_lock,
@@ -116,7 +125,7 @@ def test_held_lock_refuses_second_pull_and_rolls_back(tmp_path: Path) -> None:
     spy = _SpyGuard(raise_on_enter=True, lock_path=pull_singleflight_lock_path(tmp_path))
     spawned: list[Callable[[], None]] = []
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=spawned.append,
         lake_root_resolver=lambda: tmp_path,
         singleflight_factory=lambda _root: spy,
@@ -138,7 +147,7 @@ def test_refused_then_idle_can_start_again(tmp_path: Path) -> None:
     spy_ok = _SpyGuard()
     factories: list[_SpyGuard] = [spy_refuse, spy_ok]
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=_sync_spawn,
         lake_root_resolver=lambda: tmp_path,
         singleflight_factory=lambda _root: factories.pop(0),
@@ -157,7 +166,7 @@ def test_guard_released_on_worker_exception(tmp_path: Path) -> None:
         raise RuntimeError("kaboom")
 
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=_sync_spawn,
         lake_root_resolver=lambda: tmp_path,
         singleflight_factory=lambda _root: spy,
@@ -179,7 +188,7 @@ def test_none_resolver_disables_the_guard(tmp_path: Path) -> None:
         return _SpyGuard()
 
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=_sync_spawn,
         lake_root_resolver=lambda: None,
         singleflight_factory=factory,
@@ -201,7 +210,7 @@ def test_release_is_best_effort_and_swallows_errors(tmp_path: Path) -> None:
             raise OSError("close failed")
 
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=_sync_spawn,
         lake_root_resolver=lambda: tmp_path,
         singleflight_factory=lambda _root: _BadExitGuard(),
@@ -225,9 +234,14 @@ def _hung_event() -> WorkerEvent:
     )
 
 
-def test_on_hung_releases_the_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A wedged run: the watchdog HUNG edge must release the account lock (along with
-    # clearing _running) so a future pull is admitted — the worker never reaches finally.
+def test_on_hung_holds_the_guard_until_worker_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DEC-PIPELINE-STALL-HEARTBEAT-001 (supersedes the release-on-hung pin): the watchdog
+    # HUNG edge must NOT release the account lock while the worker thread may still be
+    # alive — releasing admitted a SECOND pull concurrent with the still-running zombie
+    # worker (the forensically-proven double-run race on the same lake). The guard is
+    # released ONLY when the worker's own finally runs (the thread actually exits).
     monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _exc: None)
     spy = _SpyGuard()
     captured: list[Callable[[WorkerEvent], None]] = []
@@ -235,15 +249,14 @@ def test_on_hung_releases_the_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
         captured.append(on_hung)
         return PullWatchdog(
-            on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
         )
 
-    def _capture_only(_fn: Callable[[], None]) -> None:
-        """Capture-only spawner: never runs the worker, so the run stays in flight."""
+    workers: list[Callable[[], None]] = []
 
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
-        spawn=_capture_only,
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=workers.append,  # capture-only: the worker stays "alive" until we run it
         watchdog_factory=factory,
         lake_root_resolver=lambda: tmp_path,
         singleflight_factory=lambda _root: spy,
@@ -251,7 +264,12 @@ def test_on_hung_releases_the_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     started = job.start(lambda _h: None, total=1)
     assert started is True
     assert spy.entered == 1
-    # Fire the hung edge: it clears _running AND releases the guard.
+    # Fire the hung edge: the guard stays HELD and _running stays True (no double-run).
     captured[0](_hung_event())
+    assert spy.exited == 0
+    assert job.running is True
+    assert job.snapshot().stalled is True  # the stall is still detected + reported
+    # The worker thread finally exits → the guard is released exactly once, there.
+    workers[0]()
     assert spy.exited == 1
     assert job.running is False
