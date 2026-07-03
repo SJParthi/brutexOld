@@ -1026,9 +1026,12 @@ jobs:
           else
             echo "(brutex.vocabulary.describe test file not present yet — gate inactive)"
           fi
-          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests)
+          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests) — since
+          # DEC-RUST-HARDENING-R2-001 (#1163) the module's covering set is
+          # test_doctor.py + test_doctor_wheel_freshness.py (mirrors the
+          # DEC-COV-001 block above; test_doctor.py alone reads 92%).
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
-            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py
+            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
