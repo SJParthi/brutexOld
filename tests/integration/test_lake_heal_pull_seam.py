@@ -1,0 +1,387 @@
+# pyright: reportPrivateUsage=none
+"""L2 post-pull heal wiring at the dashboard pull seams (DEC-LAKE-HEAL-001).
+
+Pins the pull-seam glue contract on BOTH L2 wirings:
+
+* ``brutex.dashboard.historical_pull._heal_lake_after_pull`` — the F&O twin,
+  called by ``pull_contract_candles`` inside ``if not dry_run:`` BEFORE the
+  daily derive: a pre-poisoned month inside the pulled span is healed
+  end-to-end (raw-pyarrow dup → keep-FIRST winner on disk + restorable
+  quarantine copy), the heal runs BEFORE ``_derive_daily_from_minute`` (order
+  spy), a dry-run never heals, ``LakeWriteHalt`` from the heal PROPAGATES out
+  of the pull (disk-full = pull halt), and every other heal error is swallowed
+  + logged ``lake_heal.post_pull_error`` (a heal bug never fails a pull).
+  Target derivation is pinned: no-window / unresolvable-exchange contracts
+  contribute nothing; the span is the UNION of the resolved windows.
+
+* ``brutex.dashboard.pull_controller._heal_after_pull`` — the spot glue
+  (``# pragma: no cover`` raw-lake I/O per the ``_resample_daily_after_pull``
+  convention, so its contract is pinned HERE): heals a poisoned pulled slice,
+  re-raises ``LakeWriteHalt``, swallows + logs everything else.
+
+Offline throughout: fake Groww SDK (canned candles), a recording sink for the
+ingest writes, a REAL temp registry + lake; poison planted with raw pyarrow
+(the #1067 convention — the fixed writer refuses duplicates).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import UTC, date, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+from brutex.data.errors import LakeWriteHalt
+from brutex.data.partition import build_partition_path
+from brutex.data.sink import SinkAppendResult
+from structlog.testing import capture_logs
+
+pytest.importorskip("polars")
+pytest.importorskip("pyarrow")
+pytest.importorskip("duckdb", reason="RegistryStore needs duckdb")
+
+import brutex.data.lake_heal as lake_heal_module
+from brutex.adapters.groww.client import GrowwClient
+from brutex.dashboard import historical_pull as hp
+from brutex.dashboard import pull_controller as pc
+from brutex.data.registry_store import RegistryStore
+
+_NOW = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
+_RUN_ID = "heal-seam-test"
+_FETCHED = datetime(2026, 1, 1, tzinfo=UTC)
+_FROM = date(2024, 1, 1)
+_TO = date(2024, 1, 20)
+_CE_SYMBOL = "NSE-NIFTY-25Jan24-21000-CE"
+
+
+# ── offline fakes (the test_pull_historical shapes) ──────────────────────────
+
+
+class _FakeSDK:
+    """A ``GrowwSDK``-shaped fake returning one canned candle per fetch."""
+
+    def get_historical_candles(self, **_kw: object) -> dict[str, object]:
+        return {"candles": [["2024-01-15T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
+
+
+class _RecordingSink:
+    """A minimal recording ``BarSink`` (the ingest writes stay off the lake)."""
+
+    def __init__(self) -> None:
+        self.appends: list[tuple[str, str, str, int]] = []
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[object],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        self.appends.append((segment, symbol, interval, len(bars)))
+        return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
+
+
+def _factory(root_unused: Path) -> tuple[GrowwClient, Any]:
+    return GrowwClient(sdk=_FakeSDK(), sleep=lambda _s: None, max_attempts=1), _RecordingSink()
+
+
+@pytest.fixture
+def registry(tmp_path: Path) -> RegistryStore:
+    """A real temp registry seeded with one NIFTY CE contract."""
+    store = RegistryStore.open(tmp_path / "registry.duckdb")
+    store.upsert_contract(
+        "NSE",
+        "NIFTY",
+        date(2024, 1, 25),
+        _CE_SYMBOL,
+        side="CE",
+        strike=21000.0,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    return store
+
+
+@pytest.fixture
+def tmp_lake(tmp_path: Path) -> Path:
+    root = tmp_path / "lake"
+    root.mkdir()
+    return root
+
+
+def _poison_partition(dest: Path, rows: Sequence[tuple[datetime, float, int]]) -> None:
+    """Write a RAW pyarrow partition with VERBATIM duplicate timestamps."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    prices = [price for _, price, _ in rows]
+    table = pa.table(
+        {
+            "timestamp": pa.array([ts for ts, _, _ in rows], type=pa.timestamp("us", tz="UTC")),
+            "open": pa.array(prices, type=pa.float64()),
+            "high": pa.array(prices, type=pa.float64()),
+            "low": pa.array(prices, type=pa.float64()),
+            "close": pa.array(prices, type=pa.float64()),
+            "volume": pa.array([vol for _, _, vol in rows], type=pa.int64()),
+            "open_interest": pa.array([None] * len(rows), type=pa.int64()),
+        }
+    )
+    pq.write_table(table, dest)
+
+
+def _fno_ts(minute: int) -> datetime:
+    """A UTC instant inside the January-2024 partition (Wed 3 Jan, IST session)."""
+    return datetime(2024, 1, 3, 4, minute, tzinfo=UTC)
+
+
+def _poisoned_fno_dest(lake: Path) -> Path:
+    dest = build_partition_path(
+        lake_root=lake,
+        exchange="NSE",
+        segment="FNO",
+        symbol=_CE_SYMBOL,
+        interval="1minute",
+        year=2024,
+        month=1,
+    )
+    _poison_partition(
+        dest,
+        [
+            (_fno_ts(16), 100.0, 10),  # keep-first winner
+            (_fno_ts(16), 999.0, 99),  # the poisoned duplicate
+            (_fno_ts(17), 101.0, 11),
+        ],
+    )
+    return dest
+
+
+def _stored_timestamps(dest: Path) -> list[datetime]:
+    import polars as pl
+
+    return list(pl.read_parquet(dest, columns=["timestamp"])["timestamp"])
+
+
+def _pull(registry: RegistryStore, tmp_lake: Path, *, dry_run: bool = False) -> object:
+    return hp.pull_contract_candles(
+        registry.list_contracts(underlying="NIFTY"),
+        lake_root=tmp_lake,
+        dry_run=dry_run,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=_factory,
+        now=_NOW,
+    )
+
+
+def _contract(symbol: str = _CE_SYMBOL) -> Any:
+    from brutex.adapters.protocol import DerivativeContract
+
+    return DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 25),
+        symbol=symbol,
+        contract_type="CE",
+        strike=21000.0,
+    )
+
+
+# ── F&O seam: pull_contract_candles ──────────────────────────────────────────
+
+
+class TestFnoPullSeam:
+    def test_live_pull_heals_poisoned_month_in_span(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        """The seam pin: a poisoned month inside the pulled span is healed."""
+        dest = _poisoned_fno_dest(tmp_lake)
+        original_bytes = dest.read_bytes()
+
+        _pull(registry, tmp_lake, dry_run=False)
+
+        assert _stored_timestamps(dest) == [_fno_ts(16), _fno_ts(17)]
+        quarantined = list((tmp_lake / ".quarantine").rglob("01.parquet"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == original_bytes
+
+    def test_heal_runs_before_daily_derive(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Order pin: the heal fires BEFORE the daily derive reads the 1-minute."""
+        order: list[str] = []
+        monkeypatch.setattr(hp, "_heal_lake_after_pull", lambda **_kw: order.append("heal"))
+        monkeypatch.setattr(hp, "_derive_daily_from_minute", lambda **_kw: order.append("derive"))
+        _pull(registry, tmp_lake, dry_run=False)
+        assert order[:2] == ["heal", "derive"]
+
+    def test_dry_run_never_heals(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        called: list[str] = []
+        monkeypatch.setattr(hp, "_heal_lake_after_pull", lambda **_kw: called.append("heal"))
+        _pull(registry, tmp_lake, dry_run=True)
+        assert called == []
+
+    def test_lake_write_halt_from_heal_propagates(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A disk-full heal halts the pull exactly like any lake write."""
+
+        def _halt(**_kw: object) -> object:
+            raise LakeWriteHalt("disk_full")
+
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", _halt)
+        with pytest.raises(LakeWriteHalt):
+            _pull(registry, tmp_lake, dry_run=False)
+
+    def test_heal_error_swallowed_and_logged(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A heal bug never fails a successful pull — swallowed + WARNING."""
+
+        def _boom(**_kw: object) -> object:
+            raise RuntimeError("heal bug")
+
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", _boom)
+        with capture_logs() as logs:
+            _pull(registry, tmp_lake, dry_run=False)
+        events = [e for e in logs if e["event"] == "lake_heal.post_pull_error"]
+        assert len(events) == 1
+        assert "heal bug" in str(events[0]["error"])
+
+
+class TestFnoGlueTargets:
+    """Direct pins on ``_heal_lake_after_pull``'s target/span derivation."""
+
+    def test_no_window_and_bad_exchange_contribute_nothing(
+        self, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", lambda **kw: calls.append(kw))
+        rebuilt = cast(
+            Any,
+            [
+                (None, _contract()),  # resolvable, windowed → the ONE target
+                (None, _contract("NSE-NIFTY-25Jan24-22000-CE")),  # no window → skipped
+                (None, _contract("NOHYPHEN")),  # unresolvable exchange → skipped
+            ],
+        )
+        windows = {
+            _CE_SYMBOL: (date(2024, 1, 1), date(2024, 1, 20)),
+            "NOHYPHEN": (date(2024, 2, 1), date(2024, 2, 10)),
+        }
+        hp._heal_lake_after_pull(rebuilt=rebuilt, windows=windows, lake_root=tmp_lake)
+        assert len(calls) == 1
+        assert calls[0]["targets"] == [("NSE", "FNO", _CE_SYMBOL)]
+        assert calls[0]["start"] == date(2024, 1, 1)
+        assert calls[0]["end"] == date(2024, 1, 20)
+
+    def test_span_is_union_of_windows(
+        self, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", lambda **kw: calls.append(kw))
+        other = "NSE-NIFTY-25Jan24-21000-PE"
+        rebuilt = cast(Any, [(None, _contract()), (None, _contract(other))])
+        windows = {
+            _CE_SYMBOL: (date(2024, 1, 5), date(2024, 1, 20)),
+            other: (date(2023, 12, 1), date(2024, 1, 10)),
+        }
+        hp._heal_lake_after_pull(rebuilt=rebuilt, windows=windows, lake_root=tmp_lake)
+        assert calls[0]["start"] == date(2023, 12, 1)
+        assert calls[0]["end"] == date(2024, 1, 20)
+
+    def test_zero_targets_is_a_no_op(self, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", lambda **kw: calls.append(kw))
+        hp._heal_lake_after_pull(rebuilt=cast(Any, []), windows={}, lake_root=tmp_lake)
+        assert calls == []
+
+
+# ── spot seam: pull_controller._heal_after_pull glue ─────────────────────────
+
+
+def _instrument(symbol: str = "NIFTY") -> Any:
+    return SimpleNamespace(
+        exch_id=SimpleNamespace(value="NSE"),
+        segment=SimpleNamespace(value="INDEX"),
+        symbol_name=symbol,
+    )
+
+
+def _spot_ts(minute: int) -> datetime:
+    """A UTC instant inside the June-2024 partition (Mon 3 Jun, IST session)."""
+    return datetime(2024, 6, 3, 4, minute, tzinfo=UTC)
+
+
+class TestSpotGlue:
+    def test_glue_heals_poisoned_pulled_slice(self, tmp_lake: Path) -> None:
+        dest = build_partition_path(
+            lake_root=tmp_lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            year=2024,
+            month=6,
+        )
+        _poison_partition(
+            dest,
+            [(_spot_ts(16), 100.0, 10), (_spot_ts(16), 999.0, 99), (_spot_ts(17), 101.0, 11)],
+        )
+        original_bytes = dest.read_bytes()
+
+        pc._heal_after_pull(
+            instruments=[_instrument()],
+            lake_root=tmp_lake,
+            start=date(2024, 6, 1),
+            end=date(2024, 6, 30),
+            pull_id="pid-1",
+        )
+
+        assert _stored_timestamps(dest) == [_spot_ts(16), _spot_ts(17)]
+        quarantined = list((tmp_lake / ".quarantine").rglob("06.parquet"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == original_bytes
+
+    def test_lake_write_halt_re_raises(
+        self, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _halt(**_kw: object) -> object:
+            raise LakeWriteHalt("disk_full")
+
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", _halt)
+        with pytest.raises(LakeWriteHalt):
+            pc._heal_after_pull(
+                instruments=[_instrument()],
+                lake_root=tmp_lake,
+                start=date(2024, 6, 1),
+                end=date(2024, 6, 30),
+                pull_id="pid-2",
+            )
+
+    def test_other_errors_swallowed_and_logged(
+        self, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(**_kw: object) -> object:
+            raise RuntimeError("heal bug")
+
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", _boom)
+        with capture_logs() as logs:
+            pc._heal_after_pull(
+                instruments=[_instrument()],
+                lake_root=tmp_lake,
+                start=date(2024, 6, 1),
+                end=date(2024, 6, 30),
+                pull_id="pid-3",
+            )
+        events = [e for e in logs if e["event"] == "lake_heal.post_pull_error"]
+        assert len(events) == 1
+        assert events[0]["pull_id"] == "pid-3"

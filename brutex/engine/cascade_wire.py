@@ -1627,7 +1627,15 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     (reconciling the catalog from on-disk Parquet first, mirroring
     ``brutex sweep-all``), keyed by the manifest's :class:`BarsContext` window.
     Marked ``no cover``: it opens DuckDB + reads the real lake (the pure cascade
-    core + the manifest round-trip are fully tested with injected bars).
+    core + the manifest round-trip are fully tested with injected bars; the L1
+    heal wiring below is exercised end-to-end by
+    ``tests/integration/test_cascade_reconcile_heal.py``).
+
+    DEC-LAKE-HEAL-001 (L1): the reconcile's free invariant piggyback returns
+    any poisoned-partition findings on ``ReconcileResult.findings``; ONE
+    :func:`~brutex.data.lake_heal.heal_after_reconcile` call heals them BEFORE
+    the feed consumes the slice (auto mode; ``BRUTEX_LAKE_HEAL=observe`` logs
+    only). ``LakeWriteHalt`` propagates to the CLI top-level halt handling.
 
     Parameters
     ----------
@@ -1647,7 +1655,9 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
 
     from brutex.data.catalog import Catalog
     from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    from brutex.data.lake_heal import heal_after_reconcile, lake_heal_audit
     from brutex.feed.replay import ReplayFeed
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
 
     def _parse(value: str) -> datetime:
         parsed = datetime.fromisoformat(value)
@@ -1659,7 +1669,7 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     slices: dict[tuple[str, str], list[CandleBar]] = {}
     with Catalog.open(catalog) as cat:
         for instrument, tf_label in coords:
-            reconcile_catalog_from_lake(
+            result = reconcile_catalog_from_lake(
                 lake_root=lake_root,
                 catalog=cat,
                 exchange=ctx.exchange,
@@ -1667,6 +1677,18 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
                 symbol=instrument,
                 interval=tf_label,
             )
+            if result.findings:
+                # DEC-LAKE-HEAL-001 L1: heal what the reconcile detected for
+                # free, so the sweep/replay reads clean bars. The audit sink is
+                # opened lazily (findings-gated — a clean lake writes nothing).
+                with lake_heal_audit(lake_root) as audit:
+                    heal_after_reconcile(
+                        result,
+                        lake_root=lake_root,
+                        catalog=cat,
+                        audit=audit,
+                        on_report=lambda r: emit_lake_heal_alert(r, scope="reconcile"),
+                    )
             feed = ReplayFeed(
                 catalog=cat,
                 lake_root=lake_root,

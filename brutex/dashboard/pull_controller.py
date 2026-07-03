@@ -1941,6 +1941,15 @@ def pull_all_spot(
             # byte-preserving the failure path. Quarantined end-to-end (it can NEVER
             # fail the pull) and a no-op for any symbol with no 1-minute.
             if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
+                # DEC-LAKE-HEAL-001 L2: heal the pulled slice FIRST so the
+                # daily derive below reads clean 1-minute.
+                _heal_after_pull(
+                    instruments=instruments,
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    pull_id=pid,
+                )
                 _resample_daily_after_pull(
                     instruments=instruments,
                     lake_root=lake_root,
@@ -2142,6 +2151,55 @@ def _autoderive_after_pull(  # pragma: no cover — raw lake I/O glue; planner c
             symbols=[o.symbol for o in report.outcomes if not o.ok],
             note="auto-derive quarantined these symbols; the pull itself is unaffected",
         )
+
+
+def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 100%-unit-tested
+    *,
+    instruments: Sequence[Instrument],
+    lake_root: Path,
+    start: date,
+    end: date,
+    pull_id: str,
+) -> None:
+    """L2 lake heal over the just-pulled coordinates (DEC-LAKE-HEAL-001).
+
+    Runs the COMMON :func:`~brutex.data.lake_heal.heal_after_pull` core —
+    a scan BOUNDED to the pulled ``(exchange, segment, symbol)`` targets ×
+    the pulled span's UTC months, then the automatic keep-FIRST heal
+    (``BRUTEX_LAKE_HEAL=observe`` logs only) — BEFORE the pull's own daily
+    derive, so :func:`_resample_daily_after_pull` reads clean 1-minute.
+    :class:`~brutex.data.errors.LakeWriteHalt` RE-RAISES (a disk-full heal
+    must halt the pull exactly like any lake write — it reaches the existing
+    ``_is_pull_halt`` / ``emit_pull_halt_alert`` handling); every OTHER error
+    is swallowed + logged ``lake_heal.post_pull_error`` (a heal bug never
+    fails a successful pull). Marked ``no cover`` per the sibling
+    ``_resample_daily_after_pull`` convention; the core is 100%-unit-tested
+    and the glue contract is pinned by
+    ``tests/integration/test_lake_heal_pull_seam.py``.
+    """
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
+
+    scope = f"pull:{pull_id}"
+    try:
+        with lake_heal_audit(lake_root) as audit:
+            heal_after_pull(
+                lake_root=lake_root,
+                targets=[
+                    (inst.exch_id.value, inst.segment.value, inst.symbol_name)
+                    for inst in instruments
+                ],
+                start=start,
+                end=end,
+                scope=scope,
+                audit=audit,
+                on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+            )
+    except LakeWriteHalt:
+        raise
+    except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull
+        _LOG.warning("lake_heal.post_pull_error", pull_id=pull_id, error=str(exc))
 
 
 def _resample_daily_after_pull(  # pragma: no cover — raw lake I/O glue; derive core is 100%-unit-tested
@@ -2578,6 +2636,15 @@ def pull_candles(
             # halt skips it, byte-preserving the failure path. Quarantined end-to-end
             # (can NEVER fail the pull); a no-op when no 1-minute backs it.
             if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
+                # DEC-LAKE-HEAL-001 L2: heal the pulled slice FIRST so the
+                # daily derive below reads clean 1-minute.
+                _heal_after_pull(
+                    instruments=[instrument],
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    pull_id=pid,
+                )
                 _resample_daily_after_pull(
                     instruments=[instrument],
                     lake_root=lake_root,

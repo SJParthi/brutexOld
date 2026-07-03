@@ -1205,6 +1205,66 @@ def _derive_daily_from_minute(
     )
 
 
+def _heal_lake_after_pull(
+    *,
+    rebuilt: Sequence[_RebuiltContract],
+    windows: dict[str, tuple[date, date]],
+    lake_root: Path,
+) -> None:
+    """L2 lake heal over the just-pulled F&O contracts (DEC-LAKE-HEAL-001).
+
+    The F&O twin of the dashboard spot pull's ``_heal_after_pull`` glue: one
+    COMMON :func:`~brutex.data.lake_heal.heal_after_pull` call over the
+    rebuilt contracts' ``(exchange, "FNO", groww_symbol)`` coordinates,
+    bounded to the UNION of their resolved minute-window spans (a months
+    SUPERSET of every per-contract span — bounded, never the whole lake).
+    Runs BEFORE :func:`_derive_daily_from_minute` so the daily derive reads
+    clean 1-minute. A contract with no resolved window, or whose exchange is
+    unresolvable (already surfaced by the derive's ``contract_skipped`` log),
+    contributes no target; zero targets is a no-op.
+    :class:`~brutex.data.errors.LakeWriteHalt` RE-RAISES (a disk-full heal
+    halts the pull exactly like any lake write); every OTHER error is
+    swallowed + logged ``lake_heal.post_pull_error`` (a heal bug never fails
+    a successful pull — the ``_enrich_greeks_from_minute`` guard convention).
+    """
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
+    from brutex.observability.correlation import current_pull_id
+
+    targets: list[tuple[str, str, str]] = []
+    spans: list[tuple[date, date]] = []
+    for _row, contract in rebuilt:
+        window = windows.get(contract.symbol)
+        if window is None:
+            continue
+        try:
+            exchange = contract_exchange(contract)
+        except ValueError:
+            # Already surfaced by the daily derive's ``contract_skipped`` log.
+            continue
+        targets.append((exchange, OPTION_SEGMENT, contract.symbol))
+        spans.append(window)
+    if not targets:
+        return
+    scope = f"pull:{current_pull_id()}"
+    try:
+        with lake_heal_audit(lake_root) as audit:
+            heal_after_pull(
+                lake_root=lake_root,
+                targets=targets,
+                start=min(win_start for win_start, _win_end in spans),
+                end=max(win_end for _win_start, win_end in spans),
+                scope=scope,
+                audit=audit,
+                on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+            )
+    except LakeWriteHalt:
+        raise
+    except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull
+        _LOG.warning("lake_heal.post_pull_error", scope=scope, error=str(exc))
+
+
 def _enrich_greeks_from_minute(
     *,
     rebuilt: Sequence[_RebuiltContract],
@@ -1551,6 +1611,9 @@ def pull_contract_candles(
     # derived 1-day partition is a best-effort convenience. Skipped on a dry-run (the
     # NullBarSink wrote nothing, and the sentinel lake_root may not be writable).
     if not dry_run:
+        # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
+        # daily derive below reads clean 1-minute (LakeWriteHalt re-raises).
+        _heal_lake_after_pull(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
         _derive_daily_from_minute(
             rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root, now=now
         )
