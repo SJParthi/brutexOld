@@ -257,9 +257,12 @@ HOLIDAYS_2025 = frozenset(
 
 # 2026 list COMPLETED per DEC-CALENDAR-2026-COMPLETE-001 (two independent
 # research rounds, 2026-07-03). Source honesty (Golden Rule #1): the official
-# NSE 2026 trading-holiday circular is **CMTR71775 dated 2025-12-12**, but its
-# PDF (and every other NSE/BSE primary holiday page probed — 19 fetch attempts)
-# returned HTTP 403 from this environment, so NO date below is primary-verified.
+# NSE 2026 trading-holiday circular is REPORTED as **CMTR71775 dated
+# 2025-12-12** by the secondary sources both research rounds consulted (the
+# circular NUMBER is itself a secondary claim — the circular was never read);
+# its PDF (and every other NSE/BSE primary holiday page probed — 19 fetch
+# attempts) returned HTTP 403 from this environment, so NO date below is
+# primary-verified.
 # Every date IS corroborated by BOTH research rounds AND >= 2 independent
 # secondary sources (named inline per date); a date the two rounds disagreed on
 # would have been EXCLUDED and tagged UNVERIFIED — none was (the rounds agreed
@@ -276,7 +279,8 @@ HOLIDAYS_2025 = frozenset(
 # **20** distinct Jan-2026 trading sessions while this calendar derives **21**
 # (22 Jan-2026 weekdays minus the sole listed January holiday, Republic Day
 # 2026-01-26). The now-COMPLETED full-year 2026 list contains NO second January
-# holiday (both research rounds confirm: per the NSE circular dated 2025-12-12,
+# holiday (both research rounds confirm: per the secondary reports of the NSE
+# circular dated 2025-12-12,
 # Republic Day is the ONLY January 2026 trading holiday — Makar Sankranti /
 # Pongal are explicitly absent), so the 20-vs-21 drift is now MORE likely a
 # vendor data gap than a missing holiday. No date is fabricated to reconcile
@@ -401,6 +405,17 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 #: Golden Rule #1 we do NOT hallucinate holiday dates — the 2 standing-annual
 #: 2020 November dates that could not be pinned to the raw circular are tagged
 #: ``# UNVERIFIED`` rather than presented as confirmed.
+#:
+#: MAINTENANCE — the post-2026 hard horizon (hostile-review operational note,
+#: calendar-correctness pack): the strict consumers (the engine trade-sim
+#: walkers ``engine/trade_sim.py`` / ``engine/rust_trade_sim.py``,
+#: ``feed/bar_metadata.py``, ``dashboard/preopen_report.py``) now RAISE
+#: :class:`HolidayDataUnavailableError` for any weekday bar dated outside this
+#: span — loud-by-design (a sweep surfaces it as ``TUPLE_FAILED`` per
+#: DEC-ENGINE-TUPLE-SKIP-RESILIENT-001), never a silently-fabricated
+#: 09:15/15:20 session. Consequence: ``HOLIDAYS_2027`` MUST be added (from the
+#: official NSE 2027 circular, once published) BEFORE any 2027-dated bar is
+#: pulled or swept, or every 2027 tuple fails loudly.
 HOLIDAY_COVERAGE_FIRST_YEAR: Final[int] = min(h.year for h in ALL_HOLIDAYS)
 HOLIDAY_COVERAGE_LAST_YEAR: Final[int] = max(h.year for h in ALL_HOLIDAYS)
 
