@@ -18,9 +18,12 @@ This module closes that gap by mirroring the sweep-engine watchdog wiring
   pull worker. The pull worker calls :meth:`PullWatchdog.beat` on **real progress** (per
   fetched window), and a background timer thread calls :meth:`PullWatchdog.check_once` on
   a cadence so a hung worker — which cannot poll itself — is still detected.
-* On a HEALTHY→HUNG edge the watchdog fires the operator-supplied ``on_hung`` callback
-  (the dashboard wires a CRITICAL Telegram alert + transitions the job to a stalled state
-  so ``_running`` is cleared and future pulls are not silently refused).
+* On a HEALTHY→HUNG edge the watchdog fires the operator-supplied ``on_hung`` callback.
+  The dashboard wires a CRITICAL Telegram alert + marks the job STALLED-SUSPECT
+  (DEC-PIPELINE-STALL-HEARTBEAT-001 — an honest DEGRADED observation; it does NOT fail
+  the run or release the single-flight while the worker thread is still alive, closing
+  the forensically-proven false-positive kill + double-run race). A later heartbeat
+  fires the HUNG→HEALTHY :attr:`PullWatchdog.on_recovery` hook, clearing the marker.
 
 ## Why a separate timer thread
 
@@ -141,13 +144,20 @@ class PullWatchdog:
         self._spawn = spawn
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        #: Optional HUNG→HEALTHY edge callback (DEC-PIPELINE-STALL-HEARTBEAT-001): the
+        #: dashboard job clears its stalled-suspect marker here when a heartbeat lands
+        #: again after a HUNG declaration (e.g. the greeks/prebuild/movers seams resume
+        #: beating). Settable AFTER construction so the injected ``watchdog_factory``
+        #: signature stays ``(on_hung) -> PullWatchdog`` (back-compat). Best-effort —
+        #: a raising callback is swallowed + logged, never crashing the timer.
+        self.on_recovery: OnHung | None = None
         wd_kwargs: dict[str, object] = {
             "timeout_seconds": self._timeout,
             "on_hung": on_hung,
-            # A recovery edge is informational only — the dashboard never resumes a
-            # declared-hung worker (it has already cleared _running), so there is nothing
-            # to un-do; log it and move on.
-            "on_recovery": self._log_recovery,
+            # A recovery edge logs, then forwards to the optional ``on_recovery`` hook
+            # (the dashboard clears its stalled-suspect marker there —
+            # DEC-PIPELINE-STALL-HEARTBEAT-001).
+            "on_recovery": self._recovery,
         }
         if clock is not None:
             wd_kwargs["clock"] = clock
@@ -158,14 +168,26 @@ class PullWatchdog:
         """The configured stall timeout (seconds)."""
         return self._timeout
 
-    @staticmethod
-    def _log_recovery(event: WorkerEvent) -> None:
-        """Log a HUNG→HEALTHY edge (informational — no resume, no alert)."""
+    def _recovery(self, event: WorkerEvent) -> None:
+        """Log a HUNG→HEALTHY edge, then forward it to the optional hook.
+
+        The forward is best-effort (DEC-PIPELINE-STALL-HEARTBEAT-001): a raising
+        ``on_recovery`` is swallowed + logged here — the underlying watchdog's own
+        callback guard is narrower (``OSError/ValueError/RuntimeError``), so this
+        wrapper must catch broadly or a buggy hook could kill the timer loop.
+        """
         logger.info(
             "pull_stall.recovery worker=%s last_beat_seconds_ago=%.1f",
             event.worker_name,
             event.last_beat_seconds_ago,
         )
+        hook = self.on_recovery
+        if hook is None:
+            return
+        try:
+            hook(event)
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
+            logger.exception("pull_stall.on_recovery failed; the timer is unaffected")
 
     def start(self, *, poll_seconds: float | None = None) -> None:
         """Register the worker HEALTHY + launch the background poll loop.

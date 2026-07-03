@@ -33,6 +33,8 @@ from pathlib import Path
 
 import structlog
 
+from brutex.observability.progress_beat import emit_progress_beat
+
 __all__ = [
     "WARM_EXCHANGES",
     "WARM_OPTIONS_TIERS",
@@ -190,6 +192,10 @@ def warm_movers_snapshots(jobs: Sequence[Callable[[], int]]) -> int:
     """
     warmed = 0
     for job in jobs:
+        # Liveness beat per warmed coordinate (DEC-PIPELINE-STALL-HEARTBEAT-001): the
+        # movers warm runs minutes after the last fetch heartbeat — keep the pull
+        # stall watchdog honestly fed. No-op outside a dashboard pull; O(1).
+        emit_progress_beat()
         try:
             if job() > 0:
                 warmed += 1
