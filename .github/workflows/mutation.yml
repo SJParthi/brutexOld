@@ -46,11 +46,21 @@ concurrency:
   # were CANCELLED by this group (every push-to-main superseded the in-flight
   # run, including the WEEKLY scheduled pass, e.g. run 27118349051 killed
   # 25 min in), so on busy days the mutation gate never finished at all.
-  # Push runs still supersede each other (freshness probes); the scheduled
-  # weekly pass and manual dispatches get their own groups and always run to
-  # completion.
+  #
+  # R2-CI-3(b): cancel-in-progress is DISABLED for push events. Push-to-main
+  # mutation FAILURES now open an alert issue (the `if: failure()` issue steps
+  # below), but a CANCELLED run is not a failure and emits NO signal — so a
+  # newer push cancelling an older run mid-flight would make the older run's
+  # surviving-mutant failure vanish silently. With cancel-in-progress=false
+  # for push, an in-flight push run always runs to completion (and can alert);
+  # a newer push queues instead of killing it. schedule + workflow_dispatch
+  # keep cancel-in-progress=true: the group is event-keyed, so the weekly
+  # scheduled pass and manual dispatches still get their own groups (a push
+  # never cancels them) and a re-dispatch still supersedes the prior dispatch.
+  # There is no pull_request trigger here, so no PR-run cancellation to
+  # preserve.
   group: mutation-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   PYTHON_VERSION: "3.12"
@@ -225,7 +235,11 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
       - name: Open GitHub issue on failure
-        if: failure() && github.event_name == 'schedule'
+        # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
+        # push-to-main). This workflow has no pull_request trigger, so there is
+        # no PR-noise path to suppress — the schedule-only guard used to leave a
+        # push-to-main mutation failure alerting nobody.
+        if: failure()
         uses: actions/github-script@v9
         with:
           script: |
@@ -294,7 +308,11 @@ jobs:
           path: rust/fno-math/cargo-mutants.out
           retention-days: 14
       - name: Open GitHub issue on failure
-        if: failure() && github.event_name == 'schedule'
+        # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
+        # push-to-main). This workflow has no pull_request trigger, so there is
+        # no PR-noise path to suppress — the schedule-only guard used to leave a
+        # push-to-main mutation failure alerting nobody.
+        if: failure()
         uses: actions/github-script@v9
         with:
           script: |
@@ -383,7 +401,11 @@ jobs:
           path: rust/trading-core/cargo-mutants.out
           retention-days: 14
       - name: Open GitHub issue on failure
-        if: failure() && github.event_name == 'schedule'
+        # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
+        # push-to-main). This workflow has no pull_request trigger, so there is
+        # no PR-noise path to suppress — the schedule-only guard used to leave a
+        # push-to-main mutation failure alerting nobody.
+        if: failure()
         uses: actions/github-script@v9
         with:
           script: |
