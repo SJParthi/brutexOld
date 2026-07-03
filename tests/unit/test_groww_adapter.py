@@ -276,6 +276,47 @@ def test_fetch_ohlcv_ampersand_stock_resolves() -> None:
     assert sdk.last_kwargs["groww_symbol"] == "NSE-M&M"
 
 
+def test_fetch_ohlcv_ampersand_spot_clean_empty_falls_back_to_encoded_form() -> None:
+    """The SPOT path rides the shared `%26` candle fallback (DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001).
+
+    ``M&M`` resolves fine, but the plain-``&`` candle fetch returns a clean-empty 200
+    (the un-encoded query-string-separator miss); the shared
+    :func:`fetch_candle_windows` seam retries the ``%26``-encoded form ONCE and the
+    recovered bars flow back through ``fetch_ohlcv`` — no adapter-level change needed.
+    """
+
+    class _EmptyPlainSDK:
+        def __init__(self) -> None:
+            self.symbols: list[str] = []
+
+        def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+            symbol = str(kw["groww_symbol"])
+            self.symbols.append(symbol)
+            if "%26" in symbol:
+                return {"candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 9, None]]}
+            return {"candles": []}
+
+        def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+        def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+            raise AssertionError("unused")
+
+    sdk = _EmptyPlainSDK()
+    adapter = GrowwMarketAdapter(
+        client=GrowwClient(sdk=sdk, sleep=lambda _s: None), index=_HYPHEN_INDEX
+    )
+    bars = adapter.fetch_ohlcv(
+        symbol="M&M",
+        exchange=Exchange.NSE,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert len(bars) == 1  # the encoded form's bars surfaced through the spot path
+    assert sdk.symbols == ["NSE-M&M", "NSE-M%26M"]  # plain first, one encoded retry
+
+
 def test_fetch_ohlcv_prefixed_contract_still_used_as_is() -> None:
     """An already-prefixed contract groww_symbol resolves via by_groww_symbol, AS-IS.
 

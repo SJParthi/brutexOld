@@ -536,3 +536,32 @@ def test_token_still_stale_is_retryable_auth_subclass() -> None:
 )
 def test_is_retryable(exc: e.GrowwError, retryable: bool) -> None:
     assert e.is_retryable(exc) is retryable
+
+
+# ── is_terminal_auth_failure (DEC-GROWW-AUTH-HALT-001) ───────────────────────
+
+
+@pytest.mark.parametrize(
+    ("exc", "terminal_auth"),
+    [
+        # The TERMINAL auth shape — a dead credential / re-mint budget exhausted → HALT.
+        (e.GrowwAuthError("bad credential"), True),
+        # The two RETRYABLE auth-family subclasses — transient by design → NEVER a halt.
+        (e.GrowwTokenIssuanceThrottled("mint throttled"), False),
+        (e.GrowwTokenStillStaleError("same dead token"), False),
+        # Non-auth Groww errors (terminal or not) are NOT the auth halt shape.
+        (e.GrowwError("unknown"), False),
+        (e.GrowwBadRequestError("bad request"), False),
+        (e.GrowwRateLimitError("429"), False),
+        (e.GrowwTimeoutError("timeout"), False),
+    ],
+)
+def test_is_terminal_auth_failure(exc: e.GrowwError, terminal_auth: bool) -> None:
+    """The ONE pull-halt auth predicate: terminal GrowwAuthError only, never a self-heal shape."""
+    assert e.is_terminal_auth_failure(exc) is terminal_auth
+
+
+def test_is_terminal_auth_failure_non_groww_exception_is_false() -> None:
+    """A non-Groww exception (typed BaseException at the halt-path call sites) is never auth."""
+    assert e.is_terminal_auth_failure(RuntimeError("boom")) is False
+    assert e.is_terminal_auth_failure(BruteXError("domain")) is False

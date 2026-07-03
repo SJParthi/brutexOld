@@ -74,6 +74,7 @@ from brutex.models import (
     InstrumentType,
     Segment,
 )
+from structlog.testing import capture_logs
 
 pytest.importorskip("duckdb")
 
@@ -568,6 +569,72 @@ class TestUpsertManyEdges:
             assert result.rows_written == 1
             assert s.count(in_scope_only=False) == 1
             assert s.verify_integrity().is_clean is True
+
+    def test_security_id_collision_warns_and_counts(self, tmp_path: Path) -> None:
+        """A DISTINCT-security identity collision (the live ``13, NSE, CASH``) is now
+        LOUD: the graceful last-wins dedup stays, but the drop is logged at WARNING
+        naming BOTH symbols AND surfaced as ``UpsertResult.security_id_collisions``
+        (fail-before: the old silent dedup carried no count + emitted no warning)."""
+        nifty_a = _idx("NIFTY")
+        # SAME (security_id, exch_id, segment) identity, DIFFERENT symbol_name — two
+        # distinct securities the vendor listed under one id.
+        nifty_b = replace(nifty_a, symbol_name="NIFTY 50", display_name="Nifty 50 (dup)")
+        assert nifty_a.security_id == nifty_b.security_id
+        with InstrumentStore.open(tmp_path / "db") as s, capture_logs() as logs:
+            result = s.upsert_many(
+                [nifty_a, nifty_b],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+        # The dropped row is COUNTED on the report (was silently 0 before).
+        assert result.security_id_collisions == 1
+        assert result.rows_written == 1  # graceful dedup unchanged (last-wins)
+        warnings = [e for e in logs if e.get("event") == "instrument_store.security_id_collision"]
+        assert len(warnings) == 1
+        entry = warnings[0]
+        assert entry["log_level"] == "warning"
+        assert entry["security_id"] == nifty_a.security_id
+        assert entry["exch_id"] == "NSE"
+        assert entry["segment"] == "CASH"
+        # BOTH securities are named — the dropped (first-seen) + the kept (last-seen).
+        assert entry["dropped_symbol"] == "NIFTY"
+        assert entry["kept_symbol"] == "NIFTY 50"
+
+    def test_exact_duplicate_identity_is_not_a_collision(self, tmp_path: Path) -> None:
+        """A same-identity re-list with the SAME symbol_name is the benign arm —
+        collapsed silently, NOT counted or warned (covers the ``symbol_name ==``
+        short-circuit so a clean master keeps ``0``). Only the NAME is compared:
+        the fixture differs in display_name, and same-name rows differing in
+        economics (lot/tick) would still collapse last-wins silently by design."""
+        nifty_a = _idx("NIFTY")
+        nifty_dup = replace(nifty_a, display_name="Nifty (re-listed, same symbol)")
+        assert nifty_a.security_id == nifty_dup.security_id
+        assert nifty_a.symbol_name == nifty_dup.symbol_name
+        with InstrumentStore.open(tmp_path / "db") as s, capture_logs() as logs:
+            result = s.upsert_many(
+                [nifty_a, nifty_dup],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+        assert result.security_id_collisions == 0
+        assert result.rows_written == 1
+        assert [e for e in logs if e.get("event") == "instrument_store.security_id_collision"] == []
+
+    def test_clean_batch_reports_zero_collisions(self, tmp_path: Path) -> None:
+        """Distinct identities → no collision (the ``existing is None`` arm); the
+        report reads ``0`` and no warning fires (byte-identical to the old path)."""
+        with InstrumentStore.open(tmp_path / "db") as s, capture_logs() as logs:
+            result = s.upsert_many(
+                [_idx("NIFTY"), _idx("BANKNIFTY")],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+        assert result.security_id_collisions == 0
+        assert result.rows_written == 2
+        assert [e for e in logs if e.get("event") == "instrument_store.security_id_collision"] == []
 
     def test_failed_bulk_insert_rolls_back_and_reraises(self, tmp_path: Path) -> None:
         """A mid-transaction bulk-INSERT failure rolls back and propagates (1025-1027)."""

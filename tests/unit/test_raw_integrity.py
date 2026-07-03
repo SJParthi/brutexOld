@@ -197,6 +197,33 @@ def test_build_record_propagates_malformed_payload() -> None:
         build_record({"candles": object()}, **_coords())
 
 
+def test_build_record_issued_symbol_default_is_none() -> None:
+    # LEGACY / plain path: no issued form recorded → verify re-issues the key symbol.
+    record = build_record(_PAYLOAD, **_coords())
+    assert record.issued_symbol is None
+    assert record.fetch_symbol == "NSE-NIFTY"
+
+
+def test_build_record_normalises_identical_issued_symbol_to_none() -> None:
+    # The common plain-form fetch (issued == key) normalises to None so the record
+    # stays byte-identical to the pre-field shape (back-compat by construction).
+    record = build_record(_PAYLOAD, issued_symbol="NSE-NIFTY", **_coords())
+    assert record.issued_symbol is None
+    assert record.fetch_symbol == "NSE-NIFTY"
+
+
+def test_build_record_keeps_divergent_issued_symbol_and_key_unchanged() -> None:
+    # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001 Fix-1: the `%26` fallback recovery
+    # records the ENCODED issued form while the 6-tuple key stays the plain symbol
+    # (latest-wins semantics preserved; fetch_symbol drives the verify re-issue).
+    coords = _coords()
+    coords["groww_symbol"] = "NSE-M&M"
+    record = build_record(_PAYLOAD, issued_symbol="NSE-M%26M", **coords)
+    assert record.issued_symbol == "NSE-M%26M"
+    assert record.fetch_symbol == "NSE-M%26M"
+    assert record.key[2] == "NSE-M&M"  # issued form is NEVER part of the key
+
+
 # --------------------------------------------------------------------------- #
 # verify_record
 # --------------------------------------------------------------------------- #
