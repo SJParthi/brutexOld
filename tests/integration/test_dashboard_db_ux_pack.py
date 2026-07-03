@@ -67,8 +67,7 @@ def _write_fno(lake: Path, symbol: str) -> None:
 
 def _seed_registry(lake: Path, *, listed: int, underlying: str = "NIFTY") -> None:
     """Seed ``registry.duckdb`` with one 2025-01-02 expiry + *listed* NIFTY legs."""
-    reg = RegistryStore.open(lake / "registry.duckdb")
-    try:
+    with RegistryStore.open(lake / "registry.duckdb") as reg:
         exp = date(2025, 1, 2)
         reg.upsert_expiry("NSE", underlying, exp, run_id="r1", fetched_at=_NOW)
         for i in range(listed):
@@ -82,8 +81,6 @@ def _seed_registry(lake: Path, *, listed: int, underlying: str = "NIFTY") -> Non
                 run_id="r1",
                 fetched_at=_NOW,
             )
-    finally:
-        reg.close()
 
 
 def _client(lake: Path) -> TestClient:
@@ -249,9 +246,8 @@ _SPOT_OHLCV = ["timestamp", "open", "high", "low", "close", "volume", "open_inte
 def store_client(tmp_path: Path):
     """An app over a REAL InstrumentStore (the candle routes need ``.connection``);
     the lake root is ``tmp_path`` (the store file's parent)."""
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    yield TestClient(build_app(DashboardState(), instrument_store=store))
-    store.close()
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+        yield TestClient(build_app(DashboardState(), instrument_store=store))
 
 
 def _write_spot(lake: Path, instants: list[datetime], symbol: str = "NSE-NIFTY") -> None:
