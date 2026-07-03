@@ -197,6 +197,12 @@ def _stub_dashboard_runtime(
     # tested in isolation (test_cli_auto_resume + test_orchestrator_auto_resume). Mirrors the
     # ``_start_instrument_autoload`` stub above (both are live-side-effect boot seams).
     monkeypatch.setattr(cli, "_start_auto_resume_on_boot", lambda *args, **kwargs: None)
+    # HERMETIC (DEC-LAKE-HEAL-001): stub the L3 lake-heal startup-sweep launcher to a
+    # no-op so the dashboard-boot tests never spawn the real sweeper daemon thread (a
+    # real sweep would scan + stamp the tmp lake mid-test). The launcher WIRING is
+    # asserted in TestDashboardLakeHealSweep below; the sweeper's own lifecycle is
+    # tested with the 100%-covered synchronous ``run_sync`` in test_lake_heal.
+    monkeypatch.setattr(cli, "_start_lake_heal_sweep", lambda *args, **kwargs: None)
 
 
 def test_dashboard_missing_uvicorn_is_user_error(
@@ -375,6 +381,9 @@ def test_dashboard_autoload_runs_off_the_bind_path(
     # NOTE: _start_instrument_autoload is deliberately NOT stubbed — the real
     # daemon-thread starter runs, targeting this blocking stub.
     monkeypatch.setattr(cli, "_autoload_instrument_master", blocking_autoload)
+    # HERMETIC (DEC-LAKE-HEAL-001): keep the lake-heal sweeper out of this
+    # thread-timing test (it has its own wiring tests below).
+    monkeypatch.setattr(cli, "_start_lake_heal_sweep", lambda *args, **kwargs: None)
 
     uvicorn_mod = importlib.import_module("uvicorn")
 
@@ -395,3 +404,82 @@ def test_dashboard_autoload_runs_off_the_bind_path(
     assert probes["autoload_blocked_at_bind"] is True
     # The daemon thread really did start (proving _start_instrument_autoload ran).
     assert autoload_started.wait(timeout=5)
+
+
+# ── cmd_dashboard × lake-heal startup sweep (DEC-LAKE-HEAL-001) ──────────
+
+
+class TestDashboardLakeHealSweep:
+    """The L3 startup-sweep launch wiring inside ``cmd_dashboard``."""
+
+    def test_sweep_launcher_gets_the_same_summary_cache_as_build_app(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ONE SummaryCache reaches BOTH build_app and the sweep launcher.
+
+        DEC-LAKE-HEAL-001 (load-bearing, recon-D §7): the sweeper's
+        ``on_healed=summary_cache.mark_dirty`` must bump the SAME write
+        generation every dashboard read cache keys on — a second, disconnected
+        cache would leave every post-heal poll stale forever.
+        """
+        pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+        pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+        pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
+        probes: dict[str, Any] = {}
+        _stub_dashboard_runtime(monkeypatch, tmp_path, probes, probe_stream=False)
+
+        seen: dict[str, Any] = {}
+
+        def record_launch(lake_root: Path, summary_cache: Any, log: Any) -> None:
+            seen["lake_root"] = lake_root
+            seen["launcher_cache"] = summary_cache
+
+        # Override the harness no-op stub with a RECORDING launcher.
+        monkeypatch.setattr(cli, "_start_lake_heal_sweep", record_launch)
+
+        app_module = importlib.import_module("brutex.dashboard.app")
+        real_build = app_module.build_app
+
+        def recording_build(state: Any, **kwargs: Any) -> Any:
+            seen["build_cache"] = kwargs.get("summary_cache")
+            return real_build(state, **kwargs)
+
+        monkeypatch.setattr(app_module, "build_app", recording_build)
+
+        rc = cli.cmd_dashboard(tmp_path, "127.0.0.1", 9084)
+
+        assert rc == cli.EXIT_OK
+        assert probes["port"] == 9084
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        assert isinstance(seen["launcher_cache"], SummaryCache)
+        # The SAME instance — the launcher's mark_dirty bumps the app's caches.
+        assert seen["launcher_cache"] is seen["build_cache"]
+        assert seen["lake_root"] == tmp_path
+
+    def test_sweep_launch_failure_never_blocks_serving(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A failing sweep LAUNCH is swallowed; the dashboard still serves.
+
+        The same "never crashes boot" guard contract as the auto-resume launch:
+        even a thread-spawn failure only logs ``lake_heal.launch_failed`` and the
+        boot continues to ``uvicorn.run``.
+        """
+        pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+        pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+        pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
+        probes: dict[str, Any] = {}
+        _stub_dashboard_runtime(monkeypatch, tmp_path, probes, probe_stream=False)
+
+        def boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("sweep launch failed")
+
+        # Override the harness no-op stub with a RAISING launcher to exercise the guard.
+        monkeypatch.setattr(cli, "_start_lake_heal_sweep", boom)
+
+        rc = cli.cmd_dashboard(tmp_path, "127.0.0.1", 9085)
+        assert rc == cli.EXIT_OK
+        assert probes["port"] == 9085
+        out = capsys.readouterr().out
+        assert "[brutex] dashboard → http://127.0.0.1:9085  (Ctrl-C to stop)" in out

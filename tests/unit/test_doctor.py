@@ -7,7 +7,11 @@ Covers the public surface of :mod:`brutex.doctor` end-to-end:
 * :func:`run_doctor` aggregating both checks
 * :func:`main` returning the right exit code on PASS/FAIL
 * :class:`DoctorReport.format` produces the expected emoji shape
+* :func:`check_lake_uniqueness` — the bounded engine-index duplicate census
+  (DEC-LAKE-HEAL-001)
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -15,12 +19,14 @@ import json
 from pathlib import Path
 
 import pytest
+from brutex import doctor as doctor_module
 from brutex.doctor import (
     CheckResult,
     DoctorReport,
     check_audit_chain,
     check_audit_replay_consistency,
     check_derived_freshness,
+    check_lake_uniqueness,
     check_runtime_file,
     main,
     run_doctor,
@@ -303,14 +309,16 @@ class TestRunDoctor:
             lake_root=tmp_path / "no_lake",
         )
         assert report.ok is True
-        # 4 checks: audit_chain + runtime_file + audit_replay + derived_freshness
-        assert len(report.checks) == 4
+        # 5 checks: audit_chain + runtime_file + audit_replay + derived_freshness
+        # + lake_uniqueness (DEC-LAKE-HEAL-001)
+        assert len(report.checks) == 5
         statuses = {c.name: c.status for c in report.checks}
         assert statuses == {
             "audit_chain": "SKIP",
             "runtime_file": "SKIP",
             "audit_replay": "SKIP",
             "derived_freshness": "SKIP",
+            "lake_uniqueness": "SKIP",
         }
 
     def test_audit_pass_runtime_skip(self, good_audit_log: Path, tmp_path: Path) -> None:
@@ -513,3 +521,157 @@ class TestDerivedFreshness:
         result = check_derived_freshness(tmp_path)
         assert result.status == "FAIL"
         assert "freshness probe errored" in result.detail
+
+
+# ────────────────────────────────────────────────────────────────────────
+# lake_uniqueness (DEC-LAKE-HEAL-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _write_engine_partition(lake_root: Path, *, symbol: str = "NIFTY", month: int = 9) -> None:
+    """One clean 1-minute engine-index month written through the production writer."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+
+    ParquetWriter(lake_root=lake_root).write(
+        bars=[
+            CandleBar(
+                timestamp=datetime(2025, month, 1, 4, 0, tzinfo=UTC),
+                open=Decimal("100.00"),
+                high=Decimal("101.00"),
+                low=Decimal("99.00"),
+                close=Decimal("100.50"),
+                volume=10,
+                open_interest=0,
+            )
+        ],
+        exchange="NSE",
+        segment="INDEX",
+        symbol=symbol,
+        interval="1minute",
+    )
+
+
+def _plant_dup_partition(
+    lake_root: Path, *, segment: str = "INDEX", symbol: str = "NIFTY", month: int = 9
+) -> Path:
+    """Plant a duplicate-timestamp month file with raw pyarrow.
+
+    The fixed writer refuses to store duplicates (DEC-LAKE-WRITE-UNIQUE-001),
+    so the poison is planted exactly like the operator's pre-fix lake.
+    """
+    from datetime import UTC, datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = (
+        lake_root / "bars" / "NSE" / segment / symbol / "1minute" / "2025" / f"{month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime(2025, month, 1, 4, 0, tzinfo=UTC)
+    prices = [100.0, 100.0]
+    table = pa.table(
+        {
+            "timestamp": pa.array([ts, ts], type=pa.timestamp("us", tz="UTC")),
+            "open": pa.array(prices, type=pa.float64()),
+            "high": pa.array(prices, type=pa.float64()),
+            "low": pa.array(prices, type=pa.float64()),
+            "close": pa.array(prices, type=pa.float64()),
+            "volume": pa.array([10, 10], type=pa.int64()),
+            "open_interest": pa.array([None, None], type=pa.int64()),
+        }
+    )
+    pq.write_table(table, dest)
+    return dest
+
+
+class TestLakeUniqueness:
+    """The bounded ENGINE-index duplicate census check (DEC-LAKE-HEAL-001)."""
+
+    def test_skip_when_no_lake(self, tmp_path: Path) -> None:
+        result = check_lake_uniqueness(tmp_path / "no_lake")
+        assert result.status == "SKIP"
+        assert "nothing to verify" in result.detail
+
+    def test_pass_on_clean_engine_series(self, tmp_path: Path) -> None:
+        _write_engine_partition(tmp_path)
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "PASS"
+        assert "0 findings over 1 files" in result.detail
+        assert "last full sweep" not in result.detail
+
+    def test_pass_detail_includes_last_sweep_sentinel(self, tmp_path: Path) -> None:
+        from brutex.data.lake_heal import SENTINEL_RELPATH
+
+        _write_engine_partition(tmp_path)
+        sentinel = tmp_path / SENTINEL_RELPATH
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "lake_token": "a" * 64,
+                    "completed_utc": "2026-07-03T05:00:00Z",
+                    "findings": 2,
+                    "healed": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "PASS"
+        assert "last full sweep: 2026-07-03T05:00:00Z, findings=2, healed=2" in result.detail
+
+    def test_bounded_by_design_ignores_non_engine_poison(self, tmp_path: Path) -> None:
+        """A poisoned non-engine symbol never flips the doctor — whole-lake is the CLI's job."""
+        _write_engine_partition(tmp_path)
+        _plant_dup_partition(tmp_path, segment="CASH", symbol="RELIANCE")
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "PASS"
+
+    def test_fail_names_offenders_capped_with_remediation(self, tmp_path: Path) -> None:
+        for month in (6, 7, 8, 9):
+            _plant_dup_partition(tmp_path, month=month)
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "FAIL"
+        assert "engine-index partitions poisoned" in result.detail
+        # Up to 3 offenders named, the 4th folded into the honest "+1 more".
+        assert "bars/NSE/INDEX/NIFTY/1minute/2025/06.parquet" in result.detail
+        assert "bars/NSE/INDEX/NIFTY/1minute/2025/08.parquet" in result.detail
+        assert "bars/NSE/INDEX/NIFTY/1minute/2025/09.parquet" not in result.detail
+        assert "(+1 more)" in result.detail
+        # Remediation pointers: the auto-heal note, the census CLI, the quarantine dir.
+        assert "BRUTEX_LAKE_HEAL=auto" in result.detail
+        assert "brutex lake audit-unique --json" in result.detail
+        assert ".quarantine" in result.detail
+
+    def test_fail_when_probe_errors(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data import lake_invariants
+
+        (tmp_path / "bars").mkdir()
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("scanner exploded")
+
+        monkeypatch.setattr(lake_invariants, "scan_lake_invariants", _boom)
+        result = check_lake_uniqueness(tmp_path)
+        assert result.status == "FAIL"
+        assert "lake uniqueness probe errored: scanner exploded" in result.detail
+
+    def test_offender_naming_both_branches(self) -> None:
+        """``_lake_offender``: coords-carrying findings by relpath, others by repr."""
+
+        class _Coords:
+            def relpath(self) -> str:
+                return "bars/NSE/INDEX/NIFTY/1minute/2025/09.parquet"
+
+        class _WithCoords:
+            coords = _Coords()
+
+        named = doctor_module._lake_offender(_WithCoords())
+        assert named == "bars/NSE/INDEX/NIFTY/1minute/2025/09.parquet"
+        assert doctor_module._lake_offender("stray") == "'stray'"

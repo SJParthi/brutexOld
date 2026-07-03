@@ -190,6 +190,11 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
+from brutex.data.lake_invariants import (
+    build_lake_census,
+    census_to_dict,
+    scan_lake_invariants,
+)
 from brutex.data.mapping_integrity import (
     EligibleSpot,
     MappingIntegrityReport,
@@ -1146,6 +1151,15 @@ def build_app(
     _coverage_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache()
     _mapping_integrity_cache = MoversSnapshotCache()
+    # The /universe lake-uniqueness census cache (DEC-LAKE-HEAL-001): the duplicate
+    # census is a full bounded lake scan — O(files), one key-column read per file —
+    # so it is memoised behind the SAME composite (write-generation, master-revision)
+    # token as the nav-latency caches above. A pull, a materialize, OR a heal (the L3
+    # startup sweeper's `on_healed=summary_cache.mark_dirty`) moves the token →
+    # recompute; a repeat 15 s chip poll within one token is an O(1) handoff. HONEST:
+    # the FIRST compute per token is a real O(files) scan (never claimed O(1) total).
+    # REUSES the COMMON generation-stamped LRU `MoversSnapshotCache` (no new class).
+    _lake_uniqueness_cache = MoversSnapshotCache()
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001): the
     # `<lake>/sweeps` discovery + per-tuple Parquet read is O(stores × rows); the
     # ranked leaderboard for a given (instrument, tf, direction, rank_by, top_n) is a
@@ -3864,6 +3878,69 @@ def build_app(
                 "Content-Disposition": 'attachment; filename="economics_integrity.csv"',
             },
         )
+
+    def _build_lake_census_payload() -> dict[str, Any]:
+        """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
+
+        The ONE builder behind the cached ``/api/v1/universe/lake-uniqueness`` route:
+        runs the bounded invariant scanner (READ-ONLY / observe — the ROUTE never
+        heals; healing belongs to the L2 pull seams + the L3 startup sweep), folds
+        :func:`~brutex.data.lake_invariants.build_lake_census`, and stamps the heal
+        mode + the ``.lake_heal`` stats/sentinel reads into the SAME dict shape
+        ``brutex lake audit-unique --json`` prints. ``{"present": False}`` when no
+        lake root can be resolved (mirrors the sibling panel routes' honest gate).
+        """
+        from brutex.data.lake_heal import (
+            load_heal_stats,
+            load_last_sweep,
+            resolve_lake_heal_mode,
+        )
+
+        lake_db = getattr(_require_store(), "path", None)
+        if not isinstance(lake_db, Path):
+            return {"present": False}
+        lake = lake_db.parent
+        census = build_lake_census(scan_lake_invariants(lake))
+        return census_to_dict(
+            census,
+            mode=resolve_lake_heal_mode(),
+            stats=load_heal_stats(lake),
+            last_sweep=load_last_sweep(lake),
+        )
+
+    def _build_lake_census_payload_cached() -> dict[str, Any]:
+        """Memoise the lake census behind the COMPOSITE (generation, master-revision) key.
+
+        DEC-LAKE-HEAL-001, the mapping-integrity #870 cache pattern: the census is a
+        pure function of the lake bytes, and every lake write path moves the key —
+        a pull/materialize bumps ``_summary_cache.generation``; the L3 startup
+        sweeper's ``on_healed`` bump does the same after an out-of-band heal — so a
+        hit can never serve a pre-heal census (Golden Rule #1). HONEST cost: the
+        first compute per key is a real O(files) scan; the repeat 15 s chip poll is
+        an O(1) handoff.
+        """
+        return _lake_uniqueness_cache.get_or_compute(
+            _nav_latency_key("lake-uniqueness", _require_store()),
+            generation=0,
+            compute=_build_lake_census_payload,
+        )
+
+    @app.get("/api/v1/universe/lake-uniqueness")
+    async def api_universe_lake_uniqueness() -> JSONResponse:
+        """GET /api/v1/universe/lake-uniqueness — the lake duplicate-census verdict.
+
+        DEC-LAKE-HEAL-001: per-segment (INDEX/CASH/FNO/OPTIONS) clean vs
+        dup/foreign/overlap/drift file counts + the ENGINE-index
+        (NIFTY/BANKNIFTY/SENSEX) ``engine_clean`` verdict + the heal mode and
+        ``.lake_heal`` stats/sentinel — the ``/universe`` chip's data source.
+        READ-ONLY (never heals). Served from the generation-stamped cache; the
+        first compute per (generation, master-revision) token is honestly
+        O(files) in the lake, every repeat poll an O(1) handoff. No store
+        wired → 503; no resolvable lake root → ``{"present": false}``.
+        """
+        _require_store()
+        payload = await run_in_threadpool(_build_lake_census_payload_cached)
+        return JSONResponse(payload)
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
