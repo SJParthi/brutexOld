@@ -100,6 +100,7 @@ from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
 from brutex.dashboard.fno_cascade import (
     FnoCascadeCache,
     FnoCascadeIndex,
+    build_expiry_counts,
     build_fno_cascade,
     contract_to_json,
 )
@@ -5000,17 +5001,64 @@ def build_app(
             }
         )
 
+    def _fno_listed_by_expiry(underlying: str, expiries: list[str]) -> dict[str, int] | None:
+        """Vendor-LISTED contract count per expiry for *underlying*, or ``None``.
+
+        Feeds the ``/db`` F&O cascade "listed N with data M" chip
+        (DEC-DB-UX-PACK-001 Feature 6): reads the authoritative ``registry.duckdb``
+        calendar (the vendor ``get_contracts`` leg-set persisted by the metadata
+        phase). Returns ``None`` — an honest "unknown, show with-data only" — when the
+        registry file is absent, the registry does not know this underlying (a
+        form/alias mismatch → never a misleading "listed 0"), or the registry is
+        corrupt (``RegistryError``). Called ONLY with a non-``None`` cascade index in
+        hand, so ``store.path`` is a real lake ``Path`` (verified by
+        :func:`_fno_cascade_or_none`) and each *expiry* is ISO by construction
+        (``FnoCascadeIndex.expiries``). Runs off the event loop.
+        """
+        registry_path = registry_path_for(_require_store().path)
+        if not registry_path.exists():
+            return None
+        try:
+            with RegistryStore.open(registry_path) as registry:
+                # The registry must KNOW this underlying, else its per-expiry
+                # count(*) is a misleading 0 (Golden Rule #1) — treat as unknown.
+                if registry.count_expiries(underlying=underlying) == 0:
+                    return None
+                return {
+                    expiry: registry.count_contracts(
+                        underlying=underlying, expiry_date=date.fromisoformat(expiry)
+                    )
+                    for expiry in expiries
+                }
+        except RegistryError:
+            return None
+
     @app.get("/api/v1/db/fno/expiries")
     async def api_db_fno_expiries(underlying: str = Query(...)) -> JSONResponse:
         """GET /api/v1/db/fno/expiries?underlying=NIFTY — level-2 picker, scoped to one underlying.
 
         The ISO ``YYYY-MM-DD`` expiries for *underlying* (ascending). Empty list for
-        an unknown underlying (never a 500). O(1) cached read.
+        an unknown underlying (never a 500). O(1) cached read. ``expiry_counts`` pairs
+        each expiry's vendor-LISTED count (``registry.duckdb``) with its WITH-DATA
+        count (contracts that truly have lake candles), so the cascade renders a
+        self-explanatory "listed N with data M" chip (DEC-DB-UX-PACK-001 Feature 6);
+        ``listed`` is ``null`` when the registry is absent / does not know the
+        underlying (honest "with data M" only).
         """
         idx = await _fno_cascade_or_none()
         if idx is None:
-            return JSONResponse({"underlying": underlying, "expiries": []})
-        return JSONResponse({"underlying": underlying, "expiries": list(idx.expiries(underlying))})
+            return JSONResponse({"underlying": underlying, "expiries": [], "expiry_counts": []})
+        expiries = list(idx.expiries(underlying))
+        listed_by_expiry = await run_in_threadpool(
+            lambda: _fno_listed_by_expiry(underlying, expiries)
+        )
+        return JSONResponse(
+            {
+                "underlying": underlying,
+                "expiries": expiries,
+                "expiry_counts": build_expiry_counts(idx, underlying, listed_by_expiry),
+            }
+        )
 
     @app.get("/api/v1/db/fno/contracts")
     async def api_db_fno_contracts(

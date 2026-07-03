@@ -42,6 +42,7 @@ __all__ = [
     "FnoCascadeCache",
     "FnoCascadeIndex",
     "FnoContract",
+    "build_expiry_counts",
     "build_fno_cascade",
     "contract_to_json",
 ]
@@ -224,6 +225,39 @@ def build_fno_cascade(datasets: Iterable[Mapping[str, Any]]) -> FnoCascadeIndex:
         _contracts=contracts_sorted,
         unparsed=unparsed,
     )
+
+
+def build_expiry_counts(
+    index: FnoCascadeIndex,
+    underlying: str,
+    listed_by_expiry: Mapping[str, int] | None,
+) -> list[dict[str, Any]]:
+    """Per-expiry "listed N with data M" rows for one underlying's cascade level.
+
+    A young live option chain is otherwise silent about WHY an expiry shows only a
+    few strikes: the vendor may list dozens but only a handful have been pulled yet.
+    This surfaces both counts per expiry so the ``/db`` cascade can render a
+    self-explanatory "listed N with data M" chip (DEC-DB-UX-PACK-001 Feature 6):
+
+    * ``with_data`` (M) = the count of DISTINCT contracts that TRULY have lake candle
+      data for that ``(underlying, expiry)`` — exactly what the cascade offers
+      (:meth:`FnoCascadeIndex.contracts`), so it can never over-count a phantom strike.
+    * ``listed`` (N) = the count of vendor-LISTED contracts for that expiry from the
+      authoritative ``registry.duckdb`` calendar (passed in as *listed_by_expiry*), or
+      ``None`` when the registry does not know this underlying (a CLI-only / absent /
+      unreadable registry). ``None`` reads as an honest "with data M" chip — never a
+      misleading "listed 0 with data M" (Golden Rule #1). ``listed`` MAY exceed
+      ``with_data`` (the young-chain case) and MAY equal it (fully pulled).
+
+    Rows are aligned with :meth:`FnoCascadeIndex.expiries` order (ascending ISO) and
+    an unknown underlying yields ``[]``. Pure + deterministic (no I/O).
+    """
+    rows: list[dict[str, Any]] = []
+    for expiry in index.expiries(underlying):
+        with_data = len(index.contracts(underlying, expiry))
+        listed = None if listed_by_expiry is None else listed_by_expiry.get(expiry)
+        rows.append({"expiry": expiry, "listed": listed, "with_data": with_data})
+    return rows
 
 
 def contract_to_json(contract: FnoContract) -> dict[str, Any]:
