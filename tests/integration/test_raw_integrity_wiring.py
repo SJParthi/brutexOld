@@ -114,7 +114,7 @@ def test_hook_fires_per_window_with_raw_payload() -> None:
         start=date(2024, 1, 1),
         end=date(2024, 3, 16),  # 75 days → 3 windows
         drop_volume=False,
-        on_raw_payload=lambda p, i, ws, we: captured.append((p, i, ws, we)),
+        on_raw_payload=lambda p, i, ws, we, _sym: captured.append((p, i, ws, we)),
     )
     assert len(bars) == 3  # one canned bar per window, unaffected by the hook
     assert len(captured) == 3  # hook fired once per window
@@ -207,7 +207,7 @@ def test_option_path_threads_capture_hook() -> None:
         interval="1minute",
         start=date(2024, 12, 20),
         end=date(2025, 1, 3),
-        on_raw_payload=lambda _p, _i, _ws, _we: captured.append(_i),
+        on_raw_payload=lambda _p, _i, _ws, _we, _sym: captured.append(_i),
     )
     assert len(bars) == 1
     assert captured == ["1minute"]
@@ -228,6 +228,94 @@ def test_verify_one_matches_unchanged_vendor(tmp_path: Path) -> None:
     )
     (record,) = load_records(tmp_path).values()
     result = verify_one(client, record)  # same fake → same bytes → match
+    assert result.matches is True
+
+
+class _FormAwareSDK:
+    """Symbol-form-aware fake: ONLY the ``%26``-encoded form returns bars; the
+    plain ``&`` form returns clean-empty (the un-encoded-``&`` silent-miss shape
+    of MIGRATION.md #870/#898). Records every fetched symbol in call order."""
+
+    def __init__(self) -> None:
+        self.symbols: list[str] = []
+        self.payload: Mapping[str, object] = {
+            "candles": [["2024-01-01T09:15:00", 100.0, 110.0, 90.0, 105.0, 777, 42]]
+        }
+
+    def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+        symbol = str(kw["groww_symbol"])
+        self.symbols.append(symbol)
+        if "%26" in symbol:
+            return self.payload
+        return {"candles": []}
+
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+
+def test_verify_reissues_encoded_form_after_fallback_recovery(tmp_path: Path) -> None:
+    """Fix-1 e2e: a `%26` fallback recovery's surviving record verifies CLEAN.
+
+    Before this fix the capture recorded only the plain key symbol, so
+    ``verify_one`` re-issued the PLAIN form, re-hit the clean-empty miss, and
+    flagged a GUARANTEED false ``raw_integrity.verify_mismatch`` for every
+    recovered ``&``-window. Now the latest-wins record carries the ISSUED
+    (encoded) form and the verify re-issues THAT byte-identical call.
+    """
+    sdk = _FormAwareSDK()
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None)
+    hook = make_capture_hook(tmp_path, exchange="NSE", segment="CASH", groww_symbol="NSE-M&M")
+    bars = fetch_candle_windows(
+        client,
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-M&M",
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 15),
+        drop_volume=False,
+        on_raw_payload=hook,
+    )
+    assert len(bars) == 1  # the encoded form recovered the data
+    assert sdk.symbols == ["NSE-M&M", "NSE-M%26M"]  # plain first, encoded fallback
+    # TWO captures landed under the SAME plain-symbol key — latest-wins keeps the
+    # ENCODED capture (the payload that actually produced the stored bars).
+    (record,) = load_records(tmp_path).values()
+    assert record.groww_symbol == "NSE-M&M"
+    assert record.issued_symbol == "NSE-M%26M"
+    assert record.payload_hash == hash_payload(sdk.payload)
+    # verify_one re-issues the ISSUED form — the SDK sees the ENCODED symbol on
+    # the verify call — and the hash matches (no false mismatch).
+    calls_before = len(sdk.symbols)
+    result = verify_one(client, record)
+    assert sdk.symbols[calls_before:] == ["NSE-M%26M"]
+    assert result.matches is True
+
+
+def test_verify_legacy_record_without_issued_symbol_reissues_plain(tmp_path: Path) -> None:
+    """Back-compat: a LEGACY record (no issued_symbol) verifies exactly as before —
+    the plain key symbol is re-issued and the hash still matches."""
+    from brutex.data.raw_integrity import build_record
+    from brutex.data.raw_integrity_store import append_record
+
+    client, sdk = _client()
+    legacy = build_record(  # the pre-field shape: no issued_symbol argument at all
+        sdk.payload,
+        exchange="NSE",
+        segment="CASH",
+        groww_symbol="NSE-NIFTY",
+        interval="1minute",
+        window_start="2024-01-01T00:00:00",
+        window_end="2024-01-15T00:00:00",
+    )
+    append_record(legacy, tmp_path)
+    (record,) = load_records(tmp_path).values()
+    assert record.issued_symbol is None  # the legacy shape
+    result = verify_one(client, record)
+    assert str(sdk.calls[-1]["groww_symbol"]) == "NSE-NIFTY"  # the plain re-issue
     assert result.matches is True
 
 
@@ -307,7 +395,7 @@ def test_adapter_explicit_hook_wins_over_factory(tmp_path: Path) -> None:
     adapter = GrowwMarketAdapter(
         client=client,
         index=_index(),
-        on_raw_payload=lambda _p, i, _ws, _we: captured.append(i),
+        on_raw_payload=lambda _p, i, _ws, _we, _sym: captured.append(i),
         capture_hook_factory=make_capture_hook_factory(tmp_path),
     )
     adapter.fetch_ohlcv(
