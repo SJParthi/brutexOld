@@ -18,7 +18,9 @@ series drains in bounded passes and is never re-fetched.
 > **Legacy naming note (re-grounded 2026-07-03):** earlier revisions of this
 > runbook keyed the whole detection recipe on the vendor error string
 > `DH-905` and cited `groww/errors.py` for it. **`DH-905` is a prior-vendor
-> (Dhan) error code** — it appears NOWHERE in the Groww adapter and survives
+> error code** (the retired vendor superseded by Groww per
+> DEC-DHAN-GROWW-REMIGRATE-001 / ADR-0009) — it appears NOWHERE in the
+> Groww adapter and survives
 > only as legacy commentary (representative, NOT exhaustive:
 > `data/window_ledger.py:64,556,558`, `orchestrator/watchdog.py:403`,
 > `dashboard/pull_progress.py:54,175`, `dashboard/pull_jobs.py`,
