@@ -780,14 +780,13 @@ def test_pull_pipeline_cross_list_selection_scopes_both_kinds(
     instrument kinds resolves to BOTH targets (``resolve_pull_targets`` is
     kind-agnostic) and the spot phase receives BOTH instruments, in tick order.
     """
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    store.upsert_many(
-        [_nifty(), _adanient()],
-        snapshot_date=date(2024, 1, 2),
-        run_id="r1",
-        csv_source_sha256="0" * 64,
-    )
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_nifty(), _adanient()],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r1",
+            csv_source_sha256="0" * 64,
+        )
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
         _pin_creds_present(monkeypatch)
         _patch_spines(monkeypatch)
@@ -808,5 +807,3 @@ def test_pull_pipeline_cross_list_selection_scopes_both_kinds(
             assert _wait_for_job(client)["state"] == "done"
         # The spot phase received the COMBINED cross-list selection, tick-ordered.
         assert spot_target_sets == [["ADANIENT", "NIFTY"]]
-    finally:
-        store.close()
