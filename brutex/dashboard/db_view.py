@@ -48,6 +48,7 @@ import structlog
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
+    TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
@@ -1186,7 +1187,12 @@ def _execute_candle_page_resilient(
     return out_columns, list(cursor.fetchall())
 
 
-def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+def summarize_spot_datasets(
+    conn: Any,
+    lake_root: Path,
+    *,
+    session_date_segments: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
     """Summarise every spot candle dataset in the lake for the coverage page.
 
     Discovers each ``(exchange, segment, symbol, interval)`` partition set via
@@ -1210,6 +1216,20 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         A DuckDB connection (see :func:`table_summary`).
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    session_date_segments
+        OPT-IN density enrichment (DEC-COLDSTART-SEED-INTERIOR-GAP-001): when a
+        dataset's ``segment`` is in this set AND its ``interval`` is the ONE
+        fetched spot granularity (:data:`TRACK1_SPOT_INTERVAL`, ``1minute`` —
+        a derived ``1day`` must never carry the density signal, or the
+        cold-start seed would leave a never-fetched window permanently
+        unseeded), the SAME single aggregate additionally ``array_agg``-s the
+        dataset's DISTINCT IST bar dates (:data:`_IST_DATE_EXPR`, the SQL twin
+        of :func:`_ist_date`) and the row gains a ``session_dates`` frozenset —
+        the ledger cold-start's interior-gap density cross-check input. The
+        default ``None`` is BYTE-IDENTICAL to the historical 3-scalar aggregate
+        (the hot /coverage + /completeness pollers pass nothing). O(sessions)
+        per enriched dataset — a full-column DISTINCT scan, so callers gate it
+        to the ~3 dense INDEX datasets at cold-start only.
 
     Returns
     -------
@@ -1218,7 +1238,7 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
 
             {"exchange", "segment", "symbol", "interval",
              "bars": <int>, "first_date": <YYYY-MM-DD|None>,
-             "last_date": <YYYY-MM-DD|None>}
+             "last_date": <YYYY-MM-DD|None>[, "session_dates": frozenset[date]]}
     """
     rows: list[dict[str, Any]] = []
     for dataset in list_candle_datasets(lake_root):
@@ -1226,6 +1246,16 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         segment = dataset["segment"]
         symbol = dataset["symbol"]
         interval = dataset["interval"]
+        # Belt half of the DEC-COLDSTART-SEED-INTERIOR-GAP-001 REVISION-1 gate
+        # (the braces half lives in `seed_enclosed_windows`): session dates are
+        # attached ONLY for an opted-in segment at the FETCHED `1minute`
+        # granularity, so a derived `1day` row never carries the density signal.
+        with_session_dates = (
+            session_date_segments is not None
+            and segment in session_date_segments
+            and interval == TRACK1_SPOT_INTERVAL
+        )
+        session_expr = f", array_agg(DISTINCT {_IST_DATE_EXPR})" if with_session_dates else ""
         # The glob is built from list_candle_datasets coordinates (each already
         # validated against the partition allowlists during discovery), never
         # free user text; the path is given to read_parquet as a bound parameter.
@@ -1238,22 +1268,31 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         agg_rows = _aggregate_parquet_resilient(
             conn,
             lake_root / "bars" / exchange / segment / symbol / interval,
-            f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp") '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
-            "FROM read_parquet(?, union_by_name=true)",
+            f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp")'  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
+            f"{session_expr} FROM read_parquet(?, union_by_name=true)",
             source=f"spot:{exchange}/{segment}/{symbol}/{interval}",
         )
         agg = agg_rows[0] if agg_rows else None
-        rows.append(
-            {
-                "exchange": exchange,
-                "segment": segment,
-                "symbol": symbol,
-                "interval": interval,
-                "bars": int(agg[0]) if agg else 0,
-                "first_date": _ist_date(agg[1]) if agg else None,
-                "last_date": _ist_date(agg[2]) if agg else None,
-            }
-        )
+        row: dict[str, Any] = {
+            "exchange": exchange,
+            "segment": segment,
+            "symbol": symbol,
+            "interval": interval,
+            "bars": int(agg[0]) if agg else 0,
+            "first_date": _ist_date(agg[1]) if agg else None,
+            "last_date": _ist_date(agg[2]) if agg else None,
+        }
+        if with_session_dates:
+            # DuckDB `array_agg` over zero rows is SQL NULL (→ None) and an
+            # all-unreadable partition yields no aggregate row at all — both
+            # degrade to an EMPTY set, over which the seed's density check
+            # honestly ABSTAINS (too-few sessions), never a crash / never a
+            # fabricated verdict (Golden Rule #1).
+            raw_sessions = agg[3] if agg else None
+            row["session_dates"] = (
+                frozenset(raw_sessions) if raw_sessions is not None else frozenset()
+            )
+        rows.append(row)
     return rows
 
 

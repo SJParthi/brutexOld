@@ -53,7 +53,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -61,6 +61,7 @@ from brutex.calendars.nse import IST
 from brutex.data.atomic_io import atomic_write_via
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.interior_gap_detect import classify_interior_gap_dates
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.window_ledger import (
     EMPTY,
@@ -707,8 +708,19 @@ def plan_windows(
 #: The shape a lake-span index maps: ``(exchange, segment, symbol, interval) -> span``.
 #: The span dict carries ``bars`` / ``first_date`` / ``last_date`` (the WHAT-is-stored
 #: aggregate from :func:`~brutex.dashboard.db_view.summarize_spot_datasets`, which lists
-#: the WHOLE ``bars/`` tree — spot AND ``segment="FNO"`` contract partitions alike).
+#: the WHOLE ``bars/`` tree — spot AND ``segment="FNO"`` contract partitions alike),
+#: plus an OPTIONAL ``session_dates`` frozenset on the opted-in dense INDEX ``1minute``
+#: spans (DEC-COLDSTART-SEED-INTERIOR-GAP-001 — the seed's density cross-check input).
 _SpanIndex = dict[tuple[str, str, str, str], dict[str, Any]]
+
+#: The lake segments whose SPOT cold-start spans carry ``session_dates`` for the
+#: interior-gap density cross-check (DEC-COLDSTART-SEED-INTERIOR-GAP-001): the DENSE
+#: index partitions only — the literal matches the on-disk partition dir name +
+#: ``Segment.INDEX.value`` (brutex/data/partition.py ``VALID_SEGMENTS``), mirroring
+#: DEC-INTERIOR-GAP-DETECT-001's dense-``is_index`` demote scope. CASH reference
+#: equities keep span-only seeding (sparse-but-healthy names must never false-flag);
+#: the F&O cold-start reads its spans WITHOUT session dates (a deliberate non-goal).
+_SESSION_DATE_SEGMENTS: Final[frozenset[str]] = frozenset({"INDEX"})
 
 #: One reconcile candidate: the ledger window to seed + the span-index lookup key whose
 #: stored ``(first_date, last_date)`` must ENCLOSE the window for the seed to fire.
@@ -767,15 +779,35 @@ def seed_enclosed_windows(
     dead (their exclusive ``end`` sits at today while the storable ``last_date`` is
     at most yesterday); only interior sub-daily tiles (and historical sub-range
     pulls) ever seeded. Now that the rescue is LIVE, remember it is a SPAN test, not
-    a DENSITY test: a window inside the lake's ``[first_date, last_date]`` seeds
-    ``SUCCESS`` even if it has an INTERIOR HOLE, and on a lost ledger that window is
-    then auto-skipped. The compensating, operator-visible signal is the /completeness
-    scoreboard (density-based — it reads the LAKE, not the ledger); the fetch-time
-    interior-gap detector (DEC-INTERIOR-GAP-DETECT-001, MIGRATION.md #1031) does NOT
-    compensate here — it never sees a seeded window (skipped before any fetch). The
-    load-bearing safety stands: seeding is strictly ONLY-IF-ABSENT
+    a DENSITY test — EXCEPT for the one surface below. The load-bearing safety
+    stands: seeding is strictly ONLY-IF-ABSENT
     (:meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success`), so a
     ``FAILED`` / ``EMPTY`` / ``PLANNED`` row is never masked.
+
+    **Interior-gap density cross-check (DEC-COLDSTART-SEED-INTERIOR-GAP-001):** a
+    span test alone would stamp ``SUCCESS`` over a window whose lake span contains
+    an interior multi-session hole — and since ``SUCCESS`` is skippable, the hole
+    would be masked FOREVER on a lost-ledger cold-start (the spot /completeness
+    verdict is LEDGER-backed, so it would read ``full``; the fetch-time detector
+    of DEC-INTERIOR-GAP-DETECT-001 never sees a seeded window). So when a span
+    entry carries ``session_dates`` (attached ONLY for the dense INDEX ``1minute``
+    spans — :data:`_SESSION_DATE_SEGMENTS` via
+    :func:`reconcile_ledger_with_lake`) AND the candidate window's interval is
+    the FETCHED spot granularity (``TRACK1_SPOT_INTERVAL`` — belt-and-braces with
+    the read-side gate: a DERIVED ``1day`` window is never density-checked, or it
+    could sit permanently un-seedable since it is never fetched), the window's
+    in-range session dates are classified by the COMMON
+    :func:`~brutex.data.interior_gap_detect.classify_interior_gap_dates` (one
+    source of interior-hole truth — CLAUDE.md §11). A confirmed interior gap
+    SKIPS the seed with ONE ``window_ledger.seed_interior_gap_skip`` WARNING —
+    the window stays absent → ``PLANNED`` this pull → fetched → the fetch-time
+    detector bounds it (``record(degraded=True)``, re-pullable then terminal).
+    FAIL-CLOSED: an error inside the check logs
+    ``window_ledger.seed_interior_gap_error`` and skips the seed (a re-pull is
+    always data-safe — idempotent keep-first sink), never a crash. Honest
+    residuals: CASH reference equities + the F&O reconcile stay span-only (their
+    spans carry no ``session_dates``), and an out-of-calendar-coverage hole
+    honestly ABSTAINS (seeded — consistent with the fetch-time detector).
 
     **Live-edge guard:** a window whose coverage INCLUDES the current IST day
     (``end − 1 >= today_ist``) is NEVER seeded — the day's session data may still be
@@ -785,6 +817,13 @@ def seed_enclosed_windows(
     *today_ist* defaults to *now* converted to the IST calendar day; the F&O reconcile
     injects its clamp clock's date so reconcile == plan == fetch stays deterministic.
     """
+    # The fetched spot granularity — the ONE interval the density gate may fire on
+    # (REVISION 1 of DEC-COLDSTART-SEED-INTERIOR-GAP-001: a derived `1day` window is
+    # never fetched, so un-seeding it could never self-heal). Imported locally,
+    # mirroring the module's ingest_common pattern (brutex.data must not import the
+    # vendor package at module import time).
+    from brutex.adapters.groww.constants import TRACK1_SPOT_INTERVAL
+
     if today_ist is None:
         today_ist = now.astimezone(IST).date()
     seeded = 0
@@ -804,6 +843,34 @@ def seed_enclosed_windows(
             continue  # live edge — today's data may be partial; never seed it settled
         if not (first_date <= window_key.start and last_covered <= last_date):
             continue
+        # Density cross-check (DEC-COLDSTART-SEED-INTERIOR-GAP-001, docstring above):
+        # only a FETCHED-interval window whose span carries `session_dates` is
+        # checked — every other candidate (F&O / CASH / derived `1day` / legacy
+        # span shape) takes the historical span-only path byte-identically.
+        if window_key.interval == TRACK1_SPOT_INTERVAL:
+            sessions = entry.get("session_dates")
+            if sessions is not None:
+                try:
+                    window_sessions = [d for d in sessions if window_key.start <= d <= last_covered]
+                    verdict = classify_interior_gap_dates(covered_dates=window_sessions)
+                except Exception as exc:  # fail-CLOSED — a re-pull is always data-safe
+                    _LOG.warning(
+                        "window_ledger.seed_interior_gap_error",
+                        span_key=span_key,
+                        window_start=window_key.start.isoformat(),
+                        window_end=window_key.end.isoformat(),
+                        error=str(exc),
+                    )
+                    continue
+                if verdict.is_interior_gap():
+                    _LOG.warning(
+                        "window_ledger.seed_interior_gap_skip",
+                        span_key=span_key,
+                        window_start=window_key.start.isoformat(),
+                        window_end=window_key.end.isoformat(),
+                        largest_gap_sessions=verdict.largest_gap_sessions,
+                    )
+                    continue
         if ledger.seed_lake_success(window_key, bars=int(entry["bars"]), now=now):
             seeded += 1
     return seeded
@@ -924,10 +991,19 @@ def reconcile_ledger_with_lake(
     pull start so a fresh-clone ledger inherits the lake's already-stored windows as
     ``SUCCESS`` — no full re-pull / quota blowout once the ledger drives skip.
     O(datasets) aggregate reads, never per-window.
+
+    This SPOT wrapper requests ``session_dates`` for the dense INDEX spans
+    (:data:`_SESSION_DATE_SEGMENTS` — DEC-COLDSTART-SEED-INTERIOR-GAP-001) so
+    :func:`seed_enclosed_windows` can density-cross-check the fetched ``1minute``
+    windows for an interior multi-session hole before span-seeding ``SUCCESS``;
+    the F&O cold-start (:func:`~brutex.adapters.groww.option_ingest.
+    reconcile_fno_ledger_with_lake`) reads its spans WITHOUT session dates and is
+    byte-identical. Cost: one O(sessions) DISTINCT-date scan per index dataset,
+    once at pull start — never the hot /coverage or /completeness poll.
     """
     from brutex.dashboard.coverage_reconcile import load_lake_spans
 
-    spans = load_lake_spans(lake_root)
+    spans = load_lake_spans(lake_root, session_date_segments=_SESSION_DATE_SEGMENTS)
     return reconcile_ledger_windows(
         ledger,
         spans,

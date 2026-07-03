@@ -315,6 +315,139 @@ class TestSpotCoverageApi:
         assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
 
 
+def _index_inst(symbol: str) -> Instrument:
+    """A REAL index instrument on the ``INDEX`` segment (DEC-INDEX-SEGMENT-PK-FIX-001)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+class TestColdStartSeedInteriorGap:
+    """DEC-COLDSTART-SEED-INTERIOR-GAP-001 end-to-end over a REAL lake (REVISION 2):
+    the INDEX partitions are written by the actual ``ParquetWriter`` and the density
+    branch is driven through the REAL ``load_lake_spans`` DuckDB read — a green suite
+    can never sit over a dead feature."""
+
+    def test_gappy_index_window_not_seeded_and_completeness_not_full(self, tmp_path: Path) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: pre-fix the gappy NIFTY window was span-seeded
+        # SUCCESS on the lost-ledger cold-start (skippable forever) and /completeness
+        # read the symbol "full" — the interior 18-session hole was masked. Post-fix
+        # the window is left un-seeded → PLANNED → an honest "partial" on the board.
+        from datetime import timedelta
+
+        from brutex.calendars.nse import is_trading_day
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import (
+            plan_windows,
+            reconcile_ledger_with_lake,
+            save_window_ledger,
+        )
+
+        s = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        s.upsert_many(
+            [_index_inst("NIFTY"), _index_inst("BANKNIFTY")],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-coldstart-gap",
+            csv_source_sha256="0" * 64,
+        )
+        writer = ParquetWriter(lake_root=tmp_path)
+        # GAPPY: real bars at BOTH ends of the window (2020-01-01 + 2020-01-28, both
+        # NSE trading days) with an 18-trading-session interior hole between them.
+        writer.write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[
+                _bar(datetime(2020, 1, 1, 4, 5, tzinfo=UTC), "100.4"),
+                _bar(datetime(2020, 1, 28, 4, 5, tzinfo=UTC), "100.9"),
+            ],
+        )
+        # CLEAN: a bar on EVERY trading session of the same window — the control
+        # proving the density gate never false-skips a healthy dataset.
+        clean_days = []
+        cursor = date(2020, 1, 1)
+        while cursor <= date(2020, 1, 28):
+            if is_trading_day(cursor):
+                clean_days.append(cursor)
+            cursor += timedelta(days=1)
+        writer.write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="BANKNIFTY",
+            interval="1minute",
+            bars=[
+                _bar(datetime(d.year, d.month, d.day, 4, 5, tzinfo=UTC), "99.9") for d in clean_days
+            ],
+        )
+
+        ledger = WindowLedger()
+        start, end = date(2020, 1, 1), date(2020, 1, 29)  # ONE sub-daily tile
+        instruments = [_index_inst("NIFTY"), _index_inst("BANKNIFTY")]
+        with capture_logs() as logs:
+            seeded = reconcile_ledger_with_lake(
+                ledger,
+                tmp_path,
+                instruments=instruments,
+                intervals=("1minute",),
+                start=start,
+                end=end,
+                market=GROWW_COVERAGE_MARKET,
+            )
+        # The clean window cold-start-seeded; the gappy one did NOT — and said so.
+        assert seeded == 1
+        skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
+        assert len(skips) == 1
+        gap = skips[0]["largest_gap_sessions"]
+        assert isinstance(gap, int) and gap > 5
+
+        # The un-seeded gappy window is minted PLANNED (re-pullable, self-heals via
+        # the fetch-time detector); the seeded clean row stays settled.
+        plan_windows(
+            ledger,
+            instruments=instruments,
+            intervals=("1minute",),
+            start=start,
+            end=end,
+            market=GROWW_COVERAGE_MARKET,
+        )
+        status_by_symbol = {(r.security_id, r.status) for r in ledger.records()}
+        assert ("NIFTY", "PLANNED") in status_by_symbol
+        assert ("BANKNIFTY", "SUCCESS") in status_by_symbol
+        save_window_ledger(ledger, tmp_path)
+
+        client = TestClient(build_app(DashboardState(), instrument_store=s))
+        try:
+            spot_rows = {r["symbol"]: r for r in client.get("/api/v1/coverage/spot").json()["rows"]}
+            assert spot_rows["NIFTY"]["completeness"] == "pending"
+            assert spot_rows["NIFTY"]["windows_pending"] == 1
+            assert spot_rows["BANKNIFTY"]["completeness"] == "settled"
+            board = client.get("/api/v1/completeness/scoreboard").json()
+            per_symbol = {r["symbol"]: r for r in board["spot"]["per_symbol"]}
+            # The mask is CLOSED: the gappy symbol reads an honest NOT-full verdict
+            # (pre-fix it read "full" — settled ledger + Jan-2020 first bar).
+            assert per_symbol["NIFTY"]["1minute"] == "partial"
+            # No false-red on the healthy control (settled + Jan-2020 start → full).
+            assert per_symbol["BANKNIFTY"]["1minute"] == "full"
+        finally:
+            s.close()
+
+
 class TestWindowStatusApi:
     """The per-window SUCCESS / EMPTY / FAILED status table (DEC-WINDOW-STATUS-001).
 

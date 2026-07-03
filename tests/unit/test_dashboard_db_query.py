@@ -1879,6 +1879,107 @@ def test_summarize_spot_datasets_all_unreadable_reports_zero(
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Opt-in session-date enrichment (DEC-COLDSTART-SEED-INTERIOR-GAP-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+#: The three INDEX `1minute` bar instants of the enrichment fixture — the last one
+#: crosses IST midnight (20:30 UTC → 02:00 IST NEXT day), pinning the SQL IST cast
+#: against the Python `_ist_date` twin.
+_SESSION_FIXTURE_TS = (
+    datetime(2024, 3, 1, 9, 15, tzinfo=UTC),
+    datetime(2024, 3, 22, 9, 15, tzinfo=UTC),
+    datetime(2024, 3, 1, 20, 30, tzinfo=UTC),  # IST calendar date 2024-03-02
+)
+
+
+def _write_session_fixture(lake_root: Path) -> None:
+    """An INDEX `1minute` + INDEX `1day` + CASH `1minute` lake for the enrichment tests."""
+    writer = ParquetWriter(lake_root=lake_root)
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_bar(ts, "100.4") for ts in _SESSION_FIXTURE_TS],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="RELIANCE",
+        interval="1minute",
+        bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+    )
+
+
+def test_summarize_spot_datasets_default_carries_no_session_dates(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # FAILS-BEFORE trivially (the key never existed) + pins the hot-path contract
+    # FOREVER: the default (poller) read is BYTE-IDENTICAL — no `session_dates`
+    # key on ANY row, INDEX included (the enrichment is strictly opt-in).
+    _write_session_fixture(tmp_path)
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    assert len(rows) == 3
+    assert all("session_dates" not in row for row in rows)
+
+
+def test_summarize_spot_datasets_session_dates_on_index_1minute_only(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The opted-in read attaches `session_dates` to the INDEX `1minute` row ONLY:
+    # the derived INDEX `1day` row must NEVER carry it (REVISION 1 — a derived
+    # window must never be density-gated) and CASH stays span-only.
+    _write_session_fixture(tmp_path)
+    rows = summarize_spot_datasets(
+        store.connection, tmp_path, session_date_segments=frozenset({"INDEX"})
+    )
+    by_key = {(r["segment"], r["interval"]): r for r in rows}
+    index_minute = by_key[("INDEX", "1minute")]
+    # GOLDEN IST parity: the SQL cast agrees with the Python `_ist_date` twin for
+    # every bar — including the 20:30 UTC bar whose IST calendar date rolls over.
+    expected = {_ist_date(ts) for ts in _SESSION_FIXTURE_TS}
+    assert {d.isoformat() for d in index_minute["session_dates"]} == expected
+    assert date(2024, 3, 2) in index_minute["session_dates"]  # the rolled-over IST date
+    assert isinstance(index_minute["session_dates"], frozenset)
+    assert "session_dates" not in by_key[("INDEX", "1day")]
+    assert "session_dates" not in by_key[("CASH", "1minute")]
+    # The enriched aggregate leaves the historical 3 scalars byte-identical.
+    plain = {
+        (r["segment"], r["interval"]): r
+        for r in summarize_spot_datasets(store.connection, tmp_path)
+    }
+    for key, row in by_key.items():
+        assert {k: v for k, v in row.items() if k != "session_dates"} == plain[key]
+
+
+def test_summarize_spot_datasets_session_dates_all_unreadable_is_empty_set(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # An all-unreadable INDEX `1minute` partition degrades to an EMPTY session set
+    # (over which the seed's density check honestly abstains), never a crash.
+    _write_session_fixture(tmp_path)
+    dataset_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute"
+    for parquet in dataset_dir.rglob("*.parquet"):
+        parquet.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs():
+        rows = summarize_spot_datasets(
+            store.connection, tmp_path, session_date_segments=frozenset({"INDEX"})
+        )
+    by_key = {(r["segment"], r["interval"]): r for r in rows}
+    index_minute = by_key[("INDEX", "1minute")]
+    assert index_minute["bars"] == 0
+    assert index_minute["session_dates"] == frozenset()
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Derived %-change columns (DEC-DB-CANDLE-DERIVED-001)
 # ────────────────────────────────────────────────────────────────────────
 
