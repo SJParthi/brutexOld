@@ -6,6 +6,15 @@ name: Branch protection drift detector
 # disables "Do not allow bypassing" or removes a required check, this
 # workflow catches it within 24h + opens an issue.
 #
+# DEC-DRIFT-MISSING-RULE-FAIL-001 (R2-CI-2): the worst-case drift — the
+# protection rule missing ENTIRELY on `main` (the fetch API 404s) — is the
+# LOUDEST case, not a silent green. When the rule is missing this workflow
+# opens/refreshes the same drift-alert issue AND fails the job (non-zero
+# exit), so a deleted rule can never report success. (Previously the 404
+# path logged a warning and exited 0 with the compare + issue steps gated
+# off, so the worst drift alerted nobody — directly contradicting the claim
+# above; that gap is now closed.)
+#
 # Z+ L3 RECONCILE layer for the GitHub-server-side enforcement we
 # document in docs/runbooks/github-branch-protection-setup.md.
 
@@ -44,9 +53,22 @@ jobs:
           # 404 — we treat that as drift "rule missing entirely".
           if ! gh api "repos/${{ github.repository }}/branches/main/protection" \
                 > live-protection.json 2>fetch.err; then
-            echo "::warning::Branch protection rule for main does NOT exist."
-            echo "::warning::Per docs/runbooks/github-branch-protection-setup.md,"
-            echo "::warning::the operator must apply the rule (one-time UI setup)."
+            echo "::error::Branch protection rule for main does NOT exist."
+            echo "::error::Per docs/runbooks/github-branch-protection-setup.md,"
+            echo "::error::the operator must apply the rule (one-time UI setup)."
+            # DEC-DRIFT-MISSING-RULE-FAIL-001 (R2-CI-2): a missing rule is the
+            # WORST-case drift, not a benign skip. Record RULE_MISSING=true and
+            # exit 0 here so the later steps still run (the issue-open step +
+            # the fail-the-job step below both key off RULE_MISSING). Write the
+            # drift summary the issue-open step reads via `cat drift-summary.txt`.
+            {
+              printf 'Branch protection drift detected for main:\n\n'
+              printf -- '  - CRITICAL: branch protection rule missing ENTIRELY on main '
+              printf '(GET .../branches/main/protection returned 404). No required '
+              printf 'checks, no admin-bypass block, no PR-review requirement are in '
+              printf 'force. Per docs/runbooks/github-branch-protection-setup.md the '
+              printf 'operator must (re-)apply the rule.\n'
+            } > drift-summary.txt
             echo "RULE_MISSING=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -67,7 +89,25 @@ jobs:
           live = json.load(open("live-protection.json"))
 
           # ── Expected snapshot (per docs/runbooks/github-branch-protection-setup.md) ──
-          # Required: every gate in ci.yml's ci-ok needs: list.
+          # DEC-DRIFT-EXPECTED-SUBSET-DOC-001 (R2-CI-6): POLICY — the DIRECT
+          # branch-protection required-status-check contexts below are a curated
+          # SUBSET of ci.yml's ci-ok `needs:` list, NOT "every gate in that list"
+          # (the prior comment here was FALSE — ci-ok has 32 needs, this set has
+          # 22). The aggregate context "CI OK (aggregate gate)" is ITSELF required
+          # below, and ci-ok fails if ANY of its needs is red, so every ci-ok need
+          # is transitively enforced through that one aggregate context even when it
+          # is not its own direct required context. The 11 ci-ok needs deliberately
+          # enforced VIA ci-ok (and therefore intentionally ABSENT from this set) are:
+          #   actionlint, rust-trading-core, ledger-numbering, no-dhan-guard,
+          #   zplus-pr-guard, definition-of-ready, dec-id-validator,
+          #   bugfix-regression-scan, no-hallucination-scan, conv-commits, chaos-race.
+          # Do NOT add those to expected_required_checks: they are never registered
+          # as DIRECT required contexts, so they never appear in `live_checks`, so the
+          # UNEXPECTED-context drift check below never false-flags them — and adding
+          # them would make each independently required (regressing the manual-merge
+          # path, e.g. the PR-only gates would then block non-PR merges). The
+          # UNEXPECTED check still fires for any live required context outside this
+          # set, which is the intended drift signal.
           expected_required_checks = {
               "Lint (ruff)",
               "Type check (mypy + pyright)",
@@ -147,7 +187,14 @@ jobs:
           PY
 
       - name: Open drift-alert issue
-        if: failure() && steps.drift.conclusion == 'failure'
+        # DEC-DRIFT-MISSING-RULE-FAIL-001 (R2-CI-2): fire on BOTH drift cases —
+        # (1) a present rule that drifted (compare step exited 1 → job failure),
+        # and (2) the worst case, no rule at all (fetch set RULE_MISSING=true and
+        # exited 0, so the job is not yet in a failure state here). The explicit
+        # `always()` drops the implicit `success()` so this evaluates on the
+        # missing-rule path too; the compare-drift disjunct keeps the original
+        # present-rule behavior byte-identical.
+        if: always() && (steps.fetch.outputs.RULE_MISSING == 'true' || (failure() && steps.drift.conclusion == 'failure'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SERVER_URL: ${{ github.server_url }}
@@ -204,3 +251,17 @@ jobs:
               --label "branch-protection-drift" \
               --body-file drift-body.md
           fi
+
+      - name: Fail the job when the protection rule is missing entirely
+        # DEC-DRIFT-MISSING-RULE-FAIL-001 (R2-CI-2): the worst-case drift must be
+        # the loudest. This runs AFTER the issue-open step (so the alert is filed
+        # first), then fails the job so a deleted/absent rule can never report
+        # green. The present-rule drift path already fails via the compare step's
+        # sys.exit(1); this closes the missing-rule (404) path, which previously
+        # exited 0 and reported success.
+        if: steps.fetch.outputs.RULE_MISSING == 'true'
+        run: |
+          echo "::error::Branch protection rule is MISSING entirely on main —"
+          echo "::error::the worst-case drift. A drift-alert issue has been"
+          echo "::error::opened/refreshed; failing the job so the drift is loud."
+          exit 1
