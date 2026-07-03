@@ -493,7 +493,12 @@ hostile-review pass._
   strike is never reduced; "if uncertain, fetch" (`< 1` clamps UP to 1). RE-PULL NET: a reduced-budget empty makes
   `fetch_count == 1 < CONFIRMED_EMPTY_MIN_FETCHES(2)` so the OLD-gap fast-settle does NOT fire — the window stays
   re-fetchable on a later idempotent pull (keep-first sink + durable ledger), so even a vendor-bug 200-empty is
-  recoverable; the #919 all-empty + #974 partial-window detectors stay ACTIVE. THE GUARANTEE = a MEASURED CI BENCH GATE
+  recoverable [SETTLE-RECONCILE — DEC-DEAD-STRIKE-LEDGER-SETTLE-001, MIGRATION.md #1163: SUPERSEDED for an OLD window —
+  the old-gap settle is now BUDGET-AWARE, accumulating clean-EMPTY confirmations ACROSS pulls (`prior.empty_streak +
+  in_pull_fetches` vs the SAME 2-confirmation bar), so TWO independent pulls' clean empties settle a reduced-budget old
+  window SKIPPED; a repeated vendor-bug 200-empty on an OLD window is thereafter recoverable via `brutex
+  reopen-skipped`, not an automatic re-pull; RECENT windows keep the conservative streak, SUCCESS resets, a
+  suppressed/transient empty never counts]; the #919 all-empty + #974 partial-window detectors stay ACTIVE. THE GUARANTEE = a MEASURED CI BENCH GATE
   (`tests/bench/test_fetch_per_window_guarantee.py`): replays a representative NIFTY chain end-to-end through the REAL
   spine against a fetch-COUNTING SDK and ASSERTS fetches-per-window ≤ 1.2 AND `86,400/fpw` ≥ the chain's windows (a
   regression FAILS CI), plus a teeth test that the SAME chain WITHOUT bounding is ABOVE the ceiling and stores the SAME
@@ -755,8 +760,12 @@ hostile-review pass._
   via `_is_clean_fetch` = `windows≥1 ∧ skipped==0 ∧ still_failed==0`, flags `attempted≥3 ∧ stored_bars==0`) + immutable
   `UnderlyingEmptyReport`/`AllEmptyScan` + a guarded `_log_underlying_all_empty` (capped 20, `repr()`-named) + ONE
   best-effort `try/except` wiring line in `run_groww_option_ingest`. HONEST: pure DETECT+WARN — no return/ledger/engine
-  change, no auto-recovery; false-positive-guarded (skip/transient/empty-clamp excluded so a re-pull or a 1-2-leg
-  illiquid name never flags); ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). `option_ingest.py` 100% line+branch (247/68,
+  change, no auto-recovery; false-positive-guarded (skip/transient/empty-clamp excluded so a re-pull never flags)
+  [LOWLEG-RECONCILE — DEC-SILENT-VANISH-LOWLEG-001, MIGRATION.md #1163: the original "a 1-2-leg illiquid name never
+  flags" clause is SUPERSEDED — a 1-2-clean-fetch underlying whose EVERY pair was a clean empty, with ZERO non-clean
+  AND ZERO terminally-quarantined siblings, NOW flags marked `low_leg=True`; every other #919 false-positive guard
+  (skip/transient/empty-clamp/quarantined sibling → disqualified) is regression-pinned; observe-only WARN unchanged];
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). `option_ingest.py` 100% line+branch (247/68,
   0 missing); NEW `TestSuspiciousEmptyFlag` (14 tests); 75 option-ingest tests green; ruff/`mypy --strict`/`pyright`
   clean. Prior merged: DEC-SCOREBOARD-REFRESH-002, MIGRATION.md #918 — the customer-facing Product Scoreboard
   (`docs/PRODUCT_SCOREBOARD.md` + the shareable self-contained `docs/product_scoreboard.html` one-pager) REFRESHED
