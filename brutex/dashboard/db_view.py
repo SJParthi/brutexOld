@@ -1236,11 +1236,14 @@ def summarize_spot_datasets(
     aggregate scalars.
 
     For a dataset at the ONE fetched spot granularity
-    (:data:`TRACK1_SPOT_INTERVAL`, ``1minute``) the aggregate is the folded
-    per-session CTE of DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 — ONE scan (the
-    SAME O(bars) order as the historical 3-scalar aggregate, never a second
-    full-column pass; the #920 hot-path guard) that groups the bars by their
-    IST calendar date (:data:`_IST_DATE_EXPR`) and derives:
+    (:data:`TRACK1_SPOT_INTERVAL`, ``1minute``) in a SCORED spot segment
+    (``INDEX``/``CASH`` — :data:`~brutex.data.partition.SPOT_PROBE_SEGMENTS`,
+    the only segments the completeness projections join; hostile-review perf
+    fold) the aggregate is the folded per-session CTE of
+    DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 — ONE scan (the SAME O(bars) order
+    as the historical 3-scalar aggregate, never a second full-column pass; the
+    #920 hot-path guard) that groups the bars by their IST calendar date
+    (:data:`_IST_DATE_EXPR`) and derives:
 
     * ``bars`` = ``SUM`` of the per-session DISTINCT-timestamp counts (equal to
       the historical whole-dataset ``COUNT(DISTINCT "timestamp")`` — a
@@ -1259,11 +1262,15 @@ def summarize_spot_datasets(
       counted (strict ``>``). INFORMATIONAL only — no verdict downgrade;
     * ``session_days`` = the number of distinct IST session dates stored.
 
-    Every NON-``1minute`` dataset (the derived ``1day`` + intraday TFs) keeps
-    the historical 3-scalar aggregate byte-identical and carries
+    Every NON-``1minute`` dataset (the derived ``1day`` + intraday TFs) AND
+    every non-scored-segment ``1minute`` dataset (the REFERENCE_ONLY F&O
+    contract partitions — unless a segment is explicitly opted in via
+    *session_date_segments*, the DEC-COLDSTART-SEED-INTERIOR-GAP-001
+    extensibility path, in which case it takes the CTE and carries real
+    counts) keeps the historical 3-scalar aggregate byte-identical and carries
     ``open_substituted_days`` / ``session_days`` as ``None`` — the substitution
     signal is only meaningful on the fetched granularity the 1-day is derived
-    FROM.
+    FROM, and only surfaced where a projection actually consumes it.
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
@@ -1272,7 +1279,13 @@ def summarize_spot_datasets(
     ``open_substituted_days`` is a SUBSTITUTION signal, not exclusively "vendor
     lost data": a genuine late/special open (Muhurat), a sparse reference
     symbol, and a vendor gap all count — each honestly means the derived daily
-    open is not the canonical 09:15 price.
+    open is not the canonical 09:15 price. The ``.first()``-parity claim
+    assumes NO bar earlier than the canonical session open is stored for a
+    session (guaranteed by the pre-open exclusion — CLAUDE.md §7, spot bars
+    tick from 09:15:00 IST): a hypothetical BEFORE-open first bar would still
+    be the resampler's ``.first()`` substitute yet is NOT counted by the strict
+    ``>`` (an under-count) — out of contract, deliberately not detected
+    (hostile-review honesty note).
 
     Parameters
     ----------
@@ -1319,6 +1332,18 @@ def summarize_spot_datasets(
             and segment in session_date_segments
             and is_fetched_minute
         )
+        # Hostile-review perf fold (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the
+        # folded per-session CTE runs ONLY for the SCORED spot segments
+        # (INDEX/CASH — `SPOT_PROBE_SEGMENTS`, the only segments the completeness
+        # projections join) or a segment explicitly opted into the session-dates
+        # enrichment; the many REFERENCE_ONLY F&O `1minute` contract partitions
+        # keep the historical flat 3-scalar aggregate — their per-session
+        # substitution counts were computed then DISCARDED on the #920-sensitive
+        # /completeness + /coverage hot path. `with_session_dates` ⇒
+        # `use_session_cte`, so an opted-in row can never miss its `array_agg`.
+        use_session_cte = is_fetched_minute and (
+            segment in _SPOT_PROBE_SEGMENTS or with_session_dates
+        )
         # The glob is built from list_candle_datasets coordinates (each already
         # validated against the partition allowlists during discovery), never
         # free user text; the path is given to read_parquet as a bound parameter.
@@ -1328,7 +1353,7 @@ def summarize_spot_datasets(
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
-        if is_fetched_minute:
+        if use_session_cte:
             # The ONE folded per-session CTE (DEC-DAILY-OPEN-SUBSTITUTION-
             # HONESTY-001, shared with the (a)-fix session_dates enrichment) —
             # a single O(bars) scan, never a second full-column pass (#920).
@@ -1362,7 +1387,7 @@ def summarize_spot_datasets(
             "symbol": symbol,
             "interval": interval,
         }
-        if is_fetched_minute:
+        if use_session_cte:
             # A zero-row partition aggregates the CTE to (NULL, NULL, NULL, 0,
             # 0[, NULL]) and an all-unreadable one yields no aggregate row at
             # all — both honestly degrade to 0 bars / no dates / (0, 0) counts,
@@ -1376,9 +1401,11 @@ def summarize_spot_datasets(
             row["bars"] = int(agg[0]) if agg else 0
             row["first_date"] = _ist_date(agg[1]) if agg else None
             row["last_date"] = _ist_date(agg[2]) if agg else None
-            # The substitution signal exists ONLY on the fetched 1-minute
-            # granularity — a derived TF row carries an honest None, never 0
-            # (0 would assert "checked, found none").
+            # The substitution signal is COMPUTED only where the per-session CTE
+            # ran (the fetched 1-minute granularity in a scored/opted-in
+            # segment) — a derived TF row AND an F&O `1minute` contract row each
+            # carry an honest None, never 0 (0 would assert "checked, found
+            # none").
             row["open_substituted_days"] = None
             row["session_days"] = None
         if with_session_dates:

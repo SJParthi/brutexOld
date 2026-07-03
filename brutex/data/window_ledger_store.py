@@ -340,8 +340,15 @@ def merge_ledger_rows(
       pull records ``SUCCESS`` with an EMPTY tombstone set, so ITS save keeps the
       ``SUCCESS`` (honest residual: a concurrent writer that does not itself run
       the gap detector can re-mask under the more-settled rule on ITS flush — a
-      pre-existing property of the merge rule; a real persistent gap re-demotes on
-      the next gap-checking pull).
+      pre-existing property of the merge rule. A re-masked ``SUCCESS`` is
+      skippable, so an ordinary later pull does NOT re-fetch it and the fetch-time
+      detector never sees it again; an INTERIOR gap re-demotes only on the next
+      lost-ledger COLD-START — the seed's density cross-check,
+      DEC-COLDSTART-SEED-INTERIOR-GAP-001, leaves it un-seeded → re-planned →
+      re-fetched — or on an explicit operator re-plan, and a re-masked TRAILING
+      truncation needs the re-plan (the cold-start check is interior-only) —
+      hostile-review wording fix: the residual does NOT self-heal on a
+      steady-state pull).
 
     Output is sorted by window key (the same order :meth:`WindowLedger.to_rows`
     emits), so a merge with an empty/absent disk side is byte-row-identical to the
@@ -406,8 +413,19 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
         # os.replace — its merge then includes the earlier rows (no lost update).
         with partition_write_lock(lake_root, path):
             disk_rows = load_window_ledger(lake_root).to_rows()
+            # LOAD-BEARING snapshot ORDER (hostile-review fold, DEC-WINDOW-LEDGER-
+            # DEGRADED-TOMBSTONE-001): the ROW snapshot is taken BEFORE the
+            # tombstone snapshots, and a tombstone only ever moves "forward" (added
+            # at the demotion, under the SAME ledger lock as the row; discarded only
+            # when the SAME key's row is superseded by a settled outcome). So a
+            # demoted FAILED observed in `memory_rows` is guaranteed still
+            # tombstoned in `degraded_keys` UNLESS a newer settled row (which the
+            # next flush persists) genuinely superseded it — the reverse order
+            # would open a race where a fresh demotion is saved un-tombstoned and
+            # the disk SUCCESS silently wins.
+            memory_rows = ledger.to_rows()
             rows = merge_ledger_rows(
-                ledger.to_rows(),
+                memory_rows,
                 disk_rows,
                 pruned_keys=ledger.pruned_keys(),
                 reopened_keys=ledger.reopened_keys(),
@@ -806,8 +824,15 @@ def seed_enclosed_windows(
     ``window_ledger.seed_interior_gap_error`` and skips the seed (a re-pull is
     always data-safe — idempotent keep-first sink), never a crash. Honest
     residuals: CASH reference equities + the F&O reconcile stay span-only (their
-    spans carry no ``session_dates``), and an out-of-calendar-coverage hole
-    honestly ABSTAINS (seeded — consistent with the fetch-time detector).
+    spans carry no ``session_dates``); an out-of-calendar-coverage hole
+    honestly ABSTAINS (seeded — consistent with the fetch-time detector); and a
+    hole at the window's LEADING/TRAILING edge — bars resuming only in a
+    NEIGHBOURING window, so the dataset span still encloses this one — is
+    invisible to the INTERIOR classifier (it walks strictly between the window's
+    own first/last covered dates) and stays span-seeded, a deliberate
+    interior-scope non-goal of DEC-COLDSTART-SEED-INTERIOR-GAP-001 (the
+    fetch-path trailing-truncation demotion, DEC-PARTIAL-WINDOW-REPULL-001,
+    watches edges on FETCHED windows only).
 
     **Live-edge guard:** a window whose coverage INCLUDES the current IST day
     (``end − 1 >= today_ist``) is NEVER seeded — the day's session data may still be

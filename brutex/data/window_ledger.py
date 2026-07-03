@@ -285,8 +285,12 @@ class WindowLedger:
     #: tombstones close for the operator re-open. For a key in this set the
     #: IN-MEMORY row wins the merge outright. The accept-gap ``SKIPPED`` settle at
     #: the threshold is deliberately NOT tombstoned (it is a legitimately terminal
-    #: rank-3 row a concurrent ``SUCCESS`` may honestly displace). Never serialised
-    #: (per-instance lifetime — the window between load and save).
+    #: rank-3 row a concurrent ``SUCCESS`` may honestly displace) — and a later
+    #: SETTLED re-record of the same key (a genuine complete ``SUCCESS`` re-pull /
+    #: the ``SKIPPED`` settle) DISCARDS its earlier tombstone (the demotion was
+    #: superseded in-process; a re-pullable ``FAILED``/``EMPTY`` re-record keeps
+    #: it — hostile-review fold). Never serialised (per-instance lifetime — the
+    #: window between load and save).
     _degraded: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
@@ -479,7 +483,11 @@ class WindowLedger:
         would otherwise silently re-mask the confirmed gap on the very next flush)
         — exactly as :meth:`reopen_skipped` tombstones its ``SKIPPED`` → ``FAILED``
         demotions. The accept-gap ``SKIPPED`` settle at the threshold is NOT
-        tombstoned (a legitimately terminal row).
+        tombstoned (a legitimately terminal row), and a later SETTLED re-record of
+        the same key (a genuine complete ``SUCCESS`` re-pull / the ``SKIPPED``
+        settle) DISCARDS its earlier same-process tombstone — a re-pullable
+        ``FAILED``/``EMPTY`` re-record keeps it (no completeness evidence either
+        way, so the demotion stands).
 
         *suppress_settle* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) marks an ``EMPTY``
         outcome as **UNTRUSTED** — recorded while the pull's mass-empty circuit
@@ -564,6 +572,19 @@ class WindowLedger:
                 # and ``status == FAILED`` excludes the accept-gap SKIPPED settle above
                 # (legitimately terminal — never wrongly pinned against a SUCCESS).
                 self._degraded.add(wk)
+            elif status in (SUCCESS, SKIPPED):
+                # Hostile-review fold: a later SETTLED outcome for the SAME key — a
+                # genuine complete re-pull (SUCCESS) or the accept-gap settle
+                # (SKIPPED) — SUPERSEDES any earlier same-process demotion, so its
+                # stale tombstone is discarded and the merge's more-settled rule
+                # applies to the new row unconditionally (the "a SKIPPED settle is
+                # never tombstoned" contract now holds even when a prior FAILED
+                # demotion of the same window tombstoned it earlier in this
+                # process). A re-pullable FAILED/EMPTY re-record deliberately KEEPS
+                # the tombstone — a 429/timeout/empty gives NO completeness
+                # evidence, and discarding on it would let a concurrent pull's disk
+                # SUCCESS re-mask the confirmed gap on our own save.
+                self._degraded.discard(wk)
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             if status == SKIPPED and (prior is None or prior.status != SKIPPED):
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): count every

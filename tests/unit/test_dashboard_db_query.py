@@ -2101,8 +2101,9 @@ def test_open_substitution_none_for_derived_1day_but_counted_for_1minute(
     # FAILS-BEFORE (keys absent): the substitution columns exist on EVERY summary row,
     # but they are COMPUTED only for the ONE fetched granularity (TRACK1_SPOT_INTERVAL,
     # 1minute) — a derived `1day` (or intraday-TF) row carries an honest None, never a
-    # fabricated 0 ("checked, found none"). Segment-agnostic: the CASH 1minute row is
-    # counted too (the gate is the interval, not the segment).
+    # fabricated 0 ("checked, found none"). The CASH 1minute row is counted too (CASH
+    # is a SCORED spot segment — SPOT_PROBE_SEGMENTS; the hostile-review perf fold
+    # gates the CTE on the scored segments, not on the interval alone).
     _write_session_fixture(tmp_path)  # INDEX 1minute + INDEX 1day + CASH 1minute
     rows = summarize_spot_datasets(store.connection, tmp_path)
     by_key = {(r["segment"], r["interval"]): r for r in rows}
@@ -2118,6 +2119,61 @@ def test_open_substitution_none_for_derived_1day_but_counted_for_1minute(
     index_minute = by_key[("INDEX", "1minute")]
     assert index_minute["open_substituted_days"] == 2
     assert index_minute["session_days"] == 3
+
+
+def test_open_substitution_none_for_fno_1minute_reference_partition(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Hostile-review perf fold: a REFERENCE_ONLY F&O `1minute` contract partition
+    # keeps the historical flat 3-scalar aggregate on the default (hot-path) read —
+    # its per-session substitution counts were computed then DISCARDED on the
+    # #920-sensitive /completeness + /coverage pollers (the scored projections join
+    # only INDEX/CASH). The row carries honest None counts, never a fabricated 0,
+    # and its bars/first/last stay byte-identical to any 1minute read.
+    _write_fno(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 46, tzinfo=UTC), "100.4"),  # 09:16 IST first
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), "100.6"),
+        ],
+        symbol="NIFTY24MAYFUT",
+    )
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    [row] = rows
+    assert row["segment"] == "FNO"
+    assert row["interval"] == "1minute"
+    assert row["bars"] == 2
+    assert row["first_date"] == "2024-03-01"
+    assert row["last_date"] == "2024-03-04"
+    assert row["open_substituted_days"] is None
+    assert row["session_days"] is None
+    assert "session_dates" not in row
+
+
+def test_fno_segment_opted_in_session_dates_takes_cte_and_counts(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The DEC-COLDSTART-SEED-INTERIOR-GAP-001 extensibility path: a segment
+    # EXPLICITLY opted in via `session_date_segments` takes the per-session CTE
+    # even outside the scored spot segments — the row carries real substitution
+    # counts AND its `session_dates` (`with_session_dates` ⇒ `use_session_cte`,
+    # so an opted-in row can never miss its array_agg — the IndexError hazard the
+    # gate refactor had to preserve against).
+    _write_fno(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 46, tzinfo=UTC), "100.4"),  # 09:16 IST first
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), "100.6"),  # 09:15 IST exactly
+        ],
+        symbol="NIFTY24MAYFUT",
+    )
+    rows = summarize_spot_datasets(
+        store.connection, tmp_path, session_date_segments=frozenset({"FNO"})
+    )
+    [row] = rows
+    assert row["open_substituted_days"] == 1
+    assert row["session_days"] == 2
+    assert row["session_dates"] == frozenset({date(2024, 3, 1), date(2024, 3, 4)})
 
 
 def test_folded_cte_matches_prechange_flat_aggregate_golden(
