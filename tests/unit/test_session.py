@@ -16,6 +16,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
+from brutex.calendars.nse import get_session
 from brutex.data.models import CandleBar
 from brutex.data.session import (
     ALL_FILTERED,
@@ -172,16 +173,17 @@ class TestFilterToTradingSession:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # O(bars + unique_dates): many bars on ONE date resolve the session ONCE.
-        import brutex.data.session as session_mod
-
+        # The real function is taken from its home module (brutex.calendars.nse —
+        # the identical object brutex.data.session binds); the patch targets the
+        # session module's binding by dotted path, so this file imports the module
+        # in exactly ONE style (CodeQL py/import-and-import-from, alert #534).
         calls = {"n": 0}
-        real = session_mod.get_session
 
         def _counting(d: object) -> object:
             calls["n"] += 1
-            return real(d)  # type: ignore[arg-type]
+            return get_session(d)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(session_mod, "get_session", _counting)
+        monkeypatch.setattr("brutex.data.session.get_session", _counting)
         bars = [_ist_bar(2024, 1, 2, 10, m) for m in range(30)]
         verdict = filter_to_trading_session(bars)
         assert len(verdict.kept) == 30
