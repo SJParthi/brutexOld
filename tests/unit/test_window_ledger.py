@@ -744,6 +744,208 @@ class TestSettleEmpty:
         assert ledger.is_skippable(_key()) is False
 
 
+class TestBudgetAwareOldGapSettle:
+    """DEC-DEAD-STRIKE-LEDGER-SETTLE-001: the old-gap settle accumulates confirmations ACROSS pulls.
+
+    A reduced empty-retry budget (1 fetch/pull, DEC-FETCH-PER-WINDOW-GUARANTEE-001) can
+    never reach ``CONFIRMED_EMPTY_MIN_FETCHES`` (2) inside one pull, so ``record`` now
+    counts ``prior.empty_streak + in_pull_fetches`` for an OLD window
+    (``old_window=True``) — two independent pulls' clean empties meet the same
+    2-confirmation bar the one-pull fast-settle demands. The data-safety law is pinned
+    too: SUCCESS resets, FAILED never counts, a suppressed empty neither bumps nor
+    settles, and a recent window keeps the conservative streak.
+    """
+
+    def test_first_reduced_pull_stays_refetchable(self) -> None:
+        # ONE clean empty (1 in-pull fetch) is NOT confirmation — "if uncertain, fetch".
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        assert status == EMPTY
+        assert ledger.records()[0].empty_streak == 1
+        assert ledger.is_skippable(_key()) is False
+
+    def test_cumulative_second_pull_settles(self) -> None:
+        # Pull 1: streak 1. Pull 2: prior_streak(1) + in_pull_fetches(1) == 2 → SKIPPED.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        assert status == SKIPPED
+        record = ledger.records()[0]
+        assert record.empty_streak == EMPTY_TERMINAL_THRESHOLD  # forced — same as fast-settle
+        assert record.attempts == 2
+        assert ledger.is_skippable(_key()) is True
+
+    def test_single_pull_two_fetches_settles_without_settle_empty_hint(self) -> None:
+        # The cumulative rule SUBSUMES the one-pull fast-settle: 0 + 2 >= 2 settles pull 1.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=2,
+            old_window=True,
+        )
+        assert status == SKIPPED
+        assert ledger.records()[0].empty_streak == EMPTY_TERMINAL_THRESHOLD
+
+    def test_recent_window_keeps_conservative_streak(self) -> None:
+        # old_window=False → the cumulative arm never fires; two empties stay EMPTY 2/3.
+        ledger = WindowLedger()
+        for now in (_NOW, _LATER):
+            status = ledger.record(
+                _key(),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=now,
+                in_pull_fetches=1,
+                old_window=False,
+            )
+        assert status == EMPTY
+        assert ledger.records()[0].empty_streak == 2
+        assert ledger.is_skippable(_key()) is False
+
+    def test_success_resets_cumulative_evidence_and_stores_data(self) -> None:
+        # A window that COULD still have data wins: bars on pull 2 → SUCCESS, streak 0 —
+        # the prior clean-empty evidence never masks real data.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        status = ledger.record(
+            _key(),
+            raw_bars=9,
+            error_type=None,
+            bars_appended=9,
+            now=_LATER,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        assert status == SUCCESS
+        record = ledger.records()[0]
+        assert record.empty_streak == 0
+        assert record.bars == 9
+
+    def test_failed_never_counts_and_never_settles(self) -> None:
+        # A 429/timeout between empties PRESERVES the streak but is never a confirmation:
+        # empty(1) → FAILED (streak kept, no settle) → empty (1 + 1 == 2) settles.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type="GrowwRateLimitError",
+            bars_appended=0,
+            now=_LATER,
+            in_pull_fetches=3,  # transient fetches are NOT clean-empty evidence
+            old_window=True,
+        )
+        assert status == FAILED
+        assert ledger.records()[0].empty_streak == 1  # preserved, not bumped
+        assert ledger.is_skippable(_key()) is False
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        assert status == SKIPPED  # 1 prior clean-empty pull + this pull's clean empty
+
+    def test_suppressed_empty_neither_bumps_nor_settles(self) -> None:
+        # A breaker-suppressed empty is UNTRUSTED: no streak bump, no cumulative settle —
+        # a throttle-shaped empty can never cement a dead strike.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            in_pull_fetches=1,
+            old_window=True,
+            suppress_settle=True,
+        )
+        assert status == EMPTY
+        assert ledger.records()[0].empty_streak == 1  # preserved — no poisoned progress
+        assert ledger.is_skippable(_key()) is False
+
+    def test_old_window_ignored_for_success(self) -> None:
+        # old_window on a bars-returning fetch is a no-op — data always wins.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            in_pull_fetches=2,
+            old_window=True,
+        )
+        assert status == SUCCESS
+        assert ledger.records()[0].empty_streak == 0
+
+
+def test_confirmed_empty_min_fetches_single_source_of_truth() -> None:
+    # DEC-DEAD-STRIKE-LEDGER-SETTLE-001 relocation: the ledger is the canonical home and
+    # ``brutex.adapters.ingest_common`` re-exports the SAME value (CLAUDE.md §11 COMMON).
+    from brutex.adapters.ingest_common import CONFIRMED_EMPTY_MIN_FETCHES as REEXPORTED
+    from brutex.data.window_ledger import CONFIRMED_EMPTY_MIN_FETCHES as CANONICAL
+
+    assert REEXPORTED == CANONICAL == 2
+
+
 def test_concurrent_plan_and_record_never_tears_the_map() -> None:
     # DEC-DHAN-PARALLEL-INGEST-001: one ledger, many workers stamping distinct
     # windows concurrently — the lock keeps the map consistent.

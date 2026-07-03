@@ -83,6 +83,25 @@ class TestParseFutureSymbol:
         # EXCH then an empty underlying part then expiry then FUT.
         assert parse_future_symbol("NSE--30Sep25-FUT") is None
 
+    # ── DEC-FNO-EXPIRY-YEAR-PIVOT-001: the SHARED [2019, 2059] year window ──
+
+    def test_out_of_window_year_is_none(self) -> None:
+        # Fails-before regression: _CENTURY=2000 decoded "75" to a fabricated
+        # 2075 expiry (while the canonical fno_symbol parser pivoted it to 1975
+        # — a live one-source-of-truth divergence). Both now reject via the ONE
+        # shared expiry_year_in_window predicate.
+        assert parse_future_symbol("NSE-NIFTY-30Jun75-FUT") is None
+
+    def test_below_window_year_is_none(self) -> None:
+        assert parse_future_symbol("NSE-NIFTY-01Jan18-FUT") is None
+
+    def test_above_window_year_is_none(self) -> None:
+        assert parse_future_symbol("NSE-NIFTY-30Jun60-FUT") is None
+
+    def test_boundary_years_accepted(self) -> None:
+        assert parse_future_symbol("NSE-NIFTY-31Dec19-FUT") == ("NIFTY", date(2019, 12, 31))
+        assert parse_future_symbol("NSE-NIFTY-30Jun59-FUT") == ("NIFTY", date(2059, 6, 30))
+
 
 # ── select_near_month ─────────────────────────────────────────────────────
 

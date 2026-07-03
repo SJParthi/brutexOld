@@ -601,6 +601,104 @@ def test_silent_vanish_underlying_warns_in_production_pipeline_pull(
     assert warns[0]["stored_bars"] == 0
     # No scan-error event (the guarded scan ran cleanly).
     assert [r for r in logs if r["event"] == "pull.underlying_all_empty_error"] == []
+    # Tier A (3 clean-empty pairs) — not the low-leg tier (DEC-SILENT-VANISH-LOWLEG-001).
+    assert warns[0]["low_leg"] is False
+
+
+def test_silent_vanish_low_leg_underlying_warns_in_production_pipeline_pull(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The PRODUCTION post-drain scan ALSO flags a 1-2-leg all-clean-empty underlying.
+
+    DEC-SILENT-VANISH-LOWLEG-001 — the low-leg twin of the Tier A production regression
+    above: selecting only 2 of the NIFTY contracts makes a 2-leg chain whose every leg
+    fetches CLEANLY EMPTY, which the pre-fix ``attempted >= 3`` rule could NEVER flag.
+    The post-drain scan (fed ``minute.failure_symbols`` — empty here) must emit exactly
+    ONE ``pull.underlying_all_empty`` WARNING marked ``low_leg=True``.
+    """
+    monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+    sdk = _EmptyCandleSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")[:2]  # a 2-leg chain
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+            now=_NOW,
+        )
+    assert report.bars_appended == 0
+    assert set(sdk.candle_symbols) == {r.contract_symbol for r in selected}
+    warns = [r for r in logs if r["event"] == "pull.underlying_all_empty"]
+    assert len(warns) == 1
+    assert warns[0]["underlying"] == repr("NIFTY")
+    assert warns[0]["attempted_pairs"] == 2
+    assert warns[0]["stored_bars"] == 0
+    assert warns[0]["low_leg"] is True
+    assert [r for r in logs if r["event"] == "pull.underlying_all_empty_error"] == []
+
+
+class _EmptyOrRaiseSDK(_EmptyCandleSDK):
+    """An ``_EmptyCandleSDK`` whose mapped symbols raise a TERMINAL error instead.
+
+    Exercises the quarantined-sibling shape at the PRODUCTION post-drain seam: one leg
+    fetches CLEANLY EMPTY, the sibling terminally quarantines (never enters ``pairs``).
+    """
+
+    def __init__(self, *, raise_for: dict[str, Exception]) -> None:
+        super().__init__()
+        self._raise_for = dict(raise_for)
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        """Raise the symbol's mapped terminal error, else the clean empty payload."""
+        exc = self._raise_for.get(str(kw["groww_symbol"]))
+        if exc is not None:
+            self.candle_symbols.append(str(kw["groww_symbol"]))
+            raise exc
+        return super().get_historical_candles(**kw)
+
+
+def test_pipeline_pull_quarantined_sibling_suppresses_low_leg_flag(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The PRODUCTION post-drain scan threads the REAL quarantine set — wrong-set regression pin.
+
+    DEC-SILENT-VANISH-LOWLEG-001: the one production line
+    (``failed_symbols=minute.failure_symbols`` in ``pull_contract_candles``) must carry the
+    phase's terminally-quarantined contract symbols into the Tier B rule. A 2-leg NIFTY
+    chain with 1 clean-empty leg + 1 terminally-quarantined leg must emit NO
+    ``pull.underlying_all_empty`` WARNING — without the threading (or with a wrong set)
+    the chain is indistinguishable from a genuine 1-leg all-clean-empty chain and would
+    falsely flag ``low_leg=True`` (the sync-driver twin is
+    ``test_run_ingest_quarantined_sibling_suppresses_low_leg_flag``).
+    """
+    monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+    selected = registry.list_contracts(underlying="NIFTY")[:2]  # a 2-leg chain
+    bad = selected[1].contract_symbol
+    sdk = _EmptyOrRaiseSDK(raise_for={bad: GrowwAPIBadRequestException("nope")})
+    sink = _RecordingSink()
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+            now=_NOW,
+        )
+    assert report.bars_appended == 0
+    assert set(sdk.candle_symbols) == {r.contract_symbol for r in selected}  # both attempted
+    # The quarantined sibling disqualifies the low-leg tier → NO all-empty warning.
+    assert [r for r in logs if r["event"] == "pull.underlying_all_empty"] == []
+    assert [r for r in logs if r["event"] == "pull.underlying_all_empty_error"] == []
 
 
 def test_fno_pull_write_pool_none_when_fetch_pipeline_on(
