@@ -338,3 +338,89 @@ def test_set_phase_does_not_touch_counters() -> None:
     p.set_phase("spot")
     snap = p.snapshot()
     assert snap.completed == 1 and snap.bars == 10 and snap.total == 4
+
+
+# ── DEC-PIPELINE-STALL-HEARTBEAT-001: grow_total / bars=None / stalled marker ──
+
+
+def test_advance_grow_total_grows_total_with_completed() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=2)
+    for _ in range(3):
+        p.advance(current="pair", bars=10, grow_total=True)
+    snap = p.snapshot()
+    assert snap.completed == 3
+    assert snap.total == 3  # grew past the starting 2 — open-ended units
+    assert snap.bars == 30
+
+
+def test_advance_grow_total_keeps_a_larger_total() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=10)
+    p.advance(grow_total=True)
+    snap = p.snapshot()
+    assert snap.completed == 1
+    assert snap.total == 10  # max(total, completed) — a known-larger total survives
+
+
+def test_sync_bars_none_preserves_the_cumulative_tally() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=10)
+    p.sync(completed=5, total=10, bars=1_000)
+    # A bar-less sync source (the metadata pull) must NOT wipe the tally to 0.
+    p.sync(completed=8, total=10, bars=None)
+    snap = p.snapshot()
+    assert snap.bars == 1_000
+    assert snap.completed == 8
+
+
+def test_mark_stalled_sets_marker_while_running_only() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=1, detail="pipeline")
+    p.mark_stalled("stalled-suspect — no heartbeat for 769s during phase 'prebuild'")
+    snap = p.snapshot()
+    assert snap.stalled is True
+    assert "769" in snap.stall_detail
+    assert snap.state == STATE_RUNNING  # never a false FAILED
+    assert snap.detail == "pipeline"  # the start detail is untouched
+
+
+def test_mark_stalled_is_a_noop_on_a_settled_run() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=1)
+    p.finish(detail="done")
+    p.mark_stalled("late timer edge")  # must NOT stamp a settled run
+    snap = p.snapshot()
+    assert snap.stalled is False
+    assert snap.stall_detail == ""
+
+
+def test_clear_stalled_lifts_the_marker() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=1)
+    p.mark_stalled("suspect")
+    p.clear_stalled()
+    snap = p.snapshot()
+    assert snap.stalled is False and snap.stall_detail == ""
+    assert snap.state == STATE_RUNNING
+
+
+def test_finish_and_fail_clear_the_stalled_marker() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=1)
+    p.mark_stalled("suspect")
+    p.finish(detail="done")
+    assert p.snapshot().stalled is False
+    p.start(total=1)
+    p.mark_stalled("suspect")
+    p.fail("boom")
+    assert p.snapshot().stalled is False
+
+
+def test_start_resets_the_stalled_marker() -> None:
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=1)
+    p.mark_stalled("suspect")
+    p.start(total=1)  # a fresh run never inherits the prior run's marker
+    snap = p.snapshot()
+    assert snap.stalled is False and snap.stall_detail == ""

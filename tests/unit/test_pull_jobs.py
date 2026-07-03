@@ -671,3 +671,118 @@ class TestFinishDetailFromWorkNote:
         snap = job.snapshot()
         assert snap.state == STATE_ERROR
         assert snap.detail == "RuntimeError: boom"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-PIPELINE-STALL-HEARTBEAT-001: the recovery edge + the pair-progress
+# per-pair advance (the frozen-counter fix's job-layer branch).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _recovery_event() -> WorkerEvent:
+    return WorkerEvent(
+        worker_name="dashboard-pull",
+        new_state=WorkerState.HEALTHY,
+        last_beat_seconds_ago=1.0,
+        timeout_seconds=30.0,
+    )
+
+
+class TestOnRecovered:
+    """``BackgroundPullJob._on_recovered``: the HUNG→HEALTHY edge clears the marker."""
+
+    def _job_and_watchdogs(self) -> tuple[BackgroundPullJob, list[PullWatchdog]]:
+        built: list[PullWatchdog] = []
+
+        def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            wd = PullWatchdog(
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            )
+            built.append(wd)
+            return wd
+
+        def _capture_only(_fn: Callable[[], None]) -> None:
+            """Capture-only spawner: the worker stays in flight."""
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_FakeClock()),
+            spawn=_capture_only,
+            watchdog_factory=factory,
+        )
+        return job, built
+
+    def test_recovery_clears_the_stalled_marker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        job, built = self._job_and_watchdogs()
+        assert job.start(lambda _h: None, total=1) is True
+        job._on_hung(_hung_event(), built[0])  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is True
+        # start() wired the watchdog's on_recovery to _on_recovered — fire it.
+        assert built[0].on_recovery is not None
+        built[0].on_recovery(_recovery_event())
+        assert job.snapshot().stalled is False
+        assert job.running is True  # the run itself was never touched
+
+    def test_stale_recovery_for_superseded_run_is_gated_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        job, built = self._job_and_watchdogs()
+        job.start(lambda _h: None, total=1)
+        stale = built[0]
+        # Supersede the run identity: a newer watchdog owns the job now.
+        newer = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+        )
+        job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
+        job._on_hung(_hung_event(), newer)  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is True
+        # The STALE run's recovery edge must NOT clear the current run's marker.
+        job._on_recovered(_recovery_event(), stale)  # pyright: ignore[reportPrivateUsage]
+        assert job.snapshot().stalled is True
+
+    def test_on_recovered_swallows_a_raising_clear(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+
+        class _BoomProgress(PullProgress):
+            def clear_stalled(self) -> None:
+                raise RuntimeError("clear boom")
+
+        built: list[PullWatchdog] = []
+
+        def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            wd = PullWatchdog(
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            )
+            built.append(wd)
+            return wd
+
+        job = BackgroundPullJob(
+            progress=_BoomProgress(clock=_FakeClock()),
+            spawn=lambda _fn: None,
+            watchdog_factory=factory,
+        )
+        job.start(lambda _h: None, total=1)
+        # Must NOT raise out of the best-effort recovery body (swallowed + logged).
+        job._on_recovered(_recovery_event(), built[0])  # pyright: ignore[reportPrivateUsage]
+        assert job.running is True
+
+
+def test_pair_progress_phase_advances_open_ended_counters() -> None:
+    """The ledger-synced + pair_progress branch of ``_on_progress`` (frozen-counter fix)."""
+    job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=lambda fn: fn())
+
+    def work(on_progress: ProgressHook) -> None:
+        job.sync_from_ledger(completed=45, total=45, bars=None)  # the metadata freeze shape
+        job.set_phase("historical", pair_progress=True)
+        on_progress("NSE-NIFTY-25Jun26-FUT 1minute", 1_000, False, False)
+        on_progress("NSE-NIFTY-25Jun26-22000-CE 1minute", 500, True, False)
+        snap = job.snapshot()
+        assert snap.completed == 47 and snap.total == 47  # units MOVE past 45/45
+        assert snap.bars == 1_500  # cumulative bars — never frozen at 0
+        assert snap.failed == 1
+
+    assert job.start(work, total=45, ledger_synced=True) is True
+    assert job.snapshot().state == STATE_DONE

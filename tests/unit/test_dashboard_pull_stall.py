@@ -160,6 +160,38 @@ class TestPullWatchdog:
         assert recovered[0].new_state == WorkerState.HEALTHY
         assert len(events) == 1  # still only the original hung event (no recovery alert)
 
+    def test_recovery_edge_forwards_to_the_on_recovery_hook(self) -> None:
+        """DEC-PIPELINE-STALL-HEARTBEAT-001: the post-construction hook fires on recovery."""
+        _, spawn = _capturing_spawn()
+        clock = _FakeClock()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=30.0, spawn=spawn, clock=clock)
+        recovered: list[WorkerEvent] = []
+        wd.on_recovery = recovered.append
+        wd.start()
+        clock.advance(31.0)
+        wd.check_once()  # HUNG
+        wd.beat()
+        wd.check_once()  # HUNG→HEALTHY — must reach the hook
+        assert len(recovered) == 1
+        assert recovered[0].new_state == WorkerState.HEALTHY
+
+    def test_recovery_hook_raising_is_swallowed(self) -> None:
+        """A raising on_recovery hook is swallowed + logged — the timer never crashes."""
+        _, spawn = _capturing_spawn()
+        clock = _FakeClock()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=30.0, spawn=spawn, clock=clock)
+
+        def _boom(_event: WorkerEvent) -> None:
+            raise RuntimeError("recovery hook boom")
+
+        wd.on_recovery = _boom
+        wd.start()
+        clock.advance(31.0)
+        wd.check_once()  # HUNG
+        wd.beat()
+        recovered = wd.check_once()  # must NOT raise out of the recovery forward
+        assert len(recovered) == 1
+
     def test_drive_loop_polls_until_stopped(self) -> None:
         """The real timer-loop body polls check_once each tick until stop() fires."""
         clock = _FakeClock()
