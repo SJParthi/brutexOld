@@ -36,6 +36,8 @@ from brutex.strategies.errors import StrategyContractError
 from brutex.strategies.types import Signal, StrategyState
 
 if TYPE_CHECKING:  # pragma: no cover
+    from datetime import datetime
+
     from brutex.feed.replay import ReplayFeed
     from brutex.strategies.protocol import Strategy
 
@@ -142,6 +144,13 @@ class StrategyRunner:
 
         signals: list[Signal] = []
         bars_skipped_lookback = 0
+        # Per-symbol strictly-increasing feed-integrity assert
+        # (DEC-LAKE-READ-UNIQUE-001): the catalog read gate collapses stored
+        # duplicates keep-FIRST upstream, so a duplicate/backwards bar reaching
+        # the strategy here is a wiring regression — rejected loudly, O(1) per
+        # bar (only the previous timestamp per symbol is tracked). Different
+        # symbols may legitimately share a timestamp (the interleaved merge).
+        last_ts_by_symbol: dict[str, datetime] = {}
 
         for step, event in enumerate(self._feed):
             # Advance the runtime look-ahead barrier (Property P-06) to the
@@ -150,6 +159,16 @@ class StrategyRunner:
             self._barrier.advance_to(step)
             if event.symbol not in self._allowed_symbols:
                 continue
+
+            prev_ts = last_ts_by_symbol.get(event.symbol)
+            if prev_ts is not None and event.timestamp <= prev_ts:
+                raise StrategyContractError(
+                    f"feed yielded a non-increasing bar for {event.symbol!r}: "
+                    f"{event.timestamp!r} <= previous {prev_ts!r} — a duplicate or "
+                    f"out-of-order bar must never reach a strategy "
+                    f"(DEC-LAKE-READ-UNIQUE-001)"
+                )
+            last_ts_by_symbol[event.symbol] = event.timestamp
 
             # Route the bar through the barrier: it asserts the index the
             # strategy is about to see is ≤ the current cursor (never the

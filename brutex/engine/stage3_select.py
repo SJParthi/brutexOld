@@ -118,6 +118,7 @@ def select_stage3_survivors(
     root: Path,
     *,
     top_k: int = DEFAULT_STAGE3_TOP_K,
+    current_snapshot_hash: str | None = None,
 ) -> dict[LeaderboardKey, tuple[ResultRow, ...]]:
     """Load the persisted Stage-2 results tree and select each leaderboard's top-K.
 
@@ -134,6 +135,11 @@ def select_stage3_survivors(
     top_k
         Per-leaderboard selection depth (defaults to
         :data:`DEFAULT_STAGE3_TOP_K`).
+    current_snapshot_hash
+        Optional CURRENT lake snapshot context — threaded to the loader's
+        snapshot-mismatch quarantine (DEC-LAKE-READ-UNIQUE-001) so a
+        poisoned-era tree cannot seed the Stage-3 refinement. ``None`` (the
+        default) is byte-identical to legacy behaviour.
 
     Returns
     -------
@@ -151,7 +157,7 @@ def select_stage3_survivors(
     # Validate top_k BEFORE the (potentially large) tree load — fail fast.
     if top_k < 1:
         raise ResultsStoreError(f"stage3 top_k must be >= 1, got {top_k}")
-    store = load_results_tree(root)
+    store = load_results_tree(root, current_snapshot_hash=current_snapshot_hash)
     return group_survivors(store.rows(), top_k=top_k)
 
 

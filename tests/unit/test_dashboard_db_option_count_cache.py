@@ -128,7 +128,8 @@ class _CountingConn:
         self.count_execs = 0
 
     def execute(self, sql: str, parameters: Any = None) -> Any:
-        if "COUNT(*)" in sql:
+        # The deduped total is a COUNT(DISTINCT ...) since DEC-LAKE-READ-UNIQUE-001.
+        if "COUNT(" in sql:
             self.count_execs += 1
         return (
             self._real.execute(sql) if parameters is None else self._real.execute(sql, parameters)
