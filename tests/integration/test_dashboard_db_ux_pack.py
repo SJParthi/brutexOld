@@ -394,8 +394,10 @@ def test_candles_route_dup_poisoned_partition_never_500(
     store_client: TestClient, tmp_path: Path
 ) -> None:
     # Dup-poisoned permutation at the ROUTE layer: a legacy duplicate-timestamp
-    # parquet (the pre-DEC-LAKE-WRITE-UNIQUE-001 poison shape) renders honestly —
-    # both stored rows, HTTP 200, never a 500 (the read guards already exist).
+    # parquet (the pre-DEC-LAKE-WRITE-UNIQUE-001 poison shape) is HTTP 200, never
+    # a 500 — and since main's DEC-LAKE-READ-UNIQUE-001 read-side dedup chokepoint
+    # the page collapses the poison keep-FIRST (ONE row, DISTINCT-timestamp total),
+    # so the viewer serves exactly what the deduped readers serve.
     import polars as pl
 
     part_dir = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute" / "2024"
@@ -431,4 +433,5 @@ def test_candles_route_dup_poisoned_partition_never_500(
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["total"] == 2  # renders what is stored, honestly
+    # DEC-LAKE-READ-UNIQUE-001: the dup collapses keep-first at read time.
+    assert resp.json()["total"] == 1

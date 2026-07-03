@@ -709,9 +709,11 @@ def test_query_candles_dup_row_poisoned_partition_renders_not_500(
     # A LEGACY dup-poisoned partition — two rows at the SAME timestamp, the
     # pre-DEC-LAKE-WRITE-UNIQUE-001 vendor-duplicate shape (the production writer
     # now dedups keep-first, so the file is written RAW here to mimic the legacy
-    # poison). The read-only /db viewer must RENDER what is stored (both rows,
-    # honest — the dup-train self-heal fixes the file on its next WRITE touch),
-    # never 500, and the date filter + applied range stay correct.
+    # poison). The read-only /db viewer must never 500 — and since main's
+    # DEC-LAKE-READ-UNIQUE-001 read-side dedup chokepoint the page collapses the
+    # poison keep-FIRST (ONE row; the total counts DISTINCT timestamps), so the
+    # viewer serves exactly what the deduped readers serve; the date filter +
+    # applied range stay correct.
     import polars as pl
 
     part_dir = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute" / "2024"
@@ -748,8 +750,8 @@ def test_query_candles_dup_row_poisoned_partition_renders_not_500(
         end="2024-03-01",
         limit=50,
     )
-    assert out["total"] == 2
-    assert _ts_dates(out) == ["2024-03-01", "2024-03-01"]
+    assert out["total"] == 1
+    assert _ts_dates(out) == ["2024-03-01"]
     assert out["applied_range"] == {"start": "2024-03-01", "end": "2024-03-01"}
 
 
