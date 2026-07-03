@@ -223,7 +223,15 @@ class ResultRow:
         DEC-RANKING-OVERFIT-001) carried for leaderboard transparency, or ``None``
         when the pool could not be deflated / the overfit gate was inactive. When
         present it must be finite (``NaN`` / ``±inf`` rejected); NEVER rounded.
-        Round-trips as a Parquet null when ``None``.
+        Round-trips as a Parquet null when ``None``. HONEST SCOPE
+        (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F3): the persisted figure is
+        **TUPLE-scoped** — deflated against one grid cell's rank-time
+        ``N = len(candidates)``, an under-count that materially inflates it
+        (measured: DSR 0.230 at ``n_trials=1e3`` vs 0.003 at ``1e7``) — and is
+        rendered ``dsr@tupleN`` on the leaderboard (ADR-0008 condition 7). It
+        is superseded by the Stage-4 cascade's leaderboard-N DSR GATE
+        (filter #2), whose N/V provenance is stamped run-level on the
+        ``CascadeReport``.
     avg_entry_price, avg_exit_price
         Price-family representatives as :class:`~decimal.Decimal` rupees. Must be
         finite and ``>= 0``; normalised to two decimals via

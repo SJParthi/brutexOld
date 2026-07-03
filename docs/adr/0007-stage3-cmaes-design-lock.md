@@ -134,3 +134,49 @@ in the merged pool, the cascade re-simulates each at its own coordinates, and
 no cross-window dedup is claimed or wanted. Condition 3's intra-Stage-3 dedup
 (the run-scoped value cache + identical refined evals across reruns) is
 unaffected.
+
+## 7. Amendment A2 (2026-07-03, DEC-STATS-GATE-INTEGRITY-001) — filter #8 training-reference decontamination + trade-count evidence
+
+The audit-round-2 findings R2-SR-F1/F2 (statistics/ranking gate integrity)
+found a divergence between condition 7's intent and the cascade wire's
+actual filter-#8 inputs:
+
+**Pre-change divergence (R2-SR-F1):** `brutex.engine.cascade_wire.
+build_candidate_input` fed the IDENTICAL full per-bar series as BOTH the
+training reference (`training_sharpe` / `training_max_drawdown` were
+computed over `per_bar` in full) AND the lockbox series
+(`lockbox_returns = per_bar`). Filter #8's degradation floor therefore
+compared the holdout tail against a reference that CONTAINED the tail —
+anti-conservative: a tail-degraded candidate's full-series reference was
+dragged down by the very tail being judged, softening the floor. §6's
+"as cascade filter #8 over the same series tail" wording described this
+(now historical) same-series convention.
+
+**Pre-change divergence (R2-SR-F2):** the wire's lockbox series is per-BAR,
+so `lockbox_evaluation`'s `>= min_trades` count gate counted BARS (a
+182-calendar-day 1-minute window holds ~47k bars — ~125 NSE sessions ×
+375 bars) — the DEC-LOCK-001 500-**trade** floor
+could never bind in production.
+
+**Resolution (binding):** ONE shared pure resolver —
+`brutex.metrics.lockbox.resolve_lockbox_window` — is the single source of
+truth for the filter-#8 train/holdout boundary. The wire (a) computes each
+candidate's TRUE per-trade exit-day IST ordinals and threads them as
+`evidence_days` (the count gate + adaptive window extension are now
+trade-driven), and (b) computes `training_sharpe`/`training_max_drawdown`
+over the per-bar TRAIN COMPLEMENT (`day < window_start`) resolved by the
+SAME resolver with the SAME `CascadeConfig` lockbox params filter #8 gates
+with. Degenerate complement (< 2 bars or zero variance — e.g. every trade
+exits inside the window): the reference falls back to the legacy
+full-series pair AS ONE UNIT, logged loudly
+(`cascade_wire.training_ref_fallback`) — decontamination is NOT claimed for
+fallback candidates.
+
+**Standing honest envelope (unchanged by this amendment):** selection-stage
+lockbox EXPOSURE remains by design — Stage-1A/2 selection evaluates the full
+CLI window, lockbox days included; the sweep window is deliberately NOT
+changed here. The uncontaminated arbiter is the cascade's filter #8 (whose
+training reference now genuinely excludes the holdout tail), plus Stage-3's
+static `train_slice_bars` exclusion (condition 7). The Stage-3 residual also
+stands: an EXTENDED per-candidate lockbox window can overlap Stage-3's
+static 182-day exclusion (documented at `stage3_wire.train_slice_bars`).
