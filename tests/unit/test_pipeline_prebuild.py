@@ -290,17 +290,21 @@ def test_guarded_prebuild_reraises_lake_write_halt_from_materialize() -> None:
 
 
 def _global_stop_errors() -> list[Exception]:
-    """The pull-wide halt set — the SAME classes ``pull_jobs.is_pull_halt`` matches."""
-    from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
-    from brutex.data.errors import LakeWriteHalt
-    from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+    """The pull-wide halt set — DERIVED from the spine's ``_GLOBAL_STOP_ERRORS``.
 
-    return [
-        LakeWriteHalt("disk_full"),
-        DailyQuotaExceeded("daily quota hit"),
-        QuotaInvariantError("quota state corrupt"),
-        MassEmptySettleHalt("mass-empty breaker tripped"),
-    ]
+    Previously a hand-copied list that silently went stale when
+    DEC-VENDOR-DOWN-BREAKER-001 added ``VendorDownError`` +
+    ``GrowwCredentialDeadError`` (the exact drift this pin exists to catch —
+    hostile-review MINOR folded). Now built generically from
+    ``run_ingest._GLOBAL_STOP_ERRORS`` (every member is bare-message
+    constructible by the drift-pin contract), so a NEW global-stop class is
+    picked up automatically and can never be missed here again.
+    """
+    from brutex.adapters.groww.run_ingest import (
+        _GLOBAL_STOP_ERRORS,  # pyright: ignore[reportPrivateUsage] — the drift-pin source
+    )
+
+    return [cls(f"{cls.__name__} halt") for cls in _GLOBAL_STOP_ERRORS]
 
 
 @pytest.mark.parametrize("halt", _global_stop_errors(), ids=lambda e: type(e).__name__)
@@ -318,6 +322,30 @@ def test_guarded_prebuild_reraises_every_global_stop_class(halt: Exception) -> N
             cascade_or_error=_halting_cascade,
             materialize=_FakeMaterializer(),
         )
+
+
+@pytest.mark.parametrize("halt", _global_stop_errors(), ids=lambda e: type(e).__name__)
+def test_is_pull_halt_matches_every_spine_global_stop(halt: Exception) -> None:
+    """``pull_jobs.is_pull_halt`` matches EVERY spine ``_GLOBAL_STOP_ERRORS`` member.
+
+    The behavioral membership pin the hostile review found missing: a mutation
+    deleting ``VendorDownError`` / ``GrowwCredentialDeadError`` (or any other
+    member) from the hand-mirrored ``is_pull_halt`` tuple previously passed the
+    whole suite, silently dropping the dashboard's generic CRITICAL pull-halt
+    alert for that halt class.
+    """
+    from brutex.dashboard.pull_jobs import is_pull_halt
+
+    assert is_pull_halt(halt) is True
+
+
+def test_is_pull_halt_rejects_a_plain_domain_error() -> None:
+    """A per-symbol domain error is NEVER classified as a pull-wide halt."""
+    from brutex.dashboard.pull_jobs import is_pull_halt
+    from brutex.models import BruteXError
+
+    assert is_pull_halt(BruteXError("one symbol failed")) is False
+    assert is_pull_halt(RuntimeError("code bug")) is False
 
 
 def test_guarded_prebuild_threads_segment_and_source() -> None:

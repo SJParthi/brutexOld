@@ -13,8 +13,9 @@ hypothesis property that a mixed success/failure stream NEVER trips.
 
 from __future__ import annotations
 
+import itertools
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 
 import pytest
 from brutex.adapters.error_storm_breaker import (
@@ -85,10 +86,22 @@ def _breaker(
     )
 
 
+#: Globally-unique window keys: each `_fail_n`/`_stale_n` observation models a
+#: DISTINCT window (the pre-dedupe semantics every threshold test was written
+#: against). Tests that pin the per-window dedupe pass an explicit repeated key.
+_KEYS = itertools.count()
+
+
+def _next_key() -> Hashable:
+    return ("W", next(_KEYS))
+
+
 def _fail_n(breaker: ErrorStormBreaker, n: int, *, symbol: str = "S") -> None:
-    """Observe *n* non-StillStale transport failures for *symbol*."""
+    """Observe *n* non-StillStale transport failures for *symbol* (distinct windows)."""
     for _ in range(n):
-        breaker.observe_transport_failure(symbol, error_type="GrowwTimeoutError")
+        breaker.observe_transport_failure(
+            symbol, error_type="GrowwTimeoutError", window_key=_next_key()
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -196,7 +209,7 @@ class TestVendorDownRule:
         b = _breaker(min_symbols=1, min_failures=1, enabled=False)
         _fail_n(b, 10, symbol="A")
         b.observe_success("A")
-        b.observe_transport_failure("A", error_type="x", still_stale=True)
+        b.observe_transport_failure("A", error_type="x", window_key=_next_key(), still_stale=True)
         assert b.tripped is False
         assert b.counts() == (0, 0, 0)
 
@@ -208,18 +221,95 @@ class TestVendorDownRule:
         b.observe_success("A")
         assert b.tripped is True
         with pytest.raises(VendorDownError):
-            b.observe_transport_failure("B", error_type="GrowwServerError")
+            b.observe_transport_failure("B", error_type="GrowwServerError", window_key=_next_key())
         # Even a StillStale observation re-raises the LATCHED vendor-down halt.
         with pytest.raises(VendorDownError):
-            b.observe_transport_failure("C", error_type="stale", still_stale=True)
+            b.observe_transport_failure(
+                "C", error_type="stale", window_key=_next_key(), still_stale=True
+            )
 
     def test_still_stale_neither_counts_toward_nor_resets_the_storm(self) -> None:
         b = _breaker(min_symbols=1, min_failures=3, streak=0)  # stale rule disabled
+        b.observe_transport_failure(
+            "A", error_type="stale", window_key=_next_key(), still_stale=True
+        )
         _fail_n(b, 2, symbol="A")
-        b.observe_transport_failure("A", error_type="stale", still_stale=True)
+        b.observe_transport_failure(
+            "A", error_type="stale", window_key=_next_key(), still_stale=True
+        )
         assert b.counts() == (2, 1, 1)  # storm unchanged, streak grew
         with pytest.raises(VendorDownError):
             _fail_n(b, 1, symbol="A")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Per-window dedupe — each window counts at most ONCE per pull
+# (the correctness-review MAJOR: retry passes / until-clean rounds / a resume
+# pull's failure-only streams re-observe the SAME sticky windows; without the
+# dedupe those re-observations accumulated a FALSE vendor-down storm)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestWindowDedup:
+    def test_same_window_reobserved_counts_once(self) -> None:
+        """A sticky window re-observed across passes/rounds counts exactly ONCE."""
+        b = _breaker(min_symbols=1, min_failures=3)
+        sticky = ("W", "NIFTY", "1day", "2020-01-01")
+        for _ in range(50):
+            b.observe_transport_failure("NIFTY", error_type="GrowwTimeoutError", window_key=sticky)
+        assert b.tripped is False
+        assert b.counts() == (1, 1, 0)  # one window, however often re-observed
+
+    def test_sticky_windows_below_floor_never_trip_across_rounds(self) -> None:
+        """The verified false-trip repro shape: 3 sticky symbols × 1 window each,
+        re-observed on every in-run pass and until-clean round (a failure-only
+        stream — settled healthy windows skip without observing success), maxes
+        out at 3 distinct windows forever — never 25."""
+        b = _breaker(min_symbols=3, min_failures=25)
+        keys = [("W", s, "1minute", "2020-01-01") for s in ("STUCK1", "STUCK2", "STUCK3")]
+        for _round in range(12):  # 12 failure-only re-observations of the same trio
+            for symbol, key in zip(("STUCK1", "STUCK2", "STUCK3"), keys, strict=True):
+                b.observe_transport_failure(symbol, error_type="GrowwTimeoutError", window_key=key)
+        assert b.tripped is False
+        assert b.counts() == (3, 3, 0)
+
+    def test_reobserved_window_after_success_reset_never_recounts(self) -> None:
+        """A success clears the storm but NOT the seen set: a pre-reset window
+        re-failing later is old evidence, never a fresh storm contribution."""
+        b = _breaker(min_symbols=1, min_failures=3)
+        keys = [("W", "A", "1day", f"2020-0{i}-01") for i in (1, 2)]
+        for key in keys:
+            b.observe_transport_failure("A", error_type="GrowwTimeoutError", window_key=key)
+        assert b.counts() == (2, 1, 0)
+        b.observe_success("B")  # storm cleared, seen set kept
+        for _ in range(10):  # the retry-round shape: the SAME windows re-fail
+            for key in keys:
+                b.observe_transport_failure("A", error_type="GrowwTimeoutError", window_key=key)
+        assert b.tripped is False
+        assert b.counts() == (0, 0, 0)  # nothing re-counted
+        # A genuinely FRESH window still counts normally after the reset.
+        b.observe_transport_failure("A", error_type="GrowwTimeoutError", window_key=_next_key())
+        assert b.counts() == (1, 1, 0)
+
+    def test_fresh_windows_still_trip_a_genuine_outage(self) -> None:
+        """The dedupe never blunts a real outage: distinct fresh windows trip."""
+        b = _breaker(min_symbols=3, min_failures=5)
+        _fail_n(b, 2, symbol="A")
+        _fail_n(b, 2, symbol="B")
+        with pytest.raises(VendorDownError):
+            _fail_n(b, 1, symbol="C")
+
+    def test_reobserved_window_still_breaks_stale_consecutiveness(self) -> None:
+        """An already-counted window's re-failure is CURRENT evidence for the
+        StillStale streak break, even though it never re-counts to the storm."""
+        b = _breaker(min_symbols=1, min_failures=100, streak=3, min_seconds=0.0)
+        sticky = ("W", "S", "1day", "2020-01-01")
+        b.observe_transport_failure("S", error_type="GrowwTimeoutError", window_key=sticky)
+        _stale_n(b, 2)
+        b.observe_transport_failure("S", error_type="GrowwTimeoutError", window_key=sticky)
+        _stale_n(b, 2)
+        assert b.tripped is False  # the streak never reached 3 consecutively
+        assert b.counts() == (1, 1, 2)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -230,7 +320,7 @@ class TestVendorDownRule:
 def _stale_n(breaker: ErrorStormBreaker, n: int, *, symbol: str = "S") -> None:
     for _ in range(n):
         breaker.observe_transport_failure(
-            symbol, error_type="GrowwTokenStillStaleError", still_stale=True
+            symbol, error_type="GrowwTokenStillStaleError", window_key=_next_key(), still_stale=True
         )
 
 
@@ -288,7 +378,9 @@ class TestCredentialDeadRule:
     def test_other_transport_failure_breaks_strict_consecutiveness(self) -> None:
         b = _breaker(streak=3, min_seconds=0.0, min_failures=100)
         _stale_n(b, 2)
-        b.observe_transport_failure("S", error_type="GrowwTimeoutError")  # breaks the run
+        b.observe_transport_failure(
+            "S", error_type="GrowwTimeoutError", window_key=_next_key()
+        )  # breaks the run
         _stale_n(b, 2)
         assert b.tripped is False
         assert b.counts()[2] == 2
@@ -298,7 +390,7 @@ class TestCredentialDeadRule:
         with pytest.raises(GrowwCredentialDeadError):
             _stale_n(b, 2)
         with pytest.raises(GrowwCredentialDeadError):
-            b.observe_transport_failure("T", error_type="GrowwTimeoutError")
+            b.observe_transport_failure("T", error_type="GrowwTimeoutError", window_key=_next_key())
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -357,7 +449,7 @@ class TestTripAlerts:
         monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
         b = ErrorStormBreaker(min_distinct_symbols=1, min_failed_windows=1)
         with pytest.raises(VendorDownError):
-            b.observe_transport_failure("A", error_type="GrowwTimeoutError")
+            b.observe_transport_failure("A", error_type="GrowwTimeoutError", window_key=_next_key())
         assert captured == [(1, 1)]
 
     def test_default_credential_alert_publishes_via_sweep_alerter(
@@ -375,7 +467,9 @@ class TestTripAlerts:
             credential_dead_streak=1, credential_dead_min_seconds=0.0, now=_Clock()
         )
         with pytest.raises(GrowwCredentialDeadError):
-            b.observe_transport_failure("A", error_type="stale", still_stale=True)
+            b.observe_transport_failure(
+                "A", error_type="stale", window_key=_next_key(), still_stale=True
+            )
         assert captured == ["GrowwCredentialDeadError"]
 
     def test_default_alert_swallows_its_own_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -388,11 +482,13 @@ class TestTripAlerts:
         monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _BoomAlerter)
         b = ErrorStormBreaker(min_distinct_symbols=1, min_failed_windows=1)
         with capture_logs() as logs, pytest.raises(VendorDownError):
-            b.observe_transport_failure("A", error_type="GrowwTimeoutError")
+            b.observe_transport_failure("A", error_type="GrowwTimeoutError", window_key=_next_key())
         assert any(e["event"] == "error_storm.vendor_down_alert_failed" for e in logs)
         b2 = ErrorStormBreaker(credential_dead_streak=1, credential_dead_min_seconds=0.0)
         with capture_logs() as logs, pytest.raises(GrowwCredentialDeadError):
-            b2.observe_transport_failure("A", error_type="stale", still_stale=True)
+            b2.observe_transport_failure(
+                "A", error_type="stale", window_key=_next_key(), still_stale=True
+            )
         assert any(e["event"] == "error_storm.credential_dead_alert_failed" for e in logs)
 
 
@@ -404,12 +500,14 @@ class TestTripAlerts:
 class TestGuardedSeams:
     def test_none_breaker_is_a_no_op(self) -> None:
         observe_window_success(None, symbol="A")
-        observe_window_failure(None, symbol="A", exc=GrowwTimeoutError("t"))
+        observe_window_failure(None, symbol="A", window_key=_next_key(), exc=GrowwTimeoutError("t"))
 
     def test_failure_seam_classifies_still_stale_by_isinstance(self) -> None:
         b = _breaker(streak=100, min_failures=100)
-        observe_window_failure(b, symbol="A", exc=GrowwTokenStillStaleError("stale"))
-        observe_window_failure(b, symbol="A", exc=GrowwServerError("500"))
+        observe_window_failure(
+            b, symbol="A", window_key=_next_key(), exc=GrowwTokenStillStaleError("stale")
+        )
+        observe_window_failure(b, symbol="A", window_key=_next_key(), exc=GrowwServerError("500"))
         # The StillStale fed the streak (then the 500 broke it) and only the 500
         # counted toward the storm — the isinstance routing worked.
         assert b.counts() == (1, 1, 0)
@@ -423,10 +521,14 @@ class TestGuardedSeams:
     def test_trips_propagate_through_the_failure_seam(self) -> None:
         b = _breaker(min_symbols=1, min_failures=1)
         with pytest.raises(VendorDownError):
-            observe_window_failure(b, symbol="A", exc=GrowwTimeoutError("t"))
+            observe_window_failure(
+                b, symbol="A", window_key=_next_key(), exc=GrowwTimeoutError("t")
+            )
         b2 = _breaker(streak=1, min_seconds=0.0)
         with pytest.raises(GrowwCredentialDeadError):
-            observe_window_failure(b2, symbol="A", exc=GrowwTokenStillStaleError("s"))
+            observe_window_failure(
+                b2, symbol="A", window_key=_next_key(), exc=GrowwTokenStillStaleError("s")
+            )
 
     def test_breaker_bug_never_crashes_a_pull(self) -> None:
         """An internal defect in either observation is swallowed + logged."""
@@ -436,14 +538,21 @@ class TestGuardedSeams:
                 raise RuntimeError("bug in success path")
 
             def observe_transport_failure(
-                self, symbol: str, *, error_type: str, still_stale: bool = False
+                self,
+                symbol: str,
+                *,
+                error_type: str,
+                window_key: Hashable,
+                still_stale: bool = False,
             ) -> None:
                 raise RuntimeError("bug in failure path")
 
         buggy = _BuggyBreaker()
         with capture_logs() as logs:
             observe_window_success(buggy, symbol="A")
-            observe_window_failure(buggy, symbol="A", exc=GrowwTimeoutError("t"))
+            observe_window_failure(
+                buggy, symbol="A", window_key=_next_key(), exc=GrowwTimeoutError("t")
+            )
         events = {e["event"] for e in logs}
         assert "error_storm.observe_success_failed" in events
         assert "error_storm.observe_failure_failed" in events
@@ -459,7 +568,9 @@ class TestGuardedSeams:
             barrier.wait()
             for _ in range(10):
                 try:
-                    b.observe_transport_failure(f"S{idx % 4}", error_type="t")
+                    b.observe_transport_failure(
+                        f"S{idx % 4}", error_type="t", window_key=_next_key()
+                    )
                 except VendorDownError as exc:
                     raises.append(exc)
 
@@ -502,7 +613,7 @@ def test_property_mixed_stream_with_frequent_successes_never_trips(
             b.observe_success(symbol)
             run = 0
         else:
-            b.observe_transport_failure(symbol, error_type="t")
+            b.observe_transport_failure(symbol, error_type="t", window_key=_next_key())
             run += 1
     assert b.tripped is False
 

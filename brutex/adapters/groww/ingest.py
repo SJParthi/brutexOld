@@ -843,13 +843,18 @@ def _fetch_window_raw(
                 # Vendor-down error-storm breaker + dead-credential StillStale escalation
                 # (DEC-VENDOR-DOWN-BREAKER-001): this window's whole bounded retry ladder
                 # (the client's max_attempts fast-retry) is exhausted — feed the per-pull
-                # breaker AFTER the ledger record (the window stays re-pullable). A
-                # sustained zero-success storm across distinct symbols RAISES
+                # breaker AFTER the ledger record (the window stays re-pullable). The
+                # ledger `key` is the window's stable identity, so a retry pass /
+                # until-clean round re-observing the SAME failed window never re-counts
+                # it (each distinct window counts once per pull). A sustained
+                # zero-success storm across distinct symbols + distinct windows RAISES
                 # VendorDownError here on the producer thread — a GLOBAL stop; K
                 # consecutive StillStale outcomes over T minutes RAISE
                 # GrowwCredentialDeadError (also a global stop). None (dry-run /
                 # synthetic / tests) observes nothing.
-                observe_window_failure(storm_breaker, symbol=instrument.symbol_name, exc=exc)
+                observe_window_failure(
+                    storm_breaker, symbol=instrument.symbol_name, window_key=key, exc=exc
+                )
                 return (
                     _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__),
                     None,

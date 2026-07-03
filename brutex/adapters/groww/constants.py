@@ -251,16 +251,25 @@ GROWW_WRITE_DEADLINE_S: Final[float] = 90.0
 #: span before the vendor-down breaker may trip. ONE symbol failing every window
 #: (a delisted / mis-addressed name) is a per-symbol problem — the quarantine
 #: handles it; a real vendor outage fails EVERY in-flight symbol alike, so 3 keeps
-#: a single-symbol blip from ever halting a pull. Heuristic; env-overridable
-#: (:data:`GROWW_STORM_MIN_SYMBOLS_ENV`).
+#: a single-symbol blip from ever halting a pull. The F&O spine feeds the
+#: contract's UNDERLYING symbol (not the per-strike contract symbol), so one
+#: underlying's whole multi-contract chain failing alone can never satisfy this
+#: floor either — the guarantee is per underlying on both spines. Heuristic;
+#: env-overridable (:data:`GROWW_STORM_MIN_SYMBOLS_ENV`).
 GROWW_STORM_MIN_DISTINCT_SYMBOLS: Final[int] = 3
 
-#: Minimum ladder-exhausted, zero-success transport-failure WINDOWS before the
-#: vendor-down breaker may trip. Each observation means one window's WHOLE bounded
-#: retry ladder was spent (the client's 6-attempt fast-retry — every attempt
-#: failing), so 25 all-failed windows with zero successes ≈ 150+ consecutive
-#: failed vendor calls — far past any blip the AIMD ladder absorbs, reached within
-#: seconds under a true outage at the production ceiling. ANY success resets the
+#: Minimum DISTINCT ladder-exhausted, zero-success transport-failure windows
+#: before the vendor-down breaker may trip. Each counted window means one window's
+#: WHOLE bounded retry ladder was spent (the client's 6-attempt fast-retry — every
+#: attempt failing), and each window counts at most ONCE per pull (dedupe on the
+#: ledger window identity — a retry pass / until-clean round / resume stream
+#: re-observing the SAME failed window never re-counts it, so a few sticky
+#: windows can never fake a storm), so 25 distinct all-failed windows with zero
+#: successes ≈ 150+ failed vendor calls — far past any blip the AIMD ladder
+#: absorbs. TIMING honesty (Golden Rule #10): reached within seconds under a
+#: FAST-FAIL outage shape (connection refused / instant 5xx) at the production
+#: ceiling; a read-timeout-shaped outage burns the full client timeout ladder per
+#: window, so the trip can take tens of minutes there. ANY success resets the
 #: count, so a mixed pull can never trip. Heuristic; env-overridable
 #: (:data:`GROWW_STORM_MIN_FAILURES_ENV`).
 GROWW_STORM_MIN_FAILED_WINDOWS: Final[int] = 25

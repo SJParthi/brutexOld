@@ -12,16 +12,24 @@ existing per-window retry machinery deliberately never escalates:
    observed across ``>=`` :data:`~brutex.adapters.groww.constants.\
 GROWW_STORM_MIN_DISTINCT_SYMBOLS` DISTINCT symbols AND ``>=``
    :data:`~brutex.adapters.groww.constants.GROWW_STORM_MIN_FAILED_WINDOWS`
-   all-failed windows with **ZERO successes** since the storm began is the
-   whole-vendor-outage shape — every remaining window would fail identically, so
-   burning the rest of the pull's fetches (and hours) against a down vendor is
+   DISTINCT all-failed windows with **ZERO successes** since the storm began is
+   the whole-vendor-outage shape — every remaining window would fail identically,
+   so burning the rest of the pull's fetches (and hours) against a down vendor is
    pure waste. The breaker raises :class:`VendorDownError` (a member of both
    spines' ``_GLOBAL_STOP_ERRORS``) → the pull HALTS gracefully, and a CRITICAL
    "VENDOR DOWN — WAIT" Telegram alert fires (best-effort). A clean
    vendor-confirmed EMPTY 200 is a SUCCESS here (the vendor answered — it is
    alive); ANY success fully resets the storm state, so a mixed
    success/failure pull can NEVER trip, and a single symbol's persistent
-   failures can never trip (the distinct-symbol floor).
+   failures can never trip (the distinct-symbol floor — the F&O spine feeds the
+   contract's UNDERLYING symbol, so one underlying's whole multi-contract chain
+   failing alone can never trip either). Each window is identified by its
+   *window_key* and counts toward the storm **at most ONCE per pull**: the spot
+   in-run retry passes, the until-clean rounds and a resume pull's re-observation
+   of the same sticky failed window never re-count it, so a handful of
+   persistently-failing windows can never accumulate a fake storm across
+   failure-only retry streams (settled windows skip without observing success —
+   the shape that previously false-tripped).
 2. **Dead-credential StillStale escalation.** ``>=``
    :data:`~brutex.adapters.groww.constants.GROWW_CREDENTIAL_DEAD_STREAK`
    CONSECUTIVE ladder-exhausted
@@ -55,10 +63,22 @@ outage or credential-death semantics — its published rate table covers only th
 Live Data group, ``docs/groww/api-reference/01-introduction.md:130-134``). The
 breaker cannot distinguish a vendor outage from a total local network outage (both
 halt with the same VENDOR-DOWN verdict — either way, waiting is the right action);
-a storm SMALLER than the floors (fewer symbols / windows) is absorbed by the
-existing per-window retry + across-pull re-pull, never halted. Every observation
-is O(1) lock-held counter work (the reset clears sets sized by the current streak
-— bounded by the pull's worklist, amortized O(1) per observation).
+a storm SMALLER than the floors (fewer symbols / distinct windows) is absorbed by
+the existing per-window retry + across-pull re-pull, never halted. A resume pull
+whose ONLY remaining un-settled work is ``>=`` the floors' worth of whole failing
+symbols still trips (zero successes THIS pull — indistinguishable from an outage
+without a success signal; the alert NAMES the symbols so the verdict is
+inspectable). TIMING: the window floor is crossed within seconds under a
+fast-fail outage shape (connection refused / instant 5xx) at the production
+ceiling, but a read-timeout-shaped outage burns the full client timeout ladder
+per window, so the trip can take tens of minutes there. A trip fires the
+breaker's SPECIFIC CRITICAL alert once at the transition; the propagated halt
+then ALSO fires the GENERIC pull-halt alert at the dashboard-job / CLI
+chokepoint (``pull_jobs.is_pull_halt`` / the CLI ``_pull_halt_errors``) — a
+DELIBERATE two-alert envelope (distinct dedupe keys: the specific verdict + the
+generic "the pull STOPPED"), both truthful. Every observation is O(1) lock-held
+counter/set work; the seen-window dedupe set grows monotonically, bounded by the
+pull's window worklist and released with the per-pull breaker instance.
 """
 
 from __future__ import annotations
@@ -66,7 +86,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -232,14 +252,24 @@ class ErrorStormBreaker:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     #: The latched trip rule (``""`` = not tripped) — once set it never clears.
     _trip_rule: str = field(default="", repr=False)
-    #: All-failed windows since the last success (vendor-down evidence).
+    #: DISTINCT all-failed windows since the last success (vendor-down evidence).
     _failed_windows: int = field(default=0, repr=False)
     #: Distinct symbols contributing to the current storm (cleared by any success).
     _failed_symbols: set[str] = field(default_factory=set, repr=False)
+    #: EVERY window key already counted THIS pull — the per-pull dedupe set. NEVER
+    #: cleared (not even by a success): a retry pass / until-clean round / resume
+    #: stream re-observing the SAME failed window must never re-count it, so a few
+    #: sticky windows cannot accumulate a fake storm across failure-only retry
+    #: streams. Grows monotonically, bounded by the pull's window worklist.
+    _seen_window_keys: set[Hashable] = field(default_factory=set, repr=False)
     #: Consecutive ladder-exhausted StillStale outcomes (zero successes between).
     _stale_streak: int = field(default=0, repr=False)
     #: Injected-clock instant of the streak's FIRST StillStale (``None`` = no streak).
     _stale_started: float | None = field(default=None, repr=False)
+    #: Streak span (seconds) FROZEN at the instant the time gate passed — the halt
+    #: message reads this, never the live clock, so the reported span is exactly
+    #: the gated span (and post-trip re-raises never inflate it).
+    _stale_elapsed_s: float = field(default=0.0, repr=False)
 
     @property
     def tripped(self) -> bool:
@@ -265,8 +295,13 @@ class ErrorStormBreaker:
         200 — either way the vendor is ALIVE) after the window's ladder, so any
         in-progress storm was a blip: the vendor-down counters AND the StillStale
         streak (an adopted-token success proves the credential works) both reset.
-        A latched trip is NEVER un-latched (the halt already propagated; a stray
-        late success from an in-flight sibling worker must not mask it).
+        The per-pull ``_seen_window_keys`` dedupe set is deliberately KEPT — an
+        already-counted window that keeps failing after the reset is old evidence,
+        never a fresh storm contribution. A latched trip is NEVER un-latched (the
+        halt already propagated; a stray late success from an in-flight sibling
+        worker must not mask it). *symbol* is unused by the reset itself (both
+        resets are pull-wide by design) and kept for seam-signature symmetry with
+        :meth:`observe_transport_failure`.
         """
         if not self.enabled:
             return
@@ -279,22 +314,29 @@ class ErrorStormBreaker:
             self._stale_started = None
 
     def observe_transport_failure(
-        self, symbol: str, *, error_type: str, still_stale: bool = False
+        self, symbol: str, *, error_type: str, window_key: Hashable, still_stale: bool = False
     ) -> None:
         """Record a LADDER-EXHAUSTED transport failure; RAISE on/after a trip — O(1).
 
-        *still_stale* routes the observation: a
+        *window_key* is the window's stable identity (the spines pass the ledger
+        :class:`~brutex.data.fetch_coverage.WindowKey`): a window counts toward
+        the vendor-down storm at most ONCE per pull, however many retry passes /
+        until-clean rounds re-observe its failure — so a few sticky windows can
+        never accumulate a fake storm across failure-only retry streams, while a
+        genuine outage still crosses the floor on FRESH windows within its first
+        pass. *still_stale* routes the observation: a
         :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` outcome
         extends the dead-credential streak (it is OUR credential, not vendor
-        evidence — it neither counts toward nor resets the vendor-down storm),
-        while any other transport failure counts toward the vendor-down storm AND
-        breaks the strict StillStale consecutiveness. The moment either rule
-        crosses, the matching global-stop error is built under the lock, the
-        CRITICAL alert hook fires ONCE (outside the lock, exception-guarded), and
-        the error is raised OUTSIDE the lock. An already-tripped breaker keeps
-        raising its latched rule's error on EVERY further failure observation so
-        every in-flight worker stops promptly (the raise is the mechanism — the
-        spines cannot forget the halt).
+        evidence — it neither counts toward nor resets the vendor-down storm, and
+        it never marks the window seen), while any other transport failure counts
+        toward the vendor-down storm AND breaks the strict StillStale
+        consecutiveness. The moment either rule crosses, the matching global-stop
+        error is built under the lock, the CRITICAL alert hook fires ONCE
+        (outside the lock, exception-guarded), and the error is raised OUTSIDE
+        the lock. An already-tripped breaker keeps raising its latched rule's
+        error on EVERY further failure observation so every in-flight worker
+        stops promptly (the raise is the mechanism — the spines cannot forget
+        the halt).
         """
         if not self.enabled:
             return
@@ -313,14 +355,21 @@ class ErrorStormBreaker:
                 else:
                     # A non-StillStale transport failure breaks the STRICT
                     # StillStale consecutiveness (rule 2 wants an uninterrupted
-                    # auth-stall signature, never a mixed outage).
+                    # auth-stall signature, never a mixed outage) — even when the
+                    # window itself was already counted (the break is CURRENT
+                    # evidence; the count dedupe is not).
                     self._stale_streak = 0
                     self._stale_started = None
-                    self._failed_windows += 1
-                    self._failed_symbols.add(symbol)
-                    if self._vendor_down_locked():
-                        self._trip_rule = _RULE_VENDOR_DOWN
-                        fresh_trip = True
+                    if window_key not in self._seen_window_keys:
+                        # Count each DISTINCT window once per pull: symbol + window
+                        # move together, so the storm's symbol set stays exactly
+                        # the symbols of its counted windows (message honesty).
+                        self._seen_window_keys.add(window_key)
+                        self._failed_windows += 1
+                        self._failed_symbols.add(symbol)
+                        if self._vendor_down_locked():
+                            self._trip_rule = _RULE_VENDOR_DOWN
+                            fresh_trip = True
             if self._trip_rule == _RULE_VENDOR_DOWN:
                 vendor_halt = VendorDownError(
                     failed_windows=self._failed_windows,
@@ -354,24 +403,32 @@ class ErrorStormBreaker:
         """Evaluate the dead-credential rule under the lock — O(1).
 
         ``credential_dead_streak <= 0`` disables the rule; the time gate reads the
-        INJECTED clock only (deterministic in tests); a negative configured span
-        clamps to 0 (pure streak).
+        INJECTED clock ONCE (deterministic in tests) and — when the gate passes —
+        FREEZES the gated span into ``_stale_elapsed_s`` so the halt message
+        reports exactly the span that satisfied the gate (never a later clock
+        read); a negative configured span clamps to 0 (pure streak).
         """
         if not 0 < self.credential_dead_streak <= self._stale_streak:
             return False
         started = self._stale_started
         if started is None:  # pragma: no cover — a positive streak always stamps its start
             return False
-        return self.now() - started >= max(0.0, self.credential_dead_min_seconds)
+        elapsed_s = self.now() - started
+        if elapsed_s >= max(0.0, self.credential_dead_min_seconds):
+            self._stale_elapsed_s = max(0.0, elapsed_s)
+            return True
+        return False
 
     def _credential_dead_error_locked(self) -> GrowwCredentialDeadError:
-        """Build the escalated credential-dead error from the locked streak state — O(1)."""
-        started = self._stale_started
-        elapsed_s = 0.0 if started is None else max(0.0, self.now() - started)
+        """Build the escalated credential-dead error from the locked streak state — O(1).
+
+        Reads the span FROZEN at the trip's gate check (``_stale_elapsed_s``) —
+        never the live clock — so every post-trip re-raise reports the SAME span.
+        """
         return GrowwCredentialDeadError(
             "OUR CREDENTIAL / token-broker Lambda looks DEAD — OPERATOR ACTION NEEDED: "
             f"{self._stale_streak} consecutive StillStale re-reads over "
-            f"{elapsed_s / 60.0:.1f} min with ZERO adopted-token successes. The re-read "
+            f"{self._stale_elapsed_s / 60.0:.1f} min with ZERO adopted-token successes. The re-read "
             "keeps returning the same dead token, so every remaining window would fail "
             "identically. The pull HALTED gracefully — re-provision the API key / TOTP "
             "secret or fix the token-broker Lambda, then re-run (the durable ledger + "
@@ -413,12 +470,17 @@ def observe_window_success(breaker: ErrorStormBreaker | None, *, symbol: str) ->
 
 
 def observe_window_failure(
-    breaker: ErrorStormBreaker | None, *, symbol: str, exc: BaseException
+    breaker: ErrorStormBreaker | None, *, symbol: str, window_key: Hashable, exc: BaseException
 ) -> None:
     """The COMMON failure-observation seam BOTH spines call — None-safe, trip-propagating.
 
     Classifies *exc* (a ladder-exhausted retryable transport error) into the
-    StillStale streak vs the vendor-down storm and feeds the breaker. A TRIP
+    StillStale streak vs the vendor-down storm and feeds the breaker. *symbol* is
+    the storm's distinct-symbol unit (the spot spine passes the instrument's
+    ``symbol_name``; the F&O spine passes the contract's **underlying** symbol so
+    one underlying's whole chain reads as ONE symbol); *window_key* is the
+    window's stable identity (the ledger :class:`~brutex.data.fetch_coverage.\
+WindowKey`) — each window counts at most ONCE per pull. A TRIP
     (:class:`VendorDownError` / :class:`~brutex.adapters.groww.errors.\
 GrowwCredentialDeadError`) PROPAGATES — it is the global stop, the whole point —
     while any other internal breaker bug is swallowed + logged so a defect here can
@@ -430,6 +492,7 @@ GrowwCredentialDeadError`) PROPAGATES — it is the global stop, the whole point
         breaker.observe_transport_failure(
             symbol,
             error_type=type(exc).__name__,
+            window_key=window_key,
             still_stale=isinstance(exc, GrowwTokenStillStaleError),
         )
     except (VendorDownError, GrowwCredentialDeadError):

@@ -7,9 +7,17 @@ its alert hooks wired through the REAL ``SweepAlerter`` methods into a recording
 fake notifier:
 
 * FAKE VENDOR DOWN — every fetch raises a retryable transport error across ≥ 3
-  distinct symbols with ZERO successes → exactly ONE graceful
-  :class:`VendorDownError` halt + exactly ONE CRITICAL ``vendor_down`` Telegram
-  alert; and a MIXED success/failure pull does NOT halt (zero alerts).
+  distinct symbols AND ≥ 25 DISTINCT windows with ZERO successes → exactly ONE
+  graceful :class:`VendorDownError` halt + exactly ONE CRITICAL ``vendor_down``
+  Telegram alert; a MIXED success/failure pull does NOT halt (zero alerts) even
+  across until-clean retry rounds; and the false-trip repro of the hostile
+  review — sticky symbols whose SAME failed windows are re-observed on every
+  in-run pass + retry round while ledger-settled healthy windows skip silently —
+  NEVER trips (the per-window dedupe: each window counts at most once per pull).
+* F&O GRANULARITY — the options spine feeds the UNDERLYING symbol, so ONE
+  underlying's whole multi-contract chain failing alone can never satisfy the
+  ≥ 3-distinct-symbols floor (the halt-integration review MAJOR); a storm across
+  3 underlyings' chains still trips.
 * FAKE DEAD BROKER — every fetch raises
   :class:`GrowwTokenStillStaleError` with zero adopted-token successes → the
   streak escalates (K consecutive over ≥ T minutes on an INJECTED clock) to
@@ -18,9 +26,11 @@ fake notifier:
   streak (no halt, no alert).
 
 Fail-before/pass-after: with the spine ``observe_window_failure`` wiring stubbed
-out (verified during development by neutering the two spine call sites), the two
-halt tests FAIL with ``DID NOT RAISE`` — the wiring, not the breaker alone, is
-what these tests pin.
+out (verified during development by neutering the two spine call sites), all
+THREE halt tests FAIL with ``DID NOT RAISE``; with the spot
+``observe_window_success`` reset neutered OR the per-window dedupe removed, the
+mixed-pull test trips a false halt and FAILS — the wiring + the reset + the
+dedupe, not the breaker alone, are what these tests pin.
 """
 
 from __future__ import annotations
@@ -38,10 +48,11 @@ from brutex.adapters.groww.errors import (
     GrowwTokenStillStaleError,
 )
 from brutex.adapters.groww.option_ingest import run_groww_option_ingest
-from brutex.adapters.groww.run_ingest import run_groww_spot_ingest
+from brutex.adapters.groww.run_ingest import run_groww_spot_ingest, run_groww_spot_ingest_with_retry
 from brutex.adapters.protocol import DerivativeContract
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
+from brutex.data.window_ledger import WindowLedger
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.notifications.sweep_alerts import SweepAlerter, escape_markdown_v2
 from brutex.notifications.telegram import TelegramEvent, TelegramEventKind, TelegramSeverity
@@ -124,18 +135,18 @@ class _VendorDownAdapter:
 
 
 class _MixedAdapter:
-    """Fake spot MarketAdapter — one healthy symbol, every other symbol failing."""
+    """Fake spot MarketAdapter — the *sticky* symbols always fail, the rest succeed."""
 
-    def __init__(self, healthy: str) -> None:
-        self._healthy = healthy
+    def __init__(self, sticky: frozenset[str]) -> None:
+        self._sticky = sticky
 
     def fetch_ohlcv(
         self, *, symbol: str, exchange: object, interval: str, start: date, end: date
     ) -> list[CandleBar]:
         del exchange, interval, start, end
-        if symbol == self._healthy:
-            return [_bar()]
-        raise GrowwTimeoutError("read timeout")
+        if symbol in self._sticky:
+            raise GrowwTimeoutError("read timeout")
+        return [_bar()]
 
 
 _OPTION_PAYLOAD: Mapping[str, object] = {
@@ -162,11 +173,11 @@ class _StillStaleClient:
         raise GrowwTokenStillStaleError("re-read returned the SAME dead token")
 
 
-def _ce(strike: int) -> DerivativeContract:
+def _ce(strike: int, *, underlying: str = "NIFTY") -> DerivativeContract:
     return DerivativeContract(
-        underlying_symbol="NIFTY",
+        underlying_symbol=underlying,
         expiry=date(2025, 1, 2),
-        symbol=f"NSE-NIFTY-02Jan25-{strike}-CE",
+        symbol=f"NSE-{underlying}-02Jan25-{strike}-CE",
         contract_type="CE",
         strike=float(strike),
     )
@@ -242,9 +253,10 @@ class TestSpotVendorDownE2E:
     def test_sustained_storm_halts_once_with_one_critical_alert(self) -> None:
         """3 symbols × every window failing, zero successes → ONE graceful halt + ONE alert.
 
-        PRODUCTION thresholds (25 windows / 3 distinct symbols): each symbol's
-        1-day 2020→2023 range tiles to 7 windows × 3 passes = 21 ladder-exhausted
-        failures, so the storm crosses BOTH floors on the third symbol — the halt
+        PRODUCTION thresholds (25 DISTINCT windows / 3 distinct symbols): each
+        symbol's 1-day 2020→2024 range tiles to 9 DISTINCT windows (the in-run
+        retry passes re-observe them but never re-count — the per-window dedupe),
+        so the storm crosses BOTH floors on the third symbol's windows — the halt
         must propagate out of ``run_groww_spot_ingest`` as the global stop (never
         a per-symbol quarantine), exactly once.
         """
@@ -258,12 +270,12 @@ class TestSpotVendorDownE2E:
                 instruments=[_inst("NIFTY"), _inst("BANKNIFTY"), _inst("SENSEX")],
                 intervals=["1day"],
                 start=date(2020, 1, 1),
-                end=date(2023, 1, 1),
+                end=date(2024, 1, 1),
                 run_parallel=SerialRunParallel(),
                 storm_breaker=breaker,
             )
         assert exc_info.value.distinct_symbols == 3
-        assert exc_info.value.failed_windows >= 25
+        assert exc_info.value.failed_windows == 25  # DISTINCT windows, exact floor
         assert breaker.trip_rule == "vendor_down"
         # Exactly ONE CRITICAL vendor-down Telegram alert, with the WAIT wording.
         assert len(notifier.published) == 1
@@ -275,31 +287,75 @@ class TestSpotVendorDownE2E:
         assert escape_markdown_v2("WAIT") in ev.message
 
     def test_mixed_success_failure_pull_never_halts(self) -> None:
-        """One healthy symbol between two failing ones → NO halt, NO alert.
+        """3 whole failing symbols + 1 healthy, through the FULL retry rounds → NO halt.
 
-        The healthy symbol's clean windows reset the storm between the failing
-        symbols' runs, and each failing symbol alone can never satisfy the
-        distinct-symbol floor — the pull completes with an honest transient
-        residual (re-pulled next round), never a vendor-down verdict.
+        This is the load-bearing mixed-pull pin (coverage-review MAJOR-1 folded):
+        WITHOUT the spot success reset the 3 failing symbols' 27 distinct windows
+        (9 each) cross BOTH production floors in round 1 and the test FAILS with a
+        false halt; WITH the reset the post-success storm remainder is 18 windows /
+        2 symbols (below the 3-symbol floor). And WITHOUT the per-window dedupe the
+        until-clean retry rounds — failure-only streams re-observing the SAME
+        windows — would re-accumulate a false storm in round 2; WITH it, nothing
+        re-counts. Both mutations verified to fail this test.
         """
         notifier = _FakeNotifier()
         breaker = _armed_breaker(notifier)
         sink = _Sink()
-        report = run_groww_spot_ingest(
-            _MixedAdapter(healthy="BANKNIFTY"),  # type: ignore[arg-type]
+        result = run_groww_spot_ingest_with_retry(
+            _MixedAdapter(sticky=frozenset({"NIFTY", "SENSEX", "FINNIFTY"})),  # type: ignore[arg-type]
             sink,  # type: ignore[arg-type]
-            instruments=[_inst("NIFTY"), _inst("BANKNIFTY"), _inst("SENSEX")],
+            instruments=[
+                _inst("NIFTY"),
+                _inst("BANKNIFTY"),  # healthy — its successes reset the storm
+                _inst("SENSEX"),
+                _inst("FINNIFTY"),
+            ],
             intervals=["1day"],
             start=date(2020, 1, 1),
-            end=date(2023, 1, 1),
+            end=date(2024, 1, 1),
             run_parallel=SerialRunParallel(),
+            retry_backoff=lambda _i: None,
             storm_breaker=breaker,
         )
         assert breaker.tripped is False
         assert notifier.published == []  # zero alerts
-        assert report.still_failed_windows > 0  # the honest transient residual
-        assert report.failed_pairs == 0  # transients, never terminal quarantines
+        assert result.report.still_failed_windows > 0  # the honest transient residual
+        assert result.report.failed_pairs == 0  # transients, never terminal quarantines
         assert sum(sink.appends) > 0  # the healthy symbol's bars landed
+
+    def test_sticky_windows_resume_pull_never_halts(self) -> None:
+        """The hostile-review FALSE-TRIP repro, fixed: 3 sticky symbols, 1 window each.
+
+        20 healthy symbols pull clean; 3 sticky symbols each have ONE persistently
+        timing-out window. The shared ledger settles the healthy windows, so every
+        in-run pass + until-clean retry round is a FAILURE-ONLY stream re-observing
+        the SAME 3 windows. Pre-fix the observation counting reached 25 (3 windows ×
+        passes × rounds) and false-tripped "VENDOR DOWN … ZERO successes" on a pull
+        where 20 symbols succeeded moments earlier; post-fix the per-window dedupe
+        caps the storm at 3 distinct windows FOREVER — never a halt, never an alert.
+        """
+        notifier = _FakeNotifier()
+        breaker = _armed_breaker(notifier)
+        sink = _Sink()
+        sticky = frozenset({"STUCK1", "STUCK2", "STUCK3"})
+        instruments = [_inst(f"OK{i:02d}") for i in range(20)] + [_inst(s) for s in sorted(sticky)]
+        result = run_groww_spot_ingest_with_retry(
+            _MixedAdapter(sticky=sticky),  # type: ignore[arg-type]
+            sink,  # type: ignore[arg-type]
+            instruments=instruments,
+            intervals=["1day"],
+            start=date(2020, 11, 1),
+            end=date(2021, 4, 1),  # 151 days → ONE 1-day window per symbol
+            ledger=WindowLedger(),  # settled healthy windows SKIP on retry rounds
+            run_parallel=SerialRunParallel(),
+            retry_backoff=lambda _i: None,
+            storm_breaker=breaker,
+        )
+        assert breaker.tripped is False
+        assert notifier.published == []  # zero alerts — the false trip is gone
+        assert breaker.counts()[0] <= 3  # the 3 sticky windows, counted once each
+        assert result.report.failed_pairs == 0
+        assert sum(sink.appends) == 20  # every healthy symbol's bars landed
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -320,12 +376,22 @@ class _TimeoutClient:
 
 
 class TestOptionVendorDownE2E:
-    def test_sustained_storm_across_contracts_halts_with_one_alert(self) -> None:
-        """25+ contracts all transport-failing → ONE VendorDownError + ONE alert."""
+    def test_sustained_storm_across_underlyings_halts_with_one_alert(self) -> None:
+        """3 underlyings' chains all transport-failing → ONE VendorDownError + ONE alert.
+
+        30 contracts across 3 UNDERLYINGS (10 each) = 30 distinct contract windows
+        ≥ the 25-window floor AND 3 distinct symbols (the storm's F&O symbol unit
+        is the UNDERLYING) — the genuine-outage shape still trips at production
+        thresholds after the underlying-granularity fix.
+        """
         notifier = _FakeNotifier()
         breaker = _armed_breaker(notifier)
-        contracts = [_ce(20000 + 100 * i) for i in range(30)]
-        with pytest.raises(VendorDownError):
+        contracts = [
+            _ce(20000 + 100 * i, underlying=u)
+            for u in ("NIFTY", "BANKNIFTY", "FINNIFTY")
+            for i in range(10)
+        ]
+        with pytest.raises(VendorDownError) as exc_info:
             run_groww_option_ingest(
                 _TimeoutClient(),  # type: ignore[arg-type]
                 _Sink(),  # type: ignore[arg-type]
@@ -337,9 +403,38 @@ class TestOptionVendorDownE2E:
                 now_ist=_now,
                 storm_breaker=breaker,
             )
+        assert exc_info.value.distinct_symbols == 3  # underlyings, not contracts
         assert breaker.trip_rule == "vendor_down"
         assert len(notifier.published) == 1
         assert notifier.published[0].dedupe_key == "vendor-down"
+
+    def test_single_underlying_chain_failing_alone_never_trips(self) -> None:
+        """ONE underlying's whole 30-contract chain failing → NO halt, NO alert.
+
+        The halt-integration review MAJOR, fixed: the F&O spine feeds the
+        contract's UNDERLYING symbol, so a per-underlying persistent retryable
+        failure (the M&M-``&`` / BAJAJ-AUTO shape) reads as ONE distinct symbol —
+        below the 3-symbol floor — and stays on the honest per-window transient
+        path (re-pulled next run) instead of faking a pull-wide VENDOR DOWN.
+        """
+        notifier = _FakeNotifier()
+        breaker = _armed_breaker(notifier)
+        contracts = [_ce(20000 + 100 * i) for i in range(30)]  # all NIFTY
+        report = run_groww_option_ingest(
+            _TimeoutClient(),  # type: ignore[arg-type]
+            _Sink(),  # type: ignore[arg-type]
+            contracts=contracts,
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 10),
+            max_attempts=0,
+            now_ist=_now,
+            storm_breaker=breaker,
+        )
+        assert breaker.tripped is False
+        assert notifier.published == []  # zero alerts
+        assert breaker.counts() == (30, 1, 0)  # 30 windows but ONE distinct symbol
+        assert report.still_failed_windows == 30  # every window stays re-pullable
 
 
 # ────────────────────────────────────────────────────────────────────────

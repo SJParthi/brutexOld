@@ -494,13 +494,23 @@ def ingest_option_contract(
                     # Vendor-down error-storm breaker + dead-credential StillStale
                     # escalation (DEC-VENDOR-DOWN-BREAKER-001): this window's bounded
                     # transient-retry ladder is EXHAUSTED — feed the per-pull breaker
-                    # AFTER the ledger record above (the window stays re-pullable). A
-                    # sustained zero-success storm across distinct contracts RAISES
+                    # AFTER the ledger record above (the window stays re-pullable). The
+                    # storm's distinct-symbol unit is the UNDERLYING symbol — one
+                    # underlying's whole multi-contract chain failing alone can never
+                    # satisfy the >=3-distinct-symbols floor (the constants.py
+                    # guarantee) — while the window identity stays the CONTRACT-level
+                    # ledger `key`, so each contract window counts once per pull. A
+                    # sustained zero-success storm across distinct underlyings RAISES
                     # VendorDownError; K consecutive StillStale outcomes over T minutes
                     # RAISE GrowwCredentialDeadError — both _GLOBAL_STOP_ERRORS members,
                     # so the driver halts the pull instead of quarantining per contract.
                     # None (dry-run / synthetic / tests) observes nothing.
-                    observe_window_failure(storm_breaker, symbol=contract.symbol, exc=exc)
+                    observe_window_failure(
+                        storm_breaker,
+                        symbol=contract.underlying_symbol,
+                        window_key=key,
+                        exc=exc,
+                    )
                     # Budget spent — leave the window UNMARKED-as-success (deferred).
                     return IngestReport(
                         windows=1,
@@ -541,7 +551,8 @@ def ingest_option_contract(
     # bars OR a vendor-confirmed empty 200 — is a transport SUCCESS (the vendor answered:
     # it is ALIVE), so it resets BOTH the vendor-down storm and the StillStale streak.
     # Observed before the mass-EMPTY breaker feed (a separate, content-level verdict).
-    observe_window_success(storm_breaker, symbol=contract.symbol)
+    # The UNDERLYING symbol mirrors the failure seam (the storm's per-underlying unit).
+    observe_window_success(storm_breaker, symbol=contract.underlying_symbol)
     if empty_breaker is not None:
         series = f"{contract.symbol}:{interval}"
         if raw_bars:

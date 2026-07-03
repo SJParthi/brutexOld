@@ -1225,6 +1225,66 @@ def test_cmd_fetch_alerts_then_reraises_on_lake_write_halt(
     assert halts[0].reason == "disk_full"
 
 
+def _breaker_halts() -> list[Exception]:
+    """The DEC-VENDOR-DOWN-BREAKER-001 global stops the CLI halt tuple must match."""
+    from brutex.adapters.error_storm_breaker import VendorDownError
+    from brutex.adapters.groww.errors import GrowwCredentialDeadError
+
+    return [VendorDownError("vendor down"), GrowwCredentialDeadError("credential dead")]
+
+
+@pytest.mark.parametrize("halt", _breaker_halts(), ids=lambda e: type(e).__name__)
+def test_cmd_fetch_alerts_then_reraises_on_breaker_trips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, halt: Exception
+) -> None:
+    """The two DEC-VENDOR-DOWN-BREAKER-001 trips ride the SAME CLI halt path.
+
+    The behavioral ``_pull_halt_errors`` membership pin the 4-agent hostile
+    review found missing: a mutation deleting ``VendorDownError`` /
+    ``GrowwCredentialDeadError`` from the CLI's hand-mirrored halt tuple would
+    previously pass the whole suite — the trip would then propagate WITHOUT the
+    generic CRITICAL pull-halt Telegram alert. Same fakes-only harness as the
+    ``LakeWriteHalt`` twin above.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+
+    def fake_ingest(*_a: Any, **_k: Any) -> Any:
+        """Simulate the breaker's global stop propagating out of the spine."""
+        raise halt
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+    halts: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", halts.append)
+
+    with pytest.raises(type(halt)):
+        cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=False,
+            rows_per_chunk=5,
+        )
+    # The alert fired exactly once with the propagating trip, then it re-raised.
+    assert halts == [halt]
+
+
 def test_emit_pull_halt_alert_surfaces_lake_write_halt_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
