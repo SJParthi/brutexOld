@@ -737,10 +737,12 @@ class TestLockboxTrainingSplit:
             take_profit_paisa=50,
         )
         expected = tuple(sorted(t.exit_ts.astimezone(IST).date().toordinal() for t in trades))
-        assert cand.lockbox_trade_days == expected
-        assert len(cand.lockbox_trade_days) == cand.total_trades > 0
+        trade_days = cand.lockbox_trade_days
+        assert trade_days is not None  # narrows tuple[int, ...] | None for pyright
+        assert trade_days == expected
+        assert len(trade_days) == cand.total_trades > 0
         day_ordinals = [b.timestamp.astimezone(IST).date().toordinal() for b in bars]
-        assert all(day_ordinals[0] <= d <= day_ordinals[-1] for d in cand.lockbox_trade_days)
+        assert all(day_ordinals[0] <= d <= day_ordinals[-1] for d in trade_days)
 
     def test_degenerate_complement_falls_back_to_full_series_loudly(self) -> None:
         # Review A3: a single-session slice puts EVERY trade inside the lockbox
