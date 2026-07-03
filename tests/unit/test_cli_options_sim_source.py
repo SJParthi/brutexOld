@@ -514,3 +514,246 @@ class TestExpirySeriesSelection:
             )
         assert bar is None
         assert any(log["event"] == "options_sim.ambiguous_option_rows" for log in logs)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Hostile-review MINOR (DEC-OPTIONS-EXEC-COST-AUDIT-R2-001): the ambiguity
+# key uses PRICING columns only — nullable annotation drift never rejects
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestAliasedAnnotationDrift:
+    """Aliased series that AGREE on pricing but drift on spot/iv annotations.
+
+    Pre-fix, ``_OPTION_VALUE_COLUMNS`` folded the nullable ``spot``/``iv``
+    annotation columns (+ the constant ``strike``) into the ambiguity key, so
+    a monthly-that-is-also-weekly pair with identical OHLCV but per-pull
+    annotation drift (one series captured spot, the other stored None) was
+    over-rejected as ambiguous → NO_DATA, silently dropping a priceable trade.
+    """
+
+    # Jan-30 2025 is BOTH the near weekly (from Jan-27) and the monthly.
+    _ALIAS_ENTRY = datetime(2025, 1, 27, 9, 16, tzinfo=_IST)
+    _ALIAS_EXIT = datetime(2025, 1, 27, 15, 20, tzinfo=_IST)
+
+    def test_regression_annotation_drift_prices_normally(self, tmp_path: Path) -> None:
+        """THE fix regression — FAILS on the pre-fix annotation-keyed reader.
+
+        Identical OHLCV under both aliased series; the monthly rows carry
+        spot/iv, the weekly rows None. The pair must price normally (same
+        physical contract), silently — no ambiguity WARN, no duplicates WARN
+        (two DISTINCT series keys → dropped == 0).
+        """
+        from brutex.data.lake_read import DUPLICATES_DROPPED_EVENT
+        from structlog.testing import capture_logs
+
+        _write_series(
+            tmp_path,
+            _EXPIRY_FLAG_WEEKLY,
+            0,
+            [_bar(self._ALIAS_ENTRY, "180.00"), _bar(self._ALIAS_EXIT, "190.00")],
+        )
+        _write_series(
+            tmp_path,
+            _EXPIRY_FLAG_MONTHLY,
+            0,
+            [
+                _bar(
+                    self._ALIAS_ENTRY,
+                    "180.00",
+                    spot=Decimal("24010.55"),
+                    iv=Decimal("0.1523"),
+                ),
+                _bar(self._ALIAS_EXIT, "190.00", spot=Decimal("24020.10")),
+            ],
+        )
+        with capture_logs() as logs:
+            pair = _load(tmp_path, _MONTHLY_EXPIRY, entry=self._ALIAS_ENTRY, exit_=self._ALIAS_EXIT)
+        assert pair is not None
+        assert pair.entry_bar.open == Decimal("180.00")  # type: ignore[attr-defined]
+        assert pair.exit_bar.open == Decimal("190.00")  # type: ignore[attr-defined]
+        # The aliased-agreeing pair prices SILENTLY (no ambiguity, no dedup WARN).
+        assert not any(log["event"] == "options_sim.ambiguous_option_rows" for log in logs)
+        assert not any(log["event"] == DUPLICATES_DROPPED_EVENT for log in logs)
+
+    def test_most_annotated_agreeing_survivor_is_kept(self, tmp_path: Path) -> None:
+        # Among price-agreeing survivors the reader keeps the MOST-annotated
+        # row (non-None spot/iv), deterministically — never an arbitrary
+        # glob-order row(0) that could drop the annotations.
+        _write_series(
+            tmp_path,
+            _EXPIRY_FLAG_WEEKLY,
+            0,
+            [_bar(self._ALIAS_ENTRY, "180.00"), _bar(self._ALIAS_EXIT, "190.00")],
+        )
+        _write_series(
+            tmp_path,
+            _EXPIRY_FLAG_MONTHLY,
+            0,
+            [
+                _bar(
+                    self._ALIAS_ENTRY,
+                    "180.00",
+                    spot=Decimal("24010.55"),
+                    iv=Decimal("0.1523"),
+                ),
+                _bar(self._ALIAS_EXIT, "190.00"),
+            ],
+        )
+        pair = _load(tmp_path, _MONTHLY_EXPIRY, entry=self._ALIAS_ENTRY, exit_=self._ALIAS_EXIT)
+        assert pair is not None
+        assert pair.entry_bar.spot == Decimal("24010.55")  # type: ignore[attr-defined]
+        assert pair.entry_bar.iv == Decimal("0.1523")  # type: ignore[attr-defined]
+
+    def test_end_to_end_annotation_drift_materializes(self, tmp_path: Path) -> None:
+        # Through the REAL executor: the annotation-drifted aliased pair is a
+        # MaterializedTrade (pre-fix: RejectedTrade NO_DATA).
+        _write_series(
+            tmp_path,
+            _EXPIRY_FLAG_WEEKLY,
+            0,
+            [_bar(self._ALIAS_ENTRY, "180.00"), _bar(self._ALIAS_EXIT, "190.00")],
+        )
+        _write_series(
+            tmp_path,
+            _EXPIRY_FLAG_MONTHLY,
+            0,
+            [
+                _bar(self._ALIAS_ENTRY, "180.00", spot=Decimal("24010.55")),
+                _bar(self._ALIAS_EXIT, "190.00"),
+            ],
+        )
+        out = materialize_trade(
+            _signal(_MONTHLY_EXPIRY, entry=self._ALIAS_ENTRY, exit_=self._ALIAS_EXIT),
+            RULES_BY_NAME["atm"],
+            source=_LakeOptionBarSource(lake_root=tmp_path),
+        )
+        assert isinstance(out, MaterializedTrade)
+        assert out.entry_open_paisa == 18000
+
+    def test_close_only_disagreement_is_still_ambiguous_none(self) -> None:
+        # The narrowed key still has TEETH: two aliased rows agreeing on
+        # open/high/low/volume (and every annotation) but differing on CLOSE
+        # alone are a genuine pricing ambiguity → honest None + the WARN.
+        from structlog.testing import capture_logs
+
+        naive_ts = datetime(2025, 1, 27, 3, 46)  # naive == already-UTC wall time
+
+        def _row(flag: str, close: float) -> pl.DataFrame:
+            return pl.DataFrame(
+                {
+                    "expiry_flag": [flag],
+                    "expiry_code": [0],
+                    "timestamp": [naive_ts],
+                    "open": [180.0],
+                    "high": [182.0],
+                    "low": [178.0],
+                    "close": [close],
+                    "volume": [10],
+                    "open_interest": [1000],
+                    "strike": [24000.0],
+                    "spot": [None],
+                    "iv": [None],
+                }
+            ).with_columns(
+                pl.col("open_interest").cast(pl.Int64),
+                pl.col("spot").cast(pl.Float64),
+                pl.col("iv").cast(pl.Float64),
+            )
+
+        df = pl.concat([_row(_EXPIRY_FLAG_WEEKLY, 180.0), _row(_EXPIRY_FLAG_MONTHLY, 181.0)])
+        with capture_logs() as logs:
+            bar = _LakeOptionBarSource._row_at(
+                df,
+                naive_ts,
+                "CE",
+                series=((_EXPIRY_FLAG_WEEKLY, 0), (_EXPIRY_FLAG_MONTHLY, 0)),
+            )
+        assert bar is None
+        events = [log for log in logs if log["event"] == "options_sim.ambiguous_option_rows"]
+        assert len(events) == 1
+        assert events[0]["n_rows"] == 2
+
+    def test_same_series_agreeing_duplicate_with_annotation_drift_still_warns(self) -> None:
+        # Composition guard: a POISONED same-series physical duplicate that
+        # agrees on pricing (annotations aside) still takes the keep-first +
+        # ONE aggregated WARN path (DEC-LAKE-READ-UNIQUE-001) — the narrowed
+        # ambiguity key must not silence the duplicate accounting.
+        from brutex.data.lake_read import DUPLICATES_DROPPED_EVENT
+        from structlog.testing import capture_logs
+
+        naive_ts = datetime(2025, 1, 2, 3, 46)
+        df = _seam_frame(naive_ts, opens=[150.0, 150.0]).with_columns(
+            pl.Series("spot", [24010.55, None], dtype=pl.Float64)
+        )
+        with capture_logs() as logs:
+            bar = _LakeOptionBarSource._row_at(
+                df, naive_ts, "CE", series=((_EXPIRY_FLAG_WEEKLY, 0),)
+            )
+        assert bar is not None
+        assert bar.open == Decimal("150.0")
+        assert bar.spot == Decimal("24010.55")  # most-annotated survivor kept
+        events = [log for log in logs if log["event"] == DUPLICATES_DROPPED_EVENT]
+        assert len(events) == 1
+        assert events[0]["dropped"] == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Rolling multi-day regression (hostile-review NIT): the SAME absolute
+# expiry resolves to DIFFERENT series codes at entry vs exit
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRollingSeriesResolution:
+    """Entry WEEK/1 → exit WEEK/0 for ONE absolute expiry, with decoys.
+
+    The strongest expression of the R2-OC-1 fix: the rolling lake stores a
+    bar under the Near/Next/Far rank the contract held AS OF that bar's
+    trading date, so a multi-day trade on the Jan-9 weekly enters while it is
+    the NEXT weekly (WEEK/1, seen from Thu Jan-2) and exits after it has
+    ROLLED to the near weekly (WEEK/0, seen from Mon Jan-6). Entry and exit
+    must be resolved INDEPENDENTLY — a refactor collapsing entry_series /
+    exit_series to one shared resolution silently regresses this.
+    """
+
+    _EXPIRY = date(2025, 1, 9)  # Thursday — the Jan-9 NIFTY weekly
+    _ROLL_ENTRY = datetime(2025, 1, 2, 9, 16, tzinfo=_IST)  # Jan-9 is WEEK/1 here
+    _ROLL_EXIT = datetime(2025, 1, 6, 15, 20, tzinfo=_IST)  # Jan-9 is WEEK/0 here
+
+    @pytest.fixture
+    def rolling_lake(self, tmp_path: Path) -> Path:
+        # The Jan-9 contract's REAL bars, stored under the rank current at
+        # each bar's own date (rolling accretion):
+        _write_series(tmp_path, _EXPIRY_FLAG_WEEKLY, 1, [_bar(self._ROLL_ENTRY, "250.00")])
+        _write_series(tmp_path, _EXPIRY_FLAG_WEEKLY, 0, [_bar(self._ROLL_EXIT, "275.00")])
+        # Same-strike DECOYS present at BOTH lookup timestamps:
+        # (a) the Jan-2 weekly's own bar at the entry ts under WEEK/0;
+        # (b) the Jan-30 monthly's bar at the exit ts under MONTH/0.
+        _write_series(tmp_path, _EXPIRY_FLAG_WEEKLY, 0, [_bar(self._ROLL_ENTRY, "90.00")])
+        _write_series(tmp_path, _EXPIRY_FLAG_MONTHLY, 0, [_bar(self._ROLL_EXIT, "500.00")])
+        return tmp_path
+
+    def test_series_codes_differ_at_entry_and_exit(self) -> None:
+        # The premise, pinned: ONE absolute expiry, two different codes.
+        assert _expiry_series_candidates(
+            OptionsUnderlying.NIFTY, self._EXPIRY, on_date=self._ROLL_ENTRY.date()
+        ) == ((_EXPIRY_FLAG_WEEKLY, 1),)
+        assert _expiry_series_candidates(
+            OptionsUnderlying.NIFTY, self._EXPIRY, on_date=self._ROLL_EXIT.date()
+        ) == ((_EXPIRY_FLAG_WEEKLY, 0),)
+
+    def test_rolling_pair_prices_each_leg_from_its_own_code(self, rolling_lake: Path) -> None:
+        pair = _load(rolling_lake, self._EXPIRY, entry=self._ROLL_ENTRY, exit_=self._ROLL_EXIT)
+        assert pair is not None
+        assert pair.entry_bar.open == Decimal("250.00")  # type: ignore[attr-defined]
+        assert pair.exit_bar.open == Decimal("275.00")  # type: ignore[attr-defined]
+
+    def test_rolling_pair_end_to_end_through_the_executor(self, rolling_lake: Path) -> None:
+        out = materialize_trade(
+            _signal(self._EXPIRY, entry=self._ROLL_ENTRY, exit_=self._ROLL_EXIT),
+            RULES_BY_NAME["atm"],
+            source=_LakeOptionBarSource(lake_root=rolling_lake),
+        )
+        assert isinstance(out, MaterializedTrade)
+        assert out.entry_open_paisa == 25000  # ₹250 — WEEK/1, never the 90.00 decoy
+        assert out.exit_open_paisa == 27500  # ₹275 — WEEK/0, never the 500.00 decoy

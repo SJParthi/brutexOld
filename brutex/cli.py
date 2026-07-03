@@ -5083,21 +5083,23 @@ _EXPIRY_FLAG_MONTHLY = "MONTH"
 #: the Far selector is honestly unresolvable against this lake.
 _MAX_EXPIRY_CODE = 2
 
-#: The per-bar VALUE columns of the expired-options table (everything except
-#: the series-addressing columns + the row key). Two rows surviving the series
-#: filter at ONE timestamp that agree on ALL of these are the same physical
-#: contract stored under two aliased series (e.g. a monthly expiry that is
-#: also that week's weekly); rows that disagree are a genuine ambiguity.
-_OPTION_VALUE_COLUMNS = (
+#: The per-bar PRICING columns of the expired-options table — the inputs that
+#: actually drive a priced trade. Two rows surviving the series filter at ONE
+#: timestamp that agree on ALL of these are the same physical contract stored
+#: under two aliased series (e.g. a monthly expiry that is also that week's
+#: weekly); rows that disagree are a genuine ambiguity. The NULLABLE
+#: annotation columns (``spot`` / ``iv`` / ``open_interest``) are deliberately
+#: EXCLUDED: two aliased series pulled independently can legitimately drift on
+#: them (one captured spot, the other stored None) while pricing identically —
+#: keying ambiguity on annotations over-rejected priceable trades as NO_DATA
+#: (hostile-review MINOR, DEC-OPTIONS-EXEC-COST-AUDIT-R2-001). ``strike`` is
+#: excluded as redundant: ``load_pair`` already filters it to a constant.
+_OPTION_PRICING_COLUMNS = (
     "open",
     "high",
     "low",
     "close",
     "volume",
-    "open_interest",
-    "strike",
-    "spot",
-    "iv",
 )
 
 
@@ -5181,6 +5183,20 @@ class _LakeOptionBarSource:
     strike, can never collide). A missing entry/exit bar (band-drift hole / not
     ingested), an unresolvable expiry, or a cross-series ambiguity returns
     ``None`` so the trade is rejected, never faked.
+
+    HONEST ENVELOPE (hostile-review composition MINOR,
+    DEC-OPTIONS-EXEC-COST-AUDIT-R2-001): the per-lookup-date series resolution
+    assumes the lake's ROLLING accretion semantics — a bar at trading date D
+    is stored under the Near/Next/Far rank the contract held AS OF D (each
+    pull stamps the then-current selector, so one contract's life spans codes:
+    the rolling regression test pins entry WEEK/1 → exit WEEK/0 for the SAME
+    absolute expiry). A lake back-filled in ONE shot that stamps a contract's
+    whole multi-week history under a single pull-time code would read honest
+    ``NO_DATA`` for the bars whose stored rank differs from the as-of-date
+    resolution — fail-SAFE (reject + logged), never a mis-priced trade;
+    widening the filter to any code of a matching flag would reintroduce the
+    exact concurrent-series collision R2-OC-1 removed, so it is deliberately
+    NOT done.
     """
 
     def __init__(self, *, lake_root: Path) -> None:
@@ -5260,15 +5276,18 @@ class _LakeOptionBarSource:
 
         Rows are matched on ``timestamp`` AND the resolved series
         discriminator (``expiry_flag``/``expiry_code``). Multiple surviving
-        rows that agree on every value column are the SAME contract stored
-        under two aliased series (a monthly that is also that week's weekly)
-        — the first is used — and a REPEATED series key among them (a
-        poisoned-era physical duplicate) keeps the FIRST physical row and is
-        WARNED via the COMMON read gate, never silent
-        (DEC-LAKE-READ-UNIQUE-001; the write side dedups on the same
-        composite key, ``option_parquet_writer``). Rows that DISAGREE on any
-        value column are a genuine ambiguity: the lookup logs
-        ``options_sim.ambiguous_option_rows`` and returns ``None``
+        rows that agree on every PRICING column (:data:`_OPTION_PRICING_COLUMNS`
+        — open/high/low/close/volume; the nullable ``spot``/``iv``/
+        ``open_interest`` annotations are excluded so aliased-series annotation
+        drift never over-rejects) are the SAME contract stored under two
+        aliased series (a monthly that is also that week's weekly) — the
+        most-annotated survivor is kept (every survivor prices identically) —
+        and a REPEATED series key among them (a poisoned-era physical
+        duplicate) keeps the first row of that ordering and is WARNED via the
+        COMMON read gate, never silent (DEC-LAKE-READ-UNIQUE-001; the write
+        side dedups on the same composite key, ``option_parquet_writer``).
+        Rows that DISAGREE on any pricing column are a genuine ambiguity: the
+        lookup logs ``options_sim.ambiguous_option_rows`` and returns ``None``
         (→ NO_DATA), never an arbitrary row (R2-OC-1).
         """
         from decimal import Decimal
@@ -5287,7 +5306,7 @@ class _LakeOptionBarSource:
         if hit.height == 0:
             return None
         if hit.height > 1:
-            if hit.select(list(_OPTION_VALUE_COLUMNS)).unique().height > 1:
+            if hit.select(list(_OPTION_PRICING_COLUMNS)).unique().height > 1:
                 import structlog
 
                 structlog.get_logger("brutex.cli.options_sim").warning(
@@ -5298,18 +5317,30 @@ class _LakeOptionBarSource:
                     series=[f"{flag}/{code}" for flag, code in series],
                 )
                 return None
-            # Surviving rows AGREE on every value column: distinct series keys
-            # are the SAME physical contract under aliased series (priced
-            # normally, keep-first via `row(0)` below), while a REPEATED
-            # series key is a poisoned-era physical duplicate — keep-FIRST +
-            # the ONE aggregated WARNING, never silent
+            # Surviving rows AGREE on every pricing column: distinct series
+            # keys are the SAME physical contract under aliased series (priced
+            # normally + silently, keep-first via `row(0)` below), while a
+            # REPEATED series key is a poisoned-era physical duplicate —
+            # keep-first + the ONE aggregated WARNING, never silent
             # (DEC-LAKE-READ-UNIQUE-001; no-op when every series key is
-            # distinct). Conflicts are 0 by construction here: a
-            # value-DISAGREEING survivor took the ambiguity reject above.
+            # distinct). Price-conflicts are 0 by construction here: a
+            # pricing-DISAGREEING survivor took the ambiguity reject above;
+            # annotation drift among agreeing rows is benign (see below).
             log_read_duplicates(
                 source=f"options_sim:{side}@{ts_utc.isoformat()}",
                 dropped=hit.height - hit.select(["expiry_flag", "expiry_code"]).unique().height,
                 conflicts=0,
+            )
+            # Among the price-agreeing survivors prefer the MOST-ANNOTATED row
+            # (fewest None spot/iv/open_interest — the nullable annotations the
+            # ambiguity key deliberately excludes), so an aliased pair with
+            # annotation drift keeps its annotations instead of arbitrarily
+            # dropping them; the priced result is identical for any survivor.
+            hit = hit.sort(
+                pl.col("spot").is_null().cast(pl.Int8)
+                + pl.col("iv").is_null().cast(pl.Int8)
+                + pl.col("open_interest").is_null().cast(pl.Int8),
+                maintain_order=True,
             )
         r = hit.row(0, named=True)
 
