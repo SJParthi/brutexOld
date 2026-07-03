@@ -46,7 +46,8 @@ pub use indicators::ema::{EmaState, compute_ema, ema_alpha, ema_seed, ema_step};
 pub use indicators::fib::{FibLevels, compute_fib_levels};
 pub use indicators::market_structure::{MarketStructureSignal, MarketStructureState, Trend};
 pub use indicators::metadata::{
-    BarMetadata, derive_bar_metadata, minute_of_session, resolve_near_month, weekday_from_ordinal,
+    BarMetadata, derive_bar_metadata, minute_of_session, resolve_near_month, seconds_of_day,
+    weekday_from_ordinal,
 };
 pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
 pub use indicators::vwap::VwapState;

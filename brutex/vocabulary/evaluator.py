@@ -194,8 +194,11 @@ def evaluate_atoms(
 
     # Group 8 reads only the IST wall-clock time-of-day (never the UTC instant);
     # seconds-of-day floors sub-second, matching the golden fixture's parser.
+    # DERIVED by the shared Rust seam (DEC-TOD-SECONDS-RUST-SEAM-001) — never
+    # inline `h*3600` arithmetic here, so the value is bit-identical to the
+    # TickVault-native derivation by construction.
     ts = snapshot.timestamp_ist
-    tod_seconds = ts.hour * 3600 + ts.minute * 60 + ts.second
+    tod_seconds = int(trading_core.seconds_of_day(ts.hour, ts.minute, ts.second))
 
     mask: int = trading_core.evaluate_with_levels(
         tod_seconds,
