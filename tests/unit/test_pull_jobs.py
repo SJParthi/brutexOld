@@ -741,9 +741,7 @@ class TestOnRecovered:
         job._on_recovered(_recovery_event(), stale)  # pyright: ignore[reportPrivateUsage]
         assert job.snapshot().stalled is True
 
-    def test_on_recovered_swallows_a_raising_clear(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_on_recovered_swallows_a_raising_clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
 
         class _BoomProgress(PullProgress):
