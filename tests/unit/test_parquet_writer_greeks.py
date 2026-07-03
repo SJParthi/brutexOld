@@ -247,6 +247,40 @@ class TestRenderAndReadBack:
             ParquetWriter._read_existing_bars(dest, dest.read_bytes())
 
 
+class TestFreshBatchOverlayDedup:
+    """Overlay rule on the FRESH within-batch dedup (DEC-FRESH-WRITE-BATCH-DEDUP-001).
+
+    The fresh twin of :class:`TestMergeOverlaySemantics`: a within-batch
+    duplicate timestamp carrying identical OHLCV+OI but a DIFFERENT Greeks
+    overlay collapses under the SAME rule the merge applies — ``latest-wins``
+    takes the later overlay, ``keep-first`` keeps the first silently (an
+    overlay-only difference is never a :class:`BarConflict`).
+    """
+
+    def test_latest_wins_duplicate_takes_the_later_overlay(self, tmp_path: Path) -> None:
+        writer = _writer(tmp_path)
+        result = _write(
+            writer,
+            [_enriched(iv=0.125), _enriched(iv=0.2, pid=1_050_001)],
+            merge_mode="latest-wins",
+        )
+        assert result.row_count == 1  # type: ignore[attr-defined]
+        assert result.conflicts == ()  # type: ignore[attr-defined]
+        df = pl.read_parquet(_partition(tmp_path))
+        assert df["iv"].to_list() == [0.2]  # the LATER (corrected) overlay won
+        assert df["greeks_provenance_id"].to_list() == [1_050_001]
+
+    def test_keep_first_duplicate_keeps_the_first_overlay_silently(self, tmp_path: Path) -> None:
+        writer = _writer(tmp_path)
+        result = _write(writer, [_enriched(iv=0.125), _enriched(iv=0.2, pid=1_050_001)])
+        assert result.row_count == 1  # type: ignore[attr-defined]
+        # An overlay-only difference is NEVER a conflict (mirrors the merge rule).
+        assert result.conflicts == ()  # type: ignore[attr-defined]
+        df = pl.read_parquet(_partition(tmp_path))
+        assert df["iv"].to_list() == [0.125]  # the FIRST occurrence's overlay kept
+        assert df["greeks_provenance_id"].to_list() == [1_050_000]
+
+
 class TestMergeOverlaySemantics:
     def test_keep_first_plain_repull_never_strips_greeks(self, tmp_path: Path) -> None:
         """A vendor re-pull (plain bars, same OHLCV) keeps the stored overlay — no conflict."""

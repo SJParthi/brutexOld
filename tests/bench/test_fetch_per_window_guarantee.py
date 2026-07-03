@@ -64,6 +64,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time
 
+from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.groww.chunks import plan_candle_windows
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
@@ -300,6 +301,14 @@ def _run(
         now_ist=_now,
         contract_windows=contract_windows,
         empty_retry_by_symbol=empty_retry_by_symbol,
+        # Stand the mass-empty circuit breaker DOWN for this replay (DEC-EMPTY-WINDOW-
+        # CIRCUIT-BREAKER-001): the deliberately deep-OTM-heavy synthetic chain — above
+        # all the un-bounded BASELINE arm, which passes no deep-strike budget and so has
+        # no expected-empty exclusion — is EXACTLY the mass-empty shape the production
+        # breaker now HALTS (its own trip/halt behaviour is pinned in
+        # test_groww_option_ingest.py). This bench measures the per-window FETCH COST,
+        # not settle safety, so the guard is disabled here deliberately.
+        empty_breaker=EmptySettleBreaker(enabled=False),
     )
     return sdk.fetches, report.windows, sink.bars_stored
 

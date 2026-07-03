@@ -19,9 +19,12 @@ units live HERE so the strict per-module coverage gates scope them.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from brutex.adapters.ingest_common import (
     CREDENTIALS_REFUSAL_HEADLINE,
+    SETTLED_SKIPPED_OPERATOR_THRESHOLD,
     SYNTHETIC_DRY_RUN_LABEL,
     PullVerdict,
     classify_pull,
@@ -182,6 +185,7 @@ class TestPullVerdictSerialisation:
             "no_data": 2,
             "completed": 0,
             "auth_cause": "DH-906",
+            "settled_skipped": 0,
         }
 
     def test_needs_operator_false_for_clean_and_known_gap(self) -> None:
@@ -283,3 +287,183 @@ class TestRefusalVerdictAndLabels:
         assert clean.headline in marked.headline
         assert "DISCARDED — zero real bars landed" in marked.action
         assert isinstance(marked, PullVerdict)
+
+
+class TestMassEmptyHaltVerdict:
+    """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — the mass-empty halt kind."""
+
+    def test_mass_empty_halt_kind_and_needs_operator(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=4,
+            failed_pairs=0,
+            no_data=0,
+            completed=2,
+            mass_empty_cause="Mass-empty circuit breaker TRIPPED (consecutive rule): 40 of 41",
+        )
+        assert verdict.kind == "mass_empty_halt"
+        assert verdict.needs_operator is True
+        assert "HALTED" in verdict.headline
+        # The halt's own count-naming message is PREFIXED to the action…
+        assert verdict.action.startswith("Mass-empty circuit breaker TRIPPED")
+        # …and the static action names the causes + the re-verify path.
+        assert "[R2]" in verdict.action and "[R3]" in verdict.action
+        assert "reopen-skipped" in verdict.action
+        assert verdict.to_dict()["kind"] == "mass_empty_halt"
+
+    def test_auth_expired_outranks_mass_empty(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=True,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=0,
+            mass_empty_cause="tripped",
+        )
+        assert verdict.kind == "auth_expired"
+
+    def test_mass_empty_outranks_quota_and_transient(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=9,
+            failed_pairs=1,
+            no_data=0,
+            completed=0,
+            quota_exhausted=True,
+            mass_empty_cause="tripped",
+        )
+        assert verdict.kind == "mass_empty_halt"
+
+
+class TestSettledSkippedHonesty:
+    """DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 — a settling pull may never read silent."""
+
+    def test_clean_with_settles_never_says_no_action_needed(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=5,
+            settled_skipped=27,
+        )
+        assert verdict.kind == "clean"
+        assert verdict.action != "No action needed."
+        assert "27 window(s)" in verdict.action
+        assert "reopen-skipped" in verdict.action
+        assert verdict.settled_skipped == 27
+        assert verdict.to_dict()["settled_skipped"] == 27
+
+    def test_clean_without_settles_is_byte_identical(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=5,
+        )
+        assert verdict.action == "No action needed."
+        assert verdict.settled_skipped == 0
+
+    def test_settle_note_appended_to_non_clean_kinds(self) -> None:
+        # The primary instruction stays FIRST; the settle note rides after it.
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=3,
+            failed_pairs=0,
+            no_data=0,
+            completed=1,
+            settled_skipped=2,
+        )
+        assert verdict.kind == "transient_residual"
+        assert verdict.action.startswith("Re-pull to finish")
+        assert "2 window(s)" in verdict.action
+
+    def test_settle_note_on_every_kind(self) -> None:
+        # quarantined / known-gap / quota / auth / mass-empty all carry the note.
+        cases: list[dict[str, Any]] = [
+            {"auth_aborted": True},
+            {"quota_exhausted": True},
+            {"mass_empty_cause": "tripped"},
+            {"failed_pairs": 1},
+            {"no_data": 1},
+        ]
+        for extra in cases:
+            kwargs: dict[str, Any] = {
+                "auth_aborted": False,
+                "still_failed_windows": 0,
+                "failed_pairs": 0,
+                "no_data": 0,
+                "completed": 0,
+                "settled_skipped": 7,
+            }
+            kwargs.update(extra)
+            verdict = classify_pull(**kwargs)
+            assert "7 window(s)" in verdict.action, verdict.kind
+
+
+class TestSettledSkippedOperatorThreshold:
+    """Minor M-4 — a mass write-off flips needs_operator even on a clean verdict."""
+
+    def _clean(self, settled_skipped: int) -> PullVerdict:
+        return classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=5,
+            settled_skipped=settled_skipped,
+        )
+
+    def test_above_threshold_flips_needs_operator_on_clean(self) -> None:
+        verdict = self._clean(SETTLED_SKIPPED_OPERATOR_THRESHOLD + 1)
+        assert verdict.kind == "clean"
+        assert verdict.needs_operator is True  # a mass write-off demands eyes
+        assert verdict.to_dict()["needs_operator"] is True
+
+    def test_at_threshold_stays_quiet(self) -> None:
+        # The gate is STRICTLY above (> 50): exactly-at stays a quiet clean.
+        verdict = self._clean(SETTLED_SKIPPED_OPERATOR_THRESHOLD)
+        assert verdict.kind == "clean"
+        assert verdict.needs_operator is False
+
+    def test_threshold_applies_on_non_clean_kinds_too(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=2,  # quarantined_symbols — normally needs_operator=False
+            no_data=0,
+            completed=1,
+            settled_skipped=SETTLED_SKIPPED_OPERATOR_THRESHOLD + 5,
+        )
+        assert verdict.kind == "quarantined_symbols"
+        assert verdict.needs_operator is True
+
+
+class TestReVerifyGuidanceTexts:
+    """Minor M-1 — the halt + settle-note texts explain the bounded re-verify path."""
+
+    def test_mass_empty_action_names_limit_and_envs(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=0,
+            mass_empty_cause="tripped",
+        )
+        assert "--limit N" in verdict.action  # the bounded re-verify sample
+        assert "REOPENED" in verdict.action  # re-checks are breaker-exempt
+        assert "BRUTEX_EMPTY_BREAKER" in verdict.action  # the env-tunable thresholds
+
+    def test_settle_note_names_limit_and_exemption(self) -> None:
+        verdict = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=3,
+            settled_skipped=2,
+        )
+        assert "--limit N" in verdict.action
+        assert "breaker-exempt" in verdict.action

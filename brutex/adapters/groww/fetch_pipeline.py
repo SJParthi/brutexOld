@@ -125,10 +125,12 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
     DEC-FETCH-CORRUPT-PARTITION-ISOLATE-001. Mirrors the synchronous spine's quarantine
     carve-out (``run_ingest._GLOBAL_STOP_ERRORS``): a :class:`~brutex.models.BruteXError`
     is per-symbol-quarantinable (isolate to its own series, re-pull next pull) UNLESS it is
-    a pull-wide STOP — a :class:`~brutex.data.errors.LakeWriteHalt` (disk-full / OOM) or a
+    a pull-wide STOP — a :class:`~brutex.data.errors.LakeWriteHalt` (disk-full / OOM), a
     quota stop (:class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` /
-    ``QuotaInvariantError``), which fail every remaining window identically and so MUST halt
-    the whole pull. A non-``BruteXError`` (a genuine code bug) is NEVER isolatable — it
+    ``QuotaInvariantError``), or a tripped mass-empty circuit breaker
+    (:class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`,
+    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001), which fail/poison every remaining window
+    identically and so MUST halt the whole pull. A non-``BruteXError`` (a genuine code bug) is NEVER isolatable — it
     trips the pool so the bug is surfaced, never silently swallowed.
 
     The heavy ``quota_tracker`` import is LAZY (inside the function) so this module stays
@@ -143,11 +145,15 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
         return False  # a genuine code bug → trip the pool (surface it)
     if isinstance(exc, LakeWriteHalt):
         return False  # disk-full / OOM → pull-wide halt
+    from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
-    # A quota stop → pull-wide halt; anything else is a per-symbol-quarantinable
-    # BruteXError (e.g. a corrupt-partition WriterError) → isolate, do NOT trip the pool.
-    return not isinstance(exc, (DailyQuotaExceeded, QuotaInvariantError))
+    # A quota stop OR a tripped mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-
+    # BREAKER-001 — a suspected soft-throttle/mis-addressing episode poisons every
+    # remaining window identically) → pull-wide halt; anything else is a per-symbol-
+    # quarantinable BruteXError (e.g. a corrupt-partition WriterError) → isolate, do
+    # NOT trip the pool.
+    return not isinstance(exc, (DailyQuotaExceeded, QuotaInvariantError, MassEmptySettleHalt))
 
 
 __all__ = [

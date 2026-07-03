@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.ingest import IngestReport
@@ -108,6 +109,7 @@ from brutex.data.window_ledger_store import (
     reconcile_ledger_with_lake,
 )
 from brutex.models import Instrument
+from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.correlation import pull_id_scope
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
 from brutex.orchestrator.parallel import PoolRunParallel
@@ -725,6 +727,17 @@ class BulkSpotReport:
     """True when the persisted window ledger EXISTED but failed to reload at pull
     start (DEC-WINDOW-LEDGER-RESCUE-001) — the pull ran a full re-verify (no skip),
     announced loudly in the log + the pipeline note, never silent."""
+    mass_empty_cause: str | None = None
+    """The mass-empty circuit-breaker halt message (DEC-EMPTY-WINDOW-CIRCUIT-
+    BREAKER-001) when the pull HALTED on a suspected soft-throttle [R2] /
+    mis-addressing [R3] clean-empty burst — drives the loud, needs-operator
+    ``mass_empty_halt`` verdict naming the counts + candidate causes. ``None``
+    when the breaker never tripped."""
+    settled_skipped: int = 0
+    """Windows THIS pull newly settled as terminal ``SKIPPED`` (the per-pull
+    ledger tally) — the honest-verdict count every verdict kind must surface
+    (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001; never "No action needed" over a
+    settling pull)."""
 
     @property
     def total_symbols(self) -> int:
@@ -769,6 +782,8 @@ class BulkSpotReport:
             completed=self.total_completed,
             auth_cause=self.auth_cause,
             quota_exhausted=self.quota_exhausted,
+            mass_empty_cause=self.mass_empty_cause,
+            settled_skipped=self.settled_skipped,
         )
         if self.dry_run:
             return mark_synthetic(verdict)
@@ -1496,20 +1511,15 @@ def pull_all_spot(
                 note="window ledger reload FAILED — running full re-verify pull (no skip)",
             )
         if ledger is not None and daily_requested:
-            plan_windows(
-                ledger,
-                instruments=instruments,
-                intervals=(_PHASE1_DAILY,),
-                start=start.date(),
-                end=end.date(),
-                market=GROWW_COVERAGE_MARKET,
-                window_days_for=groww_window_days_for,
-            )
-            # Cold-start seed (DEC-WINDOW-LEDGER-001, Stage b1): on a fresh clone
-            # the ledger is empty but the lake may already hold years of bars.
-            # Seed SUCCESS for every PLANNED window the lake already encloses (and
-            # only ABSENT rows — never overwriting a FAILED/PLANNED row) so the
-            # upcoming is_skippable flip will NOT re-pull the entire history. A
+            # Cold-start seed FIRST (DEC-WINDOW-LEDGER-001, Stage b1): on a fresh clone
+            # the ledger is empty but the lake may already hold years of bars. Seed
+            # SUCCESS for every window of this pull's tiling the lake already
+            # encloses, so the is_skippable flip will NOT re-pull the entire history.
+            # The seed is ABSENT-ONLY (``WindowLedger.seed_lake_success`` never
+            # overwrites ANY existing row — a PLANNED one included), so it MUST run
+            # BEFORE ``plan_windows`` mints the PLANNED rows: seeding after the plan
+            # was a permanent no-op and a cold start (lost/corrupt ledger over a
+            # fully-populated lake) re-fetched every window (forensic-audit #7). A
             # non-None ledger already implies a live (non-dry-run) pull —
             # ``begin_pull_ledger`` returns None for dry_run — so no extra guard.
             # ``market=GROWW_COVERAGE_MARKET`` so the seeded rows share the Groww
@@ -1517,6 +1527,17 @@ def pull_all_spot(
             reconcile_ledger_with_lake(
                 ledger,
                 lake_root,
+                instruments=instruments,
+                intervals=(_PHASE1_DAILY,),
+                start=start.date(),
+                end=end.date(),
+                market=GROWW_COVERAGE_MARKET,
+                window_days_for=groww_window_days_for,
+            )
+            # PLAN the remaining (genuinely-absent) windows — ``WindowLedger.plan``
+            # is itself absent-only, so a just-seeded SUCCESS row stays settled.
+            plan_windows(
+                ledger,
                 instruments=instruments,
                 intervals=(_PHASE1_DAILY,),
                 start=start.date(),
@@ -1614,6 +1635,10 @@ def pull_all_spot(
         final_auth_aborted = False
         final_auth_cause: str | None = None
         final_quota_exhausted = False
+        # The mass-empty circuit-breaker halt cause (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001):
+        # set when a phase raises MassEmptySettleHalt — drives the loud, needs-operator
+        # ``mass_empty_halt`` verdict naming the counts + the likely causes.
+        final_mass_empty_cause: str | None = None
         # Per-phase FIRST-pass reports keyed by interval — the per-symbol rollup reads
         # each interval's 1-day/1-minute outcome from its own phase's report. Both
         # phases run over EVERY requested instrument (DEC-SPOT-INTERVAL-DECOUPLE-001 —
@@ -1640,6 +1665,7 @@ def pull_all_spot(
             pass of each phase is appended to ``phase_reports`` for the rollup.
             """
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
+            nonlocal final_mass_empty_cause
             passes: list[SpotIngestWithRetry] = []
 
             def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
@@ -1771,12 +1797,52 @@ def pull_all_spot(
                         "resume after IST midnight"
                     ),
                 )
+            except MassEmptySettleHalt as exc:
+                # The mass-empty circuit breaker TRIPPED mid-phase
+                # (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a suspected vendor soft-throttle
+                # [R2] / mis-addressing [R3] episode was answering windows with clean-empty
+                # 200s, so the spine HALTED before settling them SKIPPED. Everything already
+                # committed survives (bars via the sink, window records via the throttled
+                # flush + the outer finally); every un-settled window stays retryable. Map to
+                # the loud needs-operator ``mass_empty_halt`` verdict (naming the counts +
+                # candidate causes) instead of a generic job error. Because the halt is
+                # CAUGHT here (it never escapes to the job layer's ``_is_pull_halt``
+                # escaping-exception path), the CRITICAL Telegram pull-halt alert is fired
+                # HERE — parity with the F&O route and the CLI ``_pull_halt_errors`` set
+                # (DEC-TELEGRAM-PULL-HALT-001; minor M-3). Best-effort by construction —
+                # the helper can never mask the verdict flow.
+                emit_pull_halt_alert(exc)
+                final_mass_empty_cause = str(exc)
+                # HONEST UNDERCOUNT: ``passes`` holds only COMPLETED passes — the pass the
+                # halt aborted never appended, so its still-pending windows are NOT in this
+                # tally (the verdict's ``pending_windows`` reads low after a mid-pass halt).
+                # Harmless for control flow — the halt verdict already demands operator
+                # triage + a re-pull, and the ledger (not this count) is the retry
+                # authority — but do not present this number as the full residual.
+                final_still_failed += passes[-1].report.still_failed_windows if passes else 0
+                final_auth_aborted = final_auth_aborted or (
+                    bool(passes) and passes[-1].report.auth_aborted
+                )
+                _LOG.warning(
+                    "universe.pull_all.mass_empty_halt",
+                    pull_id=pid,
+                    error=str(exc),
+                    rounds_completed=len(passes),
+                    note=(
+                        "mass clean-empty responses — pull halted before settling; "
+                        "committed work kept; un-settled windows stay retryable"
+                    ),
+                )
             # The per-symbol rollup reads each phase's FIRST pass; an absent (no pass
             # completed) phase contributes an empty report.
             phase_reports.append(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=())
             )
 
+        # Success-path latch for the post-drain 1-day derivation below: set as the
+        # try body's LAST statement, so a phase error leaves it False and the
+        # ``finally`` skips the derive (the drains + ledger persist still run).
+        fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (over EVERY symbol; full range) ──
             if daily_requested:
@@ -1791,32 +1857,36 @@ def pull_all_spot(
             # coupling of DEC-SPOT-1DAY-FIRST-001. Per DEC-1MINUTE-ONLY-DERIVE-1DAY-001
             # this 1-minute phase is the ONLY vendor phase (1-day is derived after).
             if minute_requested:
-                # GLOBAL-STOP GUARD: if Phase 1 ended with a dead token or a spent
-                # quota, the minute pull would fail identically — SKIP it honestly (the
-                # verdict already carries the actionable state).
-                if final_auth_aborted or final_quota_exhausted:
+                # GLOBAL-STOP GUARD: if Phase 1 ended with a dead token, a spent quota,
+                # or a tripped mass-empty breaker, the minute pull would fail (or poison)
+                # identically — SKIP it honestly (the verdict already carries the
+                # actionable state).
+                if (
+                    final_auth_aborted
+                    or final_quota_exhausted
+                    or final_mass_empty_cause is not None
+                ):
                     _LOG.warning(
                         "universe.pull_all.minute_skipped_global_stop",
                         pull_id=pid,
                         auth_aborted=final_auth_aborted,
                         quota_exhausted=final_quota_exhausted,
+                        mass_empty_halt=final_mass_empty_cause is not None,
                     )
                 else:
                     if ledger is not None:
-                        # PLAN Phase 2's full-range minute windows (``symbol_windows=None``
-                        # → the global ``[start, end]`` per symbol). The DAILY interval is
-                        # never in this phase. Guarded on a non-None ledger (the live pull;
-                        # ``begin_pull_ledger`` returns None for a dry-run, which simply
-                        # skips the ledger plan + reconcile, mirroring Phase 1).
-                        plan_windows(
-                            ledger,
-                            instruments=instruments,
-                            intervals=minute_intervals,
-                            start=start.date(),
-                            end=end.date(),
-                            market=GROWW_COVERAGE_MARKET,
-                            window_days_for=groww_window_days_for,
-                        )
+                        # Cold-start seed FIRST, then PLAN Phase 2's full-range minute
+                        # windows (``symbol_windows=None`` → the global ``[start, end]``
+                        # per symbol). The seed is ABSENT-ONLY
+                        # (``WindowLedger.seed_lake_success`` never overwrites ANY
+                        # existing row — a PLANNED one included), so it MUST precede
+                        # ``plan_windows``: seeding after the plan was a permanent no-op
+                        # and a cold start re-fetched every lake-held window
+                        # (forensic-audit #7). ``plan`` is itself absent-only, so a
+                        # just-seeded SUCCESS row stays settled. The DAILY interval is
+                        # never in this phase. Guarded on a non-None ledger (the live
+                        # pull; ``begin_pull_ledger`` returns None for a dry-run, which
+                        # simply skips the ledger reconcile + plan, mirroring Phase 1).
                         reconcile_ledger_with_lake(
                             ledger,
                             lake_root,
@@ -1827,25 +1897,18 @@ def pull_all_spot(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                         )
+                        plan_windows(
+                            ledger,
+                            instruments=instruments,
+                            intervals=minute_intervals,
+                            start=start.date(),
+                            end=end.date(),
+                            market=GROWW_COVERAGE_MARKET,
+                            window_days_for=groww_window_days_for,
+                        )
                     _run_phase(minute_intervals, instruments, None)
-            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
-            # 1-minute is the ONLY granularity fetched from Groww; the 1-day partition
-            # the engine reads (the PDH/PDL daily anchor) is DERIVED here by resampling
-            # the just-pulled 1-minute over the FULL [start, end) range to midnight-IST
-            # daily bars and writing the 1-day partition. UNCONDITIONAL — there is no
-            # vendor 1-day to be empty (this supersedes the resample-on-EMPTY arm of the
-            # retired #842/#852). Runs AFTER the minute phase but BEFORE the finally's
-            # end_pull_ledger so it shares the pull's lifetime; quarantined end-to-end
-            # (it can NEVER fail the pull) and a no-op for any symbol with no 1-minute.
-            if not dry_run:  # pragma: no cover — raw lake I/O glue; derive core is 100%-unit-tested
-                _resample_daily_after_pull(
-                    instruments=instruments,
-                    lake_root=lake_root,
-                    start=start.date(),
-                    end=end.date(),
-                    now=now if now is not None else datetime.now(UTC),
-                    pull_id=pid,
-                )
+            # Fetch phases done — arm the post-drain 1-day derivation in the finally.
+            fetch_phases_ok = True
         finally:
             # Drain the FULL async fetch/process pipeline FIRST (DEC-GROWW-FETCH-ASYNC-SEPARATION-001
             # MAJOR-4 fix): a pipeline consumer's tail calls ``sink.append`` which may FEED the
@@ -1863,6 +1926,29 @@ def pull_all_spot(
             # no-op when the batched path is OFF (the synchronous default). Best-effort: a drain
             # error is logged, never re-raised, so the ledger persist below always runs.
             _drain_write_consumer(_write_consumer)
+            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
+            # 1-minute is the ONLY granularity fetched from Groww; the 1-day partition
+            # the engine reads (the PDH/PDL daily anchor) is DERIVED here by resampling
+            # the just-pulled 1-minute over the FULL [start, end) range to midnight-IST
+            # daily bars and writing the 1-day partition. UNCONDITIONAL — there is no
+            # vendor 1-day to be empty (this supersedes the resample-on-EMPTY arm of the
+            # retired #842/#852). Runs AFTER BOTH drains above — the async fetch
+            # pipeline is ON by default, so until it drains the just-fetched 1-minute
+            # bars are NOT yet durably in the lake and a pre-drain resample derived the
+            # daily anchor from an INCOMPLETE 1-minute lake (forensic-audit #15) — and
+            # BEFORE end_pull_ledger so it shares the pull's lifetime. SUCCESS-path
+            # only (``fetch_phases_ok``): a phase error / a drain-raised halt skips it,
+            # byte-preserving the failure path. Quarantined end-to-end (it can NEVER
+            # fail the pull) and a no-op for any symbol with no 1-minute.
+            if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
+                _resample_daily_after_pull(
+                    instruments=instruments,
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    now=now if now is not None else datetime.now(UTC),
+                    pull_id=pid,
+                )
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
@@ -1944,6 +2030,13 @@ def pull_all_spot(
             # re-skip the same windows by design — summing passes would double-count).
             windows_skipped=sum(pr.skipped_windows for pr in phase_reports),
             ledger_load_failed=ledger_reload_failed,
+            mass_empty_cause=final_mass_empty_cause,
+            # Honest-verdict settle tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the
+            # per-pull ledger instance counted every window THIS pull newly settled
+            # SKIPPED (fast-settle + streak promotion + degraded accept-gap), so the
+            # verdict can NAME the count + the reopen-skipped re-verify path. 0 for a
+            # dry-run (no ledger — nothing settles).
+            settled_skipped=ledger.newly_settled_skipped if ledger is not None else 0,
         )
         verdict = bulk.verdict
         _LOG.info(
@@ -2070,8 +2163,10 @@ def _resample_daily_after_pull(  # pragma: no cover — raw lake I/O glue; deriv
     the ``1day`` partition. UNCONDITIONAL (no vendor 1-day to be empty). Binds the SHARED
     window-bounded lake read + ``1day`` write builders per symbol and runs the quarantining
     driver. Wrapped so NO failure here can ever surface as a pull error, and a no-op (no
-    1-minute backs the range) is honest, never an invented bar. Runs BEFORE the ``finally``'s
-    ``end_pull_ledger`` so it shares the pull's lifetime.
+    1-minute backs the range) is honest, never an invented bar. Runs in the pull's
+    ``finally`` AFTER the fetch-pipeline + write-consumer drains (so it reads the COMPLETE
+    durable 1-minute lake — the default-ON async pipeline defers writes until drain,
+    forensic-audit #15) and BEFORE ``end_pull_ledger``, so it shares the pull's lifetime.
     """
     from brutex.calendars.nse import IST
     from brutex.data.spot_daily_resample import (
@@ -2265,8 +2360,20 @@ def pull_candles(
         # whole pull. Only the 1-minute phase runs; ``1day`` is derived after the pull.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         if ledger is not None and daily_requested:
-            plan_windows(
+            # Cold-start seed FIRST (DEC-WINDOW-LEDGER-001, Stage b1): seed SUCCESS
+            # for this symbol's lake-enclosed windows so the upcoming is_skippable
+            # flip won't re-pull bars the lake already holds. The seed is
+            # ABSENT-ONLY (``seed_lake_success`` never overwrites ANY existing row
+            # — a PLANNED one included), so it MUST run BEFORE ``plan_windows``
+            # mints the PLANNED rows (seeding after the plan was a permanent no-op
+            # — forensic-audit #7); ``plan`` is itself absent-only, so a seeded
+            # SUCCESS row stays settled. A non-None ledger already implies a live
+            # pull (begin_pull_ledger returns None for dry_run), so no extra
+            # dry-run guard is needed. ``market=GROWW_COVERAGE_MARKET`` matches the
+            # Groww spine namespace.
+            reconcile_ledger_with_lake(
                 ledger,
+                lake_root,
                 instruments=[instrument],
                 intervals=(_PHASE1_DAILY,),
                 start=start.date(),
@@ -2274,15 +2381,8 @@ def pull_candles(
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
             )
-            # Cold-start seed (DEC-WINDOW-LEDGER-001, Stage b1): seed SUCCESS for
-            # this symbol's lake-enclosed ABSENT windows so the upcoming
-            # is_skippable flip won't re-pull bars the lake already holds. A
-            # non-None ledger already implies a live pull (begin_pull_ledger
-            # returns None for dry_run), so no extra dry-run guard is needed.
-            # ``market=GROWW_COVERAGE_MARKET`` matches the Groww spine namespace.
-            reconcile_ledger_with_lake(
+            plan_windows(
                 ledger,
-                lake_root,
                 instruments=[instrument],
                 intervals=(_PHASE1_DAILY,),
                 start=start.date(),
@@ -2397,6 +2497,10 @@ def pull_candles(
             phase_auth_aborted = phase_auth_aborted or phase_report.auth_aborted
             return phase_report
 
+        # Success-path latch for the post-drain 1-day derivation below: set as the
+        # try body's LAST statement, so a phase error leaves it False and the
+        # ``finally`` skips the derive (the drains + ledger persist still run).
+        fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (full range) ──
             if daily_requested:
@@ -2415,20 +2519,17 @@ def pull_candles(
                     _LOG.warning("universe.pull.minute_skipped_global_stop", pull_id=pid)
                 else:
                     if ledger is not None:
-                        # PLAN the full-range minute windows (``symbol_windows=None`` →
-                        # the global ``[start, end]``). Guarded on a non-None ledger (the
-                        # live pull; ``begin_pull_ledger`` returns None for a dry-run,
-                        # which simply skips the ledger plan + reconcile, mirroring
+                        # Cold-start seed FIRST, then PLAN the full-range minute
+                        # windows (``symbol_windows=None`` → the global ``[start,
+                        # end]``). The seed is ABSENT-ONLY (``seed_lake_success``
+                        # never overwrites ANY existing row — a PLANNED one
+                        # included), so it MUST precede ``plan_windows`` (seeding
+                        # after the plan was a permanent no-op — forensic-audit #7);
+                        # ``plan`` is itself absent-only, so a seeded SUCCESS row
+                        # stays settled. Guarded on a non-None ledger (the live pull;
+                        # ``begin_pull_ledger`` returns None for a dry-run, which
+                        # simply skips the ledger reconcile + plan, mirroring
                         # Phase 1).
-                        plan_windows(
-                            ledger,
-                            instruments=[instrument],
-                            intervals=minute_intervals,
-                            start=start.date(),
-                            end=end.date(),
-                            market=GROWW_COVERAGE_MARKET,
-                            window_days_for=groww_window_days_for,
-                        )
                         reconcile_ledger_with_lake(
                             ledger,
                             lake_root,
@@ -2439,21 +2540,18 @@ def pull_candles(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                         )
+                        plan_windows(
+                            ledger,
+                            instruments=[instrument],
+                            intervals=minute_intervals,
+                            start=start.date(),
+                            end=end.date(),
+                            market=GROWW_COVERAGE_MARKET,
+                            window_days_for=groww_window_days_for,
+                        )
                     _run_phase(minute_intervals, None)
-            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
-            # Derive this instrument's 1-day partition from the just-pulled 1-minute over
-            # the FULL [start, end) range (midnight-IST stamped). UNCONDITIONAL — 1-minute
-            # is the only fetched granularity; 1-day is never vendor-fetched. Quarantined
-            # end-to-end (can NEVER fail the pull); a no-op when no 1-minute backs it.
-            if not dry_run:  # pragma: no cover — raw lake I/O glue; derive core is 100%-unit-tested
-                _resample_daily_after_pull(
-                    instruments=[instrument],
-                    lake_root=lake_root,
-                    start=start.date(),
-                    end=end.date(),
-                    now=datetime.now(UTC),
-                    pull_id=pid,
-                )
+            # Fetch phases done — arm the post-drain 1-day derivation in the finally.
+            fetch_phases_ok = True
         finally:
             # Drain the FULL async fetch/process pipeline FIRST (DEC-GROWW-FETCH-ASYNC-SEPARATION-001
             # MAJOR-4 fix): a pipeline consumer's tail calls ``sink.append`` which may FEED the
@@ -2469,6 +2567,25 @@ def pull_candles(
             # saving the ledger, so every settled window is on disk (settle-after-durable). A
             # no-op when the batched path is OFF (the synchronous default). Best-effort.
             _drain_write_consumer(_write_consumer)
+            # ── ALWAYS-ON 1-DAY DERIVATION (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) ──
+            # Derive this instrument's 1-day partition from the just-pulled 1-minute over
+            # the FULL [start, end) range (midnight-IST stamped). UNCONDITIONAL — 1-minute
+            # is the only fetched granularity; 1-day is never vendor-fetched. Runs AFTER
+            # BOTH drains above (the default-ON async pipeline must land every queued
+            # 1-minute bar in the lake first, else the daily anchor derives from an
+            # INCOMPLETE 1-minute lake — forensic-audit #15) and BEFORE end_pull_ledger.
+            # SUCCESS-path only (``fetch_phases_ok``): a phase error / a drain-raised
+            # halt skips it, byte-preserving the failure path. Quarantined end-to-end
+            # (can NEVER fail the pull); a no-op when no 1-minute backs it.
+            if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
+                _resample_daily_after_pull(
+                    instruments=[instrument],
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    now=datetime.now(UTC),
+                    pull_id=pid,
+                )
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
         # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
