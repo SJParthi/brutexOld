@@ -43,14 +43,12 @@ from brutex.dashboard.db_view import (
     _today_ist_iso,
     candle_count_key,
     candle_span_key,
-    list_fno_candle_datasets,
     option_candle_count_key,
     option_candle_span_key,
     query_candles,
     query_option_candles,
     resolve_applied_range,
 )
-from brutex.dashboard.fno_cascade import build_expiry_counts, build_fno_cascade
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
 from brutex.data.models import CandleBar, OptionBar
@@ -809,55 +807,10 @@ def test_query_candles_page_boundaries_ascending_and_descending(
     assert min(dts0) >= max(ts1)  # newest bars first descending
 
 
-# ════════════════════════════════════════════════════════════════════════
-# Feature 6 — build_expiry_counts (pure)
-# ════════════════════════════════════════════════════════════════════════
-
-
-def _cascade(lake: Path) -> object:
-    return build_fno_cascade(list_fno_candle_datasets(lake))
-
-
-def test_build_expiry_counts_listed_none_when_registry_absent(tmp_path: Path) -> None:
-    _write_fno_1min(
-        tmp_path, [datetime(2025, 1, 2, 3, 45, tzinfo=UTC)], symbol="NSE-NIFTY-02Jan25-24000-CE"
-    )
-    _write_fno_1min(
-        tmp_path, [datetime(2025, 1, 2, 3, 45, tzinfo=UTC)], symbol="NSE-NIFTY-02Jan25-24000-PE"
-    )
-    idx = _cascade(tmp_path)
-    rows = build_expiry_counts(idx, "NIFTY", None)  # type: ignore[arg-type]
-    assert rows == [{"expiry": "2025-01-02", "listed": None, "with_data": 2}]
-
-
-def test_build_expiry_counts_young_chain_listed_exceeds_with_data(tmp_path: Path) -> None:
-    # Only ONE strike has candle data, but the vendor listed THREE → "listed 3 with data 1".
-    _write_fno_1min(
-        tmp_path, [datetime(2025, 1, 2, 3, 45, tzinfo=UTC)], symbol="NSE-NIFTY-02Jan25-24000-CE"
-    )
-    idx = _cascade(tmp_path)
-    rows = build_expiry_counts(idx, "NIFTY", {"2025-01-02": 3})  # type: ignore[arg-type]
-    assert rows == [{"expiry": "2025-01-02", "listed": 3, "with_data": 1}]
-
-
-def test_build_expiry_counts_listed_equals_with_data(tmp_path: Path) -> None:
-    _write_fno_1min(
-        tmp_path, [datetime(2025, 1, 2, 3, 45, tzinfo=UTC)], symbol="NSE-NIFTY-02Jan25-24000-CE"
-    )
-    _write_fno_1min(
-        tmp_path, [datetime(2025, 1, 2, 3, 45, tzinfo=UTC)], symbol="NSE-NIFTY-02Jan25-24000-PE"
-    )
-    idx = _cascade(tmp_path)
-    rows = build_expiry_counts(idx, "NIFTY", {"2025-01-02": 2})  # type: ignore[arg-type]
-    assert rows == [{"expiry": "2025-01-02", "listed": 2, "with_data": 2}]
-
-
-def test_build_expiry_counts_unknown_underlying_is_empty(tmp_path: Path) -> None:
-    _write_fno_1min(
-        tmp_path, [datetime(2025, 1, 2, 3, 45, tzinfo=UTC)], symbol="NSE-NIFTY-02Jan25-24000-CE"
-    )
-    idx = _cascade(tmp_path)
-    assert build_expiry_counts(idx, "NOPE", {"2025-01-02": 3}) == []  # type: ignore[arg-type]
+# The pure build_expiry_counts unit tests (Feature 6) live in
+# tests/unit/test_fno_cascade.py — the fno_cascade module's own stem-matched
+# suite, where the coverage-gate discovery (DEC-CICD-GATE-HONESTY-001) finds
+# them. This file keeps the /db route-level UX-pack integration surface.
 
 
 # ════════════════════════════════════════════════════════════════════════
