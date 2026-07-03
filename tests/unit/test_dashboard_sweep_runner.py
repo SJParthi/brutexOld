@@ -90,8 +90,8 @@ def test_custom_values_are_normalised() -> None:
         tp="2500",
         top=50,
         mode="B",
-        exchange="bse",
-        segment="index",
+        exchange=" BSE ",
+        segment=" INDEX ",
         start="2022-03-01",
         end="2023-09-30",
         today=_TODAY,
@@ -104,8 +104,10 @@ def test_custom_values_are_normalised() -> None:
     assert req.tp == "2500"
     assert req.top == 50
     assert req.mode == "B"
-    assert req.exchange == "bse"  # non-blank passthrough (case preserved)
-    assert req.segment == "index"
+    # Non-blank passthrough is trimmed; case must be lake-exact (a lowercase
+    # coordinate is now REFUSED by the DEC-ENGINE-SCOPE-GUARD-001 scope law).
+    assert req.exchange == "BSE"
+    assert req.segment == "INDEX"
     assert req.start == "2022-03-01"
     assert req.end == "2023-09-30"
 
