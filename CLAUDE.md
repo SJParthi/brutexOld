@@ -493,7 +493,7 @@ hostile-review pass._
   strike is never reduced; "if uncertain, fetch" (`< 1` clamps UP to 1). RE-PULL NET: a reduced-budget empty makes
   `fetch_count == 1 < CONFIRMED_EMPTY_MIN_FETCHES(2)` so the OLD-gap fast-settle does NOT fire — the window stays
   re-fetchable on a later idempotent pull (keep-first sink + durable ledger), so even a vendor-bug 200-empty is
-  recoverable [SETTLE-RECONCILE — DEC-DEAD-STRIKE-LEDGER-SETTLE-001, MIGRATION.md #1166 (pack #1171): SUPERSEDED for an OLD window —
+  recoverable [SETTLE-RECONCILE — DEC-DEAD-STRIKE-LEDGER-SETTLE-001, MIGRATION.md #1172 (pack #1171): SUPERSEDED for an OLD window —
   the old-gap settle is now BUDGET-AWARE, accumulating clean-EMPTY confirmations ACROSS pulls (`prior.empty_streak +
   in_pull_fetches` vs the SAME 2-confirmation bar), so TWO independent pulls' clean empties settle a reduced-budget old
   window SKIPPED; a repeated vendor-bug 200-empty on an OLD window is thereafter recoverable via `brutex
