@@ -28,12 +28,15 @@ from brutex.data.moneyness import (
     OPTION_PUT,
     Moneyness,
     MoneynessView,
+    StepConfidence,
+    StrikeStepResult,
     _format_label,
     _is_positive_finite,
     atm_offset,
     classify,
     derive_strike_step,
     moneyness_view,
+    resolve_strike_step,
 )
 from hypothesis import given
 from hypothesis import strategies as st
@@ -225,6 +228,122 @@ class TestDeriveStrikeStep:
         assert derive_strike_step([None, Decimal("100"), Decimal("0"), Decimal("150")]) == Decimal(
             "50"
         )
+
+    def test_authoritative_param_prefers_the_registry_chain(self) -> None:
+        # The back-compat facade over resolve_strike_step: a sparse observed ladder
+        # (gap 100) is corrected by the full authoritative chain (gap 50).
+        assert derive_strike_step(
+            [Decimal("100"), Decimal("200")],
+            authoritative_strikes=[Decimal("100"), Decimal("150"), Decimal("200")],
+        ) == Decimal("50")
+
+    def test_authoritative_param_falls_back_when_chain_degenerate(self) -> None:
+        assert derive_strike_step(
+            [Decimal("100"), Decimal("200")],
+            authoritative_strikes=[Decimal("100")],
+        ) == Decimal("100")
+
+
+class TestResolveStrikeStep:
+    """DEC-MONEYNESS-REGISTRY-STEP-001 — the confidence-aware step resolver."""
+
+    def test_registry_chain_corrects_a_sparse_observed_ladder(self) -> None:
+        # REGRESSION (fails before the fix, when only the observed ladder existed):
+        # only alternate strikes were pulled → observed min gap 100 = 2× the true base
+        # step; the FULL vendor chain restores the 50 grid, labelled high-confidence.
+        observed = [Decimal("24000"), Decimal("24100")]
+        chain = [Decimal("24000"), Decimal("24050"), Decimal("24100")]
+        result = resolve_strike_step(observed, authoritative_strikes=chain)
+        assert result.step == Decimal("50")
+        assert result.confidence is StepConfidence.REGISTRY
+        # The uncorrected derivation really does overestimate (the bug being fixed).
+        assert derive_strike_step(observed) == Decimal("100")
+
+    def test_no_authoritative_chain_is_observed_low_confidence(self) -> None:
+        result = resolve_strike_step([Decimal("100"), Decimal("150")])
+        assert result.step == Decimal("50")
+        assert result.confidence is StepConfidence.OBSERVED
+
+    def test_degenerate_chain_falls_back_to_observed(self) -> None:
+        # A single-strike (or junk-only) chain cannot size the grid → observed wins,
+        # still honestly labelled low-confidence.
+        result = resolve_strike_step(
+            [Decimal("100"), Decimal("150")], authoritative_strikes=[Decimal("100")]
+        )
+        assert result.step == Decimal("50")
+        assert result.confidence is StepConfidence.OBSERVED
+
+    def test_registry_chain_works_even_with_an_empty_observed_ladder(self) -> None:
+        result = resolve_strike_step([], authoritative_strikes=[Decimal("100"), Decimal("150")])
+        assert result.step == Decimal("50")
+        assert result.confidence is StepConfidence.REGISTRY
+
+    def test_stale_registry_chain_is_refined_by_union_with_observed(self) -> None:
+        # UNION refinement (DEC-FNO-HONESTY-PACK-001): a lake partition is itself
+        # vendor-grounded proof a strike exists, so a STALE/SPARSER registry chain
+        # (metadata pull predating a newly-listed strike) must not overestimate.
+        # Registry {24000, 24100} alone says 100; the observed 24050 partition only
+        # surfaces via the UNION (min(reg, obs) would miss the cross-ladder gap).
+        result = resolve_strike_step(
+            [Decimal("24050")],
+            authoritative_strikes=[Decimal("24000"), Decimal("24100")],
+        )
+        assert result.step == Decimal("50")
+        assert result.confidence is StepConfidence.REGISTRY  # both ladders vendor evidence
+
+    def test_union_never_launders_a_pure_observed_step_into_registry(self) -> None:
+        # A 1-strike chain contributes NO pair of its own → the REGISTRY label is
+        # never claimed for a step that only the observed ladder produced.
+        result = resolve_strike_step(
+            [Decimal("24000"), Decimal("24050")],
+            authoritative_strikes=[Decimal("24000")],
+        )
+        assert result.step == Decimal("50")
+        assert result.confidence is StepConfidence.OBSERVED
+
+    def test_no_step_from_either_ladder_is_none_none(self) -> None:
+        result = resolve_strike_step([Decimal("100")], authoritative_strikes=[Decimal("50")])
+        assert result.step is None
+        assert result.confidence is None
+
+    def test_no_step_and_no_chain_is_none_none(self) -> None:
+        result = resolve_strike_step([])
+        assert result.step is None
+        assert result.confidence is None
+
+    def test_confidence_tokens_are_json_native(self) -> None:
+        # StrEnum → the payload strings the frontends match on.
+        assert StepConfidence.REGISTRY == "registry"
+        assert StepConfidence.OBSERVED == "observed"
+
+    def test_result_is_frozen(self) -> None:
+        result = resolve_strike_step([Decimal("100"), Decimal("150")])
+        with pytest.raises(FrozenInstanceError):
+            result.step = Decimal("1")  # type: ignore[misc]
+
+    @given(
+        st.lists(_POS, max_size=6),
+        st.one_of(st.none(), st.lists(_POS, max_size=6)),
+    )
+    def test_resolve_agrees_with_derive_and_labels_honestly(
+        self, observed: list[Decimal], chain: list[Decimal] | None
+    ) -> None:
+        # Property: the step ALWAYS equals what derive_strike_step would say for the
+        # winning ladder — the UNION of chain+observed when the chain itself yields a
+        # step (DEC-FNO-HONESTY-PACK-001), else the observed ladder — and the
+        # confidence names exactly that source (no step ⇒ no confidence): the two can
+        # never disagree (one gap-math source of truth).
+        result = resolve_strike_step(observed, authoritative_strikes=chain)
+        registry_step = derive_strike_step(chain) if chain is not None else None
+        if registry_step is not None:
+            assert chain is not None
+            union_step = derive_strike_step([*chain, *observed])
+            assert result == StrikeStepResult(union_step, StepConfidence.REGISTRY)
+            assert union_step is not None and union_step <= registry_step  # never coarser
+        elif derive_strike_step(observed) is not None:
+            assert result == StrikeStepResult(derive_strike_step(observed), StepConfidence.OBSERVED)
+        else:
+            assert result == StrikeStepResult(None, None)
 
 
 class TestAtmOffset:

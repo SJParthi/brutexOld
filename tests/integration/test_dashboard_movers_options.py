@@ -1080,3 +1080,250 @@ class TestOptionsGreeksEndToEnd:
         assert '["IV","iv","num4"]' in html
         assert '["Delta","delta","num4"]' in html
         assert 'type === "num4"' in html  # the 4dp display formatter exists
+
+
+# ── the AUTHORITATIVE registry strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001) ──
+
+
+class TestRegistryStrikeStep:
+    """The options screen prefers the FULL vendor strike chain for the ATM±N grid.
+
+    A sparsely-pulled expiry (only alternate strikes have candles) makes the
+    lake-observed min gap OVERESTIMATE the true base step; the registry chain —
+    loaded via the graceful ``load_registry_strike_chains`` fallback pattern —
+    corrects it, and the fallback is honestly labelled low-confidence.
+    """
+
+    _CE_24100 = "NSE-NIFTY-27Jun24-24100-CE"
+
+    def _seed_sparse_grid_lake(self, tmp_path: Path) -> None:
+        """CE strikes 24000 + 24100 ONLY (observed gap 100; the true grid is 50)."""
+        _seed_options_lake(tmp_path)  # 24000 CE/PE + the NIFTY spot (LTP 23622.90)
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=self._CE_24100,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="120", volume=100, oi=500)],
+        )
+
+    def _chains(self) -> dict[tuple[str, date], tuple[Decimal, ...]]:
+        return {
+            ("NIFTY", date(2024, 6, 27)): (
+                Decimal("24000"),
+                Decimal("24050"),
+                Decimal("24100"),
+            )
+        }
+
+    def test_without_chains_the_sparse_step_overestimates_with_honest_label(
+        self, tmp_path: Path
+    ) -> None:
+        # REGRESSION (the pre-fix depth, now honestly labelled): spot 23622.90,
+        # strike 24000, observed step 100 → (377.10 / 100) rounds to +4.
+        self._seed_sparse_grid_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
+        )
+        ce = next(m for m in cands.movers if m.symbol == _CE)
+        assert ce.moneyness_label == "OTM +4"
+        assert ce.strike_step_confidence is not None
+        assert ce.strike_step_confidence.value == "observed"
+
+    def test_registry_chains_correct_the_step(self, tmp_path: Path) -> None:
+        # The FULL chain restores the 50 grid → (377.10 / 50) rounds to +8, and the
+        # row is high-confidence. Fails before the fix (no chain consumption).
+        self._seed_sparse_grid_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            registry_chain_for=lambda u, e: self._chains().get((u, e)),
+        )
+        ce = next(m for m in cands.movers if m.symbol == _CE)
+        assert ce.moneyness_label == "OTM +8"
+        assert ce.strike_step_confidence is not None
+        assert ce.strike_step_confidence.value == "registry"
+
+    def test_underlying_absent_from_chains_degrades_to_observed(self, tmp_path: Path) -> None:
+        # A registry↔lake naming mismatch (or a never-enumerated underlying) must
+        # never break the screen — the observed ladder + low-confidence label win.
+        self._seed_sparse_grid_lake(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            registry_chain_for=lambda u, e: {
+                ("OTHER", date(2024, 6, 27)): (Decimal("1"), Decimal("2"))
+            }.get((u, e)),
+        )
+        ce = next(m for m in cands.movers if m.symbol == _CE)
+        assert ce.moneyness_label == "OTM +4"
+        assert ce.strike_step_confidence is not None
+        assert ce.strike_step_confidence.value == "observed"
+
+    def test_run_snapshot_threads_the_chains(self, tmp_path: Path) -> None:
+        payload = run_options_snapshot(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            registry_chain_for=lambda u, e: self._chains().get((u, e)),
+        )
+        # An options-less lake still degrades honestly with the chains wired.
+        assert payload["instrument_count"] == 0
+
+    def test_route_serves_the_registry_confidence(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # End-to-end: the registry sits beside the instrument store
+        # (registry_path_for) and its chain reaches the movers rows.
+        from brutex.data.registry_store import RegistryStore
+
+        self._seed_sparse_grid_lake(tmp_path)
+        now = datetime(2024, 6, 1, tzinfo=UTC)
+        with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
+            for strike in (24000.0, 24050.0, 24100.0):
+                reg.upsert_contract(
+                    "NSE",
+                    "NIFTY",
+                    date(2024, 6, 27),
+                    f"NSE-NIFTY-27Jun24-{int(strike)}-CE",
+                    side="CE",
+                    strike=strike,
+                    run_id="r1",
+                    fetched_at=now,
+                )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13", "top_n": 5},
+        ).json()
+        ce_row = next(r for r in body["highest_oi"] if r["symbol"] == _CE)
+        assert ce_row["moneyness"] == "OTM +8"
+        assert ce_row["strike_step_confidence"] == "registry"
+
+    def test_route_without_registry_is_honestly_observed(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        self._seed_sparse_grid_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13", "top_n": 5},
+        ).json()
+        ce_row = next(r for r in body["highest_oi"] if r["symbol"] == _CE)
+        assert ce_row["moneyness"] == "OTM +4"
+        assert ce_row["strike_step_confidence"] == "observed"
+
+    def test_route_memoises_the_chains_per_generation(
+        self,
+        store: InstrumentStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Two polls within ONE write-generation share a single per-key registry chain
+        # read (the dedicated generation-stamped MoversSnapshotCache in build_app,
+        # keyed per (exchange, underlying, expiry) — the LAZY bounded loader).
+        import brutex.dashboard.registry_strikes as rs_module
+
+        self._seed_sparse_grid_lake(tmp_path)
+        calls: list[tuple[str, str]] = []
+        real_loader = rs_module.load_registry_strike_chain
+
+        def _counting_loader(*args: object, **kwargs: object) -> object:
+            calls.append((str(kwargs["underlying"]), str(kwargs["expiry"])))
+            return real_loader(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(rs_module, "load_registry_strike_chain", _counting_loader)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        params = {"asset": "options", "interval": "1day", "date": "2024-06-13"}
+        first = client.get("/api/v1/movers", params=params).json()
+        second = client.get("/api/v1/movers", params=params).json()
+        assert first["instrument_count"] == second["instrument_count"] == 3
+        assert calls == [("NIFTY", "2024-06-27")]  # ONE narrowed read; 2nd poll O(1) hit
+        # A contract-LESS exchange coordinate has no tier-target keys → ZERO extra
+        # reads (the bounded-read win: no whole-registry load per exchange key).
+        client.get("/api/v1/movers", params={**params, "exchange": "BSE"}).json()
+        assert len(calls) == 1
+        # An exchange coordinate WITH contracts keys separately → exactly one more.
+        client.get("/api/v1/movers", params={**params, "exchange": "NSE"}).json()
+        assert calls == [("NIFTY", "2024-06-27")] * 2
+
+    def test_route_reads_only_tier_target_chains_never_whole_registry(
+        self,
+        store: InstrumentStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # BOUNDED-READ pin (Golden Rule #5, DEC-FNO-HONESTY-PACK-001): the registry
+        # holds EXTRA chains (another underlying + a far historical expiry) that the
+        # snapshot's tier does NOT target — the lazy loader must request ONLY the
+        # tier-target (underlying, expiry) key, never materialise the whole table.
+        import brutex.dashboard.registry_strikes as rs_module
+        from brutex.data.registry_store import RegistryStore
+
+        self._seed_sparse_grid_lake(tmp_path)
+        now = datetime(2024, 6, 1, tzinfo=UTC)
+        with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
+            for strike in (24000.0, 24050.0, 24100.0):
+                reg.upsert_contract(
+                    "NSE",
+                    "NIFTY",
+                    date(2024, 6, 27),
+                    f"NSE-NIFTY-27Jun24-{int(strike)}-CE",
+                    side="CE",
+                    strike=strike,
+                    run_id="r1",
+                    fetched_at=now,
+                )
+            # EXTRA chains the tier never targets — must never be read.
+            reg.upsert_contract(
+                "NSE",
+                "BANKNIFTY",
+                date(2024, 6, 26),
+                "NSE-BANKNIFTY-26Jun24-52000-CE",
+                side="CE",
+                strike=52000.0,
+                run_id="r1",
+                fetched_at=now,
+            )
+            reg.upsert_contract(
+                "NSE",
+                "NIFTY",
+                date(2023, 1, 25),
+                "NSE-NIFTY-25Jan23-18000-CE",
+                side="CE",
+                strike=18000.0,
+                run_id="r1",
+                fetched_at=now,
+            )
+        requested: list[tuple[str, str]] = []
+        real_loader = rs_module.load_registry_strike_chain
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            requested.append((str(kwargs["underlying"]), str(kwargs["expiry"])))
+            return real_loader(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(rs_module, "load_registry_strike_chain", _spy)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13", "top_n": 5},
+        ).json()
+        ce_row = next(r for r in body["highest_oi"] if r["symbol"] == _CE)
+        assert ce_row["strike_step_confidence"] == "registry"  # the narrowed read worked
+        assert requested == [("NIFTY", "2024-06-27")]  # ONLY the tier-target key
+
+    def test_movers_template_renders_the_low_confidence_marker(self) -> None:
+        # The frontend honesty marker (a trailing " ~" keyed off the row field) is
+        # present in the served template — display-only, string-pinned.
+        import brutex.dashboard as dashboard_pkg
+
+        template = (Path(dashboard_pkg.__file__).parent / "templates" / "movers.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'strike_step_confidence === "observed"' in template

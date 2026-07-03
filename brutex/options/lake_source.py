@@ -46,7 +46,9 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
+
+import structlog
 
 from brutex.costs.types import OptionType
 from brutex.data.fno_symbol import parse_fno_symbol
@@ -54,7 +56,16 @@ from brutex.data.models import OptionBar
 from brutex.options.executor import OptionBarPair
 from brutex.options.lot_size_history import OptionsUnderlying
 
-__all__ = ["LakeOptionBarSource"]
+__all__ = ["STRIKE_COLLISION_EVENT", "LakeOptionBarSource"]
+
+_LOG = structlog.get_logger(__name__)
+
+#: Structlog WARNING event emitted when two discovered FNO partition directories
+#: decode to Decimal-EQUAL strikes for the same ``(expiry, option_type)`` — e.g.
+#: ``…-24650-CE`` vs ``…-24650.0-CE`` (``Decimal("24650") == Decimal("24650.0")``
+#: and they hash alike, so they are ONE dict key). Without the warning the later
+#: directory silently shadowed the earlier one (DEC-LAKE-SOURCE-STRIKE-COLLIDE-001).
+STRIKE_COLLISION_EVENT: Final[str] = "lake_source.strike_collision"
 
 #: The exchange each Track-2 underlying's F&O contracts live under in the lake —
 #: NIFTY / BANKNIFTY ride ``NSE``, SENSEX rides ``BSE`` (CLAUDE.md §6 scope).
@@ -150,12 +161,28 @@ class LakeOptionBarSource:
         return index.get((expiry_date, Decimal(strike), option_type))
 
     def _build_symbol_index(self, exchange: str, underlying: str) -> dict[_ContractKey, str]:
-        """Scan ``bars/<exchange>/FNO/`` and index this underlying's OPTION contracts."""
+        """Scan ``bars/<exchange>/FNO/`` and index this underlying's OPTION contracts.
+
+        The scan is ``sorted()`` so the walk order is deterministic across
+        filesystems (raw ``iterdir()`` order is OS-arbitrary). When sibling
+        directories decode to Decimal-EQUAL strikes for the same
+        ``(expiry, option_type)`` — e.g. ``…-24650-CE`` vs ``…-24650.0-CE`` —
+        one :data:`STRIKE_COLLISION_EVENT` WARNING fires PER COLLIDED PAIR,
+        naming the shadowed + kept raw directory names via ``repr()`` (an N-way
+        collision emits N−1 warnings; every colliding raw dir is named across
+        them, the intermediate winner appearing as ``kept`` in one and
+        ``shadowed`` in the next). Then the keep-policy applies: the
+        lexicographically-LATER raw name wins (last write of the sorted walk),
+        matching the module's long-standing last-wins overwrite but now
+        deterministic + visible. The shadowed directory's bars are unreachable
+        for that key — warned, never silent, never a fabricated price
+        (DEC-LAKE-SOURCE-STRIKE-COLLIDE-001).
+        """
         index: dict[_ContractKey, str] = {}
         fno_dir = self._lake_root / "bars" / exchange / _FNO_SEGMENT
         if not fno_dir.is_dir():
             return index
-        for contract_dir in fno_dir.iterdir():
+        for contract_dir in sorted(fno_dir.iterdir()):
             if not contract_dir.is_dir():
                 continue
             parts = parse_fno_symbol(contract_dir.name)
@@ -164,7 +191,23 @@ class LakeOptionBarSource:
                 continue
             if parts.underlying != underlying:
                 continue
-            index[parts.expiry, parts.strike, parts.option_type] = contract_dir.name
+            key: _ContractKey = (parts.expiry, parts.strike, parts.option_type)
+            existing = index.get(key)
+            if existing is not None:
+                # Decimal-equal strike collision: warn once PER collided pair naming
+                # both raw dirs, then keep the deterministic pick (later sorted name
+                # wins; an N-way collision emits N−1 of these, naming every dir).
+                _LOG.warning(
+                    STRIKE_COLLISION_EVENT,
+                    exchange=exchange,
+                    underlying=underlying,
+                    expiry=parts.expiry.isoformat(),
+                    strike=str(parts.strike),
+                    option_type=parts.option_type,
+                    shadowed=repr(existing),
+                    kept=repr(contract_dir.name),
+                )
+            index[key] = contract_dir.name
         return index
 
     def _contract_bars(

@@ -42,6 +42,7 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_status import EMPTY, FAILED, SUCCESS, classify_window_status
 
 __all__ = [
+    "CONFIRMED_EMPTY_MIN_FETCHES",
     "EMPTY",
     "EMPTY_TERMINAL_THRESHOLD",
     "FAILED",
@@ -82,6 +83,23 @@ SKIPPED: str = "SKIPPED"
 #: old-gap settle path (DEC-OLD-GAP-FAST-SETTLE-001), so this never re-hammers an
 #: ancient dead window — only recent maybe-late windows get the few extra chances.
 EMPTY_TERMINAL_THRESHOLD: int = 3
+
+#: Minimum CLEAN-EMPTY confirmations an old empty window needs before its empty is
+#: trusted as "confirmed" for the OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001).
+#: ``2`` means the empty was observed at least twice — historically both had to land
+#: WITHIN one pull (the in-pull empty retry re-hit it), which a REDUCED per-strike
+#: empty-retry budget of 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) made STRUCTURALLY
+#: unreachable, so a confirmed-dead deep-OTM strike re-fetched once per pull far past
+#: the point its empty was proven. DEC-DEAD-STRIKE-LEDGER-SETTLE-001 makes the settle
+#: BUDGET-AWARE: confirmations now accumulate ACROSS pulls (``prior.empty_streak`` —
+#: each unit one distinct pull's genuine, unsuppressed clean-EMPTY — plus this pull's
+#: ``in_pull_fetches``), compared against this SAME threshold inside
+#: :meth:`WindowLedger.record`. CANONICAL HOME moved here from
+#: ``brutex.adapters.ingest_common`` (which re-exports it — one source of truth,
+#: CLAUDE.md §11 COMMON) because the ledger applies the cumulative rule and
+#: ``ingest_common`` already imports from ``brutex.data`` (the reverse import would
+#: be a cycle).
+CONFIRMED_EMPTY_MIN_FETCHES: int = 2
 
 #: The ``last_error`` marker :meth:`WindowLedger.reopen_skipped` stamps on a
 #: re-opened row (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). A ``FAILED`` row carrying
@@ -399,6 +417,7 @@ class WindowLedger:
         now: datetime,
         in_pull_fetches: int = 1,
         settle_empty: bool = False,
+        old_window: bool = False,
         degraded: bool = False,
         degraded_reason: str | None = None,
         suppress_settle: bool = False,
@@ -436,6 +455,33 @@ class WindowLedger:
         the window is empty). The default ``False`` is byte-identical to the prior
         behaviour. It is a TRANSIENT per-call decision — NOT a stored field; the resulting
         ``SKIPPED`` status + ``empty_streak`` persist through the existing columns.
+
+        *old_window* (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) is the pure "vendor data can
+        never appear" fact (``window_end`` older than
+        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`), threaded so the
+        old-gap fast-settle can be BUDGET-AWARE: a strike whose in-pull EMPTY-retry
+        budget was REDUCED to 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) can never reach
+        :data:`CONFIRMED_EMPTY_MIN_FETCHES` fetches inside ONE pull, so without this
+        it re-fetched once per pull long after its empty was confirmed. When the
+        classification is ``EMPTY``, the window is old, and the settle is not
+        suppressed, the confirmation count is CUMULATIVE across pulls:
+        ``prior.empty_streak`` (each unit one distinct prior pull's genuine,
+        unsuppressed clean-EMPTY observation — an independent confirmation at least as
+        strong as an in-pull re-fetch) plus this pull's *in_pull_fetches*; crossing
+        :data:`CONFIRMED_EMPTY_MIN_FETCHES` settles ``SKIPPED`` exactly like the
+        one-pull fast-settle (streak forced to the threshold). The data-safety law is
+        untouched ("if uncertain, fetch"): a ``SUCCESS`` resets the streak, a
+        ``FAILED`` (429/timeout) never counts and never settles, a breaker-suppressed
+        empty neither bumps nor settles, a RECENT window (*old_window* ``False``)
+        keeps the conservative across-pull streak, and :meth:`reopen_skipped` resets
+        the streak so an operator re-open regains the full confirmation budget. The
+        default ``False`` is byte-identical to the prior behaviour. HONEST envelope:
+        *in_pull_fetches* counts transient re-attempts too, preserving the
+        already-shipped in-pull generosity (1 transient + 1 clean empty == 2), and on
+        the SPOT spine ``empty_streak`` may include degraded-demotion bumps — but the
+        spot spine never passes *old_window* (its full empty-retry budget always
+        reaches the in-pull confirmation), so the cumulative rule's evidence there is
+        genuine clean-EMPTY pulls only.
 
         *degraded* (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001) is the
         DATA-COMPLETENESS demotion hint: a clean bars-returning fetch whose stored bars
@@ -515,16 +561,36 @@ class WindowLedger:
                 # accept the gap and settle SKIPPED so the pull converges (the operator has
                 # been warned each time; the stored bars are kept).
                 status = SKIPPED
-            elif classified == EMPTY and settle_empty and not suppress_settle:
+            elif (
+                classified == EMPTY
+                and not suppress_settle
+                and (
+                    settle_empty
+                    or (
+                        old_window and prior_streak + in_pull_fetches >= CONFIRMED_EMPTY_MIN_FETCHES
+                    )
+                )
+            ):
                 # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an in-pull-confirmed
                 # empty window OLD enough that vendor data can never appear is a PERMANENT
                 # gap — settle it SKIPPED in ONE pull, forcing the streak to the threshold
                 # so the persisted row is identical to a normal across-pull settle. Only
                 # ever reached for EMPTY (a SUCCESS/FAILED ignores the hint), so it can
-                # never mask a window with data. RECENT windows (settle_empty False) keep
-                # the conservative across-pull streak below. GATED OFF while the pull's
-                # mass-empty breaker is tripped (suppress_settle — a throttle-shaped
-                # empty must never cement, DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
+                # never mask a window with data. RECENT windows (settle_empty False,
+                # old_window False) keep the conservative across-pull streak below. GATED
+                # OFF while the pull's mass-empty breaker is tripped (suppress_settle — a
+                # throttle-shaped empty must never cement,
+                # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
+                #
+                # BUDGET-AWARE arm (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): a reduced
+                # empty-retry budget (1 fetch/pull, DEC-FETCH-PER-WINDOW-GUARANTEE-001)
+                # can never reach CONFIRMED_EMPTY_MIN_FETCHES inside one pull, so the
+                # confirmation count for an OLD window accumulates ACROSS pulls —
+                # ``prior_streak`` (one unit per distinct prior pull's genuine,
+                # unsuppressed clean-EMPTY) + this pull's ``in_pull_fetches``. Two
+                # independent pulls' clean empties meet the same 2-confirmation evidence
+                # bar the one-pull fast-settle demands; anything short of it stays
+                # re-fetchable ("if uncertain, fetch").
                 empty_streak = self._threshold
                 status = SKIPPED
             elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
