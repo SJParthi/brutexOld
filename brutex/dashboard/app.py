@@ -2826,7 +2826,12 @@ def build_app(
                 # segment tag is threaded through the F&O spine. The operator's from/to
                 # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
                 # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
-                _pull_job.set_phase("historical")
+                # pair_progress=True (DEC-PIPELINE-STALL-HEARTBEAT-001): the F&O
+                # historical phase has NO ledger-sync driver at this layer, so the
+                # per-pair hook advances the units + cumulative bars open-endedly —
+                # the counters keep moving instead of freezing at the metadata
+                # phase's "45/45 units, 0 bars" while millions of bars stream in.
+                _pull_job.set_phase("historical", pair_progress=True)
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -2853,6 +2858,9 @@ def build_app(
                 (never 'today' — the pull fills only to the previous trading day, so a
                 today-warm would cache empties); ``None`` when the lake has no spot day yet.
                 """
+                # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
+                # observed during the movers warm is named "movers".
+                _pull_job.set_phase("movers")
                 try:
                     warm_date = latest_movers_date(lake_root)
                 except Exception as exc:  # pylint: disable=broad-except - best-effort warm
@@ -3046,6 +3054,10 @@ def build_app(
                 ``run_full_pipeline``) and the ``finally`` below still releases
                 the movers gate with ``prebuild_ok=False``.
                 """
+
+                # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
+                # observed here is named "prebuild", never blamed on "historical".
+                _pull_job.set_phase("prebuild")
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
@@ -5501,13 +5513,15 @@ def _metadata_progress_sync(
     """Map the metadata pull's absolute ``(completed, total, current)`` progress onto the
     job's ``sync_from_ledger`` resync (DEC-METADATA-LIVE-PROGRESS-001).
 
-    ``bars=0`` / ``failed=0``: the metadata pull persists only the chain SHAPE, never
-    candles (DEC-INSTRUMENT-UNIVERSE-FAST-001) — there are no bars. Lifted OUT of the
+    ``bars=None`` / ``failed=0``: the metadata pull persists only the chain SHAPE, never
+    candles (DEC-INSTRUMENT-UNIVERSE-FAST-001) — there are no bars, so the sync PRESERVES
+    the cumulative bar tally an earlier phase already streamed instead of wiping it to 0
+    (DEC-PIPELINE-STALL-HEARTBEAT-001, the frozen-counter fix). Lifted OUT of the
     ``# pragma: no cover`` job-thread closure so the ``(completed, total, current)`` →
     ``sync_from_ledger`` mapping is unit-tested (a swapped arg / wrong ``bars`` would now
     fail a test, not pass CI green) instead of being pragma-hidden.
     """
-    job.sync_from_ledger(completed=completed, total=total, bars=0, failed=0, current=current)
+    job.sync_from_ledger(completed=completed, total=total, bars=None, failed=0, current=current)
 
 
 def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | None] | None:
