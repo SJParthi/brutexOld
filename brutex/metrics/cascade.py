@@ -77,9 +77,10 @@ ships the *orchestration logic*; the production series-regeneration adapter
 
 from __future__ import annotations
 
+import itertools
 import math
 import statistics
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Final
@@ -88,7 +89,12 @@ import numpy as np
 
 from brutex.metrics.cpcv import DEFAULT_N_GROUPS, DEFAULT_N_TEST_GROUPS, cpcv_pass_rate
 from brutex.metrics.deflated_sharpe import deflated_sharpe_ratio
-from brutex.metrics.lockbox import lockbox_evaluation
+from brutex.metrics.lockbox import (
+    LOCKBOX_DEFAULT_MIN_TRADES,
+    LOCKBOX_DEFAULT_WINDOW_DAYS,
+    LockboxResult,
+    lockbox_evaluation,
+)
 from brutex.metrics.monte_carlo import monte_carlo_permutation_test
 from brutex.metrics.pbo import pbo_probability
 from brutex.metrics.spa import BootstrapConfig, reality_check, romano_wolf
@@ -135,7 +141,7 @@ _FINITE_METRIC_FIELDS: Final[tuple[str, ...]] = (
     "kurtosis",
 )
 
-#: Composite-score weights (spec lines 607-615), summing to 1.0.
+#: Composite-score weights (spec lines 686-697), summing to 1.0.
 _COMPOSITE_WEIGHTS: Final[dict[str, float]] = {
     "sharpe_ratio": 0.25,
     "sortino_ratio": 0.20,
@@ -199,6 +205,14 @@ class CandidateInput:
     mc_n_bars: int
     mc_n_entries: int
     mc_evaluate: Callable[[npt.NDArray[np.intp]], float]
+    #: TRUE per-trade exit-day ordinals for the lockbox filter #8
+    #: (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F2): when supplied, the lockbox
+    #: count gate + window extension are driven by real TRADES instead of the
+    #: (per-bar) ``lockbox_returns`` observation count. ``None`` (the default)
+    #: keeps the legacy bar-count behaviour byte-identical (a hand-built
+    #: per-trade caller needs no evidence — its rows already ARE trades).
+    #: May be EMPTY (a zero-trade candidate ⇒ honest ``INSUFFICIENT_N``).
+    lockbox_trade_days: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         """Reject a non-finite metric / series value or an empty id up front."""
@@ -217,6 +231,13 @@ class CandidateInput:
                     f"CandidateInput.{name} must be all-finite (no NaN/inf) "
                     f"(candidate {self.candidate_id!r})"
                 )
+        if self.lockbox_trade_days is not None and any(
+            later < earlier for earlier, later in itertools.pairwise(self.lockbox_trade_days)
+        ):
+            raise ValueError(
+                f"CandidateInput.lockbox_trade_days must be non-decreasing "
+                f"(trades chronological) (candidate {self.candidate_id!r})"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,9 +276,10 @@ class CascadeConfig:
     wfo_train_size: int = 252
     wfo_test_size: int = 126
     wfo_step: int = 63
-    # #8 Lockbox (spec #8 defaults)
-    lockbox_min_trades: int = 500
-    lockbox_default_window_days: int = 182
+    # #8 Lockbox (spec #8 defaults — the lockbox module's own public constants,
+    # never re-typed literals; CLAUDE.md §11 COMMON / DEC-STATS-GATE-INTEGRITY-001)
+    lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES
+    lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS
     # #9 Monte-Carlo (spec line 472: p < 0.01)
     mc_alpha: float = 0.01
     mc_n_permutations: int = 1000
@@ -276,6 +298,17 @@ class CandidateVerdict:
     rejected_at: FilterStage | None
     detail: str
     composite_score: float | None = None
+    #: ``True`` iff this is a PASS whose DSR filter #2 deflated against the
+    #: legacy entering-POOL fallback (``dsr_n_source == "pool"`` — an
+    #: anti-conservative under-count of the true leaderboard N), so a
+    #: pool-sourced pass can never silently read as proven
+    #: (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F4). PASS-scoped only: a rejected
+    #: verdict stays ``False`` — a pool-N *rejection* is a-fortiori safe under
+    #: the true larger N (DSR is monotonically decreasing in N). HONEST
+    #: envelope: the flag covers ONLY the pool-N under-count; later filters
+    #: keep their own skip states (e.g. ``pool_pbo=None``), so
+    #: ``provisional=False`` is not a blanket "fully proven" claim.
+    provisional: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +387,22 @@ class CascadeReport:
         """Candidate ids that did not survive, in input order."""
         return tuple(v.candidate_id for v in self.verdicts if not v.passed)
 
+    @property
+    def provisional_pass_ids(self) -> tuple[str, ...]:
+        """Survivor ids whose pass is PROVISIONAL (pool-N DSR), in survivor order.
+
+        The ``survivor_ids``-ordered subsequence of passes flagged
+        :attr:`CandidateVerdict.provisional` (DEC-STATS-GATE-INTEGRITY-001,
+        R2-SR-F4). Because ``dsr_n_source`` is a RUN-level stamp (computed
+        once before the candidate loop), this is by construction
+        ``survivor_ids`` itself when the source is ``"pool"`` and ``()``
+        when it is ``"leaderboard"`` — the per-verdict stamp's value is that
+        a verdict dict extracted from a serialized report stays
+        self-describing.
+        """
+        by_id = {v.candidate_id: v for v in self.verdicts}
+        return tuple(sid for sid in self.survivor_ids if by_id[sid].provisional)
+
 
 def _hard_gate_failure(c: CandidateInput, cfg: CascadeConfig) -> str | None:
     """Return the first failing hard-rejection-gate reason, or ``None`` if all pass.
@@ -420,14 +469,37 @@ def _zscore_clamped(values: list[float]) -> list[float]:
     return [max(-_Z_CLAMP, min(_Z_CLAMP, (v - mean) / std)) for v in values]
 
 
-def _composite_scores(survivors: list[CandidateInput]) -> dict[str, float]:
-    """Per-candidate composite score (spec lines 607-615): weighted clamped z-scores.
+def _measured_lockbox_sharpe(lb: LockboxResult) -> float:
+    """The MEASURED lockbox Sharpe of a PASSING filter-#8 result, as a float.
+
+    The composite's ``lockbox_sharpe`` term (spec lines 688-697) reads the
+    measured out-of-sample value (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F5).
+    A ``lb.passed`` result always carries a non-``None`` Sharpe by
+    construction (:func:`lockbox_evaluation`'s ``sharpe_gate`` requires it),
+    but :class:`~brutex.metrics.lockbox.LockboxResult` is a plain frozen
+    dataclass with no cross-field validation, so a hand-built inconsistent
+    result is rejected LOUDLY here rather than crashing the z-score.
+    """
+    if lb.lockbox_sharpe is None:
+        raise ValueError("a passing LockboxResult must carry a measured lockbox_sharpe")
+    return lb.lockbox_sharpe
+
+
+def _composite_scores(
+    survivors: list[CandidateInput], lockbox_sharpe_by_id: Mapping[str, float]
+) -> dict[str, float]:
+    """Per-candidate composite score (spec lines 686-697): weighted clamped z-scores.
 
     Note: the spec's ``normalize(x)`` is a per-(instrument, TF) *leaderboard*
     z-score; here it is taken over the **surviving pool** (a deliberate
     consequence of the pure-pool design — the orchestrator only sees the
     injected survivors, not the full leaderboard), so scores rank survivors
-    relative to each other.
+    relative to each other. The ``lockbox_sharpe`` term reads the MEASURED
+    per-candidate lockbox Sharpe retained from filter #8
+    (*lockbox_sharpe_by_id*, a SUPERSET of the survivors — a #8-passer later
+    rejected at #9 has an unused entry), never the training reference
+    (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F5 — spec conformance,
+    ``TRACK1_BACKTEST_SPEC.md`` composite formula).
     """
     raw: dict[str, list[float]] = {
         "sharpe_ratio": [c.sharpe_ratio for c in survivors],
@@ -436,7 +508,7 @@ def _composite_scores(survivors: list[CandidateInput]) -> dict[str, float]:
         "profit_factor_excess": [c.profit_factor - 1.0 for c in survivors],
         "recovery_factor": [c.recovery_factor for c in survivors],
         "win_quality": [c.win_rate * c.win_loss_ratio for c in survivors],
-        "lockbox_sharpe": [c.training_sharpe for c in survivors],
+        "lockbox_sharpe": [lockbox_sharpe_by_id[c.candidate_id] for c in survivors],
     }
     z = {k: _zscore_clamped(v) for k, v in raw.items()}
     scores: dict[str, float] = {}
@@ -681,7 +753,12 @@ def run_stage4_cascade(
     survivors = kept
     stage_survivors[FilterStage.WALK_FORWARD.value] = len(survivors)
 
-    # ── #8 Lockbox (per-candidate) ──
+    # ── #8 Lockbox (per-candidate). ``evidence_days`` carries the TRUE
+    # per-trade exit-day ordinals when the caller supplied them
+    # (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F2) so the 500-trade floor counts
+    # trades, not bars; the MEASURED lockbox Sharpe of each passer is retained
+    # for the composite's lockbox term (R2-SR-F5). ──
+    lockbox_sharpe_by_id: dict[str, float] = {}
     kept = []
     for c in survivors:
         try:
@@ -692,12 +769,14 @@ def run_stage4_cascade(
                 training_max_drawdown=c.training_max_drawdown,
                 min_trades=config.lockbox_min_trades,
                 default_window_days=config.lockbox_default_window_days,
+                evidence_days=c.lockbox_trade_days,
             )
         except ValueError as exc:
             reject(c, FilterStage.LOCKBOX, f"lockbox could not be evaluated: {exc}")
             continue
         if lb.passed:
             kept.append(c)
+            lockbox_sharpe_by_id[c.candidate_id] = _measured_lockbox_sharpe(lb)
         else:
             reject(c, FilterStage.LOCKBOX, f"lockbox {lb.status.value}")
     survivors = kept
@@ -728,9 +807,18 @@ def run_stage4_cascade(
     survivors = kept
     stage_survivors[FilterStage.MONTE_CARLO.value] = len(survivors)
 
-    # ── Composite ranking of survivors (spec 607-615) ──
-    scores = _composite_scores(survivors)
-    ranked = sorted(survivors, key=lambda c: scores[c.candidate_id], reverse=True)
+    # ── Composite ranking of survivors (spec 686-697) ──
+    scores = _composite_scores(survivors, lockbox_sharpe_by_id)
+    # Deterministic TOTAL order (DEC-STATS-GATE-INTEGRITY-001 R2-SR-F6,
+    # mirroring DEC-RANKING-TIEBREAK-001 in ``brutex.ranking``): primary key is
+    # the composite score DESCENDING with the unique ``candidate_id`` ASCENDING
+    # as the final tie-break, so tied scores can never leave the survivor order
+    # input-dependent (``sorted`` is stable — a bare score key permuted with the
+    # candidate enumeration on any tie). The key is always well-defined: every
+    # composite is finite by construction (finite-validated inputs + the
+    # ``[-3, +3]`` z-clamp + finite weights) and id uniqueness is enforced at
+    # entry, so ``(-score, candidate_id)`` is a strict total order.
+    ranked = sorted(survivors, key=lambda c: (-scores[c.candidate_id], c.candidate_id))
     for c in survivors:
         verdicts[c.candidate_id] = CandidateVerdict(
             candidate_id=c.candidate_id,
@@ -738,6 +826,9 @@ def run_stage4_cascade(
             rejected_at=None,
             detail="survived all Stage-4 filters",
             composite_score=scores[c.candidate_id],
+            # A pool-N-deflated pass is PROVISIONAL (R2-SR-F4): the legacy
+            # entering-pool fallback under-counts the true leaderboard N.
+            provisional=dsr_n_source == "pool",
         )
 
     ordered_verdicts = tuple(verdicts[cid] for cid in ids)
