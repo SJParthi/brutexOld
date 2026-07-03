@@ -49,10 +49,17 @@ def verify_one(client: GrowwClientProtocol, record: RawIntegrityRecord) -> Verif
     """Re-fetch *record*'s window from Groww + verify its hash (one window).
 
     Re-issues :meth:`GrowwClientProtocol.historical_candles` with the EXACT
-    coordinates the record stored (``exchange`` / ``segment`` / ``groww_symbol`` /
+    coordinates the record stored (``exchange`` / ``segment`` /
+    :attr:`~brutex.data.raw_integrity.RawIntegrityRecord.fetch_symbol` /
     ``interval`` / ``window_start`` / ``window_end`` — the bounds are the same ISO
     strings the original call used), then delegates to the pure
-    :func:`~brutex.data.raw_integrity.verify_record`. A
+    :func:`~brutex.data.raw_integrity.verify_record`. The symbol re-issued is the
+    record's ``fetch_symbol`` — the ISSUED form when the capture recorded one
+    (a ``%26`` ampersand-fallback recovery was PHYSICALLY fetched with the
+    encoded form while keyed under the plain symbol, so re-issuing the plain form
+    would re-hit the clean-empty miss and flag a guaranteed false
+    ``verify_mismatch`` — DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001), else the key
+    ``groww_symbol`` (every legacy record verifies exactly as before). A
     :class:`~brutex.data.raw_integrity.RawIntegrityError` on a malformed re-fetched
     payload propagates (an inconclusive verification surfaces, never a silent
     pass). The vendor call may raise its own
@@ -62,7 +69,7 @@ def verify_one(client: GrowwClientProtocol, record: RawIntegrityRecord) -> Verif
     payload = client.historical_candles(
         exchange=record.exchange,
         segment=record.segment,
-        groww_symbol=record.groww_symbol,
+        groww_symbol=record.fetch_symbol,
         interval=record.interval,
         start=record.window_start,
         end=record.window_end,

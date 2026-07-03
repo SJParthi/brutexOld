@@ -1070,6 +1070,35 @@ def test_auth_abort_halts_and_reports(registry: RegistryStore, tmp_lake: Path) -
     assert "auth token expired" in report.note
 
 
+def test_retryable_auth_shape_escaping_spine_propagates_unchanged(
+    registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-GROWW-AUTH-HALT-001 carve-out (F&O twin): a RETRYABLE auth-family error
+    (a stale read-only re-read) escaping the option spine re-raises UNCHANGED out
+    of ``pull_contract_candles`` — never mapped to the graceful terminal-auth abort."""
+    from brutex.adapters.groww.errors import GrowwTokenStillStaleError
+
+    def _raise_still_stale(*_a: object, **_k: object) -> GrowwOptionIngestReport:
+        raise GrowwTokenStillStaleError("same dead token", safe_message="stale")
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _raise_still_stale)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    with pytest.raises(GrowwTokenStillStaleError):
+        pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+
+
 # ── until-clean: bounded re-pull rounds (default-off vs on) ───────────────────
 
 

@@ -423,6 +423,28 @@ def is_auth_failure(exc: GrowwError) -> bool:
     return isinstance(exc, GrowwAuthError)
 
 
+def is_terminal_auth_failure(exc: BaseException) -> bool:
+    """True iff *exc* is the TERMINAL Groww auth shape — a dead credential, never a self-heal.
+
+    DEC-GROWW-AUTH-HALT-001 — the ONE source of truth for "this auth error must HALT
+    the pull": a :class:`GrowwAuthError` that is NOT retryable (a wrong TOTP secret /
+    expired api key / re-mint budget exhausted). Every remaining symbol would fail
+    identically against the dead credential, so the pull-wide halt paths (both ingest
+    spines' ``_GLOBAL_STOP_ERRORS`` drain checks, ``fetch_pipeline._is_pool_isolatable``,
+    ``pull_jobs._is_pull_halt``, the CLI ``cmd_fetch`` alert wrap) consult THIS predicate
+    instead of quarantining every symbol one by one into a silent all-failed "success".
+
+    Deliberately FALSE for the two RETRYABLE :class:`GrowwAuthError` subclasses —
+    :class:`GrowwTokenIssuanceThrottled` (a throttled mint) and
+    :class:`GrowwTokenStillStaleError` (a read-only broker re-read racing the Lambda's
+    fresh mint) — which are transient by design and must NEVER halt. The mid-pull
+    auto-re-mint self-heal (DEC-GROWW-TOKEN-REAUTH-001) is untouched by construction:
+    a 06:00 IST token reset that the :class:`~brutex.adapters.groww.reauth.SdkRefresher`
+    heals never raises out of ``client._call`` at all, so it can never reach a halt path.
+    """
+    return isinstance(exc, GrowwAuthError) and not is_retryable(exc)
+
+
 def is_retryable(exc: GrowwError) -> bool:
     """True if *exc* is transient and the orchestrator should retry it.
 
@@ -470,4 +492,5 @@ __all__ = [
     "is_auth_failure",
     "is_rate_limit",
     "is_retryable",
+    "is_terminal_auth_failure",
 ]
