@@ -263,6 +263,9 @@ class _InterleaveProbeStore:
         class _Up:
             rows_written = len(instruments)
             rows_replaced = 0
+            # The loader now reads the collision count off the UpsertResult
+            # (DEC-MAPPING-COLLISION-HONESTY-001) — the duck-typed fake mirrors it.
+            security_id_collisions = 0
 
         return _Up()
 
