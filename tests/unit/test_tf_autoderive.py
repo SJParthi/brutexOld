@@ -1,95 +1,22 @@
-"""Tests for `brutex.data.tf_autoderive` — pull-settle auto-derivation (DEC-TF-MATERIALIZE-002).
+"""Tests for `brutex.data.tf_autoderive` — the doctor derived-freshness compare core.
 
-Covers the opt-in strict decoder, the planner selection rule, the
-quarantining runner, the report arithmetic, and the freshness compare core
-(fresh / stale on value drift / stale on row-count drift).
+The pull-settle auto-derive arm (``autoderive_enabled`` /
+``plan_autoderive_symbols`` / ``run_autoderive`` + the ``BRUTEX_AUTO_DERIVE_TFS``
+opt-in of DEC-TF-MATERIALIZE-002) is REMOVED by DEC-PIPELINE-AUTOPREBUILD-001 —
+derived timeframes are written ONLY by the pipeline's automatic prebuild phase
+(covered in ``test_pipeline_prebuild.py`` / ``test_gated_prebuild.py``). What
+remains here is the pure freshness compare the ``brutex doctor`` probe uses
+(fresh / stale on value drift / stale on row-count drift) plus a pin that the
+removed auto-derive surface stays removed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import polars as pl
-import pytest
-from brutex.data.tf_autoderive import (
-    ENV_AUTO_DERIVE_TFS,
-    AutoderiveOutcome,
-    AutoderiveReport,
-    autoderive_enabled,
-    compare_derived_freshness,
-    plan_autoderive_symbols,
-    run_autoderive,
-)
-from brutex.data.timeframe_materialize import MaterializeResult
-
-
-@dataclass(frozen=True)
-class _FakeResult:
-    symbol: str
-    completed: int
-
-
-class TestOptInFlag:
-    def test_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(ENV_AUTO_DERIVE_TFS, raising=False)
-        assert not autoderive_enabled()
-
-    @pytest.mark.parametrize("val", ["", "0", "true", "yes", "2", " 1 ", "1"])
-    def test_only_literal_one_activates(self, monkeypatch: pytest.MonkeyPatch, val: str) -> None:
-        monkeypatch.setenv(ENV_AUTO_DERIVE_TFS, val)
-        assert autoderive_enabled() is (val.strip() == "1")
-
-
-class TestPlanner:
-    def test_selects_only_symbols_with_new_bars(self) -> None:
-        results = [
-            _FakeResult("NIFTY", 2),
-            _FakeResult("BANKNIFTY", 0),  # nothing new — skipped
-            _FakeResult("SENSEX", 1),
-        ]
-        assert plan_autoderive_symbols(results) == ("NIFTY", "SENSEX")
-
-    def test_dedupes_preserving_order(self) -> None:
-        results = [_FakeResult("NIFTY", 1), _FakeResult("NIFTY", 2), _FakeResult("SENSEX", 1)]
-        assert plan_autoderive_symbols(results) == ("NIFTY", "SENSEX")
-
-    def test_empty_input_plans_nothing(self) -> None:
-        assert plan_autoderive_symbols([]) == ()
-
-
-class TestRunner:
-    def test_quarantines_one_failure_without_sinking_the_rest(self) -> None:
-        calls: list[str] = []
-
-        def _materialize(symbol: str) -> MaterializeResult:
-            calls.append(symbol)
-            if symbol == "BANKNIFTY":
-                raise ValueError("corrupt partition")
-            return MaterializeResult(written={"5m": 10, "15m": 4}, skipped=())
-
-        report = run_autoderive(
-            symbols=("NIFTY", "BANKNIFTY", "SENSEX"), materialize_one=_materialize
-        )
-        # Every symbol still ran — the failure never stopped the loop.
-        assert calls == ["NIFTY", "BANKNIFTY", "SENSEX"]
-        assert report.symbols_ok == 2
-        assert report.symbols_failed == 1
-        assert report.total_bars == 28
-        by = {o.symbol: o for o in report.outcomes}
-        assert by["BANKNIFTY"].error == "corrupt partition"
-        assert not by["BANKNIFTY"].ok
-        assert by["NIFTY"].written_tfs == 2 and by["NIFTY"].ok
-
-    def test_empty_symbols_is_a_clean_noop(self) -> None:
-        report = run_autoderive(symbols=(), materialize_one=lambda s: pytest.fail("never called"))
-        assert report == AutoderiveReport(outcomes=())
-        assert report.symbols_ok == report.symbols_failed == report.total_bars == 0
-
-    def test_outcome_ok_property(self) -> None:
-        assert AutoderiveOutcome(symbol="X", written_tfs=1, bars_written=1).ok
-        assert not AutoderiveOutcome(symbol="X", written_tfs=0, bars_written=0, error="boom").ok
-
+from brutex.data import tf_autoderive
+from brutex.data.tf_autoderive import compare_derived_freshness
 
 _OPEN_UTC = datetime(2025, 6, 9, 3, 45, tzinfo=UTC).replace(tzinfo=None)
 
@@ -142,3 +69,22 @@ class TestFreshnessCompare:
         df_1m = _df_1m()
         stored = resample_1m_to_tf(df_1m, 5).slice(1)  # a bucket went missing
         assert compare_derived_freshness(df_1m, stored, 5) == "stale"
+
+
+class TestAutoDeriveSurfaceRemoved:
+    """DEC-PIPELINE-AUTOPREBUILD-001: the pull-settle auto-derive arm stays removed."""
+
+    def test_autoderive_symbols_gone(self) -> None:
+        for gone in (
+            "autoderive_enabled",
+            "plan_autoderive_symbols",
+            "run_autoderive",
+            "AutoderiveOutcome",
+            "AutoderiveReport",
+            "ENV_AUTO_DERIVE_TFS",
+        ):
+            assert not hasattr(tf_autoderive, gone), (
+                f"{gone} must stay removed — derived TFs are written only by the "
+                "pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001)"
+            )
+        assert tf_autoderive.__all__ == ["compare_derived_freshness"]

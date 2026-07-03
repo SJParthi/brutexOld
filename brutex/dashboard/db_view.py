@@ -2576,6 +2576,39 @@ def _decode_option_window(
     return (f"{label} · {segment}", f"{flag}#{code} {strike} {opt_type} · 1m")
 
 
+def window_status_label(status: str, empty_streak: int) -> str:
+    """The honest, spelled-out meaning of a window's bare *status* — pure, O(1).
+
+    DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (empty-vs-failed honesty on
+    ``/coverage/windows``): the bare ``EMPTY`` / ``SKIPPED`` / ``FAILED`` tokens
+    read ambiguously — an EMPTY row is a VENDOR-CONFIRMED no-trades answer (the
+    fetch succeeded; there was simply nothing to store), while a FAILED row is a
+    fetch that ERRORED and WILL be re-pulled. This is the ONE label function both
+    payload paths (the DuckDB fast path and the legacy pyarrow path) share via
+    :func:`_window_row` (CLAUDE.md §11 COMMON — the two can never drift):
+
+    * ``EMPTY`` → ``"vendor confirmed no trades (N clean attempt(s))"`` — N is
+      the row's genuine clean-empty streak, floored at 1 (a legacy record with
+      no streak column still had at least the one clean attempt that classified
+      it EMPTY).
+    * ``SKIPPED`` (terminally-settled empty) → the same, suffixed ``— settled``
+      (the ledger promoted it; no further re-pull).
+    * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
+      no-data; the window stays re-pullable.
+    * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
+      (self-explanatory; unknown statuses degrade to themselves, never raise).
+    """
+    if status == "EMPTY":
+        return f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s))"
+    if status == "SKIPPED":
+        return (
+            f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
+        )
+    if status == "FAILED":
+        return "FAILED (will re-pull)"
+    return status
+
+
 def _window_row(
     record: Any,
     *,
@@ -2605,6 +2638,11 @@ def _window_row(
         "window_start": record.window_start,
         "window_end": record.window_end,
         "status": record.status,
+        # The spelled-out honesty label (ONE shape for BOTH payload paths —
+        # DuckDB fast + legacy pyarrow — since both project through this row
+        # builder): EMPTY/SKIPPED read "vendor confirmed no trades (N clean
+        # attempt(s)[ — settled])", FAILED reads "FAILED (will re-pull)".
+        "status_label": window_status_label(str(record.status), getattr(record, "empty_streak", 0)),
         "bars": record.bars,
         "attempts": record.attempts,
         # The genuine-EMPTY count (window_ledger R1) — surfaces WHY an EMPTY row
@@ -3571,4 +3609,5 @@ __all__ = [
     "summarize_option_datasets",
     "summarize_spot_datasets",
     "table_summary",
+    "window_status_label",
 ]

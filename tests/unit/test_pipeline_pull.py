@@ -9,21 +9,48 @@ fakes return the REAL report dataclasses, nothing fabricated).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
+    MAX_QUARANTINED_NAMES,
     PHASE_METADATA,
     PHASE_PREBUILD,
     PHASE_SPOT,
     PipelinePullReport,
+    derive_quarantined_symbols,
     historical_phase_ok,
     metadata_phase_ok,
     run_full_pipeline,
     spot_phase_ok,
 )
 from brutex.dashboard.pull_controller import BulkSpotReport, SymbolPullResult
+
+
+def _outcome(
+    *,
+    symbols_built: int = 4,
+    total_bars: int = 100,
+    failed: tuple[str, ...] = (),
+    failed_count: int | None = None,
+    ok: bool | None = None,
+    crashed: str | None = None,
+) -> PrebuildOutcome:
+    """Build a :class:`PrebuildOutcome` (the run_prebuild contract's REAL dataclass)."""
+    count = len(failed) if failed_count is None else failed_count
+    return PrebuildOutcome(
+        symbols_built=symbols_built,
+        total_bars=total_bars,
+        failed=failed,
+        failed_count=count,
+        ok=(count == 0) if ok is None else ok,
+        crashed=crashed,
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Report builders (the REAL dataclasses, populated minimally per Golden Rule #1)
@@ -68,7 +95,14 @@ def _metadata(*, expiry_failures: int = 0, contract_failures: int = 0) -> Metada
 
 
 def _historical_inner(
-    *, auth_aborted: bool = False, still_failed_windows: int = 0, failed_pairs: int = 0
+    *,
+    auth_aborted: bool = False,
+    still_failed_windows: int = 0,
+    failed_pairs: int = 0,
+    expiries_out_of_scope: int = 0,
+    contracts_out_of_scope: int = 0,
+    phase1_complete: tuple[str, ...] = ("RELIANCE25JAN3000CE",),
+    start_dates: dict[str, str] | None = None,
 ) -> HistoricalPullReport:
     """Build the inner :class:`HistoricalPullReport` (the candle sub-report)."""
     return HistoricalPullReport(
@@ -83,10 +117,12 @@ def _historical_inner(
         auth_aborted=auth_aborted,
         note="ok",
         phase1_clean=not (auth_aborted or still_failed_windows or failed_pairs),
-        phase1_complete=("RELIANCE25JAN3000CE",),
-        start_dates={"RELIANCE25JAN3000CE": "2024-10-01"},
+        phase1_complete=phase1_complete,
+        start_dates=({"RELIANCE25JAN3000CE": "2024-10-01"} if start_dates is None else start_dates),
         minute_requested=True,
         minute_skipped=False,
+        expiries_out_of_scope=expiries_out_of_scope,
+        contracts_out_of_scope=contracts_out_of_scope,
     )
 
 
@@ -292,7 +328,7 @@ def test_pipeline_complete_note_with_no_candle_subreport() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# run_full_pipeline — the PER-SEGMENT movers warm (DEC-PIPELINE-SEGMENT-MOVERS-001)
+# run_full_pipeline — movers warm AFTER the prebuild (DEC-PIPELINE-AUTOPREBUILD-001)
 # --------------------------------------------------------------------------- #
 
 
@@ -307,10 +343,10 @@ def _clean_phases() -> tuple[
     )
 
 
-def test_pipeline_warms_each_segment_as_it_finishes() -> None:
-    # All three fetch phases clean + all three per-segment warmers injected → each
-    # segment warms, the per-segment map carries each count, the total is the sum,
-    # and the note names every warmed segment in order.
+def test_pipeline_warms_all_segments_after_prebuild() -> None:
+    # All three fetch phases clean + prebuild + all three warmers injected → the
+    # prebuild runs, THEN each segment warms; the per-segment map carries each
+    # count, the total is the sum, and the note names every warmed segment.
     spot, meta, hist = _clean_phases()
     w_spot, w_fut, w_opt = _Spy(3), _Spy(1), _Spy(4)
     report = run_full_pipeline(
@@ -320,6 +356,7 @@ def test_pipeline_warms_each_segment_as_it_finishes() -> None:
         warm_spot_movers=w_spot,
         warm_futures_movers=w_fut,
         warm_options_movers=w_opt,
+        run_prebuild=_Spy(_outcome(symbols_built=2, total_bars=50)),
     )
     assert report.ok is True
     assert w_spot.called and w_fut.called and w_opt.called
@@ -331,10 +368,44 @@ def test_pipeline_warms_each_segment_as_it_finishes() -> None:
     assert payload["segment_movers_warmed"] == {"spot": 3, "futures": 1, "options": 4}
 
 
-def test_pipeline_spot_only_success_warms_spot_only() -> None:
-    # The operator's headline: spot succeeds → SPOT movers warm the moment the spot
-    # phase finishes; a LATER metadata failure stops the chain, but the already-clean
-    # spot movers stay warmed (and futures/options are NEVER warmed).
+def test_pipeline_order_prebuild_runs_before_any_movers_warm() -> None:
+    """ORDER REGRESSION (DEC-PIPELINE-AUTOPREBUILD-001): prebuild BEFORE every warm.
+
+    Movers read the derived timeframes only the prebuild writes now, so a warm
+    firing before the prebuild would cache stale/absent partitions.
+    """
+    order: list[str] = []
+
+    def _prebuild() -> PrebuildOutcome:
+        order.append("prebuild")
+        return _outcome()
+
+    def _warm(segment: str) -> Callable[[], int]:
+        def _w() -> int:
+            order.append(f"warm_{segment}")
+            return 1
+
+        return _w
+
+    spot, meta, hist = _clean_phases()
+    run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_spot_movers=_warm("spot"),
+        warm_futures_movers=_warm("futures"),
+        warm_options_movers=_warm("options"),
+        run_prebuild=_prebuild,
+    )
+    assert order == ["prebuild", "warm_spot", "warm_futures", "warm_options"]
+
+
+def test_pipeline_early_spot_warm_removed_on_metadata_stop() -> None:
+    """REGRESSION FLIP (supersedes DEC-PIPELINE-SEGMENT-MOVERS-001's early warm):
+    a clean spot phase followed by a metadata failure warms NOTHING — the old
+    behaviour warmed the spot segment the moment spot succeeded, but derived
+    data is now written only by the prebuild (which never ran here), so an
+    early warm would read stale/absent partitions."""
     spot = _Spy(_spot())
     meta = _Spy(_metadata(contract_failures=1))  # metadata FAILS after spot
     hist = _Spy(_composite(historical=_historical_inner()))
@@ -346,19 +417,39 @@ def test_pipeline_spot_only_success_warms_spot_only() -> None:
         warm_spot_movers=w_spot,
         warm_futures_movers=w_fut,
         warm_options_movers=w_opt,
+        run_prebuild=_Spy(_outcome()),
     )
     assert report.stopped_after == PHASE_METADATA
     assert hist.called is False  # historical never ran
-    assert w_spot.called is True  # spot warmed (it succeeded)
-    assert w_fut.called is False and w_opt.called is False  # historical never succeeded
-    assert report.segment_movers_warmed == {"spot": 5}
-    assert report.movers_warmed == 5
-    assert report.to_dict()["segment_movers_warmed"] == {"spot": 5}
+    assert not (w_spot.called or w_fut.called or w_opt.called)  # NO early warm
+    assert report.segment_movers_warmed == {}
+    assert report.movers_warmed is None
 
 
-def test_pipeline_futures_and_options_warm_only_after_historical_success() -> None:
-    # spot + metadata clean, then historical succeeds → futures + options warm; spot
-    # (no warmer here) stays absent, proving per-segment independence.
+def test_pipeline_no_warm_when_prebuild_absent() -> None:
+    """Warmers injected but NO run_prebuild ⇒ no segment warms — the movers gate
+    is "fetch clean AND the prebuild ran" (there is no fresh derived data to
+    warm over without the prebuild)."""
+    spot, meta, hist = _clean_phases()
+    w_spot, w_fut, w_opt = _Spy(2), _Spy(2), _Spy(2)
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_spot_movers=w_spot,
+        warm_futures_movers=w_fut,
+        warm_options_movers=w_opt,
+    )
+    assert report.ok is True
+    assert not (w_spot.called or w_fut.called or w_opt.called)
+    assert report.segment_movers_warmed == {}
+    assert report.movers_warmed is None
+    assert "warmed" not in report.note
+
+
+def test_pipeline_partial_warmers_warm_only_injected_segments() -> None:
+    # Only futures + options warmers injected → spot absent from the map,
+    # proving per-segment independence of the injection.
     spot, meta, hist = _clean_phases()
     w_fut, w_opt = _Spy(2), _Spy(6)
     report = run_full_pipeline(
@@ -367,6 +458,7 @@ def test_pipeline_futures_and_options_warm_only_after_historical_success() -> No
         run_historical=hist,
         warm_futures_movers=w_fut,
         warm_options_movers=w_opt,
+        run_prebuild=_Spy(_outcome()),
     )
     assert report.ok is True
     assert w_fut.called and w_opt.called
@@ -384,20 +476,22 @@ def test_pipeline_segment_warm_zero_is_honest_not_absent() -> None:
         run_metadata=meta,
         run_historical=hist,
         warm_spot_movers=_Spy(0),
+        run_prebuild=_Spy(_outcome()),
     )
     assert report.segment_movers_warmed == {"spot": 0}
     assert report.movers_warmed == 0
     assert "movers spot 0 snapshot(s) warmed" in report.note
 
 
-def test_pipeline_skips_futures_options_when_historical_not_clean() -> None:
+def test_pipeline_skips_warms_and_prebuild_when_historical_not_clean() -> None:
     # The HARD gate: a historical fetch that completed-with-failures (failed_pairs)
-    # must NEVER warm futures/options ("a segment that did not fully succeed must NOT
-    # warm its movers"). Spot still warmed (it succeeded earlier).
+    # runs NEITHER the prebuild NOR any warm (the shared fully-successful-fetch
+    # rule; the old early spot warm is gone too).
     spot = _Spy(_spot())
     meta = _Spy(_metadata())
     hist = _Spy(_composite(historical=_historical_inner(failed_pairs=1)))
     w_spot, w_fut, w_opt = _Spy(3), _Spy(5), _Spy(5)
+    prebuild = _Spy(_outcome())
     report = run_full_pipeline(
         run_spot=spot,
         run_metadata=meta,
@@ -405,13 +499,14 @@ def test_pipeline_skips_futures_options_when_historical_not_clean() -> None:
         warm_spot_movers=w_spot,
         warm_futures_movers=w_fut,
         warm_options_movers=w_opt,
+        run_prebuild=prebuild,
     )
     assert report.ok is False  # historical gate failed
-    assert w_spot.called is True  # spot succeeded → warmed
-    assert w_fut.called is False and w_opt.called is False  # historical not clean → NOT warmed
-    assert report.segment_movers_warmed == {"spot": 3}
-    assert report.movers_warmed == 3
-    assert "futures" not in report.note and "options" not in report.note
+    assert prebuild.called is False
+    assert not (w_spot.called or w_fut.called or w_opt.called)
+    assert report.segment_movers_warmed == {}
+    assert report.movers_warmed is None
+    assert "warmed" not in report.note and "pre-built" not in report.note
 
 
 def test_pipeline_skips_all_warms_when_stopped_at_spot() -> None:
@@ -424,6 +519,7 @@ def test_pipeline_skips_all_warms_when_stopped_at_spot() -> None:
         warm_spot_movers=w_spot,
         warm_futures_movers=w_fut,
         warm_options_movers=w_opt,
+        run_prebuild=_Spy(_outcome()),
     )
     assert report.stopped_after == PHASE_SPOT
     assert not (w_spot.called or w_fut.called or w_opt.called)
@@ -432,8 +528,8 @@ def test_pipeline_skips_all_warms_when_stopped_at_spot() -> None:
 
 
 def test_pipeline_no_movers_phase_when_no_warmers_injected() -> None:
-    # Backward-compatible: with no warmers (the whole-universe pipeline), no segment
-    # warms and movers_warmed is None — never a fabricated count.
+    # Backward-compatible: with no warmers (and no prebuild), no segment warms
+    # and movers_warmed is None — never a fabricated count.
     spot, meta, hist = _clean_phases()
     report = run_full_pipeline(run_spot=spot, run_metadata=meta, run_historical=hist)
     assert report.ok is True
@@ -445,24 +541,52 @@ def test_pipeline_no_movers_phase_when_no_warmers_injected() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# run_full_pipeline — the GATED FINAL pre-build phase (DEC-UNIVERSE-PULL-CONSOLIDATE-001)
+# run_full_pipeline — the GATED prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001)
 # --------------------------------------------------------------------------- #
 
 
 def test_pipeline_prebuilds_timeframes_on_clean_run() -> None:
-    # All three fetch phases clean + a prebuild callable injected → the FINAL phase
-    # runs, the symbol count is recorded, and the note appends the pre-build clause.
+    # All three fetch phases clean + a prebuild callable injected → the phase
+    # runs, the outcome is folded into the report, and the note appends the
+    # pre-build clause with the symbol AND bar counts.
     spot, meta = _Spy(_spot()), _Spy(_metadata())
     hist = _Spy(_composite(historical=_historical_inner()))
-    prebuild = _Spy(4)
+    prebuild = _Spy(_outcome(symbols_built=4, total_bars=1234))
     report = run_full_pipeline(
         run_spot=spot, run_metadata=meta, run_historical=hist, run_prebuild=prebuild
     )
     assert report.ok is True
     assert prebuild.called is True
     assert report.prebuild_built == 4
-    assert "timeframes pre-built for 4 symbol(s)" in report.note
-    assert report.to_dict()["prebuild_built"] == 4
+    assert report.prebuild_total_bars == 1234
+    assert report.prebuild_failed == ()
+    assert "timeframes pre-built for 4 symbol(s) (1234 bars)" in report.note
+    payload = report.to_dict()
+    assert payload["prebuild_built"] == 4
+    assert payload["prebuild_total_bars"] == 1234
+    assert payload["prebuild_failed"] == []
+    assert payload["prebuild_crashed"] is None  # completed run — never a crash marker
+
+
+def test_pipeline_prebuild_crash_marker_renders_crashed_note_not_built_zero() -> None:
+    """A guarded whole-run prebuild CRASH (hostile-review F2) reads
+    ``", prebuild CRASHED (ErrorType)"`` — NEVER the benign "pre-built for 0
+    symbol(s)" clause — and warms nothing (ok=False fails the warm gate)."""
+    warmed: list[str] = []
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        warm_spot_movers=lambda: warmed.append("spot") or 0,
+        run_prebuild=_Spy(_outcome(symbols_built=0, total_bars=0, ok=False, crashed="ValueError")),
+    )
+    assert ", prebuild CRASHED (ValueError)" in report.note
+    assert "pre-built for" not in report.note  # never the benign built-0 clause
+    assert report.prebuild_crashed == "ValueError"
+    assert report.prebuild_built == 0  # the raw counts still recorded honestly
+    assert warmed == []  # a crashed prebuild warms NOTHING
+    assert report.movers_warmed is None
+    assert report.to_dict()["prebuild_crashed"] == "ValueError"
 
 
 def test_pipeline_prebuild_zero_is_honest_not_none() -> None:
@@ -472,17 +596,48 @@ def test_pipeline_prebuild_zero_is_honest_not_none() -> None:
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
         run_historical=_Spy(_composite(historical=_historical_inner())),
-        run_prebuild=_Spy(0),
+        run_prebuild=_Spy(_outcome(symbols_built=0, total_bars=0)),
     )
     assert report.prebuild_built == 0
-    assert "timeframes pre-built for 0 symbol(s)" in report.note
+    assert report.prebuild_total_bars == 0
+    assert "timeframes pre-built for 0 symbol(s) (0 bars)" in report.note
+
+
+def test_pipeline_prebuild_failures_named_in_note() -> None:
+    # Per-symbol prebuild failures are folded into the report AND named in the
+    # note (up to 3 names) — honestly reported, never hidden.
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_Spy(_outcome(symbols_built=7, total_bars=90, failed=("AAA", "BBB"))),
+    )
+    assert report.prebuild_failed == ("AAA", "BBB")
+    assert "timeframes pre-built for 7 symbol(s) (90 bars)" in report.note
+    assert "prebuild failures: AAA, BBB" in report.note
+    assert "more)" not in report.note  # ≤ 3 names → no remainder suffix
+    assert report.to_dict()["prebuild_failed"] == ["AAA", "BBB"]
+
+
+def test_pipeline_prebuild_failure_names_capped_with_true_remainder() -> None:
+    # The note shows at most 3 names + the TRUE remainder from failed_count —
+    # here the producer capped 12 real failures to 10 names, so the note reads
+    # "(+9 more)" (12 − 3), NOT "(+7 more)" (10 − 3): the uncapped total wins.
+    failed = tuple(f"SYM{i}" for i in range(10))  # producer-capped names
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_Spy(_outcome(symbols_built=1, total_bars=5, failed=failed, failed_count=12)),
+    )
+    assert "prebuild failures: SYM0, SYM1, SYM2 (+9 more)" in report.note
 
 
 def test_pipeline_skips_prebuild_when_historical_not_clean() -> None:
     # The HARD gate: a historical fetch that completed-with-failures (failed_pairs)
-    # must NEVER pre-build timeframes (same rule as movers).
+    # must NEVER pre-build timeframes.
     hist = _Spy(_composite(historical=_historical_inner(failed_pairs=1)))
-    prebuild = _Spy(3)
+    prebuild = _Spy(_outcome())
     report = run_full_pipeline(
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
@@ -492,12 +647,14 @@ def test_pipeline_skips_prebuild_when_historical_not_clean() -> None:
     assert report.ok is False  # historical gate failed
     assert prebuild.called is False  # pre-build NOT run
     assert report.prebuild_built is None
+    assert report.prebuild_total_bars is None
+    assert report.prebuild_failed == ()
     assert "pre-built" not in report.note
 
 
 def test_pipeline_skips_prebuild_when_stopped_at_spot() -> None:
     # An early stop never reaches the final phase — the prebuild is not consulted.
-    prebuild = _Spy(3)
+    prebuild = _Spy(_outcome())
     report = run_full_pipeline(
         run_spot=_Spy(_spot(auth_aborted=True)),
         run_metadata=_Spy(_metadata()),
@@ -510,7 +667,7 @@ def test_pipeline_skips_prebuild_when_stopped_at_spot() -> None:
 
 
 def test_pipeline_no_prebuild_phase_when_not_injected() -> None:
-    # Backward-compatible: with no prebuild callable, the final phase is skipped
+    # Backward-compatible: with no prebuild callable, the phase is skipped
     # entirely and prebuild_built is None — never a fabricated count.
     report = run_full_pipeline(
         run_spot=_Spy(_spot()),
@@ -519,14 +676,54 @@ def test_pipeline_no_prebuild_phase_when_not_injected() -> None:
     )
     assert report.ok is True
     assert report.prebuild_built is None
+    assert report.prebuild_total_bars is None
     assert "pre-built" not in report.note
     assert report.to_dict()["prebuild_built"] is None
+    assert report.to_dict()["prebuild_total_bars"] is None
+
+
+def test_pipeline_failed_prebuild_outcome_recorded_but_no_warm() -> None:
+    # CHUNK-2 FLIP of `test_pipeline_failed_prebuild_outcome_still_recorded_and_warms`
+    # (DEC-PIPELINE-AUTOPREBUILD-001): the warm gate is TIGHTENED from "the prebuild
+    # RAN" to "the prebuild SUCCEEDED" (`PrebuildOutcome.ok`). An ok=False outcome
+    # (the guarded crash path, or per-symbol failures) is STILL folded into the
+    # report honestly — but NO movers warm fires (a failed prebuild's derived
+    # partitions may be stale/absent, so warming would cache a wrong snapshot).
+    w_spot = _Spy(2)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        warm_spot_movers=w_spot,
+        run_prebuild=_Spy(
+            _outcome(symbols_built=0, total_bars=0, failed=(), failed_count=0, ok=False)
+        ),
+    )
+    assert report.prebuild_built == 0  # the ok=False outcome is still RECORDED
+    assert report.prebuild_total_bars == 0
+    assert w_spot.called is False  # …but the warm did NOT fire (chunk-2 gate)
+    assert report.segment_movers_warmed == {}
+    assert report.movers_warmed is None
+
+
+def test_pipeline_successful_prebuild_warms() -> None:
+    # The positive twin of the chunk-2 gate: an ok=True prebuild DOES warm.
+    w_spot = _Spy(2)
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        warm_spot_movers=w_spot,
+        run_prebuild=_Spy(_outcome(symbols_built=3, total_bars=30, ok=True)),
+    )
+    assert w_spot.called is True
+    assert report.segment_movers_warmed == {"spot": 2}
+    assert report.movers_warmed == 2
 
 
 def test_pipeline_warms_movers_and_prebuilds_together() -> None:
     # Both gated post-fetch phases run on a clean fetch; the per-segment movers
-    # counts + the prebuild count + both note clauses are present (the shared
-    # historical gate is evaluated once, every post-fetch phase fires).
+    # counts + the prebuild counts + both note clauses are present.
     report = run_full_pipeline(
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
@@ -534,13 +731,14 @@ def test_pipeline_warms_movers_and_prebuilds_together() -> None:
         warm_spot_movers=_Spy(2),
         warm_futures_movers=_Spy(1),
         warm_options_movers=_Spy(1),
-        run_prebuild=_Spy(5),
+        run_prebuild=_Spy(_outcome(symbols_built=5, total_bars=77)),
     )
     assert report.movers_warmed == 4  # 2 (spot) + 1 (futures) + 1 (options)
     assert report.segment_movers_warmed == {"spot": 2, "futures": 1, "options": 1}
     assert report.prebuild_built == 5
+    assert report.prebuild_total_bars == 77
     assert "movers spot 2 + futures 1 + options 1 snapshot(s) warmed" in report.note
-    assert "timeframes pre-built for 5 symbol(s)" in report.note
+    assert "timeframes pre-built for 5 symbol(s) (77 bars)" in report.note
 
 
 # --------------------------------------------------------------------------- #
@@ -720,3 +918,237 @@ def test_pipeline_note_announces_historical_ledger_reload_failure() -> None:
     assert report.note.startswith(
         "window ledger reload FAILED — running full re-verify pull (no skip); "
     )
+
+
+# --------------------------------------------------------------------------- #
+# pipeline note — expiry scope visibility (DEC-FNO-EXPIRY-SCOPE-001)
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_note_names_out_of_scope_expiries() -> None:
+    """A scoped-out expiry count is NAMED in the pipeline complete-note."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(
+            _composite(
+                historical=_historical_inner(expiries_out_of_scope=3, contracts_out_of_scope=9)
+            )
+        ),
+    )
+    assert report.stopped_after is None
+    assert ", 3 expiries out of scope skipped" in report.note
+
+
+def test_pipeline_note_zero_out_of_scope_renders_no_clause() -> None:
+    """The unscoped default renders byte-identically — no scope clause."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+    )
+    assert "out of scope" not in report.note
+
+
+# --------------------------------------------------------------------------- #
+# quarantined-symbol headline honesty (DEC-PIPELINE-AUTOPREBUILD-001 chunk 3)
+# --------------------------------------------------------------------------- #
+
+
+def _spot_with_failures(*symbols: SymbolPullResult) -> BulkSpotReport:
+    """A spot report carrying an explicit per-symbol result list (gate-clean)."""
+    return BulkSpotReport(
+        dry_run=False,
+        start_date="2020-01-01",
+        end_date="2026-06-20",
+        symbols=list(symbols),
+    )
+
+
+class TestDeriveQuarantinedSymbols:
+    """The pure name derivation — spot / historical / both / dedupe / cap."""
+
+    def test_clean_run_is_empty(self) -> None:
+        assert derive_quarantined_symbols(_spot(), _composite(historical=_historical_inner())) == (
+            (),
+            0,
+        )
+
+    def test_spot_only_failed_symbols_named(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0),
+            SymbolPullResult(symbol="SENSEX", completed=2, failed=0, no_data=0),
+        )
+        assert derive_quarantined_symbols(spot, None) == (("NIFTY",), 1)
+
+    def test_historical_only_unclean_contracts_fold_to_underlyings(self) -> None:
+        hist = _historical_inner(
+            failed_pairs=1,
+            phase1_complete=("NSE-NIFTY-25Jan24-21000-CE",),
+            start_dates={
+                "NSE-NIFTY-25Jan24-21000-CE": "2023-12-26",  # clean — not named
+                "NSE-RELIANCE-29Feb24-2800-CE": "2024-01-30",  # unclean → RELIANCE
+                "NSE-RELIANCE-29Feb24-2800-PE": "2024-01-30",  # same underlying — deduped
+            },
+        )
+        names, count = derive_quarantined_symbols(_spot(), _composite(historical=hist))
+        assert names == ("RELIANCE",)
+        assert count == 1
+
+    def test_undecodable_contract_symbol_kept_raw(self) -> None:
+        hist = _historical_inner(
+            phase1_complete=(),
+            start_dates={"RELIANCE25JAN3000CE": "2024-10-01"},  # no hyphens → undecodable
+        )
+        names, count = derive_quarantined_symbols(_spot(), _composite(historical=hist))
+        assert names == ("RELIANCE25JAN3000CE",)  # reported raw, never dropped
+        assert count == 1
+
+    def test_both_phases_deduped_and_sorted(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="RELIANCE", completed=0, failed=1, no_data=0),
+            SymbolPullResult(symbol="AXISBANK", completed=0, failed=2, no_data=0),
+        )
+        hist = _historical_inner(
+            phase1_complete=(),
+            start_dates={"NSE-RELIANCE-29Feb24-2800-CE": "2024-01-30"},
+        )
+        names, count = derive_quarantined_symbols(spot, _composite(historical=hist))
+        assert names == ("AXISBANK", "RELIANCE")  # deduped across phases, sorted
+        assert count == 2
+
+    def test_cap_at_ten_names_with_true_total(self) -> None:
+        spot = _spot_with_failures(
+            *(
+                SymbolPullResult(symbol=f"SYM{i:02d}", completed=0, failed=1, no_data=0)
+                for i in range(12)
+            )
+        )
+        names, count = derive_quarantined_symbols(spot, None)
+        assert len(names) == MAX_QUARANTINED_NAMES == 10
+        assert names == tuple(f"SYM{i:02d}" for i in range(10))  # sorted, capped
+        assert count == 12  # the TRUE uncapped total
+
+    def test_none_reports_are_empty(self) -> None:
+        assert derive_quarantined_symbols(None, None) == ((), 0)
+
+    def test_composite_without_candle_subreport_is_empty(self) -> None:
+        assert derive_quarantined_symbols(_spot(), _composite(historical=None)) == ((), 0)
+
+
+class TestQuarantinedHeadline:
+    """The complete-note wording + the report fields through run_full_pipeline."""
+
+    def test_complete_note_names_quarantined_symbols(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0)
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert report.stopped_after is None
+        assert "pipeline complete — 1 symbol(s) quarantined: NIFTY — " in report.note
+        assert report.quarantined_symbols == ("NIFTY",)
+        assert report.quarantined_count == 1
+        assert report.to_dict()["quarantined_symbols"] == ["NIFTY"]
+        assert report.to_dict()["quarantined_count"] == 1
+
+    def test_complete_note_caps_names_with_true_remainder(self) -> None:
+        spot = _spot_with_failures(
+            *(
+                SymbolPullResult(symbol=f"SYM{i:02d}", completed=0, failed=1, no_data=0)
+                for i in range(12)
+            )
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert "12 symbol(s) quarantined: " in report.note
+        assert "(+2 more)" in report.note  # true remainder beyond the 10-name cap
+        assert len(report.quarantined_symbols) == 10
+        assert report.quarantined_count == 12
+
+    def test_clean_pull_keeps_current_wording(self) -> None:
+        report = run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert "quarantined" not in report.note  # byte-identical clean wording
+        assert report.note.startswith("pipeline complete — spot ")
+        assert report.quarantined_symbols == ()
+        assert report.quarantined_count == 0
+
+    def test_historical_quarantine_reaches_the_note(self) -> None:
+        hist = _historical_inner(
+            failed_pairs=0,  # gate-clean: a still-failing TRANSIENT residual is 0 too —
+            phase1_complete=(),  # …but the contract did NOT land clean (not marked)
+            start_dates={"NSE-RELIANCE-29Feb24-2800-CE": "2024-01-30"},
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=hist)),
+        )
+        assert "1 symbol(s) quarantined: RELIANCE — " in report.note
+
+    def test_spot_stop_report_still_carries_quarantined_fields(self) -> None:
+        spot = BulkSpotReport(
+            dry_run=False,
+            start_date="2020-01-01",
+            end_date="2026-06-20",
+            symbols=[SymbolPullResult(symbol="NIFTY", completed=0, failed=1, no_data=0)],
+            still_failed_windows=2,  # gate-failing → the chain stops after spot
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert report.stopped_after == PHASE_SPOT
+        assert report.note.startswith("stopped after spot")  # the loud stop note wins
+        assert report.quarantined_symbols == ("NIFTY",)  # the fields still report
+        assert report.quarantined_count == 1
+
+    def test_metadata_stop_report_still_carries_quarantined_fields(self) -> None:
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0)
+        )
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata(expiry_failures=1)),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+        )
+        assert report.stopped_after == PHASE_METADATA
+        assert report.quarantined_symbols == ("NIFTY",)
+        assert report.quarantined_count == 1
+
+
+# --------------------------------------------------------------------------- #
+# LOUD movers-warm logs (DEC-PIPELINE-AUTOPREBUILD-001 — part D completeness)
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_movers_warm_logs_started_and_done() -> None:
+    """The movers-warm phase logs ``pipeline.movers_warm.started`` + ``.done``."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+            warm_spot_movers=lambda: 3,
+            warm_futures_movers=lambda: 1,
+            run_prebuild=_outcome,
+        )
+    started = [e for e in logs if e["event"] == "pipeline.movers_warm.started"]
+    done = [e for e in logs if e["event"] == "pipeline.movers_warm.done"]
+    assert len(started) == 1
+    assert started[0]["segments"] == ["spot", "futures"]
+    assert len(done) == 1
+    assert done[0]["warmed"] == {"spot": 3, "futures": 1}

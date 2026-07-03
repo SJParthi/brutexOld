@@ -500,7 +500,7 @@
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
     <div class="hsub">Spot pulls <b>1-minute</b> from <b>2020-01-01 → previous trading day</b> — 1-minute is the <b>only</b> granularity fetched from Groww; <b>1-day is DERIVED</b> from it (the engine's daily anchor), never separately fetched. Options fan
       <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute (1-day derived).
-      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b>; by default the intraday ones are computed on demand, <b>NOT written to your drive</b>. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) The pipeline's FINAL stage pre-builds the intraday timeframes for <b>SPOT and FUTURES</b> once the fetch fully succeeds (futures keep open-interest); <b>OPTIONS intraday stays on-demand</b> (TB-scale — the engine never reads option intraday). The <b>⚙ Pre-build timeframes</b> button below is an on-demand re-warm.</div>
+      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b> and written <b>only</b> by the pipeline's automatic FINAL pre-build stage once the fetch fully succeeds — covering <b>SPOT, FUTURES and OPTIONS</b> (F&amp;O keeps open-interest). Heads-up on storage: a fully pre-built options lake is roughly <b>2–3× its 1-minute footprint</b> (DEC-PIPELINE-AUTOPREBUILD-001, operator-accepted; the lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>). There is no manual pre-build button — the pipeline runs it itself.</div>
     <!-- The ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001): selection-aware — pulls the
          TICKED instruments, or the WHOLE universe when none are ticked — via the SHARED
          /pull-pipeline route (resolve_pull_targets: ?symbols= for a selection, bare = everything).
@@ -558,11 +558,6 @@
       </div>
       <span class="pull-div" aria-hidden="true"></span>
       <span class="ctl-field" title="1-minute is the ONLY granularity fetched from Groww; 1-day + the 19 intraday timeframes are derived from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001).">granularity · <b>1-minute</b> (1-day derived)</span>
-      <span class="pull-div" aria-hidden="true"></span>
-      <!-- The single ONE UNIFIED pre-build button (DEC-UNIVERSE-PULL-CONSOLIDATE-001):
-           an on-demand re-warm covering BOTH spot AND F&O via the COMMON resampler (no
-           spot/fno split). The pipeline also pre-builds automatically as its FINAL stage. -->
-      <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s) — SPOT and FUTURES only (futures keep open-interest, OI-aware). OPTIONS intraday stays on-demand (TB-scale; the brute-force engine never reads option intraday). F&amp;O 1-day is derived at pull time. A multi-symbol selection runs the gated order spot → futures → options. So the sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. The full pipeline also does this as its final stage; this button is an on-demand re-warm. Writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
       <span class="pull-div" aria-hidden="true"></span>
       <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
       <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
@@ -1170,7 +1165,7 @@ async function selectInstrument(i) {
   });
   document.getElementById("pulllead").innerHTML =
     `Selected <b>${esc(i.symbol)}</b> — tick more rows to scope the pull, or hit ▶ Pull · full pipeline above`;
-  updateMultiBtn();  // enable + label the pre-build button + scope the pipeline button
+  updateMultiBtn();  // scope the pipeline button label to the selection
   /* "⊕ tick its constituents" is meaningful only for an INDEX
      (DEC-UNIVERSE-NSE-CONSTITUENTS-001) — a stock has no constituents. */
   document.getElementById("tickconstbtn").disabled = (i.kind !== "index");
@@ -1342,20 +1337,14 @@ function toggleMulti(i, on) {
   updateMultiBtn();
 }
 function updateMultiBtn() {
-  // Drives the remaining selection-aware controls: the ONE pipeline button's
-  // label + the pre-build button. Both reflect the selection count; the pipeline
-  // button is ALWAYS enabled (no ticks ⇒ whole universe), the pre-build needs a
-  // target (ticks OR a single highlight).
+  // Drives the ONE selection-aware control left: the pipeline button's label.
+  // (The manual pre-build button is REMOVED — the pipeline's
+  // automatic FINAL prebuild stage writes the derived timeframes itself,
+  // DEC-PIPELINE-AUTOPREBUILD-001.) The button is ALWAYS enabled (no ticks ⇒
+  // whole universe).
   const n = selMulti.size;
-  // The single pull button's label shows the scope; it is never disabled (it pulls
-  // the whole universe when nothing is ticked).
   const lbl = document.getElementById("pullPipelineLabel");
   if (lbl) lbl.textContent = n > 0 ? `Pull · ${n} selected — full pipeline` : "Pull · full pipeline";
-  // The "⚙ Pre-build timeframes" re-warm button is selection-driven
-  // (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001): one OR many, enabled with a target.
-  const m = document.getElementById("matbtn");
-  m.textContent = n > 0 ? `⚙ Pre-build timeframes · ${n} selected` : "⚙ Pre-build timeframes";
-  m.disabled = n === 0 && !selPullSymbol;
 }
 document.getElementById("selallbtn").onclick = () => {
   // EXACTLY the rendered rows — search AND F&O-only composed
@@ -1458,120 +1447,6 @@ document.getElementById("tickconstbtn").onclick = async () => {
         || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ▶ Pull · full pipeline.`);
   }
   btn.disabled = false;
-};
-
-/* ── "⚙ Pre-build timeframes" (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001 +
-   DEC-PREBUILD-SELECT-001) ──
-   ONE clean button that materialises the 19 derived intraday timeframes to the
-   lake so the brute-force sweep reads each 5m/15m/60m bar in O(1). It is
-   SEGMENT-AWARE: SPOT (OI-dropping) + FUTURES (OI-aware) intraday is pre-built;
-   OPTIONS intraday is NEVER materialised (TB-scale; the engine never reads it) —
-   an explicit, reported on-demand no-op. A MULTI-symbol selection POSTs ONCE to
-   ?symbols= and the backend runs the GATED order spot → futures → options
-   (advance only on a phase's FULL success; the first failing phase halts). A
-   single highlight keeps the single-symbol path. The POST omits ?tfs= so the
-   backend writes every materialisable timeframe. A re-entrancy guard stops a
-   double-click. This is the ON-DEMAND re-warm; the full pipeline pre-builds
-   automatically as its final stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001). ── */
-let matInFlight = false;
-function matSelection() {
-  if (selMulti.size > 0) return [...selMulti.values()];
-  if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
-  return [];
-}
-function _matPanelStart(title) {
-  const panel = document.getElementById("pullpanel");
-  panel.classList.add("on", "running");
-  document.getElementById("pulltitle").textContent = title;
-  document.getElementById("tfgrid").innerHTML = "";
-  return panel;
-}
-async function runMaterialize(symbol, label) {
-  if (!symbol) return;
-  const panel = _matPanelStart(`Pre-building timeframes · ${label}`);
-  try {
-    const r = await fetch('/api/v1/universe/derive-timeframes?symbol=' + encodeURIComponent(symbol),
-      { method: 'POST' });
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
-    const written = body.written || {};
-    const grid = document.getElementById("tfgrid");
-    grid.innerHTML = "";
-    Object.keys(written).forEach(tf => {
-      const d = document.createElement("div");
-      d.className = "tf done";
-      d.textContent = esc(tf);
-      grid.appendChild(d);
-    });
-    const tfs = Object.keys(written).length;
-    const note = body.note ? ` — ${esc(body.note)}` : "";
-    document.getElementById("pulltitle").innerHTML = tfs
-      ? `<span class="spark">✓</span> ${esc(label)} — materialised ${tfs} timeframes · `
-        + `${(body.total_bars || 0).toLocaleString('en-IN')} bars written`
-      : `<span class="spark">✓</span> ${esc(label)}${note || " — nothing to materialise"}`;
-  } catch (e) {
-    document.getElementById("pulltitle").innerHTML =
-      `<span style="color:var(--red)">✕</span> pre-build failed: ${esc(e.message)}`;
-  } finally {
-    panel.classList.remove("running");
-  }
-}
-/* Multi-symbol GATED pre-build: ONE POST to ?symbols=, the backend runs the
-   gated spot → futures → options order + returns a per-phase report. */
-async function runGatedMaterialize(symbols) {
-  if (!symbols.length) return;
-  const panel = _matPanelStart(`Pre-building timeframes · ${symbols.length} selected (gated)`);
-  try {
-    const r = await fetch('/api/v1/universe/derive-timeframes?symbols=' +
-      encodeURIComponent(symbols.join(",")), { method: 'POST' });
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
-    const grid = document.getElementById("tfgrid");
-    grid.innerHTML = "";
-    (body.phases || []).forEach(p => {
-      const d = document.createElement("div");
-      const okPhase = p.ok && (p.phase !== "options");
-      // options (on-demand) + empty phases render as the muted base .tf.
-      d.className = "tf" + (p.failed && p.failed.length ? " failed" : (okPhase ? " done" : ""));
-      const detail = p.phase === "options"
-        ? `on-demand (${p.attempted.length})`
-        : `${p.succeeded.length}/${p.attempted.length} ok` +
-          (p.failed && p.failed.length ? ` · ${p.failed.length} failed` : "");
-      d.textContent = `${esc(p.phase)}: ${esc(detail)}`;
-      grid.appendChild(d);
-    });
-    const halted = body.halted_after
-      ? ` — halted after ${esc(body.halted_after)}`
-      : "";
-    document.getElementById("pulltitle").innerHTML = body.ok
-      ? `<span class="spark">✓</span> gated pre-build complete (spot → futures → options) · `
-        + `${(body.total_bars || 0).toLocaleString('en-IN')} bars written`
-      : `<span style="color:var(--red)">✕</span> gated pre-build${halted} · `
-        + `${(body.total_bars || 0).toLocaleString('en-IN')} bars written`;
-  } catch (e) {
-    document.getElementById("pulltitle").innerHTML =
-      `<span style="color:var(--red)">✕</span> pre-build failed: ${esc(e.message)}`;
-  } finally {
-    panel.classList.remove("running");
-  }
-}
-document.getElementById("matbtn").onclick = async () => {
-  if (matInFlight) return;
-  const items = matSelection();
-  if (!items.length) return;
-  matInFlight = true;
-  document.getElementById("matbtn").disabled = true;
-  try {
-    if (items.length > 1) {
-      // Multi-symbol: ONE gated POST (backend orders spot → futures → options).
-      await runGatedMaterialize(items.map(it => it.pull_symbol));
-    } else {
-      await runMaterialize(items[0].pull_symbol, `${items[0].symbol}`);
-    }
-  } finally {
-    matInFlight = false;
-    updateMultiBtn();
-  }
 };
 
 /* ── In-flight lock for the ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
@@ -1839,8 +1714,9 @@ async function pollProgress(label) {
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   setBulkDisabled(false);
-  // Restore the ONE pull button + the pre-build button to their selection-driven
-  // label/enabled state (the pipeline button is re-enabled by setBulkDisabled(false)).
+  // Restore the ONE pull button to its selection-driven label/enabled state
+  // (the pipeline button is re-enabled by setBulkDisabled(false); the manual
+  // pre-build button no longer exists — DEC-PIPELINE-AUTOPREBUILD-001).
   updateMultiBtn();
   document.getElementById('pullpanel').classList.remove('running');  // stop the beam
   refreshVerdict();  // a pull just ended — fetch + paint the verdict banner (DEC-VERDICT-BANNER-001)
