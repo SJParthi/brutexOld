@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ import pytest
 from brutex.adapters.groww import instruments as gi
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
 from brutex.models import Exchange, InstrumentFormatError, InstrumentType, Segment
+from structlog.testing import capture_logs
 
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
 
@@ -347,3 +349,156 @@ def test_index_symbol_of_extracts_the_fno_symbol(groww_symbol: str, expected: st
 def test_index_symbol_of_without_dash_is_empty() -> None:
     # A malformed key with no "-" yields "" (matches nothing — safe, never raises).
     assert gi.index_symbol_of("NIFTY") == ""
+
+
+# ── build_index: (exchange, trading_symbol) pair-collision is first-wins + LOUD ──
+# The pair maps (by_exchange_symbol / groww_symbol_by_pair) used to silently
+# LAST-win on a pair collision while the docstring claimed first-wins. They are now
+# genuinely FIRST-WINS (consistent with by_groww_symbol) and the collapse is logged
+# at WARNING naming BOTH the kept + the dropped groww_symbol.
+_FOO1 = _row(
+    exchange="NSE",
+    exchange_token="8001",
+    trading_symbol="FOO",
+    groww_symbol="NSE-FOO",
+    name="Foo One",
+    instrument_type="EQ",
+    segment="CASH",
+    series="EQ",
+    lot_size="1",
+    tick_size="0.05",
+)
+_FOO2 = _row(
+    exchange="NSE",
+    exchange_token="8002",
+    trading_symbol="FOO",  # SAME (exchange, trading_symbol) as _FOO1 …
+    groww_symbol="NSE-FOO-ALT",  # … but a DIFFERENT groww_symbol → a pair collision
+    name="Foo Two",
+    instrument_type="EQ",
+    segment="CASH",
+    series="EQ",
+    lot_size="1",
+    tick_size="0.05",
+)
+
+
+def test_pair_collision_is_first_wins_and_warns_naming_both() -> None:
+    pairs = gi.parse_instrument_csv(_csv(_FOO1, _FOO2))
+    with capture_logs() as logs:
+        index = gi.build_index(pairs)
+    # FIRST wins on the pair (fail-before: the old last-wins returned "Foo Two").
+    assert gi.resolve_by_pair(index, Exchange.NSE, "FOO").display_name == "Foo One"
+    assert index.groww_symbol_by_pair[(Exchange.NSE, "FOO")] == "NSE-FOO"
+    # BOTH distinct rows still resolve by their own groww_symbol (nothing dropped
+    # from by_groww_symbol) and both appear in the universe.
+    assert gi.resolve(index, "NSE-FOO").display_name == "Foo One"
+    assert gi.resolve(index, "NSE-FOO-ALT").display_name == "Foo Two"
+    assert len(index.universe) == 2
+    # The collision is LOUD, naming the kept + dropped groww_symbol.
+    warns = [e for e in logs if e.get("event") == "instrument_master.pair_key_collision"]
+    assert len(warns) == 1
+    entry = warns[0]
+    assert entry["log_level"] == "warning"
+    assert entry["exchange"] == "NSE"
+    assert entry["trading_symbol"] == "FOO"
+    assert entry["kept_groww_symbol"] == "NSE-FOO"
+    assert entry["dropped_groww_symbol"] == "NSE-FOO-ALT"
+
+
+def test_clean_master_has_no_pair_collision_warning() -> None:
+    # A clean master (no colliding pair) emits NO pair-collision warning and the
+    # pair maps are byte-identical to the prior behaviour.
+    with capture_logs() as logs:
+        index = gi.load_index_from_csv(_csv(_NIFTY, _WIPRO))
+    assert index.groww_symbol_by_pair[(Exchange.NSE, "WIPRO")] == "NSE-WIPRO"
+    assert [e for e in logs if e.get("event") == "instrument_master.pair_key_collision"] == []
+
+
+# ── build_index: a BLANK trading_symbol is skipped for the pair maps + counted ──
+# A row with a valid groww_symbol but a BLANK trading_symbol would collapse every
+# blank-symbol row onto the (exchange, "") pair key. Such rows stay pullable by
+# groww_symbol but are EXCLUDED from the pair maps and COUNTED in one WARNING.
+_BLANK_SYM_A = _row(
+    exchange="NSE",
+    exchange_token="93",
+    trading_symbol="",  # BLANK — pollutes (NSE, "") on the old code
+    groww_symbol="NSE-FOCUSEDA",
+    name="Focused A",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_BLANK_SYM_B = _row(
+    exchange="NSE",
+    exchange_token="94",
+    trading_symbol="",  # a SECOND blank-symbol row (would last-win over A on old code)
+    groww_symbol="NSE-FOCUSEDB",
+    name="Focused B",
+    instrument_type="IDX",
+    segment="CASH",
+)
+
+
+def test_blank_trading_symbol_excluded_from_pair_maps_and_counted() -> None:
+    pairs = gi.parse_instrument_csv(_csv(_NIFTY, _BLANK_SYM_A, _BLANK_SYM_B))
+    with capture_logs() as logs:
+        index = gi.build_index(pairs)
+    # The blank-symbol pair key never enters either pair map (fail-before: the old
+    # code stored (NSE, "") → the last blank-symbol row).
+    assert (Exchange.NSE, "") not in index.by_exchange_symbol
+    assert (Exchange.NSE, "") not in index.groww_symbol_by_pair
+    # … but both blank-symbol rows stay pullable by their own groww_symbol + in the
+    # universe (they are only excluded from the PAIR maps).
+    assert gi.resolve(index, "NSE-FOCUSEDA").display_name == "Focused A"
+    assert gi.resolve(index, "NSE-FOCUSEDB").display_name == "Focused B"
+    assert len(index.universe) == 3  # NIFTY + the two blank-symbol rows
+    # A clean-keyed row is unaffected.
+    assert index.groww_symbol_by_pair[(Exchange.NSE, "NIFTY")] == "NSE-NIFTY"
+    # ONE warning states how many blank-symbol rows were skipped.
+    warns = [e for e in logs if e.get("event") == "instrument_master.blank_symbol_pair_skipped"]
+    assert len(warns) == 1
+    assert warns[0]["log_level"] == "warning"
+    assert warns[0]["count"] == 2
+
+
+def test_clean_master_has_no_blank_symbol_warning() -> None:
+    with capture_logs() as logs:
+        gi.load_index_from_csv(_csv(_NIFTY, _WIPRO))
+    assert [
+        e for e in logs if e.get("event") == "instrument_master.blank_symbol_pair_skipped"
+    ] == []
+
+
+def test_whitespace_only_trading_symbol_excluded_from_pair_maps() -> None:
+    """A WHITESPACE-only ``symbol_name`` is treated as blank for the pair maps.
+
+    Not reachable via the CSV parser (which strips every cell), but a hand-built
+    :class:`~brutex.models.Instrument` can carry ``" "`` / ``"\\t"`` — the old
+    ``if not symbol:`` guard let it through and keyed the pair maps on
+    ``(exchange, " ")`` (defense-in-depth fold,
+    DEC-MAPPING-COLLISION-HONESTY-001 hostile-review NIT).
+    """
+    ((nifty_gsym, nifty),) = gi.parse_instrument_csv(_csv(_NIFTY))
+    space_sym = replace(nifty, symbol_name=" ")
+    tab_sym = replace(nifty, symbol_name="\t")
+    with capture_logs() as logs:
+        index = gi.build_index(
+            [(nifty_gsym, nifty), ("NSE-WSONLY", space_sym), ("NSE-TABONLY", tab_sym)]
+        )
+    # Neither whitespace key enters either pair map (fail-before: the old guard
+    # stored (NSE, " ") and (NSE, "\t")).
+    assert (Exchange.NSE, " ") not in index.by_exchange_symbol
+    assert (Exchange.NSE, "\t") not in index.by_exchange_symbol
+    assert (Exchange.NSE, " ") not in index.groww_symbol_by_pair
+    assert (Exchange.NSE, "\t") not in index.groww_symbol_by_pair
+    # Both rows stay pullable by their own groww_symbol + in the universe (they
+    # are only excluded from the PAIR maps, exactly like the blank-symbol rows).
+    assert gi.resolve(index, "NSE-WSONLY").symbol_name == " "
+    assert gi.resolve(index, "NSE-TABONLY").symbol_name == "\t"
+    assert len(index.universe) == 3
+    # A clean-keyed row is unaffected.
+    assert index.groww_symbol_by_pair[(Exchange.NSE, "NIFTY")] == "NSE-NIFTY"
+    # COUNTED in the ONE aggregate warning, exactly like the blank rows.
+    warns = [e for e in logs if e.get("event") == "instrument_master.blank_symbol_pair_skipped"]
+    assert len(warns) == 1
+    assert warns[0]["log_level"] == "warning"
+    assert warns[0]["count"] == 2
