@@ -237,7 +237,34 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/leftovers-pack-r8k4mp` (**DEC-HARDENING-LEFTOVERS-001, MIGRATION.md #1149** — the
+- **Active branch:** `claude/surface-trial-p9m2kv` (**DEC-SURFACE-TRIAL-001, MIGRATION.md #1154** — the `/results` +
+  `/reports` **execution-grade SURFACE TRIAL** + the #1069-review leftover folds. The trial: fixtures written with the
+  REAL repo writers (`ResultsStore` sweep stores incl. a cross-store duplicate run_id + a corrupt Parquet;
+  `ParquetWriter` 1-day/1-minute lakes incl. a missing-prior-session hole + exact ±0.005% half-up boundary prices),
+  the REAL routes driven via `build_app`+`TestClient`, and EVERY displayed number recomputed INDEPENDENTLY test-side
+  (hand-rolled integer ₹-grouping — no `format_inr`/Decimal; `fractions.Fraction` %CHNG + an away-from-zero half-up
+  rounder — no `decimal`; single-pass negated-key ranking; brute-force top-mover picks) then asserted equal
+  cell-for-cell against the wire JSON / sheet XML. **VERDICT: NO DIVERGENCE FOUND — every trialed number matched**
+  (money boundaries `₹-0.01`/odd-paisa lakh/`2**60`-paisa; exact-int-not-float ranking with a genuine
+  `float(2**60)==float(2**60+1)` teeth fixture; run_id tie-break; dedup totals; top-slice invariance; CHNG/%CHNG law +
+  contiguity/first-session skips; ±0.005 half-up cells; abs-max/inclusive-min_pct/alphabetical-tie top-mover; fills
+  from the FULL-precision sign incl. the pinned "displays 0.00 but fills green" sub-boundary edge; minute-basis
+  last-close anchor — the ANCHORED prior day now carries 2 bars with distinct closes so an arg_max→arg_min mutation
+  of the prev-close read is verified KILLED (review round-1 fix: the original fixture's 2-bar day was unanchored and
+  the mutation survived) — + hole skip) — the 13-test trial suite is the permanent regression net
+  (`tests/unit/test_surface_trial_results.py` + `test_surface_trial_reports.py`; `/operator` confirmed a nav alias of
+  `/`, not a route). Leftover folds: **MINOR-1 FIXED** — the `SummaryCache` revision-probe `os.stat` is hoisted
+  OUTSIDE the cache lock (`_probe_token` no-lock + `_reconcile_revision_locked` under it) so a probe wedged on a
+  stalled external volume can never block the pull's `mark_dirty` write funnel (regression: a stalled-probe test
+  proving mark_dirty completes + an out-of-order-token test pinning the over-invalidate-never-miss envelope);
+  **MINOR-2 DISPROVEN** for the reviewed sequence (an OSError probe outage never resets the baseline — recovery
+  compares against the PRE-outage token and bumps; the narrower cold-start-during-outage variant is DOCUMENTED as an
+  honest-envelope note, deliberately not mechanised); NIT-1 the movers as-of docstrings now claim MINUTE-granular
+  honesty (the inclusive 13:45 bucket-open bar aggregates through 13:45:59 — never "no data after 13:45"); NIT-2 the
+  stale pre-#1069 bucket-label-cutoff test comment rewritten to the raw-1m mechanism; NIT-3 the #1149 blurb's "all
+  five touched modules" conflation corrected below. READ-side + tests + docs only; ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  Prior merged: **DEC-HARDENING-LEFTOVERS-001, MIGRATION.md #1149** — the
   hardening-leftovers pack, four areas, read-side dashboard + test + comment surfaces ONLY: (1) **cross-process lake
   cache invalidation** — a CLI `brutex fetch` into the same lake now refreshes every generation-keyed dashboard cache
   on the next poll, no restart: NEW COMMON `brutex/dashboard/lake_revision.py` derives an O(1) content token from ONE
@@ -257,7 +284,11 @@ hostile-review pass._
   missing" claim is REFUTED (already a verified `SPECIAL_WEEKEND_TRADING_SESSIONS` entry); the vendor-observed
   Jan-2026 drift (20 vendor sessions vs our derived 21) implies ONE additional Jan-2026 holiday whose date is
   UNVERIFIED and deliberately NOT fabricated — closable only by the official NSE 2026 circular or a live vendor probe.
-  All five touched `brutex/` modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright` clean; ENGINE
+  The five coverage-verified dashboard modules (`lake_revision.py` + `summary_cache.py` + `movers_snapshot.py` +
+  `movers_futures.py` + the UNtouched-but-re-verified `movers_options.py`) 100% line+branch; the other touched
+  `brutex/` files (`app.py` wiring + the `calendars/nse.py` comment-only note) ride their existing suites
+  (NIT-3 wording fix, DEC-SURFACE-TRIAL-001 — the prior "all five touched modules" conflated the coverage-verified
+  set with the six-member touched set); ruff/ruff-format/`mypy --strict`/`pyright` clean; ENGINE
   UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-FETCH-PER-WINDOW-GATE-HONESTY-001, MIGRATION.md #1132** — the
   fetch-per-window CI bench gate (`tests/bench/test_fetch_per_window_guarantee.py`, #1026) now measures the PRODUCTION
@@ -1390,7 +1421,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/leftovers-pack-r8k4mp`
+- **Active feature branch:** `claude/surface-trial-p9m2kv`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
