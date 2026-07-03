@@ -35,12 +35,25 @@
  * a NEW failing verdict (a different checked_at) re-opens it. No action
  * buttons: this widget displays the proof, it never re-runs it (startup +
  * the first real pull are the only triggers).
+ *
+ * NEVER-OCCLUDE (DEC-UNIVERSE-UI-POLISH-002): the full pill at bottom-left
+ * OVERLAPPED page content (the /universe instruments list's symbol rows sit
+ * exactly there — operator screenshot 2026-07-03). The pill now AUTO-COLLAPSES
+ * to a compact dot-only badge (`bxlp-min`) AUTO_MIN_MS after a verdict is
+ * shown, so at steady state only a small status dot sits in the corner —
+ * visible but unobtrusive. Hovering the badge expands it back to the full
+ * pill (CSS-only), a click still opens the detail card, and a NEW verdict
+ * (changed kind/checked_at signature) re-expands it + restarts the timer.
+ * The RED top banner is untouched — a failing verdict stays loud.
  */
 (function () {
   "use strict";
 
   var ENDPOINT = "/api/v1/liveproof";
   var POLL_MS = 5000;
+  // Auto-collapse the pill to the compact dot badge this long after a verdict
+  // is first shown (DEC-UNIVERSE-UI-POLISH-002 — never occlude page content).
+  var AUTO_MIN_MS = 8000;
   var WIDGET_ID = "bxLiveProof";
   var BANNER_ID = "bxLiveProofBanner";
   var DETAIL_ID = "bxLiveProofDetail";
@@ -81,6 +94,15 @@
       "opacity:.96;display:none;}" +
       "#" + WIDGET_ID + ".shown{display:block;}" +
       "#" + WIDGET_ID + ":hover{opacity:1;}" +
+      // Never-occlude collapse (DEC-UNIVERSE-UI-POLISH-002): after AUTO_MIN_MS
+      // the pill shrinks to a dot-only badge so it stops covering the content
+      // above it (e.g. the /universe instruments list). Hover expands it back.
+      "#" + WIDGET_ID + ".bxlp-min{padding:7px;border-radius:999px;}" +
+      "#" + WIDGET_ID + ".bxlp-min .bxlp-text," +
+      "#" + WIDGET_ID + ".bxlp-min .bxlp-sub{display:none;}" +
+      "#" + WIDGET_ID + ".bxlp-min:hover{padding:8px 12px;border-radius:var(--r-md,10px);}" +
+      "#" + WIDGET_ID + ".bxlp-min:hover .bxlp-text{display:inline;}" +
+      "#" + WIDGET_ID + ".bxlp-min:hover .bxlp-sub{display:inline;}" +
       "#" + WIDGET_ID + " .bxlp-row{display:flex;align-items:center;gap:7px;line-height:1.6;}" +
       "#" + WIDGET_ID + " .bxlp-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;" +
       "background:var(--muted,#787B86);}" +
@@ -241,6 +263,46 @@
   var lastData = null;
   var lastFailSignature = "";
   var dismissedSignature = "";
+  // Never-occlude collapse state (DEC-UNIVERSE-UI-POLISH-002).
+  var minTimer = null;
+  var minimizedSignature = "";
+  var pendingMinSignature = "";
+
+  function verdictSignature(data) {
+    // A stable id for the CURRENTLY SHOWN verdict set — a changed kind or
+    // checked_at re-expands the collapsed badge and restarts the timer.
+    var parts = [];
+    ["preflight", "probes"].forEach(function (key) {
+      var v = data[key] && data[key].verdict;
+      if (v) {
+        parts.push(key + "@" + v.kind + "@" + v.checked_at_utc);
+      }
+    });
+    return parts.join("|");
+  }
+
+  function scheduleMinimize(pill, sig) {
+    // Already collapsed for this exact verdict set → stay collapsed (the 5 s
+    // poll re-renders; it must not re-expand an unchanged verdict).
+    if (sig === minimizedSignature) {
+      pill.classList.add("bxlp-min");
+      return;
+    }
+    // A timer is already pending for this verdict set → let it run.
+    if (sig === pendingMinSignature) {
+      return;
+    }
+    // NEW verdict set: show the full pill, then collapse after AUTO_MIN_MS.
+    pendingMinSignature = sig;
+    pill.classList.remove("bxlp-min");
+    if (minTimer) {
+      clearTimeout(minTimer);
+    }
+    minTimer = setTimeout(function () {
+      minimizedSignature = sig;
+      pill.classList.add("bxlp-min");
+    }, AUTO_MIN_MS);
+  }
 
   function failSignature(data) {
     // A stable id for the CURRENT failing verdict set — the ✕ dismisses only
@@ -363,6 +425,9 @@
         : probes.text;
     }
     renderBanner(data);
+    // Never-occlude collapse (DEC-UNIVERSE-UI-POLISH-002): auto-shrink the pill
+    // to the dot badge after AUTO_MIN_MS; a NEW verdict re-expands + restarts.
+    scheduleMinimize(pill, verdictSignature(data));
   }
 
   function poll() {

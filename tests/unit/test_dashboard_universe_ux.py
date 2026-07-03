@@ -285,7 +285,11 @@ def test_universe_selection_respects_composed_visibility() -> None:
     assert "function visibleInstruments()" in html
     # all-shown consumes the shared predicate, never its own copy.
     assert "visibleInstruments().forEach(i => selMulti.set(i.symbol, i))" in html
-    # Tab switches clear the multi-select (a different universe).
+    # Tab switches KEEP the multi-select (DEC-UNIVERSE-UI-POLISH-002 supersedes
+    # the tab-switch clear: one combined selection spans the Index + Stocks
+    # lists, made visible by the lead naming every ticked symbol). The
+    # cross-list pins live in test_dashboard_universe_crosslist_select.py; the
+    # explicit "✗ clear" button still empties BOTH lists.
     assert "selMulti.clear();" in html
     # F&O-only ON prunes non-pullable ticks so hidden rows can't ride a pull.
     assert "if (v.option_pullable === false) selMulti.delete(k);" in html
