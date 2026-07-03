@@ -83,7 +83,14 @@ from brutex.adapters.groww.contracts import (
     future_contracts,
     option_contracts,
 )
-from brutex.adapters.groww.errors import GrowwError, is_auth_failure, is_rate_limit, is_retryable
+from brutex.adapters.groww.errors import (
+    GrowwAuthError,
+    GrowwError,
+    is_auth_failure,
+    is_rate_limit,
+    is_retryable,
+    is_terminal_auth_failure,
+)
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.write_deadline import append_with_deadline
@@ -167,11 +174,21 @@ _MAX_BACKOFF_S: float = 8.0
 #: ``MassEmptySettleHalt`` joins it (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a tripped
 #: mass-empty circuit breaker means every remaining contract is fetching into the
 #: same suspected soft-throttle / mis-addressing episode — halt, don't settle.
+#: ``GrowwAuthError`` joins it (DEC-GROWW-AUTH-HALT-001): a TERMINAL auth failure —
+#: a dead credential / an exhausted re-mint budget — fails every remaining contract
+#: identically, so quarantining contract-by-contract would "complete" an all-failed
+#: pull with NO critical alert. The drain check carves the two RETRYABLE
+#: ``GrowwAuthError`` subclasses (``GrowwTokenIssuanceThrottled`` /
+#: ``GrowwTokenStillStaleError``) BACK OUT via
+#: :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` — a transient
+#: auth-family shape stays a per-contract quarantine, and the mid-pull re-mint
+#: self-heal (DEC-GROWW-TOKEN-REAUTH-001) never raises out of ``client._call`` at all.
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
     MassEmptySettleHalt,
+    GrowwAuthError,
 )
 
 #: One unit of OUTER-loop work for the parallel fan-out: a derivative
@@ -1636,11 +1653,17 @@ def run_groww_option_ingest(
         exc = outcome.exc
         if exc is None:  # pragma: no cover — a failed outcome always carries exc
             continue
-        if isinstance(exc, _GLOBAL_STOP_ERRORS):
-            # A GLOBAL stop (quota exhausted / quota-ledger invariant) is NOT one
-            # contract's problem — re-raise so it propagates to the caller's quota
+        if isinstance(exc, _GLOBAL_STOP_ERRORS) and (
+            not isinstance(exc, GrowwAuthError) or is_terminal_auth_failure(exc)
+        ):
+            # A GLOBAL stop (quota exhausted / quota-ledger invariant / disk-full / a
+            # TERMINAL dead-credential auth failure, DEC-GROWW-AUTH-HALT-001) is NOT one
+            # contract's problem — re-raise so it propagates to the caller's halt
             # handling (DEC-SPOT-QUOTA-MIDROUND-001) instead of being quarantined as a
             # single pair (the carve-out from the broad BruteXError quarantine below).
+            # The RETRYABLE ``GrowwAuthError`` subclasses (a throttled mint / a stale
+            # read-only re-read) are carved BACK OUT here: transient by design, they
+            # fall through to the ordinary per-contract quarantine, never a halt.
             raise exc
         if not isinstance(exc, BruteXError):
             # A genuine CODE bug (a Python builtin: ValueError / KeyError / TypeError
