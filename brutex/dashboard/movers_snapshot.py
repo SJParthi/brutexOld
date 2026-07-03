@@ -66,6 +66,7 @@ __all__ = [
     "build_snapshot_payload",
     "compute_snapshot",
     "compute_spot_candidates",
+    "filter_to_ist_minute",
     "interval_minutes",
     "normalize_min_volume",
     "parse_snapshot_date",
@@ -551,6 +552,40 @@ def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
     )
 
 
+def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -> pl.DataFrame:
+    """Keep only *frame*'s rows whose IST minute-of-day is ``≤ cutoff_min``.
+
+    THE one COMMON as-of cutoff filter for every ``/movers`` tab
+    (DEC-HARDENING-LEFTOVERS-001 — kills the copy-pasted Int32 minute-of-day
+    expression that lived in BOTH the spot and the futures session readers,
+    CLAUDE.md §11 COMMON). The **unified as-of semantic** it owns: keep every
+    RAW 1-minute bar whose IST minute-of-day is ``≤ cutoff_min``; intraday
+    buckets are then formed only from ELAPSED minutes — a partially-elapsed
+    bucket honestly reflects only the data up to the as-of instant, never a
+    forming-bucket leak of minutes PAST it (Golden Rule #1: an "as of 13:45"
+    snapshot must never include data after 13:45).
+
+    Parameters
+    ----------
+    frame
+        A polars frame of raw 1-minute bars carrying a tz-aware UTC timestamp
+        column named *ts_col* (``"ts_utc"`` in the spot reader, ``"timestamp"``
+        in the futures/options reader).
+    cutoff_min
+        Inclusive IST minute-of-day cutoff (e.g. ``13*60+45`` for 13:45).
+    ts_col
+        The timestamp column name to convert + compare on.
+    """
+    import polars as pl
+
+    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
+    # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
+    # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
+    # wraps to a negative Int8); the cast gives the true minute-of-day.
+    minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
+    return frame.filter(minute_of_day <= cutoff_min)
+
+
 def _read_session_bars(
     lake_root: Path,
     *,
@@ -561,7 +596,7 @@ def _read_session_bars(
     minutes: int,
     cutoff_min: int | None,
 ) -> list[CandleBar]:
-    """Read *day*'s 1-minute bars, resample to *minutes*, slice to ``≤ cutoff_min``.
+    """Read *day*'s 1-minute bars, cut at ``≤ cutoff_min``, resample to *minutes*.
 
     Reads *day*'s bars via :func:`~brutex.data.lake_day_glob.read_day_intraday_frame`
     — ONLY ``1minute/<yyyy>/<mm>.parquet`` for a SESSION-FILTERED symbol (an IST
@@ -572,12 +607,22 @@ def _read_session_bars(
     back to the whole partition there to stay byte-equivalent (its full-day series
     can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
-    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11),
-    then :func:`~brutex.data.tf_resampler.resample_1m_to_tf` buckets to the chosen
-    timeframe (1minute → no-op, 1day → the single session bar). For an intraday
-    timeframe the bars are kept up to (and including) the bar whose IST
-    open-minute ``≤ cutoff_min``. Empty when the symbol has no 1-minute bars on
-    *day* (the caller reports it skipped, never fabricated — Golden Rule #1).
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
+
+    **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
+    the ``cutoff_min`` filter is applied to the RAW 1-minute frame **BEFORE**
+    resampling, via the COMMON :func:`filter_to_ist_minute` — the same instant
+    the futures/options session reader cuts at. Previously the cut was applied
+    AFTER resampling on the resampled bucket-OPEN minute, so the final kept
+    bucket leaked bars PAST the as-of minute (e.g. cutoff 10:00, TF=5m: the
+    10:00 bucket included 10:01–10:04). Now the last bucket aggregates only the
+    elapsed minutes ``≤ cutoff_min``, so LTP / volume / value end exactly at the
+    as-of instant.
+
+    :func:`~brutex.data.tf_resampler.resample_1m_to_tf` then buckets the kept
+    minutes to the chosen timeframe (1minute → no-op). Empty when the symbol has
+    no 1-minute bars on *day*, or none at/before the cutoff (the caller reports
+    it skipped, never fabricated — Golden Rule #1).
     """
     import polars as pl
 
@@ -595,18 +640,11 @@ def _read_session_bars(
     )
     ist_date = pl.col("ts_utc").dt.convert_time_zone(_IST).dt.date()
     day_df = df.filter(ist_date == day).sort("ts_utc")
+    if cutoff_min is not None:
+        day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
     if day_df.is_empty():
         return []
     res = resample_1m_to_tf(day_df, minutes).sort("ts_utc")
-    if cutoff_min is not None:
-        ist = pl.col("ts_utc").dt.convert_time_zone(_IST)
-        # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-        # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
-        # wraps to a negative Int8); the cast gives the true minute-of-day.
-        minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
-        res = res.filter(minute_of_day <= cutoff_min)
-    if res.is_empty():
-        return []
     return [_row_to_bar(row) for row in res.iter_rows(named=True)]
 
 

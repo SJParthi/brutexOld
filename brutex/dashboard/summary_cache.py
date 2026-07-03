@@ -144,6 +144,24 @@ class SummaryCache:
         Minimum seconds between two real recomputes of the same kind while
         dirty (defaults to :data:`DEFAULT_TTL_FLOOR_S`). A non-positive value
         means "recompute on every dirty read" (no floor).
+    revision_probe
+        Optional zero-arg **cross-process freshness probe**
+        (DEC-HARDENING-LEFTOVERS-001; production wiring:
+        :func:`brutex.dashboard.lake_revision.lake_revision` over the lake
+        root). Called under the cache lock on every :attr:`generation` read and
+        every :meth:`get_or_refresh` plan, it returns an opaque content token
+        (``str``) or ``None`` ("unknown — no signal"). The FIRST non-``None``
+        observation records the baseline WITHOUT bumping; a later token
+        **change** bumps the generation exactly once (and records the new
+        token); ``None`` is a no-op. This is how a CLI ``brutex fetch`` in a
+        SEPARATE process (which can never call :meth:`mark_dirty`) invalidates
+        every generation-keyed dashboard cache. The probe MUST be O(1) and MUST
+        NOT raise (the production probe maps every :class:`OSError` to
+        ``None``). ``None`` (the default) disables the probe — byte-identical
+        to the pre-probe behaviour. Honest note: a dashboard-side pull may
+        DOUBLE-bump (its own :meth:`mark_dirty` + the probe seeing the ledger
+        move) — harmless, the keyed caches recompute lazily at most once per
+        distinct generation actually read.
 
     Notes
     -----
@@ -160,9 +178,14 @@ class SummaryCache:
         *,
         clock: Callable[[], float] = _monotonic,
         ttl_floor_s: float = DEFAULT_TTL_FLOOR_S,
+        revision_probe: Callable[[], str | None] | None = None,
     ) -> None:
         self._clock = clock
         self._ttl_floor_s = ttl_floor_s
+        self._revision_probe = revision_probe
+        #: Last token the probe returned (``None`` until the first non-None
+        #: observation — the baseline is recorded WITHOUT a bump).
+        self._last_revision: str | None = None
         self._lock = threading.Lock()
         self._generation = 0
         self._entries: dict[str, _Entry] = {}
@@ -182,10 +205,38 @@ class SummaryCache:
         with self._lock:
             self._generation += 1
 
+    def _observe_revision_locked(self) -> None:
+        """Reconcile the generation against the cross-process probe — O(1).
+
+        Caller MUST hold ``self._lock``. No probe / a ``None`` token → no-op.
+        First non-``None`` token → record the baseline WITHOUT bumping (an app
+        started over an existing lake must not invalidate its cold caches). A
+        token CHANGE → record it + bump the generation exactly once, so every
+        generation-keyed cache invalidates on the next key build
+        (DEC-HARDENING-LEFTOVERS-001 — the CLI-write staleness fix).
+        """
+        if self._revision_probe is None:
+            return
+        token = self._revision_probe()
+        if token is None:
+            return
+        if self._last_revision is None:
+            self._last_revision = token
+            return
+        if token != self._last_revision:
+            self._last_revision = token
+            self._generation += 1
+
     @property
     def generation(self) -> int:
-        """The current monotonic generation counter — O(1)."""
+        """The current monotonic generation counter — O(1).
+
+        Reconciles against the ``revision_probe`` first (one O(1) ``stat``
+        under the lock), so a ledger checkpoint written by ANOTHER process (a
+        CLI ``brutex fetch``) advances the generation on the very next read.
+        """
         with self._lock:
+            self._observe_revision_locked()
             return self._generation
 
     def get_or_refresh(self, kind: str, *, recompute: Recompute) -> SummaryPayload:
@@ -221,6 +272,10 @@ class SummaryCache:
             The cached or freshly-computed summary for *kind*.
         """
         with self._lock:
+            # Reconcile against the cross-process probe BEFORE planning, so the
+            # SPOT/OPTIONS summaries themselves (not only the generation-KEYED
+            # sibling caches) see a CLI-process ledger checkpoint as dirty.
+            self._observe_revision_locked()
             decision = self._plan(kind)
         if decision is None:
             # Hit or stale-but-throttled: a payload is available without a scan.

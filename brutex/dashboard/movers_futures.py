@@ -71,6 +71,7 @@ from brutex.dashboard.movers_snapshot import (
     _cutoff_minute,
     _prev_day_close,
     _prior_session_last_from_minute,
+    filter_to_ist_minute,
     interval_minutes,
     normalize_min_volume,
     parse_snapshot_date,
@@ -789,11 +790,10 @@ def _read_future_session(
     ist = pl.col("timestamp").dt.convert_time_zone(_IST)
     day_df = df.filter(ist.dt.date() == day).sort("timestamp")
     if cutoff_min is not None:
-        # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-        # narrow Int8 (15*60 overflows), so the cast gives the true minute-of-day
-        # (mirrors movers_snapshot._read_session_bars — CLAUDE.md §11 COMMON).
-        minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
-        day_df = day_df.filter(minute_of_day <= cutoff_min)
+        # The ONE COMMON raw-1m as-of cut shared with the spot reader
+        # (movers_snapshot.filter_to_ist_minute — DEC-HARDENING-LEFTOVERS-001,
+        # CLAUDE.md §11 COMMON; byte-identical to the prior inline expression).
+        day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="timestamp")
     if day_df.is_empty():
         return None
     last = day_df.tail(1)
