@@ -39,13 +39,22 @@ def _disable_account_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pull_jobs, "_default_lake_root_resolver", lambda: None)
 
 
-class _FakeClock:
-    def __init__(self) -> None:
-        self._t = 0.0
+def _ticking_clock() -> Callable[[], float]:
+    """A deterministic, monotonically-increasing injected clock.
 
-    def __call__(self) -> float:
-        self._t += 1.0
-        return self._t
+    A plain ``def`` closure over a mutable holder — NOT a callable class — so
+    CodeQL's cross-function points-to analysis can prove the production
+    ``clock()`` call sites callable (the callable-class fixture pattern
+    false-positives ``py/call-to-non-callable`` on production lines; see the
+    team playbook).
+    """
+    state = {"t": 0.0}
+
+    def clock() -> float:
+        state["t"] += 1.0
+        return state["t"]
+
+    return clock
 
 
 def _sync_spawn(fn: Callable[[], None]) -> None:
@@ -54,7 +63,7 @@ def _sync_spawn(fn: Callable[[], None]) -> None:
 
 
 def _job() -> BackgroundPullJob:
-    return BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+    return BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
 
 
 def test_successful_job_advances_then_finishes() -> None:
@@ -518,7 +527,7 @@ def test_single_flight_blocks_second_start() -> None:
     # so a second start must be a no-op returning False.
     captured: list[Callable[[], None]] = []
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=captured.append,
     )
     first = job.start(lambda _h: None, total=1)
@@ -551,7 +560,7 @@ def test_real_daemon_thread_end_to_end() -> None:
     # Exercise the default daemon spawner (the pragma path is the lambda only;
     # here we use a real thread + join to prove the engine works off-thread).
     done = threading.Event()
-    progress = PullProgress(clock=_FakeClock())
+    progress = PullProgress(clock=_ticking_clock())
 
     def spawn(fn: Callable[[], None]) -> None:
         t = threading.Thread(target=fn)
@@ -569,7 +578,7 @@ def test_real_daemon_thread_end_to_end() -> None:
 def test_snapshot_running_state_before_completion() -> None:
     # With a capturing spawner the tracker is started but not yet finished.
     captured: list[Callable[[], None]] = []
-    job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=captured.append)
+    job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=captured.append)
     job.start(lambda _h: None, total=3, detail="warming")
     snap = job.snapshot()
     assert snap.state == STATE_RUNNING
@@ -611,7 +620,7 @@ def test_write_funnel_feeds_coverage_counters() -> None:
 def test_injected_counters_are_used() -> None:
     counters = CoverageCounters()
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, counters=counters
+        progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn, counters=counters
     )
     job.start(lambda on_progress: on_progress("X 1minute", 9, False, False), total=1)
     assert job.counters is counters
@@ -630,7 +639,7 @@ def test_duplicate_repull_zero_bars_leaves_counter_unchanged() -> None:
 def test_summary_cache_invalidated_once_per_window() -> None:
     cache = _SpyCache()
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, summary_cache=cache
+        progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn, summary_cache=cache
     )
 
     def work(on_progress: ProgressHook) -> None:
@@ -667,7 +676,7 @@ class TestLedgerSynced:
     def test_sync_from_ledger_sets_absolute_bar(self) -> None:
         cache = _Cache()
         job = BackgroundPullJob(
-            progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, summary_cache=cache
+            progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn, summary_cache=cache
         )
 
         def work(_on_progress: ProgressHook) -> None:
@@ -686,7 +695,7 @@ class TestLedgerSynced:
     def test_synced_mode_per_pair_hook_only_sets_label_not_completed(self) -> None:
         # In ledger-synced mode the per-pair hook must NOT advance completed (the bar
         # comes from the ledger sync); it only refreshes the "current" label + counters.
-        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
 
         def work(on_progress: ProgressHook) -> None:
             on_progress("NIFTY 1day", 500, False, False)  # a finished pair
@@ -701,13 +710,13 @@ class TestLedgerSynced:
 
     def test_default_mode_still_advances_per_pair(self) -> None:
         # ledger_synced defaults to False → the per-pair advance is byte-unchanged.
-        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
         job.start(lambda h: h("NIFTY 1day", 5, False, False), total=2)
         assert job.snapshot().completed == 1
 
     def test_sync_from_ledger_without_cache_is_a_noop_on_dirty(self) -> None:
         # No summary cache wired → sync still updates the bar, just no mark_dirty.
-        job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+        job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
         job.start(
             lambda _h: job.sync_from_ledger(completed=3, total=10, bars=30),
             total=10,
@@ -755,14 +764,14 @@ class TestOnHung:
         def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
             captured.append(on_hung)
             return PullWatchdog(
-                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
             )
 
         def _capture_only(_fn: Callable[[], None]) -> None:
             """Capture-only spawner: never runs the worker, so the run stays in flight."""
 
         return BackgroundPullJob(
-            progress=PullProgress(clock=_FakeClock()),
+            progress=PullProgress(clock=_ticking_clock()),
             spawn=_capture_only,
             watchdog_factory=factory,
         )
@@ -812,7 +821,7 @@ class TestOnHung:
         # Supersede the run: a newer watchdog now owns the job's identity, so the OLD
         # on_hung must see `self._watchdog is watchdog` as False (the ->exit branch).
         newer = PullWatchdog(
-            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
         )
         job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
 
@@ -846,16 +855,16 @@ def test_run_finally_skips_clearing_running_when_superseded() -> None:
     must NOT clear ``_running`` (the ``self._watchdog is watchdog`` ->exit branch)."""
     captured: list[Callable[[], None]] = []
     newer = PullWatchdog(
-        on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+        on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
     )
 
     def factory(_on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
         return PullWatchdog(
-            on_hung=_on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            on_hung=_on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
         )
 
     job = BackgroundPullJob(
-        progress=PullProgress(clock=_FakeClock()),
+        progress=PullProgress(clock=_ticking_clock()),
         spawn=captured.append,  # capture the worker so we can supersede before it runs
         watchdog_factory=factory,
     )
@@ -872,7 +881,7 @@ def test_run_finally_skips_clearing_running_when_superseded() -> None:
 def test_beat_is_a_noop_when_no_watchdog_wired() -> None:
     """``_beat`` short-circuits (the ``self._watchdog is not None`` ->exit branch) when
     no watchdog is wired — e.g. before any ``start`` built one."""
-    job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn)
+    job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
     assert job._watchdog is None  # pyright: ignore[reportPrivateUsage]
     job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the None guard
 
@@ -974,7 +983,7 @@ class TestOnRecovered:
 
         def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
             wd = PullWatchdog(
-                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
             )
             built.append(wd)
             return wd
@@ -983,7 +992,7 @@ class TestOnRecovered:
             """Capture-only spawner: the worker stays in flight."""
 
         job = BackgroundPullJob(
-            progress=PullProgress(clock=_FakeClock()),
+            progress=PullProgress(clock=_ticking_clock()),
             spawn=_capture_only,
             watchdog_factory=factory,
         )
@@ -1010,7 +1019,7 @@ class TestOnRecovered:
         stale = built[0]
         # Supersede the run identity: a newer watchdog owns the job now.
         newer = PullWatchdog(
-            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
         )
         job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
         job._on_hung(_hung_event(), newer)  # pyright: ignore[reportPrivateUsage]
@@ -1030,13 +1039,13 @@ class TestOnRecovered:
 
         def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
             wd = PullWatchdog(
-                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_FakeClock()
+                on_hung=on_hung, timeout_seconds=30.0, spawn=_noop_spawn, clock=_ticking_clock()
             )
             built.append(wd)
             return wd
 
         job = BackgroundPullJob(
-            progress=_BoomProgress(clock=_FakeClock()),
+            progress=_BoomProgress(clock=_ticking_clock()),
             spawn=lambda _fn: None,
             watchdog_factory=factory,
         )
@@ -1048,7 +1057,7 @@ class TestOnRecovered:
 
 def test_pair_progress_phase_advances_open_ended_counters() -> None:
     """The ledger-synced + pair_progress branch of ``_on_progress`` (frozen-counter fix)."""
-    job = BackgroundPullJob(progress=PullProgress(clock=_FakeClock()), spawn=lambda fn: fn())
+    job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=lambda fn: fn())
 
     def work(on_progress: ProgressHook) -> None:
         job.sync_from_ledger(completed=45, total=45, bars=None)  # the metadata freeze shape

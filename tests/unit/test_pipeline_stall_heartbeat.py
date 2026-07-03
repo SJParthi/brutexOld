@@ -54,17 +54,31 @@ from brutex.observability.watchdog import WorkerEvent
 from brutex.options.risk_free import FixedRateSource
 
 
-class _FakeClock:
-    """Manually-advanced monotonic clock (no sleeping)."""
+class _ClockBox:
+    """Mutable time holder for the manually-advanced fake clock (no sleeping)."""
 
     def __init__(self) -> None:
         self.t = 0.0
 
-    def __call__(self) -> float:
-        return self.t
-
     def advance(self, dt: float) -> None:
         self.t += dt
+
+
+def _make_clock() -> tuple[Callable[[], float], _ClockBox]:
+    """A manually-advanced monotonic clock as a PLAIN ``def`` closure.
+
+    Not a callable class: CodeQL's cross-function points-to analysis flags the
+    production ``clock()`` call sites as ``py/call-to-non-callable`` when a test
+    passes a callable-class instance as the injected clock (the known
+    false-positive pattern in the team playbook) — a plain ``def`` is
+    unambiguously callable. Advance time through the returned :class:`_ClockBox`.
+    """
+    box = _ClockBox()
+
+    def clock() -> float:
+        return box.t
+
+    return clock, box
 
 
 @pytest.fixture(autouse=True)
@@ -183,7 +197,7 @@ def _spot(name: str) -> Instrument:
 
 
 def _job_with_real_watchdog(
-    clock: _FakeClock, *, timeout: float = 600.0
+    clock: Callable[[], float], *, timeout: float = 600.0
 ) -> tuple[BackgroundPullJob, list[PullWatchdog], list[BaseException]]:
     """A job wired to a REAL PullWatchdog (fake clock, no daemon timer) + alert capture."""
     built: list[PullWatchdog] = []
@@ -208,7 +222,7 @@ def test_a_beating_post_fetch_stages_never_declared_hung(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """(a) greeks+prebuild+movers outlast the timeout WITH the seams beating → no fire."""
-    clock = _FakeClock()
+    clock, box = _make_clock()
     job, built, alerts = _job_with_real_watchdog(clock)
     monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
 
@@ -218,14 +232,17 @@ def test_a_beating_post_fetch_stages_never_declared_hung(
         # Three post-fetch stages, each 4 × 300 s = 1200 s (2× the 600 s timeout) of
         # wall clock — but each unit of work beats the process-global seam (as the
         # real greeks/prebuild/movers loops now do), so every timer poll stays HEALTHY.
-        for _stage in ("greeks", "prebuild", "movers"):
-            for _unit in range(4):
-                clock.advance(300.0)
+        stages_survived: list[str] = []
+        for stage in ("greeks", "prebuild", "movers"):
+            for _ in range(4):
+                box.advance(300.0)
                 # the stage loop's per-unit beat (emit_progress_beat → the job's beat)
                 from brutex.observability.progress_beat import emit_progress_beat
 
                 emit_progress_beat()
                 assert wd.check_once() == ()  # the timer poll: never a HUNG edge
+            stages_survived.append(stage)
+        assert stages_survived == ["greeks", "prebuild", "movers"]
 
     assert job.start(work, total=1) is True
     snap = job.snapshot()
@@ -239,7 +256,7 @@ def test_b_silent_stages_fire_watchdog_but_hold_single_flight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """(b) a GENUINE hang (seams silent) is still detected — and the flight stays held."""
-    clock = _FakeClock()
+    clock, box = _make_clock()
     job, built, alerts = _job_with_real_watchdog(clock)
     monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
     refused_mid_run: list[bool] = []
@@ -249,7 +266,7 @@ def test_b_silent_stages_fire_watchdog_but_hold_single_flight(
     def work(on_progress: ProgressHook) -> None:
         wd = built[0]
         on_progress("NIFTY 1minute", 1000, False, False)
-        clock.advance(769.0)  # the forensic silence — NO seam beats (true wedge)
+        box.advance(769.0)  # the forensic silence — NO seam beats (true wedge)
         events = wd.check_once()  # the timer poll declares HUNG
         assert len(events) == 1
         # While the worker is still alive: detected + reported, but NOT released.
@@ -280,7 +297,7 @@ def test_d_forensic_small_run_shape_greeks_769s_survives(
     times over. With the per-contract seam beat the watchdog NEVER fires
     (fail-before: reverting the greeks-loop ``emit_progress_beat`` fails this).
     """
-    clock = _FakeClock()
+    clock, box = _make_clock()
     job, built, alerts = _job_with_real_watchdog(clock)
     monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
 
@@ -289,7 +306,7 @@ def test_d_forensic_small_run_shape_greeks_769s_survives(
         on_progress("NSE-BANKNIFTY-25Jun26-50000-PE 1minute", 42, False, False)  # 13:58:21
 
         def slow_read(_t: GreeksEnrichTarget) -> list[dict[str, object]]:
-            clock.advance(300.0)  # a slow contract read/solve
+            box.advance(300.0)  # a slow contract read/solve
             assert wd.check_once() == ()  # the timer poll during the greeks phase
             return []
 

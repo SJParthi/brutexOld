@@ -10,6 +10,7 @@ concurrent advances.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 
 from brutex.dashboard.pull_progress import (
     STATE_DONE,
@@ -21,19 +22,26 @@ from brutex.dashboard.pull_progress import (
 )
 
 
-class _FakeClock:
-    """A deterministic, monotonically-increasing injected clock."""
+def _ticking_clock() -> Callable[[], float]:
+    """A deterministic, monotonically-increasing injected clock.
 
-    def __init__(self) -> None:
-        self._t = 0.0
+    A plain ``def`` closure over a mutable holder — NOT a callable class — so
+    CodeQL's cross-function points-to analysis can prove the production
+    ``clock()`` call sites callable (the callable-class fixture pattern
+    false-positives ``py/call-to-non-callable`` on production lines; see the
+    team playbook).
+    """
+    state = {"t": 0.0}
 
-    def __call__(self) -> float:
-        self._t += 1.0
-        return self._t
+    def clock() -> float:
+        state["t"] += 1.0
+        return state["t"]
+
+    return clock
 
 
 def test_initial_state_is_idle() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     snap = p.snapshot()
     assert snap.state == STATE_IDLE
     assert snap.total == 0
@@ -43,7 +51,7 @@ def test_initial_state_is_idle() -> None:
 
 
 def test_start_sets_running_and_total() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=4, detail="kick")
     snap = p.snapshot()
     assert snap.state == STATE_RUNNING
@@ -54,13 +62,13 @@ def test_start_sets_running_and_total() -> None:
 
 
 def test_negative_total_clamped_to_zero() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=-5)
     assert p.snapshot().total == 0
 
 
 def test_advance_counts_and_percent() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=4)
     p.advance(current="NIFTY", bars=100)
     p.advance(current="BANKNIFTY", bars=50, failed=True)
@@ -73,7 +81,7 @@ def test_advance_counts_and_percent() -> None:
 
 
 def test_advance_without_current_keeps_prior_label() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=2)
     p.advance(current="NIFTY", bars=10)
     p.advance(bars=5)  # no current → label unchanged (the `if current` False branch)
@@ -84,14 +92,14 @@ def test_advance_without_current_keeps_prior_label() -> None:
 
 
 def test_negative_bars_ignored() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1)
     p.advance(bars=-99)
     assert p.snapshot().bars == 0
 
 
 def test_completed_clamps_to_total() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1)
     p.advance()
     p.advance()  # second advance would exceed total → clamped
@@ -101,7 +109,7 @@ def test_completed_clamps_to_total() -> None:
 
 
 def test_finish_marks_done() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=2)
     p.advance()
     p.finish(detail="all good")
@@ -112,7 +120,7 @@ def test_finish_marks_done() -> None:
 
 
 def test_fail_marks_error() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=2)
     p.fail("DhanError: token expired")
     snap = p.snapshot()
@@ -121,7 +129,7 @@ def test_fail_marks_error() -> None:
 
 
 def test_restart_resets_counters() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=3)
     p.advance(current="X", bars=7, failed=True)
     p.finish()
@@ -134,7 +142,7 @@ def test_restart_resets_counters() -> None:
 
 
 def test_updated_at_advances_with_clock() -> None:
-    clock = _FakeClock()
+    clock = _ticking_clock()
     p = PullProgress(clock=clock)
     p.start(total=1)
     first = p.snapshot().updated_at
@@ -143,7 +151,7 @@ def test_updated_at_advances_with_clock() -> None:
 
 
 def test_to_dict_shape() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=2)
     p.advance(current="NIFTY", bars=10)
     d = p.snapshot().to_dict()
@@ -170,7 +178,7 @@ def test_advance_counts_no_data_gaps_separately_from_failures() -> None:
     # DEC-DHAN-NO-DATA-GAP-COUNT-001: a benign DH-905 gap bumps ``gaps``, NOT
     # ``failed`` — the two counters are independent and a gap is still a processed
     # unit (``completed`` advances). A reset via ``start`` clears ``gaps`` too.
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=3)
     p.advance(current="NIFTY", bars=100)  # clean
     p.advance(current="NIFTY NEXT 50", gap=True)  # benign DH-905 boundary
@@ -192,7 +200,7 @@ def test_default_monotonic_clock() -> None:
 
 
 def test_thread_safe_concurrent_advances() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1000)
 
     def worker() -> None:
@@ -211,7 +219,7 @@ def test_thread_safe_concurrent_advances() -> None:
 
 
 def test_snapshot_is_immutable() -> None:
-    snap = PullProgress(clock=_FakeClock()).snapshot()
+    snap = PullProgress(clock=_ticking_clock()).snapshot()
     assert isinstance(snap, ProgressSnapshot)
     try:
         snap.total = 9  # type: ignore[misc]
@@ -225,7 +233,7 @@ class TestSync:
     """`sync` — absolute, idempotent WINDOW-level progress (DEC-SPOT-WINDOW-PROGRESS-001)."""
 
     def test_sets_absolute_counters(self) -> None:
-        p = PullProgress(clock=_FakeClock())
+        p = PullProgress(clock=_ticking_clock())
         p.start(total=779)  # initial symbol placeholder
         p.sync(completed=118, total=10906, bars=12054, failed=0, current="NIFTYSMALL 1day")
         snap = p.snapshot()
@@ -239,7 +247,7 @@ class TestSync:
     def test_is_idempotent_not_cumulative(self) -> None:
         # Unlike advance(), a repeated sync SETS rather than adds — so the per-window live
         # poll can never double-count windows the retry rounds re-touch.
-        p = PullProgress(clock=_FakeClock())
+        p = PullProgress(clock=_ticking_clock())
         p.start(total=10)
         p.sync(completed=5, total=10, bars=50)
         p.sync(completed=5, total=10, bars=50)
@@ -247,7 +255,7 @@ class TestSync:
         assert p.snapshot().bars == 50
 
     def test_clamps_completed_to_total_and_non_negative(self) -> None:
-        p = PullProgress(clock=_FakeClock())
+        p = PullProgress(clock=_ticking_clock())
         p.start(total=10)
         p.sync(completed=999, total=10, bars=-3, failed=-1)
         snap = p.snapshot()
@@ -256,7 +264,7 @@ class TestSync:
         assert snap.failed == 0
 
     def test_empty_current_keeps_prior_label(self) -> None:
-        p = PullProgress(clock=_FakeClock())
+        p = PullProgress(clock=_ticking_clock())
         p.start(total=10)
         p.sync(completed=1, total=10, bars=1, current="NIFTY 1day")
         p.sync(completed=2, total=10, bars=2, current="")  # no live label this tick
@@ -267,7 +275,7 @@ class TestSetCurrent:
     """`set_current` — refresh only the label, no counter change."""
 
     def test_updates_label_only(self) -> None:
-        p = PullProgress(clock=_FakeClock())
+        p = PullProgress(clock=_ticking_clock())
         p.start(total=10)
         p.sync(completed=3, total=10, bars=30)
         p.set_current("BANKNIFTY 1day")
@@ -277,7 +285,7 @@ class TestSetCurrent:
         assert snap.bars == 30  # untouched
 
     def test_empty_label_is_a_noop(self) -> None:
-        clock = _FakeClock()
+        clock = _ticking_clock()
         p = PullProgress(clock=clock)
         p.start(total=10)
         before = p.snapshot().updated_at
@@ -290,11 +298,11 @@ class TestSetCurrent:
 
 def test_phase_defaults_to_empty() -> None:
     # A fresh tracker has no phase — the live per-phase view highlights nothing.
-    assert PullProgress(clock=_FakeClock()).snapshot().phase == ""
+    assert PullProgress(clock=_ticking_clock()).snapshot().phase == ""
 
 
 def test_set_phase_records_the_running_phase() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=3)
     p.set_phase("spot")
     assert p.snapshot().phase == "spot"
@@ -305,7 +313,7 @@ def test_set_phase_records_the_running_phase() -> None:
 
 
 def test_set_phase_empty_clears_the_label() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1)
     p.set_phase("futures")
     p.set_phase("")  # honoured — back to "no phase in flight"
@@ -313,7 +321,7 @@ def test_set_phase_empty_clears_the_label() -> None:
 
 
 def test_set_phase_stamps_the_clock() -> None:
-    clock = _FakeClock()
+    clock = _ticking_clock()
     p = PullProgress(clock=clock)
     p.start(total=1)
     before = p.snapshot().updated_at
@@ -323,7 +331,7 @@ def test_set_phase_stamps_the_clock() -> None:
 
 def test_start_resets_the_phase() -> None:
     # A fresh pull (idempotent re-click) clears any stale phase label.
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=2)
     p.set_phase("historical")
     p.start(total=2)  # reset
@@ -332,7 +340,7 @@ def test_start_resets_the_phase() -> None:
 
 def test_set_phase_does_not_touch_counters() -> None:
     # Purely a label — no counter is keyed by it (no fabricated progress).
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=4)
     p.advance(current="NIFTY", bars=10)
     p.set_phase("spot")
@@ -344,7 +352,7 @@ def test_set_phase_does_not_touch_counters() -> None:
 
 
 def test_advance_grow_total_grows_total_with_completed() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=2)
     for _ in range(3):
         p.advance(current="pair", bars=10, grow_total=True)
@@ -355,7 +363,7 @@ def test_advance_grow_total_grows_total_with_completed() -> None:
 
 
 def test_advance_grow_total_keeps_a_larger_total() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=10)
     p.advance(grow_total=True)
     snap = p.snapshot()
@@ -364,7 +372,7 @@ def test_advance_grow_total_keeps_a_larger_total() -> None:
 
 
 def test_sync_bars_none_preserves_the_cumulative_tally() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=10)
     p.sync(completed=5, total=10, bars=1_000)
     # A bar-less sync source (the metadata pull) must NOT wipe the tally to 0.
@@ -375,7 +383,7 @@ def test_sync_bars_none_preserves_the_cumulative_tally() -> None:
 
 
 def test_mark_stalled_sets_marker_while_running_only() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1, detail="pipeline")
     p.mark_stalled("stalled-suspect — no heartbeat for 769s during phase 'prebuild'")
     snap = p.snapshot()
@@ -386,7 +394,7 @@ def test_mark_stalled_sets_marker_while_running_only() -> None:
 
 
 def test_mark_stalled_is_a_noop_on_a_settled_run() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1)
     p.finish(detail="done")
     p.mark_stalled("late timer edge")  # must NOT stamp a settled run
@@ -396,7 +404,7 @@ def test_mark_stalled_is_a_noop_on_a_settled_run() -> None:
 
 
 def test_clear_stalled_lifts_the_marker() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1)
     p.mark_stalled("suspect")
     p.clear_stalled()
@@ -406,7 +414,7 @@ def test_clear_stalled_lifts_the_marker() -> None:
 
 
 def test_finish_and_fail_clear_the_stalled_marker() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1)
     p.mark_stalled("suspect")
     p.finish(detail="done")
@@ -418,7 +426,7 @@ def test_finish_and_fail_clear_the_stalled_marker() -> None:
 
 
 def test_start_resets_the_stalled_marker() -> None:
-    p = PullProgress(clock=_FakeClock())
+    p = PullProgress(clock=_ticking_clock())
     p.start(total=1)
     p.mark_stalled("suspect")
     p.start(total=1)  # a fresh run never inherits the prior run's marker
