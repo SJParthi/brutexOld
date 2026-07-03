@@ -2570,8 +2570,7 @@ def window_status_label(status: str, empty_streak: int) -> str:
         return f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s))"
     if status == "SKIPPED":
         return (
-            f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s)"
-            " — settled)"
+            f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
     if status == "FAILED":
         return "FAILED (will re-pull)"
@@ -2611,9 +2610,7 @@ def _window_row(
         # DuckDB fast + legacy pyarrow — since both project through this row
         # builder): EMPTY/SKIPPED read "vendor confirmed no trades (N clean
         # attempt(s)[ — settled])", FAILED reads "FAILED (will re-pull)".
-        "status_label": window_status_label(
-            str(record.status), getattr(record, "empty_streak", 0)
-        ),
+        "status_label": window_status_label(str(record.status), getattr(record, "empty_streak", 0)),
         "bars": record.bars,
         "attempts": record.attempts,
         # The genuine-EMPTY count (window_ledger R1) — surfaces WHY an EMPTY row
