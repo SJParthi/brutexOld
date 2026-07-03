@@ -1714,8 +1714,9 @@ async function pollProgress(label) {
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   setBulkDisabled(false);
-  // Restore the ONE pull button + the pre-build button to their selection-driven
-  // label/enabled state (the pipeline button is re-enabled by setBulkDisabled(false)).
+  // Restore the ONE pull button to its selection-driven label/enabled state
+  // (the pipeline button is re-enabled by setBulkDisabled(false); the manual
+  // pre-build button no longer exists — DEC-PIPELINE-AUTOPREBUILD-001).
   updateMultiBtn();
   document.getElementById('pullpanel').classList.remove('running');  // stop the beam
   refreshVerdict();  // a pull just ended — fetch + paint the verdict banner (DEC-VERDICT-BANNER-001)

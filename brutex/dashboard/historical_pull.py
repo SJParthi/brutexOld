@@ -1001,7 +1001,7 @@ def _run_phase(
         # cause is folded onto the phase result so the report's `verdict` reads the
         # loud, needs-operator ``mass_empty_halt`` — not a generic job error. Because
         # the halt is CAUGHT here (it never escapes to the job layer's
-        # ``_is_pull_halt`` path), the CRITICAL Telegram pull-halt alert fires HERE
+        # ``is_pull_halt`` path), the CRITICAL Telegram pull-halt alert fires HERE
         # (DEC-TELEGRAM-PULL-HALT-001 parity with the spot/CLI routes; best-effort by
         # construction).
         emit_pull_halt_alert(exc)
@@ -1145,9 +1145,13 @@ def _enrich_greeks_from_minute(
     """Post-pull Greeks enrichment over the just-written option 1-minute — best-effort.
 
     ``greeks_enrich_after_pull`` (DEC-GREEKS-ENGINE-PR2B-001 /
-    `DEC-GREEKS-GENERATION-TIME-001`, plan §15.4): the F&O Greeks twin of
-    :func:`_derive_daily_from_minute`, run at the SAME post-drain seam (the
-    fetch lane has fully drained — the pass can never block or slow a fetch).
+    `DEC-GREEKS-GENERATION-TIME-001`, plan §15.4): the F&O Greeks pass at the
+    post-drain seam (the fetch lane has fully drained — the pass can never
+    block or slow a fetch). It once shared this seam with the (now removed)
+    mid-pull ``_derive_daily_from_minute`` daily derive — the ``1day`` derive
+    was relocated into the pipeline's automatic FINAL prebuild stage
+    (DEC-PIPELINE-AUTOPREBUILD-001); the Greeks overlay stays HERE because it
+    annotates the just-pulled 1-minute bars themselves.
     One :class:`~brutex.data.greeks_enrich.GreeksEnrichTarget` per resolved
     contract window; FUT legs are skipped INSIDE the driver (never a bogus
     Greek for a future); the risk-free source is the locked PR-1 seam
