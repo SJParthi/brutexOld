@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 from brutex.engine.sweep_launch import (
@@ -166,18 +166,16 @@ def test_digest_path_returns_no_alloc_sink_without_touching_bloom_machinery(
     """The digest plan constructs NOTHING: no hint, no index, no Bloom.
 
     The lazy imports inside the legacy arm resolve at call time, so poisoning
-    the SOURCE-module symbols proves the digest arm never reaches them.
+    the SOURCE-module symbols (string-target ``monkeypatch.setattr`` — one
+    import style per module) proves the digest arm never reaches them.
     """
-    import brutex.data.option_dedup as option_dedup_mod
-    import brutex.engine.sweep_orchestrator as orch_mod
-    import brutex.orchestrator.bloom as bloom_mod
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("digest path must not touch the Bloom/dedup machinery")
 
-    monkeypatch.setattr(orch_mod, "bloom_capacity_hint", _boom)
-    monkeypatch.setattr(option_dedup_mod, "OptionDedupIndex", _boom)
-    monkeypatch.setattr(bloom_mod, "BloomFilter", _boom)
+    monkeypatch.setattr("brutex.engine.sweep_orchestrator.bloom_capacity_hint", _boom)
+    monkeypatch.setattr("brutex.data.option_dedup.OptionDedupIndex", _boom)
+    monkeypatch.setattr("brutex.orchestrator.bloom.BloomFilter", _boom)
 
     sink = plan_launch_dedup(_grid(), digest_path=True)
     assert isinstance(sink, DigestPathNoDedup)
@@ -369,6 +367,11 @@ def test_knobs_malformed_env_is_loud() -> None:
 # ────── sweep_abort_alert (R2-SL-F8 / R2-CC-G4) ──────
 
 
+def _raise(exc: BaseException) -> NoReturn:
+    """Raise *exc* from a call site so no with-body statement is a bare raise."""
+    raise exc
+
+
 def test_abort_alert_clean_span_fires_nothing() -> None:
     """A clean span never emits — only the launcher's sweep_complete fires."""
     fired: list[Exception] = []
@@ -382,7 +385,7 @@ def test_abort_alert_fires_once_then_reraises_unchanged() -> None:
     fired: list[Exception] = []
     boom = MemoryError("oom mid-grid")
     with pytest.raises(MemoryError) as excinfo, sweep_abort_alert(fired.append):
-        raise boom
+        _raise(boom)
     assert excinfo.value is boom
     assert fired == [boom]
 
@@ -391,7 +394,7 @@ def test_abort_alert_keyboard_interrupt_passes_through_silently() -> None:
     """Ctrl-C is BaseException — it propagates with NO alert."""
     fired: list[Exception] = []
     with pytest.raises(KeyboardInterrupt), sweep_abort_alert(fired.append):
-        raise KeyboardInterrupt
+        _raise(KeyboardInterrupt())
     assert fired == []
 
 
@@ -399,5 +402,5 @@ def test_abort_alert_system_exit_passes_through_silently() -> None:
     """SystemExit is BaseException — it propagates with NO alert."""
     fired: list[Exception] = []
     with pytest.raises(SystemExit), sweep_abort_alert(fired.append):
-        raise SystemExit(3)
+        _raise(SystemExit(3))
     assert fired == []

@@ -557,16 +557,13 @@ class TestRecordDigestExactFirst:
                 assert filler < 200_000, "1 MiB map never filled — fixture broken"
             persisted = len(pre)
 
-        cache = SweepCache.open(root, bloom_capacity=persisted + 8192, map_size_mb=1)
-        try:
+        with SweepCache.open(root, bloom_capacity=persisted + 8192, map_size_mb=1) as cache:
             assert cache.snapshot()["bloom_insertions"] == persisted  # rebuild ran
             failing, successes, exc = self._record_until_map_full(cache)
             assert "--sweep-cache-map-mb" in str(exc)  # actionable remedy
             assert cache._bloom.might_contain(failing) is False  # no phantom
             assert cache.snapshot()["bloom_insertions"] == persisted + successes
             assert cache.seen_digest(failing) is False  # never a phantom skip
-        finally:
-            cache.close()
 
         # Grow the map (the remedy) — the refused digest lands exactly once.
         with SweepCache.open(root, bloom_capacity=persisted + 8192, map_size_mb=4) as grown:
