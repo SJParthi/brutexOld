@@ -71,7 +71,7 @@ from brutex.data.partition import (
     VALID_INTERVALS,
     VALID_SEGMENTS,
 )
-from brutex.data.session import format_ist_clock
+from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
 from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
@@ -332,13 +332,20 @@ _IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 #: ``00:00:00`` suffix) in the candle viewer (DEC-DB-CANDLE-DERIVED-001).
 _DAILY_INTERVAL: Final[str] = "1day"
 
+#: The SQL fragment for a bar's **IST wall-clock instant** (a naive TIMESTAMP on
+#: the Indian-market clock). Adds the fixed +05:30 IST offset (330 minutes; India
+#: has no DST — CLAUDE.md §6) to the UTC wall-clock, so it is independent of the
+#: ambient DuckDB session ``TimeZone`` (the operator runs Asia/Kolkata). The ONE
+#: place the 330-minute offset lives — :data:`_IST_DATE_EXPR` derives from it so
+#: no second literal can drift (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+_IST_TS_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')"
+
 #: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
-#: the candle grid renders (:func:`_format_candle_timestamp`). Adds the fixed
-#: +05:30 IST offset (330 minutes; India has no DST — CLAUDE.md §6) to the UTC
-#: wall-clock before truncating, so it is independent of the ambient DuckDB
-#: session ``TimeZone`` (the operator runs Asia/Kolkata). Used by the derived-1day
-#: date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O full-stored-life span.
-_IST_DATE_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')::DATE"
+#: the candle grid renders (:func:`_format_candle_timestamp`). Derived from
+#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant) by truncating to DATE.
+#: Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O
+#: full-stored-life span + the coverage per-session aggregate.
+_IST_DATE_EXPR: Final[str] = f"{_IST_TS_EXPR}::DATE"
 
 #: The SQL fragment for a bar's **UTC calendar date** — the legacy intraday date
 #: bound (byte-identical to the pre-DEC-DB-UX-PACK-001 comparison). Real intraday
@@ -370,6 +377,16 @@ _INTRADAY_BASE_INTERVAL: Final[str] = "1minute"
 #: derived column (DEC-DB-CANDLE-DERIVED-001) is computed ONLY for the bar at
 #: this instant; mirrors ``brutex.data.spot_features._SESSION_OPEN`` (§11 COMMON).
 _SESSION_OPEN_IST: Final[time] = time(9, 15)
+
+#: The canonical session open as minutes-past-midnight-IST (555), DERIVED from the
+#: ONE COMMON :data:`brutex.data.session.SESSION_OPEN` constant — never a fourth
+#: hardcoded 09:15 literal (CLAUDE.md §11 COMMON). The per-session coverage
+#: aggregate (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001) counts a session as
+#: *open-substituted* when its FIRST present 1-minute bar is STRICTLY later than
+#: ``ist_date + this many minutes`` — i.e. the derived 1-day open for that session
+#: is the earliest PRESENT minute's open (``tf_resampler`` ``.first()``), not the
+#: canonical 09:15 IST open price.
+_SESSION_OPEN_MINUTES: Final[int] = SESSION_OPEN.hour * 60 + SESSION_OPEN.minute
 
 #: The two server-computed derived columns appended to every spot candle page
 #: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
@@ -453,6 +470,21 @@ def _ist_date(value: Any) -> str | None:
     if isinstance(value, datetime):
         ist = value.astimezone(_IST) if value.tzinfo is not None else value
         return ist.date().isoformat()
+    return None
+
+
+def _iso_date(value: Any) -> str | None:
+    """Render a DuckDB ``DATE`` cell as ISO ``YYYY-MM-DD``, or ``None`` for SQL NULL.
+
+    The already-IST twin of :func:`_ist_date` for the per-session coverage
+    aggregate (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the folded CTE's
+    ``MIN(ist_date)`` / ``MAX(ist_date)`` are ALREADY IST calendar dates (cast via
+    :data:`_IST_DATE_EXPR`), so no timezone conversion applies — a
+    :class:`~datetime.date` renders as ISO, and the SQL ``NULL`` an empty
+    partition aggregates to yields ``None``.
+    """
+    if isinstance(value, date):
+        return value.isoformat()
     return None
 
 
@@ -1196,19 +1228,51 @@ def summarize_spot_datasets(
     """Summarise every spot candle dataset in the lake for the coverage page.
 
     Discovers each ``(exchange, segment, symbol, interval)`` partition set via
-    :func:`list_candle_datasets`, then reads ONE aggregate row per set
-    (``COUNT(*)`` + ``MIN`` / ``MAX`` of the bar ``timestamp``) straight from the
-    Parquet lake via DuckDB ``read_parquet`` over the partition glob — no data
-    duplication, the lake stays the single source of truth (CLAUDE.md §11
-    COMMON). Read-only by construction: a single ``SELECT`` aggregate per set, no
-    write path. A click never materialises bar rows — only the three aggregate
-    scalars — so cost is bounded regardless of how many years are stored
-    (DuckDB skips row-groups via Parquet min/max stats).
+    :func:`list_candle_datasets`, then reads ONE aggregate row per set straight
+    from the Parquet lake via DuckDB ``read_parquet`` over the partition glob —
+    no data duplication, the lake stays the single source of truth (CLAUDE.md
+    §11 COMMON). Read-only by construction: a single ``SELECT`` aggregate per
+    set, no write path. A click never materialises bar rows — only the
+    aggregate scalars.
+
+    For a dataset at the ONE fetched spot granularity
+    (:data:`TRACK1_SPOT_INTERVAL`, ``1minute``) the aggregate is the folded
+    per-session CTE of DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 — ONE scan (the
+    SAME O(bars) order as the historical 3-scalar aggregate, never a second
+    full-column pass; the #920 hot-path guard) that groups the bars by their
+    IST calendar date (:data:`_IST_DATE_EXPR`) and derives:
+
+    * ``bars`` = ``SUM`` of the per-session DISTINCT-timestamp counts (equal to
+      the historical whole-dataset ``COUNT(DISTINCT "timestamp")`` — a
+      timestamp belongs to exactly one IST date, so the dedup of
+      DEC-LAKE-READ-UNIQUE-001 is preserved);
+    * ``first_date`` / ``last_date`` = ``MIN`` / ``MAX`` of the per-session IST
+      dates (equal to the IST date of the ``MIN`` / ``MAX`` timestamp — the
+      fixed +05:30 offset is monotone);
+    * ``open_substituted_days`` = how many sessions' FIRST present minute
+      (``MIN`` of :data:`_IST_TS_EXPR`) is STRICTLY later than the canonical
+      09:15 IST session open (:data:`_SESSION_OPEN_MINUTES`, derived from the
+      COMMON :data:`brutex.data.session.SESSION_OPEN`) — exactly the sessions
+      whose DERIVED 1-day open is the earliest-present-minute substitute
+      (``tf_resampler`` aggregates a bucket's open with ``.first()``), not the
+      canonical 09:15 price. A session opening exactly at 09:15:00 is NOT
+      counted (strict ``>``). INFORMATIONAL only — no verdict downgrade;
+    * ``session_days`` = the number of distinct IST session dates stored.
+
+    Every NON-``1minute`` dataset (the derived ``1day`` + intraday TFs) keeps
+    the historical 3-scalar aggregate byte-identical and carries
+    ``open_substituted_days`` / ``session_days`` as ``None`` — the substitution
+    signal is only meaningful on the fetched granularity the 1-day is derived
+    FROM.
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
     stored, NOT whether the full ``2020 → today`` range is complete.
     Partial-date-range detection is an explicit follow-up, not claimed here.
+    ``open_substituted_days`` is a SUBSTITUTION signal, not exclusively "vendor
+    lost data": a genuine late/special open (Muhurat), a sparse reference
+    symbol, and a vendor gap all count — each honestly means the derived daily
+    open is not the canonical 09:15 price.
 
     Parameters
     ----------
@@ -1222,14 +1286,11 @@ def summarize_spot_datasets(
         fetched spot granularity (:data:`TRACK1_SPOT_INTERVAL`, ``1minute`` —
         a derived ``1day`` must never carry the density signal, or the
         cold-start seed would leave a never-fetched window permanently
-        unseeded), the SAME single aggregate additionally ``array_agg``-s the
-        dataset's DISTINCT IST bar dates (:data:`_IST_DATE_EXPR`, the SQL twin
-        of :func:`_ist_date`) and the row gains a ``session_dates`` frozenset —
-        the ledger cold-start's interior-gap density cross-check input. The
-        default ``None`` is BYTE-IDENTICAL to the historical 3-scalar aggregate
-        (the hot /coverage + /completeness pollers pass nothing). O(sessions)
-        per enriched dataset — a full-column DISTINCT scan, so callers gate it
-        to the ~3 dense INDEX datasets at cold-start only.
+        unseeded), the SAME single per-session CTE additionally
+        ``array_agg``-s the dataset's DISTINCT IST bar dates and the row gains
+        a ``session_dates`` frozenset — the ledger cold-start's interior-gap
+        density cross-check input. The default ``None`` omits the key (the hot
+        /coverage + /completeness pollers pass nothing).
 
     Returns
     -------
@@ -1238,7 +1299,9 @@ def summarize_spot_datasets(
 
             {"exchange", "segment", "symbol", "interval",
              "bars": <int>, "first_date": <YYYY-MM-DD|None>,
-             "last_date": <YYYY-MM-DD|None>[, "session_dates": frozenset[date]]}
+             "last_date": <YYYY-MM-DD|None>,
+             "open_substituted_days": <int|None>, "session_days": <int|None>
+             [, "session_dates": frozenset[date]]}
     """
     rows: list[dict[str, Any]] = []
     for dataset in list_candle_datasets(lake_root):
@@ -1246,6 +1309,7 @@ def summarize_spot_datasets(
         segment = dataset["segment"]
         symbol = dataset["symbol"]
         interval = dataset["interval"]
+        is_fetched_minute = interval == TRACK1_SPOT_INTERVAL
         # Belt half of the DEC-COLDSTART-SEED-INTERIOR-GAP-001 REVISION-1 gate
         # (the braces half lives in `seed_enclosed_windows`): session dates are
         # attached ONLY for an opted-in segment at the FETCHED `1minute`
@@ -1253,9 +1317,8 @@ def summarize_spot_datasets(
         with_session_dates = (
             session_date_segments is not None
             and segment in session_date_segments
-            and interval == TRACK1_SPOT_INTERVAL
+            and is_fetched_minute
         )
-        session_expr = f", array_agg(DISTINCT {_IST_DATE_EXPR})" if with_session_dates else ""
         # The glob is built from list_candle_datasets coordinates (each already
         # validated against the partition allowlists during discovery), never
         # free user text; the path is given to read_parquet as a bound parameter.
@@ -1265,11 +1328,31 @@ def summarize_spot_datasets(
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
+        if is_fetched_minute:
+            # The ONE folded per-session CTE (DEC-DAILY-OPEN-SUBSTITUTION-
+            # HONESTY-001, shared with the (a)-fix session_dates enrichment) —
+            # a single O(bars) scan, never a second full-column pass (#920).
+            session_expr = ", array_agg(DISTINCT ist_date)" if with_session_dates else ""
+            sql = (
+                "WITH per_session AS ("  # noqa: S608  # nosec B608 - static fragments from hardcoded constants; path bound
+                f"SELECT {_IST_DATE_EXPR} AS ist_date, "
+                f"MIN({_IST_TS_EXPR}) AS first_ist, "
+                f"{distinct_count_sql(('timestamp',))} AS n "
+                "FROM read_parquet(?, union_by_name=true) GROUP BY ist_date) "
+                "SELECT SUM(n), MIN(ist_date), MAX(ist_date), "
+                "COUNT(*) FILTER (WHERE first_ist > ist_date "
+                f"+ INTERVAL '{_SESSION_OPEN_MINUTES} minutes'), "
+                f"COUNT(*){session_expr} FROM per_session"
+            )
+        else:
+            sql = (
+                f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp") '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
+                "FROM read_parquet(?, union_by_name=true)"
+            )
         agg_rows = _aggregate_parquet_resilient(
             conn,
             lake_root / "bars" / exchange / segment / symbol / interval,
-            f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp")'  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
-            f"{session_expr} FROM read_parquet(?, union_by_name=true)",
+            sql,
             source=f"spot:{exchange}/{segment}/{symbol}/{interval}",
         )
         agg = agg_rows[0] if agg_rows else None
@@ -1278,17 +1361,33 @@ def summarize_spot_datasets(
             "segment": segment,
             "symbol": symbol,
             "interval": interval,
-            "bars": int(agg[0]) if agg else 0,
-            "first_date": _ist_date(agg[1]) if agg else None,
-            "last_date": _ist_date(agg[2]) if agg else None,
         }
+        if is_fetched_minute:
+            # A zero-row partition aggregates the CTE to (NULL, NULL, NULL, 0,
+            # 0[, NULL]) and an all-unreadable one yields no aggregate row at
+            # all — both honestly degrade to 0 bars / no dates / (0, 0) counts,
+            # never a crash / never a fabricated verdict (Golden Rule #1).
+            row["bars"] = int(agg[0]) if agg is not None and agg[0] is not None else 0
+            row["first_date"] = _iso_date(agg[1]) if agg else None
+            row["last_date"] = _iso_date(agg[2]) if agg else None
+            row["open_substituted_days"] = int(agg[3]) if agg else 0
+            row["session_days"] = int(agg[4]) if agg else 0
+        else:
+            row["bars"] = int(agg[0]) if agg else 0
+            row["first_date"] = _ist_date(agg[1]) if agg else None
+            row["last_date"] = _ist_date(agg[2]) if agg else None
+            # The substitution signal exists ONLY on the fetched 1-minute
+            # granularity — a derived TF row carries an honest None, never 0
+            # (0 would assert "checked, found none").
+            row["open_substituted_days"] = None
+            row["session_days"] = None
         if with_session_dates:
             # DuckDB `array_agg` over zero rows is SQL NULL (→ None) and an
             # all-unreadable partition yields no aggregate row at all — both
             # degrade to an EMPTY set, over which the seed's density check
             # honestly ABSTAINS (too-few sessions), never a crash / never a
             # fabricated verdict (Golden Rule #1).
-            raw_sessions = agg[3] if agg else None
+            raw_sessions = agg[5] if agg else None
             row["session_dates"] = (
                 frozenset(raw_sessions) if raw_sessions is not None else frozenset()
             )

@@ -254,6 +254,11 @@ class TestSpotCoverageApi:
                 "bars": 2,
                 "first_date": "2024-03-01",
                 "last_date": "2024-03-02",
+                # Re-baselined (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): both fixture
+                # sessions' first stored minute is 14:45 IST (> the 09:15 open) — the
+                # substitution counts pass through the /coverage/spot payload.
+                "open_substituted_days": 2,
+                "session_days": 2,
                 "completeness": "no_ledger_record",
                 "windows_settled": None,
                 "windows_pending": None,
@@ -444,6 +449,100 @@ class TestColdStartSeedInteriorGap:
             assert per_symbol["NIFTY"]["1minute"] == "partial"
             # No false-red on the healthy control (settled + Jan-2020 start → full).
             assert per_symbol["BANKNIFTY"]["1minute"] == "full"
+        finally:
+            s.close()
+
+
+class TestDailyOpenSubstitutionHonesty:
+    """DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 end-to-end over a REAL lake: a session
+    whose 09:15 IST minute is ABSENT gets its derived 1-day open silently substituted
+    from the earliest present minute (tf_resampler ``.first()`` — deliberately
+    unchanged); the completeness surface now REPORTS the substitution on every
+    projection (scoreboard JSON + /universe map + CSV + /coverage/spot pass-through)
+    while the verdict honestly stays ``full`` (informational, never a downgrade)."""
+
+    def test_missing_0915_session_surfaces_on_every_completeness_projection(
+        self, tmp_path: Path
+    ) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: pre-fix none of these payloads carried ANY
+        # substitution field — the missing-09:15 session was invisible everywhere.
+        from datetime import date as _date
+
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import (
+            reconcile_ledger_with_lake,
+            save_window_ledger,
+        )
+
+        s = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        s.upsert_many(
+            [_index_inst("NIFTY")],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-open-subst",
+            csv_source_sha256="0" * 64,
+        )
+        # Three consecutive Jan-2020 trading sessions (the 2020 floor, so the verdict
+        # can read a genuine "full"): 01+03 open at the canonical 09:15 IST (03:45 UTC);
+        # 02's 09:15 minute is MISSING — its first stored minute is 09:16 IST.
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[
+                _bar(datetime(2020, 1, 1, 3, 45, tzinfo=UTC), "100.4"),
+                _bar(datetime(2020, 1, 2, 3, 46, tzinfo=UTC), "100.5"),  # 09:16 IST first
+                _bar(datetime(2020, 1, 3, 3, 45, tzinfo=UTC), "100.6"),
+            ],
+        )
+        # Settle the fetch window (the cold-start seed over the continuous 3-session
+        # span) so the ledger-backed verdict is a genuine "full" — proving end-to-end
+        # that the substitution is INFORMATIONAL, never a verdict downgrade.
+        ledger = WindowLedger()
+        seeded = reconcile_ledger_with_lake(
+            ledger,
+            tmp_path,
+            instruments=[_index_inst("NIFTY")],
+            intervals=("1minute",),
+            start=_date(2020, 1, 1),
+            end=_date(2020, 1, 4),
+            market=GROWW_COVERAGE_MARKET,
+        )
+        assert seeded == 1
+        save_window_ledger(ledger, tmp_path)
+
+        client = TestClient(build_app(DashboardState(), instrument_store=s))
+        try:
+            # /coverage/spot — the {**row} pass-through.
+            (spot_row,) = client.get("/api/v1/coverage/spot").json()["rows"]
+            assert spot_row["open_substituted_days"] == 1
+            assert spot_row["session_days"] == 3
+
+            # /api/v1/completeness/scoreboard — per-symbol row + per-category sum,
+            # verdict stays "full" (settled + Jan-2020 floor + informational count).
+            board = client.get("/api/v1/completeness/scoreboard").json()
+            (row,) = board["spot"]["per_symbol"]
+            assert row["symbol"] == "NIFTY"
+            assert row["1minute"] == "full" and row["overall"] == "full"
+            assert row["open_substituted_days"] == 1
+            assert row["session_days"] == 3
+            assert board["spot"]["by_category"]["index"]["open_substituted_days"] == 1
+
+            # /api/v1/universe/completeness — the per-symbol detail map.
+            detail = client.get("/api/v1/universe/completeness").json()
+            one_min = detail["NIFTY"]["spot"]["1minute"]
+            assert one_min["status"] == "full"
+            assert one_min["open_substituted_days"] == 1
+            assert one_min["session_days"] == 3
+            assert one_min["open_substituted"] is True
+
+            # The CSV report — enriched DETAIL-spot section carries N + M.
+            csv_text = client.get("/api/v1/completeness/scoreboard.csv").text
+            assert "1-minute open-substituted days" in csv_text
+            assert "1-minute sessions" in csv_text
+            assert "index,NIFTY,NSE,full,2020-01-01,2020-01-03,yes,1,3,full" in (
+                csv_text.splitlines()
+            )
         finally:
             s.close()
 
