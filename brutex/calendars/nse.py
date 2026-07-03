@@ -836,11 +836,22 @@ def session_minutes_per_day() -> int:
 def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     """Number of bars expected in a regular session at the given timeframe.
 
+    CEILING division over the 375-minute session
+    (DEC-CALENDAR-BARS-CEIL-001): the resampler oracle
+    :func:`brutex.data.tf_resampler.resample_1m_to_tf` emits
+    ``ceil(375 / tf)`` bars per regular session — session-anchored
+    left-labeled buckets INCLUDING the truncated final bucket (pinned by
+    ``tests/unit/test_tf_resampler_session_bounds.py``). The previous FLOOR
+    division under-counted every timeframe that does not divide 375 (e.g.
+    60m read 6 while the lake actually stores 7 bars, the last labeled
+    15:15 IST covering only 15:15-15:29).
+
     Examples:
     - 1m  -> 375 bars
     - 5m  -> 75 bars
     - 15m -> 25 bars
-    - 60m -> 6 bars (well, 6.25 — partial bar at end)
+    - 30m -> 13 bars (12 full + the truncated 15:00-15:29 final bucket)
+    - 60m -> 7 bars (6 full + the truncated 15:15-15:29 final bucket)
     - 1d  -> 1 bar
 
     Raises
@@ -855,7 +866,7 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
         raise ValueError(f"expected_bars_per_day_for_tf.tf_minutes must be >= 1, got {tf_minutes}")
     if tf_minutes >= SESSION_DURATION_MINUTES:
         return 1
-    return SESSION_DURATION_MINUTES // tf_minutes
+    return -(-SESSION_DURATION_MINUTES // tf_minutes)
 
 
 def is_forced_exit_bar(t: time, tf_minutes: int, forced_exit_seconds: int | None = None) -> bool:

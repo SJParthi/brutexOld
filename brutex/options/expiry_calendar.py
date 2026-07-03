@@ -1,8 +1,15 @@
-"""Per-underlying expiry day-of-week registry (SEBI-aware, 2021-2026).
+"""Per-underlying expiry day-of-week registry (SEBI-aware, 2020-2026).
 
 Per `docs/track2/TRACK2_OPTIONS_SPEC.md` §2 — expiry rules changed
-multiple times during the 2021-2026 backfill window per NSE/BSE/SEBI
-circulars. This module is the per-date lookup.
+multiple times during the 2020-2026 backfill window per NSE/BSE/SEBI
+circulars. This module is the per-date lookup. Coverage starts
+**2020-01-01**, matching the data-pull floor (``GROWW_HISTORY_FLOOR``;
+CLAUDE.md §3, DEC-PULL-FLOOR-2020-001) — DEC-EXPIRY-REGIME-2020-001
+extended every table's first row from 2021-01-01 back to 2020-01-01
+(a coverage EXTENSION of the same regime, NOT a new transition: two
+independent research rounds found NO expiry-weekday regime change
+between 2020-01-01 and 2021-01-01 for any of the six series). A date
+before 2020-01-01 still raises :class:`ValueError` (coverage floor).
 
 ## What it returns
 
@@ -25,9 +32,23 @@ For a given (instrument, date), two questions can be asked:
    Returns the "last X of the month" for the current month (if not yet
    passed) or next month.
 
-## Verified history (citation-grounded 2026-05-16)
+## Verified history (citation-grounded 2026-05-16; 2020 extension 2026-07-03)
 
 See spec §2 for the per-underlying tables with NSE/BSE circular sources.
+
+2020 extension honesty (Golden Rule #1, DEC-EXPIRY-REGIME-2020-001): the
+2020 rows are secondary-corroborated across two independent research
+rounds (primary NSE/BSE circulars were unreachable from the research
+environment — HTTP 403). NIFTY + BANKNIFTY weekly-THURSDAY /
+monthly-last-THURSDAY are CORROBORATED (NIFTY weekly options launched
+2019-02-11, BANKNIFTY weekly launched May 2016 with Thursday expiry;
+Thursday regime continuous until the 2023 change series — ICICIdirect
+revised-expiry-days article, Zerodha bulletin 358889, 5paisa "25-year
+Thursday tradition" coverage). SENSEX 2020 Thursday is an
+UNVERIFIED-continuity inference (pre-2023-05-15 relaunch BSE derivatives
+were thin/illiquid; Business Standard's relaunch coverage says "a new
+expiry cycle of Friday from Thursday earlier", implying Thursday before
+May 2023, but NO 2020-dated BSE circular could be fetched).
 
 ## Withdrawn Monday regime (NIFTY March-April 2025)
 
@@ -72,18 +93,35 @@ _DECEMBER: Final[int] = 12
 # means weekly was killed.
 
 _WEEKLY_NIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),
+    # 2020 coverage extension (DEC-EXPIRY-REGIME-2020-001): SAME Thursday
+    # regime, not a transition — NIFTY weekly options launched 2019-02-11
+    # (Thursday) and stayed Thursday continuously until 2025-09-02
+    # (ICICIdirect revised-expiry-days; 5paisa "25-year Thursday tradition";
+    # two research rounds agree, secondary-corroborated — primary NSE
+    # circulars 403'd).
+    (date(2020, 1, 1), THURSDAY),
     (date(2025, 9, 2), TUESDAY),  # NSE FAOP/68747 + SEBI standardization May 2025
 )
 
 _WEEKLY_BANKNIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),
+    # 2020 coverage extension (DEC-EXPIRY-REGIME-2020-001): SAME Thursday
+    # regime — BANKNIFTY weekly launched May 2016 WITH Thursday expiry and
+    # first changed weekday 2023-09-04 (ICICIdirect; Zerodha bulletin
+    # 358889; two research rounds agree, secondary-corroborated).
+    (date(2020, 1, 1), THURSDAY),
     (date(2023, 9, 4), WEDNESDAY),  # NSE FAOP/57540 — first Wed weekly 2023-09-06
     (date(2024, 11, 14), NO_WEEKLY),  # SEBI killed BN-WEEK on EOD 2024-11-13
 )
 
 _WEEKLY_SENSEX: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # thin liquidity pre-2023-05-15
+    # 2020 coverage extension (DEC-EXPIRY-REGIME-2020-001): UNVERIFIED
+    # continuity — pre-2023-05-15-relaunch SENSEX weekly derivatives were
+    # thin/illiquid and NO citable 2020 BSE circular could be fetched (403).
+    # Best evidence is a single-source inference: Business Standard's 2023
+    # relaunch coverage ("a new expiry cycle of Friday from Thursday
+    # earlier") implies Thursday BEFORE May 2023, consistent with the
+    # existing "(thin liquidity)" 2021 row this extends.
+    (date(2020, 1, 1), THURSDAY),  # thin liquidity pre-2023-05-15
     (date(2023, 5, 15), FRIDAY),  # BSE Notice 20230327-65
     (date(2025, 1, 1), TUESDAY),  # Business Standard 2024-10-04
     (date(2025, 9, 4), THURSDAY),  # SEBI standardization May 2025
@@ -94,19 +132,29 @@ _WEEKLY_SENSEX: Final[tuple[tuple[date, int], ...]] = (
 # Monthly expiry = "last <day-of-week> of the calendar month".
 
 _MONTHLY_NIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # last Thursday
+    # 2020 coverage extension (DEC-EXPIRY-REGIME-2020-001): NSE index
+    # monthly expiry was last-Thursday from the early 2000s until the
+    # 2023-2025 change series — no monthly-weekday change documented
+    # anywhere near 2020 (two research rounds agree).
+    (date(2020, 1, 1), THURSDAY),  # last Thursday
     (date(2025, 9, 2), TUESDAY),  # last Tuesday — SEBI standardization
 )
 
 _MONTHLY_BANKNIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # last Thursday
+    # 2020 coverage extension (DEC-EXPIRY-REGIME-2020-001): same basis as
+    # NIFTY monthly — last-Thursday continuous through 2020, first change
+    # 2024-03-01 (two research rounds agree, secondary-corroborated).
+    (date(2020, 1, 1), THURSDAY),  # last Thursday
     (date(2024, 3, 1), WEDNESDAY),  # NSE FAOP/60011 — first Wed monthly 2024-03-27
     (date(2025, 1, 1), THURSDAY),  # NSE FAOP/65336 — reverted to last Thursday
     (date(2025, 9, 2), TUESDAY),  # SEBI standardization — last Tuesday
 )
 
 _MONTHLY_SENSEX: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # last Thursday (thin)
+    # 2020 coverage extension (DEC-EXPIRY-REGIME-2020-001): UNVERIFIED
+    # continuity — same single-source Thursday-before-May-2023 inference as
+    # _WEEKLY_SENSEX above; no 2020-dated BSE contract spec obtainable.
+    (date(2020, 1, 1), THURSDAY),  # last Thursday (thin)
     (date(2023, 5, 15), FRIDAY),  # last Friday
     (date(2025, 1, 1), TUESDAY),  # last Tuesday
     (date(2025, 9, 4), THURSDAY),  # last Thursday — SEBI standardization

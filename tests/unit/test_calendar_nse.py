@@ -162,12 +162,15 @@ class TestExpectedBarsPerDay:
     @pytest.mark.parametrize(
         "tf_minutes,expected_bars",
         [
+            # Non-divisors of 375 count the truncated final bucket
+            # (DEC-CALENDAR-BARS-CEIL-001 — ceil, matching the
+            # resample_1m_to_tf oracle; was floor: 2->187, 30->12, 60->6).
             (1, 375),
-            (2, 187),
+            (2, 188),
             (5, 75),
             (15, 25),
-            (30, 12),
-            (60, 6),
+            (30, 13),
+            (60, 7),
             (375, 1),  # full session = 1 bar
             (1440, 1),  # 1d → 1 bar
         ],
