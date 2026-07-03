@@ -17,6 +17,7 @@ from brutex.universe import (
     ALLOWED_UNDERLYINGS,
     BRUTE_FORCE_INDEX_UNDERLYINGS,
     BRUTE_FORCE_INDICES,
+    ENGINE_SWEEP_SPOT_TRIPLES,
     INDEX_UNDERLYINGS,
     REFERENCE_ONLY_INDEX_UNDERLYINGS,
     REFERENCE_ONLY_INDICES,
@@ -27,8 +28,10 @@ from brutex.universe import (
     build_fno_eligible_underlyings,
     build_options_eligible_underlyings,
     build_underlying_economics,
+    classify_engine_sweep_target,
     classify_underlying_kind,
     derive_lake_underlyings,
+    is_engine_sweep_symbol,
     is_in_brute_force_scope,
     is_in_fetch_scope,
     is_in_scope,
@@ -921,3 +924,141 @@ class TestIsOptionPullable:
         # A curated index (not reference-only) keeps its prior pullable behaviour.
         nifty = _make_idx(Exchange.NSE, "NIFTY")
         assert is_option_pullable(nifty, reference_only_ids=frozenset()) is True
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Engine sweep-entry scope law (DEC-ENGINE-SCOPE-GUARD-001, Layer 0)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEngineSweepSpotTriples:
+    """The derived spot-triple allowlist."""
+
+    def test_triples_derive_from_brute_force_underlyings(self) -> None:
+        expected = {(exch.value, "INDEX", sym) for exch, sym in BRUTE_FORCE_INDEX_UNDERLYINGS}
+        assert frozenset(expected) == ENGINE_SWEEP_SPOT_TRIPLES
+
+    def test_exactly_the_three_rule3_triples(self) -> None:
+        assert (
+            frozenset(
+                {
+                    ("NSE", "INDEX", "NIFTY"),
+                    ("NSE", "INDEX", "BANKNIFTY"),
+                    ("BSE", "INDEX", "SENSEX"),
+                }
+            )
+            == ENGINE_SWEEP_SPOT_TRIPLES
+        )
+
+
+class TestIsEngineSweepSymbol:
+    """The bare-symbol tier of the scope law (Layer-1's predicate)."""
+
+    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX"])
+    def test_spot_indexes_allowed(self, symbol: str) -> None:
+        assert is_engine_sweep_symbol(symbol) is True
+
+    def test_series_key_futures_shape_allowed(self) -> None:
+        assert is_engine_sweep_symbol("NIFTY-FUT-2026-07-30") is True
+
+    def test_lake_contract_futures_shape_allowed(self) -> None:
+        assert is_engine_sweep_symbol("NSE-NIFTY-30Jul26-FUT") is True
+
+    def test_series_key_regex_drift_pin_against_real_futures_contract(self) -> None:
+        # Drift-pin (no universe→futures_roll import — that module pulls the
+        # trading_core wheel): the regex MUST fullmatch a REAL
+        # FuturesContract(...).series_key so the two shapes can never rot apart.
+        from brutex.data.futures_roll import FuturesContract
+        from brutex.options.lot_size_history import OptionsUnderlying
+        from brutex.universe import _NIFTY_FUTURES_SERIES_RE
+
+        contract = FuturesContract(underlying=OptionsUnderlying.NIFTY, expiry=date(2026, 7, 30))
+        assert _NIFTY_FUTURES_SERIES_RE.fullmatch(contract.series_key) is not None
+        assert is_engine_sweep_symbol(contract.series_key) is True
+
+    @pytest.mark.parametrize(
+        "symbol",
+        [
+            "INDIAVIX",  # REFERENCE_ONLY — never swept
+            "RELIANCE",  # F&O stock — lake-only
+            "BANKNIFTY-FUT-2026-07-30",  # ADR-0012 authorizes NIFTY futures ONLY
+            "SENSEX-FUT-2026-07-30",
+            "NSE-BANKNIFTY-30Jul26-FUT",  # wrong underlying (lake shape)
+            "BSE-NIFTY-30Jul26-FUT",  # wrong embedded exchange
+            "NSE-NIFTY-30Jul26-24000-CE",  # an option is never engine scope
+            "NSE-NIFTY-30Jul26-24000-PE",
+            "nifty",  # lake keys are case-exact
+            "",
+        ],
+    )
+    def test_everything_else_refused(self, symbol: str) -> None:
+        assert is_engine_sweep_symbol(symbol) is False
+
+
+class TestClassifyEngineSweepTarget:
+    """The coordinate tier of the scope law (Layer-2's classifier)."""
+
+    @pytest.mark.parametrize(
+        ("exchange", "symbol"),
+        [("NSE", "NIFTY"), ("NSE", "BANKNIFTY"), ("BSE", "SENSEX")],
+    )
+    def test_spot_triples_allowed(self, exchange: str, symbol: str) -> None:
+        verdict = classify_engine_sweep_target(exchange=exchange, segment="INDEX", symbol=symbol)
+        assert verdict.allowed is True
+        assert verdict.tier == "spot_index"
+        assert "CLAUDE.md §2 Rule 3" in verdict.reason
+
+    @pytest.mark.parametrize("symbol", ["NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"])
+    def test_nifty_futures_shapes_allowed_under_nse_fno(self, symbol: str) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="FNO", symbol=symbol)
+        assert verdict.allowed is True
+        assert verdict.tier == "nifty_future"
+        assert "ADR-0012" in verdict.reason
+
+    def test_nifty_futures_shape_under_wrong_coordinates_refused(self) -> None:
+        verdict = classify_engine_sweep_target(
+            exchange="NSE", segment="INDEX", symbol="NIFTY-FUT-2026-07-30"
+        )
+        assert verdict.allowed is False
+        assert verdict.tier == "refused"
+        assert "NSE/FNO" in verdict.reason
+
+    def test_spot_symbol_under_wrong_exchange_refused_with_expected_coords(self) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="SENSEX")
+        assert verdict.allowed is False
+        assert "BSE/INDEX" in verdict.reason
+
+    def test_spot_symbol_under_wrong_segment_refused(self) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="FNO", symbol="NIFTY")
+        assert verdict.allowed is False
+        assert "NSE/INDEX" in verdict.reason
+
+    def test_india_vix_refused_with_reference_only_reason(self) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="INDIAVIX")
+        assert verdict.allowed is False
+        assert "REFERENCE_ONLY" in verdict.reason
+        assert "CLAUDE.md §2 Rule 3" in verdict.reason
+
+    def test_fno_stock_refused_with_generic_scope_reason(self) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="RELIANCE")
+        assert verdict.allowed is False
+        assert "outside the brute-force engine scope" in verdict.reason
+
+    @pytest.mark.parametrize(
+        "symbol",
+        ["BANKNIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-24000-CE"],
+    )
+    def test_non_nifty_future_and_options_refused_even_under_nse_fno(self, symbol: str) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="FNO", symbol=symbol)
+        assert verdict.allowed is False
+
+    @pytest.mark.parametrize("symbol", ["nifty", "indiavix"])
+    def test_lower_cased_known_symbol_gets_a_did_you_mean_hint(self, symbol: str) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol=symbol)
+        assert verdict.allowed is False
+        assert f"did you mean {symbol.upper()!r}?" in verdict.reason
+
+    def test_lower_cased_unknown_symbol_gets_the_generic_refusal(self) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="reliance")
+        assert verdict.allowed is False
+        assert "did you mean" not in verdict.reason

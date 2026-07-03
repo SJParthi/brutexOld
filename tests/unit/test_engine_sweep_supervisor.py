@@ -845,7 +845,10 @@ class TestRunSupervisedGrid:
 
         # 5 instruments → 5 tuples in enumeration order.
         instruments = ["I0", "I1", "I2", "I3", "I4"]
-        grid = _grid(instruments=instruments)
+        # Synthetic instrument names by test intent (bucket accounting needs 5
+        # distinct tuples) — opt out of the Layer-1 engine-scope invariant
+        # (DEC-ENGINE-SCOPE-GUARD-001).
+        grid = _grid(instruments=instruments, unsafe_allow_out_of_scope_instruments=True)
         total = count_sweep_tuples(grid)
         assert total == 5
         bars = _trending_bars()
@@ -904,7 +907,10 @@ class TestRunSupervisedGrid:
         from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
 
         # 4 instruments → 4 tuples; indices 2 and 3 are the consecutive failures.
-        grid = _grid(instruments=["I0", "I1", "I2", "I3"])
+        # Synthetic instrument names by test intent (DEC-ENGINE-SCOPE-GUARD-001 opt-out).
+        grid = _grid(
+            instruments=["I0", "I1", "I2", "I3"], unsafe_allow_out_of_scope_instruments=True
+        )
         total = count_sweep_tuples(grid)
         assert total == 4
         bars = _trending_bars()

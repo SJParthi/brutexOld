@@ -278,6 +278,18 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--allow-out-of-scope",
+        action="store_true",
+        dest="allow_out_of_scope",
+        help=(
+            "RESEARCH ONLY: proceed even when a requested symbol is outside the "
+            "brute-force engine scope (NIFTY/BANKNIFTY/SENSEX spot + NIFTY futures, "
+            "CLAUDE.md §2 Rule 3 / ADR-0012). Loud WARNING + audit-stamped "
+            "scope_override=True; REFUSED on sweep-daemon (unattended runs never "
+            "override) — DEC-ENGINE-SCOPE-GUARD-001"
+        ),
+    )
+    parser.add_argument(
         "--data-snapshot-hash",
         default=None,
         dest="data_snapshot_hash",
@@ -918,6 +930,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    sweep.add_argument(
+        "--allow-out-of-scope",
+        action="store_true",
+        dest="allow_out_of_scope",
+        help=(
+            "RESEARCH ONLY: proceed even when the symbol is outside the brute-force "
+            "engine scope (NIFTY/BANKNIFTY/SENSEX spot + NIFTY futures, CLAUDE.md "
+            "§2 Rule 3 / ADR-0012) — DEC-ENGINE-SCOPE-GUARD-001"
+        ),
     )
 
     # ── sweep-all (DEC-SWEEP-ORCHESTRATOR-001) — full multi-parameter grid ──
@@ -3447,6 +3469,7 @@ def cmd_sweep(
     sort_by: str,
     validate_oos: bool,
     oos_only: bool,
+    allow_out_of_scope: bool = False,
 ) -> int:
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
@@ -3462,9 +3485,31 @@ def cmd_sweep(
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_report import sweep_report
+
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2):
+    # refuse an out-of-engine-scope launch BEFORE any lake I/O. Report-only
+    # command, but an out-of-scope brute-force IS the violation.
+    from brutex.engine.sweep_scope import check_sweep_scope
     from brutex.feed.replay import ReplayFeed
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
+
+    scope = check_sweep_scope(
+        [symbol], exchange=exchange, segment=segment, allow_out_of_scope=allow_out_of_scope
+    )
+    if not scope.ok:
+        print(f"[brutex] {scope.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if scope.overridden:
+        import structlog
+
+        print(f"[brutex] {scope.override_warning()}")
+        structlog.get_logger("brutex.sweep").warning(
+            "sweep.scope_override",
+            symbols=[verdict.symbol for verdict in scope.refused],
+            exchange=exchange,
+            segment=segment,
+        )
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -3623,6 +3668,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     stage3_fevals: int | None = None,
     stage3_restarts: int | None = None,
     allow_missing_slices: bool = False,
+    allow_out_of_scope: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -3670,6 +3716,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     out_root = results_root if results_root is not None else resolved_lake / "sweeps"
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): refuse
+    # an out-of-engine-scope launch BEFORE the catalog reconcile + bar load —
+    # refusal costs ZERO lake I/O and beats the misleading preflight
+    # "ZERO bars" message. The CLI-only --allow-out-of-scope research escape
+    # proceeds LOUDLY (WARNING + structlog + audit stamp, Golden Rule #8).
+    from brutex.engine.sweep_scope import check_sweep_scope
+
+    scope = check_sweep_scope(
+        symbol_list, exchange=exchange, segment=segment, allow_out_of_scope=allow_out_of_scope
+    )
+    if not scope.ok:
+        print(f"[brutex] {scope.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if scope.overridden:
+        import structlog
+
+        print(f"[brutex] {scope.override_warning()}")
+        structlog.get_logger("brutex.sweep").warning(
+            "sweep.scope_override",
+            symbols=[verdict.symbol for verdict in scope.refused],
+            exchange=exchange,
+            segment=segment,
+        )
     interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
     for interval in interval_list:
         if interval not in INTERVAL_SECONDS:
@@ -3810,6 +3879,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         grid_kwargs["max_combos"] = max_combos
     if overfit_gate:
         grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
+    if scope.overridden:
+        # Layer-1 opt-out rides the SAME operator decision as the Layer-2
+        # override (DEC-ENGINE-SCOPE-GUARD-001) — set ONLY when symbols were
+        # actually refused, so an in-scope grid never carries the unsafe flag.
+        grid_kwargs["unsafe_allow_out_of_scope_instruments"] = True
     # Stage-3 knobs (DEC-STAGE3-WIRE-001): None ⇒ keep the SweepGridConfig
     # defaults (the ONE source of the engine defaults). The on-grid SL/TP
     # fail-fast runs inside SweepGridConfig.__post_init__ (review F5).
@@ -3895,6 +3969,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         SweepCache.open(cache_path) as cache,
         LmdbMembership.open(out_root / "combo-dedup") as exact_membership,
     ):
+        # Audit the scope override on the hash-chained launch log (Golden Rule
+        # #8): a research launch that let out-of-scope symbols through is a
+        # material action and must be traceable in the tree's own audit.
+        if scope.overridden:
+            ingest_audit.append(
+                action="SWEEP_SCOPE_OVERRIDE",
+                subject="sweep-all:scope",
+                payload={
+                    "scope_override": True,
+                    "symbols": [verdict.symbol for verdict in scope.refused],
+                    "exchange": exchange,
+                    "segment": segment,
+                },
+            )
         dedup = ComboDedup(
             OptionDedupIndex(capacity=bloom_capacity, fpr_target=1e-7, exact=exact_membership)
         )
@@ -4652,6 +4740,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "indicator_version": indicator,
         "code_commit_sha": code_sha,
         "top_k": top,
+        # DEC-ENGINE-SCOPE-GUARD-001: verifying recorded work, not launching —
+        # a legacy out-of-scope tree must stay verifiable, so the Layer-1
+        # config invariant is opted out at this ONE forensic rebuild site.
+        "unsafe_allow_out_of_scope_instruments": True,
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
@@ -5563,6 +5655,7 @@ def main(argv: list[str] | None = None) -> int:
             sort_by=args.sort_by,
             validate_oos=args.validate_oos,
             oos_only=args.oos_only,
+            allow_out_of_scope=args.allow_out_of_scope,
         )
     if args.command == "sweep-all":
         return cmd_sweep_all(
@@ -5596,10 +5689,22 @@ def main(argv: list[str] | None = None) -> int:
             stage3_fevals=args.stage3_fevals,
             stage3_restarts=args.stage3_restarts,
             allow_missing_slices=args.allow_missing_slices,
+            allow_out_of_scope=args.allow_out_of_scope,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
     if args.command == "sweep-daemon":
+        # DEC-ENGINE-SCOPE-GUARD-001: the research escape hatch is NEVER
+        # available on the unattended daemon — refuse loudly instead of
+        # silently ignoring the flag (Golden Rule #10 honesty).
+        if args.allow_out_of_scope:
+            print(
+                "[brutex] sweep-daemon REFUSED: --allow-out-of-scope is a manual "
+                "research escape hatch and is not available on the unattended "
+                "daemon (DEC-ENGINE-SCOPE-GUARD-001)",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
         return cmd_sweep_daemon(
             schedule=args.schedule,
             once=args.once,
