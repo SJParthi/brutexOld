@@ -15,10 +15,13 @@ from decimal import Decimal
 import pytest
 from brutex.data.fno_symbol import (
     EXPIRY_DATE_FORMAT,
+    EXPIRY_YEAR_MAX,
+    EXPIRY_YEAR_MIN,
     FNO_INSTRUMENT_TYPES,
     FUTURE_TYPE,
     OPTION_TYPES,
     FnoSymbolParts,
+    expiry_year_in_window,
     parse_expiry_token,
     parse_fno_symbol,
     parse_strike_token,
@@ -48,6 +51,65 @@ class TestParseExpiryToken:
     @pytest.mark.parametrize("token", ["", "99Zzz99", "2025-06-30", "30Jun", "garbage"])
     def test_invalid_token_is_none(self, token: str) -> None:
         assert parse_expiry_token(token) is None
+
+
+class TestExpiryYearWindow:
+    """DEC-FNO-EXPIRY-YEAR-PIVOT-001: resolved years outside [2019, 2059] are junk.
+
+    Regression: before the window, ``strptime``'s POSIX ``%y`` pivot silently
+    accepted ``30Jun75`` as ``date(1975, 6, 30)`` — a fabricated 1975 "expiry".
+    """
+
+    def test_window_constants(self) -> None:
+        assert EXPIRY_YEAR_MIN == 2019
+        assert EXPIRY_YEAR_MAX == 2059
+
+    @pytest.mark.parametrize(
+        ("year", "expected"), [(2019, True), (2059, True), (2018, False), (2060, False)]
+    )
+    def test_predicate_boundaries(self, year: int, expected: bool) -> None:
+        assert expiry_year_in_window(year) is expected
+
+    def test_min_boundary_year_accepted(self) -> None:
+        assert parse_expiry_token("31Dec19") == date(2019, 12, 31)
+
+    def test_max_boundary_year_accepted(self) -> None:
+        assert parse_expiry_token("30Jun59") == date(2059, 6, 30)
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "30Jun75",  # POSIX pivot → 1975 — the fails-before regression token
+            "31Dec99",  # POSIX pivot → 1999
+            "01Jan18",  # 2018 < EXPIRY_YEAR_MIN
+            "30Jun60",  # 2060 > EXPIRY_YEAR_MAX
+            "30Jun68",  # POSIX pivot upper edge → 2068, still out of window
+        ],
+    )
+    def test_out_of_window_year_is_none(self, token: str) -> None:
+        assert parse_expiry_token(token) is None
+
+    @pytest.mark.parametrize(
+        "symbol",
+        [
+            "NSE-NIFTY-30Jun75-24000-CE",  # option leg with a pivot-junk expiry
+            "NSE-NIFTY-30Jun75-FUT",  # future with a pivot-junk expiry
+        ],
+    )
+    def test_parse_fno_symbol_rejects_out_of_window_expiry(self, symbol: str) -> None:
+        assert parse_fno_symbol(symbol) is None
+
+    @pytest.mark.property
+    @given(two_digit_year=st.integers(min_value=0, max_value=99))
+    def test_every_two_digit_year_accepted_iff_in_window(self, two_digit_year: int) -> None:
+        # The POSIX %y pivot: 00–68 → 2000–2068, 69–99 → 1969–1999. A token is
+        # accepted iff its pivot-RESOLVED year lands inside [2019, 2059].
+        resolved = 2000 + two_digit_year if two_digit_year <= 68 else 1900 + two_digit_year
+        result = parse_expiry_token(f"15Jan{two_digit_year:02d}")
+        if EXPIRY_YEAR_MIN <= resolved <= EXPIRY_YEAR_MAX:
+            assert result == date(resolved, 1, 15)
+        else:
+            assert result is None
 
 
 class TestParseStrikeToken:

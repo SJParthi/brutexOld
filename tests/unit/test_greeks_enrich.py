@@ -505,6 +505,28 @@ class TestEnrichDriver:
         assert report.targets == 2
         assert any(e["event"] == "greeks_enrich.target_undecodable" for e in logs)
 
+    def test_pivot_junk_expiry_counts_undecodable_and_warns(self, tmp_path: Path) -> None:
+        # DEC-FNO-EXPIRY-YEAR-PIVOT-001 regression: "30Jun75" used to pivot to a
+        # fabricated 1975 expiry and be ENRICHED as a real contract. The year-window
+        # reject makes parse_fno_symbol return None, so the existing undecodable
+        # counter + structlog WARNING fire (the honest reject surface).
+        with capture_logs() as logs:
+            report = enrich_greeks_for_targets(
+                targets=self._targets("NSE-NIFTY-30Jun75-24000-CE"),
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row()],
+                read_spot=lambda _t, _p: SpotJoin({}, None),
+                write_bars=lambda _t, _b: 0,
+            )
+        assert report.undecodable == 1
+        assert report.enriched == 0
+        assert any(
+            e["event"] == "greeks_enrich.target_undecodable"
+            and e["symbol"] == "NSE-NIFTY-30Jun75-24000-CE"
+            for e in logs
+        )
+
     def test_zero_targets_is_a_zero_report(self, tmp_path: Path) -> None:
         report = enrich_greeks_for_targets(targets=[], lake_root=tmp_path, rate_source=_RATE)
         assert report.targets == 0 and report.bars_written == 0

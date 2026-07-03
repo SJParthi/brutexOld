@@ -116,6 +116,10 @@
   /* Moneyness tint (DEC-FNO-MONEYNESS-001): ITM green · OTM red · UNKNOWN/NA muted. */
   td.mny-itm { color:var(--green); } td.mny-otm { color:var(--red); }
   td.mny-na { color:var(--muted); }
+  /* Strike-step honesty note (DEC-MONEYNESS-REGISTRY-STEP-001): a small muted line
+     under the F&O candle grid when the ATM±N grid came from the sparse lake ladder
+     only (no vendor registry chain) — the step may be overestimated. */
+  .stepnote { color:var(--muted); font-size:11px; padding:6px 2px 0; }
   /* Click-to-copy cell flash — a brief green pulse on the copied cell. */
   @keyframes cellCopied { 0% { background:var(--green-dim); } 100% { background:transparent; } }
   td.copied { animation: cellCopied .6s ease both; color:var(--green-bright); }
@@ -1247,11 +1251,18 @@ function candleHeadHtml(body) {
     + '<span class="rangechip" id="crange" style="display:none"></span></div>';
 }
 
-/* The grid + pager body (or the error message). */
+/* The grid + pager body (or the error message). HONESTY MARKER
+   (DEC-MONEYNESS-REGISTRY-STEP-001): when the page's ATM±N strike-grid step was
+   derived from the sparse lake-observed ladder only (strike_step_confidence ===
+   "observed" — no vendor registry chain), a small muted note flags that the step —
+   and so the moneyness depth — may be overestimated on a sparsely-pulled expiry;
+   a registry-confident page (or a spot page, which has no such field) shows none. */
 function candleGridHtml(body, err) {
-  return err
-    ? '<div class="empty qerr">' + esc(err) + '</div>'
-    : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100));
+  if (err) return '<div class="empty qerr">' + esc(err) + '</div>';
+  const stepNote = body.strike_step_confidence === "observed"
+    ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
+    : "";
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote;
 }
 
 /* Wire the Prev/Next pager (lives INSIDE #dbgrid, so it is re-wired on every
