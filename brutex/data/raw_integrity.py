@@ -180,6 +180,15 @@ class RawIntegrityRecord:
         future hash migration can coexist.
     captured_at
         UTC timestamp the record was built (provenance; never part of the hash).
+    issued_symbol
+        The symbol form ACTUALLY SENT to the vendor when it differs from
+        :attr:`groww_symbol` (DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001): a ``%26``
+        fallback recovery fetches with the ENCODED form while the record stays
+        keyed under the plain symbol, so without this field the verify path would
+        re-issue the PLAIN form and flag a guaranteed false ``verify_mismatch``.
+        ``None`` (the default, and every pre-field legacy record) means the issued
+        form IS the key symbol — see :attr:`fetch_symbol`. NEVER part of
+        :attr:`key` (latest-wins per plain-symbol coordinates is preserved).
     """
 
     exchange: str
@@ -192,6 +201,7 @@ class RawIntegrityRecord:
     row_count: int
     algorithm: str = HASH_ALGORITHM
     captured_at: datetime | None = None
+    issued_symbol: str | None = None
 
     @property
     def key(self) -> tuple[str, str, str, str, str, str]:
@@ -205,6 +215,17 @@ class RawIntegrityRecord:
             self.window_end,
         )
 
+    @property
+    def fetch_symbol(self) -> str:
+        """The symbol form to RE-ISSUE the byte-identical vendor call with (O(1)).
+
+        The :attr:`issued_symbol` when the capture recorded a divergent form (the
+        ``%26`` fallback recovery), else the key :attr:`groww_symbol` — so a legacy
+        record (no field) verifies exactly as before
+        (DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001 verify-path correction).
+        """
+        return self.issued_symbol or self.groww_symbol
+
 
 def build_record(
     payload: Mapping[str, object],
@@ -216,13 +237,19 @@ def build_record(
     window_start: str,
     window_end: str,
     now: datetime | None = None,
+    issued_symbol: str | None = None,
 ) -> RawIntegrityRecord:
     """Capture a :class:`RawIntegrityRecord` from a raw payload + its coordinates.
 
     The function the ingest hook calls at the point the raw vendor response is in
     hand (BEFORE any parse / transform), so the recorded hash attests EXACTLY
     what the vendor sent. *now* is injectable for deterministic tests (``None`` →
-    :func:`datetime.now` in UTC).
+    :func:`datetime.now` in UTC). *issued_symbol* is the symbol form the fetch
+    was ACTUALLY issued with (DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001) —
+    NORMALISED to ``None`` when it equals *groww_symbol*, so the common
+    plain-form record (and its sidecar JSON line) stays byte-identical to the
+    pre-field format; only a genuinely divergent form (the ``%26`` fallback) is
+    recorded.
 
     Raises
     ------
@@ -242,6 +269,7 @@ def build_record(
         row_count=_row_count(payload),
         algorithm=HASH_ALGORITHM,
         captured_at=now if now is not None else datetime.now(UTC),
+        issued_symbol=(issued_symbol if issued_symbol != groww_symbol else None),
     )
 
 

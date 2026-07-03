@@ -546,6 +546,11 @@ def emit_pull_halt_alert(exc: Exception) -> None:
     construction failure here is swallowed + logged and can NEVER replace the halt the
     caller re-raises (``structlog`` is a core dep, so the logger import itself cannot
     newly fail). When Telegram is disabled (the default), the publish is a silent no-op.
+
+    A TERMINAL Groww auth failure (DEC-GROWW-AUTH-HALT-001 — a dead credential / an
+    exhausted re-mint budget, now a pull-wide global stop) reports its class name
+    (``"GrowwAuthError"``) as the reason via the generic branch — no per-type mapping
+    needed; the reason-scoped dedupe key coalesces a repeated auth halt.
     """
     import structlog
 
