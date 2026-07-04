@@ -10,11 +10,6 @@ Covers every public symbol and every branch of the new module for the strict
 * :func:`run_persisted_sweep` — happy path, skip (dedup) path, empty-survivor
   path, conflict-prune path, ``max_combos`` guard, ``HOLD`` rejection,
   ``top_k`` truncation, ``min_hits`` disabled.
-* DEC-SWEEP-LAZY-RUNID-001 (``TestLazyRunIdDigestPath``) — digest-path
-  survivors carry bare masks; run-ids recomputed lazily ONLY at the finalists
-  + the ``SweepComboError`` fingerprints (string-equality pinned on both
-  arms); the legacy arm's eager per-mask identity pinned unchanged; the
-  structural + tracemalloc memory regressions.
 
 The bars are small, deterministic, tz-aware synthetic sessions with ``Decimal``
 OHLC (Golden Rule #1 — real-shaped data, no fabrication).
@@ -124,18 +119,6 @@ def _make_config(**overrides: object) -> SweepRunConfig:
 
 def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
-
-
-def _cfg_params(cfg: SweepRunConfig) -> dict[str, Any]:
-    """Re-derive *cfg*'s canonical params via the PUBLIC one-source-of-truth builder."""
-    return canonical_trade_params(
-        sl_paisa=cfg.sl_paisa,
-        tp_paisa=cfg.tp_paisa,
-        prior_n=cfg.prior_n,
-        proximity=cfg.proximity,
-        start_equity_paisa=cfg.start_equity_paisa,
-        fib_anchor=cfg.fib_anchor,
-    )
 
 
 # ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 test seams ──────
@@ -2488,272 +2471,6 @@ class TestMetricsTailFailure:
         assert not store.path.exists()
 
 
-class TestLazyRunIdDigestPath:
-    """DEC-SWEEP-LAZY-RUNID-001 — digest-path survivors carry BARE masks.
-
-    The unflagged first slice of the R2-SL-F2 O(masks)-RAM fix: on the digest
-    path (dedup probes bypassed, ``mark_many`` skipped) run-ids are recomputed
-    lazily — ONLY at the ≤``top_k`` finalists and the ``SweepComboError``
-    fingerprints — so one blake3 per mask leaves the enumeration hot path and
-    no per-survivor 64-hex id string is ever materialised. The legacy no-digest
-    arm is pinned UNCHANGED (per-mask identity at enumeration, zero recompute
-    at the finalists).
-    """
-
-    _DIGEST = "ab12cd34ef56ab12"
-
-    def test_digest_conflict_prune_path(self, tmp_path: Path) -> None:
-        # Digest twin of test_conflict_prune_path — the digest enumeration arm
-        # has its own prune branch now (the split loop), so it gets its own pin.
-        bars = _trending_bars()
-        cfg = _make_config(condition_bits=[BIT_BAR_BULLISH, BIT_BAR_BEARISH, 0], k=2)
-        summary = _run_sweep(tmp_path, "d", bars, cfg, digest=self._DIGEST)
-        assert summary.enumerated == 3  # C(3,2)
-        assert summary.conflict_pruned == 1
-        assert summary.skipped_dedup == 0  # probes bypassed by construction
-
-    def test_digest_runid_computed_only_for_finalists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Memory/laziness regression (structural): ≤top_k blake3 calls, never O(survivors).
-
-        `mask_run_id` is the ONLY producer of run-id strings inside the sweep,
-        so pinning its digest-path call count to EXACTLY the finalists proves
-        the survivors list structurally CANNOT carry a per-survivor 64-hex
-        string (nothing else ever created one) — the honest structural form of
-        the memory assertion (a direct RSS claim would be environment-noisy;
-        the tracemalloc bound below complements this).
-        """
-        calls: list[int] = []
-
-        def _counting(**kwargs: Any) -> str:
-            calls.append(int(kwargs["mask"]))
-            return mask_run_id(**kwargs)
-
-        monkeypatch.setattr("brutex.engine.sweep_run.mask_run_id", _counting)
-        bars = _trending_bars()
-        cfg = _make_config(top_k=2)  # 5 survivors, 2 finalists
-        summary = _run_sweep(tmp_path, "d", bars, cfg, digest=self._DIGEST)
-        assert summary.evaluated == 5
-        assert summary.persisted == 2
-        # Exactly ONE lazy recompute per finalist — and strictly fewer than the
-        # survivors (the removed one-blake3-per-mask enumeration cost).
-        assert len(calls) == summary.persisted == 2
-        assert len(calls) < summary.evaluated
-        assert set(calls) <= {1, 2, 4, 8, 16}
-
-    def test_legacy_runid_count_and_finalists_unchanged(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Legacy arm pin: one blake3 per enumerated non-pruned mask, ZERO extra.
-
-        The finalists are served from the O(1) dict over the survivor pairs
-        (the enumeration-time values), so the count stays exactly 5 — no lazy
-        recompute was added to the legacy arm (never-add-work).
-        """
-        calls: list[int] = []
-
-        def _counting(**kwargs: Any) -> str:
-            calls.append(int(kwargs["mask"]))
-            return mask_run_id(**kwargs)
-
-        monkeypatch.setattr("brutex.engine.sweep_run.mask_run_id", _counting)
-        bars = _trending_bars()
-        cfg = _make_config(top_k=2)
-        summary = _run_sweep(tmp_path, "l", bars, cfg, digest=None)
-        assert summary.evaluated == 5
-        assert summary.persisted == 2
-        assert calls == [1, 2, 4, 8, 16]  # enumeration order, once each, none extra
-
-    def test_finalist_rows_byte_identical_across_arms(self, tmp_path: Path) -> None:
-        """The pinned finalist run_id equality gate: digest lazy == legacy eager.
-
-        Same bars + cfg through both arms → the SAME persisted rows (run_id
-        list, store content hash, Parquet bytes), and every persisted run_id
-        re-derives independently from its row's own mask (purity — the lazy
-        recompute can never misalign a mask with another survivor's identity).
-        """
-        bars = _trending_bars()
-        cfg = _make_config()
-        legacy_store = ResultsStore(path=tmp_path / "legacy.parquet")
-        with AuditWriter.open(tmp_path / "la.jsonl") as audit:
-            legacy = run_persisted_sweep(bars, cfg, store=legacy_store, dedup=_dedup(), audit=audit)
-        digest_store = ResultsStore(path=tmp_path / "digest.parquet")
-        with AuditWriter.open(tmp_path / "da.jsonl") as audit:
-            digest = run_persisted_sweep(
-                bars,
-                cfg,
-                store=digest_store,
-                dedup=_dedup(),
-                audit=audit,
-                trial_stats_digest=self._DIGEST,
-            )
-        assert digest.persisted == legacy.persisted > 0
-        assert digest.store_content_hash == legacy.store_content_hash
-        assert (tmp_path / "digest.parquet").read_bytes() == (
-            tmp_path / "legacy.parquet"
-        ).read_bytes()
-        legacy_ids = [row.run_id for row in legacy_store.rows()]
-        digest_ids = [row.run_id for row in digest_store.rows()]
-        assert digest_ids == legacy_ids
-        params = _cfg_params(cfg)
-        for row in digest_store.rows():
-            assert row.run_id == mask_run_id(mask=row.mask_bits, params=params, **_CTX)
-
-    def test_combo_error_message_string_equal_on_both_arms(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The pinned SweepComboError STRING equality gate (per-mask metrics tail).
-
-        The same metrics-tail failure forced on both arms must produce the
-        byte-EQUAL fingerprint — the digest arm's lazily recomputed run-id is
-        identical to the legacy arm's enumeration-time one — pinned against the
-        exact expected literal, not just cross-arm equality.
-        """
-        from brutex.engine.sweep_driver import metrics_from_trades as real_tail
-
-        bars = _trending_bars()
-        cfg = _make_config()  # kept order: masks 1, 2, 4, 8, 16
-        boom_mask = 0b100  # the 3rd kept mask
-
-        def _make_tail() -> Callable[..., object]:
-            calls = {"n": 0}
-
-            def _tail(*args: object, **kwargs: object) -> object:
-                calls["n"] += 1
-                if calls["n"] == 3:
-                    raise ValueError("tail boom")
-                return real_tail(*args, **kwargs)  # type: ignore[arg-type]
-
-            return _tail
-
-        messages: dict[str, str] = {}
-        for arm, digest in (("legacy", None), ("digest", self._DIGEST)):
-            monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _make_tail())
-            store = ResultsStore(path=tmp_path / f"{arm}.parquet")
-            with (
-                AuditWriter.open(tmp_path / f"{arm}.jsonl") as audit,
-                pytest.raises(SweepComboError) as excinfo,
-            ):
-                run_persisted_sweep(
-                    bars,
-                    cfg,
-                    store=store,
-                    dedup=_dedup(),
-                    audit=audit,
-                    trial_stats_digest=digest,
-                )
-            assert isinstance(excinfo.value.__cause__, ValueError)
-            assert not store.path.exists()  # nothing flushed — the tuple redoes
-            messages[arm] = str(excinfo.value)
-        expected_rid = mask_run_id(mask=boom_mask, params=_cfg_params(cfg), **_CTX)
-        expected = (
-            f"combo 0x{boom_mask:032x} (run_id={expected_rid}) in NIFTY/1m/bull k=1: tail boom"
-        )
-        assert messages["legacy"] == expected
-        assert messages["digest"] == expected
-
-    def test_chunk_culprit_error_message_string_equal_on_both_arms(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The pinned STRING equality gate for the chunk-reattribution fingerprint.
-
-        A batch failure re-attributed to the same culprit mask on both arms
-        must name it with the byte-EQUAL `_combo_error` string (the digest arm
-        recomputes the run-id lazily inside `_reattribute_chunk_failure`).
-        """
-        from brutex.engine.sweep_driver import metrics_for_mask as real_metrics
-
-        bars = _trending_bars()
-        cfg = _make_config()
-        boom_mask = 1 << 2
-        monkeypatch.setattr(
-            "brutex.engine.sweep_run.ResidentTradeSim",
-            _chunk_raising_sim(lambda: RuntimeError("batch boom")),
-        )
-
-        def _raising(*args: object, **kwargs: object) -> object:
-            if args[2] == boom_mask:
-                raise ValueError("culprit mask")
-            return real_metrics(*args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _raising)
-        messages: dict[str, str] = {}
-        for arm, digest in (("legacy", None), ("digest", self._DIGEST)):
-            store = ResultsStore(path=tmp_path / f"{arm}.parquet")
-            with (
-                AuditWriter.open(tmp_path / f"{arm}.jsonl") as audit,
-                pytest.raises(SweepComboError) as excinfo,
-            ):
-                run_persisted_sweep(
-                    bars,
-                    cfg,
-                    store=store,
-                    dedup=_dedup(),
-                    audit=audit,
-                    trial_stats_digest=digest,
-                )
-            assert isinstance(excinfo.value.__cause__, ValueError)
-            messages[arm] = str(excinfo.value)
-        expected_rid = mask_run_id(mask=boom_mask, params=_cfg_params(cfg), **_CTX)
-        expected = (
-            f"combo 0x{boom_mask:032x} (run_id={expected_rid}) in NIFTY/1m/bull k=1: culprit mask"
-        )
-        assert messages["legacy"] == expected
-        assert messages["digest"] == expected
-
-    def test_digest_arm_peak_allocations_below_legacy(self, tmp_path: Path) -> None:
-        """Memory regression bound (honestly framed): tracemalloc peaks, digest < legacy.
-
-        2,024 enumerated masks (C(24,3)) with Stage-1B dropping everything
-        (``min_hits`` huge) isolate the survivor-collection cost: no trade sim,
-        no ranking, no finalists. The legacy arm materialises one
-        ``(mask, 64-hex run_id)`` tuple per survivor plus the run-id dict (and
-        pays its by-design probe/mark work); the digest arm now holds bare ints
-        only, so its traced allocation peak must sit at least 48 bytes/survivor
-        BELOW the legacy arm's (a deliberately conservative floor — the id
-        string alone is ~113 bytes). HONEST envelope: this is a
-        tracemalloc (Python-allocator) peak bound over the same fixture, NOT an
-        RSS/absolute-memory claim; the structural laziness pin above
-        (`test_digest_runid_computed_only_for_finalists`) is the primary net.
-        A warm-up pass per arm absorbs one-time cache/interning allocations.
-        """
-        import gc
-        import tracemalloc
-
-        bars = _trending_bars(n_days=1, per_day=8)
-        cfg = _make_config(condition_bits=list(range(24)), k=3, min_hits=10_000_000)
-
-        def _measure(tag: str, digest: str | None) -> tuple[SweepRunSummary, int]:
-            store = ResultsStore(path=tmp_path / f"{tag}.parquet")
-            dedup = _dedup()
-            with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
-                gc.collect()
-                tracemalloc.start()
-                try:
-                    summary = run_persisted_sweep(
-                        bars,
-                        cfg,
-                        store=store,
-                        dedup=dedup,
-                        audit=audit,
-                        trial_stats_digest=digest,
-                    )
-                    peak = tracemalloc.get_traced_memory()[1]
-                finally:
-                    tracemalloc.stop()
-            return summary, peak
-
-        _measure("warm_legacy", None)  # warm-ups: one-time caches / interning
-        _measure("warm_digest", self._DIGEST)
-        legacy, legacy_peak = _measure("legacy", None)
-        digest, digest_peak = _measure("digest", self._DIGEST)
-        assert legacy.evaluated == digest.evaluated > 1_000  # identical survivor mass
-        assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
-        assert digest_peak < legacy_peak
-        assert legacy_peak - digest_peak > digest.evaluated * 48
-
-
 class TestU128EnvelopeThroughSweep:
     """A bit ≥ 64 anywhere routes to the Python oracle — byte-equal, never OverflowError.
 
@@ -2992,3 +2709,157 @@ class TestSweepLookaheadGuardWiring:
         passed, returned = seen[0]
         assert passed is bars
         assert returned is bars
+
+
+# ────── DEC-SWEEP-STREAMING-RANK-001 (part 1) — lazy run_id on the digest path ──────
+
+
+class TestLazyRunIdDigestPath:
+    """The digest path computes run-identities LAZILY — only where consumed.
+
+    PR-2 of the engine-scale series (DEC-SWEEP-STREAMING-RANK-001): on the
+    digest path the dedup probes are bypassed (sentinel-authoritative redo) and
+    ``mark_many`` is skipped, so a survivor's run_id has exactly TWO consumers
+    — the :class:`SweepComboError` fingerprint and the finalist rows — both
+    recomputed on demand from the pure :func:`mask_run_id`. These tests pin:
+
+    * the CALL COUNT — exactly ``len(finalists)`` BLAKE3 hashes on the digest
+      happy path (never ``len(enumerated)``), while the legacy no-digest arm
+      keeps its eager one-hash-per-enumerated-mask semantics (the dedup probe
+      genuinely needs the identity before the trade sim);
+    * BYTE IDENTITY — the digest-path store is byte-identical to the legacy
+      (eager, untouched-semantics) arm's store over the same inputs;
+    * the ERROR FINGERPRINT — full-string equality of the lazily-recomputed
+      ``SweepComboError`` message against the eager-era format;
+    * the structural tallies — ``skipped_dedup == 0`` and sentinel
+      ``n_marked == 0`` even against a fully pre-marked dedup.
+    """
+
+    _DIGEST = "ab12cd34ef56ab12"
+
+    @staticmethod
+    def _count_run_id_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+        """Patch ``sweep_run.mask_run_id`` with a delegating call counter."""
+        calls = {"n": 0}
+
+        def _spy(**kwargs: Any) -> str:
+            calls["n"] += 1
+            return mask_run_id(**kwargs)
+
+        monkeypatch.setattr("brutex.engine.sweep_run.mask_run_id", _spy)
+        return calls
+
+    @staticmethod
+    def _expected_run_ids(cfg: SweepRunConfig) -> dict[int, str]:
+        """Independently recompute the run-identity of every k=1 mask of the cfg."""
+        params = canonical_trade_params(
+            sl_paisa=cfg.sl_paisa,
+            tp_paisa=cfg.tp_paisa,
+            prior_n=cfg.prior_n,
+            proximity=cfg.proximity,
+            start_equity_paisa=cfg.start_equity_paisa,
+            fib_anchor=cfg.fib_anchor,
+        )
+        return {1 << b: mask_run_id(mask=1 << b, params=params, **_CTX) for b in cfg.condition_bits}
+
+    def test_digest_path_hashes_exactly_the_finalists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The counter gate: len(finalists) BLAKE3 calls, NOT len(enumerated).
+        calls = self._count_run_id_calls(monkeypatch)
+        summary = _run_sweep(
+            tmp_path, "d", _trending_bars(), _make_config(top_k=2), digest=self._DIGEST
+        )
+        assert summary.enumerated == 5
+        assert summary.persisted == 2  # top_k truncation → 2 finalists
+        assert calls["n"] == summary.persisted
+        assert calls["n"] < summary.enumerated - summary.conflict_pruned
+
+    def test_legacy_path_keeps_eager_hashing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The legacy no-digest arm still hashes ONCE per non-conflict enumerated
+        # mask (the dedup probe keys on the identity BEFORE the trade sim) and
+        # the finalists reuse those probe-time values — no recompute, so the
+        # count stays exactly 5 even though 2 finalists persist.
+        calls = self._count_run_id_calls(monkeypatch)
+        summary = _run_sweep(tmp_path, "l", _trending_bars(), _make_config(top_k=2))
+        assert summary.persisted == 2
+        assert calls["n"] == summary.enumerated - summary.conflict_pruned == 5
+
+    def test_digest_store_bytes_equal_the_eager_legacy_arm(self, tmp_path: Path) -> None:
+        # Before/after equality via the untouched arm: the legacy path kept the
+        # eager per-mask semantics byte-verbatim, so lazy(digest) == eager(legacy)
+        # over the same inputs IS the before/after store-bytes proof.
+        bars = _trending_bars()
+        lazy = _run_sweep(tmp_path, "lazy", bars, _make_config(), digest=self._DIGEST)
+        eager = _run_sweep(tmp_path, "eager", bars, _make_config())
+        assert lazy.store_content_hash == eager.store_content_hash
+        assert (tmp_path / "lazy.parquet").read_bytes() == (tmp_path / "eager.parquet").read_bytes()
+
+    def test_finalist_run_ids_match_independent_recompute(self, tmp_path: Path) -> None:
+        pl = pytest.importorskip("polars")
+        cfg = _make_config()
+        summary = _run_sweep(tmp_path, "d", _trending_bars(), cfg, digest=self._DIGEST)
+        stored = pl.read_parquet(tmp_path / "d.parquet")["run_id"].to_list()
+        expected = self._expected_run_ids(cfg)
+        assert len(stored) == summary.persisted > 0
+        assert set(stored) <= set(expected.values())
+        assert len(set(stored)) == len(stored)  # one distinct identity per finalist
+
+    def test_digest_error_message_equals_the_eager_era_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FULL-string equality of the fail-loud fingerprint: the lazily
+        # recomputed run_id lands in the exact pre-change message bytes.
+        from brutex.engine.sweep_driver import metrics_from_trades as real_tail
+
+        cfg = _make_config()
+        calls = {"n": 0}
+
+        def _tail(*args: object, **kwargs: object) -> object:
+            calls["n"] += 1
+            if calls["n"] == 3:  # the 3rd kept mask = 0b100
+                raise ValueError("tail boom")
+            return real_tail(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _tail)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(
+                _trending_bars(),
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        rid = self._expected_run_ids(cfg)[0b100]
+        assert str(excinfo.value) == (
+            f"combo 0x{0b100:032x} (run_id={rid}) in NIFTY/1m/bull k=1: tail boom"
+        )
+
+    def test_digest_tallies_pinned_against_a_premarked_dedup(self, tmp_path: Path) -> None:
+        # Structural pins (V3): probes bypassed → skipped_dedup == 0 even when
+        # EVERY identity is pre-marked; mark_many skipped → sentinel n_marked == 0.
+        from brutex.engine.tuple_complete import completion_sentinel_path, read_completion_sentinel
+
+        cfg = _make_config()
+        dedup = _dedup()
+        dedup.mark_many(self._expected_run_ids(cfg).values())
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                _trending_bars(),
+                cfg,
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        assert summary.skipped_dedup == 0
+        assert summary.persisted > 0
+        assert read_completion_sentinel(completion_sentinel_path(store.path)).n_marked == 0

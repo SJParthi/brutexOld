@@ -40,15 +40,6 @@ Three invariants make this a *sweep RUN*, not just a sweep:
   ``strategy_id = "mask:%032x"`` of the u128 mask (DEC-MASK-IDENTITY-001 — the
   mask *is* the strategy). Same inputs → same run-ids → same
   :class:`~brutex.engine.results_store.FlushResult.content_hash`, bit-for-bit.
-  On the digest path the identity is NOT computed during enumeration at all
-  (dedup probes are bypassed and marks skipped there — see Idempotence below),
-  so run-ids have exactly two consumers — the ≤``top_k`` finalists and the
-  ``SweepComboError`` fingerprint — each recomputed on demand from the pure
-  9-field hash (DEC-SWEEP-LAZY-RUNID-001, the unflagged first slice of the
-  R2-SL-F2 O(masks)-RAM fix): one BLAKE3 per enumerated mask leaves the hot
-  path and the O(survivors) 64-hex id strings are never materialised. The
-  legacy no-digest arm is unchanged — its probes need the per-mask identity at
-  enumeration time.
 * **Idempotence (Golden Rule #7).** On the digest path (the production
   launcher), redo is decided by the per-tuple COMPLETION SENTINEL
   (:mod:`brutex.engine.tuple_complete`, DEC-MARK-MANY-SENTINEL-001): a paired
@@ -917,7 +908,6 @@ def _reattribute_chunk_failure(
     cfg: SweepRunConfig,
     direction_label: str,
     batch_exc: Exception,
-    *,
     run_id_of: Callable[[int], str],
 ) -> NoReturn:
     """A batched trade-sim chunk raised — attribute the culprit mask, then fail LOUD.
@@ -926,16 +916,12 @@ def _reattribute_chunk_failure(
     mask at a time through the ORACLE (:func:`metrics_for_mask` — the exact
     pre-wiring per-mask chain, engine-agnostic: it attributes a Python-fallback
     chunk failure identically). The FIRST mask that re-raises gets the standard
-    fingerprint (:func:`_combo_error`, chained from ITS error). ``MemoryError``
+    fingerprint (:func:`_combo_error`, chained from ITS error), its run-identity
+    resolved via *run_id_of* (lazy recompute on the digest path, the eager
+    probe-time value on the legacy path — byte-identical either way because
+    :func:`mask_run_id` is pure; DEC-SWEEP-STREAMING-RANK-001). ``MemoryError``
     during re-attribution re-raises BARE (the global-stop law holds under
     memory pressure too — never a downgrade to a tuple skip).
-
-    *chunk* carries BARE masks (DEC-SWEEP-LAZY-RUNID-001); *run_id_of* serves a
-    mask's run-identity ONLY inside the exception branch — an O(1) lookup of
-    the enumeration-time value on the legacy no-digest arm, a lazy recompute of
-    the pure 9-field BLAKE3 on the digest arm — so the fingerprint string is
-    byte-identical on both arms and no run-id work happens unless a culprit is
-    actually named.
 
     If EVERY mask passes the oracle, the failure was batch-level (a PyO3
     marshalling error, a kernel-only validator, a kernel bug): the oracle's
@@ -1010,13 +996,13 @@ def run_persisted_sweep(
     3. Emit the ``SWEEP_START`` audit line.
     4. Build the Stage-1A ``bar_bits`` **once**.
     5. Enumerate the K-of-bits masks; for each: prune conflicts; on the legacy
-       no-digest path, compute the run-identity, skip already-seen identities
-       (O(1) Bloom→exact, BEFORE any trade sim) and collect the
-       ``(mask, run_id)`` survivor; on the digest path collect the BARE mask —
-       no per-mask identity is computed at all (DEC-SWEEP-LAZY-RUNID-001):
-       run-ids are recomputed lazily, only at the ≤``top_k`` finalists and the
-       :class:`SweepComboError` fingerprints (:func:`mask_run_id` is pure, so
-       the lazy value is byte-identical to an enumeration-time one).
+       no-digest path, compute the run-identity eagerly (the dedup probe keys
+       on it) and skip already-seen identities (O(1) Bloom→exact, BEFORE any
+       trade sim); on the digest path collect the bare mask — the run-identity
+       is NOT computed per enumerated mask there
+       (DEC-SWEEP-STREAMING-RANK-001): probes are bypassed and marks skipped,
+       so its only consumers (the :class:`SweepComboError` fingerprint + the
+       finalist rows) recompute it lazily from the pure :func:`mask_run_id`.
     6. Stage-1B coarse pre-filter (``cfg.min_hits``): drop survivors that fire on
        too few bars to ever rank (still counted as ``evaluated`` + marked seen).
     7. Backtest the kept survivors — the wired resident Rust trade-sim
@@ -1191,80 +1177,9 @@ def run_persisted_sweep(
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
-    # Legacy no-digest arm ONLY: the ``(mask, run_id)`` pairs — its `seen`
-    # probes need the per-mask identity at enumeration time and its
-    # `mark_many` below consumes every survivor's run-id, so the pairs stay
-    # materialised there, byte-verbatim. Stays EMPTY on the digest arm.
-    survivors: list[tuple[int, str]] = []
-    # BOTH arms downstream: the bare survivor masks — the Stage-1B / chunk /
-    # rank spine carries ONLY these (DEC-SWEEP-LAZY-RUNID-001).
-    survivor_masks: list[int]
-    if bypass_dedup:
-        # Digest arm (DEC-SWEEP-LAZY-RUNID-001): `seen` is bypassed here and
-        # `mark_many` is skipped below, so a survivor's run-id has EXACTLY two
-        # consumers — the ≤top_k finalists and the SweepComboError fingerprint
-        # — both served lazily by `run_id_of` (pure BLAKE3 → byte-identical).
-        # Survivors carry BARE masks: one blake3 per mask leaves the
-        # enumeration hot path and O(survivors) 64-hex strings are never
-        # materialised (the R2-SL-F2 O(masks)-RAM fix, unflagged slice).
-        survivor_masks = []
-        for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
-            enumerated += 1
-            if has_conflict(mask):
-                conflict_pruned += 1
-                continue
-            survivor_masks.append(mask)
-    else:
-        for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
-            enumerated += 1
-            if has_conflict(mask):
-                conflict_pruned += 1
-                continue
-            run_id = mask_run_id(
-                mask=mask,
-                direction=direction_label,
-                instrument=cfg.instrument,
-                tf=cfg.tf,
-                mode=cfg.mode,
-                params=params,
-                data_snapshot_hash=cfg.data_snapshot_hash,
-                indicator_version=cfg.indicator_version,
-                code_commit_sha=cfg.code_commit_sha,
-            )
-            if dedup.seen(run_id):
-                skipped_dedup += 1
-                continue
-            survivors.append((mask, run_id))
-        survivor_masks = [mask for mask, _ in survivors]
 
-    # Stage-1B coarse pre-filter — drop survivors that can never reach the
-    # trade-count gate (still "evaluated": we decided their fate + mark them seen).
-    kept = survivor_masks
-    if cfg.min_hits > 0 and survivor_masks:
-        # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
-        # are bit-identical (same SUPERSET kernel) so the kept set never differs.
-        hits = (
-            kernel.count_hits(survivor_masks)
-            if kernel is not None
-            else count_supermasks(bar_bits, survivor_masks)
-        )
-        kept = [mask for mask, hit in zip(survivor_masks, hits, strict=True) if hit >= cfg.min_hits]
-    evaluated = len(survivor_masks)
-
-    # Run-id service (DEC-SWEEP-LAZY-RUNID-001): the finalists + the
-    # SweepComboError fingerprints are the ONLY post-enumeration run-id
-    # consumers. Legacy arm: serve the enumeration-time value from an O(1)
-    # dict over the survivor pairs (already paid above — zero recompute, zero
-    # added work). Digest arm: NO per-survivor dict is materialised (the
-    # deleted `run_id_by_mask = dict(survivors)`); the pure 9-field BLAKE3 is
-    # recomputed on demand — ≤ top_k + error-path calls total, never one per
-    # survivor.
-    run_id_by_mask = None if bypass_dedup else dict(survivors)
-
-    def run_id_of(mask: int) -> str:
-        """Return *mask*'s run-identity — O(1) legacy lookup / lazy digest recompute."""
-        if run_id_by_mask is not None:
-            return run_id_by_mask[mask]
+    def _lazy_run_id(mask: int) -> str:
+        """Recompute one mask's run-identity on demand (:func:`mask_run_id` is pure)."""
         return mask_run_id(
             mask=mask,
             direction=direction_label,
@@ -1277,6 +1192,58 @@ def run_persisted_sweep(
             code_commit_sha=cfg.code_commit_sha,
         )
 
+    survivors: list[int] = []
+    #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
+    #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
+    survivor_run_ids: list[str] = []
+    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
+        enumerated += 1
+        if has_conflict(mask):
+            conflict_pruned += 1
+            continue
+        if bypass_dedup:
+            # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
+            # path the dedup probes are BYPASSED (sentinel-authoritative redo,
+            # above) and ``mark_many`` is SKIPPED (below), so a survivor's
+            # run_id has exactly TWO consumers — the SweepComboError
+            # fingerprint and the finalist rows — both recomputed on demand
+            # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
+            # canonical inputs, Golden Rule #4: same bytes, computed later).
+            # Skipping the eager per-enumerated-mask hash deletes O(survivors)
+            # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
+            survivors.append(mask)
+            continue
+        run_id = _lazy_run_id(mask)
+        if dedup.seen(run_id):
+            skipped_dedup += 1
+            continue
+        survivors.append(mask)
+        survivor_run_ids.append(run_id)
+
+    # Stage-1B coarse pre-filter — drop survivors that can never reach the
+    # trade-count gate (still "evaluated": we decided their fate + mark them seen).
+    kept = survivors
+    if cfg.min_hits > 0 and survivors:
+        # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
+        # are bit-identical (same SUPERSET kernel) so the kept set never differs.
+        hits = (
+            kernel.count_hits(survivors)
+            if kernel is not None
+            else count_supermasks(bar_bits, survivors)
+        )
+        kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
+    evaluated = len(survivors)
+
+    # ONE run-identity resolver for every downstream consumer (finalist rows +
+    # the SweepComboError fingerprints): the digest path recomputes lazily
+    # (O(finalists + errors) BLAKE3 instead of O(survivors)); the legacy path
+    # reuses the exact probe-time values already paid for above (eager
+    # semantics untouched — the dedup probe genuinely needs them).
+    run_id_of: Callable[[int], str]
+    if bypass_dedup:
+        run_id_of = _lazy_run_id
+    else:
+        run_id_of = dict(zip(survivors, survivor_run_ids, strict=True)).__getitem__
     # Combo evaluation — the wired resident Rust trade-sim
     # (DEC-SWEEP-RUST-TRADESIM-WIRE-001, wiring the bit-identity-proven
     # DEC-SWEEP-RUST-TRADESIM-001 kernel): one ResidentTradeSim per tuple (built
@@ -1332,7 +1299,7 @@ def run_persisted_sweep(
                 raise
             except Exception as exc:
                 _reattribute_chunk_failure(
-                    bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of=run_id_of
+                    bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of
                 )
             for mask, trades in zip(chunk, chunk_trades, strict=True):
                 try:
@@ -1404,7 +1371,7 @@ def run_persisted_sweep(
     # write to the (now off-heap LMDB) exact tier; skip it (DEC-SWEEP-DEDUP-LMDB-001).
     # The sentinel below is the redo authority on this path, so ``n_marked``
     # honestly reads 0 (no marks were written).
-    marked = 0 if bypass_dedup else dedup.mark_many(run_id for _, run_id in survivors)
+    marked = 0 if bypass_dedup else dedup.mark_many(survivor_run_ids)
     # Completion sentinel STRICTLY LAST (DEC-MARK-MANY-SENTINEL-001): its
     # presence proves flush + sidecar + mark all completed; a crash anywhere
     # before this line leaves it absent → the next run redoes the FULL tuple.
