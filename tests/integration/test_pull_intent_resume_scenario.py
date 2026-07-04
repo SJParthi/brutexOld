@@ -35,6 +35,7 @@ pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
+from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pull_intent import PullIntent, PullIntentStore
 from brutex.data.instrument_store import InstrumentStore
@@ -97,9 +98,12 @@ def test_sigkill_survivor_intent_resumes_full_pipeline_on_fresh_app(
         prebuilds.append(kwargs)
         return PrebuildOutcome(symbols_built=1, total_bars=9, failed=(), failed_count=0, ok=True)
 
-    def _spy_warm(jobs: Any) -> int:
+    def _spy_warm(jobs: Any, **_kwargs: Any) -> MoversWarmResult:
+        # DEC-MOVERS-WARM-PROGRESS-001 (MIGRATION.md #1290 pack): the real
+        # warm_movers_snapshots takes segment/labels/on_progress kwargs and
+        # returns the per-coordinate tally, not an int.
         warmed.append(len(list(jobs)))
-        return 0
+        return MoversWarmResult(warmed=0, failed=0, total=0)
 
     monkeypatch.setattr(app_module, "pull_all_spot", _spot)
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)

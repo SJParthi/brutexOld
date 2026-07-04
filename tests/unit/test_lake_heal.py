@@ -1269,6 +1269,48 @@ class TestDerivedRecall:
         assert daily["close"].to_list() == [101.0]
         assert daily["volume"].to_list() == [22]
 
+    def test_recall_removes_the_derive_stamp(self, tmp_path: Path) -> None:
+        """DEC-PREBUILD-INCREMENTAL-001: a healed symbol's derive stamp is
+        removed outright by the recall (belt-and-braces on top of the source
+        token the rewrite already moved), so the next pipeline prebuild can
+        never skip a healed symbol."""
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        from brutex.data.derive_stamp import (
+            DeriveStamp,
+            derive_stamp_path,
+            save_derive_stamp,
+        )
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0), close="100.00"), _bar(_ts(1), close="101.00", volume=12)])
+        stamp_file = derive_stamp_path(lake, "NSE", "INDEX", "NIFTY")
+        save_derive_stamp(
+            stamp_file,
+            DeriveStamp(
+                token="stale",
+                tfs=("5m",),
+                include_daily=True,
+                daily_before="2024-06-03",
+                last_1m_ist_date="2024-06-02",
+                written_at=_dt.now(_UTC).isoformat(timespec="seconds"),
+            ),
+        )
+        assert stamp_file.exists()
+        _replant_with_dup(_dest(lake))
+        scan = scan_lake_invariants(lake)
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.files_scanned,
+            mode="auto",
+            recall=True,
+            now=_now,
+        )
+        assert report.recall is not None and report.recall.daily_targets == 1
+        assert not stamp_file.exists()  # the stale stamp is GONE
+
     def test_recall_fno_daily_carries_oi_through_fno_resampler(self, tmp_path: Path) -> None:
         """The F&O branch reads OI + resamples through the OI-carry positional
         resampler — the recalled 1day row carries last-of-day open_interest."""
