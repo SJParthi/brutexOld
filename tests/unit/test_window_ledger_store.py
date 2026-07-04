@@ -1364,9 +1364,10 @@ def _row(
     attempts: int = 1,
     last_attempt: str | None = "2026-06-08T12:00:00+00:00",
     bars: int = 5,
+    bars_net_new: int | None = None,
     last_error: str | None = None,
 ) -> LedgerRow:
-    """One serialised ledger row (the exact 13-field ``to_rows`` shape)."""
+    """One serialised ledger row (the exact 14-field ``to_rows`` shape)."""
     return (
         "dhan",
         security,
@@ -1381,6 +1382,7 @@ def _row(
         last_attempt,
         0,
         1,
+        bars_net_new,
     )
 
 
@@ -1718,3 +1720,123 @@ class TestLoadFailedFlag:
     def test_migrate_path_is_not_flagged(self, tmp_path: Path) -> None:
         # No parquet at all → the one-shot sidecar migration, not a reload failure.
         assert load_or_migrate_window_ledger(tmp_path).load_failed is False
+
+
+class TestBarsNetNewBackwardCompat:
+    """DEC-INGEST-BOUNDARY-INTEGRITY-001: ``bars_net_new`` follows the exact
+    optional-column template — appended LAST, absent column loads as an honest
+    ``None`` (NEVER a fabricated 0), new files round-trip the int."""
+
+    def test_old_format_parquet_loads_bars_net_new_none(self, tmp_path: Path) -> None:
+        # A pre-column file (13 columns: core 11 + streak + fetches) MUST load;
+        # the absent bars_net_new is an honest unknown None — never fabricated 0.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["NIFTY"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": [SUCCESS],
+                "bars": [5],
+                "attempts": [1],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+                "empty_streak": [0],
+                "in_pull_fetches": [1],
+            },
+        )
+        ledger = load_window_ledger(tmp_path)
+        rec = ledger.records()[0]
+        assert ledger.count == 1  # loaded, NOT degraded to empty
+        assert rec.bars_net_new is None
+        assert rec.bars == 5  # every other column intact
+        assert ledger.is_skippable(_key()) is True  # the settled row still skips
+
+    def test_new_round_trip_carries_the_int(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=3, now=_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.to_rows() == ledger.to_rows()
+        assert restored.records()[0].bars_net_new == 3
+
+    def test_new_round_trip_preserves_a_null_cell(self, tmp_path: Path) -> None:
+        # A NEW file can carry a NULL bars_net_new (e.g. a cold-start seed / a
+        # record with no sink result) — it round-trips as None, not 0.
+        ledger = WindowLedger()
+        ledger.seed_lake_success(_key(), bars=42, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.records()[0].bars_net_new is None
+        assert restored.to_rows() == ledger.to_rows()
+
+    def test_mixed_old_and_new_rows_merge_on_save(self, tmp_path: Path) -> None:
+        # An OLD-format file already on disk (no bars_net_new column) merges with
+        # a NEW in-memory ledger: the disk row keeps its honest None, the new row
+        # its int — no crash, no fabrication.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["SENSEX"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": [SUCCESS],
+                "bars": [7],
+                "attempts": [1],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+            },
+        )
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=2, now=_NOW
+        )
+        save_window_ledger(ledger, tmp_path)  # read-merge-write folds the disk row in
+        by_symbol = {r.security_id: r for r in load_window_ledger(tmp_path).records()}
+        assert by_symbol["NIFTY"].bars_net_new == 2
+        assert by_symbol["SENSEX"].bars_net_new is None
+
+    def test_schema_pin_column_order_and_names(self, tmp_path: Path) -> None:
+        # The on-disk schema is FIXED: bars_net_new is the LAST column, after
+        # in_pull_fetches (the append-LAST back-compat contract).
+        import pyarrow.parquet as pq
+
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=1, error_type=None, bars_appended=1, bars_net_new=1, now=_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+        names = pq.read_schema(ledger_path(tmp_path)).names
+        assert names == [
+            "market",
+            "security_id",
+            "interval",
+            "window_start",
+            "window_end",
+            "status",
+            "bars",
+            "attempts",
+            "last_error",
+            "first_seen_at",
+            "last_attempt_at",
+            "empty_streak",
+            "in_pull_fetches",
+            "bars_net_new",
+        ]
+
+    def test_merge_rows_prefer_by_leading_fields_regardless_of_net_new(self) -> None:
+        # merge_ledger_rows is arity-safe with the 14th field: same-key conflict
+        # resolution still keys off status/timestamp/attempts; the winning row's
+        # bars_net_new rides along untouched.
+        older = _row(last_attempt="2026-06-08T12:00:00+00:00", bars_net_new=None)
+        newer = _row(last_attempt="2026-06-08T13:00:00+00:00", bars_net_new=9)
+        assert merge_ledger_rows([older], [newer]) == [newer]
+        assert merge_ledger_rows([newer], [older]) == [newer]
