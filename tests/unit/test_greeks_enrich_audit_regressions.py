@@ -237,3 +237,61 @@ class TestDegenerateInputHandling:
         # still stamps BAD_INPUT (the except GreeksInputError arm stays live).
         bars, _stats = _enrich_rows([_row(close=1e-310)], symbol="NSE-NIFTY-25Jan24-24000-CE")
         assert _status_of(bars[0]) == STATUS_BAD_INPUT
+
+
+class TestDegenerateTimeValueScreen:
+    """IVX-1 (FIX-2, subsumes IVX-4): at-floor premiums stamp BELOW_INTRINSIC.
+
+    A close at (or within ``1e-9 · close`` of) the discounted no-arb floor has
+    ~zero time value: the kernel's 1e-9-relative verification then "confirms"
+    ANY sigma in a band as wide as [0.001, 0.29] and one arbitrary member was
+    stored STATUS_OK. The pre-screen now refuses the whole degenerate band —
+    mirroring the kernel's ``VERIFY_REL_TOL`` — before the solver ever runs.
+    """
+
+    def test_production_shaped_at_floor_artifact_stamps_below_intrinsic(self) -> None:
+        # The audited production failing input: NSE-NIFTY-27Aug26-14000-CE,
+        # bar 2026-06-30 10:14 IST, spot 23500.00, close 9644.40 — time value
+        # 4.17e-6 rupees above the discounted floor. Pre-fix: STATUS_OK with
+        # stored iv=0.23835784699791276 (vega 5.9e-6).
+        ts = datetime(2026, 6, 30, 4, 44, tzinfo=UTC)
+        row = _row(ts, close=9644.40)
+        bars, stats = _enrich_rows(
+            [row],
+            symbol="NSE-NIFTY-27Aug26-14000-CE",
+            spot_by_ts={ts: Decimal("23500.00")},
+        )
+        assert _status_of(bars[0]) == STATUS_BELOW_INTRINSIC
+        assert bars[0].iv is None
+        assert stats.nulls == 1
+
+    def test_r0_call_at_intrinsic_is_below_intrinsic(self) -> None:
+        # r = 0 makes the floor land EXACTLY on the 2dp grid (K − S for a
+        # call): every deep-ITM at-intrinsic quote was a systematic artifact.
+        bars, _stats = _enrich_rows(
+            [_row(close=1500.0)],
+            symbol="NSE-NIFTY-25Jan24-20000-CE",
+            rate_source=FixedRateSource(rate=0.0),
+        )
+        assert _status_of(bars[0]) == STATUS_BELOW_INTRINSIC
+
+    def test_r0_put_deep_itm_at_floor_is_below_intrinsic(self) -> None:
+        # PE twin (the preflight-validated put branch of the predicate):
+        # floor = K·e^(−rT) − S = 8500 exactly at r = 0.
+        bars, _stats = _enrich_rows(
+            [_row(close=8500.0)],
+            symbol="NSE-NIFTY-25Jan24-30000-PE",
+            rate_source=FixedRateSource(rate=0.0),
+        )
+        assert _status_of(bars[0]) == STATUS_BELOW_INTRINSIC
+
+    def test_real_time_value_above_band_still_solves(self) -> None:
+        # Anti-overscreen guard: a REAL half-rupee of time value on the same
+        # deep-ITM geometries must still solve (CE floor ≈ 1536.51, PE floor
+        # ≈ 8445.23 at r = 6.5%) — the band fires ONLY on the artifact family.
+        ce_bars, _s1 = _enrich_rows([_row(close=1537.01)], symbol="NSE-NIFTY-25Jan24-20000-CE")
+        assert _status_of(ce_bars[0]) == STATUS_OK
+        assert ce_bars[0].iv is not None
+        pe_bars, _s2 = _enrich_rows([_row(close=8445.73)], symbol="NSE-NIFTY-25Jan24-30000-PE")
+        assert _status_of(pe_bars[0]) == STATUS_OK
+        assert pe_bars[0].iv is not None

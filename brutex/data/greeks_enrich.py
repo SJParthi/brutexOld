@@ -86,6 +86,7 @@ if TYPE_CHECKING:
 _LOG = structlog.get_logger("brutex.data.greeks_enrich")
 
 __all__ = [
+    "DEGENERATE_TIME_VALUE_REL",
     "EXPIRY_HOUR_IST",
     "EXPIRY_MINUTE_IST",
     "GREEKS_FORMULA_VERSION",
@@ -162,6 +163,20 @@ EXPIRY_MINUTE_IST: Final[int] = 30
 #: Act/365 calendar seconds per year — the kernel's own day-count base
 #: (its ``T``-floor is "600 s in Act/365 years"; theta is per Act/365 day).
 SECONDS_PER_YEAR_ACT365: Final[float] = 365.0 * 86400.0
+
+#: Relative degenerate-time-value band of the BELOW_INTRINSIC pre-screen
+#: (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-1). Mirrors the kernel's
+#: ``VERIFY_REL_TOL`` (``rust/trading-core/src/greeks/mod.rs`` — the 1e-9
+#: relative round-trip verification tolerance, whose discounted-space image is
+#: exactly ``1e-9 · close``): a premium within this band of the discounted
+#: no-arb floor carries ~zero time value, so the kernel would "verify" ANY
+#: sigma across a huge indeterminacy band (measured up to [0.001, 0.29]) and
+#: return one arbitrary member. Such bars are refused as honest
+#: :data:`STATUS_BELOW_INTRINSIC` NULLs instead — never an arbitrary stored
+#: IV. Preflight-validated on BOTH sides (CE and PE: 0 escapes, 0 over-screens
+#: over 292,500 production-shaped combos; the smallest genuine one-tick time
+#: value sits ~5000x above the band).
+DEGENERATE_TIME_VALUE_REL: Final[float] = 1e-9
 
 #: Fixed +05:30 IST (no DST) — the same offset the vendor parser uses.
 _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
@@ -749,11 +764,16 @@ def _compute_bar(
         # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3; the NO_RATE / AT_EXPIRY /
         # NO_SPOT precedence above is unchanged).
         return _null(STATUS_BAD_INPUT, with_spot=spot)
-    if float(close) < _no_arb_floor(
+    floor = _no_arb_floor(
         is_call=is_call, spot=float(spot), strike=strike_f, rate=rate.rate, t_years=t_years
-    ):
-        # Below the DISCOUNTED parity floor — a negative time value has no IV
-        # root; never fed to the solver, never a spurious root (plan §15.8).
+    )
+    if float(close) <= floor + DEGENERATE_TIME_VALUE_REL * float(close):
+        # At/below the DISCOUNTED parity floor, or within the kernel's own
+        # 1e-9-relative verification band of it: a negative time value has no
+        # IV root, and a ~zero time value has NO DETERMINED root (the kernel
+        # would "verify" an arbitrary sigma from a wide indeterminacy band —
+        # the IVX-1 artifact). Never fed to the solver, never a spurious /
+        # arbitrary root (plan §15.8; DEC-GREEKS-CORRECTNESS-AUDIT-001).
         return _null(STATUS_BELOW_INTRINSIC, with_spot=spot)
     forward = float(spot) * math.exp(rate.rate * t_years)
     try:
