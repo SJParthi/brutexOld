@@ -75,7 +75,7 @@ def _sim_columns(price: int) -> tuple[list[int], list[int], list[int], list[int]
 def _valid_sim() -> fno_math.ResidentSweepSim:
     """A minimal in-range one-bar resident window (open=high=low=close)."""
     o, h, lo, c = _sim_columns(10_000)
-    return fno_math.ResidentSweepSim(o, h, lo, c, [False], [0])
+    return fno_math.ResidentSweepSim(o, h, lo, c, [False], [0], [0])
 
 
 class TestResidentSweepSimPriceBoundary:
@@ -92,7 +92,7 @@ class TestResidentSweepSimPriceBoundary:
                 r"\[-1152921504606846975, 1152921504606846975\] paisa"
             ),
         ):
-            fno_math.ResidentSweepSim(o, h, lo, c, [False], [0])
+            fno_math.ResidentSweepSim(o, h, lo, c, [False], [0], [0])
 
     @pytest.mark.parametrize("column", ["open", "high", "low", "close"])
     def test_each_column_is_guarded_and_named(self, column: str) -> None:
@@ -101,19 +101,19 @@ class TestResidentSweepSimPriceBoundary:
         cols[column] = [MAX_PRICE_PAISA + 1]
         with pytest.raises(ValueError, match=rf"{column}.*out of the overflow-safe range"):
             fno_math.ResidentSweepSim(
-                cols["open"], cols["high"], cols["low"], cols["close"], [False], [0]
+                cols["open"], cols["high"], cols["low"], cols["close"], [False], [0], [0]
             )
 
     def test_negative_out_of_range_raises(self) -> None:
         o, h, lo, c = _sim_columns(-(MAX_PRICE_PAISA + 1))
         with pytest.raises(ValueError, match="out of the overflow-safe range"):
-            fno_math.ResidentSweepSim(o, h, lo, c, [False], [0])
+            fno_math.ResidentSweepSim(o, h, lo, c, [False], [0], [0])
 
     def test_exact_boundary_prices_are_accepted(self) -> None:
         """``±MAX_PRICE_PAISA`` exactly is VALID (inclusive range — guard teeth)."""
         for price in (MAX_PRICE_PAISA, -MAX_PRICE_PAISA):
             o, h, lo, c = _sim_columns(price)
-            sim = fno_math.ResidentSweepSim(o, h, lo, c, [False], [0])
+            sim = fno_math.ResidentSweepSim(o, h, lo, c, [False], [0], [0])
             assert sim.n_bars == 1
 
 
@@ -147,7 +147,7 @@ class TestResidentSweepSimLevelDistanceBoundary:
         """
         price = 10_000
         two = [price, price]
-        sim = fno_math.ResidentSweepSim(two, two, two, two, [False, False], [0, 0])
+        sim = fno_math.ResidentSweepSim(two, two, two, two, [False, False], [0, 0], [0, 0])
         counts = sim.count_trades([0], True, 0, MAX_PRICE_PAISA)
         assert counts == [1]
 

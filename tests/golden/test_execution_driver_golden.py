@@ -50,6 +50,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from brutex.data.models import CandleBar
 from brutex.execution.driver import BacktestDriver
 from brutex.execution.errors import ExecutionError
@@ -59,6 +60,13 @@ from brutex.feed.replay import FeedEvent, ReplayFeed
 from brutex.models import InstrumentType, Segment
 from brutex.strategies.protocol import Strategy, StrategyMeta
 from brutex.strategies.types import Side, Signal
+
+# The dormant IndianCostModel is deprecated (R2-OC-8): constructing it (directly
+# or via ExecutionSimulator's default cost model) emits a DeprecationWarning.
+# This legacy suite exercises the FROZEN dormant stack, so the warning is
+# expected here — ignore it (message-scoped) instead of failing under the
+# repo-wide ``filterwarnings = error`` gate.
+pytestmark = pytest.mark.filterwarnings("ignore:IndianCostModel:DeprecationWarning")
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "execution_driver_golden_vectors.json"
 
