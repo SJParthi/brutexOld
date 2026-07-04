@@ -773,8 +773,11 @@ jobs:
           # exercise the urllib transport's success+error paths, worker
           # start/stop lifecycle, queue.Full + queue.Empty branches, and
           # drain's edge cases. Module: 210 stmts, 38 branches, 34 tests.
+          # DEC-DASHBOARD-SECURITY-HYGIENE-001: the notifier lifecycle/dedupe +
+          # config-hygiene code is covered by the two sibling suites added to
+          # the invocation (test_telegram_lifecycle_dedupe + test_telegram_config_hygiene).
           if compgen -G "tests/unit/test_notifications_telegram.py" > /dev/null; then
-            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py
+            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py tests/unit/test_telegram_lifecycle_dedupe.py tests/unit/test_telegram_config_hygiene.py
           else
             echo "(brutex.notifications.telegram test file not present yet — gate inactive)"
           fi
@@ -1889,7 +1892,7 @@ jobs:
           # (_default_opener) is `# pragma: no cover` (NSE bot-blocks + this
           # build env network-blocks nseindia.com, so it is UNVERIFIABLE in CI).
           if compgen -G "tests/unit/test_nse_constituents.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py
+            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py tests/unit/test_nse_constituents_opener_guard.py
           else
             echo "(brutex.dashboard.nse_constituents test file not present yet — gate inactive)"
           fi

@@ -62,7 +62,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from brutex import __version__
 from brutex.config.paths import resolve_lake_root
@@ -2241,6 +2241,59 @@ def _start_liveproof_preflight(liveproof: Any, log: Any) -> None:
     log.info("liveproof.autorun_preflight", started=started)
 
 
+#: Loopback bind addresses — the strict loopback-only default allowlist of
+#: :data:`brutex.dashboard.host_allowlist.DEFAULT_ALLOWED_HOSTS` already admits every
+#: client Host these binds can receive.
+_LOOPBACK_BIND_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1"})
+
+#: Wildcard binds (all interfaces) — the machine address a remote client will
+#: put in ``Host`` cannot be known ahead of time.
+_WILDCARD_BIND_HOSTS: Final[frozenset[str]] = frozenset(
+    {"0.0.0.0", "::"}  # noqa: S104  # nosec B104 — classifying the operator's --host, not binding
+)
+
+
+def _dashboard_allowed_hosts(host: str) -> list[str] | None:
+    """Resolve the dashboard ``Host``-header allowlist for the bound *host* (R2-DS-F1).
+
+    ``build_app``'s DNS-rebinding guard defaults to a loopback-ONLY
+    allowlist, so serving beyond loopback (the advertised ``--host`` flag)
+    would hard-400 every remote client unless the actual bound host is
+    threaded through. Three cases:
+
+    * loopback bind (``127.0.0.1`` / ``localhost`` / ``::1``) → ``None``
+      (keep the strict loopback-only default);
+    * concrete non-loopback bind (e.g. ``192.168.1.50``) → the loopback
+      default PLUS that host on any port, so remote clients addressing the
+      bound name pass while foreign/rebound Hosts still 400;
+    * wildcard bind (``0.0.0.0`` / ``::``) → ``["*"]`` — the guard cannot
+      enumerate which machine address a client will use, so the Host
+      allowlist is DISABLED (the caller warns LOUDLY; the same-origin CSRF
+      guard in ``build_app`` stays fully active).
+
+    Parameters
+    ----------
+    host
+        The ``--host`` bind address as given on the CLI (an IPv6 literal may
+        be bracketed; matching is case-insensitive, surrounding whitespace
+        ignored).
+
+    Returns
+    -------
+    list[str] | None
+        ``None`` to keep ``build_app``'s loopback-only default, else the
+        explicit allowlist to inject.
+    """
+    from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
+
+    bare = host.strip().lower().strip("[]")
+    if not bare or bare in _LOOPBACK_BIND_HOSTS:
+        return None
+    if bare in _WILDCARD_BIND_HOSTS:
+        return ["*"]
+    return [*DEFAULT_ALLOWED_HOSTS, f"{bare}:*"]
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
@@ -2342,22 +2395,25 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # cause of the `'PosixPath' object has no attribute 'load_snapshot'` 500.
     # InstrumentStore.open() runs CREATE TABLE IF NOT EXISTS, so a fresh/empty
     # lake yields a valid empty store (universe shows 0 instruments, no crash).
-    store: Any = None
-    if lake_root is not None:
-        from brutex.data.instrument_store import InstrumentStore
+    # `brutex dashboard` WITHOUT --lake-root resolves the DEFAULT lake
+    # (--lake-root → $BRUTEX_LAKE_ROOT → ~/.brutex/lake) exactly like the
+    # sibling `_resolve_lake_root` call sites in this function (+ cmd_run,
+    # which pre-resolves) — previously a bare `brutex dashboard` silently
+    # opened NO InstrumentStore at all (R2-OCLI-F6 asymmetry fix).
+    from brutex.data.instrument_store import InstrumentStore
 
-        store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    store: Any = InstrumentStore.open(_resolve_lake_root(lake_root) / "instruments.duckdb")
 
-        # The instrument autoload (keyless Groww master + best-effort NTM
-        # constituent enrichment) can block ~90 s when niftyindices.com
-        # bot-blocks / slow-first-bytes a cold start (3 × 30 s retries in
-        # nse_constituents.fetch_constituent_csv). On the bind path that left the
-        # dashboard unreachable (ERR_CONNECTION_REFUSED) for the whole window, so
-        # run it in a background daemon thread — uvicorn binds the port INSTANTLY
-        # and the InstrumentStore read/write split (DEC-STORE-READ-WRITE-SPLIT-001)
-        # keeps concurrent route reads safe against the loader's writes
-        # (DEC-DASHBOARD-INSTANT-LAUNCH-001).
-        _start_instrument_autoload(store, _log)
+    # The instrument autoload (keyless Groww master + best-effort NTM
+    # constituent enrichment) can block ~90 s when niftyindices.com
+    # bot-blocks / slow-first-bytes a cold start (3 × 30 s retries in
+    # nse_constituents.fetch_constituent_csv). On the bind path that left the
+    # dashboard unreachable (ERR_CONNECTION_REFUSED) for the whole window, so
+    # run it in a background daemon thread — uvicorn binds the port INSTANTLY
+    # and the InstrumentStore read/write split (DEC-STORE-READ-WRITE-SPLIT-001)
+    # keeps concurrent route reads safe against the loader's writes
+    # (DEC-DASHBOARD-INSTANT-LAUNCH-001).
+    _start_instrument_autoload(store, _log)
     # ONE shared write-generation cache for this dashboard session (DEC-LAKE-HEAL-001):
     # constructed HERE instead of letting build_app default-construct its own internally,
     # so the L3 lake-heal startup sweep below can bump the SAME generation every dashboard
@@ -2377,7 +2433,27 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         liveproof = _build_liveproof_autorun(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("liveproof.build_failed", error=str(exc))
-    app = build_app(state, instrument_store=store, summary_cache=summary_cache, liveproof=liveproof)
+    # R2-DS-F1: thread the actual bound host through build_app's allowed_hosts
+    # seam so serving beyond loopback (--host 0.0.0.0 / a LAN address) is not
+    # hard-400'd by the TrustedHost DNS-rebinding guard. A loopback bind keeps
+    # the strict loopback-only default; any relaxation is LOUDLY logged — a
+    # wildcard bind disables the Host allowlist entirely (the same-origin CSRF
+    # guard stays active), a concrete bind merely extends it with that host.
+    allowed_hosts = _dashboard_allowed_hosts(host)
+    if allowed_hosts is not None:
+        _log.warning(
+            "dashboard.host_allowlist_relaxed",
+            host=host,
+            allowed_hosts=allowed_hosts,
+            host_guard="disabled" if "*" in allowed_hosts else "extended",
+        )
+    app = build_app(
+        state,
+        instrument_store=store,
+        summary_cache=summary_cache,
+        liveproof=liveproof,
+        allowed_hosts=allowed_hosts,
+    )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
     # ITSELF (the hard operator law). Guarded like the auto-resume launch so

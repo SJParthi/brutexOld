@@ -89,17 +89,31 @@ class TestBucketDedupe:
             assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_START, "", 1000.1)
 
     def test_dedupe_within_window(self) -> None:
-        """First HEARTBEAT at t=1000 is unique; second at t=1005 is dup."""
+        """A recorded HEARTBEAT at t=1000 makes a check at t=1005 a dup.
+
+        Since the dedupe-before-send fix (R2-OCLI-F4) the check is PURE —
+        the stamp is written by record_dedupe_locked after a successful send.
+        """
         bucket = TelegramBucket()
         with bucket._lock:
             assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1000.0)
+            bucket.record_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1000.0)
             assert bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1005.0)
+
+    def test_check_is_pure_without_record(self) -> None:
+        """check_dedupe_locked alone never stamps — repeated checks all pass."""
+        bucket = TelegramBucket()
+        with bucket._lock:
+            assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1000.0)
+            assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1005.0)
+            assert bucket._dedupe_cache == {}
 
     def test_dedupe_outside_window_passes(self) -> None:
         """HEARTBEAT window is 600s. A second call 601s later should pass."""
         bucket = TelegramBucket()
         with bucket._lock:
             assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1000.0)
+            bucket.record_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1000.0)
             assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1601.0)
 
     def test_different_dedupe_keys_not_conflated(self) -> None:
@@ -109,9 +123,17 @@ class TestBucketDedupe:
             assert not bucket.check_dedupe_locked(
                 TelegramEventKind.QUARANTINE_NEW, "item-A", 1000.0
             )
+            bucket.record_dedupe_locked(TelegramEventKind.QUARANTINE_NEW, "item-A", 1000.0)
             assert not bucket.check_dedupe_locked(
                 TelegramEventKind.QUARANTINE_NEW, "item-B", 1000.0
             )
+
+    def test_record_skips_zero_window_kind(self) -> None:
+        """record_dedupe_locked no-ops for a zero-window kind (cache stays bounded)."""
+        bucket = TelegramBucket()
+        with bucket._lock:
+            bucket.record_dedupe_locked(TelegramEventKind.RUN_START, "", 1000.0)
+            assert bucket._dedupe_cache == {}
 
     def test_evict_expired(self) -> None:
         bucket = TelegramBucket()
