@@ -196,10 +196,17 @@ class PullWatchdog:
         self._wedged_fired = False
         self._hung_baseline_token: str | None = None
         self._hung_baseline_captured = False
-        #: When (if ever) the escalation OBSERVED the revision token move after the HUNG
-        #: edge — the wedge window then restarts from that movement, so BOTH halves of
-        #: the DUAL signal cover the full ``wedge_multiplier x timeout`` window.
-        self._movement_observed_at: float | None = None
+        #: Set by the HUNG edge; :meth:`check_once` then reads the baseline token
+        #: OUTSIDE the lock on the SAME poll (the probe ``os.stat``s a possibly-wedged
+        #: volume, so it must never run while holding ``_lock`` — the stalled-probe-
+        #: under-lock class DEC-SURFACE-TRIAL-001 MINOR-1 fixed in ``SummaryCache``).
+        self._baseline_capture_pending = False
+        #: Wedge-window restart marker: set when the escalation OBSERVED the revision
+        #: token move after the HUNG edge, OR when a blind (``None``) HUNG-edge baseline
+        #: was later replaced by the FIRST real token — either way BOTH halves of the
+        #: DUAL signal must cover the full ``wedge_multiplier x timeout`` window from
+        #: that observation before a verdict.
+        self._wedge_window_restart_at: float | None = None
         #: Optional HUNG→HEALTHY edge callback (DEC-PIPELINE-STALL-HEARTBEAT-001): the
         #: dashboard job clears its stalled-suspect marker here when a heartbeat lands
         #: again after a HUNG declaration (e.g. the greeks/prebuild/movers seams resume
@@ -249,52 +256,79 @@ class PullWatchdog:
             return None
 
     def _hung(self, event: WorkerEvent) -> None:
-        """HEALTHY→HUNG edge: capture the wedge baseline, then forward to the caller.
+        """HEALTHY→HUNG edge: flag the wedge-baseline capture, then forward to the caller.
 
-        The lake-revision token observed AT the HUNG edge is the baseline the
+        The lake-revision token observed at the HUNG edge is the baseline the
         escalation compares against (DEC-PULL-WEDGE-ESCALATE-001): "no movement since
         the HUNG edge". Runs inside :meth:`check_once`'s lock (the underlying watchdog
-        fires callbacks synchronously from ``check_once``).
+        fires callbacks synchronously from ``check_once``), so the probe itself is NOT
+        run here — a wedged ``os.stat`` under the lock would block a recovering
+        worker's ``beat`` (the stalled-probe-under-lock class). :meth:`check_once`
+        reads the token OUTSIDE the lock on this SAME poll and stores the baseline.
         """
-        self._hung_baseline_token = self._probe_token()
-        self._hung_baseline_captured = True
-        self._movement_observed_at = None
+        self._baseline_capture_pending = True
+        self._wedge_window_restart_at = None
         self._user_on_hung(event)
 
-    def _maybe_escalate_locked(self) -> None:
+    def _escalation_wants_probe_locked(self) -> bool:
+        """True when THIS poll's escalation evaluation needs a revision token — lock held.
+
+        Replicates every pre-probe guard of :meth:`_maybe_escalate_locked` so the probe
+        stays LAZY: it is never touched while healthy, never without an ``on_wedged``
+        hook, never before the full wedge window of silence, and never after the
+        terminal latch. :meth:`check_once` calls this under the lock, releases the
+        lock, reads the token, and re-takes the lock to evaluate — the probe cost
+        (an ``os.stat`` on a possibly-wedged volume) is paid OUTSIDE the lock.
+        """
+        if self._wedged_fired or self.on_wedged is None:
+            return False
+        if self._wd.state_of(PULL_WORKER_NAME) is not WorkerState.HUNG:
+            return False
+        if self._last_beat_at is None:  # pragma: no cover — start() always seeds it
+            return False
+        if self._clock_fn() - self._last_beat_at < self._wedge_multiplier * self._timeout:
+            return False
+        return self._hung_baseline_captured
+
+    def _maybe_escalate_locked(self, current: str | None) -> None:
         """Fire ``on_wedged`` ONCE when the DUAL wedge signal holds — caller holds the lock.
 
-        DEC-PULL-WEDGE-ESCALATE-001, STAGE 1. Escalates ONLY when ALL hold:
+        DEC-PULL-WEDGE-ESCALATE-001, STAGE 1. *current* is the revision token
+        :meth:`check_once` read OUTSIDE the lock on this poll (never probed here — the
+        stalled-probe-under-lock guard). Escalates ONLY when ALL hold:
 
         * the worker is currently HUNG and the escalation has not already fired (the
           terminal latch — a later heartbeat never un-latches a fired escalation);
         * ZERO heartbeats for ``wedge_multiplier × timeout`` (the last-beat age — a
           beat between polls resets it, so any sign of life defers the verdict);
-        * the DUAL second half CONFIRMS: a revision probe is wired, a baseline was
-          captured at the HUNG edge, BOTH tokens are real (an absent/erroring probe
-          ABSTAINS — never escalate on a blind probe), and the token has NOT moved.
-          A token that DID move re-baselines (the worker is writing — measure any
-          later freeze against the newest observation).
+        * the DUAL second half CONFIRMS: a revision probe is wired, a baseline is
+          known, BOTH tokens are real (an absent/erroring probe ABSTAINS — never
+          escalate on a blind probe), and the token has NOT moved. A token that DID
+          move re-baselines (the worker is writing — measure any later freeze against
+          the newest observation). A ``None`` HUNG-edge baseline (the probe erred at
+          the edge — likely the SAME wedged volume) is REPLACED by the first later
+          real token, restarting the wedge window from that observation, so a
+          recovered probe re-arms the verdict instead of abstaining forever.
 
         O(1) per poll. The hook is best-effort (swallow + log), mirroring
         :meth:`_recovery`.
         """
-        if self._wedged_fired or self.on_wedged is None:
+        if not self._escalation_wants_probe_locked():
+            # Guards re-checked under THIS lock hold: a beat may have landed while the
+            # probe ran outside the lock — any sign of life defers the verdict.
             return
-        if self._wd.state_of(PULL_WORKER_NAME) is not WorkerState.HUNG:
+        if current is None:
+            # The probe abstained on this poll: the DUAL signal cannot be confirmed —
+            # never escalate on heartbeat silence alone (honest envelope: a probe-less
+            # deployment never reaches WEDGED).
             return
-        if self._last_beat_at is None:  # pragma: no cover — start() always seeds it
-            return
-        age = self._clock_fn() - self._last_beat_at
-        if age < self._wedge_multiplier * self._timeout:
-            return
-        if not self._hung_baseline_captured:
-            return  # no HUNG-edge baseline (defensive) — abstain
-        current = self._probe_token()
-        if current is None or self._hung_baseline_token is None:
-            # No probe / probe abstained on either side: the DUAL signal cannot be
-            # confirmed — never escalate on heartbeat silence alone (honest envelope:
-            # a probe-less deployment never reaches WEDGED).
+        if self._hung_baseline_token is None:
+            # The HUNG-edge probe abstained (baseline None — e.g. the wedged volume also
+            # wedged the edge's os.stat). Adopt the FIRST later real token as the fresh
+            # baseline and restart the wedge window from this observation — the verdict
+            # is re-armed once the probe recovers, never fired against a blind baseline.
+            self._hung_baseline_token = current
+            self._wedge_window_restart_at = self._clock_fn()
             return
         if current != self._hung_baseline_token:
             # The lake moved — the worker IS making durable progress despite the silent
@@ -302,14 +336,20 @@ class PullWatchdog:
             # and restart the wedge window from the movement (both DUAL halves must cover
             # the FULL window before a verdict).
             self._hung_baseline_token = current
-            self._movement_observed_at = self._clock_fn()
+            self._wedge_window_restart_at = self._clock_fn()
             return
-        if self._movement_observed_at is not None and (
-            self._clock_fn() - self._movement_observed_at < self._wedge_multiplier * self._timeout
+        if self._wedge_window_restart_at is not None and (
+            self._clock_fn() - self._wedge_window_restart_at
+            < self._wedge_multiplier * self._timeout
         ):
-            # Movement WAS observed after the HUNG edge and the freeze since then has not
-            # yet spanned the full wedge window — defer the verdict.
+            # The window restarted (observed movement / adopted baseline) and the freeze
+            # since then has not yet spanned the full wedge window — defer the verdict.
             return
+        hook = self.on_wedged
+        last_beat = self._last_beat_at
+        if hook is None or last_beat is None:  # pragma: no cover — guarded above
+            return  # narrowing only — _escalation_wants_probe_locked() already refused
+        age = self._clock_fn() - last_beat
         self._wedged_fired = True
         event = WorkerEvent(
             worker_name=PULL_WORKER_NAME,
@@ -323,7 +363,6 @@ class PullWatchdog:
             age,
             self._wedge_multiplier,
         )
-        hook = self.on_wedged
         try:
             hook(event)
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
@@ -384,13 +423,39 @@ class PullWatchdog:
             self._last_beat_at = self._clock_fn()
 
     def check_once(self) -> tuple[WorkerEvent, ...]:
-        """Poll the heartbeat, firing the hung edge if the worker wedged — O(1)."""
+        """Poll the heartbeat, firing the hung edge if the worker wedged — O(1).
+
+        The lake-revision probe is read OUTSIDE ``_lock`` (review MINOR fold, the
+        stalled-probe-under-lock class DEC-SURFACE-TRIAL-001 MINOR-1 fixed in
+        ``SummaryCache``): the probe ``os.stat``s a possibly-wedged external volume —
+        exactly the volume this feature suspects — so running it under the lock could
+        wedge the timer thread WHILE HOLDING THE LOCK and block a recovering worker's
+        :meth:`beat`. The lock is taken to decide WHETHER a token is needed (the lazy
+        probe guards — never while healthy, never without a hook), released for the
+        read, then re-taken to evaluate; the guards are re-checked under the second
+        hold so a beat landing during the read still defers the verdict. A wedged
+        probe can now stall only the timer thread itself (escalation degrades to
+        abstention) — never the worker's heartbeat path.
+        """
         with self._lock:
             events = self._wd.check_once()
             # Wedged-worker escalation (DEC-PULL-WEDGE-ESCALATE-001): evaluated on the
             # SAME poll cadence, after the HUNG/recovery edges have fired.
-            self._maybe_escalate_locked()
-            return events
+            capture_baseline = self._baseline_capture_pending
+            want_probe = capture_baseline or self._escalation_wants_probe_locked()
+        if want_probe:
+            token = self._probe_token()  # OUTSIDE the lock — may block, never holds it
+            with self._lock:
+                if self._baseline_capture_pending:
+                    # The HUNG edge on THIS poll flagged the capture: this token is the
+                    # baseline the escalation compares against ("no movement since the
+                    # HUNG edge"). The escalation itself starts on the NEXT poll.
+                    self._hung_baseline_token = token
+                    self._hung_baseline_captured = True
+                    self._baseline_capture_pending = False
+                else:
+                    self._maybe_escalate_locked(token)
+        return events
 
     def stop(self) -> None:
         """Stop the background poll loop (called from the worker's ``finally``)."""

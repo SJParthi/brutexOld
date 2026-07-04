@@ -865,17 +865,95 @@ class TestPullWatchdogWedgeEscalation:
         wd.check_once()
         assert wedges == []
 
-    def test_baseline_none_current_real_abstains(self) -> None:
-        """Baseline None (probe erred at the HUNG edge) + a later real token → abstain."""
+    def test_baseline_none_adopts_first_real_token_then_escalates(self) -> None:
+        """Baseline None (probe erred at the HUNG edge) is REPLACED by the first real token.
+
+        Review MINOR fold: the feature's own target scenario — a wedged volume — makes
+        the HUNG-edge probe itself likely to error, so a permanently-None baseline used
+        to disable WEDGED for the rest of the run even after the probe recovered. Now
+        the first later REAL token is adopted as a fresh baseline (NEVER escalating on
+        that poll — no verdict against a blind baseline) and the wedge window restarts;
+        a further full window of silence with the token unmoved then escalates.
+        """
         probe = _TokenProbe(None)
         wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
         clock.advance(31.0)
-        wd.check_once()  # HUNG — baseline captured as None
+        wd.check_once()  # HUNG — baseline captured as None (probe abstained at the edge)
         probe.token = "rev-1"
         clock.advance(500.0)
         wd.check_once()
-        # current != baseline(None)? The None baseline abstains BEFORE any comparison.
+        # The adoption poll NEVER escalates — the window restarts from this observation.
         assert wedges == []
+        clock.advance(100.0)
+        wd.check_once()
+        assert wedges == []  # only 100 s since the adopted baseline < 180 s window
+        clock.advance(100.0)  # 200 s since the adoption >= 180, token unmoved
+        wd.check_once()
+        assert len(wedges) == 1
+
+    def test_baseline_none_and_probe_still_blind_abstains_forever(self) -> None:
+        """A probe that NEVER recovers keeps abstaining — no verdict on a blind probe."""
+        probe = _TokenProbe(None)
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
+        clock.advance(31.0)
+        wd.check_once()  # HUNG — baseline None
+        for _ in range(5):
+            clock.advance(500.0)
+            wd.check_once()
+        assert wedges == []
+
+    def test_probe_runs_outside_the_lock(self) -> None:
+        """The revision probe is NEVER called while ``_lock`` is held (review MINOR fold).
+
+        The probe ``os.stat``s a possibly-wedged volume — the exact volume this feature
+        suspects — so a probe under the lock could wedge the timer thread holding it
+        and block a recovering worker's ``beat`` (the stalled-probe-under-lock class
+        DEC-SURFACE-TRIAL-001 MINOR-1 fixed in ``SummaryCache``). Pinned white-box: on
+        EVERY probe invocation (the HUNG-edge baseline capture AND the escalation
+        read) the watchdog lock must be immediately acquirable.
+        """
+        acquired: list[bool] = []
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=None)
+
+        def _lock_free_probe() -> str | None:
+            got = wd._lock.acquire(blocking=False)
+            acquired.append(got)
+            if got:
+                wd._lock.release()
+            return "rev-1"
+
+        wd.revision_probe = _lock_free_probe
+        clock.advance(31.0)
+        wd.check_once()  # HUNG edge — the baseline capture probe (outside the lock)
+        clock.advance(200.0)
+        wd.check_once()  # the escalation probe (outside the lock) — fires the verdict
+        assert len(wedges) == 1
+        assert acquired == [True, True]
+
+    def test_beat_during_probe_read_defers_the_verdict(self) -> None:
+        """A heartbeat landing WHILE the probe reads (lock free) still defers the verdict.
+
+        The exact race the under-the-second-lock guard re-check defends: the probe runs
+        outside the lock, so a recovering worker can now ``beat`` mid-read — the
+        escalation must observe that sign of life and abstain, never fire a verdict
+        decided before the beat.
+        """
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=None)
+        calls = {"n": 0}
+
+        def _beating_probe() -> str | None:
+            calls["n"] += 1
+            if calls["n"] == 2:  # the escalation read — the worker recovers mid-probe
+                wd.beat()
+            return "rev-1"
+
+        wd.revision_probe = _beating_probe
+        clock.advance(31.0)
+        wd.check_once()  # HUNG edge (baseline capture, probe call 1)
+        clock.advance(200.0)
+        wd.check_once()  # escalation read (probe call 2) — a beat lands mid-read
+        assert calls["n"] == 2
+        assert wedges == []  # the re-checked guards saw the recovery and deferred
 
     def test_missing_hung_baseline_abstains(self) -> None:
         """DEFENSIVE: no HUNG-edge baseline capture → abstain, never a blind verdict.
