@@ -186,6 +186,26 @@ def _call_fallback_reason(
     return None
 
 
+def _width_offender_fields(values: Sequence[int]) -> dict[str, str | int | None]:
+    """Name the first value outside ``[0, U64_MASK]`` for a width-fallback WARNING.
+
+    DEC-SWEEP-RUST-WIRE-001 part 1 (the engine-scale spec's PR-1 gate): the
+    u64-width fallback WARNING must NAME the offending word — ``offending_value``
+    (hex) + ``offending_bit`` — so the operator sees exactly which value could
+    not cross the ``Vec<u64>`` FFI edge and at which bit (the first width that
+    cannot fit u64 is bit 64; today's 60-bit vocabulary never triggers this).
+    ``offending_bit`` is the word's highest set bit for the oversize direction;
+    ``None`` for the negative API-misuse direction, where a "bit" has no
+    meaning. One ``O(N)`` scan paid ONLY on the already-warned fallback path —
+    the kernel fast path never runs this.
+    """
+    offender = next(v for v in values if not 0 <= v <= U64_MASK)
+    return {
+        "offending_value": hex(offender),
+        "offending_bit": offender.bit_length() - 1 if offender > U64_MASK else None,
+    }
+
+
 class ResidentTradeSim:
     """Hold one ``(instrument, tf)`` bar window resident for repeated mask sims.
 
@@ -313,11 +333,15 @@ class ResidentTradeSim:
             except (ImportError, AttributeError):
                 reason = "wheel_missing"
         if self._rust is None:
+            # The width reason additionally NAMES the offending word (value +
+            # bit) — spec PR-1, DEC-SWEEP-RUST-WIRE-001 part 1; other reasons
+            # carry no width offender.
             _LOG.warning(
                 "rust_trade_sim.fallback",
                 reason=reason,
                 n_bars=len(self._bars),
                 tf_minutes=tf_minutes,
+                **(_width_offender_fields(self._bar_bits) if reason == "bar_bits_u128" else {}),
             )
 
     @property
@@ -405,8 +429,13 @@ class ResidentTradeSim:
             if call_reason is not None:
                 if call_reason not in self._call_fallback_warned:
                     self._call_fallback_warned.add(call_reason)
+                    # The width reason additionally NAMES the offending mask
+                    # (value + bit) — spec PR-1, DEC-SWEEP-RUST-WIRE-001 part 1.
                     _LOG.warning(
-                        "rust_trade_sim.call_fallback", reason=call_reason, n_masks=len(masks)
+                        "rust_trade_sim.call_fallback",
+                        reason=call_reason,
+                        n_masks=len(masks),
+                        **(_width_offender_fields(masks) if call_reason == "mask_u128" else {}),
                     )
                 rust = None
         if rust is None:
