@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 from brutex.adapters.groww import parser
 from brutex.data.candle_fields import CandleParseError
+from brutex.observability.correlation import pull_id_scope
+from structlog.testing import capture_logs
 
 
 # ── parse_timestamp_ist ─────────────────────────────────────────────────────
@@ -209,3 +212,104 @@ def test_partial_absent_open_row_is_skipped_not_fatal() -> None:
         }
     )
     assert len(bars) == 2  # the partial bar is dropped; both good rows are kept
+
+
+# ── once-per-pull epoch-timestamp WARNING (DEC-INGEST-BOUNDARY-INTEGRITY-001) ─
+
+
+def _epoch_warns(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """The captured ``groww.parse.epoch_timestamp`` events only."""
+    return [e for e in logs if e["event"] == "groww.parse.epoch_timestamp"]
+
+
+class TestEpochTimestampWarnOncePerPull:
+    """The DEFENSIVE epoch branch is LOUD exactly once per pull — never silent, never spam."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_guard(self) -> Iterator[None]:
+        # The module-level dedup persists per process — reset around each test so
+        # "exactly one WARNING" assertions are isolated (the explicit reset seam).
+        parser.reset_epoch_timestamp_warnings()
+        yield
+        parser.reset_epoch_timestamp_warnings()
+
+    def test_many_epoch_rows_in_one_pull_warn_exactly_once(self) -> None:
+        with pull_id_scope("pullaaaa0001"), capture_logs() as logs:
+            for epoch in (1_700_000_000, 1_700_000_060, 1_700_000_120.0):
+                parser.parse_timestamp_ist(epoch)
+        warns = _epoch_warns(logs)
+        assert len(warns) == 1
+        assert warns[0]["pull_id"] == "pullaaaa0001"  # explicit field, not a contextvar
+        assert warns[0]["assumed"] == "unix-utc-seconds"
+
+    def test_two_distinct_pulls_warn_once_each(self) -> None:
+        with capture_logs() as logs:
+            with pull_id_scope("pullaaaa0001"):
+                parser.parse_timestamp_ist(1_700_000_000)
+                parser.parse_timestamp_ist(1_700_000_060)
+            with pull_id_scope("pullbbbb0002"):
+                parser.parse_timestamp_ist(1_700_000_000)
+        warns = _epoch_warns(logs)
+        assert [w["pull_id"] for w in warns] == ["pullaaaa0001", "pullbbbb0002"]
+
+    def test_no_pull_id_bound_still_warns_once_under_empty_key(self) -> None:
+        # DECIDED behavior: outside any pull scope the guard dedups under the ""
+        # key — the anomaly is still LOUD (once per process, until reset).
+        with capture_logs() as logs:
+            parser.parse_timestamp_ist(1_700_000_000)
+            parser.parse_timestamp_ist(1_700_000_060)  # deduped
+        warns = _epoch_warns(logs)
+        assert len(warns) == 1
+        assert warns[0]["pull_id"] == ""
+
+    def test_string_path_never_warns(self) -> None:
+        with capture_logs() as logs:
+            parser.parse_timestamp_ist("2025-09-24T10:30:00")
+            parser.parse_timestamp_ist("2025-09-24 10:31:00")
+        assert _epoch_warns(logs) == []
+
+    def test_reset_seam_re_arms_the_warning(self) -> None:
+        with capture_logs() as logs:
+            parser.parse_timestamp_ist(1_700_000_000)
+            parser.reset_epoch_timestamp_warnings()
+            parser.parse_timestamp_ist(1_700_000_060)
+        assert len(_epoch_warns(logs)) == 2
+
+    def test_non_finite_epoch_still_warns_before_rejecting(self) -> None:
+        # The branch FIRING is the anomaly — even a rejected epoch is flagged.
+        with capture_logs() as logs, pytest.raises(CandleParseError, match="non-finite"):
+            parser.parse_timestamp_ist(float("nan"))
+        assert len(_epoch_warns(logs)) == 1
+
+    def test_parallel_epoch_parses_warn_exactly_once(self) -> None:
+        # The parser runs on PARALLEL window workers — the check-then-add is atomic.
+        import threading
+
+        barrier = threading.Barrier(8)
+
+        def _parse() -> None:
+            barrier.wait()
+            parser.parse_timestamp_ist(1_700_000_000)
+
+        with pull_id_scope("pullcccc0003"), capture_logs() as logs:
+            threads = [threading.Thread(target=_parse) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert len(_epoch_warns(logs)) == 1
+
+    def test_epoch_payload_through_parse_candle_rows_warns_once(self) -> None:
+        # End-to-end: a whole epoch-timestamped payload (the real spam risk) emits
+        # ONE warning for the pull, and the bars still parse (behavior unchanged).
+        payload = {
+            "candles": [
+                [1_700_000_000, 100.0, 110.0, 90.0, 105.0, 10, 1],
+                [1_700_000_060, 101.0, 111.0, 91.0, 106.0, 11, 2],
+                [1_700_000_120, 102.0, 112.0, 92.0, 107.0, 12, 3],
+            ]
+        }
+        with pull_id_scope("pulldddd0004"), capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        assert len(bars) == 3
+        assert len(_epoch_warns(logs)) == 1

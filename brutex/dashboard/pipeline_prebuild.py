@@ -1,10 +1,13 @@
 """The pipeline's ONE automatic timeframe-prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001).
 
 Derived data (the 19 intraday timeframes + the derived ``1day``) is written
-ONLY here — as the pull pipeline's FINAL data stage, strictly AFTER a
-fully-successful 1-minute fetch — never mid-pull (the always-on post-pull daily
-derives and the ``BRUTEX_AUTO_DERIVE_TFS`` pull-settle auto-derive are removed)
-and never from a manual button (the ``derive-timeframes`` surface is removed).
+ONLY here — as the pull pipeline's FINAL data stage, run on EVERY
+completed-chain pull over the CLEAN symbol set (quarantined symbols excluded
+via ``exclude_symbols`` — DEC-PREBUILD-CLEANSET-001, superseding the #1145
+fully-clean-fetch all-or-nothing gate) — never mid-pull (the always-on
+post-pull daily derives and the ``BRUTEX_AUTO_DERIVE_TFS`` pull-settle
+auto-derive are removed) and never from a manual button (the
+``derive-timeframes`` surface is removed).
 Coverage: SPOT underlyings + their FUTURES contracts + their **OPTIONS**
 contracts (the CE/PE chain the F&O candle lake actually holds), each including
 the ``1day`` partition (``include_daily=True`` on the injected materialiser).
@@ -50,6 +53,7 @@ from brutex.dashboard.gated_prebuild import (
     discover_futures_contracts,
     discover_option_contracts,
     run_gated_prebuild,
+    underlying_match_tokens,
 )
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fs_probe import probe_allocation_granularity
@@ -151,6 +155,7 @@ def run_pipeline_prebuild(
     materialize: Callable[[PrebuildTarget], MaterializeResult],
     fno_segment: str = FNO_CANDLE_LAKE_SEGMENT,
     source: str = "pipeline",
+    exclude_symbols: frozenset[str] = frozenset(),
     lake_root: Path | None = None,
 ) -> PrebuildOutcome:
     """Compose + run the SPOT → FUTURES → OPTIONS prebuild over *instruments*.
@@ -183,6 +188,24 @@ def run_pipeline_prebuild(
         The F&O lake segment token for contract targets (default ``"FNO"``).
     source
         The report's selection-source label.
+    exclude_symbols
+        Quarantined-symbol names to EXCLUDE from the prebuild
+        (DEC-PREBUILD-CLEANSET-001 — the UNCAPPED set from
+        :func:`~brutex.dashboard.pipeline_pull.derive_quarantined_name_set`,
+        never a display-capped tuple). An underlying is excluded when ANY of
+        its COMMON :func:`~brutex.dashboard.gated_prebuild.underlying_match_tokens`
+        (the raw ``symbol_name`` e.g. ``NSE-NIFTY``, the exchange-stripped
+        bare ticker e.g. ``NIFTY``, and its own ``underlying_symbol``) is in
+        the set — so both spot-quarantine names (``symbol_name``-shaped) and
+        historical-quarantine names (bare-underlying-shaped) match; excluding
+        an underlying also excludes its FUTURES + OPTIONS contract discovery.
+        HONEST envelope: an undecodable raw CONTRACT symbol in the set matches
+        no underlying token and filters nothing (its underlying is unknown —
+        reported by the pipeline note, never guessed). The default empty set
+        is behaviour-identical to the pre-cleanset prebuild. A set that
+        excludes EVERY instrument degrades honestly: the run still completes
+        (a ``pipeline.prebuild.all_excluded`` warning, then an ``ok=True``
+        0-built outcome), never a crash.
     lake_root
         When given, the lake root is allocation-probed at start
         (DEC-LAKE-FS-PROBE-001 — the prebuild is the ~0.5-1M-tiny-file
@@ -202,6 +225,13 @@ def run_pipeline_prebuild(
     # construction (the probe never raises).
     fs_probe = probe_allocation_granularity(lake_root) if lake_root is not None else None
     fs_note = fs_probe.note if fs_probe is not None else None
+    kept = [inst for inst in instruments if not (underlying_match_tokens(inst) & exclude_symbols)]
+    excluded_count = len(instruments) - len(kept)
+    if excluded_count and not kept:
+        # Fully-quarantined pull (DEC-PREBUILD-CLEANSET-001): nothing clean to
+        # derive over — LOUD, then complete honestly with a 0-built outcome.
+        _LOG.warning("pipeline.prebuild.all_excluded", excluded_symbols=excluded_count)
+    instruments = kept
     futures_by_underlying: dict[str, tuple[FnoContract, ...]] = {}
     options_by_underlying: dict[str, tuple[FnoContract, ...]] = {}
     contract_exchange: dict[str, str] = {}
@@ -217,6 +247,10 @@ def run_pipeline_prebuild(
         spot_symbols=len(instruments),
         futures_contracts=sum(len(v) for v in futures_by_underlying.values()),
         options_contracts=sum(len(v) for v in options_by_underlying.values()),
+        # Honest payload extension (DEC-PREBUILD-CLEANSET-001): how many
+        # quarantined underlyings the clean-set exclusion removed (0 on a
+        # clean pull — the pre-cleanset payload plus this one key).
+        excluded_symbols=excluded_count,
         fs_allocation=fs_note if fs_note is not None else "ok",
     )
 
@@ -306,9 +340,13 @@ def run_pipeline_prebuild_guarded(
     materialize: Callable[[PrebuildTarget], MaterializeResult],
     fno_segment: str = FNO_CANDLE_LAKE_SEGMENT,
     source: str = "pipeline",
+    exclude_symbols: frozenset[str] = frozenset(),
     lake_root: Path | None = None,
 ) -> PrebuildOutcome:
     """Crash-guarded :func:`run_pipeline_prebuild` for the route seam.
+
+    ``exclude_symbols`` is forwarded verbatim — the clean-set exclusion of
+    DEC-PREBUILD-CLEANSET-001 (see :func:`run_pipeline_prebuild`).
 
     The fetch already succeeded when the prebuild runs, so no ORDINARY error
     here may kill the job — an unexpected NON-halt error (a cascade-build
@@ -335,6 +373,7 @@ def run_pipeline_prebuild_guarded(
             materialize=materialize,
             fno_segment=fno_segment,
             source=source,
+            exclude_symbols=exclude_symbols,
             lake_root=lake_root,
         )
     except Exception as exc:  # pylint: disable=broad-except - the route seam must never crash the job

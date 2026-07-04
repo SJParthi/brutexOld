@@ -100,7 +100,7 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
 from brutex.data.partial_window_detect import SUSPECTED_PARTIAL, observe_partial_window
-from brutex.data.session import filter_intraday_session, is_session_exempt
+from brutex.data.session import ALL_FILTERED, filter_to_trading_session, is_session_exempt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import Instrument
@@ -847,6 +847,7 @@ def _fetch_window_raw(
                         raw_bars=0,
                         error_type=type(exc).__name__,
                         bars_appended=0,
+                        bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
                     )
@@ -986,11 +987,33 @@ def _process_window_tail(
     # fully retryable with no poisoned progress toward the across-pull promotion.
     suppress_settle = empty_breaker is not None and not empty_breaker.allow_settle()
     settle_empty = raw.settle_empty and not suppress_settle
-    # Drop pre-open / post-close bars before they enter the lake — intraday only
-    # (a daily bar has no intraday time). An exempt symbol (e.g. a ~21h instrument)
-    # keeps its full-day series verbatim.
+    # CALENDAR-AWARE session filter (DEC-INGEST-BOUNDARY-INTEGRITY-001): drop bars
+    # outside their OWN IST date's real NSE session before they enter the lake —
+    # pre-open / post-close bars AND bars on non-trading dates (a weekend/holiday
+    # leak), while an evening-muhurat / special-weekend session's bars are KEPT
+    # (the prior date-blind fixed 09:15-15:30 filter wrongly dropped muhurat bars
+    # and kept holiday bars whose wall clock looked in-session). Intraday only (a
+    # daily bar has no intraday time — deliberately unfiltered); an exempt symbol
+    # (e.g. a ~21h instrument) keeps its full-day series verbatim.
+    all_session_filtered = False
     if interval != _DAILY and not is_session_exempt(instrument.symbol_name):
-        bars = filter_intraday_session(raw_bars)
+        session_verdict = filter_to_trading_session(raw_bars)
+        bars = session_verdict.kept
+        if session_verdict.dropped:
+            # EXACTLY ONE aggregated WARNING per window (never per bar), carrying
+            # the window identity + per-cause counts, so an out-of-session /
+            # non-trading-date leak is visible without flooding a long pull's log.
+            _LOG.warning(
+                "ingest.session_filter.dropped",
+                pull_id=pull_id,
+                window_start=window_start.isoformat(),
+                window_end=window_end.isoformat(),
+                dropped=session_verdict.dropped,
+                off_session=session_verdict.dropped_off_session,
+                non_trading_date=session_verdict.dropped_non_trading_date,
+                **series_fields,
+            )
+        all_session_filtered = session_verdict.all_filtered
     else:
         bars = raw_bars
     # Drop any bar timestamped on a date STRICTLY AFTER the clamped window end
@@ -1045,6 +1068,7 @@ def _process_window_tail(
                 raw_bars=0,
                 error_type=type(exc).__name__,
                 bars_appended=0,
+                bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
             )
@@ -1161,12 +1185,27 @@ def _process_window_tail(
     #       1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), never vendor-fetched, so a "truncated"
     #       daily window is meaningless; its completeness follows the 1-minute.
     demotable = detect_completeness_gaps and instrument.is_index and interval != _DAILY
-    degraded = demotable and (truncated or interior_gap)
-    degraded_reason = (
-        (INTERIOR_GAP if interior_gap else SUSPECTED_PARTIAL if truncated else None)
-        if degraded
-        else None
-    )
+    # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001): the vendor returned
+    # bars but EVERY one was dropped by the calendar-aware session filter — a
+    # would-be SUCCESS with ZERO stored bars the skip rule would never revisit.
+    # INTRINSIC (vendor sent bars, all out-of-session — not a liquidity heuristic),
+    # so it is NOT gated on ``instrument.is_index``; it IS gated on
+    # ``detect_completeness_gaps`` because the dry-run synthetic adapter anchors its
+    # bars on the window-START day regardless of the trading calendar, so a
+    # weekend-start ``--dry-run`` window would otherwise demote → false-red (the
+    # same protection gate #1031 chose). Orthogonal to sink dedup: a re-pull whose
+    # bars all dedup to zero NET-NEW still passes bars THROUGH the filter
+    # (``bars`` non-empty), so it stays SUCCESS.
+    all_filtered = detect_completeness_gaps and all_session_filtered
+    degraded = all_filtered or (demotable and (truncated or interior_gap))
+    if all_filtered:
+        degraded_reason: str | None = ALL_FILTERED
+    elif demotable and interior_gap:
+        degraded_reason = INTERIOR_GAP
+    elif demotable and truncated:
+        degraded_reason = SUSPECTED_PARTIAL
+    else:
+        degraded_reason = None
     # Record the window's outcome in the unified ledger: SUCCESS when the vendor returned
     # COMPLETE bars, EMPTY on a clean 0-bar response, or a DEMOTED re-pullable FAILED when the
     # bars are incomplete (interior gap / truncation). ``raw_bars`` (NOT
@@ -1178,6 +1217,10 @@ def _process_window_tail(
             raw_bars=len(raw_bars),
             error_type=None,
             bars_appended=result.bars_appended,
+            # Persist the sink's keep-first-DEDUPED net-new count alongside the
+            # input count (DEC-INGEST-BOUNDARY-INTEGRITY-001 — #1031 computed it
+            # but never persisted it).
+            bars_net_new=result.bars_net_new,
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,

@@ -2173,3 +2173,276 @@ class TestEmptyBreakerSpotSpine:
         statuses = [r.status for r in ledger.records()]
         assert statuses.count(SKIPPED) == 4  # the genuine pre-listing gap settled
         assert statuses.count(SUCCESS) == 4  # …and the listed range landed bars
+
+
+class _NetNewSink:
+    """Recording sink whose result carries an EXPLICIT deduped ``bars_net_new``.
+
+    ``bars_net_new = bars_appended - dedup_hidden`` so the two counts DIFFER —
+    the threading test proves the ledger stores the sink's deduped count, not a
+    mirror of the input count.
+    """
+
+    def __init__(self, *, dedup_hidden: int = 1) -> None:
+        self._dedup_hidden = dedup_hidden
+        self.appends: list[int] = []
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval
+        self.appends.append(len(bars))
+        return SinkAppendResult(
+            bars_appended=len(bars),
+            partitions_written=1,
+            write_results=(),
+            bars_net_new=max(len(bars) - self._dedup_hidden, 0),
+        )
+
+
+class TestIngestSpotBoundaryIntegrity:
+    """DEC-INGEST-BOUNDARY-INTEGRITY-001 on the SPOT spine: the calendar-aware
+    boundary filter (one WARN per window, muhurat KEPT, holiday dropped), the
+    ALL_FILTERED demotion (gated on detect_completeness_gaps), the
+    dedup-orthogonality contract, and the persisted ``bars_net_new``."""
+
+    # 2021-01-26 (Republic Day, Tuesday) 10:05 IST — in-window wall clock, NO session.
+    _HOLIDAY_TS = datetime(2021, 1, 26, 4, 35, tzinfo=UTC)
+    # 2021-01-04 09:00 IST — pre-open on a regular trading day.
+    _PRE_OPEN_TS = datetime(2021, 1, 4, 3, 30, tzinfo=UTC)
+    # 2021-11-04 18:30 IST (= 13:00 UTC) — inside the Diwali muhurat 18:15–19:15.
+    _MUHURAT_TS = datetime(2021, 11, 4, 13, 0, tzinfo=UTC)
+
+    def test_session_filter_warns_exactly_once_per_window_with_counts(self) -> None:
+        # One window, three bars: kept / pre-open (off-session) / holiday (non-trading
+        # date). EXACTLY ONE aggregated WARNING carrying the window identity + counts.
+        bars = [_bar(_IN_SESSION_TS), _bar(self._PRE_OPEN_TS), _bar(self._HOLIDAY_TS)]
+        sink = _Sink()
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _Adapter(bars=bars),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),  # exactly one 30-day window
+            )
+        assert report.bars_appended == 1
+        assert sink.appends == [1]
+        warns = _events(logs, "ingest.session_filter.dropped")
+        assert len(warns) == 1
+        assert warns[0]["dropped"] == 2
+        assert warns[0]["off_session"] == 1
+        assert warns[0]["non_trading_date"] == 1
+        assert warns[0]["window_start"] == "2021-01-01"
+        assert warns[0]["window_end"] == "2021-01-31"
+        assert warns[0]["symbol"] == "NIFTY"
+
+    def test_clean_window_emits_no_session_filter_warn(self) -> None:
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=[_bar(_IN_SESSION_TS)]),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+            )
+        assert _events(logs, "ingest.session_filter.dropped") == []
+
+    def test_muhurat_evening_bar_is_now_stored(self) -> None:
+        # SANCTIONED BEHAVIOR CHANGE (DEC-INGEST-BOUNDARY-INTEGRITY-001): the
+        # date-blind filter wrongly DROPPED an evening Diwali-muhurat bar; the
+        # calendar-aware boundary now stores it.
+        sink = _Sink()
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _Adapter(bars=[_bar(self._MUHURAT_TS)]),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 11, 1),
+                end=date(2021, 11, 30),  # one window
+            )
+        assert report.bars_appended == 1  # KEPT (was 0 under the old filter)
+        assert sink.appends == [1]
+        assert _events(logs, "ingest.session_filter.dropped") == []
+
+    def test_holiday_bar_is_dropped_and_counted(self) -> None:
+        # A bar on a published holiday whose wall clock LOOKS in-session was
+        # previously stored (the date-blind defect) — now excluded + counted.
+        sink = _Sink()
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _Adapter(bars=[_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+            )
+        assert report.bars_appended == 0
+        assert sink.appends == [0]
+        warns = _events(logs, "ingest.session_filter.dropped")
+        assert len(warns) == 1
+        assert warns[0]["non_trading_date"] == 1
+
+    def test_all_filtered_window_is_demoted_to_repullable(self) -> None:
+        # GAP (c): raw bars > 0 but EVERY one session-filtered → the would-be
+        # SUCCESS (raw_bars judges it) is demoted FAILED + ALL_FILTERED so the
+        # window is re-examinable, riding the #1031 degraded machinery.
+        from brutex.data.session import ALL_FILTERED
+        from brutex.data.window_ledger import WindowLedger
+
+        led = WindowLedger()
+        ingest_spot(
+            _Adapter(bars=[_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            ledger=led,
+            detect_completeness_gaps=True,
+        )
+        rec = led.records()[0]
+        assert rec.status == "FAILED"  # re-pullable, NOT skippable
+        assert rec.last_error == ALL_FILTERED
+        assert rec.empty_streak == 1  # the bounded-settle machinery is engaged
+
+    def test_all_filtered_settles_skipped_after_threshold(self) -> None:
+        # BOUNDED (data-safe): after EMPTY_TERMINAL_THRESHOLD consecutive
+        # all-filtered pulls the window settles SKIPPED so the pull converges.
+        from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, SKIPPED, WindowLedger
+
+        led = WindowLedger()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ingest_spot(
+                _Adapter(bars=[_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+                ledger=led,
+                detect_completeness_gaps=True,
+            )
+        assert led.records()[0].status == SKIPPED
+
+    def test_all_filtered_not_demoted_without_detect_flag(self) -> None:
+        # The demotion is gated on detect_completeness_gaps (like #1031) because
+        # the dry-run synthetic adapter anchors bars on the window-START day
+        # regardless of the calendar — a weekend-start dry-run window would
+        # otherwise false-red. The WARN still fires (visibility ungated).
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        led = WindowLedger()
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=[_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+                ledger=led,
+                # detect_completeness_gaps defaults False — dry-run/synthetic contract
+            )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS
+        assert rec.last_error is None
+        assert len(_events(logs, "ingest.session_filter.dropped")) == 1
+
+    def test_dedup_to_zero_net_new_stays_success(self) -> None:
+        # ORTHOGONALITY (GAP c): a re-pull whose bars all dedup to ZERO net-new in
+        # the sink still passes bars THROUGH the filter, so it stays SUCCESS —
+        # the all-filtered discriminator reads the FILTER survivors, never the
+        # sink's dedup count. (_Sink models the full-dedup case: bars_net_new=0.)
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        led = WindowLedger()
+        ingest_spot(
+            _CompleteWindowAdapter(),  # type: ignore[arg-type]
+            _Sink(),  # returns bars_appended=N, bars_net_new=0 (all deduped)
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 3, 1),
+            end=date(2021, 4, 1),
+            ledger=led,
+            detect_completeness_gaps=True,
+        )
+        rec = led.records()[0]
+        assert rec.status == SUCCESS  # never demoted by a dedup-to-zero write
+        assert rec.bars == 1
+        assert rec.bars_net_new == 0  # GAP (d): the deduped count is persisted
+
+    def test_genuine_empty_window_is_byte_unchanged(self) -> None:
+        # raw_bars == 0 stays EMPTY (the all-filtered discriminator requires
+        # raw bars) — the genuine-EMPTY path is untouched by this pack.
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        led = WindowLedger()
+        ingest_spot(
+            _Adapter(bars=[]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            ledger=led,
+            detect_completeness_gaps=True,
+            # RECENT clock → conservative EMPTY, not the old-gap fast-settle.
+            now_ist=lambda: datetime(2021, 2, 5, 12, 0, tzinfo=UTC),
+        )
+        rec = led.records()[0]
+        assert rec.status == EMPTY
+        assert rec.last_error is None
+
+    def test_bars_net_new_threaded_from_sink_to_ledger(self) -> None:
+        # GAP (d): the ledger row stores the SINK's deduped net-new count — a
+        # value deliberately DIFFERENT from bars_appended so a mirror would fail.
+        from brutex.data.window_ledger import WindowLedger
+
+        led = WindowLedger()
+        bars = [
+            _bar(datetime(2021, 1, 4, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 1, 4, 4, 6, tzinfo=UTC)),
+        ]
+        ingest_spot(
+            _Adapter(bars=bars),  # type: ignore[arg-type]
+            _NetNewSink(dedup_hidden=1),  # bars_appended=2, bars_net_new=1
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            ledger=led,
+        )
+        rec = led.records()[0]
+        assert rec.bars == 2
+        assert rec.bars_net_new == 1  # the DEDUPED count, not the input count
+
+    def test_write_deferred_record_carries_known_zero_net_new(self) -> None:
+        # A deferred write (lock timeout) stored nothing — bars_net_new is a
+        # KNOWN 0 (not an unknown None): the write demonstrably did not land.
+        from brutex.data.window_ledger import WindowLedger
+
+        led = WindowLedger()
+        ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            _LockTimeoutSink(),  # type: ignore[arg-type]
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            ledger=led,
+        )
+        rec = led.records()[0]
+        assert rec.last_error == "PartitionLockTimeout"
+        assert rec.bars_net_new == 0
