@@ -698,40 +698,37 @@ class TestCompletenessScoreboard:
         scalar rides the real ``summarize_spot_datasets`` scan, the ledger rollup is
         settled (nothing left to re-pull), yet the range density (3 / ~60 sessions)
         honestly fails the 0.95 floor. Pre-fix this read a false ``full``."""
-        s = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        s.upsert_many(
-            [_eq("SPARSECO")],
-            snapshot_date=date(2024, 1, 2),
-            run_id="r-sparse",
-            csv_source_sha256="0" * 64,
-        )
-        # A REAL sparse lake: Jan-2020-anchored (the floor passes) but only 3 distinct
-        # session dates across Jan→Mar 2020 (one write per month partition).
-        writer = ParquetWriter(lake_root=tmp_path)
-        for ts, close in [
-            (datetime(2020, 1, 1, 9, 15, tzinfo=UTC), "100.4"),
-            (datetime(2020, 2, 3, 9, 15, tzinfo=UTC), "100.8"),
-            (datetime(2020, 3, 31, 9, 15, tzinfo=UTC), "101.00"),
-        ]:
-            writer.write(
-                exchange="NSE",
-                segment="CASH",
-                symbol="SPARSECO",
-                interval="1minute",
-                bars=[_bar(ts, close)],
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("SPARSECO")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-sparse",
+                csv_source_sha256="0" * 64,
             )
-        # A fully-SETTLED ledger rollup for the cell (5 settled, 0 pending, 0 failed) —
-        # the base verdict is ``full``; only the range audit can downgrade it.
-        monkeypatch.setattr(
-            _app_module,
-            "spot_window_rollup",
-            lambda _lake: {("SPARSECO", "1minute"): (5, 0, 0)},
-        )
-        client = TestClient(build_app(DashboardState(), instrument_store=s))
-        try:
+            # A REAL sparse lake: Jan-2020-anchored (the floor passes) but only 3 distinct
+            # session dates across Jan→Mar 2020 (one write per month partition).
+            writer = ParquetWriter(lake_root=tmp_path)
+            for ts, close in [
+                (datetime(2020, 1, 1, 9, 15, tzinfo=UTC), "100.4"),
+                (datetime(2020, 2, 3, 9, 15, tzinfo=UTC), "100.8"),
+                (datetime(2020, 3, 31, 9, 15, tzinfo=UTC), "101.00"),
+            ]:
+                writer.write(
+                    exchange="NSE",
+                    segment="CASH",
+                    symbol="SPARSECO",
+                    interval="1minute",
+                    bars=[_bar(ts, close)],
+                )
+            # A fully-SETTLED ledger rollup for the cell (5 settled, 0 pending, 0 failed) —
+            # the base verdict is ``full``; only the range audit can downgrade it.
+            monkeypatch.setattr(
+                _app_module,
+                "spot_window_rollup",
+                lambda _lake: {("SPARSECO", "1minute"): (5, 0, 0)},
+            )
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
             body = client.get("/api/v1/completeness/scoreboard").json()
-        finally:
-            s.close()
         per_symbol = {row["symbol"]: row for row in body["spot"]["per_symbol"]}
         assert per_symbol["SPARSECO"]["1minute"] == "settled_partial_range"
         assert per_symbol["SPARSECO"]["1minute_start"] == "2020-01-01"
