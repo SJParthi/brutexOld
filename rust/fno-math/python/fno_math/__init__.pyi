@@ -17,7 +17,40 @@ must consult the docstrings below.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+__all__ = [
+    "ResidentBars",
+    "ResidentSweepSim",
+    "__version__",
+    "add_u64",
+    "bitand_count_u64s",
+    "bitcount_u64s",
+    "blake3_hash",
+    "count_supermask_u64s",
+    "count_supermasks_u64s",
+    "count_supermasks_u64s_nthreads",
+    "popcount_bytes",
+]
+
 __version__: str
+
+__build_crate_version__: str
+"""Crate version of the INSTALLED compiled kernel (build stamp, not API).
+
+Derived at import from the compiled module's ``CARGO_PKG_VERSION``-baked
+``__version__``; read by ``brutex doctor``'s fno_math wheel-freshness stage
+(DEC-FNOMATH-WHEEL-FRESHNESS-001). Deliberately NOT in ``__all__``.
+"""
+
+_EXPECTED_COMPILED_SYMBOLS: tuple[str, ...]
+
+def _assert_compiled_surface(
+    compiled: object,
+    expected: Sequence[str] = ...,
+) -> None:
+    """Raise an actionable ``ImportError`` if ``compiled`` misses an expected symbol."""
+    ...
 
 def add_u64(a: int, b: int) -> int:
     """Add two `u64` values.
