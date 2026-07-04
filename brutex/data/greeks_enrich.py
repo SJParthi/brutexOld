@@ -384,12 +384,19 @@ class EnrichStats:
     changed
         Bars whose overlay DIFFERS from what is stored — ``0`` means the whole
         target is already current and no write is needed at all.
+    skipped
+        Rows dropped by the non-finite price screen (a NaN / inf OHLC field,
+        DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-2) — NO bar is built for them, so
+        the ``latest-wins`` merge leaves the stored raw row untouched (never a
+        fabricated bar, never a whole-contract quarantine). Defaults to ``0``
+        so a stats object built without the field reads as "no rows skipped".
     """
 
     solved: int
     nulls: int
     reused: int
     changed: int
+    skipped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,8 +425,11 @@ class GreeksEnrichReport:
     bars_written
         Total bars carried in the ``latest-wins`` writes.
     bars_solved, bars_null, bars_reused
-        Bar-level tallies summed across the written targets (the ``no_spot``
-        tally the plan asks for is ``bars_null`` broken down in the logs).
+        Bar-level tallies summed across the written targets.
+    bars_skipped
+        Rows dropped by the non-finite price screen, summed across EVERY read
+        target (including ``already_current`` ones — a skip is tallied even
+        when nothing else changed). Defaults to ``0`` for pre-audit callers.
     """
 
     enriched: int
@@ -432,6 +442,7 @@ class GreeksEnrichReport:
     bars_solved: int
     bars_null: int
     bars_reused: int
+    bars_skipped: int = 0
 
     @property
     def targets(self) -> int:
@@ -540,12 +551,29 @@ def enrich_option_bars(
     rate_by_date: dict[date, RiskFreeRate | None] = {}
 
     bars: list[FnoGreeksBar] = []
-    solved = nulls = reused = changed = 0
+    solved = nulls = reused = changed = skipped = 0
     for row in rows:
         ts = utc_instant(row["timestamp"])  # type: ignore[arg-type]
         stored_overlay = _overlay_of_row(row)
         stored_pid = row.get("greeks_provenance_id")
         open_, high, low, close = _row_price_fields(row)
+        if not all(p.is_finite() for p in (open_, high, low, close)):
+            # A NaN / inf OHLC field cannot even build the honest-NULL bar
+            # (FnoGreeksBar refuses non-finite prices), so the row is SKIPPED
+            # — no bar, no write; the stored raw row stays untouched under the
+            # latest-wins merge and the REST of the contract still enriches
+            # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-2 — the old behaviour
+            # quarantined the WHOLE contract on every pass).
+            skipped += 1
+            _LOG.warning(
+                "greeks_enrich.bar_skipped_nonfinite",
+                underlying=parts.underlying,
+                expiry=parts.expiry.isoformat(),
+                strike=str(strike),
+                option_type=option_type,
+                ts=ts.isoformat(),
+            )
+            continue
         volume = int(row["volume"])  # type: ignore[call-overload]
         raw_oi = row.get("open_interest")
         oi = None if raw_oi is None else int(raw_oi)  # type: ignore[call-overload]
@@ -584,6 +612,18 @@ def enrich_option_bars(
         rate = rate_by_date.setdefault(bar_date, rate_source.rate_on(bar_date))
         t_years = t_years_act365(ts, expiry_at)
         spot = spot_by_ts.get(ts)
+        if spot is not None and (not spot.is_finite() or spot <= 0):
+            # A non-finite / non-positive JOIN spot is unusable — degrade to
+            # the honest NO_SPOT NULL (never a stored NaN spot, never a
+            # whole-contract quarantine; DEC-GREEKS-CORRECTNESS-AUDIT-001
+            # IVX-2's NaN-spot arm).
+            _LOG.warning(
+                "greeks_enrich.spot_invalid",
+                underlying=parts.underlying,
+                ts=ts.isoformat(),
+                spot=str(spot),
+            )
+            spot = None
         bar = _compute_bar(
             ts=ts,
             open_=open_,
@@ -607,7 +647,9 @@ def enrich_option_bars(
             nulls += 1
         if _overlay_of_bar(bar) != stored_overlay:
             changed += 1
-    return bars, EnrichStats(solved=solved, nulls=nulls, reused=reused, changed=changed)
+    return bars, EnrichStats(
+        solved=solved, nulls=nulls, reused=reused, changed=changed, skipped=skipped
+    )
 
 
 def _as_float(value: object) -> float | None:
@@ -700,6 +742,13 @@ def _compute_bar(
     if spot is None:
         # No underlying spot minute — NEVER a carried-forward/next-bar spot.
         return _null(STATUS_NO_SPOT, with_spot=None)
+    if close <= 0:
+        # A finite zero/negative premium is a BAD INPUT regardless of
+        # moneyness — checked BEFORE the parity floor so a deep-ITM zero
+        # close no longer mislabels as BELOW_INTRINSIC
+        # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3; the NO_RATE / AT_EXPIRY /
+        # NO_SPOT precedence above is unchanged).
+        return _null(STATUS_BAD_INPUT, with_spot=spot)
     if float(close) < _no_arb_floor(
         is_call=is_call, spot=float(spot), strike=strike_f, rate=rate.rate, t_years=t_years
     ):
@@ -880,7 +929,7 @@ def enrich_greeks_for_targets(
     )
 
     enriched = already_current = futures_skipped = undecodable = no_bars = errored = 0
-    bars_written = bars_solved = bars_null = bars_reused = 0
+    bars_written = bars_solved = bars_null = bars_reused = bars_skipped = 0
     for target in targets:
         # Liveness beat per contract (DEC-PIPELINE-STALL-HEARTBEAT-001): the Greeks
         # enrichment pass runs minutes-to-hours AFTER the last fetch heartbeat, so
@@ -908,6 +957,7 @@ def enrich_greeks_for_targets(
                 rate_source=rate_source,
                 style_flag=_style_for_segment(join.segment),
             )
+            bars_skipped += stats.skipped
             if stats.changed == 0:
                 already_current += 1
                 continue
@@ -949,4 +999,5 @@ def enrich_greeks_for_targets(
         bars_solved=bars_solved,
         bars_null=bars_null,
         bars_reused=bars_reused,
+        bars_skipped=bars_skipped,
     )

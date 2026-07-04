@@ -344,9 +344,10 @@ class TestComputeBarStatuses:
         assert bar.delta is not None and bar.delta < 0.05
 
     def test_zero_price_bar_is_bad_input(self) -> None:
-        # An OTM strike (intrinsic 0) with a zero close: the below-intrinsic
-        # pre-screen passes (0 < 0 is False); the kernel rejects a zero price
-        # loudly → stamped BAD_INPUT, quarantined to the one bar.
+        # A zero close is a BAD INPUT stamped by the explicit non-positive
+        # pre-check (before the parity floor screen), regardless of moneyness
+        # — the ITM twin is pinned in test_greeks_enrich_audit_regressions
+        # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3).
         row = _row(close="0")
         row["open"] = 0.0
         row["high"] = 0.0

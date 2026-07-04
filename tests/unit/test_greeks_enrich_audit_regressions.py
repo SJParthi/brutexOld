@@ -156,3 +156,84 @@ class TestPackBandValidation:
             tte_convention_id=1,
         )
         assert pid == 1380609
+
+
+class TestDegenerateInputHandling:
+    """IVX-2 + IVX-3 (FIX-4): NaN/negative inputs degrade per-bar, never per-contract.
+
+    A NaN close used to make the honest-NULL bar ITSELF raise
+    (``decimal.InvalidOperation`` inside ``FnoGreeksBar`` validation),
+    escaping into the per-TARGET quarantine — the whole contract errored
+    every pass, good bars never enriched. A zero/negative close on an ITM
+    strike mislabelled ``BELOW_INTRINSIC`` instead of ``BAD_INPUT``.
+    """
+
+    def test_nan_close_row_skipped_other_bars_enrich(self) -> None:
+        good_ts = _BAR_TS + timedelta(minutes=1)
+        rows = [_row(close=math.nan), _row(good_ts, close=200.0)]
+        with capture_logs() as logs:
+            bars, stats = _enrich_rows(
+                rows, spot_by_ts={_BAR_TS: _SPOT, good_ts: _SPOT}
+            )
+        assert len(bars) == 1  # the NaN row builds NO bar (stored raw row untouched)
+        assert stats.skipped == 1
+        assert stats.solved == 1
+        assert _status_of(bars[0]) == STATUS_OK
+        assert any(e["event"] == "greeks_enrich.bar_skipped_nonfinite" for e in logs)
+
+    def test_inf_high_row_skipped(self) -> None:
+        row = _row()
+        row["high"] = math.inf
+        _bars, stats = _enrich_rows([row])
+        assert stats.skipped == 1 and stats.solved == 0
+
+    def test_nan_close_target_not_quarantined_in_driver(self, tmp_path: Path) -> None:
+        good_ts = _BAR_TS + timedelta(minutes=1)
+        rows = [_row(close=math.nan), _row(good_ts, close=200.0)]
+        report = enrich_greeks_for_targets(
+            targets=[
+                GreeksEnrichTarget(
+                    exchange="NSE", symbol=_CE_SYMBOL, start=_WINDOW[0], end=_WINDOW[1]
+                )
+            ],
+            lake_root=tmp_path,
+            rate_source=_RATE,
+            read_bars=lambda _t: rows,
+            read_spot=lambda _t, _p: SpotJoin({_BAR_TS: _SPOT, good_ts: _SPOT}, "INDEX"),
+            write_bars=lambda _t, b: len(list(b)),  # type: ignore[arg-type]
+        )
+        assert report.errored == 0  # the whole contract is NOT quarantined
+        assert report.enriched == 1
+        assert report.bars_skipped == 1
+        assert report.bars_solved == 1
+
+    def test_nan_spot_treated_as_no_spot(self) -> None:
+        with capture_logs() as logs:
+            bars, stats = _enrich_rows([_row()], spot_by_ts={_BAR_TS: Decimal("NaN")})
+        assert stats.nulls == 1
+        assert _status_of(bars[0]) == STATUS_NO_SPOT
+        assert bars[0].spot_at_bar is None  # never a stored NaN spot
+        assert any(e["event"] == "greeks_enrich.spot_invalid" for e in logs)
+
+    def test_negative_spot_treated_as_no_spot(self) -> None:
+        bars, _stats = _enrich_rows([_row()], spot_by_ts={_BAR_TS: Decimal("-5")})
+        assert _status_of(bars[0]) == STATUS_NO_SPOT
+
+    def test_itm_zero_close_is_bad_input_not_below_intrinsic(self) -> None:
+        # Deep ITM (floor ≈ 6560 > 0): a zero close is a BAD INPUT, not a
+        # price below parity — the two stamps used to split by moneyness.
+        row = _row(close=0.0)
+        bars, _stats = _enrich_rows([row], symbol="NSE-NIFTY-25Jan24-15000-CE")
+        assert _status_of(bars[0]) == STATUS_BAD_INPUT
+
+    def test_negative_close_is_bad_input_everywhere(self) -> None:
+        for symbol in ("NSE-NIFTY-25Jan24-15000-CE", "NSE-NIFTY-25Jan24-24000-CE"):
+            bars, _stats = _enrich_rows([_row(close=-5.0)], symbol=symbol)
+            assert _status_of(bars[0]) == STATUS_BAD_INPUT
+
+    def test_subnormal_close_still_reaches_kernel_reject(self) -> None:
+        # A positive subnormal passes the zero/negative pre-check and the
+        # floor screen (OTM floor 0), so the kernel's caller-contract reject
+        # still stamps BAD_INPUT (the except GreeksInputError arm stays live).
+        bars, _stats = _enrich_rows([_row(close=1e-310)], symbol="NSE-NIFTY-25Jan24-24000-CE")
+        assert _status_of(bars[0]) == STATUS_BAD_INPUT
