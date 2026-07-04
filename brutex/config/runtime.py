@@ -28,9 +28,10 @@ Security
 --------
 The file contains only non-sensitive data: PID, run ID, URLs, phase,
 and a sanitised snapshot of ``BRUTEX_*`` env vars **excluding any
-``*_TOKEN*``/``*_SECRET*`` patterns**. Vendor API credentials, Telegram bot
-tokens, and any similar credentials are redacted via
-:func:`_redact_env_snapshot`.
+``*_TOKEN*`` / ``*_SECRET*`` / ``*_PASSWORD*`` / ``*_API_KEY*`` /
+``*_AUTH*`` / ``*_CLIENT_ID*`` patterns**. Vendor API credentials, Telegram
+bot tokens, and any similar credentials are redacted via
+:func:`_redact_env_snapshot`, and the file is written owner-only (0600).
 """
 
 from __future__ import annotations
@@ -58,9 +59,11 @@ DEFAULT_RUNTIME_FILE: Final[Path] = Path.home() / ".brutex" / "runtime.json"
 #: multi-user / CI scenarios).
 ENV_RUNTIME_FILE: Final[str] = "BRUTEX_RUNTIME_FILE"
 
-#: Env var name pattern for secrets that must be redacted.
+#: Env var name pattern for secrets that must be redacted. CLIENT_ID is
+#: included (R2-CS-1): vendor client identifiers are credential material and
+#: must not land in a world-readable service-discovery file.
 _SECRET_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(TOKEN|SECRET|PASSWORD|API_KEY|AUTH)",
+    r"(TOKEN|SECRET|PASSWORD|API_KEY|AUTH|CLIENT_ID)",
     re.IGNORECASE,
 )
 
@@ -187,8 +190,8 @@ def _redact_env_snapshot(environ: dict[str, str]) -> dict[str, str]:
 
     * Only keys starting with ``BRUTEX_`` are kept.
     * Keys matching :data:`_SECRET_ENV_PATTERN` (TOKEN / SECRET /
-      PASSWORD / API_KEY / AUTH, case-insensitive) have their values
-      replaced with ``"<redacted>"``.
+      PASSWORD / API_KEY / AUTH / CLIENT_ID, case-insensitive) have their
+      values replaced with ``"<redacted>"``.
     """
     out: dict[str, str] = {}
     for key, value in environ.items():
@@ -258,9 +261,14 @@ def write_runtime_file(info: RuntimeInfo, *, path: Path | None = None) -> Path:
     # The COMMON crash-safe atomic write (tmp→fsync→os.replace→cleanup), guard-free so
     # a runtime-file failure surfaces as RuntimeFileError — NOT the lake's LakeWriteHalt
     # (CLAUDE.md §11, DEC-ATOMIC-WRITE-CONSOLIDATE-001). Readers never observe a partial.
+    # chmod=0o600 (R2-CS-1): the env snapshot is redacted but still names every
+    # BRUTEX_* var — owner-only, matching the credential store's 0600, and set on
+    # the temp file BEFORE the rename so it is never briefly world-readable.
     try:
         atomic_write_simple(
-            target, lambda tmp: tmp.write_text(info.to_json() + "\n", encoding="utf-8")
+            target,
+            lambda tmp: tmp.write_text(info.to_json() + "\n", encoding="utf-8"),
+            chmod=0o600,
         )
     except OSError as exc:
         raise RuntimeFileError(f"Failed to write {target}: {exc}") from exc

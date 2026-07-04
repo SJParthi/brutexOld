@@ -57,6 +57,7 @@ import logging
 import threading
 from typing import Final, TypedDict
 
+from brutex.notifications.sweep_alerts import escape_markdown_v2
 from brutex.notifications.telegram import (
     TelegramConfig,
     TelegramConfigError,
@@ -210,9 +211,13 @@ def reset_notifier_for_tests() -> None:
 def _format_message(event: PipelineEvent) -> str:
     """Render a Telegram-friendly message for *event*.
 
-    The result is plain text (NOT MarkdownV2 yet — the notifier does
-    its own MarkdownV2 escaping on the final message). Keeps to one
-    line per event to avoid Telegram's reply-block visual clutter.
+    The result is PLAIN text — NOT yet MarkdownV2-escaped. The notifier
+    does NOT escape: :class:`TelegramEvent` requires a pre-escaped
+    MarkdownV2 body and the transport sends it verbatim, so THIS source
+    module escapes via :func:`escape_markdown_v2` at the publish site in
+    :func:`make_pipeline_event_subscriber` (escape-once — never here AND
+    there, so a body is never double-escaped). Keeps to one line per
+    event to avoid Telegram's reply-block visual clutter.
     """
     phase_str = f" phase={event.phase.value}" if event.phase is not None else ""
     run_str = f" run={event.run_id}" if event.run_id else ""
@@ -303,10 +308,13 @@ def make_pipeline_event_subscriber(
         if target_kind is None:
             return  # Pipeline kind not mapped — silently drop
         try:
+            # TelegramEvent.message must be pre-escaped MarkdownV2 (the
+            # notifier transport sends it VERBATIM with parse_mode=
+            # MarkdownV2) — escape the plain-text body exactly once here.
             tg_event = TelegramEvent(
                 kind=target_kind,
                 severity=_KIND_TO_SEVERITY.get(event.kind, TelegramSeverity.INFO),
-                message=_format_message(event),
+                message=escape_markdown_v2(_format_message(event)),
                 dedupe_key=_dedupe_key(event),
             )
             active.publish(tg_event)
