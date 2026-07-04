@@ -32,11 +32,14 @@ from brutex.data.window_ledger import (
 )
 from brutex.data.window_ledger_store import (
     LedgerRow,
+    append_ledger_delta,
     begin_pull_ledger,
+    deltas_dir,
     end_pull_ledger,
     index_lake_spans,
     ledger_dir,
     ledger_path,
+    list_ledger_deltas,
     load_or_migrate_window_ledger,
     load_window_ledger,
     make_live_ledger_flush,
@@ -620,27 +623,31 @@ class TestLiveFlush:
         assert not ledger_path(tmp_path).exists()
 
     def test_throttles_writes(self, tmp_path: Path) -> None:
+        # DEC-LEDGER-DELTA-FLUSH-001: the mid-pull flush now APPENDS a delta
+        # Parquet (O(dirty)) instead of rewriting the whole base file — the
+        # throttle contract is unchanged, only the artifact moved.
         ledger = WindowLedger()
         ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
         clock = [100.0]
         flush = make_live_ledger_flush(
             ledger, tmp_path, min_interval_s=10.0, clock=lambda: clock[0]
         )
-        flush()  # first write
-        assert ledger_path(tmp_path).is_file()
-        ledger_path(tmp_path).unlink()
+        flush()  # first write → one delta appended, base untouched
+        assert len(list_ledger_deltas(tmp_path)) == 1
+        assert not ledger_path(tmp_path).exists()
+        ledger.record(_key(), raw_bars=2, error_type=None, bars_appended=2, now=_NOW)
         clock[0] = 105.0  # within the interval → skipped
         flush()
-        assert not ledger_path(tmp_path).exists()
-        clock[0] = 120.0  # past the interval → writes again
+        assert len(list_ledger_deltas(tmp_path)) == 1
+        clock[0] = 120.0  # past the interval → appends again
         flush()
-        assert ledger_path(tmp_path).is_file()
+        assert len(list_ledger_deltas(tmp_path)) == 2
 
     def test_default_clock_first_call_writes(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
         ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
         make_live_ledger_flush(ledger, tmp_path)()  # clock=None → monotonic branch
-        assert ledger_path(tmp_path).is_file()
+        assert len(list_ledger_deltas(tmp_path)) == 1
 
     def test_adaptive_throttle_scales_with_save_duration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -649,7 +656,9 @@ class TestLiveFlush:
         # scale a save measured ~3.94 s > the fixed 2 s interval, degenerating
         # the throttle to flush-per-tick (~13.7 h of pure Parquet rewriting on
         # a 12.5k-outcome drain). The interval must scale to
-        # _FLUSH_DUTY_FACTOR × the LAST save duration.
+        # _FLUSH_DUTY_FACTOR × the LAST flush duration — since
+        # DEC-LEDGER-DELTA-FLUSH-001 the flush IS append_ledger_delta, so the
+        # spy repoints there (the adaptive machinery is unchanged).
         from brutex.data import window_ledger_store as store_module
 
         ledger = WindowLedger()
@@ -657,14 +666,15 @@ class TestLiveFlush:
         clock = [100.0]
         saves: list[float] = []
 
-        def _slow_counting_save(_ledger: WindowLedger, _root: Path) -> None:
+        def _slow_counting_append(_ledger: WindowLedger, _root: Path) -> int:
             saves.append(clock[0])
-            clock[0] += 4.0  # the save itself takes 4 simulated seconds
+            clock[0] += 4.0  # the delta append itself takes 4 simulated seconds
+            return 1
 
-        monkeypatch.setattr(store_module, "save_window_ledger", _slow_counting_save)
+        monkeypatch.setattr(store_module, "append_ledger_delta", _slow_counting_append)
         flush = make_live_ledger_flush(ledger, tmp_path, min_interval_s=2.0, clock=lambda: clock[0])
 
-        flush()  # first write — measures the 4 s save
+        flush()  # first write — measures the 4 s append
         assert len(saves) == 1
         clock[0] += 3.0  # 3 s later: past the FIXED 2 s, but < 5 × 4 s = 20 s
         flush()
@@ -1492,3 +1502,197 @@ class TestLoadFailedFlag:
     def test_migrate_path_is_not_flagged(self, tmp_path: Path) -> None:
         # No parquet at all → the one-shot sidecar migration, not a reload failure.
         assert load_or_migrate_window_ledger(tmp_path).load_failed is False
+
+
+class TestLedgerDeltaFlush:
+    """DEC-LEDGER-DELTA-FLUSH-001 — the incremental dirty-row delta stream.
+
+    The throttled mid-pull flush appends ONLY the dirtied rows to
+    ``window_ledger/deltas/`` (O(dirty)); the load folds ``base + deltas``
+    newer-file-wins; the pull-end full save subsumes + deletes the deltas.
+    """
+
+    def test_append_is_a_noop_without_dirty_rows(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()  # nothing recorded — nothing dirty
+        assert append_ledger_delta(ledger, tmp_path) == 0
+        assert not deltas_dir(tmp_path).exists()
+        # A freshly-LOADED ledger is clean too (from_rows stamps nothing dirty).
+        seeded = WindowLedger()
+        seeded.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        save_window_ledger(seeded, tmp_path)
+        assert append_ledger_delta(load_window_ledger(tmp_path), tmp_path) == 0
+
+    def test_append_writes_only_the_dirtied_rows(self, tmp_path: Path) -> None:
+        import pyarrow.parquet as pq
+
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        # A second mutation dirties ONLY the new key — the second delta carries
+        # exactly that one row, not the whole ledger.
+        ledger.record(_key("BANKNIFTY"), raw_bars=2, error_type=None, bars_appended=2, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        first, second = list_ledger_deltas(tmp_path)
+        assert pq.read_table(first).column("security_id").to_pylist() == ["NIFTY"]
+        assert pq.read_table(second).column("security_id").to_pylist() == ["BANKNIFTY"]
+
+    def test_load_folds_base_plus_deltas_to_the_live_state(self, tmp_path: Path) -> None:
+        # Row-level fixed point (CLAUDE.md §2 Rule 7): base + deltas load to
+        # EXACTLY the in-memory ledger the writer held.
+        base = WindowLedger()
+        base.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        save_window_ledger(base, tmp_path)
+        live = load_window_ledger(tmp_path)
+        live.record(_key("BANKNIFTY"), raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        live.record(_key("NIFTY"), raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        assert append_ledger_delta(live, tmp_path) == 2
+        loaded = load_window_ledger(tmp_path)
+        assert loaded.to_rows() == live.to_rows()
+        assert loaded.load_failed is False
+
+    def test_delta_fold_never_resurrects_a_deliberate_demotion(self, tmp_path: Path) -> None:
+        """The named merge-semantics regression: newer-file-wins, NOT settle rank.
+
+        A delta carrying a DEMOTED row (``reopen_skipped``'s SKIPPED→FAILED,
+        the sketch's degraded-SUCCESS twin) must WIN over the base's
+        more-settled SKIPPED copy — the ``merge_ledger_rows`` preference rule
+        would resurrect it, which is exactly why the fold is a WAL replay.
+        """
+        seeded = WindowLedger()
+        seeded.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+        )
+        save_window_ledger(seeded, tmp_path)
+        live = load_window_ledger(tmp_path)
+        assert live.reopen_skipped() == 1
+        assert append_ledger_delta(live, tmp_path) == 1
+        folded = load_window_ledger(tmp_path)
+        assert folded.records()[0].status == FAILED  # demotion held
+        assert folded.is_skippable(_key()) is False  # the next pull re-fetches
+
+    def test_malformed_delta_is_skipped_loudly(self, tmp_path: Path) -> None:
+        base = WindowLedger()
+        base.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        save_window_ledger(base, tmp_path)
+        deltas_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        (deltas_dir(tmp_path) / "00000000000000000001-1.parquet").write_bytes(b"not parquet")
+        with capture_logs() as logs:
+            loaded = load_window_ledger(tmp_path)
+        assert any(log["event"] == "window_ledger.delta_load_failed" for log in logs)
+        assert [r.security_id for r in loaded.records()] == ["NIFTY"]  # base intact
+        assert loaded.load_failed is False  # only a failed BASE read sets the flag
+
+    def test_base_less_deltas_reconstruct_and_skip_legacy_migration(self, tmp_path: Path) -> None:
+        # A first pull's mid-flight delta checkpoint that crashed before its
+        # pull-end save: no base file, deltas only.
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=3, error_type=None, bars_appended=3, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        assert not ledger_path(tmp_path).is_file()
+        loaded = load_window_ledger(tmp_path)
+        assert [r.security_id for r in loaded.records()] == ["NIFTY"]
+        # load_or_migrate treats it as a LIVE ledger — never the frozen sidecar.
+        migrated = load_or_migrate_window_ledger(tmp_path)
+        assert [r.security_id for r in migrated.records()] == ["NIFTY"]
+
+    def test_corrupt_base_still_folds_readable_deltas(self, tmp_path: Path) -> None:
+        path = ledger_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"corrupt")
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=3, error_type=None, bars_appended=3, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        with capture_logs() as logs:
+            loaded = load_window_ledger(tmp_path)
+        assert any(log["event"] == "window_ledger.load_failed" for log in logs)
+        assert loaded.load_failed is True  # the base loss is still ANNOUNCED
+        assert [r.security_id for r in loaded.records()] == ["NIFTY"]  # partial rescue
+
+    def test_save_subsumes_and_deletes_the_deltas(self, tmp_path: Path) -> None:
+        writer = WindowLedger()
+        writer.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert append_ledger_delta(writer, tmp_path) == 1
+        writer.record(_key("BANKNIFTY"), raw_bars=2, error_type=None, bars_appended=2, now=_NOW)
+        end_pull_ledger(writer, tmp_path, dry_run=False)  # the pull-end full save
+        assert list_ledger_deltas(tmp_path) == []  # subsumed + pruned
+        assert not deltas_dir(tmp_path).exists()  # emptied dir tidied
+        loaded = load_window_ledger(tmp_path)
+        assert {r.security_id for r in loaded.records()} == {"NIFTY", "BANKNIFTY"}
+
+    def test_crash_orphaned_deltas_subsumed_by_the_next_pulls_save(self, tmp_path: Path) -> None:
+        crashed = WindowLedger()
+        crashed.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert append_ledger_delta(crashed, tmp_path) == 1
+        # The crashed pull never ran end_pull_ledger. The NEXT pull loads (fold
+        # includes the orphan) and its first full save subsumes + prunes it.
+        next_pull = begin_pull_ledger(tmp_path, dry_run=False)
+        assert next_pull is not None
+        assert next_pull.is_skippable(_key("NIFTY")) is True  # the orphan row was folded in
+        save_window_ledger(next_pull, tmp_path)
+        assert list_ledger_deltas(tmp_path) == []
+        assert [r.security_id for r in load_window_ledger(tmp_path).records()] == ["NIFTY"]
+
+    def test_lock_timeout_keeps_the_keys_dirty_and_retries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_PARTITION_LOCK_TIMEOUT_S", "0.05")
+        path = ledger_path(tmp_path)
+        lock_path = partition_lock_path(tmp_path, path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        try:
+            with capture_logs() as logs:
+                assert append_ledger_delta(ledger, tmp_path) == 0  # skipped, never raises
+            assert any(log["event"] == "window_ledger.delta_lock_timeout" for log in logs)
+            assert list_ledger_deltas(tmp_path) == []
+            assert len(ledger.dirty_rows()) == 1  # keys STAY dirty
+        finally:
+            os.close(fd)  # releases the flock
+        assert append_ledger_delta(ledger, tmp_path) == 1  # the retry lands
+        assert ledger.dirty_rows() == []  # cleared only after the durable write
+
+    def test_two_writers_appends_never_clobber(self, tmp_path: Path) -> None:
+        # Two processes (modelled as two ledgers) appending under the flock:
+        # both rows survive the fold.
+        a = WindowLedger()
+        a.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        b = WindowLedger()
+        b.record(_key("BANKNIFTY"), raw_bars=2, error_type=None, bars_appended=2, now=_NOW)
+        assert append_ledger_delta(a, tmp_path) == 1
+        assert append_ledger_delta(b, tmp_path) == 1
+        loaded = load_window_ledger(tmp_path)
+        assert {r.security_id for r in loaded.records()} == {"NIFTY", "BANKNIFTY"}
+
+    def test_full_save_clears_the_dirty_set(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert len(ledger.dirty_rows()) == 1
+        save_window_ledger(ledger, tmp_path)
+        assert ledger.dirty_rows() == []  # nothing left for the delta stream
+
+    def test_delta_prune_failure_is_loud_not_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        real_unlink = Path.unlink
+
+        def _denying_unlink(self: Path, *args: object, **kwargs: object) -> None:
+            if self.suffix == ".parquet" and self.parent.name == "deltas":
+                raise PermissionError(13, "denied", str(self))
+            real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(Path, "unlink", _denying_unlink)
+        with capture_logs() as logs:
+            save_window_ledger(ledger, tmp_path)  # never raises
+        assert any(log["event"] == "window_ledger.delta_prune_failed" for log in logs)
+        assert ledger_path(tmp_path).is_file()  # the full save itself landed

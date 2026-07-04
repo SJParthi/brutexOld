@@ -3,8 +3,12 @@ the sweeps-tree component of DEC-RESULTS-SURFACE-HONESTY-001).
 
 100% line + branch on the cross-process lake freshness token:
 
-* a lake with NO window ledger AND no sweeps tree yields the stable composite
-  ``"absent|absent"`` (and it is stable across repeat probes — no oscillation);
+* a lake with NO window ledger, NO pending ledger deltas AND no sweeps tree
+  yields the stable composite ``"absent+absent|absent"`` (and it is stable
+  across repeat probes — no oscillation);
+* the ledger component ALSO folds the ``window_ledger/deltas/`` directory stat
+  (DEC-LEDGER-DELTA-FLUSH-001) so a mid-pull DELTA append — which no longer
+  touches ``ledger.parquet`` — still moves the cross-process token;
 * a present ledger contributes the ``"<mtime_ns>:<size>"`` stat component,
   which CHANGES after a writer touches the ledger (the CLI-checkpoint signal);
 * the NEW sweeps component (:func:`sweeps_revision`) changes when a results
@@ -24,7 +28,7 @@ from pathlib import Path
 
 import pytest
 from brutex.dashboard.lake_revision import ABSENT_TOKEN, lake_revision, sweeps_revision
-from brutex.data.window_ledger_store import ledger_path
+from brutex.data.window_ledger_store import deltas_dir, ledger_path
 
 
 def _write_ledger_bytes(lake_root: Path, payload: bytes) -> Path:
@@ -59,17 +63,19 @@ class TestLedgerComponent:
     """The window-ledger half of the composite (the #1069 behaviour, preserved)."""
 
     def test_absent_everything_returns_stable_composite_sentinel(self, tmp_path: Path) -> None:
-        """No ledger + no sweeps tree → the stable ``absent|absent`` composite."""
-        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        """No ledger + no deltas + no sweeps tree → the stable all-absent composite."""
+        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
         # Stable: a second probe of the same absent lake returns the SAME token
         # (the sentinel never oscillates a generation).
-        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
 
     def test_present_ledger_component_matches_stat(self, tmp_path: Path) -> None:
         """A present ledger contributes the exact ``"<mtime_ns>:<size>"`` component."""
         target = _write_ledger_bytes(tmp_path, b"v1")
         st = os.stat(target)
-        assert lake_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}|{ABSENT_TOKEN}"
+        assert lake_revision(tmp_path) == (
+            f"{st.st_mtime_ns}:{st.st_size}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        )
 
     def test_token_changes_after_a_ledger_write(self, tmp_path: Path) -> None:
         """A writer touching the ledger (the CLI checkpoint) moves the token."""
@@ -81,7 +87,7 @@ class TestLedgerComponent:
         assert first is not None and second is not None
         assert second != first
         # And the absent→present transition also moved the token.
-        assert first != f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert first != f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
 
     def test_unreadable_ledger_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -229,3 +235,55 @@ class TestComposite:
         from brutex.dashboard.sweep_results_view import SWEEPS_DIRNAME
 
         assert probe_mod._SWEEPS_DIRNAME == SWEEPS_DIRNAME
+
+
+class TestLedgerDeltaComponent:
+    """The deltas-dir fold of the ledger component (DEC-LEDGER-DELTA-FLUSH-001)."""
+
+    def test_delta_append_moves_the_token_without_a_base_touch(self, tmp_path: Path) -> None:
+        """A mid-pull DELTA append (base untouched) must move the composite.
+
+        Regression for the freshness freeze: the flush no longer rewrites
+        ``ledger.parquet``, so a base-only stat would serve pre-pull caches for
+        the whole pull.
+        """
+        _write_ledger_bytes(tmp_path, b"v1")
+        first = lake_revision(tmp_path)
+        d = deltas_dir(tmp_path)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "00000000000000000001-1.parquet").write_bytes(b"delta")
+        _bump_dir_mtime(d, ns=3_000_000_000)  # deterministic distinct dir mtime
+        second = lake_revision(tmp_path)
+        assert first is not None and second is not None
+        assert second != first
+
+    def test_delta_prune_moves_the_token_again(self, tmp_path: Path) -> None:
+        """The pull-end subsume-prune (delta deleted) also moves the token."""
+        _write_ledger_bytes(tmp_path, b"v1")
+        d = deltas_dir(tmp_path)
+        d.mkdir(parents=True, exist_ok=True)
+        delta = d / "00000000000000000001-1.parquet"
+        delta.write_bytes(b"delta")
+        _bump_dir_mtime(d, ns=4_000_000_000)
+        with_delta = lake_revision(tmp_path)
+        delta.unlink()
+        _bump_dir_mtime(d, ns=5_000_000_000)
+        after_prune = lake_revision(tmp_path)
+        assert with_delta is not None and after_prune is not None
+        assert after_prune != with_delta
+
+    def test_unreadable_deltas_dir_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError on the deltas dir → ``None`` ("no signal")."""
+        _write_ledger_bytes(tmp_path, b"v1")
+        target = deltas_dir(tmp_path)
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(target):
+                raise PermissionError(13, "denied", str(target))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert lake_revision(tmp_path) is None

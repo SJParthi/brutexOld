@@ -86,30 +86,51 @@ ABSENT_TOKEN: Final[str] = "absent"  # noqa: S105  # nosec B105 — a freshness 
 _SWEEPS_DIRNAME: Final[str] = "sweeps"
 
 
-def _ledger_revision(lake_root: Path) -> str | None:
-    """The window-ledger component: ``"<mtime_ns>:<size>"`` of the ledger Parquet.
+def _stat_token(target: Path, *, event: str) -> str | None:
+    """One path's ``"<mtime_ns>:<size>"`` stat token — the shared O(1) probe core.
 
-    Resolved via the COMMON
-    :func:`brutex.data.window_ledger_store.ledger_path` — the ONE place that
-    path is defined (CLAUDE.md §11). Returns :data:`ABSENT_TOKEN` when the file
-    does not exist yet, ``None`` (logged) on any other :class:`OSError`.
+    Returns :data:`ABSENT_TOKEN` when the path does not exist yet, ``None``
+    (logged under *event*) on any other :class:`OSError`.
     """
-    from brutex.data.window_ledger_store import ledger_path
-
-    target = ledger_path(lake_root)
     try:
         st = os.stat(target)
     except FileNotFoundError:
         return ABSENT_TOKEN
     except OSError as exc:
         _LOG.warning(
-            "lake_revision.stat_failed",
-            ledger_path=str(target),
+            event,
+            path=str(target),
             error_type=type(exc).__name__,
             error=str(exc),
         )
         return None
     return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _ledger_revision(lake_root: Path) -> str | None:
+    """The window-ledger component: the base Parquet stat + the deltas-dir stat.
+
+    Resolved via the COMMON :func:`brutex.data.window_ledger_store.ledger_path` /
+    :func:`~brutex.data.window_ledger_store.deltas_dir` — the ONE place those
+    paths are defined (CLAUDE.md §11). Since DEC-LEDGER-DELTA-FLUSH-001 the
+    mid-pull flush no longer rewrites ``ledger.parquet`` — it APPENDS a delta
+    file under ``window_ledger/deltas/`` — so the base stat alone would FREEZE
+    the cross-process token for the whole pull. The deltas DIRECTORY's mtime
+    moves on every direct-child create/delete (each delta append + the pull-end
+    subsume-prune), so folding its stat keeps the token honest at the same O(1)
+    cost (two ``stat`` calls). Returns :data:`ABSENT_TOKEN`-composed tokens for
+    missing pieces, ``None`` (logged) when either stat fails with a
+    non-missing-file :class:`OSError`.
+    """
+    from brutex.data.window_ledger_store import deltas_dir, ledger_path
+
+    base = _stat_token(ledger_path(lake_root), event="lake_revision.stat_failed")
+    if base is None:
+        return None
+    deltas = _stat_token(deltas_dir(lake_root), event="lake_revision.deltas_stat_failed")
+    if deltas is None:
+        return None
+    return f"{base}+{deltas}"
 
 
 def sweeps_revision(lake_root: Path) -> str | None:

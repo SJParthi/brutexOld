@@ -816,17 +816,20 @@ def test_cmd_fetch_checkpoints_ledger_mid_pull(
         cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
     )
 
-    # Count durable-ledger saves so we can prove one fired MID-pull (from the
-    # on_window checkpoint) rather than only at end_pull_ledger. begin/plan/reconcile
-    # do not save (load + in-memory mutate), so the first save is the mid-pull flush.
+    # Count durable-ledger DELTA appends so we can prove one fired MID-pull (from
+    # the on_window checkpoint) rather than only at end_pull_ledger. Since
+    # DEC-LEDGER-DELTA-FLUSH-001 the throttled mid-pull flush appends a delta
+    # (O(dirty)) instead of rewriting the whole base — the checkpoint contract is
+    # unchanged, only the artifact moved. begin/plan/reconcile do not write (load
+    # + in-memory mutate), so the first append is the mid-pull flush.
     saves = {"n": 0}
-    real_save = window_ledger_store.save_window_ledger
+    real_append = window_ledger_store.append_ledger_delta
 
-    def counting_save(led: Any, root: Any, *a: Any, **kw: Any) -> Any:
+    def counting_append(led: Any, root: Any, *a: Any, **kw: Any) -> Any:
         saves["n"] += 1
-        return real_save(led, root, *a, **kw)
+        return real_append(led, root, *a, **kw)
 
-    monkeypatch.setattr(window_ledger_store, "save_window_ledger", counting_save)
+    monkeypatch.setattr(window_ledger_store, "append_ledger_delta", counting_append)
 
     run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
     result = _FakeIngestResult(
@@ -867,7 +870,8 @@ def test_cmd_fetch_checkpoints_ledger_mid_pull(
     # The checkpoint hook was threaded into the ingest engine…
     assert callable(seen["on_window"])
     # …and firing it once persisted the durable ledger DURING the pull (before the
-    # end_pull_ledger save) — exactly one mid-pull flush observed inside the ingest.
+    # end_pull_ledger save) — exactly one mid-pull delta append observed inside
+    # the ingest (DEC-LEDGER-DELTA-FLUSH-001).
     assert saves_during_ingest == [1]
     assert window_ledger_store.load_window_ledger(tmp_path).records()
 

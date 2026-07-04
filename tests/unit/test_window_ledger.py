@@ -1350,3 +1350,65 @@ class TestRescueLedgerSurface:
         ledger.record(planned, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
         assert ledger.prune_superseded(_plan_index(planned)) == 0
         assert ledger.pruned_keys() == frozenset()
+
+
+class TestDirtyTracking:
+    """DEC-LEDGER-DELTA-FLUSH-001 — the O(1)-per-mutation dirty-key stamps."""
+
+    @staticmethod
+    def _wk(key: WindowKey) -> tuple[str, str, str, str, str]:
+        return (
+            key.market,
+            key.security_id,
+            key.interval,
+            key.start.isoformat(),
+            key.end.isoformat(),
+        )
+
+    def test_fresh_and_restored_ledgers_start_clean(self) -> None:
+        assert WindowLedger().dirty_rows() == []
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.dirty_rows() == []  # a load stamps nothing dirty
+
+    def test_every_row_writing_mutator_stamps(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key("A"), now=_NOW)
+        ledger.seed_lake_success(_key("B"), bars=5, now=_NOW)
+        ledger.record(_key("C"), raw_bars=2, error_type=None, bars_appended=2, now=_NOW)
+        ledger.settle_known_gap(_key("D"), now=_NOW, reason="DH-905")
+        assert {row[1] for row in ledger.dirty_rows()} == {"A", "B", "C", "D"}
+        # An idempotent re-plan of an existing key adds nothing new.
+        ledger.clear_dirty(ledger.dirty_keys())
+        ledger.plan(_key("A"), now=_LATER)
+        assert ledger.dirty_rows() == []
+
+    def test_reopen_demotion_stamps_dirty(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, settle_empty=True
+        )
+        ledger.clear_dirty(ledger.dirty_keys())
+        assert ledger.reopen_skipped() == 1
+        rows = ledger.dirty_rows()
+        assert len(rows) == 1 and rows[0][5] == FAILED and rows[0][8] == REOPENED_MARKER
+
+    def test_dirty_rows_sorted_and_skip_deleted_keys(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("ZEE"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        ledger.record(_key("ACME"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert [row[1] for row in ledger.dirty_rows()] == ["ACME", "ZEE"]  # key order
+        # A dirty key whose row was pruned meanwhile is silently skipped (a
+        # delta cannot express a deletion — the pull-end save owns prunes).
+        with ledger._lock:  # test-only surgical delete  # noqa: SLF001
+            del ledger._by_window[self._wk(_key("ACME"))]  # noqa: SLF001
+        assert [row[1] for row in ledger.dirty_rows()] == ["ZEE"]
+
+    def test_clear_dirty_clears_exactly_the_given_keys(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("A"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        ledger.record(_key("B"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        ledger.clear_dirty([self._wk(_key("A"))])
+        assert [row[1] for row in ledger.dirty_rows()] == ["B"]
+        assert ledger.dirty_keys() == frozenset({self._wk(_key("B"))})

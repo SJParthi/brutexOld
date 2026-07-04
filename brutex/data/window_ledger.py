@@ -290,6 +290,19 @@ class WindowLedger:
     _reopened: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
+    #: Keys whose row CHANGED since the last delta flush (DEC-LEDGER-DELTA-FLUSH-001).
+    #: Every row-writing mutator (:meth:`plan` insert, :meth:`seed_lake_success`,
+    #: :meth:`record`, :meth:`settle_known_gap`, the :meth:`reopen_skipped` /
+    #: :meth:`audit_reopen_skipped` demotions) stamps its key here — O(1) per stamp —
+    #: so the throttled mid-pull flush can append ONLY the dirtied rows
+    #: (:func:`~brutex.data.window_ledger_store.append_ledger_delta`) instead of
+    #: rewriting the whole O(N) Parquet. :meth:`prune_superseded` deliberately does
+    #: NOT stamp (a delta row cannot express a DELETION — the pull-end full save,
+    #: which carries the ``pruned_keys`` tombstones, is the prune authority). Never
+    #: serialised; cleared per flushed batch via :meth:`clear_dirty`.
+    _dirty: set[tuple[str, str, str, str, str]] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -330,6 +343,7 @@ class WindowLedger:
                 empty_streak=0,
                 in_pull_fetches=0,  # never fetched — a pure PLANNED row
             )
+            self._dirty.add(wk)
 
     def seed_lake_success(self, key: WindowKey, *, bars: int, now: datetime) -> bool:
         """Seed *key* as ``SUCCESS`` ONLY if it is ABSENT — the lake cold-start — **O(1)**, atomic.
@@ -362,6 +376,7 @@ class WindowLedger:
                 empty_streak=0,
                 in_pull_fetches=1,  # the lake proves one successful fetch's data
             )
+            self._dirty.add(wk)
             return True
 
     def is_skippable(self, key: WindowKey) -> bool:
@@ -616,6 +631,7 @@ class WindowLedger:
                 empty_streak=empty_streak,
                 in_pull_fetches=in_pull_fetches,
             )
+            self._dirty.add(wk)
             return status
 
     def settle_known_gap(self, key: WindowKey, *, now: datetime, reason: str | None = None) -> str:
@@ -655,6 +671,7 @@ class WindowLedger:
                 empty_streak=empty_streak,
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
             )
+            self._dirty.add(wk)
             return SKIPPED
 
     @property
@@ -739,6 +756,7 @@ class WindowLedger:
                     in_pull_fetches=row.in_pull_fetches,
                 )
             self._reopened.update(doomed)
+            self._dirty.update(doomed)
         return len(doomed)
 
     def reopened_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
@@ -897,6 +915,70 @@ class WindowLedger:
             current=current,
         )
 
+    @staticmethod
+    def _record_row(
+        r: WindowLedgerRecord,
+    ) -> tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]:
+        """One record → the canonical serialised 13-tuple (ONE shape — CLAUDE.md §11)."""
+        return (
+            r.market,
+            r.security_id,
+            r.interval,
+            r.window_start,
+            r.window_end,
+            r.status,
+            r.bars,
+            r.attempts,
+            r.last_error,
+            r.first_seen_at,
+            r.last_attempt_at,
+            r.empty_streak,
+            r.in_pull_fetches,
+        )
+
+    def dirty_rows(
+        self,
+    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]]:
+        """Serialise ONLY the rows dirtied since the last :meth:`clear_dirty` — sorted.
+
+        DEC-LEDGER-DELTA-FLUSH-001: the delta append's row source. Emits the SAME
+        13-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
+        restricted to keys stamped by a row-writing mutator since the last cleared
+        batch. A dirty key whose row was meanwhile DELETED (a prune) is silently
+        skipped — a delta cannot express a deletion (the pull-end full save owns
+        prunes). O(dirty log dirty) under the lock; the per-mutation stamp stays O(1).
+        """
+        with self._lock:
+            keys = sorted(k for k in self._dirty if k in self._by_window)
+            return [self._record_row(self._by_window[k]) for k in keys]
+
+    def dirty_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
+        """The keys currently stamped dirty — thread-safe snapshot, O(dirty).
+
+        DEC-LEDGER-DELTA-FLUSH-001: consumed by the full
+        :func:`~brutex.data.window_ledger_store.save_window_ledger` to clear the
+        WHOLE dirty set after a successful full persist (which subsumes every
+        pending delta — nothing is left for the incremental stream to carry).
+        """
+        with self._lock:
+            return frozenset(self._dirty)
+
+    def clear_dirty(self, keys: Iterable[tuple[str, str, str, str, str]]) -> None:
+        """Un-stamp *keys* after their rows were durably delta-appended — O(cleared).
+
+        Called by :func:`~brutex.data.window_ledger_store.append_ledger_delta` ONLY
+        after a successful atomic delta write (a lock-timeout / write failure keeps
+        the keys dirty so the next throttled flush retries them). Honest envelope
+        (Golden Rule #10): a row RE-dirtied between the flush's :meth:`dirty_rows`
+        snapshot and this clear loses its newer state from the delta stream until
+        its NEXT mutation or the pull-end full save — the same bounded-staleness
+        window the flush throttle itself already accepts; the pull-end
+        :func:`~brutex.data.window_ledger_store.save_window_ledger` is always the
+        full authority.
+        """
+        with self._lock:
+            self._dirty.difference_update(keys)
+
     def records(self) -> list[WindowLedgerRecord]:
         """A deterministic, sorted snapshot of every recorded window (atomic)."""
         with self._lock:
@@ -935,24 +1017,7 @@ class WindowLedger:
         appended after ``empty_streak`` exactly as that column was, so a legacy 12-tuple
         Parquet (written before it existed) still loads (the store fills it per-row).
         """
-        return [
-            (
-                r.market,
-                r.security_id,
-                r.interval,
-                r.window_start,
-                r.window_end,
-                r.status,
-                r.bars,
-                r.attempts,
-                r.last_error,
-                r.first_seen_at,
-                r.last_attempt_at,
-                r.empty_streak,
-                r.in_pull_fetches,
-            )
-            for r in self.records()
-        ]
+        return [self._record_row(r) for r in self.records()]
 
     @classmethod
     def from_rows(
