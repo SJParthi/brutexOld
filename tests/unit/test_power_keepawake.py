@@ -85,9 +85,13 @@ def test_darwin_spawns_caffeinate_watching_our_pid_and_releases() -> None:
 def test_darwin_release_runs_even_when_the_body_raises() -> None:
     """A pull crash still releases the assertion (finally), and propagates."""
     proc = _FakeProc()
+
+    def _crash() -> None:
+        raise RuntimeError("pull crashed")
+
     with pytest.raises(RuntimeError, match="pull crashed"):  # noqa: SIM117 — the guard must wrap the raise
         with keep_awake("crash", spawn=lambda _argv: proc, platform="darwin"):
-            raise RuntimeError("pull crashed")
+            _crash()
     assert "terminate" in proc.calls
 
 

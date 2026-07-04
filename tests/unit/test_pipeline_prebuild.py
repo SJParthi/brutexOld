@@ -372,8 +372,6 @@ def test_prebuild_probes_lake_root_and_carries_fs_note(
 ) -> None:
     """A given ``lake_root`` is allocation-probed ONCE; a COARSE note rides the
     outcome + the ``pipeline.prebuild.started`` log (DEC-LAKE-FS-PROBE-001)."""
-    import brutex.dashboard.pipeline_prebuild as prebuild_module
-
     probed: list[Path] = []
 
     def _fake_probe(root: Path) -> AllocationProbe:
@@ -382,7 +380,9 @@ def test_prebuild_probes_lake_root_and_carries_fs_note(
             allocation_unit_bytes=131072, coarse=True, note="COARSE filesystem allocation (fake)"
         )
 
-    monkeypatch.setattr(prebuild_module, "probe_allocation_granularity", _fake_probe)
+    monkeypatch.setattr(
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity", _fake_probe
+    )
     with capture_logs() as logs:
         outcome = run_pipeline_prebuild(
             instruments=[_spot("NIFTY")],
@@ -400,11 +400,8 @@ def test_prebuild_fine_allocation_reads_ok_in_started_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A fine-grained probe (note None) keeps ``fs_allocation="ok"`` + fs_note None."""
-    import brutex.dashboard.pipeline_prebuild as prebuild_module
-
     monkeypatch.setattr(
-        prebuild_module,
-        "probe_allocation_granularity",
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity",
         lambda _root: AllocationProbe(allocation_unit_bytes=4096, coarse=False, note=None),
     )
     with capture_logs() as logs:
@@ -421,12 +418,13 @@ def test_prebuild_fine_allocation_reads_ok_in_started_log(
 
 def test_prebuild_without_lake_root_never_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     """DEFAULT-PRESERVATION: ``lake_root=None`` skips the probe entirely."""
-    import brutex.dashboard.pipeline_prebuild as prebuild_module
 
     def _must_not_probe(_root: Path) -> AllocationProbe:  # pragma: no cover — must NOT be called
         raise AssertionError("no lake_root ⇒ no probe")
 
-    monkeypatch.setattr(prebuild_module, "probe_allocation_granularity", _must_not_probe)
+    monkeypatch.setattr(
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity", _must_not_probe
+    )
     outcome = run_pipeline_prebuild(
         instruments=[_spot("NIFTY")], cascade=_cascade(), materialize=_FakeMaterializer()
     )
@@ -437,15 +435,15 @@ def test_guarded_prebuild_threads_lake_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The guarded route seam passes ``lake_root`` through to the composer."""
-    import brutex.dashboard.pipeline_prebuild as prebuild_module
-
     probed: list[Path] = []
 
     def _fake_probe(root: Path) -> AllocationProbe:
         probed.append(root)
         return AllocationProbe(allocation_unit_bytes=131072, coarse=True, note="coarse (fake)")
 
-    monkeypatch.setattr(prebuild_module, "probe_allocation_granularity", _fake_probe)
+    monkeypatch.setattr(
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity", _fake_probe
+    )
     outcome = run_pipeline_prebuild_guarded(
         instruments=[_spot("NIFTY")],
         cascade_or_error=_cascade,

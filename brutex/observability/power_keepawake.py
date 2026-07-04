@@ -66,19 +66,17 @@ class KeepAwakeProcess(Protocol):
     @property
     def pid(self) -> int:
         """The spawned process id (logged, never signalled directly)."""
-        ...  # pragma: no cover — Protocol declaration
+        raise NotImplementedError
 
     def terminate(self) -> None:
         """Send SIGTERM."""
-        ...  # pragma: no cover — Protocol declaration
 
     def kill(self) -> None:
         """Send SIGKILL."""
-        ...  # pragma: no cover — Protocol declaration
 
     def wait(self, timeout: float | None = None) -> int:
         """Wait for exit (bounded); raises ``subprocess.TimeoutExpired`` on timeout."""
-        ...  # pragma: no cover — Protocol declaration
+        raise NotImplementedError
 
 
 def _default_spawn(argv: list[str]) -> KeepAwakeProcess:

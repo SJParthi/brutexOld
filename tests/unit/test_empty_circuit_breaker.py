@@ -930,7 +930,7 @@ class TestBreakerCanary:
             fraction_min_series=1,
             health_probe=_slow_probe,
         )
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def _worker(i: int) -> None:
             started.wait(timeout=10)
@@ -938,7 +938,7 @@ class TestBreakerCanary:
                 breaker.observe_empty(f"S{i}:1minute", symbol=f"S{i}", window_end=_END)
             except MassEmptySettleHalt:  # pragma: no cover — healthy canary, no halt expected
                 pass
-            except BaseException as exc:
+            except Exception as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=_worker, args=(i,)) for i in range(16)]
