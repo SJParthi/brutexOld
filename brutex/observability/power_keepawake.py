@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 import structlog
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator
 
 _LOG = structlog.get_logger(__name__)
 
@@ -124,7 +124,7 @@ def keep_awake(
     *,
     spawn: Callable[[list[str]], KeepAwakeProcess] | None = None,
     platform: str | None = None,
-) -> Iterator[None]:
+) -> Generator[None]:
     """Hold the macOS host awake for the enclosed block — best-effort, never raises.
 
     Parameters
