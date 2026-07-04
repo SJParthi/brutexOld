@@ -251,12 +251,25 @@ class TestExpirySeriesCandidates:
         assert got == ()
 
     def test_on_date_before_calendar_history_is_unresolvable(self) -> None:
-        # The expiry calendar's recorded history starts 2021-01-01; a 2020
-        # signal must resolve to () (honest reject), never raise or guess.
+        # The expiry calendar's recorded history starts 2020-01-01
+        # (DEC-EXPIRY-REGIME-2020-001, MIGRATION.md #1178(c) — extended back
+        # from the 2021-01-01 floor this test originally probed); a
+        # pre-2020 signal must resolve to () (honest reject), never raise
+        # or guess.
+        got = _expiry_series_candidates(
+            OptionsUnderlying.NIFTY, date(2019, 6, 6), on_date=date(2019, 6, 3)
+        )
+        assert got == ()
+
+    def test_2020_date_resolves_under_extended_calendar_floor(self) -> None:
+        # DEC-EXPIRY-REGIME-2020-001 (MIGRATION.md #1178(c)) extended the
+        # expiry-regime tables to the 2020-01-01 pull floor, so a 2020
+        # signal now RESOLVES (2020-06-04 is a Thursday — the near weekly
+        # as seen from 2020-06-01) instead of the old pre-history reject.
         got = _expiry_series_candidates(
             OptionsUnderlying.NIFTY, date(2020, 6, 4), on_date=date(2020, 6, 1)
         )
-        assert got == ()
+        assert got == ((_EXPIRY_FLAG_WEEKLY, 0),)
 
 
 # ────────────────────────────────────────────────────────────────────────
