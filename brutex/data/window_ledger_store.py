@@ -49,11 +49,13 @@ one-shot load (run start) + save (run end) are O(N) over the recorded windows.
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -84,6 +86,38 @@ LEDGER_FILENAME: str = "ledger.parquet"
 #: small enough that /coverage/windows feels live, large enough that a
 #: multi-thousand-row Parquet is not rewritten on every completed pair.
 LIVE_FLUSH_MIN_INTERVAL_S: float = 2.0
+
+#: Default slow-save WARNING threshold (seconds) for :func:`save_window_ledger`
+#: (DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001). A universe-scale ledger save was measured at
+#: ~3.94 s (DEC-OPTION-WINDOW-PLAN-001, hostile C2), so 10 s is comfortably above the
+#: healthy envelope — only a genuinely degraded volume / pathological ledger trips it.
+#: Operator-tunable via :data:`LEDGER_SAVE_SLOW_WARN_ENV`.
+DEFAULT_LEDGER_SAVE_SLOW_WARN_S: Final[float] = 10.0
+
+#: Environment override for the slow-save WARNING threshold (operator escape hatch).
+LEDGER_SAVE_SLOW_WARN_ENV: Final[str] = "BRUTEX_LEDGER_SAVE_SLOW_WARN_S"
+
+
+def resolve_ledger_save_slow_warn_seconds() -> float:
+    """Resolve the slow-save WARN threshold: env override, else the audited default.
+
+    Reads :data:`LEDGER_SAVE_SLOW_WARN_ENV` (``BRUTEX_LEDGER_SAVE_SLOW_WARN_S``); falls back
+    to :data:`DEFAULT_LEDGER_SAVE_SLOW_WARN_S` when unset, blank, non-numeric, or
+    non-positive — a bad value can never crash a save or silently disable the telemetry
+    (fail-safe to the audited default, mirroring
+    :func:`brutex.dashboard.pull_stall.resolve_stall_timeout_seconds`). O(1).
+    """
+    raw = os.environ.get(LEDGER_SAVE_SLOW_WARN_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+    if value <= 0.0:
+        return DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+    return value
+
 
 #: The CORE columns every ledger Parquet MUST carry — their absence is a
 #: wrong-shape file that degrades to an empty ledger (a re-pull, never a crash).
@@ -349,7 +383,9 @@ def merge_ledger_rows(
     return sorted(merged.values(), key=_row_key)
 
 
-def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
+def save_window_ledger(
+    ledger: WindowLedger, lake_root: Path, *, clock: Callable[[], float] | None = None
+) -> None:
     """Persist *ledger* — cross-process-locked READ-MERGE-WRITE, then atomic replace.
 
     DEC-WINDOW-LEDGER-RESCUE-001 (supersedes the unlocked whole-file replace): the
@@ -376,10 +412,28 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     data. A disk-full/OOM still maps to the pull-wide
     :class:`~brutex.data.errors.LakeWriteHalt` (see below), and any other error
     propagates unchanged.
+
+    **Save telemetry (DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001, observe-only):** every
+    COMPLETED save — this is the ONE common chokepoint every production save goes
+    through — emits ONE ``window_ledger.save_completed`` INFO carrying the merged row
+    count + the whole-body ``duration_ms`` (lock acquire + disk read + merge +
+    serialize + atomic replace), and additionally ONE ``window_ledger.save_slow``
+    WARNING when the duration EXCEEDS the env-tunable
+    :func:`resolve_ledger_save_slow_warn_seconds` threshold (default
+    :data:`DEFAULT_LEDGER_SAVE_SLOW_WARN_S` = 10 s). The single ``save_completed``
+    event name is deliberate — a coordinated sibling session instrumenting this same
+    save path (torn-read forensics) converges on ONE event, never two. A lock-timeout
+    SKIP emits its existing warning only (no ``save_completed`` — nothing completed);
+    a raising save emits nothing new (the error propagates unchanged). *clock* is an
+    injectable monotonic source for deterministic tests (``None`` → wall
+    :func:`time.monotonic`); logging is the ONLY delta — the save's control flow,
+    stored rows and error contracts are byte-identical.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    tick = clock if clock is not None else time.monotonic
+    started = tick()
     directory = ledger_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
     path = ledger_path(lake_root)
@@ -437,6 +491,22 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
             # place. The fsync (durability for the durable ledger) + temp cleanup on any
             # error are unchanged.
             atomic_write_via(path, _write_parquet)
+        # Whole-body duration (lock + read + merge + serialize + replace) — emitted only
+        # after the atomic replace COMPLETED, so a raising save never fabricates a line.
+        duration_s = max(tick() - started, 0.0)
+        _LOG.info(
+            "window_ledger.save_completed",
+            rows=len(rows),
+            duration_ms=duration_s * 1000.0,
+        )
+        threshold_s = resolve_ledger_save_slow_warn_seconds()
+        if duration_s > threshold_s:
+            _LOG.warning(
+                "window_ledger.save_slow",
+                rows=len(rows),
+                duration_ms=duration_s * 1000.0,
+                threshold_s=threshold_s,
+            )
     except PartitionLockTimeout as exc:
         # A peer held the ledger lock past the bounded deadline (a wedged writer).
         # SKIP this save loudly — never crash the pull mid-flush: the in-memory
@@ -956,6 +1026,13 @@ def make_live_ledger_flush(
     ledger keeps the snappy fixed cadence; a pre-planned universe-scale ledger
     (~841k rows, ~4 s/save measured) self-paces so the flush can never dominate
     wall time or hold the ledger lock back-to-back.
+
+    **Pacing telemetry (DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001, observe-only):** the
+    measured save duration was already driving the adaptive throttle but was never
+    logged; each flush that actually WRITES now emits ONE
+    ``window_ledger.flush_paced`` DEBUG carrying the measured ``duration_ms`` plus the
+    ``next_interval_s`` the throttle derives from it — logging is the ONLY delta (same
+    save calls, same throttle decisions, same measured values).
     """
     from time import monotonic
 
@@ -974,6 +1051,14 @@ def make_live_ledger_flush(
         last_write[0] = now
         save_window_ledger(ledger, lake_root)
         last_duration[0] = max(tick() - now, 0.0)
+        # Flush pacing (observe-only): the EXACT duration the throttle just measured +
+        # the adaptive interval it implies for the NEXT flush — visible at DEBUG so a
+        # self-paced (slow-save) flush cadence is diagnosable from the log alone.
+        _LOG.debug(
+            "window_ledger.flush_paced",
+            duration_ms=last_duration[0] * 1000.0,
+            next_interval_s=max(min_interval_s, _FLUSH_DUTY_FACTOR * last_duration[0]),
+        )
 
     return _flush
 
@@ -1026,8 +1111,10 @@ def end_pull_ledger(ledger: WindowLedger | None, lake_root: Path, *, dry_run: bo
 
 
 __all__ = [
+    "DEFAULT_LEDGER_SAVE_SLOW_WARN_S",
     "LEDGER_DIRNAME",
     "LEDGER_FILENAME",
+    "LEDGER_SAVE_SLOW_WARN_ENV",
     "LIVE_FLUSH_MIN_INTERVAL_S",
     "LedgerRow",
     "begin_pull_ledger",
@@ -1042,6 +1129,7 @@ __all__ = [
     "plan_windows",
     "reconcile_ledger_windows",
     "reconcile_ledger_with_lake",
+    "resolve_ledger_save_slow_warn_seconds",
     "save_window_ledger",
     "seed_enclosed_windows",
 ]
