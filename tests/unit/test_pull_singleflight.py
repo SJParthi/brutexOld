@@ -139,7 +139,12 @@ def test_lockfile_open_enospc_maps_to_lake_write_halt(
 
 
 def test_account_lock_path_is_digest_only(tmp_path: Path) -> None:
-    """The filename carries a 16-hex-char sha256 digest — NEVER the api_key itself."""
+    """The filename carries a 16-hex-char PBKDF2 fingerprint — NEVER the api_key itself.
+
+    PBKDF2-HMAC-SHA256 over the fixed app salt instead of a bare sha256, so the
+    visible filename cannot be used as a cheap offline-guessing oracle for the
+    credential it fingerprints (CodeQL py/weak-sensitive-data-hashing).
+    """
     api_key = "super-secret-api-key"
     path = account_singleflight_lock_path(api_key, lock_dir=tmp_path)
     assert path.parent == tmp_path
@@ -150,7 +155,9 @@ def test_account_lock_path_is_digest_only(tmp_path: Path) -> None:
     assert len(digest) == 16
     assert all(c in "0123456789abcdef" for c in digest)
     assert api_key not in str(path)  # no secret in a path or a log line
-    expected = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+    expected = hashlib.pbkdf2_hmac(
+        "sha256", api_key.encode("utf-8"), b"brutex-pull-account-lock", 200_000
+    ).hex()[:16]
     assert digest == expected
     # Computed only — never created by the path helper.
     assert not path.exists()

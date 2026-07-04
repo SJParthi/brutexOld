@@ -53,9 +53,11 @@ share ONE lake root — the SAME Groww account pulled into TWO distinct
 saw the SUM of both rates (~16 r/s at the 8 r/s ceiling; the residual flagged by
 DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996). That residual is now CLOSED for the
 single-host case by :func:`account_pull_singleflight_lock`
-(DEC-ACCOUNT-KEY-SINGLEFLIGHT-001, MIGRATION.md #1285): a SECOND flock keyed by the
-Groww ``api_key`` digest under ``~/.brutex/locks/pull_account<sha256[:16]>.flock``,
-taken FIRST (before the lake-root lock) at both production pull sites. HONEST envelope:
+(DEC-ACCOUNT-KEY-SINGLEFLIGHT-001, MIGRATION.md #1285): a SECOND flock keyed by a
+Groww ``api_key`` fingerprint under ``~/.brutex/locks/pull_account<pbkdf2[:16]>.flock``
+(a PBKDF2-HMAC-SHA256 derivation with a fixed app salt — deliberately expensive so the
+filename never invites offline guessing of the credential it fingerprints), taken FIRST
+(before the lake-root lock) at both production pull sites. HONEST envelope:
 the key is the AWS-resolved ``api_key`` (DEC-AWS-ONLY-CREDS-001 — the retired env-var
 path is NEVER read); the lock dir is PER-USER (``Path.home()``), so two OS users pulling
 one account, or two HOSTS, are still NOT covered (a system-wide ``/tmp``-style dir has
@@ -100,14 +102,28 @@ _LOCK_SUBDIR: Final[str] = ".locks"
 PULL_SINGLEFLIGHT_LOCK_NAME: Final[str] = "pull_singleflight.lock"
 
 #: Filename prefix for the ACCOUNT-keyed single-flight lock (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001).
-#: The full name is ``pull_account<sha256(api_key)[:16]>.flock`` — a truncated hex digest
-#: ONLY, never the api_key itself (no secret in a path or a log line).
+#: The full name is ``pull_account<pbkdf2_hmac_sha256(api_key)[:16]>.flock`` — a truncated
+#: hex KDF fingerprint ONLY, never the api_key itself (no secret in a path or a log line).
 ACCOUNT_LOCK_FILE_PREFIX: Final[str] = "pull_account"
 
-#: Hex chars of the sha256(api_key) digest kept in the account lock filename. 16 hex
+#: Hex chars of the PBKDF2 fingerprint kept in the account lock filename. 16 hex
 #: chars = 64 bits — collision-safe for the handful of accounts one host ever runs,
 #: short enough for a readable filename.
 _ACCOUNT_DIGEST_LEN: Final[int] = 16
+
+#: Fixed application salt for the account-lock PBKDF2 derivation. The fingerprint must
+#: be DETERMINISTIC per api_key (two processes must independently derive the SAME lock
+#: filename — that is the whole point), so a random per-call salt is impossible; a
+#: fixed app-scoped salt still domain-separates the fingerprint from any other use of
+#: the key.
+_ACCOUNT_LOCK_KDF_SALT: Final[bytes] = b"brutex-pull-account-lock"
+
+#: PBKDF2 iteration count for the account-lock fingerprint. High enough that the
+#: filename cannot be used as a cheap offline-guessing oracle for the api_key
+#: (CodeQL py/weak-sensitive-data-hashing — a bare sha256 of credential material is
+#: guessable at GPU speed); low enough that the one derivation per pull start costs
+#: ~100 ms on commodity hardware — negligible against a multi-hour pull.
+_ACCOUNT_LOCK_KDF_ITERATIONS: Final[int] = 200_000
 
 
 class PullAlreadyRunningError(BruteXError):
@@ -202,13 +218,25 @@ def default_account_lock_dir() -> Path:
 def account_singleflight_lock_path(api_key: str, *, lock_dir: Path | None = None) -> Path:
     """Return the account-keyed single-flight lock path for *api_key*.
 
-    ``<lock_dir>/pull_account<sha256(api_key)[:16]>.flock`` — the filename carries ONLY
-    a truncated hex digest of the api_key, NEVER the key itself, so no secret ever lands
-    in a path, an ``ls``, or a log line (the digest is stable per key and distinct
-    across keys). *lock_dir* defaults to :func:`default_account_lock_dir`; tests inject
-    a tmp dir so CI never touches the real home. O(1).
+    ``<lock_dir>/pull_account<pbkdf2(api_key)[:16]>.flock`` — the filename carries ONLY
+    a truncated hex PBKDF2-HMAC-SHA256 fingerprint of the api_key, NEVER the key itself,
+    so no secret ever lands in a path, an ``ls``, or a log line (the fingerprint is
+    stable per key and distinct across keys). PBKDF2 (``_ACCOUNT_LOCK_KDF_ITERATIONS``
+    iterations over the fixed ``_ACCOUNT_LOCK_KDF_SALT``) instead of a bare sha256 so
+    the visible filename is computationally expensive to brute-force back to the
+    credential (CodeQL py/weak-sensitive-data-hashing). HONEST cost: the derivation is
+    DELIBERATELY slow — ~100 ms once per pull start (never per fetch), negligible
+    against a multi-hour pull. *lock_dir* defaults to
+    :func:`default_account_lock_dir`; tests inject a tmp dir so CI never touches the
+    real home. O(1) calls per pull.
     """
-    digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:_ACCOUNT_DIGEST_LEN]
+    fingerprint = hashlib.pbkdf2_hmac(
+        "sha256",
+        api_key.encode("utf-8"),
+        _ACCOUNT_LOCK_KDF_SALT,
+        _ACCOUNT_LOCK_KDF_ITERATIONS,
+    )
+    digest = fingerprint.hex()[:_ACCOUNT_DIGEST_LEN]
     base = default_account_lock_dir() if lock_dir is None else lock_dir
     return base / f"{ACCOUNT_LOCK_FILE_PREFIX}{digest}.flock"
 
@@ -234,7 +262,8 @@ def account_pull_singleflight_lock(
     api_key
         The AWS-resolved Groww api_key (:func:`brutex.config.credentials.\
 resolve_groww_aws_credentials` — the SOLE credential source, DEC-AWS-ONLY-CREDS-001).
-        Only its sha256 digest is used; the key never reaches the filesystem or a log.
+        Only its PBKDF2 fingerprint is used; the key never reaches the filesystem or a
+        log.
     lock_dir
         Override of the lock directory (tests — never write the real ``$HOME`` in CI).
 

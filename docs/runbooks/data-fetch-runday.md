@@ -199,8 +199,10 @@ write no real data and pace no real account requests).
 > **✅ CLOSED for the single-host case (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001, MIGRATION
 > #1285) — an ACCOUNT-keyed second lock is now taken FIRST.** Both pull sites (the
 > dashboard `BackgroundPullJob` and the CLI `brutex fetch`) additionally take
-> `~/.brutex/locks/pull_account<sha256(api_key)[:16]>.flock`, keyed off the AWS-resolved
-> api_key digest (never the key itself) — so the SAME account pointed at **two different
+> `~/.brutex/locks/pull_account<pbkdf2(api_key)[:16]>.flock`, keyed off a PBKDF2-HMAC-SHA256
+> fingerprint of the AWS-resolved api_key (never the key itself; deliberately expensive —
+> ~100 ms once per pull start — so the filename never invites offline guessing of the
+> credential) — so the SAME account pointed at **two different
 > `BRUTEX_LAKE_ROOT`s** now contends on ONE file and the second pull is refused.
 > **Honest envelope:** the lock dir is per-OS-user and an `flock` is per-host — two OS
 > users or two HOSTS pulling one account are still NOT covered (named follow-ups, as is
