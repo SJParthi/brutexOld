@@ -20,12 +20,14 @@ from dataclasses import dataclass
 
 import pytest
 from brutex.notifications.sweep_alerts import (
+    CRASH_LOOP_RELAUNCH_THRESHOLD,
     SweepAlerter,
     emit_lake_heal_alert,
     emit_pull_halt_alert,
     escape_markdown_v2,
 )
 from brutex.notifications.telegram import (
+    DEDUPE_WINDOW_SECONDS,
     TelegramEvent,
     TelegramEventKind,
     TelegramSeverity,
@@ -674,3 +676,96 @@ class TestEmitLakeHealAlert:
         assert event.kind == TelegramEventKind.QUARANTINE_NEW
         assert event.severity == TelegramSeverity.WARN
         assert "quarantined\\=1" in event.message
+
+
+# ────────────────────────────────────────────────────────────────────────
+# child_relaunched (DEC-SUPERVISOR-CRASHLOOP-ALERT-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestChildRelaunched:
+    def test_single_relaunch_is_warn_with_exit_code(self) -> None:
+        """An isolated relaunch is a WARN push naming the child + exit code."""
+        fake = FakeNotifier()
+        assert SweepAlerter(notifier=fake).child_relaunched(
+            child="supervisor:sweep-daemon",
+            exit_code=1,
+            signal=None,
+            relaunch_count=1,
+            detail="uptime 5.0s, backoff 1.0s, restart #1 this run",
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.CHILD_RELAUNCHED
+        assert ev.severity == TelegramSeverity.WARN
+        assert ev.dedupe_key == "child-relaunch:supervisor:sweep-daemon"
+        assert escape_markdown_v2("supervisor:sweep-daemon") in ev.message
+        assert escape_markdown_v2("exit code 1") in ev.message
+        assert escape_markdown_v2("restart #1 this run") in ev.message
+        # An isolated relaunch must never read as the crash-loop escalation.
+        assert escape_markdown_v2("CRASH LOOP") not in ev.message
+
+    def test_signal_death_names_the_signal(self) -> None:
+        """A death-by-signal relaunch names the killing signal, not the raw code."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="supervisor:sweep-daemon",
+            exit_code=-9,
+            signal=9,
+            relaunch_count=1,
+            detail="uptime 2.0s, backoff 1.0s, restart #1 this run",
+        )
+        ev = fake.published[0]
+        assert escape_markdown_v2("signal 9") in ev.message
+        assert escape_markdown_v2("exit code -9") not in ev.message
+
+    def test_crash_loop_threshold_escalates_to_critical(self) -> None:
+        """relaunch_count >= the threshold flips to CRITICAL with its own dedupe key."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="supervisor:sweep-daemon",
+            exit_code=-9,
+            signal=9,
+            relaunch_count=CRASH_LOOP_RELAUNCH_THRESHOLD,
+            detail="uptime 2.0s, backoff 4.0s, restart #3 this run",
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.CHILD_RELAUNCHED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        # DISTINCT key so the WARN-tier dedupe window can never swallow it.
+        assert ev.dedupe_key == "child-crash-loop:supervisor:sweep-daemon"
+        assert escape_markdown_v2("CRASH LOOP") in ev.message
+        assert escape_markdown_v2("3×") in ev.message
+
+    def test_below_threshold_stays_warn(self) -> None:
+        """One below the threshold is still the WARN tier (boundary pin)."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="c",
+            exit_code=2,
+            signal=None,
+            relaunch_count=CRASH_LOOP_RELAUNCH_THRESHOLD - 1,
+            detail="d",
+        )
+        assert fake.published[0].severity == TelegramSeverity.WARN
+
+    def test_threshold_constant_value(self) -> None:
+        """The crash-loop bar is 3 in-window relaunches (the decision's contract)."""
+        assert CRASH_LOOP_RELAUNCH_THRESHOLD == 3
+
+    def test_kind_has_real_dedupe_window(self) -> None:
+        """CHILD_RELAUNCHED carries a >0 notifier window so a loop coalesces."""
+        assert DEDUPE_WINDOW_SECONDS[TelegramEventKind.CHILD_RELAUNCHED] == 300.0
+
+    def test_disabled_notifier_returns_false(self) -> None:
+        """Silent no-op when Telegram is disabled (resolver yields None)."""
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert not alerter.child_relaunched(
+            child="c", exit_code=1, signal=None, relaunch_count=1, detail="d"
+        )
+
+    def test_publish_raise_is_swallowed(self) -> None:
+        """A raising notifier is swallowed — best-effort contract (returns False)."""
+        fake = FakeNotifier(raise_on_publish=True)
+        assert not SweepAlerter(notifier=fake).child_relaunched(
+            child="c", exit_code=1, signal=None, relaunch_count=1, detail="d"
+        )

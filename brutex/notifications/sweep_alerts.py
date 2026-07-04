@@ -80,6 +80,13 @@ NotifierResolver = Callable[[], NotifierLike | None]
 #: escape every body so a hyphenated symbol or a decimal latency renders cleanly.
 _MDV2_SPECIALS: Final[frozenset[str]] = frozenset(r"_*[]()~`>#+-=|{}.!")
 
+#: Relaunches within the supervisor's rolling window at (and past) which the
+#: :meth:`SweepAlerter.child_relaunched` alert ESCALATES to CRITICAL — the
+#: crash-loop threshold (DEC-SUPERVISOR-CRASHLOOP-ALERT-001). The ONE source of
+#: truth for the escalation bar: the supervisor only COUNTS relaunches in its
+#: window; the severity decision lives here.
+CRASH_LOOP_RELAUNCH_THRESHOLD: Final[int] = 3
+
 
 def escape_markdown_v2(text: str) -> str:
     """Return *text* with every MarkdownV2-reserved character backslash-escaped.
@@ -382,6 +389,68 @@ class SweepAlerter:
             severity=TelegramSeverity.WARN,
             message=message,
             dedupe_key="rate-breach",
+        )
+
+    def child_relaunched(
+        self,
+        *,
+        child: str,
+        exit_code: int,
+        signal: int | None,
+        relaunch_count: int,
+        detail: str,
+    ) -> bool:
+        """Alert that the supervisor relaunched a crashed child (DEC-SUPERVISOR-CRASHLOOP-ALERT-001).
+
+        Fired by :class:`brutex.orchestrator.supervisor.ProcessSupervisor` on
+        every abnormal-exit relaunch, so a child that dies repeatedly (e.g. an
+        OOM ``SIGKILL`` loop) can never spin all night with ZERO operator
+        signal. Severity is WARN for an isolated relaunch and ESCALATES to
+        CRITICAL once *relaunch_count* reaches
+        :data:`CRASH_LOOP_RELAUNCH_THRESHOLD` relaunches within the
+        supervisor's rolling window — the crash-loop shape the operator must
+        act on. The two tiers carry DISTINCT dedupe keys, so the notifier's
+        ``CHILD_RELAUNCHED`` coalescing window can never swallow the CRITICAL
+        escalation behind an earlier WARN push.
+
+        Parameters
+        ----------
+        child
+            The supervised child's name (the supervisor's audit ``subject``).
+        exit_code
+            The child's raw ``returncode`` (NEGATIVE = death-by-signal, the
+            :class:`subprocess.Popen` convention).
+        signal
+            The killing signal number when the child died by signal (e.g.
+            ``9`` for an OOM SIGKILL), else ``None``.
+        relaunch_count
+            Relaunches within the supervisor's rolling window, THIS one
+            included.
+        detail
+            Short free-form context (uptime / backoff / restart index).
+        """
+        died_by = f"signal {signal}" if signal is not None else f"exit code {exit_code}"
+        if relaunch_count >= CRASH_LOOP_RELAUNCH_THRESHOLD:
+            severity = TelegramSeverity.CRITICAL
+            head = (
+                f"🛑 Sweep supervisor CRASH LOOP: child {child} relaunched "
+                f"{relaunch_count}× within the rolling window (latest death: {died_by})"
+            )
+            dedupe_key = f"child-crash-loop:{child}"
+        else:
+            severity = TelegramSeverity.WARN
+            head = f"⚠️ Sweep supervisor: child {child} relaunched after {died_by}"
+            dedupe_key = f"child-relaunch:{child}"
+        message = escape_markdown_v2(
+            f"{head}. {detail}. The supervisor keeps relaunching until the "
+            "max-restart cap; investigate the child's crash cause (an OOM "
+            "SIGKILL loop will not heal itself)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.CHILD_RELAUNCHED,
+            severity=severity,
+            message=message,
+            dedupe_key=dedupe_key,
         )
 
     def pull_degraded(self, *, rule: str, achieved: float, allowed: float, detail: str) -> bool:
@@ -762,6 +831,7 @@ def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
 
 
 __all__ = [
+    "CRASH_LOOP_RELAUNCH_THRESHOLD",
     "LakeHealActionLike",
     "LakeHealReportLike",
     "NotifierResolver",

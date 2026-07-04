@@ -43,6 +43,7 @@ from brutex.orchestrator.supervisor import (
     AUDIT_ACTION_GIVE_UP,
     AUDIT_ACTION_OPERATOR_STOP,
     AUDIT_ACTION_RESTART,
+    DEFAULT_ALERT_WINDOW_SECONDS,
     DEFAULT_BACKOFF_BASE_SECONDS,
     DEFAULT_BACKOFF_CAP_SECONDS,
     DEFAULT_BACKOFF_FACTOR,
@@ -972,3 +973,216 @@ class TestSignalStopLatch:
 
         assert result.outcome is SupervisorOutcome.OPERATOR_STOP
         assert launcher.launches == 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Relaunch alert — rolling-window crash-loop escalation
+# (DEC-SUPERVISOR-CRASHLOOP-ALERT-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class RecordingAlerter:
+    """Captures every ``child_relaunched`` call; matches ``RelaunchAlerter``."""
+
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def child_relaunched(
+        self,
+        *,
+        child: str,
+        exit_code: int,
+        signal: int | None,
+        relaunch_count: int,
+        detail: str,
+    ) -> bool:
+        self.calls.append(
+            {
+                "child": child,
+                "exit_code": exit_code,
+                "signal": signal,
+                "relaunch_count": relaunch_count,
+                "detail": detail,
+            }
+        )
+        return True
+
+
+class RaisingAlerter:
+    """An alerter whose ``child_relaunched`` always raises (best-effort proof)."""
+
+    def child_relaunched(self, **_kwargs: Any) -> bool:
+        raise RuntimeError("simulated alerter failure")
+
+
+class TestRelaunchAlert:
+    def test_default_window_constant(self) -> None:
+        """The rolling-window default is the module constant (10 minutes)."""
+        assert DEFAULT_ALERT_WINDOW_SECONDS == 600.0
+        sup = ProcessSupervisor(launch=lambda: FakeChild(code=0, uptime=0.0, clock=FakeClock()))
+        assert sup.alert_window_seconds == DEFAULT_ALERT_WINDOW_SECONDS
+        assert sup.alerter is None
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0])
+    def test_rejects_nonpositive_alert_window(self, bad: float) -> None:
+        with pytest.raises(ValueError, match="alert_window_seconds must be > 0"):
+            ProcessSupervisor(
+                launch=lambda: FakeChild(code=0, uptime=0.0, clock=FakeClock()),
+                alert_window_seconds=bad,
+            )
+
+    def test_relaunch_fires_alert_with_fields(self) -> None:
+        """One abnormal exit → one alert naming the subject, code, count, detail."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=1, uptime=5.0, clock=clock),
+            FakeChild(code=0, uptime=5.0, clock=clock),
+        ]
+        alerter = RecordingAlerter()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            subject="supervisor:sweep-daemon",
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=alerter,
+        )
+
+        result = sup.run()
+
+        assert result.outcome is SupervisorOutcome.CLEAN_EXIT
+        assert len(alerter.calls) == 1
+        call = alerter.calls[0]
+        assert call["child"] == "supervisor:sweep-daemon"
+        assert call["exit_code"] == 1
+        assert call["signal"] is None
+        assert call["relaunch_count"] == 1
+        assert "uptime 5.0s" in call["detail"]
+        assert "restart #1 this run" in call["detail"]
+
+    def test_signal_death_maps_negative_code_to_signal(self) -> None:
+        """A POSIX signal death (negative returncode) surfaces the signal number."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=-9, uptime=1.0, clock=clock),
+            FakeChild(code=0, uptime=1.0, clock=clock),
+        ]
+        alerter = RecordingAlerter()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=alerter,
+        )
+
+        sup.run()
+
+        assert alerter.calls[0]["exit_code"] == -9
+        assert alerter.calls[0]["signal"] == 9
+
+    def test_in_window_counts_escalate(self) -> None:
+        """Three crashes inside one window carry counts 1, 2, 3 — the alerter's
+        escalation input (the WARN→CRITICAL decision itself lives in the alerter)."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=-9, uptime=1.0, clock=clock),
+            FakeChild(code=-9, uptime=1.0, clock=clock),
+            FakeChild(code=-9, uptime=1.0, clock=clock),
+            FakeChild(code=0, uptime=1.0, clock=clock),
+        ]
+        alerter = RecordingAlerter()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=alerter,
+        )
+
+        sup.run()
+
+        assert [c["relaunch_count"] for c in alerter.calls] == [1, 2, 3]
+
+    def test_window_prunes_old_relaunches(self) -> None:
+        """Relaunches spaced FURTHER apart than the window never accumulate —
+        each alert counts 1, so no false CRITICAL from slow, isolated crashes."""
+        clock = FakeClock()
+        # Each child stays up 50s (clock advances inside wait), window is 10s,
+        # so every prior relaunch timestamp has aged out by the next crash.
+        children = [
+            FakeChild(code=1, uptime=50.0, clock=clock),
+            FakeChild(code=1, uptime=50.0, clock=clock),
+            FakeChild(code=1, uptime=50.0, clock=clock),
+            FakeChild(code=0, uptime=50.0, clock=clock),
+        ]
+        alerter = RecordingAlerter()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=alerter,
+            alert_window_seconds=10.0,
+        )
+
+        sup.run()
+
+        assert [c["relaunch_count"] for c in alerter.calls] == [1, 1, 1]
+
+    def test_raising_alerter_never_crashes_supervisor(self) -> None:
+        """A raising alerter is swallowed + logged; relaunch/exit state unchanged."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=1, uptime=1.0, clock=clock),
+            FakeChild(code=0, uptime=1.0, clock=clock),
+        ]
+        audit = RecordingAuditSink()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            audit=audit,
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=RaisingAlerter(),
+        )
+
+        result = sup.run()
+
+        assert result.outcome is SupervisorOutcome.CLEAN_EXIT
+        assert result.restarts == 1
+        assert _actions(audit) == [AUDIT_ACTION_RESTART, AUDIT_ACTION_CLEAN_EXIT]
+
+    def test_no_alert_without_relaunch(self) -> None:
+        """A clean first exit fires ZERO alerts (the alert lives ONLY in the
+        relaunch branch)."""
+        clock = FakeClock()
+        alerter = RecordingAlerter()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher([FakeChild(code=0, uptime=1.0, clock=clock)]),
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=alerter,
+        )
+
+        result = sup.run()
+
+        assert result.outcome is SupervisorOutcome.CLEAN_EXIT
+        assert alerter.calls == []
+
+    def test_give_up_alerts_only_per_relaunch(self) -> None:
+        """The give-up exit itself does not alert — only the relaunches before it."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=1, uptime=1.0, clock=clock),
+            FakeChild(code=1, uptime=1.0, clock=clock),  # hits the cap → give up
+        ]
+        alerter = RecordingAlerter()
+        policy = BackoffPolicy(max_restarts=1)
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            policy=policy,
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=alerter,
+        )
+
+        result = sup.run()
+
+        assert result.outcome is SupervisorOutcome.GAVE_UP
+        assert len(alerter.calls) == 1  # the single relaunch, not the give-up
