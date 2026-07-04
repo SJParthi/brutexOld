@@ -348,9 +348,10 @@ class TestComputeBarStatuses:
         assert bar.delta is not None and bar.delta < 0.05
 
     def test_zero_price_bar_is_bad_input(self) -> None:
-        # An OTM strike (intrinsic 0) with a zero close: the below-intrinsic
-        # pre-screen passes (0 < 0 is False); the kernel rejects a zero price
-        # loudly → stamped BAD_INPUT, quarantined to the one bar.
+        # A zero close is a BAD INPUT stamped by the explicit non-positive
+        # pre-check (before the parity floor screen), regardless of moneyness
+        # — the ITM twin is pinned in test_greeks_enrich_audit_regressions
+        # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3).
         row = _row(close="0")
         row["open"] = 0.0
         row["high"] = 0.0
@@ -405,11 +406,18 @@ class TestEnrichOptionBars:
         assert stats.reused == 0 and stats.changed == 2
 
     def test_current_ok_rows_are_reused_verbatim(self) -> None:
+        # CHANGED PIN (DEC-GREEKS-CORRECTNESS-AUDIT-001): the reuse gate now
+        # VALUE-checks the current rate + spot join, so the old "empty join
+        # proves no recompute" trick would honestly demote to no_spot instead
+        # of reusing. The no-recompute proof is a planted sentinel iv: a
+        # recompute would replace it, a verbatim restate keeps it.
         first, _ = _enrich_one(_row(close="200"))
+        assert first.iv is not None
+        sentinel = first.iv + 0.01
         stored = _row(
             close="200",
             overlay={
-                "iv": first.iv,
+                "iv": sentinel,
                 "delta": first.delta,
                 "gamma": first.gamma,
                 "theta": first.theta,
@@ -424,13 +432,13 @@ class TestEnrichOptionBars:
         bars, stats = enrich_option_bars(
             [stored],
             parts=_parts(_CE_SYMBOL),
-            spot_by_ts={},  # PROVES no recompute: an empty join would stamp no_spot
+            spot_by_ts={_BAR_TS: _SPOT},
             rate_source=_RATE,
             style_flag=STYLE_EUROPEAN_EXACT,
         )
         assert stats.reused == 1 and stats.changed == 0
         assert stats.solved == 0 and stats.nulls == 0
-        assert bars[0].iv == first.iv
+        assert bars[0].iv == sentinel  # restated verbatim — NOT re-solved
         assert bars[0].greeks_provenance_id == first.greeks_provenance_id
 
     def test_stale_input_stamp_is_recomputed(self) -> None:
