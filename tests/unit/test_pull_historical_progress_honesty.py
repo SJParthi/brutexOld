@@ -42,10 +42,20 @@ _FETCHED = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _FakeSDK:
-    """Canned-candle Groww SDK fake (one bar per fetch) — offline, deterministic."""
+    """Canned-candle Groww SDK fake (one bar per fetch) — offline, deterministic.
+
+    Carries the full ``GrowwSDK`` Protocol surface; the enumeration methods MUST
+    never be called (the contracts come from the registry, not a re-enumeration).
+    """
 
     def __init__(self) -> None:
         self.candle_symbols: list[str] = []
+
+    def get_expiries(self, **_kw: object) -> dict[str, object]:
+        raise AssertionError("chain enumeration must never run in this pull")
+
+    def get_contracts(self, **_kw: object) -> dict[str, object]:
+        raise AssertionError("chain enumeration must never run in this pull")
 
     def get_historical_candles(self, **kw: object) -> dict[str, object]:
         self.candle_symbols.append(str(kw["groww_symbol"]))
