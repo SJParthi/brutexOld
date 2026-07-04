@@ -3739,3 +3739,97 @@ class TestEmptyBreakerOptionSpine:
         assert rec.status == _EMPTY_STATUS  # NOT SKIPPED — settle suppressed
         assert rec.empty_streak == 0  # untrusted empty: streak preserved
         assert not ledger.is_skippable(key)
+
+
+# ── DEC-WRITE-HEALTH-BREAKER-001 — the F&O spine's write-health breaker wiring ──
+
+
+def test_run_wired_breaker_escalates_multi_partition_wedge_to_volume_halt() -> None:
+    """A wedged VOLUME (defers across >= 3 distinct contract partitions) HALTS the pull.
+
+    The trip is a GLOBAL stop (``LakeWriteHalt`` ∈ ``_GLOBAL_STOP_ERRORS``): it propagates
+    out of :func:`run_groww_option_ingest`, NEVER a per-contract quarantine.
+    """
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    sdk = _FakeSDK(payload=_candles())
+    breaker = WriteHealthBreaker(consecutive_limit=1, distinct_open_limit=3)
+    with pytest.raises(LakeWriteHalt) as excinfo:
+        run_groww_option_ingest(
+            _client(sdk),
+            _LockTimeoutSink(),
+            contracts=[
+                _ce("NSE-NIFTY-02Jan25-28500-CE"),
+                _ce("NSE-NIFTY-02Jan25-28600-CE"),
+                _ce("NSE-NIFTY-02Jan25-28700-CE"),
+            ],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=WindowLedger(),
+            max_attempts=0,
+            now_ist=_now,
+            write_breaker=breaker,
+        )
+    assert excinfo.value.reason == "volume_wedged"
+    assert len(breaker.open_partitions) >= 3
+
+
+def test_run_breaker_below_distinct_limit_defers_only() -> None:
+    """Defers on fewer distinct partitions than the limit stay per-window defers."""
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    sdk = _FakeSDK(payload=_candles())
+    breaker = WriteHealthBreaker(consecutive_limit=1, distinct_open_limit=3)
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _LockTimeoutSink(),
+        contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE"), _ce("NSE-NIFTY-02Jan25-28600-CE")],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+        write_breaker=breaker,
+    )
+    assert report.failed_pairs == 0  # deferred, never quarantined, never halted
+    assert report.still_failed_windows == 2
+    assert len(breaker.open_partitions) == 2
+
+
+def test_contract_successful_write_resets_partition_streak() -> None:
+    """A durable F&O write calls ``observe_success`` on the contract partition's key."""
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    class _SpyBreaker(WriteHealthBreaker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.defers: list[str] = []
+            self.successes: list[str] = []
+
+        def observe_defer(self, partition_key: str) -> None:
+            self.defers.append(partition_key)
+            super().observe_defer(partition_key)
+
+        def observe_success(self, partition_key: str) -> None:
+            self.successes.append(partition_key)
+            super().observe_success(partition_key)
+
+    sdk = _FakeSDK(payload=_candles())
+    spy = _SpyBreaker()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+        write_breaker=spy,
+    )
+    assert report.bars_appended > 0
+    assert spy.defers == []
+    assert spy.successes == ["NSE/FNO/NSE-NIFTY-02Jan25-28500-CE/1day/2024-01"]

@@ -337,6 +337,45 @@ class TestTailTransientAsync:
         statuses = {r.status for r in ledger.records()}
         assert "SUCCESS" not in statuses
 
+    def test_write_breaker_trip_in_async_tail_halts_at_drain(self, tmp_path: Path) -> None:
+        """DEC-WRITE-HEALTH-BREAKER-001 async regression: the volume-wedged trip is NOT
+        swallowed during drain.
+
+        The breaker raises ``LakeWriteHalt("volume_wedged")`` INSIDE a consumer tail; the
+        pipeline must capture it as a pool-wide stop and RE-RAISE it at drain — never a
+        silently-completed pull over a wedged volume.
+        """
+        from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout
+        from brutex.data.write_breaker import WriteHealthBreaker
+
+        lake = tmp_path / "lake"
+        ledger = WindowLedger()
+
+        class _LockTimeoutSink(ParquetBarSink):
+            def append(self, **kw: object):  # type: ignore[override,no-untyped-def]
+                raise PartitionLockTimeout(timeout_seconds=0.5)
+
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        breaker = WriteHealthBreaker(consecutive_limit=1, distinct_open_limit=1)
+        ingest_spot(
+            _DayAdapter(),  # type: ignore[arg-type]
+            _LockTimeoutSink(writer=ParquetWriter(lake_root=lake), catalog=None),
+            instrument=_inst(),
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 2, 1),
+            ledger=ledger,
+            now_ist=_now,
+            fetch_pipeline=pipeline,
+            write_breaker=breaker,
+        )
+        with pytest.raises(LakeWriteHalt) as excinfo:
+            pipeline.drain()
+        assert excinfo.value.reason == "volume_wedged"
+        # The deferred window's ledger row was recorded FAILED BEFORE the trip — never lost.
+        statuses = {r.status for r in ledger.records()}
+        assert "SUCCESS" not in statuses
+
 
 # ───────────────────────── ISOLATION PROOF (centerpiece) ─────────────────────────
 

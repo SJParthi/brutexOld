@@ -130,6 +130,11 @@ from brutex.data.window_ledger_store import (
     index_lake_spans,
     seed_enclosed_windows,
 )
+from brutex.data.write_breaker import (
+    WriteHealthBreaker,
+    partition_health_key,
+    resolve_write_breaker,
+)
 from brutex.data.write_consumer import WriteConsumer, WriteConsumerSink
 from brutex.models import BruteXError
 from brutex.observability.correlation import current_pull_id, pull_id_scope
@@ -379,6 +384,7 @@ def ingest_option_contract(
     fetch_pipeline: FetchPipeline | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -636,6 +642,7 @@ def ingest_option_contract(
             pull_id=pull_id,
             fields=fields,
             empty_breaker=empty_breaker,
+            write_breaker=write_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED IngestReport immediately and re-paces + fetches the
@@ -659,6 +666,7 @@ def ingest_option_contract(
             pull_id=pull_id,
             fields=fields,
             empty_breaker=empty_breaker,
+            write_breaker=write_breaker,
         )
         if result_report.still_failed_windows:
             # A tail-side PartitionLockTimeout DEFERRED this contract window (a wedged peer held
@@ -718,6 +726,7 @@ def _process_option_window_tail(
     pull_id: str,
     fields: dict[str, str],
     empty_breaker: EmptySettleBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
 ) -> IngestReport:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -757,6 +766,15 @@ def _process_option_window_tail(
     # bar ON the boundary is KEPT, so this only ever removes an out-of-window / clock-skew
     # phantom, never a legitimate in-range bar (existing behaviour byte-unchanged).
     bars = drop_bars_after(bars, key.end)
+    # The per-partition write-health key (DEC-WRITE-HEALTH-BREAKER-001) — series + the
+    # window-start month, from what this tail already has (no extra lookup).
+    health_key = partition_health_key(
+        exchange=exchange,
+        segment=OPTION_SEGMENT,
+        symbol=contract.symbol,
+        interval=interval,
+        month=key.start.strftime("%Y-%m"),
+    )
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
@@ -796,6 +814,12 @@ def _process_option_window_tail(
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
             )
+        # Cross-window write-health accounting (DEC-WRITE-HEALTH-BREAKER-001): AFTER the
+        # ledger row is durably FAILED (so the deferred window is never lost even if the
+        # breaker trips here), observe the defer; a volume-wedged trip raises
+        # LakeWriteHalt("volume_wedged") which propagates as a global stop.
+        if write_breaker is not None:
+            write_breaker.observe_defer(health_key)
         return IngestReport(
             windows=1,
             bars_appended=0,
@@ -803,6 +827,9 @@ def _process_option_window_tail(
             retried_windows=1 if attempt > 0 else 0,
             still_failed_windows=1,
         )
+    if write_breaker is not None:
+        # A durable write landed on this partition — reset its consecutive-defer streak.
+        write_breaker.observe_success(health_key)
     conflicts = [c for wr in result.write_results for c in wr.conflicts]
     if conflicts:
         _LOG.warning(
@@ -1546,6 +1573,7 @@ def run_groww_option_ingest(
     fetch_pipeline: FetchPipeline | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1699,6 +1727,11 @@ def run_groww_option_ingest(
             expected_empty=_deep_strike_expected_empty(empty_retry_by_symbol, empty_retry_attempts)
         )
     )
+    # One WRITE-health breaker per PASS (DEC-WRITE-HEALTH-BREAKER-001), mirroring the
+    # empty breaker above: all contracts share ONE per-partition defer accounting (a
+    # wedged volume fails every partition) and a fresh pass/pull always starts clean.
+    # BRUTEX_WRITE_BREAKER=off yields None (byte-identical per-window defer behaviour).
+    wbreaker = write_breaker if write_breaker is not None else resolve_write_breaker()
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): route every contract write through
     # the background pool when wired, freeing the fetch connection from the serial
     # O(month-depth) write. `write_pool=None` leaves `sink` untouched (byte-identical).
@@ -1789,6 +1822,7 @@ def run_groww_option_ingest(
                 fetch_pipeline=fetch_pipeline,
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
+                write_breaker=wbreaker,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}

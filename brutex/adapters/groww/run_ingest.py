@@ -74,6 +74,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.write_breaker import WriteHealthBreaker, resolve_write_breaker
 from brutex.data.write_consumer import WriteConsumer, WriteConsumerSink
 from brutex.models import BruteXError, Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
@@ -317,6 +318,7 @@ def run_groww_spot_ingest(
     detect_completeness_gaps: bool = False,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -419,6 +421,18 @@ def run_groww_spot_ingest(
         real-vendor production sites construct one
         (:func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`),
         mirroring the ``detect_completeness_gaps`` gating.
+    write_breaker
+        Optional :class:`~brutex.data.write_breaker.WriteHealthBreaker`
+        (DEC-WRITE-HEALTH-BREAKER-001). ``None`` (the default) resolves a FRESH
+        env-configured breaker for THIS pass via
+        :func:`~brutex.data.write_breaker.resolve_write_breaker` (armed by default;
+        ``BRUTEX_WRITE_BREAKER=off`` disables). The ONE breaker is threaded into every
+        pair's window tails: 2 consecutive write-defers open a partition, 3 DISTINCT
+        open partitions raise ``LakeWriteHalt("volume_wedged")`` — a
+        :data:`_GLOBAL_STOP_ERRORS` member, so a wedged VOLUME halts the pull
+        gracefully (with the existing #888/#889 Telegram alert) instead of burning
+        every remaining window on write-deadline defers. Tests inject a configured
+        instance.
 
     Returns
     -------
@@ -430,6 +444,12 @@ def run_groww_spot_ingest(
     # inside ingest_spot — so ALL pairs of this pass share ONE counter (a vendor
     # soft-throttle hits every symbol) and a fresh pass/pull always starts clean.
     breaker = empty_breaker if empty_breaker is not None else resolve_empty_breaker()
+    # One WRITE-health breaker per PASS (DEC-WRITE-HEALTH-BREAKER-001), mirroring the
+    # empty breaker above: all pairs share ONE per-partition defer accounting (a wedged
+    # volume fails every partition) and a fresh pass/pull always starts clean. The
+    # resolved default is armed; BRUTEX_WRITE_BREAKER=off yields None (byte-identical
+    # per-window defer behaviour).
+    wbreaker = write_breaker if write_breaker is not None else resolve_write_breaker()
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): when a write pool is wired, route
     # every sink.append through it so the O(month-depth) lake write runs on a background
     # shard worker, freeing the fetch connection to keep fetching. `write_pool=None`
@@ -501,6 +521,7 @@ def run_groww_spot_ingest(
                 detect_completeness_gaps=detect_completeness_gaps,
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
+                write_breaker=wbreaker,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -709,6 +730,7 @@ def run_groww_spot_ingest_with_retry(
     detect_completeness_gaps: bool = False,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -757,6 +779,12 @@ def run_groww_spot_ingest_with_retry(
     this function as a pull-wide halt. The production ``None`` default keeps every
     dry-run / synthetic / test caller un-armed.
 
+    *write_breaker* (DEC-WRITE-HEALTH-BREAKER-001) is forwarded verbatim to every
+    pass. The production ``None`` makes EACH pass resolve its own fresh
+    env-configured breaker (per-pass accounting; no wedge-history leak across passes);
+    a volume-wedged trip raises ``LakeWriteHalt("volume_wedged")`` out of this
+    function — the pull-wide graceful halt, never a retryable residual.
+
     Returns
     -------
     SpotIngestWithRetry
@@ -793,6 +821,7 @@ def run_groww_spot_ingest_with_retry(
             detect_completeness_gaps=detect_completeness_gaps,
             empty_breaker=empty_breaker,
             storm_breaker=storm_breaker,
+            write_breaker=write_breaker,
         )
 
     report = _one_pass()

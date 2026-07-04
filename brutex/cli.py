@@ -2896,7 +2896,9 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     :class:`~brutex.notifications.sweep_alerts.SweepAlerter` swallows every publish
     error), so the alert NEVER masks the halt, which the caller re-raises so the CLI
     still exits non-zero. The ``LakeWriteHalt.reason`` (``disk_full`` /
-    ``out_of_memory``) is surfaced verbatim; any other stop uses its class name.
+    ``out_of_memory`` / ``volume_wedged`` — the latter from the keepalive probe OR the
+    per-partition write-health breaker, DEC-WRITE-HEALTH-BREAKER-001) is surfaced
+    verbatim; any other stop uses its class name.
 
     Thin wrapper delegating to the COMMON
     :func:`brutex.notifications.sweep_alerts.emit_pull_halt_alert` (CLAUDE.md §11 —
