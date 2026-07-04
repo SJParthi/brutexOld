@@ -243,7 +243,13 @@ jobs:
     # 25 -> 40 (2026-06-29): the suite re-crossed 25m; the PR-event coverage
     # job was killed at 25:12 mid touched-module gate (reported `cancelled`,
     # tests PASS at 100%). Continues the 2026-06-10 15->25 ratchet.
-    timeout-minutes: 40
+    # 40 -> 55 (2026-07-04, run 28695534064): killed at 40:17 mid step 11
+    # "Touched-module 100% coverage gate" with EVERY completed step green
+    # (pytest+coverage 22:02 success, strict per-module gate 12:59 success,
+    # last log lines all passing); PR #1085 touches 10+ modules so the
+    # touched-module gate alone outgrew the remaining budget. Wall-clock
+    # budget only — no gate is weakened. Continues the 15->25->40 ratchet.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
         with:
