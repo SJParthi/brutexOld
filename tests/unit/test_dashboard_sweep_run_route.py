@@ -160,6 +160,43 @@ def test_bad_interval_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -
     assert "interval must be one of" in resp.json()["detail"]
 
 
+def test_out_of_scope_symbol_400_with_the_scope_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-ENGINE-SCOPE-GUARD-001: an out-of-engine-scope dashboard launch is a 400.
+
+    Route-level (the route tests fake ``run_sweep_from_request``, so the guard
+    must be proven at the ROUTE, not just the pure resolver): the refusal
+    carries the law citation, and NO sweep job is started.
+    """
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run", params={"symbols": "RELIANCE"})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "sweep REFUSED" in detail
+    assert "RELIANCE" in detail
+    assert "CLAUDE.md §2 Rule 3" in detail
+
+
+def test_reference_only_vix_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run", params={"symbols": "INDIAVIX"})
+    assert resp.status_code == 400
+    assert "REFERENCE_ONLY" in resp.json()["detail"]
+
+
+def test_route_has_no_scope_override_parameter(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No dashboard override exists by design — an override-shaped param is inert."""
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post(
+        "/api/v1/sweep/run",
+        params={"symbols": "RELIANCE", "allow_out_of_scope": "true"},
+    )
+    assert resp.status_code == 400  # still refused — the param is not a route input
+
+
 def test_end_before_start_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
     resp = client.post("/api/v1/sweep/run", params={"start": "2024-01-01", "end": "2023-01-01"})
@@ -167,22 +204,24 @@ def test_end_before_start_400(client: TestClient, monkeypatch: pytest.MonkeyPatc
     assert "must not precede start" in resp.json()["detail"]
 
 
-def test_out_of_scope_symbol_400_names_the_offender(
+def test_out_of_scope_400_carries_the_corp_action_rationale(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The engine scope gate (DEC-CORP-ACTION-GATE-001) fires EAGERLY as a 400.
+    """The 400 detail carries the corporate-action rationale + both DEC ids.
 
-    Before this gate rode ``resolve_sweep_request``, an out-of-scope symbol
-    started the background job, the job finished "successfully", and the
-    refusal text landed only on server stderr — invisible to the operator.
+    DEC-CORP-ACTION-GATE-001 / ADR-0016 — the extension of the
+    DEC-ENGINE-SCOPE-GUARD-001 eager 400 proven above: the operator sees WHY
+    an out-of-scope launch is dangerous (no corporate-action adjustment
+    layer exists), not just that it is refused.
     """
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
     resp = client.post("/api/v1/sweep/run", params={"symbols": "NIFTY,RELIANCE"})
     assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert "corporate-action adjustment layer missing" in detail
-    assert "'RELIANCE'" in detail
+    assert "- RELIANCE:" in detail
     assert "DEC-CORP-ACTION-GATE-001" in detail
+    assert "ADR-0016" in detail
 
 
 # ── single-flight + no-lake guards ────────────────────────────────────────────

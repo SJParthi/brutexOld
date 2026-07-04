@@ -82,6 +82,7 @@ from brutex.engine.sweep_run import (
 )
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
 from brutex.strategies.types import FibAnchorKind, Side
+from brutex.universe import is_engine_sweep_symbol
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -214,6 +215,12 @@ class SweepGridConfig:
         Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
         leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
         own backtested-combo count is its authoritative trial count ``N``.
+    unsafe_allow_out_of_scope_instruments
+        Layer-1 engine-scope escape hatch (DEC-ENGINE-SCOPE-GUARD-001; default
+        ``False``): when False, every instrument must satisfy
+        :func:`brutex.universe.is_engine_sweep_symbol` or construction raises.
+        IDENTITY-SAFE — never enters ``_tuple_digest`` / ``_grid_descriptor`` /
+        ``_tuple_cache_params``.
 
     Raises
     ------
@@ -257,6 +264,19 @@ class SweepGridConfig:
     stage3_top_k: int = 10_000
     stage3_max_fevals: int = 200
     stage3_max_restarts: int = 3
+    #: Layer-1 engine-scope hard invariant (DEC-ENGINE-SCOPE-GUARD-001): by
+    #: DEFAULT every instrument must satisfy
+    #: :func:`brutex.universe.is_engine_sweep_symbol` (the 3 brute-force spot
+    #: indexes, CLAUDE.md §2 Rule 3, plus the ADR-0012 NIFTY-futures shapes) so
+    #: even PROGRAMMATIC construction cannot silently sweep India VIX / an F&O
+    #: stock. The ONLY production True site is the ``sweep-verify --recount``
+    #: grid rebuild (verifying recorded work, not launching); the CLI research
+    #: escape is ``--allow-out-of-scope`` (loud + audit-stamped). IDENTITY-SAFE
+    #: by construction: this field enters NONE of ``_tuple_digest`` /
+    #: ``_grid_descriptor`` / ``_tuple_cache_params`` (all explicit field
+    #: enumerations) — digests, checkpoints, cache keys and store paths stay
+    #: byte-identical for in-scope grids (regression-pinned).
+    unsafe_allow_out_of_scope_instruments: bool = False
 
     def __post_init__(self) -> None:
         # Order-preserving de-dup of every axis (set semantics, deterministic
@@ -287,6 +307,24 @@ class SweepGridConfig:
         for symbol in self.instruments:
             if not symbol:
                 raise ValueError("SweepGridConfig.instruments entries must be non-empty")
+        # Layer-1 engine-scope hard invariant (DEC-ENGINE-SCOPE-GUARD-001):
+        # deny-by-default at CONSTRUCTION so no programmatic caller can sweep
+        # an out-of-engine-scope instrument silently. Coordinate correctness
+        # (exchange/segment) is Layer 2's job (engine/sweep_scope.py) — this
+        # layer sees only bare symbols.
+        if not self.unsafe_allow_out_of_scope_instruments:
+            for symbol in self.instruments:
+                if not is_engine_sweep_symbol(symbol):
+                    raise ValueError(
+                        f"SweepGridConfig.instruments contains {symbol!r}, which is "
+                        "outside the brute-force engine scope — allowed: the 3 spot "
+                        "indexes NIFTY/BANKNIFTY/SENSEX (CLAUDE.md §2 Rule 3) plus "
+                        "NIFTY futures (ADR-0012; series-key 'NIFTY-FUT-YYYY-MM-DD' "
+                        "or a lake 'NSE-NIFTY-<DDMmmYY>-FUT' contract symbol). "
+                        "Research escape hatch: construct with "
+                        "unsafe_allow_out_of_scope_instruments=True "
+                        "(the CLI flag is --allow-out-of-scope)"
+                    )
         if Side.HOLD in self.directions:
             raise ValueError(
                 "SweepGridConfig.directions must not contain Side.HOLD "

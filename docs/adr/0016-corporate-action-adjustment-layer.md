@@ -1,13 +1,16 @@
 # ADR-0016 — Corporate-action adjustment layer (design sketch + hard gate)
 
-**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1178)
-**Date:** 2026-07-03
-**Status:** **Proposed** — design sketch for a FUTURE layer. **NOT implemented.** The ONLY
-shipped artifact of this ADR is the enforcement gate (`brutex/engine/scope_guard.py`) that
-refuses engine sweeps outside NIFTY / BANKNIFTY / SENSEX until this layer exists.
+**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1180)
+**Date:** 2026-07-03 (reconciled 2026-07-04 with DEC-ENGINE-SCOPE-GUARD-001, entry #1178)
+**Status:** **Proposed** — design sketch for a FUTURE layer. **NOT implemented.** The
+shipped enforcement is the sweep-entry scope gate of DEC-ENGINE-SCOPE-GUARD-001
+(`brutex/engine/sweep_scope.py::check_sweep_scope` over the canonical
+`brutex.universe.classify_engine_sweep_target` law), which THIS decision EXTENDS with the
+corporate-action rationale + hazard warning (§3) until this layer exists.
 **Author:** the 2026-07-03 repo audit session (finding #5) — attributed to the decision ID above
 **Builds on:** CLAUDE.md §2 Golden Rule #1 (no hallucination) / #3 (scope lock) / #10
-(honest limits); DEC-P0-063 (lake ingests ~212 F&O stocks REFERENCE_ONLY);
+(honest limits); DEC-ENGINE-SCOPE-GUARD-001 (MIGRATION.md #1178 — the implemented gate);
+DEC-P0-063 (lake ingests ~212 F&O stocks REFERENCE_ONLY);
 DEC-NTM-GROWW-REPOINT-001 (~750 REFERENCE_ONLY underlyings); ADR-0012 /
 DEC-NIFTY-DYNAMIC-STRATEGY-001 (the operator-authorized NIFTY-futures engine track).
 
@@ -31,7 +34,7 @@ justification does NOT depend on that claim: the operative, repo-verified hazard
 raw single-stock vendor candles are unadjusted across ex-dates (§2), so single-stock
 sweeps are unsafe either way. India VIX is likewise a computed index. The engine needs
 no adjustment layer **as long as it only ever sweeps these instruments** — which is
-exactly what the `scope_guard` gate now enforces.
+exactly what the `sweep_scope` gate (DEC-ENGINE-SCOPE-GUARD-001) now enforces.
 
 ## 2. The problem — single-stock expansion without this layer is silent corruption
 
@@ -60,38 +63,49 @@ prior-day level (PDH/PDL, pivots, Fib anchors, gap-day bits) would fire on fabri
 cliffs, and the sweep would rank strategies on corrupted data — silently, with green
 tests. That violates Golden Rule #1 at engine scale.
 
-## 3. The shipped enforcement — the hard gate (DEC-CORP-ACTION-GATE-001)
+## 3. The shipped enforcement — DEC-ENGINE-SCOPE-GUARD-001, extended by this decision
 
-Until this layer exists, expansion is BLOCKED mechanically, not by convention:
+Until this layer exists, expansion is BLOCKED mechanically, not by convention. The
+implemented gate is **DEC-ENGINE-SCOPE-GUARD-001** (MIGRATION.md #1178, PR #1102):
 
-- `brutex/engine/scope_guard.py::ensure_engine_scope` is the ONE engine-entry symbol
-  admission chokepoint. Allowed set: exactly `NIFTY` / `BANKNIFTY` / `SENSEX`
-  (case/whitespace-normalized), the bare-symbol twin of the lake-side
-  `BRUTE_FORCE_INDEX_SYMBOLS` (`brutex/adapters/groww/constants.py:99`), agreement
-  test-pinned.
+- ONE canonical classification law, `brutex.universe.classify_engine_sweep_target`
+  (+ `is_engine_sweep_symbol` / `ENGINE_SWEEP_SPOT_TRIPLES`, derived from
+  `BRUTE_FORCE_INDEX_UNDERLYINGS`), consumed by the Layer-2 preflight
+  `brutex/engine/sweep_scope.py::check_sweep_scope` and the Layer-1
+  `SweepGridConfig.__post_init__` hard invariant. Allowed: exactly the 3 spot triples
+  (NSE/INDEX/NIFTY · NSE/INDEX/BANKNIFTY · BSE/INDEX/SENSEX — the coordinate twin of
+  the lake-side `BRUTE_FORCE_INDEX_SYMBOLS`, agreement test-pinned) + the ADR-0012
+  NIFTY-futures shapes under NSE/FNO. Deny-by-default, exact-case, zero I/O.
 - Wired at every production ENGINE-EXECUTING entry: `brutex sweep` (single tuple), the
-  `--symbols` → `SweepGridConfig.instruments` chokepoint in `cmd_sweep_all` (covering
-  `sweep-all`, `sweep-daemon`, and the dashboard 🚀 Run Sweep button, which all reuse
-  that function — the dashboard ADDITIONALLY gates eagerly in
+  `--symbols` chokepoint in `cmd_sweep_all` (covering `sweep-all`, `sweep-daemon`, and
+  the dashboard 🚀 Run Sweep button — the dashboard ADDITIONALLY gates eagerly in
   `resolve_sweep_request`, so an out-of-scope symbol is a 400 naming the offender, not
-  a background job whose refusal lands only on server stderr), AND the
-  `sweep-verify --recount` Tier-3 shadow re-sweep — which EXECUTES the real
-  `run_sweep_grid` over lake bars into `--scratch-root`, so it is a production sweep
-  entry, not a report. Refusal names every offender + this ADR and exits
-  `EXIT_USER_ERROR`.
-- **No flag bypasses the scope gate.** `sweep-verify`'s `--allow-context-mismatch`
-  overrides the recount CONTEXT gate only — the scope gate runs first and is not
-  overridable. The gate is lifted per-symbol only by a reviewed PR that lands the
-  adjustment layer below (or, for NIFTY futures, the ADR-0012 futures-sweep PR — see
-  §6).
+  a background job whose refusal lands only on server stderr), AND — added by THIS
+  decision — the `sweep-verify --recount` Tier-3 shadow re-sweep, which EXECUTES the
+  real `run_sweep_grid` over lake bars into `--scratch-root`, so it is a production
+  sweep entry, not a report. Refusal names every offender + the law + this ADR and
+  exits `EXIT_USER_ERROR`.
+- **This decision's extension (DEC-CORP-ACTION-GATE-001):** (a) the hard refusal
+  message carries the corporate-action rationale verbatim — the literal phrase
+  "corporate-action adjustment layer missing" + DEC-CORP-ACTION-GATE-001 +
+  DEC-ENGINE-SCOPE-GUARD-001 + this ADR — so the operator sees WHY, not just NO;
+  (b) the CLI-only `--allow-out-of-scope` research escape (DEC-ENGINE-SCOPE-GUARD-001's
+  deliberate design, which SUPERSEDES this ADR's original "no flag bypasses" posture)
+  can never proceed silently: every overridden launch emits one loud
+  `sweep.scope_override_hazard` structlog WARNING carrying the same hazard text, on
+  top of the base gate's override WARNING + hash-chained `SWEEP_SCOPE_OVERRIDE` audit
+  stamp. The unattended `sweep-daemon` refuses the flag outright; no dashboard
+  override exists. The gate is lifted per-symbol only by a reviewed PR that lands the
+  adjustment layer below (or, for NIFTY futures, the ADR-0012 futures-sweep launch PR
+  — see §6).
 
-Honest envelope: direct library construction of `SweepGridConfig` is not guarded (the
-test suite builds synthetic-label grids by design — not an operator surface).
-`sweep-verify`'s report-only Tier 1/2 (structural + identity) are deliberately
-unguarded: they read an existing tree and launch no engine. Accepted trade-off: a
-PRE-gate legacy tree holding out-of-scope symbols keeps Tier-1/2 report verifiability
-but loses Tier-3 recount verifiability — acceptable, since the gate now prevents such
-trees from being produced.
+Honest envelope: direct library construction of `SweepGridConfig` opts out via the
+explicit `unsafe_allow_out_of_scope_instruments` field (synthetic-label test grids —
+not an operator surface). `sweep-verify`'s report-only Tier 1/2 (structural +
+identity) are deliberately unguarded: they read an existing tree and launch no engine,
+so a legacy out-of-scope tree stays report-verifiable; its Tier-3 recount now requires
+the explicit `--allow-out-of-scope` escape and proceeds LOUDLY (the reconciled
+trade-off — verifiability preserved, silence eliminated).
 
 ## 4. Future layer design (sketch — nothing below is implemented)
 
@@ -163,16 +177,24 @@ index symbols); 100% line+branch per CLAUDE.md §12.
 
 ADR-0012 authorizes the engine on **NIFTY futures** for the dynamic-strategy track.
 Futures need no split adjustment (an index future tracks the divisor-adjusted index),
-so the gate does not conflict with ADR-0012 — but **no futures sweep wiring exists
-today**: `brutex/strategies/spec.py` deliberately does not pre-assign the NIFTY-futures
+so the gate does not conflict with ADR-0012. DEC-ENGINE-SCOPE-GUARD-001's classifier
+already admits the two NIFTY-futures addressing shapes under NSE/FNO (the
+`FuturesContract.series_key` form `NIFTY-FUT-YYYY-MM-DD` OR a `parse_fno_symbol`-
+decodable `NSE-NIFTY-<DDMmmYY>-FUT` lake contract symbol — dual acceptance, the honest
+pre-launch envelope) — but **no futures sweep wiring exists today**:
+`brutex/strategies/spec.py` deliberately does not pre-assign the NIFTY-futures
 `symbol_id` ("it lands with the futures-sweep PR once its real instrument label
-exists"), and no sweep path resolves an FNO contract symbol. The guard therefore admits
-only the 3 spot symbols, and the futures-sweep PR extends `ENGINE_SCOPE_SYMBOLS` with
-the real futures instrument label in the same reviewed PR that assigns its symbol id.
+exists"), and no sweep path resolves an FNO contract symbol. The futures-sweep launch
+PR MUST pin its final addressing shape in `brutex.universe.is_engine_sweep_symbol` in
+the same reviewed PR that assigns its symbol id.
 
 ## 7. References
 
 - CLAUDE.md §2 Golden Rules #1, #3, #10; §6 (verified Groww facts)
-- MIGRATION.md #1178 (this decision), #200 (DEC-P0-063), #694 (NTM), #1006 (ADR-0012)
+- MIGRATION.md #1180 (this decision), #1178 (DEC-ENGINE-SCOPE-GUARD-001 — the
+  implemented gate), #200 (DEC-P0-063), #694 (NTM), #1006 (ADR-0012)
 - 2026-07-03 audit finding #5 (zero corporate-action code, grep-verified)
-- `brutex/engine/scope_guard.py` (the shipped gate), `tests/unit/test_engine_scope_guard.py`
+- `brutex/engine/sweep_scope.py` + `brutex/universe.py` (the shipped gate),
+  `tests/unit/test_engine_sweep_scope.py`, `tests/unit/test_universe.py`,
+  `tests/integration/test_cli_sweep_scope.py` +
+  `tests/integration/test_cli_sweep_scope_guard.py` (the extension suite)

@@ -130,19 +130,8 @@ def _clean_csv(value: str | None, default: str) -> list[str]:
 
 
 def _normalise_symbols(value: str | None) -> str:
-    """Normalise + scope-gate the symbols axis (DEC-CORP-ACTION-GATE-001).
-
-    Every token is admitted through the engine scope gate
-    (:func:`brutex.engine.scope_guard.ensure_engine_scope` — strip + upper-case
-    normalization), so an out-of-scope symbol raises the gate's
-    :class:`~brutex.engine.scope_guard.EngineScopeError` (a :class:`ValueError`
-    subclass) HERE, eagerly, and the route turns it into a clear 400 naming
-    every offender — never a background job that "succeeds" while the refusal
-    lands only on server stderr.
-    """
-    from brutex.engine.scope_guard import ensure_engine_scope
-
-    return ",".join(ensure_engine_scope(_clean_csv(value, DEFAULT_SYMBOLS)))
+    """Normalise the symbols axis (non-empty tokens, original case preserved)."""
+    return ",".join(_clean_csv(value, DEFAULT_SYMBOLS))
 
 
 def _normalise_intervals(value: str | None) -> str:
@@ -268,10 +257,11 @@ def resolve_sweep_request(
     ValueError
         On any unknown interval, non-BUY/SELL direction, out-of-range / non-integer
         K, malformed SL/TP leg, non-positive ``top``, unparseable date,
-        ``end < start``, or an out-of-engine-scope symbol
-        (:class:`~brutex.engine.scope_guard.EngineScopeError`, a ``ValueError``
-        subclass — DEC-CORP-ACTION-GATE-001, so the route's existing
-        ``ValueError`` → 400 mapping surfaces the refusal eagerly).
+        ``end < start``, or an out-of-engine-scope launch coordinate (the
+        :func:`brutex.engine.sweep_scope.check_sweep_scope` refusal —
+        DEC-ENGINE-SCOPE-GUARD-001 + its corporate-action extension
+        DEC-CORP-ACTION-GATE-001 / ADR-0016 — surfaced eagerly as a 400 via
+        the route's existing ``ValueError`` mapping).
     """
     resolved_top = DEFAULT_TOP if top is None else top
     if resolved_top < 1:
@@ -280,15 +270,33 @@ def resolve_sweep_request(
     resolved_end = _normalise_date(end, today.isoformat(), label="end")
     if resolved_end < resolved_start:
         raise ValueError(f"end {resolved_end!r} must not precede start {resolved_start!r}")
+    resolved_symbols = _normalise_symbols(symbols)
+    resolved_exchange = _normalise_nonblank(exchange, DEFAULT_EXCHANGE)
+    resolved_segment = _normalise_nonblank(segment, DEFAULT_SEGMENT)
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): an
+    # out-of-engine-scope dashboard launch is a 400 via the existing
+    # ValueError → route mapping. There is deliberately NO override parameter
+    # on the dashboard — the research escape hatch is CLI-only
+    # (--allow-out-of-scope, loud + audit-stamped).
+    from brutex.engine.sweep_scope import check_sweep_scope
+
+    scope = check_sweep_scope(
+        resolved_symbols.split(","),
+        exchange=resolved_exchange,
+        segment=resolved_segment,
+        allow_out_of_scope=False,
+    )
+    if not scope.ok:
+        raise ValueError(scope.refusal_message())
     return SweepRunRequest(
-        symbols=_normalise_symbols(symbols),
+        symbols=resolved_symbols,
         intervals=_normalise_intervals(intervals),
         directions=_normalise_directions(directions),
         k=_normalise_k(k),
         sl=_normalise_leg(sl, DEFAULT_SL, label="sl"),
         tp=_normalise_leg(tp, DEFAULT_TP, label="tp"),
-        exchange=_normalise_nonblank(exchange, DEFAULT_EXCHANGE),
-        segment=_normalise_nonblank(segment, DEFAULT_SEGMENT),
+        exchange=resolved_exchange,
+        segment=resolved_segment,
         start=resolved_start,
         end=resolved_end,
         mode=_normalise_nonblank(mode, DEFAULT_MODE),
@@ -374,6 +382,12 @@ def build_sweep_kwargs(
         "options_sim": False,
         "stage3_enable": False,
         "allow_missing_slices": True,
+        # DEC-ENGINE-SCOPE-GUARD-001: the dashboard NEVER overrides the engine
+        # scope — explicit here to keep the 1:1 cmd_sweep_all kwargs doctrine
+        # visible (the request was already scope-checked in
+        # resolve_sweep_request; the CLI escape hatch does not exist on this
+        # surface by design).
+        "allow_out_of_scope": False,
     }
 
 

@@ -90,8 +90,8 @@ def test_custom_values_are_normalised() -> None:
         tp="2500",
         top=50,
         mode="B",
-        exchange="bse",
-        segment="index",
+        exchange=" BSE ",
+        segment=" INDEX ",
         start="2022-03-01",
         end="2023-09-30",
         today=_TODAY,
@@ -104,8 +104,10 @@ def test_custom_values_are_normalised() -> None:
     assert req.tp == "2500"
     assert req.top == 50
     assert req.mode == "B"
-    assert req.exchange == "bse"  # non-blank passthrough (case preserved)
-    assert req.segment == "index"
+    # Non-blank passthrough is trimmed; case must be lake-exact (a lowercase
+    # coordinate is now REFUSED by the DEC-ENGINE-SCOPE-GUARD-001 scope law).
+    assert req.exchange == "BSE"
+    assert req.segment == "INDEX"
     assert req.start == "2022-03-01"
     assert req.end == "2023-09-30"
 
@@ -198,6 +200,22 @@ def test_end_before_start_raises() -> None:
         resolve_sweep_request(start="2024-01-01", end="2023-12-31", today=_TODAY)
 
 
+def test_out_of_engine_scope_symbol_raises_the_scope_refusal() -> None:
+    """DEC-ENGINE-SCOPE-GUARD-001 Layer 2: an out-of-scope symbol is a ValueError.
+
+    The dashboard resolver refuses an out-of-engine-scope launch with the
+    full ``ScopeReport.refusal_message()`` (symbol + law + remedy) — the
+    route layer maps this ValueError to a 400 (proven separately in
+    ``test_dashboard_sweep_run_route.py``).
+    """
+    with pytest.raises(ValueError, match="sweep REFUSED") as excinfo:
+        resolve_sweep_request(symbols="RELIANCE", today=_TODAY)
+    message = str(excinfo.value)
+    assert "RELIANCE" in message
+    assert f"{DEFAULT_EXCHANGE}/{DEFAULT_SEGMENT}" in message
+    assert "NIFTY/BANKNIFTY/SENSEX" in message  # the law + remedy tail
+
+
 def test_explicit_none_leg_passes_through() -> None:
     req = resolve_sweep_request(sl="NONE", tp="none", today=_TODAY)
     assert req.sl == "none"
@@ -278,29 +296,33 @@ def test_request_is_frozen() -> None:
         req.symbols = "BANKNIFTY"  # type: ignore[misc]
 
 
-# ── engine scope gate (DEC-CORP-ACTION-GATE-001 / ADR-0016) ───────────────────
+# ── corporate-action extension of the scope gate (DEC-CORP-ACTION-GATE-001) ──
 
 
-def test_out_of_scope_symbol_raises_eagerly_naming_only_the_offender() -> None:
-    """The dashboard gate fires at validation time — a 400, never a background
-    job that reads SUCCESS while the refusal lands on server stderr."""
+def test_out_of_scope_refusal_carries_the_corp_action_rationale() -> None:
+    """The eager dashboard refusal (DEC-ENGINE-SCOPE-GUARD-001, proven above)
+    now carries the corporate-action rationale + both DEC ids + ADR-0016
+    (DEC-CORP-ACTION-GATE-001 — the extension), naming only the offender."""
     with pytest.raises(ValueError, match="corporate-action adjustment layer missing") as excinfo:
         resolve_sweep_request(symbols="NIFTY,RELIANCE", today=_TODAY)
     message = str(excinfo.value)
-    assert "'RELIANCE'" in message
     assert "DEC-CORP-ACTION-GATE-001" in message
-    assert "'NIFTY'" not in message
+    assert "DEC-ENGINE-SCOPE-GUARD-001" in message
+    assert "ADR-0016" in message
+    assert "- RELIANCE:" in message
+    assert "- NIFTY:" not in message
 
 
-def test_scope_refusal_is_a_value_error_subclass_for_the_route_400() -> None:
-    # The route maps ValueError -> HTTP 400; EngineScopeError must ride it.
-    from brutex.engine.scope_guard import EngineScopeError
-
-    assert issubclass(EngineScopeError, ValueError)
-    with pytest.raises(EngineScopeError):
-        resolve_sweep_request(symbols="INDIAVIX", today=_TODAY)
-
-
-def test_in_scope_symbols_are_normalized_to_engine_case() -> None:
-    req = resolve_sweep_request(symbols=" nifty , BANKNIFTY ", today=_TODAY)
+def test_whitespace_padded_in_scope_symbols_are_trimmed_and_admitted() -> None:
+    # Trim-only normalisation (case must be lake-exact — a lowercase symbol
+    # is refused with a did-you-mean hint, pinned below).
+    req = resolve_sweep_request(symbols=" NIFTY , BANKNIFTY ", today=_TODAY)
     assert req.symbols == "NIFTY,BANKNIFTY"
+
+
+def test_lowercase_in_scope_symbol_is_refused_with_a_did_you_mean_hint() -> None:
+    # Lake partition keys are case-exact (DEC-ENGINE-SCOPE-GUARD-001): the
+    # dashboard never silently upper-cases — the refusal names the fix.
+    with pytest.raises(ValueError, match="did you mean") as excinfo:
+        resolve_sweep_request(symbols="nifty", today=_TODAY)
+    assert "'NIFTY'" in str(excinfo.value)
