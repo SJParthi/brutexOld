@@ -32,6 +32,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from brutex.adapters.groww.client import GrowwClientProtocol
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.ingest_common import DEFAULT_EMPTY_RETRY_ATTEMPTS, fetch_until_nonempty
 from brutex.adapters.protocol import DerivativeContract
 
@@ -194,6 +195,7 @@ def resolve_expiries(
     year: int | None = None,
     month: int | None = None,
     empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    form_preference: SymbolFormPreference | None = None,
 ) -> list[date]:
     """Resolve an underlying's FNO expiry dates for *year*/*month* (sorted, deduped).
 
@@ -233,10 +235,23 @@ def resolve_expiries(
 
     # DEC-GROWW-AMPERSAND-FALLBACK-001: try the plain symbol, then the `%26`-encoded `&`
     # variant on an empty reply, BEFORE the transient-glitch empty-retry budget.
+    # DEC-SYMBOL-FORM-PREFERENCE-001: an injected preference moves the last-winning form
+    # FIRST (recording on every non-empty form result) — a pure reorder, never a drop.
+    canonical_forms = underlying_symbol_forms(underlying_symbol)
+
+    def _fetch_form_recording(symbol_form: str) -> list[date]:
+        result = _fetch_form(symbol_form)
+        if result and form_preference is not None:
+            form_preference.record_winner(underlying_symbol, canonical_forms, symbol_form)
+        return result
+
     def _fetch() -> list[date]:
-        return _fetch_first_nonempty_form(
-            underlying_symbol_forms(underlying_symbol), _fetch_form, is_empty=lambda r: not r
+        forms = (
+            canonical_forms
+            if form_preference is None
+            else form_preference.order(underlying_symbol, canonical_forms)
         )
+        return _fetch_first_nonempty_form(forms, _fetch_form_recording, is_empty=lambda r: not r)
 
     return fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=empty_retry_attempts)
 
@@ -248,6 +263,7 @@ def resolve_contracts(
     underlying_symbol: str,
     expiry: date,
     empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    form_preference: SymbolFormPreference | None = None,
 ) -> list[DerivativeContract]:
     """Resolve every listed contract for an ``(underlying, expiry)`` (parsed, deduped).
 
@@ -261,6 +277,10 @@ def resolve_contracts(
     *empty_retry_attempts* times (:func:`~brutex.adapters.ingest_common.fetch_until_nonempty`,
     first non-empty wins, bounded) so a transient vendor glitch can't drop a newly-listed
     expiry's whole strike chain.
+
+    *form_preference* (DEC-SYMBOL-FORM-PREFERENCE-001) optionally reorders the
+    ``&``-symbol form fallback so the LAST-WINNING form is tried first (never dropping
+    a form); ``None`` (the default) keeps the fixed plain-first order byte-identical.
 
     Raises
     ------
@@ -297,10 +317,23 @@ def resolve_contracts(
 
     # DEC-GROWW-AMPERSAND-FALLBACK-001: try the plain symbol, then the `%26`-encoded `&`
     # variant on an empty reply, BEFORE the transient-glitch empty-retry budget.
+    # DEC-SYMBOL-FORM-PREFERENCE-001: an injected preference moves the last-winning form
+    # FIRST (recording on every non-empty form result) — a pure reorder, never a drop.
+    canonical_forms = underlying_symbol_forms(underlying_symbol)
+
+    def _fetch_form_recording(symbol_form: str) -> list[DerivativeContract]:
+        result = _fetch_form(symbol_form)
+        if result and form_preference is not None:
+            form_preference.record_winner(underlying_symbol, canonical_forms, symbol_form)
+        return result
+
     def _fetch() -> list[DerivativeContract]:
-        return _fetch_first_nonempty_form(
-            underlying_symbol_forms(underlying_symbol), _fetch_form, is_empty=lambda r: not r
+        forms = (
+            canonical_forms
+            if form_preference is None
+            else form_preference.order(underlying_symbol, canonical_forms)
         )
+        return _fetch_first_nonempty_form(forms, _fetch_form_recording, is_empty=lambda r: not r)
 
     return fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=empty_retry_attempts)
 

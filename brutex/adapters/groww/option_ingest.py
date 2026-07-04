@@ -100,6 +100,7 @@ from brutex.adapters.groww.errors import (
 )
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.ingest import IngestReport
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.groww.write_deadline import append_with_deadline
 from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
@@ -260,6 +261,7 @@ def fetch_option_candles(
     start: date,
     end: date,
     on_raw_payload: RawPayloadHook | None = None,
+    form_preference: SymbolFormPreference | None = None,
 ) -> list[CandleBar]:
     """Fetch ONE contract's OHLCV+OI bars over ``[start, end)`` — index-free, FNO.
 
@@ -274,6 +276,11 @@ def fetch_option_candles(
     (DEC-RAW-DATA-INTEGRITY-001), threaded straight to
     :func:`fetch_candle_windows`; ``None`` (the default) keeps the fetch
     byte-identical to the pre-feature path.
+
+    *form_preference* (DEC-SYMBOL-FORM-PREFERENCE-001) is threaded into
+    :func:`fetch_candle_windows` KEYED BY THE CONTRACT'S UNDERLYING, so one
+    ``&``-symbol form win transfers across the whole chain (every M&M contract
+    issues the learned winner first). ``None`` keeps the fixed order.
 
     Returns
     -------
@@ -290,6 +297,8 @@ def fetch_option_candles(
         end=end,
         drop_volume=False,
         on_raw_payload=on_raw_payload,
+        form_preference=form_preference,
+        preference_key=contract.underlying_symbol,
     )
 
 
@@ -385,6 +394,7 @@ def ingest_option_contract(
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
+    form_preference: SymbolFormPreference | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -497,6 +507,7 @@ def ingest_option_contract(
                     start=start,
                     end=clamped_end,
                     on_raw_payload=on_raw_payload,
+                    form_preference=form_preference,
                 )
                 break
             except GrowwError as exc:
@@ -1574,6 +1585,7 @@ def run_groww_option_ingest(
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
+    form_preference: SymbolFormPreference | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1732,6 +1744,12 @@ def run_groww_option_ingest(
     # wedged volume fails every partition) and a fresh pass/pull always starts clean.
     # BRUTEX_WRITE_BREAKER=off yields None (byte-identical per-window defer behaviour).
     wbreaker = write_breaker if write_breaker is not None else resolve_write_breaker()
+    # ONE shared symbol-form preference per PASS (DEC-SYMBOL-FORM-PREFERENCE-001):
+    # every contract of this run shares the learned `&`-form winners (keyed by
+    # underlying inside the candle fetch), so ONE `%26` recovery reorders the whole
+    # chain's subsequent fetches. Process-local + per-run — cross-pull persistence is
+    # a named follow-up. Thread-safe (the pool fan-out records from worker threads).
+    preference = form_preference if form_preference is not None else SymbolFormPreference()
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): route every contract write through
     # the background pool when wired, freeing the fetch connection from the serial
     # O(month-depth) write. `write_pool=None` leaves `sink` untouched (byte-identical).
@@ -1823,6 +1841,7 @@ def run_groww_option_ingest(
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=wbreaker,
+                form_preference=preference,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}

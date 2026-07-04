@@ -54,6 +54,7 @@ from brutex.adapters.groww.constants import INTERVAL_TO_GROWW
 from brutex.adapters.groww.contracts import underlying_symbol_forms
 from brutex.adapters.groww.errors import GrowwError, is_retryable
 from brutex.adapters.groww.parser import parse_candle_rows
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.data.models import CandleBar
 
 #: Structured logger — the `%26` symbol-form fallback attempt + outcome
@@ -89,6 +90,8 @@ def fetch_candle_windows(
     end: date,
     drop_volume: bool,
     on_raw_payload: RawPayloadHook | None = None,
+    form_preference: SymbolFormPreference | None = None,
+    preference_key: str | None = None,
 ) -> list[CandleBar]:
     """Fetch + parse every Groww candle window for ``[start, end)`` at *interval*.
 
@@ -132,6 +135,14 @@ def fetch_candle_windows(
         path; the hash + sidecar persist live inside the caller's (best-effort)
         hook, so a hook failure is the CALLER's to absorb — the candle fetch
         itself is never affected by the capture.
+    form_preference, preference_key
+        Optional learned form ordering (DEC-SYMBOL-FORM-PREFERENCE-001): when a
+        preference is injected, the ``&``-symbol form pair is REORDERED so the
+        last-winning form (recorded under *preference_key*, default *groww_symbol*;
+        the option spine passes the contract's UNDERLYING so one win transfers
+        across the whole chain) is fetched FIRST — a pure reorder that never drops
+        a form. ``None`` (the default) keeps today's fixed plain-first order
+        byte-identical.
 
     Returns
     -------
@@ -211,54 +222,68 @@ def fetch_candle_windows(
         return bars
 
     # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001: plain form FIRST (byte-identical for
-    # the common no-`&` symbol); the `%26` form ONLY on a clean all-empty result.
-    forms = underlying_symbol_forms(groww_symbol)
-    plain_bars = _fetch_form(forms[0])
-    if plain_bars or len(forms) == 1 or not windows:
-        # Non-empty (plain form works — never fall back), a no-`&` symbol (single
+    # the common no-`&` symbol); the fallback form ONLY on a clean all-empty result.
+    # DEC-SYMBOL-FORM-PREFERENCE-001: an injected preference may move a learned winner
+    # first (a pure reorder — the loser is still the speculative second attempt, and
+    # the no-worse-than-before terminal-swallow law applies to whichever form is that
+    # SPECULATIVE second; the FIRST form's errors propagate untouched, as today).
+    canonical_forms = underlying_symbol_forms(groww_symbol)
+    pref_key = groww_symbol if preference_key is None else preference_key
+    forms = (
+        canonical_forms
+        if form_preference is None
+        else form_preference.order(pref_key, canonical_forms)
+    )
+    first_bars = _fetch_form(forms[0])
+    if first_bars or len(forms) == 1 or not windows:
+        # Non-empty (the first form works — never fall back), a no-`&` symbol (single
         # form), or an empty window plan (nothing was fetched — no signal to act on).
-        return plain_bars
-    encoded = forms[1]
+        if first_bars and form_preference is not None:
+            form_preference.record_winner(pref_key, canonical_forms, forms[0])
+        return first_bars
+    fallback = forms[1]
     _LOG.debug(
         "groww.candles.symbol_form_fallback",
         groww_symbol=groww_symbol,
-        fallback_symbol=encoded,
+        fallback_symbol=fallback,
         interval=interval,
         start=start.isoformat(),
         end=end.isoformat(),
     )
     try:
-        bars = _fetch_form(encoded)
+        bars = _fetch_form(fallback)
     except GrowwError as exc:
         if is_retryable(exc):
-            # A transient (429/timeout/5xx/empty-body) from the SPECULATIVE encoded
-            # attempt rides the EXISTING retry ladders exactly like the plain form's
+            # A transient (429/timeout/5xx/empty-body) from the SPECULATIVE second
+            # attempt rides the EXISTING retry ladders exactly like the first form's
             # — propagate unchanged (already-reviewed behaviour, never swallowed).
             raise
-        # A TERMINAL error from the speculative `%26` attempt must be NO WORSE than
+        # A TERMINAL error from the speculative second attempt must be NO WORSE than
         # never having tried it (the module's no-worse-than-before law): before this
-        # fallback existed the window would have recorded the plain form's honest
+        # fallback existed the window would have recorded the first form's honest
         # clean-empty, so swallow the speculative failure into that SAME empty —
         # logged loudly — instead of quarantining the contract into a perpetual
         # FAILED window over a fetch we volunteered.
         _LOG.warning(
             "groww.candles.symbol_form_fallback_error",
             groww_symbol=groww_symbol,
-            fallback_symbol=encoded,
+            fallback_symbol=fallback,
             interval=interval,
             error_type=type(exc).__name__,
         )
-        return plain_bars
-    # Which form won: INFO when the encoded form RECOVERED data (the signal the
+        return first_bars
+    if bars and form_preference is not None:
+        form_preference.record_winner(pref_key, canonical_forms, fallback)
+    # Which form won: INFO when the fallback form RECOVERED data (the signal the
     # operator cares about); DEBUG for a genuinely-empty window (both forms empty —
     # the same honest empty as before, just double-checked).
     log = _LOG.info if bars else _LOG.debug
     log(
         "groww.candles.symbol_form_fallback_result",
         groww_symbol=groww_symbol,
-        fallback_symbol=encoded,
+        fallback_symbol=fallback,
         interval=interval,
-        form_won="encoded" if bars else "none",
+        form_won=("encoded" if fallback != canonical_forms[0] else "plain") if bars else "none",
         bars=len(bars),
     )
     return bars
