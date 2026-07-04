@@ -256,15 +256,55 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
     ones onto ``(exchange, " ")``): it stays pullable via
     ``by_groww_symbol`` but is excluded from the pair maps + counted, so the junk
     vendor row is visible in ``/logs`` rather than shadowing a real pair key.
+
+    Index surrogate-collision detection (DEC-INDEX-SURROGATE-COLLISION-DETECT-001):
+    a non-numeric index ``exchange_token`` becomes a deterministic 32-bit blake2b
+    surrogate ``security_id`` derived from the ``groww_symbol``
+    (:func:`_security_id`) — computed per row with no cross-row awareness. Two
+    DISTINCT-gsym indices whose surrogates collide (~1e-7 birthday odds) would
+    both enter this index, then one would be SILENTLY last-wins-overwritten
+    downstream at the store's ``(security_id, exch_id, segment)`` identity dedup
+    — order-dependently, with zero warning. This chokepoint now detects the
+    collision with an O(1) reverse-map check keyed ``(exch_id, security_id)``
+    (mirroring the store's ``Segment.INDEX`` PK partition), KEEPS the first index
+    (deterministic — mirrors the gsym first-wins dedup above, and agrees with
+    what the store retains), drops the second, and emits ONE loud
+    ``instrument_master.index_security_id_collision`` WARNING naming BOTH
+    colliding groww_symbols (``kept``/``dropped``) so nothing is silent
+    (Golden Rule #1). WARN-not-raise: a raise would abort the whole ~750-
+    underlying master load on a one-index blip (Recoverability loss).
     """
     by_groww: dict[str, Instrument] = {}
     by_pair: dict[tuple[Exchange, str], Instrument] = {}
     gsym_by_pair: dict[tuple[Exchange, str], str] = {}
     universe: list[Instrument] = []
+    # Reverse map: which gsym FIRST claimed each INDEX (exchange, security_id)
+    # identity — the surrogate-collision detector's O(1) membership probe.
+    index_identity_owner: dict[tuple[Exchange, int], str] = {}
     blank_symbol_skipped = 0
     for gsym, instrument in pairs:
         if gsym in by_groww:
             continue  # first-wins dedup, O(1)
+        if instrument.segment is Segment.INDEX:
+            # Only index rows ever carry a hashed surrogate security_id
+            # (numeric vendor tokens are used directly), so the detector is
+            # scoped to Segment.INDEX — the store PK partition where a
+            # collision would silently last-wins-overwrite one index.
+            identity = (instrument.exch_id, instrument.security_id)
+            owner = index_identity_owner.get(identity)
+            if owner is not None:
+                # A PRIOR index on this exchange already owns this 32-bit
+                # surrogate under a DIFFERENT groww_symbol: keep-first, drop
+                # this one, and say so LOUDLY naming both sides.
+                _LOG.warning(
+                    "instrument_master.index_security_id_collision",
+                    security_id=instrument.security_id,
+                    exchange=instrument.exch_id.value,
+                    kept=owner,
+                    dropped=gsym,
+                )
+                continue
+            index_identity_owner[identity] = gsym
         by_groww[gsym] = instrument
         universe.append(instrument)
         symbol = instrument.symbol_name

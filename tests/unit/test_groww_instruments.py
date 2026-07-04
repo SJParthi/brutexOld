@@ -10,7 +10,13 @@ from decimal import Decimal
 import pytest
 from brutex.adapters.groww import instruments as gi
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
-from brutex.models import Exchange, InstrumentFormatError, InstrumentType, Segment
+from brutex.models import (
+    Exchange,
+    Instrument,
+    InstrumentFormatError,
+    InstrumentType,
+    Segment,
+)
 from structlog.testing import capture_logs
 
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
@@ -397,6 +403,125 @@ def test_segment_for_unmappable_raises() -> None:
         gi._segment_for(InstrumentType.FUT, "WEIRD", gsym="g")
 
 
+# ── index surrogate-collision detection ─────────────────────────────────────
+# DEC-INDEX-SURROGATE-COLLISION-DETECT-001. Two DISTINCT-gsym indices whose
+# blake2b-4byte surrogate security_ids collide both entered the index, then one
+# was SILENTLY last-wins-overwritten at the store's (security_id, exch_id,
+# segment) identity dedup — order-dependently, zero warning. build_index now
+# keep-firsts the collision at the single COMMON chokepoint + WARNs naming both.
+def _hand_instrument(
+    *,
+    security_id: int,
+    symbol_name: str,
+    instrument: InstrumentType = InstrumentType.IDX,
+    segment: Segment = Segment.INDEX,
+    lot_size: int = 0,
+    tick_size: Decimal = Decimal(0),
+) -> Instrument:
+    """Hand-build a minimal valid Instrument with a FORGED security_id."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=security_id,
+        symbol_name=symbol_name,
+        display_name=None,
+        instrument=instrument,
+        segment=segment,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=lot_size,
+        tick_size=tick_size,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+    )
+
+
+def test_index_surrogate_collision_keeps_first_and_warns_regression() -> None:
+    # FAIL-BEFORE/PASS-AFTER: before the fix both colliding indices entered the
+    # index (universe of 2, no warning) and the store later dropped one SILENTLY
+    # (last-wins, order-dependent). Now: keep-first + ONE loud WARN naming both.
+    forged = 0xDEADBEEF
+    pairs = [
+        ("NSE-IDXA", _hand_instrument(security_id=forged, symbol_name="IDXA")),
+        ("NSE-IDXB", _hand_instrument(security_id=forged, symbol_name="IDXB")),
+    ]
+    with capture_logs() as logs:
+        index = gi.build_index(pairs)
+    collisions = [
+        entry for entry in logs if entry["event"] == "instrument_master.index_security_id_collision"
+    ]
+    assert len(collisions) == 1
+    assert collisions[0]["kept"] == "NSE-IDXA"
+    assert collisions[0]["dropped"] == "NSE-IDXB"
+    assert collisions[0]["security_id"] == forged
+    assert collisions[0]["exchange"] == "NSE"
+    assert collisions[0]["log_level"] == "warning"
+    assert len(index.universe) == 1
+    assert index.by_groww_symbol["NSE-IDXA"].symbol_name == "IDXA"  # first wins
+    assert "NSE-IDXB" not in index.by_groww_symbol  # dropped, not silently masked
+
+
+def test_non_index_identical_security_ids_both_kept_no_warning() -> None:
+    # Pins the `segment is Segment.INDEX` False path: only index rows carry a
+    # hashed surrogate, so two CASH equities sharing a forged security_id are
+    # outside the detector's scope — both kept, ZERO collision warning.
+    forged = 424242
+    pairs = [
+        (
+            "NSE-EQA",
+            _hand_instrument(
+                security_id=forged,
+                symbol_name="EQA",
+                instrument=InstrumentType.EQ,
+                segment=Segment.CASH,
+                lot_size=1,
+                tick_size=Decimal("0.05"),
+            ),
+        ),
+        (
+            "NSE-EQB",
+            _hand_instrument(
+                security_id=forged,
+                symbol_name="EQB",
+                instrument=InstrumentType.EQ,
+                segment=Segment.CASH,
+                lot_size=1,
+                tick_size=Decimal("0.05"),
+            ),
+        ),
+    ]
+    with capture_logs() as logs:
+        index = gi.build_index(pairs)
+    assert not [
+        entry for entry in logs if entry["event"] == "instrument_master.index_security_id_collision"
+    ]
+    assert len(index.universe) == 2
+    assert "NSE-EQA" in index.by_groww_symbol and "NSE-EQB" in index.by_groww_symbol
+
+
+def test_distinct_index_surrogates_no_false_positive() -> None:
+    # Pins the owner-is-None assign path over REAL index rows: two distinct
+    # indices (distinct surrogates) both load with no collision warning.
+    with capture_logs() as logs:
+        index = gi.load_index_from_csv(_csv(_NIFTY, _VIX))
+    assert not [
+        entry for entry in logs if entry["event"] == "instrument_master.index_security_id_collision"
+    ]
+    assert len(index.universe) == 2
+    assert "NSE-NIFTY" in index.by_groww_symbol and "NSE-INDIAVIX" in index.by_groww_symbol
+
+
+def test_engine_index_surrogates_are_mutually_distinct() -> None:
+    # The three brute-force engine indices must produce three DISTINCT 32-bit
+    # surrogates today (no latent collision in the locked engine universe).
+    surrogates = {
+        gi._security_id(None, gsym=gsym) for gsym in ("NSE-NIFTY", "NSE-BANKNIFTY", "BSE-SENSEX")
+    }
+    assert len(surrogates) == 3
+
+
 # ── index_symbol_of (DEC-FNO-INDEX-GROWW-SYMBOL-MATCH-001) ──────────────────
 @pytest.mark.parametrize(
     ("groww_symbol", "expected"),
@@ -546,8 +671,11 @@ def test_whitespace_only_trading_symbol_excluded_from_pair_maps() -> None:
     DEC-MAPPING-COLLISION-HONESTY-001 hostile-review NIT).
     """
     ((nifty_gsym, nifty),) = gi.parse_instrument_csv(_csv(_NIFTY))
-    space_sym = replace(nifty, symbol_name=" ")
-    tab_sym = replace(nifty, symbol_name="\t")
+    # DISTINCT security_ids: ``replace`` would otherwise clone NIFTY's surrogate
+    # and trip the DEC-INDEX-SURROGATE-COLLISION-DETECT-001 keep-first drop —
+    # this test targets the pair-map whitespace guard, not the collision path.
+    space_sym = replace(nifty, symbol_name=" ", security_id=nifty.security_id + 1)
+    tab_sym = replace(nifty, symbol_name="\t", security_id=nifty.security_id + 2)
     with capture_logs() as logs:
         index = gi.build_index(
             [(nifty_gsym, nifty), ("NSE-WSONLY", space_sym), ("NSE-TABONLY", tab_sym)]

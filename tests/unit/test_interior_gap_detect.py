@@ -8,9 +8,10 @@ interior hole bookended by real bars. 100% line + branch on
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from brutex.calendars.nse import IST
 from brutex.data.interior_gap_detect import (
     INTERIOR_GAP,
     INTERIOR_GAP_WINDOW_ERROR_EVENT,
@@ -19,6 +20,7 @@ from brutex.data.interior_gap_detect import (
     InteriorGapVerdict,
     _largest_interior_session_gap,
     classify_interior_gap,
+    classify_interior_gap_dates,
     observe_interior_gap,
 )
 
@@ -136,6 +138,63 @@ class TestClassifyInteriorGap:
         monkeypatch.setenv("BRUTEX_INTERIOR_GAP_TOLERANCE_SESSIONS", "0")
         v = classify_interior_gap(bar_timestamps=[_ts(2021, 3, 1), _ts(2021, 3, 4)])
         assert v.verdict == NO_INTERIOR_GAP
+
+
+class TestClassifyInteriorGapDates:
+    """The extracted DATE-SET core (DEC-COLDSTART-SEED-INTERIOR-GAP-001) — the ONE
+    interior-hole classifier shared by the fetch-time detector AND the cold-start
+    ledger seed, driven here directly on covered dates."""
+
+    def test_interior_gap_dates_flagged(self) -> None:
+        # A >tolerance contiguous hole bracketed by covered sessions → INTERIOR_GAP.
+        v = classify_interior_gap_dates(covered_dates=[date(2021, 3, 1), date(2021, 3, 22)])
+        assert v.verdict == INTERIOR_GAP
+        assert v.reason == "interior_gap"
+        assert v.largest_gap_sessions > 5
+        assert v.first_bar_date == date(2021, 3, 1)
+        assert v.last_bar_date == date(2021, 3, 22)
+
+    def test_continuous_dates_not_flagged(self) -> None:
+        covered = [ts.astimezone(IST).date() for ts in _weekday_run(_ts(2021, 3, 1), 10)]
+        v = classify_interior_gap_dates(covered_dates=covered)
+        assert v.verdict == NO_INTERIOR_GAP
+        assert v.reason == "continuous"
+        assert v.largest_gap_sessions == 0
+
+    def test_fewer_than_two_dates_is_too_few(self) -> None:
+        assert classify_interior_gap_dates(covered_dates=[]).reason == "too_few_sessions"
+        one = classify_interior_gap_dates(covered_dates=[date(2021, 3, 1)])
+        assert one.verdict == NO_INTERIOR_GAP
+        assert one.reason == "too_few_sessions"
+
+    def test_out_of_calendar_year_abstains(self) -> None:
+        # 2019 is outside the NSE holiday-list coverage → abstain, never guess.
+        v = classify_interior_gap_dates(covered_dates=[date(2019, 3, 1), date(2019, 3, 22)])
+        assert v.verdict == NO_INTERIOR_GAP
+        assert v.reason == "out_of_calendar_coverage"
+
+    def test_custom_tolerance_flags_smaller_hole(self) -> None:
+        v = classify_interior_gap_dates(
+            covered_dates=[date(2021, 3, 1), date(2021, 3, 4)], tolerance_sessions=1
+        )
+        assert v.verdict == INTERIOR_GAP
+        assert v.largest_gap_sessions == 2
+
+    def test_golden_timestamp_delegator_equals_date_core(self) -> None:
+        # GOLDEN (COMMON, CLAUDE.md §11): the timestamp facade is EXACTLY the date
+        # core over the IST-converted dates — byte-identical verdicts, so the
+        # fetch-time detector and the cold-start seed can never drift.
+        for ts_set in (
+            [],
+            [_ts(2021, 3, 1)],
+            [_ts(2021, 3, 1), _ts(2021, 3, 4)],
+            [_ts(2021, 3, 1), _ts(2021, 3, 22)],
+            [_ts(2019, 3, 1), _ts(2019, 3, 22)],
+            _weekday_run(_ts(2021, 3, 1), 10),
+        ):
+            assert classify_interior_gap(bar_timestamps=ts_set) == classify_interior_gap_dates(
+                covered_dates=[t.astimezone(IST).date() for t in ts_set]
+            )
 
 
 class TestObserveInteriorGap:
