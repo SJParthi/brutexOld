@@ -1472,6 +1472,119 @@ def test_enter_pull_singleflight_refuses_on_contention(
     assert "refusing to start a second concurrent pull" in captured.err
 
 
+# ── account-keyed second lock, taken FIRST (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001) ──
+
+
+def test_enter_pull_singleflight_takes_account_lock_first_and_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a resolvable key the ACCOUNT lock is taken (and held) alongside the lake lock."""
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        account_pull_singleflight_lock,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # never write the real $HOME
+    with contextlib.ExitStack() as stack:
+        assert (
+            cli._enter_pull_singleflight(
+                stack, tmp_path / "lake", account_key_resolver=lambda: "key-A"
+            )
+            is True
+        )
+        # The ACCOUNT lock is held: a peer acquire for the SAME key — even with a
+        # DIFFERENT lake root — is refused (the #996 residual, closed).
+        with (
+            pytest.raises(PullAlreadyRunningError),
+            account_pull_singleflight_lock("key-A"),
+        ):
+            pass  # pragma: no cover — __enter__ raises first
+    # Stack exited (LIFO) → both released → a fresh account acquire succeeds.
+    with account_pull_singleflight_lock("key-A"):
+        pass
+
+
+def test_enter_pull_singleflight_refuses_on_account_contention(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A held ACCOUNT lock refuses the pull BEFORE the lake lock is even attempted."""
+    from brutex.adapters.groww.pull_singleflight import (
+        account_pull_singleflight_lock,
+        pull_singleflight_lock,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    lake_root = tmp_path / "lake"
+    with (
+        account_pull_singleflight_lock("key-A"),  # a peer pull holds the ACCOUNT
+        contextlib.ExitStack() as stack,
+    ):
+        assert (
+            cli._enter_pull_singleflight(stack, lake_root, account_key_resolver=lambda: "key-A")
+            is False
+        )
+        # The lake lock was never taken (account refused first) — a fresh lake acquire
+        # succeeds even while the peer still holds the account lock.
+        with pull_singleflight_lock(lake_root):
+            pass
+    captured = capsys.readouterr()
+    assert "for this Groww account" in captured.err
+    assert "DIFFERENT lake root" in captured.err
+
+
+def test_enter_pull_singleflight_skips_account_lock_on_none_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A None key (no credentials) skips the account lock; the lake lock still guards."""
+    from brutex.adapters.groww.pull_singleflight import default_account_lock_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with contextlib.ExitStack() as stack:
+        assert (
+            cli._enter_pull_singleflight(
+                stack, tmp_path / "lake", account_key_resolver=lambda: None
+            )
+            is True
+        )
+        assert not default_account_lock_dir().exists()  # no account lock file created
+
+
+def test_enter_pull_singleflight_default_resolver_uses_aws_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production default resolves the AWS-only api_key and locks on its digest."""
+    from types import SimpleNamespace
+
+    from brutex.adapters.groww.pull_singleflight import account_singleflight_lock_path
+
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(
+        credentials,
+        "resolve_groww_aws_credentials",
+        lambda: SimpleNamespace(api_key="aws-key", totp_secret="s"),
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with contextlib.ExitStack() as stack:
+        assert cli._enter_pull_singleflight(stack, tmp_path / "lake") is True
+        assert account_singleflight_lock_path("aws-key").exists()
+
+
+def test_enter_pull_singleflight_default_resolver_skips_on_credentials_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CredentialsError from the AWS source → graceful skip, the pull still starts."""
+    from brutex.config.credentials_types import CredentialsError
+
+    def _boom() -> Any:
+        raise CredentialsError("aws unreachable")
+
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "resolve_groww_aws_credentials", _boom)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with contextlib.ExitStack() as stack:
+        assert cli._enter_pull_singleflight(stack, tmp_path / "lake") is True
+
+
 def test_cmd_fetch_live_refused_when_peer_pull_holds_lock(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

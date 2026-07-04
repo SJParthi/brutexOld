@@ -196,19 +196,25 @@ concurrent pulls would each pace at the 8 r/s ceiling, so the account would see 
 and risk a sustained 429 storm. `--dry-run` / `--inspect` do not take the lock (they
 write no real data and pace no real account requests).
 
-> **⚠️ RESIDUAL — the lock is keyed by LAKE ROOT, not by Groww ACCOUNT.** If you point
-> the SAME Groww account at **two different `BRUTEX_LAKE_ROOT`s** and start a pull in
-> each, the two take DIFFERENT lock files, BOTH acquire, and the account STILL sees the
-> SUM of both rates. The guard will NOT stop you. **Operator rule: never run two pulls
-> on one Groww account at the same time, even into different lake roots.** Keying the
-> lock on the credentials / feed-token is a flagged follow-up, not yet implemented.
+> **✅ CLOSED for the single-host case (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001, MIGRATION
+> #1285) — an ACCOUNT-keyed second lock is now taken FIRST.** Both pull sites (the
+> dashboard `BackgroundPullJob` and the CLI `brutex fetch`) additionally take
+> `~/.brutex/locks/pull_account<sha256(api_key)[:16]>.flock`, keyed off the AWS-resolved
+> api_key digest (never the key itself) — so the SAME account pointed at **two different
+> `BRUTEX_LAKE_ROOT`s** now contends on ONE file and the second pull is refused.
+> **Honest envelope:** the lock dir is per-OS-user and an `flock` is per-host — two OS
+> users or two HOSTS pulling one account are still NOT covered (named follow-ups, as is
+> keying on the vendor feed-token). A credentials-less run (dry-run / no AWS) skips the
+> account lock gracefully — it makes zero vendor calls. **Operator rule unchanged for
+> multi-host setups: never run two pulls on one Groww account at the same time across
+> machines.**
 
 ---
 
 ## 7. Decision trail
 
 - **Network/creds blocker + unblock path:** this runbook + DEC-SESSION-HOOK-LIVESTATE-001 (MIGRATION #298).
-- **Cross-process pull single-flight (per lake) + CLI wiring + two-lake-root residual:** DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION #996); `brutex/adapters/groww/pull_singleflight.py`, `brutex/cli.py` (`_enter_pull_singleflight`).
+- **Cross-process pull single-flight (per lake) + CLI wiring + two-lake-root residual:** DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION #996); `brutex/adapters/groww/pull_singleflight.py`, `brutex/cli.py` (`_enter_pull_singleflight`). **Account-keyed second lock (single-host residual closed):** DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 (MIGRATION #1285).
 - **Index symbols + scope:** Golden Rule #3; `ingest.py:37`.
 - **Rate-limit + chunk windows:** CLAUDE.md §6.
 - **Auth (Groww API key + TOTP shared secret):** CLAUDE.md §6; `brutex/adapters/groww/auth.py`.

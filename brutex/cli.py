@@ -2910,7 +2910,7 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     emit_pull_halt_alert(exc)
 
 
-def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
+def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: Any = None) -> bool:
     """Take the cross-process account single-flight lock for the CLI pull; report contention.
 
     DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996) — the cross-process pull lock
@@ -2931,12 +2931,57 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
     Only the genuine persisting LIVE pull takes the lock; ``--dry-run`` / ``--inspect``
     (which write no real lake data and pace no real account requests) deliberately do
     NOT call this, so an offline test or an inspect run never contends.
+
+    **Account-keyed second lock, taken FIRST (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001,
+    MIGRATION.md #1285):** before the lake-root lock this enters the ACCOUNT-keyed
+    :func:`~brutex.adapters.groww.pull_singleflight.account_pull_singleflight_lock`
+    (``~/.brutex/locks/pull_account<sha256[:16]>.flock``), keyed off the AWS-resolved
+    api_key (:func:`~brutex.config.credentials.resolve_groww_aws_credentials` — the SOLE
+    credential source, DEC-AWS-ONLY-CREDS-001; the retired env-var path is NEVER read) —
+    so the SAME account pulled into TWO distinct lake roots is refused too (the #996
+    residual, closed for the single-host case). A ``CredentialsError`` SKIPS the account
+    lock gracefully with one loud log line (a credential-less run makes zero vendor
+    calls); the lake-root lock below still guards same-lake peers. The account lock is
+    strictly FIRST + the ExitStack releases LIFO, so the pair can never deadlock-invert
+    against ``pull_jobs.start()``'s identical order. *account_key_resolver* is the
+    injectable ``() -> str | None`` key seam (tests); ``None`` (production) resolves via
+    the AWS-only source.
     """
+    import structlog
+
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,
+        account_pull_singleflight_lock,
         pull_singleflight_lock,
     )
 
+    if account_key_resolver is not None:
+        account_key: str | None = account_key_resolver()
+    else:
+        from brutex.config.credentials import resolve_groww_aws_credentials
+        from brutex.config.credentials_types import CredentialsError
+
+        try:
+            account_key = resolve_groww_aws_credentials().api_key
+        except CredentialsError as exc:
+            account_key = None
+            structlog.get_logger("brutex.cli").warning(
+                "pull.account_lock_skipped",
+                reason="credentials unavailable — account-keyed single-flight not taken",
+                error=str(exc),
+            )
+    if account_key is not None:
+        try:
+            stack.enter_context(account_pull_singleflight_lock(account_key))
+        except PullAlreadyRunningError as exc:
+            print(
+                f"[brutex] {exc} — refusing to start a second concurrent pull for this "
+                "Groww account (it may be running against a DIFFERENT lake root). Wait "
+                "for the running pull to finish (or stop it) before re-running "
+                "`brutex fetch`.",
+                file=sys.stderr,
+            )
+            return False
     try:
         stack.enter_context(pull_singleflight_lock(lake_root))
     except PullAlreadyRunningError as exc:
