@@ -690,6 +690,39 @@ class SweepAlerter:
             dedupe_key=f"credential-dead:{reason}",
         )
 
+    def authorisation_storm(self, *, distinct_symbols: int) -> bool:
+        """Alert a fleet-wide AUTHORISATION storm — account suspension suspected (CRITICAL).
+
+        Fired ONCE by the error-storm breaker's authorisation-storm escalation
+        (DEC-GROWW-AUTHZ-QUARANTINE-001): terminal vendor authorisation rejections
+        (the SDK's ``GrowwAPIAuthorisationException`` class — no HTTP status is
+        assumed; CLAUDE.md §6 exception-hierarchy row) on ≥ the distinct-symbol
+        threshold with ZERO transport successes since the storm began. The wording
+        is deliberately DISTINCT from BOTH :meth:`vendor_down` (the vendor is UP —
+        it is answering, with rejections) and :meth:`credential_dead` (the token IS
+        authenticated — the ACCOUNT's entitlements are the problem): the operator
+        action is to check the Groww account status / API entitlements, not the
+        credential, the Lambda, or the network. A single restricted instrument
+        never reaches here — it is quarantined per symbol, below the threshold.
+        The count is a non-secret integer; the ``dedupe_key`` coalesces a repeated
+        storm verdict into one push.
+        """
+        message = escape_markdown_v2(
+            f"⛔ AUTHORISATION STORM — ACCOUNT SUSPENSION SUSPECTED: {distinct_symbols} "
+            "distinct symbols rejected with vendor authorisation errors and ZERO "
+            "successes. The vendor is up and the token authenticates — the ACCOUNT's "
+            "entitlements look revoked/suspended, so every remaining symbol would fail "
+            "identically and the pull HALTED gracefully. Check the Groww account "
+            "status / API entitlements, then re-run; bars already written are safe "
+            "(idempotent re-pull)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key="authorisation-storm",
+        )
+
     def symbol_window_failure(
         self,
         *,

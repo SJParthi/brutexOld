@@ -264,6 +264,26 @@ class TestAlerts:
         # The credential-dead wording must never read as the vendor-down alert.
         assert escape_markdown_v2("VENDOR DOWN") not in ev.message
 
+    def test_authorisation_storm(self) -> None:
+        """authorisation_storm (DEC-GROWW-AUTHZ-QUARANTINE-001): CRITICAL, account-worded.
+
+        Distinct from BOTH sibling verdicts: the vendor is UP (not vendor_down) and
+        the token authenticates (not credential_dead) — the operator action is the
+        Groww ACCOUNT's status / entitlements.
+        """
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).authorisation_storm(distinct_symbols=5)
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "authorisation-storm"
+        assert escape_markdown_v2("AUTHORISATION STORM") in ev.message
+        assert escape_markdown_v2("ACCOUNT SUSPENSION SUSPECTED") in ev.message
+        assert escape_markdown_v2("5 distinct symbols") in ev.message
+        # Never reads as either sibling CRITICAL verdict.
+        assert escape_markdown_v2("VENDOR DOWN") not in ev.message
+        assert escape_markdown_v2("LAMBDA BROKER DEAD") not in ev.message
+
     def test_pull_degraded(self) -> None:
         """pull_degraded mirrors rate_breach: WARN, deduped per rule, carries the detail."""
         fake = FakeNotifier()
