@@ -460,6 +460,10 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         f", timeframes pre-built for {prebuild.symbols_built} symbol(s) "
         f"({prebuild.total_bars} bars)"
     )
+    if prebuild.unchanged_skips:
+        # DEC-PREBUILD-INCREMENTAL-001: name the incremental saving honestly —
+        # these symbols were verified UNCHANGED and skipped, not built-with-0.
+        clause += f", {prebuild.unchanged_skips} unchanged symbol(s) skipped (incremental)"
     if prebuild.failed:
         shown = ", ".join(prebuild.failed[:_NOTE_FAILURE_NAMES])
         more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))

@@ -9,6 +9,9 @@ the all-storable default round-trips. No lake, no DuckDB, no FastAPI — the
 injected I/O makes the whole control flow offline-testable.
 """
 
+# The _last_ist_date whitebox tests read a module-private helper (the repo's
+# whitebox convention — mirrors test_lake_heal.py).
+# pyright: reportPrivateUsage=none
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -197,3 +200,50 @@ class TestStorableLadderComplete:
             if m not in (1, DAILY_TF_MINUTES)
         }
         assert expected == INTRADAY_TF_INTERVALS
+
+
+# ── _last_ist_date (DEC-PREBUILD-INCREMENTAL-001 stamp input) ────────────────
+
+
+def test_last_ist_date_empty_frame_is_none() -> None:
+    pl = pytest.importorskip("polars")
+    from brutex.data.timeframe_materialize import _last_ist_date
+
+    empty = pl.DataFrame({"ts_utc": pl.Series([], dtype=pl.Datetime(time_zone="UTC"))})
+    assert _last_ist_date(empty) is None
+
+
+def test_last_ist_date_non_datetime_column_is_none() -> None:
+    pl = pytest.importorskip("polars")
+    from brutex.data.timeframe_materialize import _last_ist_date
+
+    weird = pl.DataFrame({"ts_utc": [1, 2, 3]})
+    assert _last_ist_date(weird) is None
+
+
+def test_last_ist_date_converts_utc_to_ist_calendar_date() -> None:
+    pl = pytest.importorskip("polars")
+    from datetime import UTC, datetime
+
+    from brutex.data.timeframe_materialize import _last_ist_date
+
+    # 2021-01-04 19:30 UTC == 2021-01-05 01:00 IST → the IST date rolls over.
+    frame = pl.DataFrame(
+        {
+            "ts_utc": [
+                datetime(2021, 1, 4, 3, 45, tzinfo=UTC),
+                datetime(2021, 1, 4, 19, 30, tzinfo=UTC),
+            ]
+        }
+    )
+    assert _last_ist_date(frame) == "2021-01-05"
+
+
+def test_last_ist_date_naive_timestamp_treated_as_utc() -> None:
+    pl = pytest.importorskip("polars")
+    from datetime import datetime
+
+    from brutex.data.timeframe_materialize import _last_ist_date
+
+    frame = pl.DataFrame({"ts_utc": [datetime(2021, 1, 4, 3, 45)]})
+    assert _last_ist_date(frame) == "2021-01-04"

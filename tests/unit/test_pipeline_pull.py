@@ -41,6 +41,7 @@ def _outcome(
     ok: bool | None = None,
     crashed: str | None = None,
     fs_note: str | None = None,
+    unchanged_skips: int = 0,
 ) -> PrebuildOutcome:
     """Build a :class:`PrebuildOutcome` (the run_prebuild contract's REAL dataclass)."""
     count = len(failed) if failed_count is None else failed_count
@@ -52,6 +53,7 @@ def _outcome(
         ok=(count == 0) if ok is None else ok,
         crashed=crashed,
         fs_note=fs_note,
+        unchanged_skips=unchanged_skips,
     )
 
 
@@ -1246,3 +1248,29 @@ def test_pipeline_movers_warm_done_log_carries_failed_map() -> None:
     assert len(done) == 1
     assert done[0]["warmed"] == {"spot": 3}
     assert done[0]["failed"] == {"spot": 2}
+
+
+def test_pipeline_note_names_incremental_unchanged_skips() -> None:
+    """DEC-PREBUILD-INCREMENTAL-001: the prebuild clause names the skipped-
+    unchanged count so the incremental saving is visible, never a fake
+    "built with 0 bars"."""
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=_Spy(_outcome(symbols_built=5, total_bars=40, unchanged_skips=3)),
+    )
+    assert "timeframes pre-built for 5 symbol(s) (40 bars)" in report.note
+    assert ", 3 unchanged symbol(s) skipped (incremental)" in report.note
+
+
+def test_pipeline_note_omits_skip_clause_when_none_skipped() -> None:
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=_Spy(_outcome(symbols_built=5, total_bars=40)),
+    )
+    assert "unchanged symbol(s) skipped" not in report.note
