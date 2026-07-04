@@ -26,9 +26,18 @@ from typing import Final
 #: re-points ``TestClient`` at ``base_url="http://localhost"``, or inject
 #: ``allowed_hosts`` explicitly. Public so the CLI launcher can extend it
 #: with the actual bound host.
+#:
+#: ``[::1]`` is the IPv6 loopback in its BRACKETED RFC 3986 ``Host``-header
+#: form (a client dialing ``http://[::1]:8000`` sends ``Host: [::1]:8000``) —
+#: included since DEC-ENGINE-MISC-PACK-002 so an IPv6-loopback browser is not
+#: 400ed by the default guard; matched bracket-aware by
+#: :class:`brutex.dashboard.trusted_host.BracketAwareTrustedHostMiddleware`
+#: (Starlette's own ``split(":")[0]`` port-strip would mangle it to ``[``).
 DEFAULT_ALLOWED_HOSTS: Final[tuple[str, ...]] = (
     "127.0.0.1",
     "127.0.0.1:*",
     "localhost",
     "localhost:*",
+    "[::1]",
+    "[::1]:*",
 )

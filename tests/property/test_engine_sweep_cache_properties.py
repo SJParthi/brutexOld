@@ -98,3 +98,38 @@ def test_digest_non_finite_float_always_raises(
     params = {**other_params, "__non_finite__": bad}
     with pytest.raises(SweepCacheError, match="non-finite float"):
         combo_digest(mask, instrument, tf, direction, params)
+
+
+# ── STEP-1 bounded auto-grow (`_auto_grow_capacity`, DEC-ENGINE-MISC-PACK-001) ─
+
+
+@given(
+    capacity=st.integers(min_value=1, max_value=10**8),
+    persisted=st.integers(min_value=0, max_value=10**10),
+    fpr=st.sampled_from([1e-9, 1e-7, 1e-3]),
+)
+@settings(max_examples=200, deadline=None)
+def test_auto_grow_covers_persisted_and_respects_the_wall_or_raises(
+    capacity: int, persisted: int, fpr: float
+) -> None:
+    """The grow invariant: the result always covers *persisted* AND fits the
+    16 GiB wall — or the call FAILS_CLOSED (never a silent over-wall Bloom,
+    never an under-sized capacity that would overflow mid-rebuild)."""
+    from brutex.engine.sweep_cache import SweepCacheCapacityError, _auto_grow_capacity
+    from brutex.orchestrator.bloom import MAX_BLOOM_BYTES, _compute_m_bytes
+
+    try:
+        grown = _auto_grow_capacity(capacity, persisted, fpr)
+    except SweepCacheCapacityError:
+        # The raise arm fires ONLY when a genuine grow was needed and its
+        # sizing busts the wall — re-derived independently here.
+        assert persisted > capacity
+        would_grow = max(persisted, math.ceil(capacity * 1.25))
+        assert _compute_m_bytes(would_grow, fpr) > MAX_BLOOM_BYTES
+    else:
+        assert grown >= persisted
+        if persisted <= capacity:
+            assert grown == capacity  # identity arm — byte-identical behaviour.
+        else:
+            assert grown == max(persisted, math.ceil(capacity * 1.25))
+            assert _compute_m_bytes(grown, fpr) <= MAX_BLOOM_BYTES
