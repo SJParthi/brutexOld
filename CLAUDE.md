@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-03 (DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1269 —
+_Last updated: 2026-07-03 (DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294 —
 the ingest data-integrity pack, four boundary gaps as ONE change set: (a) the
 ingest-boundary session filter is now CALENDAR-AWARE (`brutex/data/session.py`
 `filter_to_trading_session` via `calendars/nse.get_session`, wired at BOTH ingest
@@ -290,7 +290,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sharp-hypatia-5hhycf` (**DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1269** — the
+- **Active branch:** `claude/sharp-hypatia-5hhycf` (**DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294** — the
   ingest data-integrity pack, four boundary gaps as ONE change set: **(a)** the ingest-boundary session filter is
   CALENDAR-AWARE (NEW `brutex/data/session.py::filter_to_trading_session` judging each bar against its OWN IST date's
   real NSE session via `calendars/nse.get_session`, wired at BOTH spine tails) — non-trading-date bars (weekend/holiday
