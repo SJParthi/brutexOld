@@ -31,6 +31,7 @@ from brutex.adapters.groww.constants import (
     OPTION_SEGMENT,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
+from brutex.adapters.groww.errors import GrowwTimeoutError
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
     SUSPECTED_PARTIAL_WINDOW_EVENT,
@@ -46,6 +47,7 @@ from brutex.adapters.groww.option_ingest import (
     ingest_option_contract,
     ingest_underlying_futures,
     ingest_underlying_options,
+    make_breaker_canary_probe,
     plan_contract_windows,
     reconcile_fno_ledger_windows,
     run_groww_option_ingest,
@@ -3739,3 +3741,118 @@ class TestEmptyBreakerOptionSpine:
         assert rec.status == _EMPTY_STATUS  # NOT SKIPPED — settle suppressed
         assert rec.empty_streak == 0  # untrusted empty: streak preserved
         assert not ledger.is_skippable(key)
+
+
+# ── make_breaker_canary_probe (DEC-EMPTY-BREAKER-CANARY-001) ─────────────────
+
+
+class _CanarySDK:
+    """A recording SDK fake for the canary probe (captures full call kwargs)."""
+
+    def __init__(self, payload: Mapping[str, object] | Exception) -> None:
+        self._payload = payload
+        self.calls: list[dict[str, object]] = []
+
+    def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+        self.calls.append(dict(kw))
+        if isinstance(self._payload, BaseException):
+            raise self._payload
+        return self._payload
+
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+
+class TestBreakerCanaryProbe:
+    """The one-call NIFTY-spot vendor-health canary the F&O phase wires."""
+
+    def test_data_bearing_canary_is_healthy_and_paced(self) -> None:
+        """Bars returned ⇒ True; the shared pace gate ran BEFORE the fetch
+        (one governed vendor call — never a rate-cap bypass)."""
+        sdk = _CanarySDK(_candles())
+        paced: list[int] = []
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1),
+            pace=lambda: paced.append(1),
+        )
+        with capture_logs() as logs:
+            assert probe() is True
+        assert paced == [1]
+        # ONE canary fetch, addressed at the NIFTY spot index (CASH segment).
+        assert len(sdk.calls) == 1
+        assert sdk.calls[0]["groww_symbol"] == "NSE-NIFTY"
+        assert sdk.calls[0]["segment"] == "CASH"
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_probe"]
+        assert event["healthy"] is True
+        assert event["bars"] == 1
+
+    def test_clean_empty_canary_is_unhealthy(self) -> None:
+        """A clean-but-EMPTY canary answer is the vendor-unhealthy verdict."""
+        sdk = _CanarySDK({"candles": []})
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+        )
+        with capture_logs() as logs:
+            assert probe() is False
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_probe"]
+        assert event["healthy"] is False
+
+    def test_raising_canary_is_unhealthy_never_raises(self) -> None:
+        """A transport error on the canary is False + logged — never a raise."""
+        sdk = _CanarySDK(GrowwTimeoutError("canary timeout"))
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+        )
+        with capture_logs() as logs:
+            assert probe() is False
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_probe"]
+        assert event["healthy"] is False
+        assert event["error_type"] == "GrowwTimeoutError"
+
+    def test_canary_window_is_bounded_and_recent(self) -> None:
+        """The canary spans exactly the 7-day lookback ending 'today' — ONE
+        vendor chunk at 1-minute (30-day tier), never a wide range."""
+        sdk = _CanarySDK(_candles())
+        now = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1),
+            now_utc=lambda: now,
+        )
+        assert probe() is True
+        assert len(sdk.calls) == 1  # one 7-day range = one 30-day-tier chunk
+        call = sdk.calls[0]
+        assert str(call["start_time"]).startswith("2026-06-26")
+        assert str(call["end_time"]).startswith("2026-07-0")
+
+    def test_run_ingest_threads_probe_into_resolved_breaker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``run_groww_option_ingest(breaker_health_probe=…)`` reaches
+        ``resolve_empty_breaker(health_probe=…)`` (the arming pin — a dropped
+        kwarg would ship the canary DORMANT)."""
+        captured: list[object] = []
+        real_resolve = _oi.resolve_empty_breaker
+
+        def _spy_resolve(**kwargs: object) -> object:
+            captured.append(kwargs.get("health_probe"))
+            return real_resolve(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(_oi, "resolve_empty_breaker", _spy_resolve)
+
+        def _probe() -> bool:  # pragma: no cover — identity only
+            return True
+
+        sdk = _FakeSDK(payload=_candles())
+        run_groww_option_ingest(
+            _client(sdk),
+            _Sink(),
+            contracts=[_ce()],
+            intervals=("1day",),
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            breaker_health_probe=_probe,
+        )
+        assert captured == [_probe]
