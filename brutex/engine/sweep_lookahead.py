@@ -177,11 +177,15 @@ class GuardedBarWindow(Sequence["CandleBar"]):
     # lines execute once at class creation but the stub bodies can never run,
     # so they sit outside the measured surface (standard overload exclusion —
     # the real, fully-covered implementation follows immediately below).
+    # Docstring bodies (not bare ``...`` expression statements) keep CodeQL's
+    # no-effect-statement check satisfied with identical typing semantics.
     @overload
-    def __getitem__(self, index: int) -> CandleBar: ...  # pragma: no cover
+    def __getitem__(self, index: int) -> CandleBar:  # pragma: no cover
+        """Overload stub: an integer index returns one guarded bar."""
 
     @overload
-    def __getitem__(self, index: slice) -> Sequence[CandleBar]: ...  # pragma: no cover
+    def __getitem__(self, index: slice) -> Sequence[CandleBar]:  # pragma: no cover
+        """Overload stub: a slice returns the underlying sub-sequence."""
 
     def __getitem__(self, index: int | slice) -> CandleBar | Sequence[CandleBar]:
         """Return the bar(s) at *index* iff every touched index is at/behind the front.

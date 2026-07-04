@@ -1892,7 +1892,6 @@ class TestSweepLookaheadGuardWiring:
     ) -> None:
         # Prove the seam is LIVE: with the env flag ON, the sequence every
         # downstream phase consumes is the GuardedBarWindow, not the raw list.
-        import brutex.engine.sweep_run as sweep_run_module
         from brutex.engine.sweep_lookahead import (
             SWEEP_LOOKAHEAD_GUARD_ENV,
             GuardedBarWindow,
@@ -1907,7 +1906,9 @@ class TestSweepLookaheadGuardWiring:
             seen.append(result)
             return result
 
-        monkeypatch.setattr(sweep_run_module, "maybe_guard_bars", _spy)
+        # String-target setattr: patches the name inside brutex.engine.sweep_run
+        # without a second import style for the module (CodeQL py/import-and-import-from).
+        monkeypatch.setattr("brutex.engine.sweep_run.maybe_guard_bars", _spy)
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             run_persisted_sweep(
@@ -1921,7 +1922,6 @@ class TestSweepLookaheadGuardWiring:
     ) -> None:
         # The zero-cost OFF contract at the wiring site: the seam hands the
         # SAME bars object downstream (no wrapper, no per-bar cost).
-        import brutex.engine.sweep_run as sweep_run_module
         from brutex.engine.sweep_lookahead import SWEEP_LOOKAHEAD_GUARD_ENV, maybe_guard_bars
 
         monkeypatch.delenv(SWEEP_LOOKAHEAD_GUARD_ENV, raising=False)
@@ -1932,7 +1932,8 @@ class TestSweepLookaheadGuardWiring:
             seen.append((bars, result))
             return result
 
-        monkeypatch.setattr(sweep_run_module, "maybe_guard_bars", _spy)
+        # String-target setattr (same rationale as the ON-mode wiring test).
+        monkeypatch.setattr("brutex.engine.sweep_run.maybe_guard_bars", _spy)
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
