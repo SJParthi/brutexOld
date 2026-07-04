@@ -928,7 +928,14 @@ class RateController:
             # evidence that OUR sub-second micro-burst (not a plain vendor quota
             # squeeze) provoked this 429 — and one-way latch the smooth gate ON.
             # A no-op in ON (already latched) / OFF (latch disabled) modes and once
-            # latched. Under the SAME lock, so it never races a concurrent pace().
+            # latched. The latch's STATE mutation runs under the controller lock
+            # (no torn state with the token math), but ``pace()``'s gate-0 check
+            # (``if self._smooth_pacing:``) reads the flag OUTSIDE the lock —
+            # honest envelope: a worker already past (or concurrently reading)
+            # that check may issue ONE more unsmoothed request after the flip.
+            # Benign: the flag is a one-way GIL-atomic bool transition, bounded
+            # at one unsmoothed issue per in-flight worker, and every later
+            # ``pace()`` observes the latched state.
             self._maybe_latch_smooth_locked(now)
             # Two-tier 429 ladder (DEC-DHAN-RATE-STORM-FLOOR-001): reach the soft
             # FLOOR_RPS (3) quickly on a brief burst (STEP_DOWN_HITS=3), but ease BELOW

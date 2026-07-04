@@ -11,13 +11,14 @@ monkeypatched internals) against fake adapters:
 * A transport SUCCESS between authorisation rejections RESETS the storm's
   distinct-symbol set (a mixed pull can never trip).
 
-Fail-before/pass-after: on origin/main ``GrowwAPIAuthorisationException`` mapped
-to ``GrowwAuthError`` (terminal → ``is_terminal_auth_failure`` True → the drain
-check re-raised it as a pull-wide halt), so
-``test_one_authz_symbol_no_longer_stops_a_three_symbol_pull`` FAILED with an
-escaped ``GrowwAuthError`` (the whole pull died on the ONE restricted symbol) —
-verified by running this file against the pre-fix ``_SDK_NAME_TO_ERROR`` row.
-The storm tests fail-before trivially: neither the breaker arm nor
+Fail-before/pass-after (exact, Golden Rule #1): on origin/main this FILE
+COLLECTION-fails (ImportError — ``GrowwAuthorisationError`` does not exist
+there). The BEHAVIOURAL fail-before is proven ON-BRANCH by reverting only the
+``_SDK_NAME_TO_ERROR`` authorisation row back to ``GrowwAuthError`` (terminal →
+``is_terminal_auth_failure`` True → the drain check re-raised it as a pull-wide
+halt): ``test_one_authz_symbol_no_longer_stops_a_three_symbol_pull`` then FAILS
+with the escaped ``GrowwAuthError`` (the whole pull dies on the ONE restricted
+symbol). The storm tests fail-before trivially: neither the breaker arm nor
 ``GrowwAuthorisationStormError`` existed.
 """
 
@@ -242,3 +243,65 @@ class TestAuthzStorm:
         """
         assert issubclass(GrowwAuthorisationError, ingest_mod.GrowwError)
         assert not ingest_mod.is_retryable(GrowwAuthorisationError("x"))
+
+
+class TestAuthzPipelineMode:
+    """PIPELINE-mode pins (the production shape — `pull_contract_candles` /
+    `pull_all_spot` always wire a non-None `fetch_pipeline`, the #1014 lineage):
+    the authz split must hold with the async fetch/process pipeline ON, where the
+    per-symbol isolation additionally rides `fetch_pipeline._is_pool_isolatable`.
+    The sync-spine suites above alone left this production mode unpinned."""
+
+    def test_one_authz_symbol_quarantined_with_fetch_pipeline_on(self) -> None:
+        """One restricted symbol in pipeline mode = one quarantine; the healthy
+        symbols' bars land durably through the DRAINED background consumer."""
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        sink = _Sink()
+        adapter = _AuthzAdapter(restricted=frozenset({"BANKNIFTY"}))
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        try:
+            report = run_groww_spot_ingest(
+                adapter,  # type: ignore[arg-type]
+                sink,  # type: ignore[arg-type]
+                instruments=[_inst("NIFTY"), _inst("BANKNIFTY"), _inst("SENSEX")],
+                intervals=["1day"],
+                start=_START,
+                end=_END,
+                run_parallel=SerialRunParallel(),
+                fetch_pipeline=pipeline,
+            )
+        finally:
+            pipeline.drain()
+        assert report.failed_pairs == 1
+        assert report.failures[0].symbol == "BANKNIFTY"
+        assert report.auth_aborted is False  # never read as a token death
+        # The healthy symbols' bars landed via the background consumer (post-drain).
+        assert sum(sink.appends) == 2
+
+    def test_five_distinct_authz_symbols_still_halt_with_fetch_pipeline_on(self) -> None:
+        """The storm arm trips fleet-wide in pipeline mode too (global-stop, not
+        swallowed by the pipeline's per-symbol quarantine)."""
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        fired: list[GrowwAuthorisationStormError] = []
+        breaker = ErrorStormBreaker(alert_authorisation_storm=fired.append)
+        symbols = [f"AUTHZ{i}" for i in range(5)]
+        pipeline = FetchPipeline(workers=1, queue_maxsize=8)
+        try:
+            with pytest.raises(GrowwAuthorisationStormError):
+                run_groww_spot_ingest(
+                    _AuthzAdapter(restricted=frozenset(symbols)),  # type: ignore[arg-type]
+                    _Sink(),  # type: ignore[arg-type]
+                    instruments=[_inst(s) for s in symbols],
+                    intervals=["1day"],
+                    start=_START,
+                    end=_END,
+                    run_parallel=SerialRunParallel(),
+                    storm_breaker=breaker,
+                    fetch_pipeline=pipeline,
+                )
+        finally:
+            pipeline.drain()
+        assert breaker.trip_rule == "authorisation_storm"
+        assert len(fired) == 1  # ONE CRITICAL alert — pipeline mode changes nothing

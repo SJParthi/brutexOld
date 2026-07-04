@@ -17,11 +17,15 @@ LAZILY, mid-pull, from the one honest trigger available:
   REUSING the existing Phase-0 depth prober
   (:func:`~brutex.adapters.groww.probe.probe_depth`, ``bisect=True``,
   ``max_calls`` = :data:`~brutex.adapters.groww.probe.DEPTH_PROBE_MAX_CALLS`
-  = 20) over the SAME adapter/fetch client the pull uses — the production live
-  client self-paces every physical call through the shared session
-  :class:`~brutex.adapters.rate_common.RateController`
-  (DEC-RATE-SINGLE-ADMISSION-001), so the probe can never be a rogue unpaced
-  fetch stream.
+  = 20) over the PACED replica of the pull's own adapter. PACING IS NOT
+  AUTOMATIC: the live pool factory hands every client leaf a no-op pace
+  (``build_live_pool`` without a ``pace``), and the session
+  :class:`~brutex.adapters.rate_common.RateController` is bound only via
+  :func:`~brutex.adapters.groww.run_ingest.with_paced_client` — so the
+  production build sites construct the learner over
+  ``with_paced_client(adapter, pace)`` (regression-pinned), making the
+  client's per-attempt ``pace()`` the one admission point for every probe
+  fetch (DEC-RATE-SINGLE-ADMISSION-001) — never a rogue unpaced stream.
 * **Gate (the design hazard)** — BOTH the probe AND every cementing action are
   gated on the mass-empty circuit breaker
   (:meth:`~brutex.adapters.empty_circuit_breaker.EmptySettleBreaker.allow_settle`,
@@ -42,7 +46,12 @@ LAZILY, mid-pull, from the one honest trigger available:
   ``symbol_windows`` seam of ``plan_windows`` + the spot ingest).
 
 **Honest envelope (Golden Rule #10):** lazy + per-symbol + boundary-triggered
-only; ≤ 20 probe calls per symbol per pull; a straddling window (one that spans
+only; ≤ 20 probe WINDOW fetches per symbol per pull — a PROBER-window bound,
+not a physical-vendor-call bound: each window fetch is one
+``adapter.fetch_ohlcv``, and the client layer's own bounded transient
+fast-retries (429/timeout/5xx — the same envelope every pull fetch has) may add
+physical calls under a flaky vendor, every one individually admitted through
+the paced client; a straddling window (one that spans
 the learned floor) is NEVER settled; only a clean :data:`VERDICT_OK` probe
 cements anything (ABSENT / ERROR / breaker-gated outcomes cement nothing); a
 later vendor BACKFILL below the learned floor is NOT auto-detected — the
@@ -198,10 +207,12 @@ class _AdapterCandleFetcher:
     REUSED verbatim over the pull's own adapter: the adapter resolves the
     instrument MASTER-AUTHORITATIVELY (``by_exchange_symbol`` +
     ``groww_symbol_by_pair`` — DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001, CLAUDE.md §6
-    "Symbol/key format") and its production live client SELF-PACES every physical
-    call through the shared session rate controller
-    (DEC-RATE-SINGLE-ADMISSION-001), so no resolution logic is copied and no
-    unpaced client is conjured (CLAUDE.md §11 COMMON). The prober's
+    "Symbol/key format"), so no resolution logic is copied and no separate client
+    is conjured (CLAUDE.md §11 COMMON). Pacing is the CALLER's obligation: the
+    adapter handed in must already be the paced replica
+    (:func:`~brutex.adapters.groww.run_ingest.with_paced_client` — the production
+    build sites do this; DEC-RATE-SINGLE-ADMISSION-001), because a raw live-pool
+    adapter carries a no-op pace. The prober's
     ``exchange`` / ``segment`` / ``groww_symbol`` strings are accepted and
     DISCARDED — the pre-bound instrument is the single source of addressing
     truth. The returned payload carries one ``[timestamp]`` row per bar — the
@@ -237,10 +248,13 @@ def make_adapter_depth_probe(adapter: MarketAdapter, *, boundary: date, today: d
     """Bind :func:`~brutex.adapters.groww.probe.probe_depth` to the pull's adapter.
 
     Returns an ``instrument → DepthProbeResult`` callable running the BOUNDED
-    bisection (``bisect=True``, ≤ 20 calls) between *boundary* (the configured
-    history floor) and *today*, through :class:`_AdapterCandleFetcher` — so the
-    probe rides the SAME paced fetch client as the pull (never a rogue unpaced
-    stream) and the existing prober is reused verbatim (CLAUDE.md §11 COMMON).
+    bisection (``bisect=True``, ≤ 20 probe-window fetches; client-level bounded
+    transient retries may add physical calls) between *boundary* (the configured
+    history floor) and *today*, through :class:`_AdapterCandleFetcher` — the
+    existing prober reused verbatim (CLAUDE.md §11 COMMON). *adapter* must be the
+    pull's PACED adapter (``with_paced_client(adapter, pace)`` at the production
+    build sites) — see :class:`_AdapterCandleFetcher` for why pacing is the
+    caller's obligation.
     """
 
     def _probe(instrument: Instrument) -> DepthProbeResult:
@@ -461,12 +475,17 @@ def make_vendor_floor_learner(
     today: date,
     store: VendorFloorMetaStore | None = None,
 ) -> VendorFloorLearner:
-    """Build the per-pull learner over the pull's own adapter — the ONE production seam.
+    """Build the per-pull learner over the pull's own PACED adapter — the ONE production seam.
 
     Mirrors :func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`:
     a FRESH instance per pull (single-flight state never leaks across pulls,
     Golden Rule #7), constructed ONLY at the REAL pull build sites — a dry-run /
-    synthetic pull threads ``None`` down the spine instead. O(1).
+    synthetic pull threads ``None`` down the spine instead. O(1). *adapter* MUST
+    be the paced replica (``with_paced_client(adapter, pace)``) at a live build
+    site: a raw live-pool adapter carries a no-op pace, so a learner built over
+    it would probe OUTSIDE the 8 r/s ceiling + 500/min governor (the review
+    BLOCKER; regression-pinned at both build sites + end-to-end by the
+    admission-counting probe test).
     """
     return VendorFloorLearner(
         probe=make_adapter_depth_probe(adapter, boundary=history_floor, today=today),

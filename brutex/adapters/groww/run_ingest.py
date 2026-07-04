@@ -147,7 +147,7 @@ SpotJob = tuple[Instrument, str]
 _DEFAULT_MAX_RETRY_ROUNDS: int = 3
 
 
-def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
+def with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
     """Return *adapter* with its Groww client's ``pace`` hook wired to the shared bucket.
 
     The client's per-attempt ``pace()`` (inside ``GrowwClient._call``) is the ONE
@@ -157,6 +157,13 @@ def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdap
     self-pacing client via
     :func:`~brutex.adapters.groww.client.client_self_paces`), so a fetch is never
     admitted twice against the 500/min governor + AIMD ladder.
+
+    PUBLIC because it is the ONE binding seam for ANY out-of-spine consumer of the
+    pull's adapter: the live pool factory hands every leaf ``_noop_pace``
+    (``live.build_live_pool`` without a ``pace``), so an adapter captured BEFORE
+    this binding fetches UNPACED — the vendor-floor depth probe's blocker fixed by
+    constructing the learner over ``with_paced_client(adapter, pace)`` at the
+    production build sites (DEC-VENDOR-FLOOR-LAZY-PROBE-001 review fold).
 
     A no-op (returns *adapter* unchanged) when there is nothing to wire: an
     unthrottled run (*pace* is ``None``), or any adapter that is not the live
@@ -453,7 +460,7 @@ def run_groww_spot_ingest(
     # per-window pace then stands down (DEC-RATE-SINGLE-ADMISSION-001). No-op for
     # adapters without a paceable client (fakes) or when unthrottled — those keep
     # the per-window pace as the fallback admission.
-    adapter = _with_paced_client(adapter, pace)
+    adapter = with_paced_client(adapter, pace)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
 
     # Deterministic worklist: one job per (instrument, interval) pair, in the
@@ -840,4 +847,5 @@ __all__ = [
     "SpotJob",
     "run_groww_spot_ingest",
     "run_groww_spot_ingest_with_retry",
+    "with_paced_client",
 ]

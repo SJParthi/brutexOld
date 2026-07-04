@@ -429,7 +429,7 @@ class GrowwClient:
         """Return a copy of this client with its ``pace`` hook rebound (O(1), immutable).
 
         The :class:`GrowwClientProtocol` seam the ingest spine uses
-        (:func:`~brutex.adapters.groww.run_ingest._with_paced_client`) to wire the shared
+        (:func:`~brutex.adapters.groww.run_ingest.with_paced_client`) to wire the shared
         rate bucket into the client's internal fast-retry AFTER the adapter is built —
         replacing the prior raw :func:`dataclasses.replace`, so the SAME call also re-fans
         the pace into every leaf of a multi-connection :class:`~brutex.adapters.groww.pool.\

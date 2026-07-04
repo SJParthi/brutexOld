@@ -88,6 +88,7 @@ from brutex.adapters.groww.run_ingest import (
     ProgressHook,
     run_groww_spot_ingest,
     run_groww_spot_ingest_with_retry,
+    with_paced_client,
 )
 from brutex.adapters.groww.spot_bounds import SpotWindows
 from brutex.adapters.groww.vendor_floor import (
@@ -1610,16 +1611,21 @@ def pull_all_spot(
         # as ``detect_completeness_gaps``).
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
         # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
-        # per-pull instance over THIS pull's adapter (the production live client
-        # self-paces every physical call through the shared session rate controller
-        # — the probe can never be a rogue unpaced fetch stream). Armed ONLY for a
-        # real pull (the _storm_breaker gating pattern); ``today`` = the resolved
-        # pull end (the bisect's upper bound never reaches past the envelope).
+        # per-pull instance over the PACED replica of THIS pull's adapter. The live
+        # pool factory hands every leaf a no-op pace (`build_live_pool` without a
+        # `pace`), and the session controller is bound only inside the spine
+        # (`run_ingest.with_paced_client`) — so the learner MUST bind the SAME
+        # `pace` here or its probe fetches would bypass the 8 r/s ceiling + the
+        # 500/min governor (the review BLOCKER this closes; every probe fetch now
+        # admits through `GrowwClient._call`'s per-attempt pace —
+        # DEC-RATE-SINGLE-ADMISSION-001). Armed ONLY for a real pull (the
+        # _storm_breaker gating pattern); ``today`` = the resolved pull end (the
+        # bisect's upper bound never reaches past the envelope).
         _floor_learner: VendorFloorLearner | None = (
             None
             if dry_run
             else make_vendor_floor_learner(
-                adapter,
+                with_paced_client(adapter, pace),
                 history_floor=GROWW_HISTORY_FLOOR,
                 today=end.date(),
                 store=floor_store,
@@ -2456,14 +2462,18 @@ def pull_candles(
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
         # Lazy vendor-depth-floor learner + learned-floor planning clamp
         # (DEC-VENDOR-FLOOR-LAZY-PROBE-001) — the single-symbol twin of the
-        # pull_all_spot wiring: armed only for a real pull, probing through THIS
-        # pull's (self-pacing) adapter; a ``None`` floor_store / no learned floor
-        # resolves ``_floor_windows`` to ``None`` — byte-identical planning.
+        # pull_all_spot wiring: armed only for a real pull, probing through the
+        # PACED replica of THIS pull's adapter (`with_paced_client(adapter, pace)`
+        # — the live pool leaves carry a no-op pace, so binding the session `pace`
+        # here is what keeps the probe inside the 8 r/s ceiling + 500/min
+        # governor, the review BLOCKER; DEC-RATE-SINGLE-ADMISSION-001); a ``None``
+        # floor_store / no learned floor resolves ``_floor_windows`` to ``None``
+        # — byte-identical planning.
         _floor_learner: VendorFloorLearner | None = (
             None
             if dry_run
             else make_vendor_floor_learner(
-                adapter,
+                with_paced_client(adapter, pace),
                 history_floor=GROWW_HISTORY_FLOOR,
                 today=end.date(),
                 store=floor_store,

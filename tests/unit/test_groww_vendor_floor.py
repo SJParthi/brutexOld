@@ -15,9 +15,15 @@
 * the END-TO-END spot-spine regression: a confirmed clean-empty window AT the
   configured history floor triggers EXACTLY ONE probe through the REAL
   ``run_groww_spot_ingest`` spine, persists the learned floor and mass-settles a
-  wholly-pre-floor ledger row ``SKIPPED("pre-floor")``. Fail-before: on
-  origin/main ``run_groww_spot_ingest`` has no ``floor_learner`` parameter, so
-  the spine test dies with ``TypeError`` (the feature did not exist).
+  wholly-pre-floor ledger row ``SKIPPED("pre-floor")``. Fail-before (exact,
+  Golden Rule #1): on origin/main this file COLLECTION-fails (ImportError —
+  ``brutex.adapters.groww.vendor_floor`` does not exist there); the BEHAVIOURAL
+  fail-before is proven ON-BRANCH by reverting the ``floor_learner`` spine
+  threading, which kills the spine test;
+* the probe-PACING regression (the review BLOCKER): the learner built over
+  ``with_paced_client(adapter, pace)`` — the production build-site shape —
+  admits EVERY physical probe fetch through the shared pace hook, while the raw
+  (pool-leaf no-op-pace) adapter shape probes with ZERO admissions.
 """
 
 # pyright: reportPrivateUsage=none
@@ -25,20 +31,24 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import cast
 
 import pytest
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker, MassEmptySettleHalt
+from brutex.adapters.groww.adapter import GrowwMarketAdapter
+from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
+from brutex.adapters.groww.instruments import load_index_from_csv
 from brutex.adapters.groww.probe import (
     DEPTH_PROBE_MAX_CALLS,
     VERDICT_ABSENT,
     VERDICT_OK,
     DepthProbeResult,
 )
-from brutex.adapters.groww.run_ingest import run_groww_spot_ingest
+from brutex.adapters.groww.run_ingest import run_groww_spot_ingest, with_paced_client
 from brutex.adapters.groww.vendor_floor import (
     PRE_FLOOR_REASON,
     VENDOR_FLOOR_META_PREFIX,
@@ -691,8 +701,10 @@ class TestSpineIntegration:
         spine, persists ``groww.vendor_floor.<symbol>`` and mass-settles the
         wholly-pre-floor ledger row ``SKIPPED("pre-floor")``.
 
-        Fail-before: on origin/main ``run_groww_spot_ingest`` has no
-        ``floor_learner`` parameter — this test dies with ``TypeError``.
+        Fail-before (exact): on origin/main this FILE collection-fails
+        (ImportError — the vendor_floor module does not exist there); the
+        behavioural fail-before is proven ON-BRANCH by reverting the
+        ``floor_learner`` spine threading, which kills this test.
         """
         start, end = date(2020, 11, 1), date(2021, 4, 1)
         learned = date(2020, 12, 1)
@@ -762,3 +774,115 @@ class TestSpineIntegration:
                 floor_learner=learner,
             )
         assert probe.calls == [] and store.values == {}
+
+
+# ── probe PACING — every probe fetch admits through the shared pace ─────────────
+# (the review BLOCKER: the live pool leaves carry a no-op pace, and the session
+# RateController is bound only via ``run_ingest.with_paced_client`` — a learner
+# built over the RAW adapter probed UNPACED, bypassing the 8 r/s ceiling + the
+# 500/min governor. The build sites now construct the learner over
+# ``with_paced_client(adapter, pace)``; these tests pin the mechanism end-to-end
+# through the REAL GrowwMarketAdapter/GrowwClient, mirroring the
+# DEC-RATE-SINGLE-ADMISSION-001 canary "one governed call — never a cap bypass".)
+
+
+_CSV_HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
+
+
+def _csv_row(**over: str) -> str:
+    cells = dict.fromkeys(INSTRUMENT_CSV_COLUMNS, "")
+    cells.update(over)
+    return ",".join(cells[c] for c in INSTRUMENT_CSV_COLUMNS)
+
+
+_NIFTY_CSV_ROW = _csv_row(
+    exchange="NSE",
+    exchange_token="NIFTY",
+    trading_symbol="NIFTY",
+    groww_symbol="NSE-NIFTY",
+    name="NIFTY 50",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_NIFTY_INDEX = load_index_from_csv("\n".join([_CSV_HEADER, _NIFTY_CSV_ROW]) + "\n")
+
+
+class _EmptySDK:
+    """``GrowwSDK``-shaped fake: counts physical calls, every window clean-empty."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_historical_candles(self, **_kwargs: object) -> Mapping[str, object]:
+        self.calls += 1
+        return {"candles": []}
+
+    def get_expiries(self, **_kwargs: object) -> Mapping[str, object]:
+        return {}
+
+    def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
+        return {}
+
+
+class _Admissions:
+    """A counting stand-in for ``RateController.pace``."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def pace(self) -> None:
+        self.count += 1
+
+
+def _groww_adapter(sdk: _EmptySDK) -> GrowwMarketAdapter:
+    return GrowwMarketAdapter(
+        client=GrowwClient(sdk=sdk, sleep=lambda _s: None),
+        index=_NIFTY_INDEX,
+    )
+
+
+class TestProbePacing:
+    def test_every_probe_fetch_admits_through_the_shared_pace(self) -> None:
+        """THE BLOCKER regression: the learner built over ``with_paced_client(adapter,
+        pace)`` (the production build-site shape) admits EVERY physical probe fetch
+        through the shared pace hook — the client's per-attempt ``pace()`` is the one
+        canonical admission point (DEC-RATE-SINGLE-ADMISSION-001), so the probe can
+        never bypass the 8 r/s ceiling / 500/min governor."""
+        sdk = _EmptySDK()
+        admissions = _Admissions()
+        learner = make_vendor_floor_learner(
+            with_paced_client(_groww_adapter(sdk), admissions.pace),
+            history_floor=_FLOOR,
+            today=date(2020, 3, 1),
+        )
+        learner.observe_boundary_empty(
+            instrument=_inst("NIFTY"),
+            window_start=_FLOOR,
+            ledger=None,
+            empty_breaker=None,
+        )
+        assert sdk.calls >= 2  # the boundary fetch + at least one bisect step ran
+        assert sdk.calls <= DEPTH_PROBE_MAX_CALLS
+        assert admissions.count == sdk.calls  # ONE admission per physical probe fetch
+
+    def test_raw_adapter_probe_is_unpaced_the_blocker_shape(self) -> None:
+        """The bypass this pins against: a learner built over the RAW adapter (the
+        pre-fix build-site shape — the live pool leaf's pace is a no-op) probes with
+        ZERO admissions. Pacing is the CALLER's obligation via ``with_paced_client``;
+        if this test ever fails because vendor_floor started pacing internally,
+        re-point the build-site pins first (never silently double-admit)."""
+        sdk = _EmptySDK()
+        admissions = _Admissions()
+        learner = make_vendor_floor_learner(
+            _groww_adapter(sdk),  # RAW — no with_paced_client
+            history_floor=_FLOOR,
+            today=date(2020, 3, 1),
+        )
+        learner.observe_boundary_empty(
+            instrument=_inst("NIFTY"),
+            window_start=_FLOOR,
+            ledger=None,
+            empty_breaker=None,
+        )
+        assert sdk.calls >= 2  # the probe genuinely fetched
+        assert admissions.count == 0  # ...and NOTHING admitted through the bucket
