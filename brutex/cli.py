@@ -2949,7 +2949,7 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: 
     **Account-keyed second lock, taken FIRST (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001,
     MIGRATION.md #1285):** before the lake-root lock this enters the ACCOUNT-keyed
     :func:`~brutex.adapters.groww.pull_singleflight.account_pull_singleflight_lock`
-    (``~/.brutex/locks/pull_account<sha256[:16]>.flock``), keyed off the AWS-resolved
+    (``~/.brutex/locks/pull_account<pbkdf2[:16]>.flock``), keyed off the AWS-resolved
     api_key (:func:`~brutex.config.credentials.resolve_groww_aws_credentials` — the SOLE
     credential source, DEC-AWS-ONLY-CREDS-001; the retired env-var path is NEVER read) —
     so the SAME account pulled into TWO distinct lake roots is refused too (the #996

@@ -98,7 +98,7 @@ SingleflightFactory = Callable[[Path], AbstractContextManager[None]]
 
 #: The injected ACCOUNT-keyed single-flight lock factory (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001)
 #: — given the Groww api_key, returns a context manager holding the account-wide lock
-#: (``~/.brutex/locks/pull_account<sha256[:16]>.flock``) for its lifetime, raising
+#: (``~/.brutex/locks/pull_account<pbkdf2[:16]>.flock``) for its lifetime, raising
 #: :class:`~brutex.adapters.groww.pull_singleflight.PullAlreadyRunningError` on
 #: ``__enter__`` when a peer process (possibly against a DIFFERENT lake root) already
 #: holds it. Default the live
