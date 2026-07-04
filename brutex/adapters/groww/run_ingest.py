@@ -59,9 +59,11 @@ from brutex.adapters.empty_circuit_breaker import (
     MassEmptySettleHalt,
     resolve_empty_breaker,
 )
+from brutex.adapters.error_storm_breaker import ErrorStormBreaker, VendorDownError
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
+    GrowwCredentialDeadError,
     GrowwError,
     is_auth_failure,
     is_terminal_auth_failure,
@@ -105,12 +107,22 @@ from brutex.orchestrator.universe_phases import RunParallel
 #: :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure`, so a transient
 #: auth-family shape stays a per-symbol quarantine and the mid-pull re-mint self-heal
 #: (DEC-GROWW-TOKEN-REAUTH-001, which never raises out of ``client._call``) is untouched.
+#: ``VendorDownError`` + ``GrowwCredentialDeadError`` join it
+#: (DEC-VENDOR-DOWN-BREAKER-001): a tripped vendor-down error-storm breaker means the
+#: VENDOR (or the network path to it) is down — every remaining window would burn its
+#: whole retry ladder identically; a dead-credential escalation means every remaining
+#: fetch is auth-stalled against the SAME dead token. Both halt, never quarantine
+#: (``GrowwCredentialDeadError`` is a TERMINAL ``GrowwAuthError`` subclass, so it also
+#: satisfies the ``is_terminal_auth_failure`` carve-out — listed explicitly as the
+#: DEC-VENDOR-DOWN-BREAKER-001 escalation member).
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
     MassEmptySettleHalt,
     GrowwAuthError,
+    VendorDownError,
+    GrowwCredentialDeadError,
 )
 
 #: Structured logger — per-underlying spot rollup at INFO (``ingest.underlying``)
@@ -304,6 +316,7 @@ def run_groww_spot_ingest(
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -396,6 +409,16 @@ def run_groww_spot_ingest(
         :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`, a
         :data:`_GLOBAL_STOP_ERRORS` member — the whole pull halts loudly. Tests inject
         a configured instance.
+    storm_breaker
+        Optional per-pull :class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`
+        (DEC-VENDOR-DOWN-BREAKER-001), threaded verbatim into every pair's window
+        workers so a vendor outage (sustained zero-success transport failures across
+        distinct symbols) or a dead credential (a consecutive StillStale streak over
+        T minutes) raises its global stop out of this function. ``None`` (the
+        default — dry-run / synthetic / unit-test callers) never arms it; ONLY the
+        real-vendor production sites construct one
+        (:func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`),
+        mirroring the ``detect_completeness_gaps`` gating.
 
     Returns
     -------
@@ -477,6 +500,7 @@ def run_groww_spot_ingest(
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
                 empty_breaker=breaker,
+                storm_breaker=storm_breaker,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -684,6 +708,7 @@ def run_groww_spot_ingest_with_retry(
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -724,6 +749,14 @@ def run_groww_spot_ingest_with_retry(
     a trip raises :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`
     out of this function — the pull-wide halt, never a retryable residual.
 
+    *storm_breaker* (DEC-VENDOR-DOWN-BREAKER-001) is forwarded verbatim to every pass:
+    ONE instance spans the whole pull's retry rounds (a real vendor outage persists
+    across rounds; any success resets it, so a recovering vendor never trips), and its
+    trip (:class:`~brutex.adapters.error_storm_breaker.VendorDownError` /
+    :class:`~brutex.adapters.groww.errors.GrowwCredentialDeadError`) raises out of
+    this function as a pull-wide halt. The production ``None`` default keeps every
+    dry-run / synthetic / test caller un-armed.
+
     Returns
     -------
     SpotIngestWithRetry
@@ -759,6 +792,7 @@ def run_groww_spot_ingest_with_retry(
             fetch_pipeline=fetch_pipeline,
             detect_completeness_gaps=detect_completeness_gaps,
             empty_breaker=empty_breaker,
+            storm_breaker=storm_breaker,
         )
 
     report = _one_pass()

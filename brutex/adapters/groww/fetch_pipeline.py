@@ -150,20 +150,34 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
     if isinstance(exc, LakeWriteHalt):
         return False  # disk-full / OOM → pull-wide halt
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
-    from brutex.adapters.groww.errors import is_terminal_auth_failure
+    from brutex.adapters.error_storm_breaker import VendorDownError
+    from brutex.adapters.groww.errors import GrowwCredentialDeadError, is_terminal_auth_failure
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     if is_terminal_auth_failure(exc):
         # A TERMINAL dead-credential auth failure (DEC-GROWW-AUTH-HALT-001) fails every
         # remaining window identically → pull-wide halt. The retryable auth-family
-        # subclasses return False from the predicate and stay isolatable below.
+        # subclasses return False from the predicate and stay isolatable below (the
+        # DEC-VENDOR-DOWN-BREAKER-001 ``GrowwCredentialDeadError`` escalation is a
+        # TERMINAL ``GrowwAuthError`` subclass, so it halts here too).
         return False
-    # A quota stop OR a tripped mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-
+    # A quota stop, a tripped mass-empty circuit breaker (DEC-EMPTY-WINDOW-CIRCUIT-
     # BREAKER-001 — a suspected soft-throttle/mis-addressing episode poisons every
-    # remaining window identically) → pull-wide halt; anything else is a per-symbol-
-    # quarantinable BruteXError (e.g. a corrupt-partition WriterError) → isolate, do
-    # NOT trip the pool.
-    return not isinstance(exc, (DailyQuotaExceeded, QuotaInvariantError, MassEmptySettleHalt))
+    # remaining window identically), a tripped vendor-down error-storm breaker OR the
+    # dead-credential escalation (DEC-VENDOR-DOWN-BREAKER-001 — a down vendor / dead
+    # token fails every remaining window identically) → pull-wide halt; anything else
+    # is a per-symbol-quarantinable BruteXError (e.g. a corrupt-partition WriterError)
+    # → isolate, do NOT trip the pool.
+    return not isinstance(
+        exc,
+        (
+            DailyQuotaExceeded,
+            QuotaInvariantError,
+            MassEmptySettleHalt,
+            VendorDownError,
+            GrowwCredentialDeadError,
+        ),
+    )
 
 
 __all__ = [

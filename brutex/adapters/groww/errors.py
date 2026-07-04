@@ -112,6 +112,33 @@ class GrowwTokenStillStaleError(GrowwAuthError):
     """
 
 
+class GrowwCredentialDeadError(GrowwAuthError):
+    """OUR credential / token-broker Lambda looks DEAD — TERMINAL + a pull-wide global stop.
+
+    Raised by the error-storm breaker
+    (:class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`,
+    DEC-VENDOR-DOWN-BREAKER-001), NEVER by the client/auth layer itself: when K
+    CONSECUTIVE ladder-exhausted :class:`GrowwTokenStillStaleError` outcomes span
+    ≥ T minutes with ZERO adopted-token successes in between, the "the Lambda mints
+    a few minutes late" explanation is exhausted and the honest verdict is a dead
+    credential / dead token-broker — an OPERATOR-action condition. Escalating to
+    this class (a) stays a :class:`GrowwAuthError` subclass so every
+    ``except GrowwAuthError`` site + :func:`is_auth_failure` keep matching, (b) is
+    deliberately ABSENT from :func:`is_retryable`'s tuple so it is TERMINAL, and
+    (c) joins BOTH ingest spines' ``_GLOBAL_STOP_ERRORS`` so it propagates past the
+    per-symbol quarantine and halts the whole pull (every remaining window would
+    fail identically against the same dead credential). The per-window StillStale
+    outcomes themselves STAY retryable (DEC-BROKER-READONLY-REAUTH-REREAD-001 is
+    untouched) — this class only names the ESCALATED verdict. Because it is raised
+    by the breaker on the ingest worker (never from inside
+    ``GrowwClient._call``), the client's bounded reauth branch is never re-entered
+    by it. The K/T thresholds are operator-tunable HEURISTICS
+    (:data:`~brutex.adapters.groww.constants.GROWW_CREDENTIAL_DEAD_STREAK` /
+    :data:`~brutex.adapters.groww.constants.GROWW_CREDENTIAL_DEAD_MIN_MINUTES`),
+    not vendor facts.
+    """
+
+
 class GrowwNotFoundError(GrowwError):
     """Unknown instrument / endpoint (terminal)."""
 
@@ -459,7 +486,9 @@ def is_retryable(exc: GrowwError) -> bool:
     retryable, so the cold-start mint backs off + reuses the cache and the read-only
     reauth re-pulls later instead of dying).
     Terminal: bad-request, not-found, a NON-throttled / non-still-stale auth failure
-    (needs re-auth), feed (out of scope), and any bare :class:`GrowwError`.
+    (needs re-auth — incl. the escalated :class:`GrowwCredentialDeadError`, which is
+    additionally a pull-wide global stop, DEC-VENDOR-DOWN-BREAKER-001), feed (out of
+    scope), and any bare :class:`GrowwError`.
     """
     return isinstance(
         exc,
@@ -478,6 +507,7 @@ def is_retryable(exc: GrowwError) -> bool:
 __all__ = [
     "GrowwAuthError",
     "GrowwBadRequestError",
+    "GrowwCredentialDeadError",
     "GrowwEmptyResponseError",
     "GrowwError",
     "GrowwFeedError",

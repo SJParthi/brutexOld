@@ -414,6 +414,62 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def vendor_down(self, *, failed_windows: int, distinct_symbols: int) -> bool:
+        """Alert that the VENDOR looks DOWN — the pull halted; WAIT then re-run (CRITICAL).
+
+        Fired ONCE by the error-storm breaker
+        (:class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`,
+        DEC-VENDOR-DOWN-BREAKER-001) at its trip transition: sustained
+        ladder-exhausted transport failures across multiple DISTINCT symbols with
+        ZERO successes — the whole-vendor-outage shape. The wording is deliberately
+        DISTINCT from :meth:`credential_dead` (this one says WAIT — nothing on the
+        operator's side is broken) and from the generic :meth:`pull_halted`. The
+        counts are non-secret integers; the ``dedupe_key`` coalesces a repeated
+        vendor-down verdict into one push.
+        """
+        message = escape_markdown_v2(
+            f"🛑 VENDOR DOWN — Groww transport is failing pull-wide: {failed_windows} "
+            f"windows exhausted their retry ladders across {distinct_symbols} distinct "
+            "symbols with ZERO successes. This looks like a vendor/network outage, NOT "
+            "our credential. The pull HALTED gracefully — WAIT for the vendor to "
+            "recover, then re-run; nothing is lost (the durable ledger + idempotent "
+            "sink re-pull exactly the missing windows)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key="vendor-down",
+        )
+
+    def credential_dead(self, *, reason: str) -> bool:
+        """Alert that OUR credential / token-broker Lambda is DEAD — operator action (CRITICAL).
+
+        Fired ONCE by the error-storm breaker's dead-credential escalation
+        (DEC-VENDOR-DOWN-BREAKER-001): K consecutive StillStale re-reads spanning
+        ≥ T minutes with ZERO adopted-token successes — past the healthy 06:00-IST
+        rotation shape (DEC-BROKER-READONLY-REAUTH-REREAD-001's honest envelope).
+        The wording is deliberately DISTINCT from :meth:`vendor_down`: here the
+        vendor is (as far as we can tell) fine and WAITING will NOT help — the
+        operator must re-provision the credential or fix the token-broker Lambda.
+        *reason* must stay a short NON-SECRET token (never a token/secret value —
+        the :meth:`pull_halted` rule).
+        """
+        message = escape_markdown_v2(
+            f"🔐 OUR CREDENTIAL / LAMBDA BROKER DEAD — OPERATOR ACTION NEEDED: {reason}. "
+            "Every token re-read still returns the same dead token (zero adopted-token "
+            "successes), so every fetch is auth-stalled and the pull HALTED gracefully. "
+            "Waiting will NOT fix this — re-provision the Groww API key / TOTP secret "
+            "or repair the token-broker Lambda, then re-run; bars already written are "
+            "safe (idempotent re-pull)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"credential-dead:{reason}",
+        )
+
     def symbol_window_failure(
         self,
         *,
