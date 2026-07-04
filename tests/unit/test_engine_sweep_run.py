@@ -1887,6 +1887,37 @@ class TestSweepLookaheadGuardWiring:
         assert on_summary == off_summary
         assert on_bytes == off_bytes
 
+    def test_guard_on_is_bit_identical_to_off_on_the_kernel_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Hostile-review F1: the production grid path supplies a pre-built
+        # ResidentSweepKernel, so build_bar_bits is SKIPPED and the guarded
+        # window's ARMED first sequential pass is the trade-sim walk — a
+        # different code path from the kernel-less tests above. Pin ON≡OFF
+        # bit-identity there too (summary + persisted store bytes).
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.engine.sweep_lookahead import SWEEP_LOOKAHEAD_GUARD_ENV
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+
+        def _run_with_kernel(tag: str) -> tuple[SweepRunSummary, bytes]:
+            store_path = tmp_path / f"{tag}.parquet"
+            store = ResultsStore(path=store_path)
+            with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+                summary = run_persisted_sweep(
+                    bars, cfg, store=store, dedup=_dedup(), audit=audit, kernel=kernel
+                )
+            return summary, store_path.read_bytes()
+
+        monkeypatch.delenv(SWEEP_LOOKAHEAD_GUARD_ENV, raising=False)
+        off_summary, off_bytes = _run_with_kernel("kernel-off")
+        monkeypatch.setenv(SWEEP_LOOKAHEAD_GUARD_ENV, "1")
+        on_summary, on_bytes = _run_with_kernel("kernel-on")
+        assert on_summary == off_summary
+        assert on_bytes == off_bytes
+
     def test_guard_env_on_actually_wraps_the_bar_window(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

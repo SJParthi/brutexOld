@@ -42,13 +42,17 @@ seam where a genuine future-index read is mechanically observable:
   forward-only **consumption front** (the barrier cursor).
 * Any *indexed* / *sliced* / *reversed* access to a bar at an index AHEAD of
   that front raises :class:`~brutex.feed.errors.LookAheadError` — e.g. a
-  future regression that adds a ``bars[i + 1]`` peek inside the Stage-1A
-  build or the trade-sim walk fires the barrier the moment it executes.
+  future regression that adds a ``bars[i + 1]`` peek fires the barrier the
+  moment it executes on the **first sequential pass** over the window: the
+  Stage-1A build when ``kernel=None``, or the FIRST trade-sim walk on the
+  resident-kernel path (where Stage-1A is skipped).
 * The front is monotone across the WHOLE sweep run (phases legitimately
-  re-walk the same already-consumed window: Stage-1A first, then one
+  re-walk the same already-consumed window: the first full pass, then one
   trade-sim walk per surviving mask, then the finalist re-simulation), so
   after the first full pass every in-window index is "known data" and
-  random access is permitted — the barrier does NOT re-arm per phase.
+  random access is permitted — the barrier does NOT re-arm per phase; a
+  peek introduced in a LATER phase is inside the front and is the property
+  gates' layer to catch, not the barrier's.
 * It does NOT interpose on **derived per-bar state** (the ``bar_bits``
   truth-matrix, walker-internal state, indicator streaming state): a
   future-information flow smuggled through derived state is caught by the
