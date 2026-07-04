@@ -3738,6 +3738,252 @@ class TestEmptyBreakerOptionSpine:
         assert not ledger.is_skippable(key)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# DEC-INGEST-BOUNDARY-INTEGRITY-001 — calendar-aware boundary + all-filtered
+# demotion + persisted bars_net_new (the F&O spine)
+# ─────────────────────────────────────────────────────────────────────────
+
+# 2024-01-06 (Saturday) 10:00 IST — in-window wall clock, NO session (the
+# non-trading-date leak the date-blind filter wrongly stored).
+_SATURDAY = "2024-01-06T10:00:00"
+# 2024-01-02 09:00 IST — pre-open on a regular trading day.
+_PRE_OPEN = "2024-01-02T09:00:00"
+# 2024-11-01 18:30 IST — inside the Diwali muhurat session 18:00–19:00.
+_MUHURAT_EVENING = "2024-11-01T18:30:00"
+
+
+class _NetNewSink:
+    """Recording sink whose result carries an EXPLICIT deduped ``bars_net_new``
+    (``bars_appended - 1``, floored at 0) so the two counts DIFFER — proving the
+    ledger stores the sink's deduped count, not a mirror of the input count."""
+
+    def __init__(self) -> None:
+        self.appends: list[int] = []
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval
+        self.appends.append(len(bars))
+        return SinkAppendResult(
+            bars_appended=len(bars),
+            partitions_written=1,
+            write_results=(),
+            bars_net_new=max(len(bars) - 1, 0),
+        )
+
+
+def _option_key(interval: str = "1minute", *, end: date = date(2024, 1, 8)) -> WindowKey:
+    return WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval=interval,
+        start=date(2024, 1, 1),
+        end=end,
+    )
+
+
+def test_option_session_filter_warns_exactly_once_per_window_with_counts() -> None:
+    # One window, three bars: kept / pre-open (off-session) / Saturday
+    # (non-trading date). EXACTLY ONE aggregated WARNING with identity + counts.
+    payload = {
+        "candles": [
+            [_IN_SESSION, 100.0, 110.0, 90.0, 105.0, 50, 7],
+            [_PRE_OPEN, 100.0, 110.0, 90.0, 105.0, 50, 7],
+            [_SATURDAY, 100.0, 110.0, 90.0, 105.0, 50, 7],
+        ]
+    }
+    sdk = _FakeSDK(payload=payload)
+    sink = _Sink()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            now_ist=_now,
+        )
+    assert report.bars_appended == 1  # only the in-session Tuesday bar survives
+    warns = [e for e in logs if e["event"] == "option.ingest.session_filter.dropped"]
+    assert len(warns) == 1
+    assert warns[0]["dropped"] == 2
+    assert warns[0]["off_session"] == 1
+    assert warns[0]["non_trading_date"] == 1
+    assert warns[0]["window_start"] == "2024-01-01"
+    assert warns[0]["window_end"] == "2024-01-08"
+    assert warns[0]["symbol"] == "NSE-NIFTY-02Jan25-28500-CE"
+
+
+def test_option_muhurat_evening_bar_is_now_stored() -> None:
+    # SANCTIONED BEHAVIOR CHANGE (DEC-INGEST-BOUNDARY-INTEGRITY-001): an evening
+    # Diwali-muhurat option bar was wrongly dropped by the date-blind filter.
+    sdk = _FakeSDK(payload=_candles(_MUHURAT_EVENING))
+    sink = _Sink()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 11, 1),
+            end=date(2024, 11, 2),
+            now_ist=_now,
+        )
+    assert report.bars_appended == 1  # KEPT (was 0 under the old filter)
+    assert not any(e["event"] == "option.ingest.session_filter.dropped" for e in logs)
+
+
+def test_option_all_filtered_window_is_demoted_to_repullable() -> None:
+    # GAP (c), F&O scope extension: raw bars > 0 but EVERY one session-filtered →
+    # demoted FAILED + ALL_FILTERED (re-examinable). UNgated on this spine — the
+    # F&O dry-run client returns EMPTY payloads (raw_bars == 0), so the flag can
+    # never fire offline; #1031's observe-only stance for the liquidity-heuristic
+    # detectors (interior gap / partial window) is PRESERVED.
+    from brutex.data.session import ALL_FILTERED
+
+    sdk = _FakeSDK(payload=_candles(_SATURDAY))
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 0
+    rec = ledger.records()[0]
+    assert rec.status == "FAILED"
+    assert rec.last_error == ALL_FILTERED
+    assert rec.empty_streak == 1  # bounded-settle machinery engaged
+    assert not ledger.is_skippable(_option_key())  # re-pulled next pass
+
+
+def test_option_all_filtered_settles_skipped_after_threshold() -> None:
+    # BOUNDED: after EMPTY_TERMINAL_THRESHOLD consecutive all-filtered pulls the
+    # contract window settles SKIPPED so the universe pull converges (data-safe —
+    # the sink is keep-first; nothing is deleted).
+    from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, SKIPPED
+
+    ledger = WindowLedger()
+    for _ in range(EMPTY_TERMINAL_THRESHOLD):
+        sdk = _FakeSDK(payload=_candles(_SATURDAY))
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            ledger=ledger,
+            now_ist=_now,
+        )
+    assert ledger.records()[0].status == SKIPPED
+
+
+def test_option_dedup_to_zero_net_new_stays_success() -> None:
+    # ORTHOGONALITY: a re-pull whose bars all dedup to ZERO net-new still passes
+    # bars THROUGH the filter → SUCCESS (the discriminator reads filter
+    # survivors, never the sink dedup). _Sink models full dedup (bars_net_new=0).
+    from brutex.data.window_ledger import SUCCESS
+
+    sdk = _FakeSDK(payload=_candles(_IN_SESSION))
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _Sink(),  # bars_appended=1, bars_net_new=0 (all deduped)
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    rec = ledger.records()[0]
+    assert rec.status == SUCCESS
+    assert rec.bars == 1
+    assert rec.bars_net_new == 0  # GAP (d): the deduped count is persisted
+
+
+def test_option_bars_net_new_threaded_from_sink_to_ledger() -> None:
+    # GAP (d): the ledger stores the SINK's deduped net-new — deliberately
+    # different from bars_appended so a mirror would fail.
+    payload = {
+        "candles": [
+            ["2024-01-02T09:30:00", 100.0, 110.0, 90.0, 105.0, 50, 7],
+            ["2024-01-02T09:31:00", 101.0, 111.0, 91.0, 106.0, 51, 8],
+        ]
+    }
+    sdk = _FakeSDK(payload=payload)
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _NetNewSink(),  # bars_appended=2, bars_net_new=1
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    rec = ledger.records()[0]
+    assert rec.bars == 2
+    assert rec.bars_net_new == 1
+
+
+def test_option_write_deferred_record_carries_known_zero_net_new() -> None:
+    # A deferred write (lock timeout) stored nothing — a KNOWN 0, not None.
+    sdk = _FakeSDK(payload=_candles(_IN_SESSION))
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _LockTimeoutSink(),
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    rec = ledger.records()[0]
+    assert rec.last_error == "PartitionLockTimeout"
+    assert rec.bars_net_new == 0
+
+
+def test_option_daily_interval_is_not_session_filtered_and_never_all_filtered() -> None:
+    # The daily path keeps its no-filter behavior (a daily bar has no intraday
+    # time) — an out-of-session-looking DAILY bar is stored and never demoted.
+    from brutex.data.window_ledger import SUCCESS
+
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1
+    rec = ledger.records()[0]
+    assert rec.status == SUCCESS
+    assert rec.last_error is None
+
+
 # ── make_breaker_canary_probe (DEC-EMPTY-BREAKER-CANARY-001) ─────────────────
 
 

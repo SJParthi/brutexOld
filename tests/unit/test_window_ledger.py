@@ -659,6 +659,7 @@ class TestPruneSuperseded:
                     _NOW.isoformat(),
                     0,
                     0,
+                    None,
                 )
             ]
         )
@@ -1522,3 +1523,78 @@ class TestRescueLedgerSurface:
         ledger.record(planned, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
         assert ledger.prune_superseded(_plan_index(planned)) == 0
         assert ledger.pruned_keys() == frozenset()
+
+
+class TestBarsNetNew:
+    """DEC-INGEST-BOUNDARY-INTEGRITY-001: the persisted deduped net-new count."""
+
+    def test_record_stores_bars_net_new(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=3, now=_NOW
+        )
+        rec = ledger.records()[0]
+        assert rec.bars == 5  # the input count is UNCHANGED (the >0 gates read it)
+        assert rec.bars_net_new == 3  # the deduped count is stored alongside
+
+    def test_record_default_is_honest_unknown_none(self) -> None:
+        # A caller with no sink result records None — never a fabricated 0.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.records()[0].bars_net_new is None
+
+    def test_round_trip_carries_the_int_and_the_none(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=2, now=_NOW
+        )
+        ledger.record(_key("SENSEX"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        rows = ledger.to_rows()
+        assert [r[13] for r in rows] == [2, None]  # the LAST tuple element
+        restored = WindowLedger.from_rows(rows)
+        assert restored.to_rows() == rows
+        by_symbol = {r.security_id: r for r in restored.records()}
+        assert by_symbol["NIFTY"].bars_net_new == 2
+        assert by_symbol["SENSEX"].bars_net_new is None
+
+    def test_plan_row_is_known_zero(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        assert ledger.records()[0].bars_net_new == 0  # never appended (mirrors bars=0)
+
+    def test_seed_lake_success_is_honest_unknown(self) -> None:
+        # The cold-start seed proves bars EXIST but the original write's dedup
+        # count is unrecorded — None, never fabricated.
+        ledger = WindowLedger()
+        ledger.seed_lake_success(_key(), bars=42, now=_NOW)
+        assert ledger.records()[0].bars_net_new is None
+
+    def test_settle_known_gap_preserves_prior_value(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=4, now=_NOW
+        )
+        ledger.settle_known_gap(_key(), now=_LATER, reason="DH-905")
+        assert ledger.records()[0].bars_net_new == 4  # no fetch here — preserved
+
+    def test_settle_known_gap_without_prior_is_none(self) -> None:
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        assert ledger.records()[0].bars_net_new is None
+
+    def test_reopen_skipped_preserves_prior_value(self) -> None:
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")  # SKIPPED, None
+        ledger.record(
+            _key("SENSEX"), raw_bars=0, error_type=None, bars_appended=0, bars_net_new=0, now=_NOW
+        )
+        # Build a SKIPPED row WITH a recorded net-new, then reopen it.
+        other = _key("BANKNIFTY")
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                other, raw_bars=0, error_type=None, bars_appended=0, bars_net_new=0, now=_NOW
+            )
+        assert ledger.reopen_skipped(security_id="BANKNIFTY") == 1
+        reopened = {r.security_id: r for r in ledger.records()}["BANKNIFTY"]
+        assert reopened.status == FAILED
+        assert reopened.bars_net_new == 0  # preserved through the demotion

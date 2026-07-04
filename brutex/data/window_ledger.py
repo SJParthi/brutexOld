@@ -259,6 +259,17 @@ class WindowLedgerRecord:
     #: each pull (the last pull's count, like ``last_error`` / ``last_attempt_at``) —
     #: NOT cumulative, so a re-run of the SAME pull is bit-identical (Golden Rule #7).
     in_pull_fetches: int = 0
+    #: DEDUPED bars the sink actually NET-ADDED to the lake on the MOST-RECENT
+    #: attempt (DEC-INGEST-BOUNDARY-INTEGRITY-001) — the persisted twin of
+    #: :attr:`~brutex.data.sink.SinkAppendResult.bars_net_new`, which
+    #: DEC-SINK-DEDUP-COUNT-001 (#1031) computed but never persisted. ``bars``
+    #: stays the INPUT batch size the spine appended (several ``>0`` gates read
+    #: it); this is the keep-first-deduped count, so a re-pull whose bars are all
+    #: already stored reads ``bars > 0, bars_net_new == 0``. ``None`` = honestly
+    #: UNKNOWN — a legacy row written before the column existed, or a path with
+    #: no sink result (a lake cold-start seed) — NEVER fabricated to ``0``
+    #: (Golden Rule #1: ``0`` would falsely claim "that pull added nothing new").
+    bars_net_new: int | None = None
 
 
 @dataclass(slots=True)
@@ -386,6 +397,7 @@ class WindowLedger:
                 last_attempt_at=None,
                 empty_streak=0,
                 in_pull_fetches=0,  # never fetched — a pure PLANNED row
+                bars_net_new=0,  # nothing appended yet (mirrors bars=0)
             )
 
     def seed_lake_success(self, key: WindowKey, *, bars: int, now: datetime) -> bool:
@@ -418,6 +430,9 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=0,
                 in_pull_fetches=1,  # the lake proves one successful fetch's data
+                # The historical write's keep-first-deduped count is UNRECORDED —
+                # honest unknown, never fabricated (DEC-INGEST-BOUNDARY-INTEGRITY-001).
+                bars_net_new=None,
             )
             return True
 
@@ -478,6 +493,7 @@ class WindowLedger:
         degraded: bool = False,
         degraded_reason: str | None = None,
         suppress_settle: bool = False,
+        bars_net_new: int | None = None,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -580,6 +596,13 @@ class WindowLedger:
         settle ``SKIPPED`` on this record (both the fast-settle and the streak
         promotion are gated off). IGNORED for ``SUCCESS`` / ``FAILED`` / degraded
         outcomes; the default ``False`` is byte-identical to the prior behaviour.
+
+        *bars_net_new* (DEC-INGEST-BOUNDARY-INTEGRITY-001) is the sink's
+        keep-first-DEDUPED net-new bar count for this append
+        (:attr:`~brutex.data.sink.SinkAppendResult.bars_net_new`), stored
+        alongside ``bars`` (the INPUT batch size, unchanged — the ``>0`` gates
+        keep reading it). ``None`` (the default) records an honest UNKNOWN for a
+        caller with no sink result — never fabricated to ``0``.
         """
         classified = classify_window_status(raw_bars, error_type, degraded=degraded)
         # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
@@ -701,6 +724,7 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
                 in_pull_fetches=in_pull_fetches,
+                bars_net_new=bars_net_new,
             )
             return status
 
@@ -722,6 +746,8 @@ class WindowLedger:
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             bars = prior.bars if prior is not None else 0
             empty_streak = prior.empty_streak if prior is not None else 0
+            # No fetch/append happened here — preserve the prior net-new (like ``bars``).
+            bars_net_new = prior.bars_net_new if prior is not None else None
             if prior is None or prior.status != SKIPPED:
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a known-gap
                 # settle is a newly-SKIPPED window too — the verdict must SAY it.
@@ -740,6 +766,7 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
+                bars_net_new=bars_net_new,
             )
             return SKIPPED
 
@@ -823,6 +850,7 @@ class WindowLedger:
                     last_attempt_at=row.last_attempt_at,
                     empty_streak=0,
                     in_pull_fetches=row.in_pull_fetches,
+                    bars_net_new=row.bars_net_new,  # no fetch here — preserved
                 )
             self._reopened.update(doomed)
         return len(doomed)
@@ -1031,12 +1059,31 @@ class WindowLedger:
 
     def to_rows(
         self,
-    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]]:
+    ) -> list[
+        tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            int,
+            int,
+            str | None,
+            str,
+            str | None,
+            int,
+            int,
+            int | None,
+        ]
+    ]:
         """Serialise to a deterministic list of plain tuples (for the durable store).
 
-        ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) is the LAST tuple element —
-        appended after ``empty_streak`` exactly as that column was, so a legacy 12-tuple
-        Parquet (written before it existed) still loads (the store fills it per-row).
+        ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) then ``bars_net_new``
+        (DEC-INGEST-BOUNDARY-INTEGRITY-001) were each appended LAST — after
+        ``empty_streak`` exactly as that column was — so a legacy 12/13-tuple
+        Parquet (written before either existed) still loads (the store fills the
+        missing column per-row; an absent ``bars_net_new`` reads ``None``).
         """
         return [
             (
@@ -1053,6 +1100,7 @@ class WindowLedger:
                 r.last_attempt_at,
                 r.empty_streak,
                 r.in_pull_fetches,
+                r.bars_net_new,
             )
             for r in self.records()
         ]
@@ -1061,7 +1109,22 @@ class WindowLedger:
     def from_rows(
         cls,
         rows: Iterable[
-            tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]
+            tuple[
+                str,
+                str,
+                str,
+                str,
+                str,
+                str,
+                int,
+                int,
+                str | None,
+                str,
+                str | None,
+                int,
+                int,
+                int | None,
+            ]
         ],
         *,
         threshold: int = EMPTY_TERMINAL_THRESHOLD,
@@ -1082,6 +1145,7 @@ class WindowLedger:
             last_attempt_at,
             empty_streak,
             in_pull_fetches,
+            bars_net_new,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -1098,6 +1162,7 @@ class WindowLedger:
                     last_attempt_at=last_attempt_at,
                     empty_streak=empty_streak,
                     in_pull_fetches=in_pull_fetches,
+                    bars_net_new=bars_net_new,
                 )
             )
         return ledger
