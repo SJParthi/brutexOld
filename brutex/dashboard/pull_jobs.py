@@ -396,6 +396,14 @@ class BackgroundPullJob:
         # Set post-construction so the injected factory signature stays (on_hung) —
         # back-compat with every existing factory.
         watchdog.on_recovery = lambda event: self._on_recovered(event, watchdog)
+        # Wire the wedged-worker escalation (DEC-PULL-WEDGE-ESCALATE-001, STAGE 1): the
+        # terminal WEDGED verdict + ONE CRITICAL alert when the DUAL signal holds (zero
+        # heartbeats for the wedge multiple AND no lake-revision movement since the HUNG
+        # edge). Set post-construction like on_recovery (factory back-compat). A None
+        # revision probe (no resolvable lake root) makes the escalation ABSTAIN — the
+        # honest probe-less envelope, never a blind heartbeat-only WEDGED.
+        watchdog.on_wedged = lambda event: self._on_wedged(event, watchdog)
+        watchdog.revision_probe = self._build_revision_probe()
         watchdog.start()
         self._spawn(lambda: self._run(work, watchdog, on_success))
         return True
@@ -527,6 +535,71 @@ class BackgroundPullJob:
             )
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_recovered failed; the pull / timer is unaffected")
+
+    def _build_revision_probe(self) -> Callable[[], str | None] | None:
+        """Build the wedge-escalation lake-revision probe, or ``None`` when no lake root.
+
+        DEC-PULL-WEDGE-ESCALATE-001: the DUAL wedge signal's second half — an O(1)
+        content token off the durable window-ledger sidecar
+        (:func:`brutex.dashboard.lake_revision.lake_revision`, DEC-HARDENING-LEFTOVERS-001)
+        that MOVES whenever a production pull checkpoints the ledger. A worker that is
+        silent on heartbeats but still checkpointing is NOT wedged. ``None`` (no
+        resolvable lake root — a dry-run / test) means the escalation abstains entirely
+        (documented honest envelope). Lazy import keeps this module wheel-free at import.
+        """
+        lake_root = self._lake_root_resolver()
+        if lake_root is None:
+            return None
+
+        def _probe() -> str | None:
+            from brutex.dashboard.lake_revision import lake_revision
+
+            return lake_revision(lake_root)
+
+        return _probe
+
+    def _on_wedged(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
+        """Wedge escalation (DEC-PULL-WEDGE-ESCALATE-001, STAGE 1): terminal mark + ONE alert.
+
+        The watchdog confirmed the DUAL signal — zero heartbeats for the wedge multiple
+        of the stall timeout AND no lake-revision movement since the HUNG edge — so this
+        run is judged WEDGED: (1) mark the progress WEDGED + ``restart_required`` (an
+        honest TERMINAL verdict for the run; the state stays ``running`` — the thread is
+        not killed), (2) fire ONE CRITICAL pull-halt alert naming the restart requirement.
+        Deliberately does NOT clear ``_running`` / release the single-flight — the zombie
+        worker still owns the lake (the DEC-PIPELINE-STALL-HEARTBEAT-001 double-run-race
+        fix is preserved); a PROCESS RESTART releases the ``flock`` on fd close.
+        AUTO-restart (supervisor kill + respawn) is a NAMED follow-up, NOT built here.
+        Identity-gated + best-effort, mirroring :meth:`_on_hung`.
+        """
+        try:
+            phase = self._progress.snapshot().phase or "unknown"
+            with self._lock:
+                if self._watchdog is not watchdog:
+                    return
+                self._progress.mark_wedged(
+                    f"WEDGED — no heartbeat for {event.last_beat_seconds_ago:.0f}s "
+                    f"(>= {watchdog.wedge_multiplier:g}x the {event.timeout_seconds:.0f}s "
+                    f"stall timeout) AND no lake-revision movement during phase '{phase}'; "
+                    "restart required (worker NOT killed; single-flight held)"
+                )
+            emit_pull_halt_alert(
+                TimeoutError(
+                    f"dashboard pull WEDGED: no heartbeat for "
+                    f"{event.last_beat_seconds_ago:.0f}s AND no lake-revision movement "
+                    f"during phase '{phase}' — restart required; worker NOT killed "
+                    "(auto-restart is a named follow-up)"
+                )
+            )
+            _LOG.error(
+                "pull_stall.wedged",
+                phase=phase,
+                last_beat_seconds_ago=round(event.last_beat_seconds_ago, 1),
+                timeout_seconds=event.timeout_seconds,
+                restart_required=True,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
+            _LOG.exception("pull_stall.on_wedged failed; the pull / timer is unaffected")
 
     def _run(
         self, work: PullWork, watchdog: PullWatchdog, on_success: SuccessHook | None = None

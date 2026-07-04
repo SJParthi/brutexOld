@@ -30,10 +30,13 @@ from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook, Watchdog
 from brutex.dashboard.pull_progress import STATE_DONE, STATE_RUNNING, PullProgress
 from brutex.dashboard.pull_stall import (
     DEFAULT_STALL_TIMEOUT_SECONDS,
+    DEFAULT_WEDGE_MULTIPLIER,
     PULL_STALL_ENV,
+    PULL_WEDGE_ENV,
     PULL_WORKER_NAME,
     PullWatchdog,
     resolve_stall_timeout_seconds,
+    resolve_wedge_multiplier,
 )
 from brutex.observability.watchdog import WorkerEvent, WorkerState
 
@@ -270,6 +273,11 @@ class _SpyWatchdog:
         #: The job assigns its recovery hook post-construction (DEC-PIPELINE-STALL-
         #: HEARTBEAT-001) — mirrored here so the spy can replay a HUNG→HEALTHY edge.
         self.on_recovery: Callable[[WorkerEvent], None] | None = None
+        #: The job assigns the wedge hook + revision probe post-construction
+        #: (DEC-PULL-WEDGE-ESCALATE-001) — mirrored so the spy can replay a WEDGED verdict.
+        self.on_wedged: Callable[[WorkerEvent], None] | None = None
+        self.revision_probe: Callable[[], str | None] | None = None
+        self.wedge_multiplier = 6.0
         self.started = False
         self.stopped = False
         self.beats = 0
@@ -286,6 +294,20 @@ class _SpyWatchdog:
     def trigger_hung(self, *, last_beat_seconds_ago: float = 700.0, timeout: float = 600.0) -> None:
         """Simulate the timer thread declaring the worker HUNG."""
         self.on_hung(
+            WorkerEvent(
+                worker_name=PULL_WORKER_NAME,
+                new_state=WorkerState.HUNG,
+                last_beat_seconds_ago=last_beat_seconds_ago,
+                timeout_seconds=timeout,
+            )
+        )
+
+    def trigger_wedged(
+        self, *, last_beat_seconds_ago: float = 3600.0, timeout: float = 600.0
+    ) -> None:
+        """Simulate the timer thread confirming the DUAL wedge signal."""
+        assert self.on_wedged is not None  # the job wires it in start()
+        self.on_wedged(
             WorkerEvent(
                 worker_name=PULL_WORKER_NAME,
                 new_state=WorkerState.HUNG,
@@ -716,3 +738,326 @@ class TestMakeWindowObserver:
         wrapped()
         assert monitor.state_of("pull.stalled") == SLAState.BREACH
         assert "pull.stalled" in degraded
+
+
+# ── DEC-PULL-WEDGE-ESCALATE-001 — STAGE 1 wedged-worker escalation ──────────
+
+
+class TestResolveWedgeMultiplier:
+    def test_default_when_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PULL_WEDGE_ENV, raising=False)
+        assert resolve_wedge_multiplier() == DEFAULT_WEDGE_MULTIPLIER
+
+    def test_blank_env_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(PULL_WEDGE_ENV, "   ")
+        assert resolve_wedge_multiplier() == DEFAULT_WEDGE_MULTIPLIER
+
+    def test_valid_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(PULL_WEDGE_ENV, "12")
+        assert resolve_wedge_multiplier() == 12.0
+
+    def test_non_numeric_env_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(PULL_WEDGE_ENV, "banana")
+        assert resolve_wedge_multiplier() == DEFAULT_WEDGE_MULTIPLIER
+
+    def test_non_positive_env_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(PULL_WEDGE_ENV, "-1")
+        assert resolve_wedge_multiplier() == DEFAULT_WEDGE_MULTIPLIER
+
+
+class _TokenProbe:
+    """A settable lake-revision probe double (None = no signal / abstain)."""
+
+    def __init__(self, token: str | None) -> None:
+        self.token = token
+        self.calls = 0
+
+    def __call__(self) -> str | None:
+        self.calls += 1
+        return self.token
+
+
+def _wedge_watchdog(
+    *, probe: _TokenProbe | None, timeout: float = 30.0, multiplier: float = 6.0
+) -> tuple[PullWatchdog, _FakeClock, list[WorkerEvent], list[WorkerEvent]]:
+    """Build a PullWatchdog wired for wedge tests: fake clock, capturing hooks."""
+    _, spawn = _capturing_spawn()
+    clock = _FakeClock()
+    hungs: list[WorkerEvent] = []
+    wd = PullWatchdog(
+        on_hung=hungs.append,
+        timeout_seconds=timeout,
+        spawn=spawn,
+        clock=clock,
+        wedge_multiplier=multiplier,
+    )
+    wedges: list[WorkerEvent] = []
+    wd.on_wedged = wedges.append
+    if probe is not None:
+        wd.revision_probe = probe
+    wd.start()
+    return wd, clock, hungs, wedges
+
+
+class TestPullWatchdogWedgeEscalation:
+    def test_wedge_multiplier_defaults_to_resolver(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(PULL_WEDGE_ENV, "9")
+        wd = PullWatchdog(on_hung=lambda _e: None, spawn=lambda _fn: None)
+        assert wd.wedge_multiplier == 9.0
+
+    def test_explicit_wedge_multiplier_overrides_resolver(self) -> None:
+        wd = PullWatchdog(on_hung=lambda _e: None, spawn=lambda _fn: None, wedge_multiplier=4.0)
+        assert wd.wedge_multiplier == 4.0
+
+    def test_dual_signal_fires_once_terminal(self) -> None:
+        """Zero heartbeats for 6x AND an unmoved token → ONE wedge verdict (latched)."""
+        probe = _TokenProbe("rev-1")
+        wd, clock, hungs, wedges = _wedge_watchdog(probe=probe)
+        clock.advance(31.0)
+        wd.check_once()  # HUNG edge (captures the baseline token)
+        assert len(hungs) == 1 and wedges == []
+        clock.advance(31.0)
+        wd.check_once()  # 62 s silent < 180 s — below the wedge window, no verdict
+        assert wedges == []
+        clock.advance(120.0)  # 182 s silent >= 6 x 30
+        wd.check_once()
+        assert len(wedges) == 1
+        assert wedges[0].last_beat_seconds_ago >= 180.0
+        # Terminal latch: further polls never re-fire.
+        clock.advance(500.0)
+        wd.check_once()
+        assert len(wedges) == 1
+
+    def test_token_movement_defers_the_verdict(self) -> None:
+        """A moved revision token (the worker IS writing) defers + restarts the window."""
+        probe = _TokenProbe("rev-1")
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
+        clock.advance(31.0)
+        wd.check_once()  # HUNG (baseline rev-1)
+        probe.token = "rev-2"  # the ledger checkpointed after the HUNG edge
+        clock.advance(160.0)  # 191 s silent >= 180
+        wd.check_once()
+        assert wedges == []  # movement observed — no verdict, window restarted
+        # The token now freezes at rev-2: the verdict needs the FULL window again.
+        clock.advance(100.0)
+        wd.check_once()
+        assert wedges == []  # only 100 s since the observed movement
+        clock.advance(100.0)  # 200 s since the movement >= 180
+        wd.check_once()
+        assert len(wedges) == 1
+
+    def test_probe_none_token_abstains(self) -> None:
+        """A probe with no signal (None token) NEVER escalates — honest abstention."""
+        probe = _TokenProbe(None)
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
+        clock.advance(31.0)
+        wd.check_once()  # HUNG (baseline None)
+        clock.advance(500.0)
+        wd.check_once()
+        assert wedges == []
+
+    def test_no_probe_wired_abstains(self) -> None:
+        """A probe-less deployment (revision_probe=None) never reaches WEDGED."""
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=None)
+        clock.advance(31.0)
+        wd.check_once()
+        clock.advance(500.0)
+        wd.check_once()
+        assert wedges == []
+
+    def test_baseline_none_current_real_abstains(self) -> None:
+        """Baseline None (probe erred at the HUNG edge) + a later real token → abstain."""
+        probe = _TokenProbe(None)
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
+        clock.advance(31.0)
+        wd.check_once()  # HUNG — baseline captured as None
+        probe.token = "rev-1"
+        clock.advance(500.0)
+        wd.check_once()
+        # current != baseline(None)? The None baseline abstains BEFORE any comparison.
+        assert wedges == []
+
+    def test_missing_hung_baseline_abstains(self) -> None:
+        """DEFENSIVE: no HUNG-edge baseline capture → abstain, never a blind verdict.
+
+        Unreachable through the public API today (the HUNG edge always captures a
+        baseline before the escalation can run) — pinned white-box so the defensive
+        abstain branch keeps teeth if the edge wiring ever regresses.
+        """
+        probe = _TokenProbe("rev-1")
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
+        clock.advance(31.0)
+        wd.check_once()  # HUNG edge (captures the baseline)
+        wd._hung_baseline_captured = False  # simulate a bypassed edge (whitebox)
+        clock.advance(500.0)
+        wd.check_once()
+        assert wedges == []
+
+    def test_beat_after_hung_defers_wedge(self) -> None:
+        """Any heartbeat resets the silence clock — a sign of life defers the verdict."""
+        probe = _TokenProbe("rev-1")
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
+        clock.advance(31.0)
+        wd.check_once()  # HUNG
+        clock.advance(100.0)
+        wd.beat()  # life! (also recovers on the next poll)
+        clock.advance(100.0)  # only 100 s since the beat
+        wd.check_once()
+        assert wedges == []
+
+    def test_no_wedge_while_healthy(self) -> None:
+        """The escalation is evaluated only while HUNG — a healthy worker never wedges."""
+        probe = _TokenProbe("rev-1")
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=probe)
+        for _ in range(10):
+            clock.advance(20.0)
+            wd.beat()
+            wd.check_once()
+        assert wedges == []
+        assert probe.calls == 0  # the probe is never touched while healthy
+
+    def test_no_hook_wired_is_noop(self) -> None:
+        """With no on_wedged hook the escalation short-circuits (zero probe reads)."""
+        probe = _TokenProbe("rev-1")
+        _, spawn = _capturing_spawn()
+        clock = _FakeClock()
+        wd = PullWatchdog(
+            on_hung=lambda _e: None,
+            timeout_seconds=30.0,
+            spawn=spawn,
+            clock=clock,
+            wedge_multiplier=6.0,
+        )
+        wd.revision_probe = probe
+        wd.start()
+        clock.advance(31.0)
+        wd.check_once()
+        hung_edge_reads = probe.calls  # the HUNG edge itself captures a baseline
+        clock.advance(500.0)
+        wd.check_once()
+        assert probe.calls == hung_edge_reads  # no escalation-path probe read
+
+    def test_raising_wedge_hook_is_swallowed(self) -> None:
+        """A raising on_wedged hook is swallowed + logged — the timer never crashes."""
+        probe = _TokenProbe("rev-1")
+        wd, clock, _hungs, _wedges = _wedge_watchdog(probe=probe)
+
+        def _boom(_event: WorkerEvent) -> None:
+            raise RuntimeError("wedge hook boom")
+
+        wd.on_wedged = _boom
+        clock.advance(31.0)
+        wd.check_once()
+        clock.advance(200.0)
+        wd.check_once()  # must NOT raise out of the escalation
+
+    def test_raising_probe_abstains_never_crashes(self) -> None:
+        """A probe that RAISES (a stalled volume mid-stat) abstains — never a false wedge."""
+        wd, clock, _hungs, wedges = _wedge_watchdog(probe=None)
+
+        def _boom() -> str | None:
+            raise OSError("stat wedged")
+
+        wd.revision_probe = _boom
+        clock.advance(31.0)
+        wd.check_once()  # HUNG (baseline capture swallows the probe error -> None)
+        clock.advance(500.0)
+        wd.check_once()
+        assert wedges == []
+
+
+class TestBackgroundPullJobWedge:
+    """DEC-PULL-WEDGE-ESCALATE-001 — the job-level STAGE 1 wiring."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_account_singleflight(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.dashboard import pull_jobs
+
+        monkeypatch.setattr(pull_jobs, "_default_lake_root_resolver", lambda: None)
+
+    def test_start_wires_wedge_hook_and_probe(self) -> None:
+        built, factory = _spy_factory()
+        job = _job(factory)
+        assert job.start(lambda _h: None, total=1) is True
+        spy = built[0]
+        assert spy.on_wedged is not None
+        # No resolvable lake root (the autouse fixture) → the probe is honestly None
+        # (the escalation abstains — never a blind heartbeat-only WEDGED).
+        assert spy.revision_probe is None
+
+    def test_wedged_edge_marks_terminal_and_alerts_once_without_release(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wedge verdict: WEDGED + restart_required + ONE CRITICAL alert; flight HELD."""
+        halts: list[BaseException] = []
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+        built, factory = _spy_factory()
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        built[0].trigger_wedged(last_beat_seconds_ago=3700.0, timeout=600.0)
+
+        assert len(halts) == 1  # exactly ONE CRITICAL alert
+        assert isinstance(halts[0], TimeoutError)
+        assert "WEDGED" in str(halts[0])
+        assert "restart required" in str(halts[0])
+        assert "auto-restart is a named follow-up" in str(halts[0])
+        snap = job.snapshot()
+        assert snap.state == STATE_RUNNING  # the worker is NOT killed
+        assert snap.wedged is True
+        assert "restart required" in snap.wedge_detail
+        assert snap.to_dict()["restart_required"] is True
+        # The single-flight stays HELD (the double-run-race fix preserved).
+        assert job.running is True
+        assert job.start(lambda _h: None, total=1) is False
+
+    def test_late_wedged_edge_for_prior_run_does_not_mark_new_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        built, factory = _spy_factory()
+        job = _job(factory)  # sync spawn: the first run completes immediately
+        job.start(lambda _h: None, total=1)
+        job.start(lambda _h: None, total=1)  # a SECOND run supersedes the first
+        assert len(built) == 2
+        built[0].trigger_wedged()  # a stale timer edge for the SUPERSEDED run
+        assert job.snapshot().wedged is False  # the new run is untouched
+
+    def test_on_wedged_swallows_a_raising_progress_mark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+
+        class _BoomProgress(PullProgress):
+            def mark_wedged(self, detail: str) -> None:
+                raise RuntimeError("progress boom")
+
+        built, factory = _spy_factory()
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=_BoomProgress(), spawn=captured.append, watchdog_factory=factory
+        )
+        job.start(lambda _h: None, total=1)
+        built[0].trigger_wedged()  # must NOT raise out of the timer path
+
+    def test_build_revision_probe_with_lake_root(self, tmp_path: object) -> None:
+        """A resolvable lake root builds a live probe over ``lake_revision``."""
+        from pathlib import Path
+
+        from brutex.dashboard.pull_jobs import BackgroundPullJob
+
+        assert isinstance(tmp_path, Path)
+        job = BackgroundPullJob(
+            progress=PullProgress(),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+        )
+        probe = job._build_revision_probe()
+        assert probe is not None
+        # An empty lake (no ledger sidecar) reads the honest absent token — the probe is
+        # LIVE (it consulted lake_revision), not a fabricated string.
+        from brutex.dashboard.lake_revision import lake_revision
+
+        assert probe() == lake_revision(tmp_path)
