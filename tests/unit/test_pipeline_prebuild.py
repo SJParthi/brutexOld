@@ -552,3 +552,54 @@ class TestDiskGuard:
         )
         assert outcome.disk_guard_blocked is True
         assert outcome.ok is False
+
+
+# ── incremental unchanged-skip counting (DEC-PREBUILD-INCREMENTAL-001) ──────
+
+
+class _UnchangedMaterializer:
+    """Marks the given symbols as incremental unchanged-skips (zero writes)."""
+
+    def __init__(self, unchanged: set[str]) -> None:
+        self.unchanged = unchanged
+
+    def __call__(self, target: PrebuildTarget) -> MaterializeResult:
+        if target.symbol in self.unchanged:
+            return MaterializeResult(written={}, skipped=(), unchanged=True)
+        return MaterializeResult(written={"5m": 3, "1day": 1}, skipped=())
+
+
+def test_prebuild_counts_unchanged_skips_honestly() -> None:
+    # 1 spot + 1 FUT + 2 options; the FUT + one option are unchanged-skipped.
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=_UnchangedMaterializer({"NSE-NIFTY-30Jan25-FUT", "NSE-NIFTY-30Jan25-20000-CE"}),
+    )
+    assert outcome.unchanged_skips == 2
+    assert outcome.symbols_built == 4  # a skipped symbol is still current + counted built
+    assert outcome.total_bars == 8  # only the two FULL derives wrote bars
+    assert outcome.ok is True
+
+
+def test_prebuild_zero_unchanged_skips_by_default() -> None:
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=_FakeMaterializer(),
+    )
+    assert outcome.unchanged_skips == 0
+
+
+def test_prebuild_done_log_carries_unchanged_skips() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=_UnchangedMaterializer({"NSE-NIFTY-30Jan25-FUT"}),
+        )
+    done = [e for e in logs if e["event"] == "pipeline.prebuild.done"]
+    assert len(done) == 1
+    assert done[0]["unchanged_skips"] == 1

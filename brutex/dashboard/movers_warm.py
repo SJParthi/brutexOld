@@ -28,7 +28,9 @@ generation, so the next ``/movers`` open is correct regardless.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
@@ -39,10 +41,12 @@ __all__ = [
     "WARM_EXCHANGES",
     "WARM_OPTIONS_TIERS",
     "WARM_OPTIONS_TRACKS",
+    "MoversWarmResult",
     "futures_warm_grid",
     "latest_movers_date",
     "options_warm_grid",
     "spot_warm_grid",
+    "warm_coordinate_label",
     "warm_movers_snapshots",
 ]
 
@@ -169,36 +173,150 @@ def latest_movers_date(lake_root: Path) -> str | None:
     return str(row[0]) if row is not None and row[0] is not None else None
 
 
-def warm_movers_snapshots(jobs: Sequence[Callable[[], int]]) -> int:
-    """Run each warm *job* (compute+cache one default snapshot) and return how many warmed NON-empty.
+@dataclass(frozen=True, slots=True)
+class MoversWarmResult:
+    """The honest tally of one segment's movers-warm run (DEC-MOVERS-WARM-PROGRESS-001).
+
+    Attributes
+    ----------
+    warmed
+        Jobs that warmed a NON-empty snapshot (≥ 1 candidate).
+    failed
+        Jobs that RAISED (each logged + swallowed — best-effort); a failed
+        coordinate is NOT hidden inside a bare warmed-count anymore, so the
+        pipeline completion note can name it (Golden Rule #1).
+    total
+        Total jobs run (``warmed + failed + empty-but-clean``).
+    """
+
+    warmed: int
+    failed: int
+    total: int
+
+
+def warm_coordinate_label(coord: Mapping[str, str | None]) -> str:
+    """One human-readable warm-grid coordinate key for the progress logs.
+
+    Renders the grid dict (``exchange`` / ``expiry_tier`` / ``expiry_track``)
+    as e.g. ``"all"`` / ``"NSE|near"`` / ``"BSE|far|monthly"`` — the all-exchange
+    scope (``None``) reads ``"all"``. Pure + deterministic (fixed field order),
+    so a log line names the exact coordinate a slow/failed warm belongs to.
+    """
+    parts = [coord.get("exchange") or "all"]
+    for field in ("expiry_tier", "expiry_track"):
+        value = coord.get(field)
+        if value is not None:
+            parts.append(value)
+    return "|".join(parts)
+
+
+def warm_movers_snapshots(
+    jobs: Sequence[Callable[[], int]],
+    *,
+    segment: str = "",
+    labels: Sequence[str] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> MoversWarmResult:
+    """Run each warm *job* (compute+cache one default snapshot); return the honest tally.
 
     Each job computes one asset's default snapshot via ``MoversSnapshotCache.get_or_compute``
     (so it is stored at the current generation) and returns that snapshot's candidate count.
-    A job that produces ≥ 1 candidate counts toward the returned total; a job that warms an
+    A job that produces ≥ 1 candidate counts toward ``warmed``; a job that warms an
     empty snapshot counts ``0`` (honest). A job that RAISES (a transient lake-read race) is
-    logged and counted ``0`` — the warm is best-effort and NEVER fails the already-successful
-    pull that triggered it (the cached value, if any, is still valid for the generation).
+    logged, swallowed and counted in ``failed`` — the warm is best-effort and NEVER fails the
+    already-successful pull that triggered it (the cached value, if any, is still valid for
+    the generation).
+
+    Per-coordinate PROGRESS (DEC-MOVERS-WARM-PROGRESS-001 — the forensic fix for
+    the silent 9+ minutes between ``pipeline.movers_warm.started`` and ``…done``
+    that read as a hang on the operator's 2026-07-04 run): every coordinate
+    emits one ``movers.warm.progress`` log line (``key i/N`` + segment + per-job
+    and cumulative elapsed) — a BOUNDED cadence by construction (the warm grid
+    is ≤ 39 coordinates per DEC-MOVERS-WARM-GRID-001) — plus the existing
+    :func:`~brutex.observability.progress_beat.emit_progress_beat` per
+    coordinate (the #1082 stall-watchdog seam), plus the OPTIONAL *on_progress*
+    seam so a caller (the prebuild gate's honest note,
+    DEC-PREBUILD-GATE-HONEST-NOTE-001) can surface ``i/N`` live. *on_progress*
+    is best-effort: an observer that raises is logged and never breaks the warm.
 
     Parameters
     ----------
     jobs
         One zero-arg callable per default asset snapshot; each computes+caches its snapshot
         and returns its candidate count (``len(snapshots)`` / ``len(movers)``).
+    segment
+        The segment name for the progress logs (``"spot"`` / ``"futures"`` /
+        ``"options"``); empty for legacy/anonymous callers.
+    labels
+        Optional per-job coordinate keys (same length/order as *jobs*, e.g. from
+        :func:`warm_coordinate_label`); a missing/short list falls back to the
+        1-based index — never a crash on a length mismatch.
+    on_progress
+        Optional ``(done_so_far, total)`` observer invoked BEFORE each job runs
+        (``done_so_far`` counts completed jobs, so the first call is ``(0, N)``)
+        and once more after the last job completes (``(N, N)``).
 
     Returns
     -------
-    int
-        The number of jobs that warmed a NON-empty snapshot.
+    MoversWarmResult
+        The ``warmed`` / ``failed`` / ``total`` tally.
     """
+    total = len(jobs)
     warmed = 0
-    for job in jobs:
+    failed = 0
+    started = time.monotonic()
+
+    def _observe(done: int) -> None:
+        # Best-effort observer: a raising observer is a caller bug worth a log
+        # line, never a reason to abort the (already best-effort) warm.
+        if on_progress is None:
+            return
+        try:
+            on_progress(done, total)
+        except Exception as exc:  # pylint: disable=broad-except - best-effort observer; logged, never re-raised
+            _LOG.warning("movers.warm.progress_observer_failed", error=str(exc))
+
+    for index, job in enumerate(jobs, start=1):
         # Liveness beat per warmed coordinate (DEC-PIPELINE-STALL-HEARTBEAT-001): the
         # movers warm runs minutes after the last fetch heartbeat — keep the pull
         # stall watchdog honestly fed. No-op outside a dashboard pull; O(1).
         emit_progress_beat()
+        _observe(index - 1)
+        label = labels[index - 1] if labels is not None and index <= len(labels) else str(index)
+        job_started = time.monotonic()
         try:
-            if job() > 0:
-                warmed += 1
+            candidates = job()
         except Exception as exc:  # pylint: disable=broad-except - best-effort warm; logged, never re-raised
-            _LOG.warning("movers.warm.job_failed", error=str(exc))
-    return warmed
+            failed += 1
+            _LOG.warning(
+                "movers.warm.job_failed",
+                segment=segment,
+                key=label,
+                index=index,
+                total=total,
+                error=str(exc),
+            )
+            continue
+        if candidates > 0:
+            warmed += 1
+        _LOG.info(
+            "movers.warm.progress",
+            segment=segment,
+            key=label,
+            index=index,
+            total=total,
+            candidates=candidates,
+            job_elapsed_s=round(time.monotonic() - job_started, 3),
+            elapsed_s=round(time.monotonic() - started, 3),
+        )
+    _observe(total)
+    result = MoversWarmResult(warmed=warmed, failed=failed, total=total)
+    _LOG.info(
+        "movers.warm.segment_done",
+        segment=segment,
+        warmed=result.warmed,
+        failed=result.failed,
+        total=result.total,
+        elapsed_s=round(time.monotonic() - started, 3),
+    )
+    return result

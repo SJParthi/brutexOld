@@ -910,8 +910,9 @@ def _span(
     last: str | None = "2026-06-03",
     exchange: str = "NSE",
     segment: str = "CASH",
+    session_dates: frozenset | None = None,
 ) -> dict:
-    return {
+    span: dict[str, object] = {
         "exchange": exchange,
         "segment": segment,
         "symbol": symbol,
@@ -920,6 +921,12 @@ def _span(
         "first_date": first,
         "last_date": last,
     }
+    if session_dates is not None:
+        # The DEC-COLDSTART-SEED-INTERIOR-GAP-001 density enrichment — attached by
+        # `summarize_spot_datasets(session_date_segments=...)` ONLY on the dense
+        # INDEX `1minute` spans; every legacy/F&O/CASH span omits the key.
+        span["session_dates"] = session_dates
+    return span
 
 
 class TestReconcileLedgerWithLake:
@@ -1017,9 +1024,15 @@ class TestReconcileLedgerWithLake:
         assert ledger.records()[0].status == "FAILED"
 
     def test_with_lake_delegates_and_defaults_now(self, tmp_path, monkeypatch) -> None:
+        seen_kwargs: dict = {}
+
+        def _fake_spans(_root, **kwargs):
+            seen_kwargs.update(kwargs)
+            return [_span(interval="1day")]
+
         monkeypatch.setattr(
             "brutex.dashboard.coverage_reconcile.load_lake_spans",
-            lambda _root: [_span(interval="1day")],
+            _fake_spans,
         )
         ledger = WindowLedger()
         seeded = reconcile_ledger_with_lake(
@@ -1032,6 +1045,10 @@ class TestReconcileLedgerWithLake:
         )  # now=None → datetime.now
         assert seeded == 1
         assert ledger.records()[0].status == "SUCCESS"
+        # The SPOT wrapper requests the dense-INDEX session dates so the seed's
+        # interior-gap density cross-check has its input
+        # (DEC-COLDSTART-SEED-INTERIOR-GAP-001).
+        assert seen_kwargs == {"session_date_segments": frozenset({"INDEX"})}
 
 
 class TestReconcileSymbolWindows:
@@ -1212,6 +1229,131 @@ class TestSeedEnclosureBoundary:
         assert third.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_NOW) == SKIPPED
 
 
+# --- DEC-COLDSTART-SEED-INTERIOR-GAP-001: the seed's density cross-check --------------
+
+
+def _march_trading_days() -> frozenset[date]:
+    """Every NSE trading day in [2024-03-01, 2024-03-28] — a CONTINUOUS covered set."""
+    from brutex.calendars.nse import is_trading_day
+
+    out: set[date] = set()
+    cursor = date(2024, 3, 1)
+    while cursor <= date(2024, 3, 28):
+        if is_trading_day(cursor):
+            out.add(cursor)
+        cursor += timedelta(days=1)
+    return frozenset(out)
+
+
+def _seed_density(
+    *,
+    session_dates: frozenset | None,
+    interval: str = "1minute",
+) -> tuple[int, WindowLedger, list]:
+    """Run the COMMON seed core over ONE enclosed 2024-03 window against one INDEX span."""
+    ledger = WindowLedger()
+    span_index = index_lake_spans(
+        [
+            _span(
+                interval=interval,
+                segment="INDEX",
+                first="2024-03-01",
+                last="2024-03-28",
+                session_dates=session_dates,
+            )
+        ]
+    )
+    key = WindowKey(
+        market="spot",
+        security_id="NIFTY",
+        interval=interval,
+        start=date(2024, 3, 1),
+        end=date(2024, 3, 29),  # fetch-exclusive → last covered day 2024-03-28
+    )
+    with capture_logs() as logs:
+        seeded = seed_enclosed_windows(
+            ledger,
+            span_index,
+            [(key, ("NSE", "INDEX", "NIFTY", interval))],
+            now=_NOW,
+            today_ist=date(2026, 6, 8),
+        )
+    return seeded, ledger, logs
+
+
+class TestSeedInteriorGapDensityGate:
+    """DEC-COLDSTART-SEED-INTERIOR-GAP-001 — cold-start span-seeding must not stamp
+    ``SUCCESS`` over a fetched ``1minute`` INDEX window whose lake span contains an
+    interior multi-session hole (the density cross-check REUSES
+    ``classify_interior_gap_dates`` — CLAUDE.md §11 COMMON)."""
+
+    def test_gappy_1minute_window_is_not_span_seeded_regression(self) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: bars at both ends of the window with a
+        # ~17-trading-session interior hole between — the span test alone seeded
+        # SUCCESS (the window became skippable and the hole was masked FOREVER on a
+        # lost-ledger cold-start); the density gate now leaves it ABSENT so the next
+        # pull PLANs + fetches it (self-heal via the fetch-time detector).
+        gappy = frozenset({date(2024, 3, 1), date(2024, 3, 28)})
+        seeded, ledger, logs = _seed_density(session_dates=gappy)
+        assert seeded == 0
+        assert ledger.count == 0  # no row minted — stays PLANNED-able, never masked
+        skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
+        assert len(skips) == 1
+        assert skips[0]["log_level"] == "warning"
+        assert skips[0]["window_start"] == "2024-03-01"
+        assert skips[0]["window_end"] == "2024-03-29"
+        gap = skips[0]["largest_gap_sessions"]
+        assert isinstance(gap, int) and gap > 5
+
+    def test_continuous_1minute_window_still_seeds(self) -> None:
+        # No false-skip: a window covered on EVERY trading session seeds exactly as
+        # before (the density gate abstains on a continuous set).
+        seeded, ledger, logs = _seed_density(session_dates=_march_trading_days())
+        assert seeded == 1
+        assert ledger.records()[0].status == SUCCESS
+        assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
+
+    def test_span_without_session_dates_seeds_byte_identical(self) -> None:
+        # The legacy / F&O / CASH span shape (no ``session_dates`` key) is untouched:
+        # the SAME gappy window seeds exactly as today — pins that only the opted-in
+        # INDEX `1minute` read changes behaviour.
+        seeded, ledger, _logs = _seed_density(session_dates=None)
+        assert seeded == 1
+        assert ledger.records()[0].status == SUCCESS
+
+    def test_too_few_in_range_sessions_abstains_and_seeds(self) -> None:
+        # A single in-window covered session has no interior to bracket — the COMMON
+        # classifier honestly ABSTAINS (too_few_sessions) and the seed proceeds.
+        seeded, ledger, logs = _seed_density(session_dates=frozenset({date(2024, 3, 15)}))
+        assert seeded == 1
+        assert ledger.records()[0].status == SUCCESS
+        assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
+
+    def test_malformed_session_dates_fail_closed_not_seeded(self) -> None:
+        # FAIL-CLOSED: a malformed enrichment (strings, not dates) raises inside the
+        # check → ONE seed_interior_gap_error WARNING and the seed is SKIPPED (a
+        # re-pull is always data-safe; a bad signal must never mint SUCCESS).
+        malformed = frozenset({"2024-03-01", "2024-03-28"})
+        seeded, ledger, logs = _seed_density(session_dates=malformed)
+        assert seeded == 0
+        assert ledger.count == 0
+        errors = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_error"]
+        assert len(errors) == 1
+        assert errors[0]["log_level"] == "warning"
+        assert errors[0]["window_start"] == "2024-03-01"
+
+    def test_gappy_1day_window_still_seeds_revision1(self) -> None:
+        # REVISION-1 pin: a DERIVED `1day` window is NEVER density-checked even when
+        # its span (wrongly) carries a gappy ``session_dates`` — un-seeding it could
+        # never self-heal (1day is derived, never fetched —
+        # DEC-1MINUTE-ONLY-DERIVE-1DAY-001), so only the `1minute` twin is un-seeded.
+        gappy = frozenset({date(2024, 3, 1), date(2024, 3, 28)})
+        seeded, ledger, logs = _seed_density(session_dates=gappy, interval="1day")
+        assert seeded == 1
+        assert ledger.records()[0].status == SUCCESS
+        assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
+
+
 # --- DEC-WINDOW-LEDGER-RESCUE-001: merge_ledger_rows (the pure conflict core) ---------
 
 
@@ -1222,6 +1364,7 @@ def _row(
     attempts: int = 1,
     last_attempt: str | None = "2026-06-08T12:00:00+00:00",
     bars: int = 5,
+    last_error: str | None = None,
 ) -> LedgerRow:
     """One serialised ledger row (the exact 13-field ``to_rows`` shape)."""
     return (
@@ -1233,7 +1376,7 @@ def _row(
         status,
         bars,
         attempts,
-        None,
+        last_error,
         "2026-06-01T00:00:00+00:00",
         last_attempt,
         0,
@@ -1310,6 +1453,59 @@ class TestMergeLedgerRows:
         assert merge_ledger_rows([demoted], [settled]) == [settled]
         # WITH the tombstone the deliberate demotion survives the merge:
         assert merge_ledger_rows([demoted], [settled], reopened_keys=frozenset({key})) == [demoted]
+
+    def test_merge_keeps_degraded_over_disk_success(self) -> None:
+        # BUG-REGRESSION (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001, FAIL-BEFORE/
+        # PASS-AFTER): a `record(degraded=True)` interior-gap demotion (SUCCESS →
+        # FAILED in memory) must NOT be undone by a CONCURRENT pull's on-disk
+        # SUCCESS copy's more-settled rank — for a degraded key the in-memory row
+        # wins outright, exactly as a reopened key does.
+        demoted = _row(status=FAILED, attempts=2, last_error="INTERIOR_GAP")
+        settled = _row(status=SUCCESS, attempts=2)
+        key = (demoted[0], demoted[1], demoted[2], demoted[3], demoted[4])
+        # TEETH — WITHOUT the tombstone the disk SUCCESS wins (the silent-override bug):
+        assert merge_ledger_rows([demoted], [settled]) == [settled]
+        # WITH the tombstone the demotion survives the merge (reopened stays empty —
+        # this pins the `or`'s second operand: reopened False → degraded True):
+        assert merge_ledger_rows(
+            [demoted],
+            [settled],
+            reopened_keys=frozenset(),
+            degraded_keys=frozenset({key}),
+        ) == [demoted]
+
+    def test_merge_reopened_still_wins(self) -> None:
+        # The `or`'s FIRST operand short-circuits: a reopened key keeps the
+        # in-memory row even with an EMPTY degraded set alongside it.
+        demoted = _row(status=FAILED, attempts=2)
+        settled = _row(status=SKIPPED, attempts=2)
+        key = (demoted[0], demoted[1], demoted[2], demoted[3], demoted[4])
+        assert merge_ledger_rows(
+            [demoted],
+            [settled],
+            reopened_keys=frozenset({key}),
+            degraded_keys=frozenset(),
+        ) == [demoted]
+
+    def test_merge_no_tombstone_uses_preference(self) -> None:
+        # BOTH tombstone sets explicitly empty → the ordinary more-settled
+        # preference resolves the conflict (the disk SUCCESS wins).
+        demoted = _row(status=FAILED, attempts=2, last_error="INTERIOR_GAP")
+        settled = _row(status=SUCCESS, attempts=2)
+        assert merge_ledger_rows(
+            [demoted],
+            [settled],
+            reopened_keys=frozenset(),
+            degraded_keys=frozenset(),
+        ) == [settled]
+
+    def test_merge_default_degraded_keys_omitted(self) -> None:
+        # The new kwarg defaults to an empty frozenset — a call that omits it is
+        # byte-identical to the pre-fix merge (back-compat pin).
+        demoted = _row(status=FAILED, attempts=2, last_error="INTERIOR_GAP")
+        settled = _row(status=SUCCESS, attempts=2)
+        assert merge_ledger_rows([demoted], [settled]) == [settled]
+        assert merge_ledger_rows([settled], [demoted]) == [settled]
 
 
 # --- DEC-WINDOW-LEDGER-RESCUE-001: cross-process-safe save (flock + read-merge-write) --
@@ -1392,6 +1588,36 @@ class TestSaveMergeCrossProcess:
         restored = load_window_ledger(tmp_path)
         assert restored.count == 1
         assert restored.records()[0].status == FAILED  # the demotion persisted
+        assert restored.is_skippable(_key()) is False  # the next pull re-fetches it
+
+    def test_save_preserves_degraded_demotion(self, tmp_path: Path) -> None:
+        # BUG-REGRESSION (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001, FAIL-BEFORE/
+        # PASS-AFTER): a CONCURRENT pull has already written a clean SUCCESS for W
+        # to disk; THIS pull's gap detector demotes W (record(degraded=True) →
+        # FAILED "INTERIOR_GAP") and saves. Before the fix the merge-on-save let
+        # the disk SUCCESS (more-settled rank) silently override the demotion, so
+        # W read skippable forever WITH the confirmed gap; with the degraded-keys
+        # tombstone the demotion survives its own save durably.
+        concurrent = WindowLedger()
+        concurrent.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(concurrent, tmp_path)  # the disk SUCCESS copy
+        demoter = load_window_ledger(tmp_path)
+        status = demoter.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert status == FAILED
+        save_window_ledger(demoter, tmp_path)  # exercises the degraded_keys= wire line
+        restored = load_window_ledger(tmp_path)
+        assert restored.count == 1
+        rec = restored.records()[0]
+        assert rec.status == FAILED  # the demotion persisted over the disk SUCCESS
+        assert rec.last_error == "INTERIOR_GAP"
         assert restored.is_skippable(_key()) is False  # the next pull re-fetches it
 
     def test_save_lock_timeout_skips_and_warns(

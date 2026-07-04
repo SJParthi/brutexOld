@@ -46,11 +46,18 @@ bar, so a corrupt spill can never yield a malformed bar. The atomic write
 This delivers **"the fetch lane never blocks on a slow write while memory stays bounded"** up to a
 generous spill cap. It is NOT an infinite buffer: a disk that falls behind for the ENTIRE pull,
 past the spill cap, re-applies the bounded back-pressure (the correct choice — an OOM is worse).
-It is NOT a throughput increase (the achieved rate is still vendor-bound). It bounds the OVERFLOW;
-it does not bound RSS at the OS level (a true RSS ceiling needs ``setrlimit`` / cgroups — out of
-scope, as in DEC-LAKE-WRITE-HALT-001). The spill files are best-effort cleaned at drain; any
-straggler is a small bounded set under the spill root, removed on the next clean drain. O(1) per
-window — one ``atomic_write_via`` / one ``json.loads`` / one ``unlink``, NOT per-bar.
+It is NOT a throughput increase (the achieved rate is still vendor-bound). The spill is bounded in
+**TWO dimensions** (DEC-FETCH-SPILL-COUNT-CAP-001): on-disk BYTES (the byte cap above) AND live
+spilled-window HANDLE COUNT — each spilled window keeps a small resident handle graph (a frozen
+tail + closures) in the pipeline's overflow deque, so a flood of TINY/EMPTY windows (a 2-byte
+``"[]"`` payload — the deep-OTM options chain is mostly empty) could otherwise park millions of
+handles in memory before the byte cap ever tripped. When EITHER cap is hit ``try_spill`` returns
+``None`` and the producer falls back to the SAME bounded, stop/drain-aware back-pressure — a
+slowdown, never a drop and never an OOM. It bounds the OVERFLOW (bytes + handle count); it does
+not bound RSS at the OS level (a true RSS ceiling needs ``setrlimit`` / cgroups — out of scope,
+as in DEC-LAKE-WRITE-HALT-001). The spill files are best-effort cleaned at drain; any straggler
+is a small bounded set under the spill root, removed on the next clean drain. O(1) per window —
+one ``atomic_write_via`` / one ``json.loads`` / one ``unlink``, NOT per-bar.
 
 ## Per-pull isolation (DEC-FETCH-SPILL-ISOLATION-001)
 
@@ -97,9 +104,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "FETCH_SPILL_MAX_BYTES_ENV",
+    "FETCH_SPILL_MAX_WINDOWS_ENV",
     "FetchSpillArea",
     "SpilledWindow",
     "resolve_fetch_spill_max_bytes",
+    "resolve_fetch_spill_max_windows",
 ]
 
 _LOG = structlog.get_logger("brutex.adapters.groww.fetch_spill")
@@ -113,6 +122,20 @@ _DEFAULT_FETCH_SPILL_MAX_BYTES: int = 256 * 1024 * 1024
 
 #: Environment override for the spill cap (operator escape hatch, no code change).
 FETCH_SPILL_MAX_BYTES_ENV: str = "BRUTEX_GROWW_FETCH_SPILL_MAX_BYTES"
+
+#: Default hard cap on the number of LIVE spilled WINDOWS (DEC-FETCH-SPILL-COUNT-CAP-001).
+#: Every spilled window keeps a small resident HANDLE graph (a frozen tail + closures) in the
+#: pipeline's per-shard overflow deque, so the overflow memory is O(handle count) — the byte cap
+#: alone cannot bound it: an EMPTY window's payload is 2 bytes (``"[]"``), so ~134M empty-window
+#: handles fit under the 256 MiB byte cap (the deep-OTM options chain is mostly empty) → OOM.
+#: 8192 is generous — at ~KB per handle graph it bounds the overflow to low tens of MiB — and for
+#: NORMAL windows (a 30-day 1-minute chunk is ~0.6-0.8 MB) the byte cap trips FIRST at a few
+#: hundred windows, so this count cap binds ONLY on the tiny/empty pathology. Operator-tunable via
+#: :data:`FETCH_SPILL_MAX_WINDOWS_ENV`; NOT a vendor limit.
+_DEFAULT_FETCH_SPILL_MAX_WINDOWS: int = 8192
+
+#: Environment override for the spilled-window count cap (operator escape hatch, no code change).
+FETCH_SPILL_MAX_WINDOWS_ENV: str = "BRUTEX_GROWW_FETCH_SPILL_MAX_WINDOWS"
 
 #: The on-disk spill PARENT directory name under the lake root (kept OUTSIDE ``bars/`` +
 #: ``options/`` and never a ``*.parquet``, so no lake scanner ever sees a spill file as data —
@@ -226,6 +249,32 @@ def resolve_fetch_spill_max_bytes(raw: str | None = None) -> int:
     return parsed
 
 
+def resolve_fetch_spill_max_windows(raw: str | None = None) -> int:
+    """Resolve the spilled-window COUNT cap: env override, else the audited default.
+
+    Reads :data:`FETCH_SPILL_MAX_WINDOWS_ENV`; falls back to
+    :data:`_DEFAULT_FETCH_SPILL_MAX_WINDOWS` when unset, blank, non-integer, or non-positive (a
+    bad value can NEVER disable the bound — fail-safe to the audited default, Golden Rule #1).
+    The structural twin of :func:`resolve_fetch_spill_max_bytes` so the live build site + tests
+    share ONE normalisation (CLAUDE.md §11 COMMON). O(1).
+
+    Parameters
+    ----------
+    raw
+        The cap value (``None`` reads :data:`FETCH_SPILL_MAX_WINDOWS_ENV`); a test may pass one.
+    """
+    value = os.environ.get(FETCH_SPILL_MAX_WINDOWS_ENV) if raw is None else raw
+    if value is None or not value.strip():
+        return _DEFAULT_FETCH_SPILL_MAX_WINDOWS
+    try:
+        parsed = int(value)
+    except ValueError:
+        return _DEFAULT_FETCH_SPILL_MAX_WINDOWS
+    if parsed <= 0:
+        return _DEFAULT_FETCH_SPILL_MAX_WINDOWS
+    return parsed
+
+
 @dataclass(frozen=True, slots=True)
 class SpilledWindow:
     """A handle to ONE window whose RAW bars were written to the on-disk spill area.
@@ -251,19 +300,27 @@ class FetchSpillArea:
     """A bounded on-disk overflow buffer for window RAW bars (one per pull, thread-safe).
 
     Built once per pull at the pipeline. :meth:`try_spill` atomically writes a window's bars to a
-    spill file and reserves its size against the cap, returning a :class:`SpilledWindow` handle —
-    or ``None`` when the cap would be exceeded (the caller then back-pressures instead, never an
-    OOM). :meth:`load` reloads the bars; :meth:`discard` deletes the file + releases the budget.
-    :meth:`cleanup` removes any straggler files at drain.
+    spill file and reserves its size against the BYTE cap AND one slot against the WINDOW-count
+    cap (DEC-FETCH-SPILL-COUNT-CAP-001 — the resident per-window handle graph is what the count
+    cap bounds), returning a :class:`SpilledWindow` handle — or ``None`` when EITHER cap would be
+    exceeded (the caller then back-pressures instead, never an OOM). :meth:`load` reloads the
+    bars; :meth:`discard` deletes the file + releases both budgets. :meth:`cleanup` removes any
+    straggler files at drain.
 
-    The byte budget is guarded by ``_lock`` so concurrent consumers + the producer never
+    Both budgets are guarded by the ONE ``_lock`` so concurrent consumers + the producer never
     double-count. The atomic write goes through the COMMON
     :func:`~brutex.data.atomic_io.atomic_write_via`, so a disk-full spill raises
     :class:`~brutex.data.errors.LakeWriteHalt` (the existing graceful-halt path).
     """
 
-    def __init__(self, *, spill_dir: Path, max_bytes: int) -> None:
-        """Create the spill area under *spill_dir* with a *max_bytes* total cap.
+    def __init__(
+        self,
+        *,
+        spill_dir: Path,
+        max_bytes: int,
+        max_windows: int = _DEFAULT_FETCH_SPILL_MAX_WINDOWS,
+    ) -> None:
+        """Create the spill area under *spill_dir* with the two hard caps.
 
         Parameters
         ----------
@@ -273,23 +330,36 @@ class FetchSpillArea:
             (:meth:`under_lake_root`), kept outside the data partitions.
         max_bytes
             The hard cap on total live spill bytes (``>= 1``); overflow past it back-pressures.
+        max_windows
+            The hard cap on LIVE spilled-window COUNT (``>= 1``) — bounds the resident overflow
+            handle graphs the byte cap cannot see (DEC-FETCH-SPILL-COUNT-CAP-001); overflow past
+            it back-pressures. Defaults to :data:`_DEFAULT_FETCH_SPILL_MAX_WINDOWS` so every
+            existing construction site keeps its behaviour on normal windows (the byte cap trips
+            first) while the tiny/empty-window flood is newly bounded.
         """
         if max_bytes < 1:
             raise ValueError(f"max_bytes must be >= 1, got {max_bytes}")
+        if max_windows < 1:
+            raise ValueError(f"max_windows must be >= 1, got {max_windows}")
         self._dir = spill_dir
         self._max_bytes = max_bytes
+        self._max_windows = max_windows
         self._reserved = 0
+        self._reserved_windows = 0
         self._lock = threading.Lock()
         self._dir.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def under_lake_root(cls, lake_root: Path, *, max_bytes: int | None = None) -> FetchSpillArea:
+    def under_lake_root(
+        cls, lake_root: Path, *, max_bytes: int | None = None, max_windows: int | None = None
+    ) -> FetchSpillArea:
         """Build the spill area at a UNIQUE ``<lake_root>/.fetch-spill/pull-<pid>-<uuid>/``.
 
         The COMMON build path the live site uses; *max_bytes* defaults to
-        :func:`resolve_fetch_spill_max_bytes` (env-tunable). Keeping the spill UNDER the lake root
-        (a dedicated sidecar dir) means a disk-full spill is the SAME volume the lake writes hit,
-        so the :class:`~brutex.data.errors.LakeWriteHalt` envelope is consistent.
+        :func:`resolve_fetch_spill_max_bytes` and *max_windows* to
+        :func:`resolve_fetch_spill_max_windows` (both env-tunable). Keeping the spill UNDER the
+        lake root (a dedicated sidecar dir) means a disk-full spill is the SAME volume the lake
+        writes hit, so the :class:`~brutex.data.errors.LakeWriteHalt` envelope is consistent.
 
         The subdirectory is NAMESPACED PER PULL (DEC-FETCH-SPILL-ISOLATION-001): the old FLAT
         ``<lake_root>/.fetch-spill`` was SHARED by every concurrent pull on the lake (CLI +
@@ -299,8 +369,13 @@ class FetchSpillArea:
         only this pull's own dir (plus stale hard-kill stragglers).
         """
         cap = resolve_fetch_spill_max_bytes() if max_bytes is None else max_bytes
+        window_cap = resolve_fetch_spill_max_windows() if max_windows is None else max_windows
         namespace = f"pull-{os.getpid()}-{uuid.uuid4().hex[:12]}"
-        return cls(spill_dir=lake_root / _SPILL_DIRNAME / namespace, max_bytes=cap)
+        return cls(
+            spill_dir=lake_root / _SPILL_DIRNAME / namespace,
+            max_bytes=cap,
+            max_windows=window_cap,
+        )
 
     @property
     def spill_dir(self) -> Path:
@@ -313,14 +388,22 @@ class FetchSpillArea:
         with self._lock:
             return self._reserved
 
-    def try_spill(self, bars: Sequence[CandleBar]) -> SpilledWindow | None:
-        """Atomically spill *bars* to disk + reserve their size; ``None`` if the cap is hit.
+    @property
+    def reserved_windows(self) -> int:
+        """The current LIVE spilled-window count (thread-safe) — for the watchdog / tests."""
+        with self._lock:
+            return self._reserved_windows
 
-        Serialises *bars* to JSON (:func:`_encode_bars`), measures its size, and reserves it against
-        the cap UNDER the lock (a two-phase reserve so two concurrent spills can never jointly
-        overshoot). When the reservation would exceed the cap the temp is deleted and ``None`` is
-        returned — the caller falls back to bounded back-pressure (never an OOM). On success the temp
-        is atomically promoted via :func:`~brutex.data.atomic_io.atomic_write_via`
+    def try_spill(self, bars: Sequence[CandleBar]) -> SpilledWindow | None:
+        """Atomically spill *bars* to disk + reserve both budgets; ``None`` if EITHER cap is hit.
+
+        Serialises *bars* to JSON (:func:`_encode_bars`), measures its size, and reserves it
+        against the BYTE cap plus ONE slot against the WINDOW-count cap
+        (DEC-FETCH-SPILL-COUNT-CAP-001) UNDER the lock — one atomic two-phase reserve, so two
+        concurrent spills can never jointly overshoot either cap. When either reservation would
+        exceed its cap, ``None`` is returned — the caller falls back to bounded back-pressure
+        (never an OOM, never a dropped window). On success the temp is atomically promoted via
+        :func:`~brutex.data.atomic_io.atomic_write_via`
         (tmp → ``fsync`` → ``os.replace``; disk-full → :class:`~brutex.data.errors.LakeWriteHalt`),
         and a :class:`SpilledWindow` handle is returned. O(1) per window (one JSON dump + one atomic
         rename), NOT per-bar.
@@ -328,9 +411,13 @@ class FetchSpillArea:
         payload = _encode_bars(list(bars))
         size = len(payload)
         with self._lock:
-            if self._reserved + size > self._max_bytes:
+            if (
+                self._reserved + size > self._max_bytes
+                or self._reserved_windows + 1 > self._max_windows
+            ):
                 return None
             self._reserved += size
+            self._reserved_windows += 1
         # Reserved — now write durably. If the atomic write raises (e.g. a disk-full LakeWriteHalt)
         # release the reservation first so the budget never leaks on a failed spill.
         fd, tmp_name = tempfile.mkstemp(dir=str(self._dir), prefix=".spill-", suffix=".pkl.tmp")
@@ -339,13 +426,14 @@ class FetchSpillArea:
         try:
             atomic_write_via(dest, lambda p: p.write_bytes(payload))
         except Exception:
-            # Release the reservation on ANY write failure (e.g. a disk-full LakeWriteHalt) so the
-            # budget never leaks on a failed spill, then re-raise UNCHANGED (a LakeWriteHalt halts
-            # the pull through the existing graceful-halt path). Narrow to ``Exception`` (not
-            # ``BaseException``) so a KeyboardInterrupt / SystemExit propagates as-is — the
-            # in-memory reservation dies with the interrupted process anyway.
+            # Release BOTH reservations on ANY write failure (e.g. a disk-full LakeWriteHalt) so
+            # neither budget leaks on a failed spill, then re-raise UNCHANGED (a LakeWriteHalt
+            # halts the pull through the existing graceful-halt path). Narrow to ``Exception``
+            # (not ``BaseException``) so a KeyboardInterrupt / SystemExit propagates as-is — the
+            # in-memory reservations die with the interrupted process anyway.
             with self._lock:
                 self._reserved -= size
+                self._reserved_windows -= 1
             raise
         return SpilledWindow(path=dest, size_bytes=size)
 
@@ -361,15 +449,17 @@ class FetchSpillArea:
         return _decode_bars(data)
 
     def discard(self, handle: SpilledWindow) -> None:
-        """Delete *handle*'s spill file + release its reserved bytes (after durable processing).
+        """Delete *handle*'s spill file + release both budgets (after durable processing).
 
-        Idempotent: a missing file (already cleaned) is suppressed. Releases the byte budget under
-        the lock so a later spill can reuse the space.
+        Idempotent: a missing file (already cleaned) is suppressed. Releases the byte budget AND
+        one window-count slot under the lock (both floored at 0 so a double-discard can never
+        drive a budget negative) so a later spill can reuse the space.
         """
         with contextlib.suppress(FileNotFoundError):
             handle.path.unlink()
         with self._lock:
             self._reserved = max(0, self._reserved - handle.size_bytes)
+            self._reserved_windows = max(0, self._reserved_windows - 1)
 
     def cleanup(self) -> None:
         """Best-effort remove THIS pull's spill dir + stale stragglers at drain (never raises).
@@ -378,7 +468,7 @@ class FetchSpillArea:
         Scoped to THIS pull's OWN namespace dir (DEC-FETCH-SPILL-ISOLATION-001) — a concurrent
         pull's LIVE spill files are NEVER touched (the old flat shared dir let one pull's drain
         delete the sibling pull's files, silently killing its consumer's spill load). The own
-        dir is removed after its files; the reservation counter is reset; then sibling entries
+        dir is removed after its files; both reservation counters are reset; then sibling entries
         older than :data:`_STALE_SPILL_SECONDS` (hard-killed pulls' stragglers) are swept. Any
         unlink error is logged + swallowed — cleanup must never fail the pull's ``finally``.
         """
@@ -395,6 +485,7 @@ class FetchSpillArea:
             self._dir.rmdir()
         with self._lock:
             self._reserved = 0
+            self._reserved_windows = 0
         self._sweep_stale_siblings()
 
     def _sweep_stale_siblings(self) -> None:

@@ -49,6 +49,17 @@ _SEGMENT = "INDEX"
 _INTERVAL = "1minute"
 
 
+@pytest.fixture(autouse=True)
+def _sequential_sweep_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the sequential path EXPLICITLY (ADR-0016 §6).
+
+    This suite's determinism previously rode the small-grid fallback only
+    incidentally (its grids are 1-tuple); the explicit ``=1`` opt-out makes the
+    sequential requirement survive any future grid widening.
+    """
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+
 def _bars() -> list[CandleBar]:
     """A short in-session minute window (stored UTC), valid OHLC."""
     out: list[CandleBar] = []
