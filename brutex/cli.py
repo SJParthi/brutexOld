@@ -3593,59 +3593,66 @@ def cmd_fetch(
                 raise
 
         until_outcome = None
-        try:
-            if until_clean:
-                # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
-                # rounds — each a full pass over the SHARED window ledger (re-fetches
-                # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
-                # SAME retry engine via run_until_clean, until clean / token dead / outer
-                # budget spent. Bounded round count (never an O(1)-total claim). The
-                # driver itself is vendor-neutral (pure 4-way decision + an injected
-                # round_runner) and lives in the vendor-neutral ingest_common home.
-                from brutex.adapters.ingest_common import (
-                    DEFAULT_MAX_ROUNDS,
-                    UntilCleanRound,
-                    run_until_clean,
-                )
+        # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
+        # whole fetch (including every until-clean round + the drain/persist
+        # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
+        # Best-effort: non-darwin / missing caffeinate is a logged no-op.
+        from brutex.observability.power_keepawake import keep_awake
 
-                fetch_passes: list[Any] = []
-
-                def _round_runner() -> UntilCleanRound:
-                    """One until-clean round = one full fetch pass; recorded for the summary.
-
-                    Groww's report has no ``auth_cause`` string (no fail-fast latch — the
-                    documented divergence; it derives ``auth_aborted`` from the quarantined
-                    failures), so the round leaves ``auth_cause`` at its ``None`` default.
-                    """
-                    res = _one_fetch_pass(True)
-                    fetch_passes.append(res)
-                    return UntilCleanRound(
-                        still_failed_windows=res.report.still_failed_windows,
-                        auth_aborted=res.report.auth_aborted,
+        with keep_awake("brutex fetch"):
+            try:
+                if until_clean:
+                    # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
+                    # rounds — each a full pass over the SHARED window ledger (re-fetches
+                    # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
+                    # SAME retry engine via run_until_clean, until clean / token dead / outer
+                    # budget spent. Bounded round count (never an O(1)-total claim). The
+                    # driver itself is vendor-neutral (pure 4-way decision + an injected
+                    # round_runner) and lives in the vendor-neutral ingest_common home.
+                    from brutex.adapters.ingest_common import (
+                        DEFAULT_MAX_ROUNDS,
+                        UntilCleanRound,
+                        run_until_clean,
                     )
 
-                rounds_budget = (
-                    until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
-                )
-                until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
-                result = fetch_passes[0]
-            else:
-                result = _one_fetch_pass(do_retry)
-        finally:
-            # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
-            # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
-            # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
-            # `sink.append` which may FEED the write consumer, so the pipeline must be drained
-            # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
-            # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
-            # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
-            # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
-            # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
-            # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
-            # error is swallowed so the ledger persist still runs.
-            drain_fetch_pipeline(fetch_pipeline)
-            drain_write_consumer(write_consumer)
-            end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+                    fetch_passes: list[Any] = []
+
+                    def _round_runner() -> UntilCleanRound:
+                        """One until-clean round = one full fetch pass; recorded for the summary.
+
+                        Groww's report has no ``auth_cause`` string (no fail-fast latch — the
+                        documented divergence; it derives ``auth_aborted`` from the quarantined
+                        failures), so the round leaves ``auth_cause`` at its ``None`` default.
+                        """
+                        res = _one_fetch_pass(True)
+                        fetch_passes.append(res)
+                        return UntilCleanRound(
+                            still_failed_windows=res.report.still_failed_windows,
+                            auth_aborted=res.report.auth_aborted,
+                        )
+
+                    rounds_budget = (
+                        until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
+                    )
+                    until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
+                    result = fetch_passes[0]
+                else:
+                    result = _one_fetch_pass(do_retry)
+            finally:
+                # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
+                # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
+                # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
+                # `sink.append` which may FEED the write consumer, so the pipeline must be drained
+                # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
+                # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
+                # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
+                # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
+                # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
+                # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
+                # error is swallowed so the ledger persist still runs.
+                drain_fetch_pipeline(fetch_pipeline)
+                drain_write_consumer(write_consumer)
+                end_pull_ledger(ledger, resolved, dry_run=_no_persist)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
