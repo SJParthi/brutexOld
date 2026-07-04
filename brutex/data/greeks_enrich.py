@@ -140,7 +140,13 @@ __all__ = [
 #: Formula version frozen into every stored tuple. Bump when the kernel maths /
 #: overlay semantics change — the staleness key that turns a formula revision
 #: into a positive re-enrich signal (plan §15.3 "why the stamp is MANDATORY").
-GREEKS_FORMULA_VERSION: Final[int] = 1
+#: v2 = the DEC-GREEKS-CORRECTNESS-AUDIT-001 round (degenerate time-value
+#: pre-screen + value-hardened reuse + 2dp spot snap): every v1 stored bar —
+#: incl. the IVX-1 at-floor artifacts — recomputes + restamps on the next
+#: enrich pass over its window. HONEST envelope: that pass reaches only
+#: contracts still inside a live pull window; expired contracts keep v1
+#: stamps until a bulk re-enrich surface exists (named follow-up).
+GREEKS_FORMULA_VERSION: Final[int] = 2
 
 #: Rate-source ids packed into the provenance stamp (bits 8-11).
 RATE_SOURCE_ID_NONE: Final[int] = 0

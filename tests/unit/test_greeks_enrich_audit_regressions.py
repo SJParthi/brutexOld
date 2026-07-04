@@ -327,6 +327,47 @@ class TestSpotKeyRecoveryLadder:
         assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
 
 
+class TestFormulaV2Restamp:
+    """FIX-3: the designed staleness lever — v1 stamps recompute under v2.
+
+    ``GREEKS_FORMULA_VERSION`` 1 → 2 (plan §15.3): every v1-era stored bar —
+    including IVX-1 degenerate-band artifacts and stale-style/rate bars —
+    mismatches the current inputs and recomputes + restamps on the next
+    enrich pass over its window. HONEST ENVELOPE: the re-enrich reaches only
+    contracts still inside a live pull window; expired contracts keep v1
+    stamps (bulk re-enrich surface = named follow-up in the ledger).
+    """
+
+    def test_formula_version_is_2(self) -> None:
+        from brutex.data.greeks_enrich import GREEKS_FORMULA_VERSION
+
+        assert GREEKS_FORMULA_VERSION == 2
+
+    def test_v1_ok_stamp_recomputes_and_restamps_v2(self) -> None:
+        v1_pid = pack_greeks_provenance(
+            rate_source_id=RATE_SOURCE_ID_FIXED,
+            style_flag=STYLE_EUROPEAN_EXACT,
+            status=STATUS_OK,
+            formula_version=1,
+        )
+        # A v1-era artifact row (garbage iv) with otherwise-matching values.
+        stored = _row(
+            close=200.0,
+            overlay={
+                "iv": 9.99,
+                "spot_at_bar": float(_SPOT),
+                "rate_used": 0.065,
+                "greeks_provenance_id": v1_pid,
+            },
+        )
+        bars, stats = _enrich_rows([stored])
+        assert stats.reused == 0 and stats.solved == 1 and stats.changed == 1
+        pid = bars[0].greeks_provenance_id
+        assert pid is not None
+        assert unpack_greeks_provenance(pid).formula_version == 2
+        assert bars[0].iv is not None and bars[0].iv != 9.99
+
+
 class TestNullReasonsTelemetry:
     """CTR-6 (FIX-11): the per-status NULL breakdown actually reaches the logs.
 
