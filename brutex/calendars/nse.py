@@ -251,13 +251,33 @@ HOLIDAYS_2025 = frozenset(
 # Sunday Budget session was "missing" is REFUTED: date(2026, 2, 1) is already a
 # verified entry in SPECIAL_WEEKEND_TRADING_SESSIONS below, added by
 # DEC-CALENDAR-2020-BUDGET-SATURDAY-001.)
+# The SANCTIONED operational closure path for such drift is now the OBSERVED
+# overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001, ``calendars/observed_sessions.py``):
+# a REMOVE-ONLY, evidence-gated, ``observed-not-official``-labeled sidecar that
+# subtracts a demonstrably-untraded derived-trading-day from the OPT-IN consumer
+# surfaces — it never adds a session and never names a holiday, so the
+# named-holiday gap here stays closable ONLY by the official circular.
 HOLIDAYS_2026 = frozenset(
     [
         date(2026, 1, 26),  # Republic Day
-        date(2026, 2, 15),  # Mahashivratri (UNVERIFIED — needs NSE 2026 circular)
+        # Mahashivratri 2026: the previously-listed 2026-02-15 is a SUNDAY —
+        # ``date(2026, 2, 15).weekday() == 6`` — so it was an arithmetic NO-OP in
+        # ``is_trading_day`` (a weekend is already non-trading; no special-weekend
+        # entry exists for it) AND per-line UNVERIFIED. Removed
+        # (DEC-CALENDAR-OBSERVED-SESSIONS-001): keeping an unverified
+        # movable-festival entry that changes nothing conveys false confidence.
+        # The actual NSE 2026 observance date is UNKNOWN pending the official
+        # circular — deliberately NOT replaced with a guessed date (Golden Rule #1).
         date(2026, 3, 3),  # Holi (UNVERIFIED)
         date(2026, 3, 27),  # Ram Navami (UNVERIFIED)
         date(2026, 4, 3),  # Good Friday (UNVERIFIED)
+        # The five fixed-DATE national observances below (Republic Day above,
+        # Dr Ambedkar Jayanti, Maharashtra Day, Independence Day, Gandhi Jayanti):
+        # the DATES are calendar-fixed, but their NSE 2026 trading-holiday
+        # OBSERVANCE is still circular-UNVERIFIED like the rest of this set
+        # (DEC-CALENDAR-OBSERVED-SESSIONS-001 annotation — previously implied,
+        # now stated). 2026-08-15 is a Saturday (weekend no-op) — retained because
+        # the date itself is fixed, unlike the movable 2026-02-15 case above.
         date(2026, 4, 14),  # Dr Ambedkar Jayanti
         date(2026, 5, 1),  # Maharashtra Day
         date(2026, 8, 15),  # Independence Day
