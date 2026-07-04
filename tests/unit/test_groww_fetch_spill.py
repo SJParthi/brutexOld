@@ -9,7 +9,11 @@ DEC-FETCH-NONBLOCKING-HANDOFF-001. 100% line+branch on:
 * :class:`SpilledWindow` + :meth:`FetchSpillArea.under_lake_root` / properties;
 * DEC-FETCH-SPILL-ISOLATION-001 — the per-pull ``pull-<pid>-<uuid>`` spill namespacing, the
   own-dir-only ``cleanup`` (a concurrent pull's LIVE spill is NEVER touched), and the bounded
-  stale-straggler sweep (a hard-killed pull's leftover dir / a legacy flat file).
+  stale-straggler sweep (a hard-killed pull's leftover dir / a legacy flat file);
+* DEC-FETCH-SPILL-COUNT-CAP-001 — the spilled-window COUNT cap (``max_windows`` /
+  :func:`resolve_fetch_spill_max_windows`): a tiny/empty-window flood is rejected at the count
+  cap even with byte headroom (the fail-before OOM pathology), both budgets reserve/release
+  symmetrically, and the byte cap still binds independently.
 """
 
 # Whitebox test of the spill internals (reserved-byte counter, dir) — sanctioned.
@@ -27,14 +31,17 @@ from pathlib import Path
 import pytest
 from brutex.adapters.groww.fetch_spill import (
     FETCH_SPILL_MAX_BYTES_ENV,
+    FETCH_SPILL_MAX_WINDOWS_ENV,
     FetchSpillArea,
     SpilledWindow,
     resolve_fetch_spill_max_bytes,
+    resolve_fetch_spill_max_windows,
 )
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar
 
 _DEFAULT_MAX = 256 * 1024 * 1024
+_DEFAULT_MAX_WINDOWS = 8192
 
 
 def _bar(close: str = "105.00") -> CandleBar:
@@ -73,10 +80,48 @@ class TestResolveFetchSpillMaxBytes:
         assert resolve_fetch_spill_max_bytes(raw) == _DEFAULT_MAX
 
 
+class TestResolveFetchSpillMaxWindows:
+    """DEC-FETCH-SPILL-COUNT-CAP-001 — the structural twin of the byte-cap resolver."""
+
+    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(FETCH_SPILL_MAX_WINDOWS_ENV, raising=False)
+        assert resolve_fetch_spill_max_windows() == _DEFAULT_MAX_WINDOWS
+
+    def test_reads_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FETCH_SPILL_MAX_WINDOWS_ENV, "128")
+        assert resolve_fetch_spill_max_windows() == 128
+
+    def test_explicit_raw_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FETCH_SPILL_MAX_WINDOWS_ENV, "128")
+        assert resolve_fetch_spill_max_windows("64") == 64
+
+    @pytest.mark.parametrize("raw", ["", "   ", None])
+    def test_blank_or_none_falls_back(
+        self, raw: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(FETCH_SPILL_MAX_WINDOWS_ENV, raising=False)
+        assert resolve_fetch_spill_max_windows(raw) == _DEFAULT_MAX_WINDOWS
+
+    @pytest.mark.parametrize("raw", ["abc", "1.5", "0", "-5"])
+    def test_non_int_or_non_positive_falls_back(self, raw: str) -> None:
+        # A bad value can never DISABLE the bound — fail-safe to the audited default.
+        assert resolve_fetch_spill_max_windows(raw) == _DEFAULT_MAX_WINDOWS
+
+
 class TestFetchSpillArea:
     def test_rejects_zero_max(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="max_bytes must be >= 1"):
             FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=0)
+
+    def test_rejects_zero_max_windows(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="max_windows must be >= 1"):
+            FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX, max_windows=0)
+
+    def test_default_max_windows_is_the_audited_default(self, tmp_path: Path) -> None:
+        # Back-compat pin: every existing construction site omits ``max_windows`` and inherits
+        # the generous default (normal windows keep tripping the BYTE cap first).
+        area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX)
+        assert area._max_windows == _DEFAULT_MAX_WINDOWS
 
     def test_round_trip_spill_load_discard(self, tmp_path: Path) -> None:
         area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX)
@@ -85,13 +130,15 @@ class TestFetchSpillArea:
         assert isinstance(handle, SpilledWindow)
         assert handle.path.is_file()
         assert area.reserved_bytes == handle.size_bytes > 0
+        assert area.reserved_windows == 1  # the count budget reserved symmetrically
         # Load restores byte-equal bars (exact Decimal round-trip via the JSON spill format).
         loaded = area.load(handle)
         assert loaded == bars
-        # Discard deletes the file + releases the budget.
+        # Discard deletes the file + releases BOTH budgets.
         area.discard(handle)
         assert not handle.path.exists()
         assert area.reserved_bytes == 0
+        assert area.reserved_windows == 0
 
     def test_round_trip_preserves_open_interest_int(self, tmp_path: Path) -> None:
         # An F&O bar carries an INTEGER open_interest — the JSON decode's ``oi is not None`` arm
@@ -125,15 +172,17 @@ class TestFetchSpillArea:
         handle = area.try_spill([_bar()])
         assert handle is not None
         area.discard(handle)
-        # Second discard: file already gone (FileNotFoundError suppressed) + budget clamped >= 0.
+        # Second discard: file already gone (FileNotFoundError suppressed) + budgets clamped >= 0.
         area.discard(handle)
         assert area.reserved_bytes == 0
+        assert area.reserved_windows == 0  # the count budget can never go negative either
 
     def test_cap_rejects_when_exceeded(self, tmp_path: Path) -> None:
         # A cap of 1 byte is below any real JSON spill payload → the first spill is rejected.
         area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=1)
         assert area.try_spill([_bar()]) is None
         assert area.reserved_bytes == 0  # nothing reserved on a rejection
+        assert area.reserved_windows == 0  # a byte-cap rejection reserves NO window slot either
 
     def test_cap_rejects_second_when_full(self, tmp_path: Path) -> None:
         # Size the cap so EXACTLY one window fits; the second is rejected.
@@ -148,6 +197,35 @@ class TestFetchSpillArea:
         tight.discard(h1)
         assert tight.try_spill([_bar()]) is not None
 
+    def test_count_cap_rejects_spill_despite_byte_headroom(self, tmp_path: Path) -> None:
+        """THE COUNT-CAP REGRESSION (DEC-FETCH-SPILL-COUNT-CAP-001, fail-before/pass-after).
+
+        An EMPTY window's payload is 2 bytes (``"[]"``), so the byte cap alone admits ~134M
+        resident overflow handles at the 256 MiB default — the OOM pathology. Before the fix
+        the second spill here RETURNED A HANDLE (the count was unbounded); now the count cap
+        rejects it even with near-infinite byte headroom, and ``discard`` frees the slot.
+        """
+        area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX, max_windows=1)
+        first = area.try_spill([])  # the tiny/empty pathology — 2 bytes on disk
+        assert first is not None
+        assert area.reserved_windows == 1
+        assert area.reserved_bytes == first.size_bytes == 2  # byte headroom is ENORMOUS
+        # FAIL-BEFORE: this returned a SpilledWindow (unbounded handle count) pre-fix.
+        assert area.try_spill([]) is None  # count cap hit — byte cap nowhere near
+        assert area.reserved_windows == 1  # a count-cap rejection reserves nothing
+        assert area.reserved_bytes == 2
+        # Discarding the live window frees the slot so a later spill fits again.
+        area.discard(first)
+        assert area.reserved_windows == 0
+        assert area.try_spill([]) is not None
+
+    def test_byte_cap_still_binds_with_huge_window_cap(self, tmp_path: Path) -> None:
+        # Independence regression: a huge count cap must NOT loosen the byte cap.
+        area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=1, max_windows=1_000_000)
+        assert area.try_spill([_bar()]) is None  # the byte cap rejects as before
+        assert area.reserved_bytes == 0
+        assert area.reserved_windows == 0
+
     def test_disk_full_at_spill_raises_lake_write_halt_and_releases_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -160,17 +238,19 @@ class TestFetchSpillArea:
         monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
         with pytest.raises(LakeWriteHalt):
             area.try_spill([_bar()])
-        # The reservation is RELEASED on the failed spill (budget never leaks).
+        # BOTH reservations are RELEASED on the failed spill (neither budget ever leaks).
         assert area.reserved_bytes == 0
+        assert area.reserved_windows == 0
 
     def test_cleanup_removes_stragglers(self, tmp_path: Path) -> None:
         area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX)
         handle = area.try_spill([_bar()])
         assert handle is not None and handle.path.is_file()
-        # cleanup() sweeps any straggler (an un-discarded spill) + resets the counter.
+        # cleanup() sweeps any straggler (an un-discarded spill) + resets BOTH counters.
         area.cleanup()
         assert not handle.path.exists()
         assert area.reserved_bytes == 0
+        assert area.reserved_windows == 0
 
     def test_cleanup_missing_dir_is_noop(self, tmp_path: Path) -> None:
         area = FetchSpillArea(spill_dir=tmp_path / "s", max_bytes=_DEFAULT_MAX)
@@ -197,15 +277,29 @@ class TestFetchSpillArea:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv(FETCH_SPILL_MAX_BYTES_ENV, raising=False)
+        monkeypatch.delenv(FETCH_SPILL_MAX_WINDOWS_ENV, raising=False)
         area = FetchSpillArea.under_lake_root(tmp_path)
         # Per-pull namespacing (DEC-FETCH-SPILL-ISOLATION-001): a unique subdir of .fetch-spill.
         assert area.spill_dir.parent == tmp_path / ".fetch-spill"
         assert area.spill_dir.name.startswith("pull-")
         assert area._max_bytes == _DEFAULT_MAX
+        assert area._max_windows == _DEFAULT_MAX_WINDOWS  # the live site inherits BOTH caps
 
     def test_under_lake_root_honours_explicit_cap(self, tmp_path: Path) -> None:
         area = FetchSpillArea.under_lake_root(tmp_path, max_bytes=12345)
         assert area._max_bytes == 12345
+
+    def test_under_lake_root_honours_explicit_window_cap(self, tmp_path: Path) -> None:
+        area = FetchSpillArea.under_lake_root(tmp_path, max_windows=7)
+        assert area._max_windows == 7
+
+    def test_under_lake_root_reads_window_cap_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The operator escape hatch: the env-tuned count cap reaches the live build path.
+        monkeypatch.setenv(FETCH_SPILL_MAX_WINDOWS_ENV, "77")
+        area = FetchSpillArea.under_lake_root(tmp_path)
+        assert area._max_windows == 77
 
 
 def _age(path: Path, *, hours: float) -> None:
