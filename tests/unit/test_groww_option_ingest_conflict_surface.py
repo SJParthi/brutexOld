@@ -56,6 +56,12 @@ class _FakeSDK:
         self.calls += 1
         return payload
 
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
 
 def _payload(*rows: list[object]) -> Mapping[str, object]:
     return {"candles": list(rows)}
