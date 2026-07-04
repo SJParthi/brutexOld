@@ -1,0 +1,343 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   BruteX shared DESIGN SYSTEM — bx-design.css (DEC-DASHBOARD-UX-ANIMATE-001)
+
+   The single design-token + component sheet for every dashboard page.
+   LOAD ORDER: link this file AFTER bx-theme.css on adopting pages
+   (bx-theme.css stays authoritative for the canonical page header; this file
+   deliberately styles NO bare `header` element, so there is no cascade fight).
+   Token VALUES here are byte-identical to bx-theme.css where they overlap —
+   re-declaring them makes this sheet self-sufficient for pages that do not
+   link bx-theme (e.g. the `/` operator page).
+
+   MOTION LAW: CSS-first; keyframes animate transform/opacity ONLY (the one
+   sanctioned exception is the repo-established background-position gradient
+   drift used by bxGradShift/bxShimmer — zero layout, compositor-cheap).
+   The canonical `.001ms` prefers-reduced-motion kill block lives at the
+   bottom and silences EVERYTHING in this sheet.
+
+   ── CLASS INVENTORY (every class this sheet defines) ────────────────────────
+   LAYOUT
+     .bx-wrap            fluid centered page container: width:min(100% − 2·gutter,
+                         --page-max), margin-inline:auto, bottom padding reserves
+                         the widget dock. Kills every left-locked/dead-right-side
+                         layout and every widget-over-content occlusion.
+     .bx-wrap--wide      same, capped at --page-max-wide (1720px) for wide pages.
+     (body)              padding-bottom: --dock-h + safe-area — padding-only
+                         widget docking; the fixed pills can never cover content.
+   CARD
+     .bx-card            surface card: gradient surface, border, radius, hover
+                         lift (translateY(-3px) + --elev-2) — transform only.
+     .bx-card--shimmer   adds the 2px animated gradient hairline top edge
+                         (reserved for flagship KPI cards).
+   CHIPS
+     .bx-chip            base pill chip (inline-flex, --r-pill, --fs-0).
+     .bx-chip.ok         green verdict tint     (replaces inline #34d399 hexes)
+     .bx-chip.warn       amber verdict tint
+     .bx-chip.bad        red verdict tint       (replaces inline #f87171 hexes)
+     .bx-chip.muted      neutral tint           (replaces inline #9aa4b2 hexes)
+     .bx-chip.info       blue informational tint
+   BUTTONS
+     .bx-btn             base button (surface, hover lift, press translateY(1px)).
+     .bx-btn-primary     green action variant.
+     .bx-btn.ghost       borderless muted variant.
+   TABLE
+     .bx-table           table skin: uppercase --fs-0 thead, row borders.
+     .bx-table .num      right-aligned tabular-nums monospace numeric cells.
+     .bx-tablewrap       overflow:auto scroller; thead th sticks at top:0 INSIDE
+                         it (kills the `top:64px` magic-number class; the BODY
+                         never scrolls horizontally — the wrap does).
+     .bx-tablewrap--vh   bounded-height variant (max-height:min(56vh,640px)) so
+                         long stacked tables get working sticky headers.
+   SKELETON (shimmer loading — replaces every literal "loading…" string)
+     .bx-skel            base shimmer bar (linear-gradient + bxShimmer).
+     .bx-skel-cell       14px grid cell bar (used by BXUI.skeleton()).
+     .bx-skel-row        14px full-width row bar with vertical rhythm.
+     .bx-skel-chip       pill-shaped ghost chip (86×30).
+     .bx-skel-card       card-shaped ghost block (92px tall).
+     .bx-skel-grid       the grid container BXUI.skeleton() builds.
+     .bx-skel-caption    the 10s honesty-watchdog caption row under a skeleton.
+   STATE BLOCKS (honest terminal states — "Loading…" is BANNED as one)
+     .bx-state           grid-centered icon + headline + hint + action block.
+     .bx-state.empty     genuine empty state (dashed neutral card).
+     .bx-state.error     red-tinted error state (status + Retry).
+     .bx-state.offline   muted unreachable/offline state.
+     .bx-state.gated     amber "prebuild in progress — auto-resumes" state.
+     .bx-state.busy      blue "still working" state.
+     .bx-state .ico      floating glyph.
+     .bx-state .headline emphasised one-line verdict.
+     .bx-state .hint     muted explanation (max 52ch measure).
+     .bx-state-retry     the Retry button inside a state block.
+   LIVE SIGNALS (truthful pulse dots — the always-green lying dot is dead)
+     .bx-live-dot        8px dot, neutral grey by default.
+     .bx-live-dot.live-ok    green + slow pulse ring (::after scale/opacity).
+     .bx-live-dot.live-warn  amber + fast pulse ring.
+     .bx-live-dot.live-down  red, static — never pulses while down.
+     .bx-ribbon          2px animated gradient accent strip (pull-active /
+                         hero band; ONE per page).
+   MOTION UTILITIES
+     .bx-stagger         children enter via bxFadeInUp, delay calc(--i · 60ms);
+                         set --i inline per child (BXUI.stagger()), cap ~16.
+     .bx-stagger-rows    tbody variant: tr enter via bxRowIn, 18ms steps.
+     .bx-no-anim         opt-out: items beyond the stagger cap appear instantly.
+     .bx-countpop        count-up "settle" pop (scale only; the FINAL exact text
+                         is set synchronously first — value-pin safe).
+     .bx-enter           page/section entrance (bxFadeInUp, matches bx-theme).
+     .bx-paused          set on <html> while document.hidden — pauses every
+                         descendant animation (animation-play-state).
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── 1 · Design tokens ─────────────────────────────────────────────────────── */
+:root {
+  /* palette — verbatim from the locked v28-hybrid set (identical to bx-theme.css) */
+  --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+  --border: #1E222D; --border-strong: #2B313F;
+  --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+  --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+  --red: #FF5C5C; --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+
+  /* type scale */
+  --fs-0: 11px; --fs-1: 12px; --fs-2: 13px; --fs-3: 15px; --fs-4: 18px;
+  --fs-5: clamp(22px, 1.8vw, 28px); --fs-6: clamp(28px, 2.4vw, 40px);
+
+  /* spacing scale */
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px;
+
+  /* radii + easing (identical to bx-theme.css) */
+  --r-xs: 6px; --r-sm: 8px; --r-md: 10px; --r-lg: 14px; --r-xl: 18px; --r-pill: 999px;
+  --ease: cubic-bezier(.22, .61, .36, 1);
+
+  /* elevation */
+  --elev-1: 0 2px 8px rgba(0, 0, 0, .35);
+  --elev-2: 0 8px 24px rgba(0, 0, 0, .45);
+  --elev-3: 0 16px 48px rgba(0, 0, 0, .55);
+
+  /* geometry */
+  --gutter: clamp(16px, 3vw, 28px);
+  --page-max: 1560px;        /* tables-heavy pages */
+  --page-max-wide: 1720px;   /* wide/hero pages */
+  --header-h: 64px;          /* the sticky bx-theme header band */
+  --dock-h: 72px;            /* bottom reserve for the fixed rate/liveproof pills */
+
+  /* z-scale (documented; widgets own 9000+ in their fenced JS) */
+  --z-header: 6; --z-sticky: 10; --z-popover: 300; --z-widget: 9000;
+
+  /* per-surface accent — override via body[data-accent] */
+  --accent: var(--blue);
+}
+body[data-accent="green"]  { --accent: var(--green); }
+body[data-accent="yellow"] { --accent: var(--yellow); }
+body[data-accent="blue"]   { --accent: var(--blue); }
+body[data-accent="purple"] { --accent: var(--purple); }
+body[data-accent="pink"]   { --accent: var(--pink); }
+body[data-accent="red"]    { --accent: var(--red); }
+
+/* ── 2 · Keyframes — ONE motion vocabulary (transform/opacity only; the two
+       gradient drifts move background-position, the sanctioned repo pattern) ── */
+@keyframes bxFadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes bxFadeInUp   { from { opacity: 0; transform: translateY(16px);  } to { opacity: 1; transform: translateY(0); } }
+@keyframes bxGradShift  { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+@keyframes bxShimmer    { 0% { background-position: -160% 0; } 100% { background-position: 160% 0; } }
+@keyframes bxSpin       { to { transform: rotate(360deg); } }
+@keyframes bxPulse      { 0% { transform: scale(1); opacity: .65; } 70% { transform: scale(2.6); opacity: 0; } 100% { transform: scale(2.6); opacity: 0; } }
+@keyframes bxCountPop   { 0% { transform: scale(1); } 35% { transform: scale(1.12); } 100% { transform: scale(1); } }
+@keyframes bxFloat      { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+@keyframes bxRowIn      { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes bxRiseIn     { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+/* ── 3 · Layout: fluid centered container + padding-only widget docking ────── */
+/* The ONE rule that kills every left-locked dead-right-side layout AND every
+   bottom-widget occlusion: fluid to the viewport with a sane max, centered,
+   with the dock reserve baked into the bottom padding. */
+.bx-wrap {
+  width: min(100% - 2 * var(--gutter), var(--page-max));
+  margin-inline: auto;
+  padding-bottom: calc(var(--s-6) + var(--dock-h));
+}
+.bx-wrap--wide { width: min(100% - 2 * var(--gutter), var(--page-max-wide)); }
+
+/* Padding-only docking (both widget JS files are fenced by open PRs — the
+   full flex .bx-dock mount is the named follow-up once their fences clear).
+   Every page linking this sheet reserves the bottom band so the fixed pills
+   (z 9000, bottom:16px) never cover the last table rows / pager / footer. */
+body { padding-bottom: calc(var(--dock-h) + env(safe-area-inset-bottom, 0px)); }
+
+/* ── 4 · Card ──────────────────────────────────────────────────────────────── */
+.bx-card {
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s-4) var(--s-5);
+  transition: transform .18s var(--ease), border-color .18s var(--ease), box-shadow .18s var(--ease);
+}
+.bx-card:hover { transform: translateY(-3px); border-color: var(--border-strong); box-shadow: var(--elev-2); }
+/* Flagship-KPI accent: a 2px animated gradient hairline along the top edge. */
+.bx-card--shimmer { position: relative; overflow: hidden; }
+.bx-card--shimmer::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: linear-gradient(90deg, var(--purple), var(--blue), var(--green), var(--purple));
+  background-size: 300% 100%;
+  animation: bxGradShift 8s linear infinite;
+}
+
+/* ── 5 · Chips (tokenized verdict chips — no more shadow hex palettes) ─────── */
+.bx-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: var(--r-pill);
+  font-size: var(--fs-0); font-weight: 700; letter-spacing: .3px; line-height: 1.7;
+  border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text);
+  white-space: nowrap;
+  transition: transform .14s var(--ease), border-color .14s var(--ease);
+}
+.bx-chip:hover { transform: translateY(-1px); }
+.bx-chip.ok    { color: var(--green);  border-color: rgba(38, 217, 176, .40); background: rgba(38, 217, 176, .10); }
+.bx-chip.warn  { color: var(--yellow); border-color: rgba(255, 183, 77, .40); background: rgba(255, 183, 77, .10); }
+.bx-chip.bad   { color: var(--red);    border-color: rgba(255, 92, 92, .40);  background: rgba(255, 92, 92, .10); }
+.bx-chip.muted { color: var(--muted);  border-color: var(--border);           background: var(--surface); }
+.bx-chip.info  { color: var(--blue);   border-color: rgba(91, 141, 239, .40); background: rgba(91, 141, 239, .10); }
+
+/* ── 6 · Buttons ───────────────────────────────────────────────────────────── */
+.bx-btn {
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  font: inherit; font-size: var(--fs-2); font-weight: 600; line-height: 1.2;
+  color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  padding: 8px 16px;
+  transition: transform .14s var(--ease), background .14s var(--ease),
+              border-color .14s var(--ease), box-shadow .14s var(--ease);
+}
+.bx-btn:hover  { background: var(--surface-3); border-color: var(--accent); transform: translateY(-1px); box-shadow: var(--elev-1); }
+.bx-btn:active { transform: translateY(1px); box-shadow: none; }
+.bx-btn-primary {
+  color: var(--green); background: rgba(38, 217, 176, .12);
+  border-color: rgba(38, 217, 176, .50);
+}
+.bx-btn-primary:hover { background: rgba(38, 217, 176, .20); border-color: var(--green); }
+.bx-btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+.bx-btn.ghost:hover { background: var(--surface-2); color: var(--text); }
+.bx-btn:focus-visible, .bx-state-retry:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* ── 7 · Table + scroller (sticky thead lives INSIDE the scroller at top:0) ── */
+.bx-table { width: 100%; border-collapse: collapse; font-size: var(--fs-2); }
+.bx-table th {
+  text-align: left; font-size: var(--fs-0); font-weight: 700;
+  text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+  padding: 8px 10px; border-bottom: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+.bx-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.bx-table .num, .bx-table td.num {
+  text-align: right; font-variant-numeric: tabular-nums;
+  font-family: "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.bx-tablewrap { overflow: auto; }
+.bx-tablewrap table { min-width: 640px; }
+.bx-tablewrap thead th { position: sticky; top: 0; z-index: var(--z-sticky); }
+.bx-tablewrap--vh { max-height: min(56vh, 640px); }
+
+/* ── 8 · Skeleton shimmer (the ONLY sanctioned pending state) ──────────────── */
+.bx-skel {
+  display: block;
+  background: linear-gradient(100deg, var(--surface-2) 30%, var(--surface-3) 50%, var(--surface-2) 70%);
+  background-size: 220% 100%;
+  animation: bxShimmer 1.25s linear infinite;
+  border-radius: var(--r-sm);
+}
+.bx-skel-cell { height: 14px; }
+.bx-skel-row  { height: 14px; margin: 10px 0; }
+.bx-skel-chip { display: inline-block; width: 86px; height: 30px; border-radius: var(--r-pill); }
+.bx-skel-card { height: 92px; border-radius: var(--r-lg); }
+.bx-skel-grid { display: grid; gap: 12px 16px; padding: var(--s-4); }
+.bx-skel-caption {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  color: var(--muted); font-size: var(--fs-1); padding: 10px 0 2px;
+  animation: bxRiseIn .35s var(--ease) both;
+}
+
+/* ── 9 · State blocks (honest empty / error / offline / gated / busy) ──────── */
+.bx-state {
+  display: grid; justify-items: center; gap: 10px; text-align: center;
+  padding: 36px 20px; margin: var(--s-3) 0;
+  border: 1px dashed var(--border-strong); border-radius: var(--r-lg);
+  background: var(--surface); color: var(--muted); font-size: var(--fs-2);
+  animation: bxRiseIn .4s var(--ease) both;
+}
+.bx-state .ico { font-size: 30px; line-height: 1; animation: bxFloat 5s ease-in-out infinite; }
+.bx-state .headline { color: var(--text); font-weight: 700; font-size: var(--fs-3); }
+.bx-state .hint { max-width: 52ch; line-height: 1.5; }
+.bx-state.error   { border-color: rgba(255, 92, 92, .45);  background: rgba(255, 92, 92, .05); }
+.bx-state.error .headline   { color: var(--red); }
+.bx-state.gated   { border-color: rgba(255, 183, 77, .50); background: rgba(255, 183, 77, .05); }
+.bx-state.gated .headline   { color: var(--yellow); }
+.bx-state.busy    { border-color: rgba(91, 141, 239, .45); background: rgba(91, 141, 239, .05); }
+.bx-state.busy .headline    { color: var(--blue); }
+.bx-state.offline { border-color: var(--border-strong); }
+.bx-state.offline .headline { color: var(--muted); }
+.bx-state-retry { margin-top: 4px; }
+
+/* ── 10 · Truthful live signals ────────────────────────────────────────────── */
+.bx-live-dot {
+  position: relative; display: inline-block; flex: 0 0 auto;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted);
+}
+.bx-live-dot::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: inherit; opacity: 0;
+}
+.bx-live-dot.live-ok   { background: var(--green); }
+.bx-live-dot.live-ok::after   { animation: bxPulse 2s var(--ease) infinite; }
+.bx-live-dot.live-warn { background: var(--yellow); }
+.bx-live-dot.live-warn::after { animation: bxPulse 1.1s var(--ease) infinite; }
+.bx-live-dot.live-down { background: var(--red); }
+.bx-live-dot.live-down::after { animation: none; }
+
+/* ONE gradient accent ribbon per page (hero band / pull-active strip). */
+.bx-ribbon {
+  display: block; width: 100%; height: 2px; border-radius: 1px;
+  background: linear-gradient(90deg, var(--purple), var(--blue), var(--green), var(--purple));
+  background-size: 300% 100%;
+  animation: bxGradShift 2.2s linear infinite;
+}
+
+/* ── 11 · Entrance stagger + count-up pop ──────────────────────────────────── */
+/* First-render-only: callers set --i inline per child (BXUI.stagger()), and the
+   existing skip-render memos guarantee a skipped render never re-animates. */
+.bx-stagger > * {
+  animation: bxFadeInUp .45s var(--ease) backwards;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+.bx-stagger-rows tr {
+  animation: bxRowIn .3s var(--ease) backwards;
+  animation-delay: calc(var(--i, 0) * 18ms);
+}
+.bx-no-anim, .bx-no-anim * { animation: none !important; }
+/* The settle pop: BXUI.countUp() sets the FINAL exact string synchronously,
+   then plays this transform-only pop — DOM text is never mid-tween when a
+   test (DEC-SURFACE-TRIAL-001) reads it. Element must not be display:inline. */
+.bx-countpop { animation: bxCountPop .45s var(--ease); will-change: transform; }
+
+/* Page/section entrance (same contract as bx-theme's .bx-enter — re-declared
+   so standalone pages that link only this sheet still get it). */
+.bx-enter { animation: bxFadeInUp .5s var(--ease) both; }
+
+/* ── 12 · Ambient-motion budget: pause everything while the tab is hidden ──── */
+/* BXUI.initVisibilityPause() toggles this class on <html>. */
+.bx-paused *, .bx-paused *::before, .bx-paused *::after {
+  animation-play-state: paused !important;
+}
+
+/* ── 13 · Canonical reduced-motion kill (the .001ms form — one vocabulary) ─── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important; scroll-behavior: auto !important;
+  }
+}
+
+/* ── 14 · Small screens: keep the dock reserve honest when widgets crowd ───── */
+@media (max-width: 680px) {
+  .bx-state { padding: 24px 12px; }
+  .bx-wrap, .bx-wrap--wide { width: calc(100% - 2 * var(--gutter)); }
+}

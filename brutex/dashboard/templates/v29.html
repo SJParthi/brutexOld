@@ -2,9 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>BruteX — Strategy Report v28 · v24 palette + full v25/v26/v27 motion stack</title>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"
-        onerror="window.__h2cFailed=true"></script>
+<title>BruteX — Operator · live sweep &amp; strategy report</title>
+<!-- html2canvas (PNG export) is LAZY-LOADED on the first Export click
+     (DEC-DASHBOARD-UX-ANIMATE-001): the cdnjs script was the app's ONLY
+     external dependency and, loaded from <head>, it gated the window 'load'
+     event — a slow/offline CDN kept the tab spinner turning and delayed ALL
+     entrance choreography. See ensureH2C() in the export handler;
+     window.__h2cFailed keeps its existing "export engine unavailable"
+     modal contract. -->
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -121,7 +126,7 @@
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
-    padding: 10px 24px;
+    padding: 10px var(--gutter);
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -971,7 +976,7 @@
   .sweep-id {
     background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
     border-bottom: 1px solid var(--border);
-    padding: 9px 28px;
+    padding: 9px var(--gutter);
     font-size: 11px;
     color: var(--muted);
     font-family: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
@@ -986,7 +991,7 @@
 
   /* ===== Header ===== */
   header {
-    padding: 18px 28px;
+    padding: 18px var(--gutter);
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
@@ -1019,7 +1024,7 @@
 
   /* ===== Verdict ===== */
   .verdict {
-    margin: 24px 28px 8px;
+    margin: 24px var(--gutter) 8px;
     background: linear-gradient(135deg, rgba(255,200,87,0.10), rgba(91,141,239,0.08), rgba(157,123,255,0.08));
     background-size: 200% 200%;
     border: 1px solid rgba(255,200,87,0.22);
@@ -1045,7 +1050,7 @@
   .verdict-rank-small { color: var(--muted); font-size: 11px; margin-top: 8px; text-transform: uppercase; letter-spacing: 0.1em; line-height: 1.5; font-weight: 600; }
 
   /* ===== Hero cards ===== */
-  .hero { padding: 16px 28px 8px; }
+  .hero { padding: 16px var(--gutter) 8px; }
   .hero-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }
   @media (max-width: 1000px) { .hero-cards { grid-template-columns: repeat(2, 1fr); } }
   .card { background: linear-gradient(180deg, var(--surface), var(--surface-2)); border: 1px solid var(--border); border-radius: 14px; padding: 24px 24px 26px; position: relative; transition: all 0.25s; cursor: help; overflow: hidden; }
@@ -1083,7 +1088,7 @@
   .tab-content { display: none; animation: fadeIn 0.3s ease-out; }
   .tab-content.active { display: block; }
 
-  details { margin: 16px 28px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+  details { margin: 16px var(--gutter); border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
   details summary { padding: 16px 22px; cursor: pointer; list-style: none; font-weight: 600; display: flex; align-items: center; gap: 10px; user-select: none; transition: background 0.15s; }
   details summary:hover { background: var(--surface-2); }
   details summary::-webkit-details-marker { display: none; }
@@ -1129,7 +1134,7 @@
   .donut-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 12px; }
   .dot-sm { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 
-  .trades-wrap { margin: 16px 28px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .trades-wrap { margin: 16px var(--gutter); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; overflow-x: auto; }
   .trades-header { padding: 16px 22px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
   .trades-header h2 { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
   .trades-header .count { color: var(--muted); font-size: 13px; font-weight: 600; }
@@ -1145,11 +1150,10 @@
   .trades-table tbody tr.loss-row { border-left-color: #663030; }
   .trades-table tbody tr.loss-row:hover { border-left-color: var(--red); background: rgba(139,149,176,0.06); }
   .trade-id { font-weight: 800; font-size: 16px; color: var(--text-bright); letter-spacing: -0.01em; }
-  .trade-type { padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; }
+  .trade-type { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; }
   .trade-type.long { background: rgba(255,200,87,0.15); color: var(--green); }
   .trade-type.short { background: rgba(139,149,176,0.15); color: var(--red); }
   .vix-chip { background: rgba(255,183,77,0.15); color: var(--yellow); padding: 4px 9px; border-radius: 5px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .trade-type { font-size: 11px !important; padding: 4px 10px !important; }
 
   /* ===== Per-trade RULE badges (entry/exit transparency, ref Rules_Explain.xlsx) ===== */
   .rule-badge {
@@ -1260,7 +1264,7 @@
   .rule-stat .v.neg { color: var(--red); }
   .rule-stat .l { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 700; margin-top: 2px; }
 
-  .sweep-context-wrap { margin: 16px 28px; }
+  .sweep-context-wrap { margin: 16px var(--gutter); }
   .sweep-hero { background: linear-gradient(135deg, rgba(91,141,239,0.1), rgba(157,123,255,0.08)); background-size: 200% 200%; border: 1px solid rgba(91,141,239,0.22); border-radius: 14px; padding: 26px; margin-bottom: 16px; display: flex; gap: 28px; align-items: center; flex-wrap: wrap; animation: gradientShift 10s ease-in-out infinite; }
   .sweep-hero-stat { text-align: center; flex: 1; min-width: 140px; }
   .sweep-hero-stat .num { font-size: 36px; font-weight: 900; background: linear-gradient(135deg, var(--blue), var(--purple)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.03em; line-height: 1; }
@@ -1315,7 +1319,7 @@
   body.share-mode .charges-warn { display: none; }
 
   /* ===== Top Combos table ===== */
-  .top-combos-wrap { margin: 16px 28px; }
+  .top-combos-wrap { margin: 16px var(--gutter); }
   .top-combos-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
   .top-combos-header h2 { font-size: 22px; font-weight: 800; display: flex; align-items: center; gap: 12px; letter-spacing: -0.02em; }
   .top-combos-header .trophy { color: var(--yellow); font-size: 22px; }
@@ -1943,7 +1947,7 @@
   [data-tooltip]::after { content: attr(data-tooltip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); background: #000; color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.5; white-space: normal; width: 240px; text-align: left; opacity: 0; pointer-events: none; transition: opacity 0.15s; z-index: 100; border: 1px solid var(--border-strong); box-shadow: 0 12px 28px rgba(0,0,0,0.4); }
   [data-tooltip]:hover::after { opacity: 1; }
 
-  footer { margin-top: 32px; padding: 18px 28px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); font-family: "SF Mono", ui-monospace, Menlo, monospace; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+  footer { margin-top: 32px; padding: 18px var(--gutter); border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); font-family: "SF Mono", ui-monospace, Menlo, monospace; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
   footer .ok-row { display: flex; gap: 16px; }
   footer .ok-row span { display: inline-flex; align-items: center; gap: 6px; }
   footer .ok-row .check { color: var(--green); }
@@ -2157,7 +2161,58 @@
   .modal p { color: var(--muted); margin-bottom: 18px; line-height: 1.6; font-size: 13px; }
   .modal kbd { background: var(--surface-3); padding: 3px 8px; border-radius: 4px; font-family: "SF Mono", monospace; font-size: 11px; border: 1px solid var(--border); }
   .modal button { background: linear-gradient(135deg, var(--blue), var(--purple)); border: none; color: white; padding: 9px 18px; border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer; }
+
+  /* ==================== DEC-DASHBOARD-UX-ANIMATE-001 ==================== */
+  /* Operator page nav (the "/" page was a navigation dead end — zero
+     href="/…" links). Deliberately NOT the shared topnav class:
+     test_dashboard_nav_consistency.test_index_page_still_renders pins that
+     "/" carries no topnav nav block (it is exempt from the canonical
+     nav guard), so these links use their own class. */
+  .bx-opnav { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .bx-opnav::-webkit-scrollbar { display: none; }
+  .bx-opnav a { color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 600; padding: 6px 10px; border-radius: 7px; white-space: nowrap; transition: color 0.15s, background 0.15s; }
+  .bx-opnav a:hover { color: var(--text); background: var(--surface-2); }
+
+  /* Live system-heartbeat hero — REAL pipeline state (pull rate / sweep
+     progress / live-proof verdict) above the preview report. Every slot is
+     an async region: skeleton shimmer while pending, then data / an honest
+     idle state / an honest "unreachable — retrying" state. "Loading…" text
+     is banned as a terminal state. */
+  .hb { margin: 18px var(--gutter) 0; }
+  .hb-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+  .hb-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); font-weight: 800; }
+  .hb-sub { font-size: 11px; color: var(--muted); }
+  .hb-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 900px) { .hb-grid { grid-template-columns: 1fr; } }
+  .hb-card { padding: 14px 16px; cursor: default; animation: fadeInUp 0.5s var(--ease) backwards; }
+  .hb-card:nth-child(2) { animation-delay: 0.08s; }
+  .hb-card:nth-child(3) { animation-delay: 0.16s; }
+  .hb-label { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); font-weight: 800; margin-bottom: 8px; display: flex; align-items: center; gap: 7px; }
+  .hb-big { font-size: 17px; font-weight: 700; color: var(--text-bright); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1.3; overflow-wrap: anywhere; }
+  .hb-note { font-size: 11px; color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
+  .hb-big.hb-ok { color: var(--green-bright); }
+  .hb-big.hb-warn { color: var(--yellow); }
+  .hb-big.hb-bad { color: var(--red); }
+  .hb-big.hb-idle { color: var(--muted); font-weight: 600; }
+
+  /* Persistent PREVIEW ribbon — the mockup ₹ figures below were disclosed
+     only by a 10px corner badge; this slim strip labels the WHOLE report. */
+  .preview-ribbon { display: flex; align-items: center; gap: 10px; margin: 14px var(--gutter) 0; padding: 7px 14px; border: 1px solid rgba(255,183,77,0.3); border-radius: 8px; background: linear-gradient(90deg, rgba(255,183,77,0.10), rgba(255,183,77,0.04)); font-size: 11px; color: var(--muted); }
+  .preview-ribbon .pr-mark { color: var(--yellow); font-weight: 800; letter-spacing: 0.1em; white-space: nowrap; flex-shrink: 0; }
+  .preview-ribbon .pr-mark::before { content: "◈ "; }
+
+  /* Offscreen ambient-animation pause (IntersectionObserver adds/removes
+     .bx-anim-off): richer feel at LOWER runtime cost; transform/opacity
+     animations simply freeze while not visible and resume when scrolled
+     back in. The hidden-tab pause rides BXUI.initVisibilityPause()'s
+     .bx-paused rule in bx-design.css. */
+  .bx-anim-off, .bx-anim-off *, .bx-anim-off *::before, .bx-anim-off *::after { animation-play-state: paused !important; }
 </style>
+<!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, skeleton
+     shimmer, honest .bx-state states, .bx-live-dot, .bx-wrap fluid layout.
+     Linked AFTER the page's inline styles so shared tokens win ties. -->
+<link rel="stylesheet" href="/static/bx-design.css">
+<script defer src="/static/bx-ui.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
@@ -2196,6 +2251,18 @@
 
 <div class="mode-bar">
   <div class="brand-logo">BruteX</div>
+  <!-- Operator page links (DEC-DASHBOARD-UX-ANIMATE-001): "/" was a
+       navigation dead end (zero internal links). Own class, NOT the shared
+       topnav — test_index_page_still_renders pins that "/" carries no
+       topnav nav block. -->
+  <nav class="bx-opnav show-operator-only" aria-label="BruteX pages">
+    <a href="/universe">Universe</a>
+    <a href="/db">Database</a>
+    <a href="/coverage">Coverage</a>
+    <a href="/movers">Movers</a>
+    <a href="/results">Results</a>
+    <a href="/reports">Reports</a>
+  </nav>
   <div class="mode-bar-right">
     <span class="preview-badge" title="ALL 13 SweepFunnelSnapshot schema fields are now LIVE (step_0/1/2/3/4/5/6/7/8/9 + winners_top_n + sweep_id + snapshot_at) — values flow from the brute-force sweep via /api/v1/state every 2s. ONLY remaining placeholder: top combos table P&L, equity curve, KPI tiles, podium cards. Methodology is institutional-grade. Badge stays until brutex/strategies/sweep.py wires update_sweep_funnel() (Phase 3).">Preview Data</span>
     <div class="mode-toggle">
@@ -2241,6 +2308,47 @@
 <div class="brand-watermark show-share-only">
   <div class="handle">@brutex_sj</div>
   <div class="tag">Brute-force backtest · 28.4M strategies tested</div>
+</div>
+
+<!-- .bx-wrap--wide (bx-design.css): fluid centered container — caps the page
+     at --page-max-wide on ultra-wide screens + reserves bottom dock space so
+     the fixed rate/liveproof pills never cover the footer. The sticky
+     mode-bar + sweep strips above stay full-bleed. -->
+<main class="bx-wrap bx-wrap--wide">
+
+<!-- ══ LIVE SYSTEM HEARTBEAT (DEC-DASHBOARD-UX-ANIMATE-001) ══════════════
+     REAL pipeline state from real endpoints — /api/v1/pull/rate,
+     /api/v1/sweep-progress (shared with the poller below, zero extra
+     sockets) and /api/v1/liveproof — shown ABOVE the preview report so the
+     operator's mid-pull glance lands on truth, not mockup ₹ figures.
+     Each slot: skeleton shimmer → data / honest idle / honest
+     "unreachable — retrying". Never a terminal "Loading…". -->
+<section class="hb show-operator-only" id="bxHeartbeat" aria-label="Live system status">
+  <div class="hb-head">
+    <span class="hb-title">System heartbeat</span>
+    <span class="hb-sub">live endpoints — everything below this strip is the preview report</span>
+  </div>
+  <div class="hb-grid">
+    <div class="bx-card hb-card" id="hbPull">
+      <div class="hb-label"><span class="bx-live-dot" id="hbPullDot"></span> Pull rate</div>
+      <div id="hbPullBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
+    </div>
+    <div class="bx-card hb-card" id="hbSweep">
+      <div class="hb-label"><span class="bx-live-dot" id="hbSweepDot"></span> Sweep progress</div>
+      <div id="hbSweepBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
+    </div>
+    <div class="bx-card hb-card" id="hbProof">
+      <div class="hb-label"><span class="bx-live-dot" id="hbProofDot"></span> Live proof</div>
+      <div id="hbProofBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Persistent preview disclosure: the corner badge alone was far too quiet
+     for a page of hard-coded ₹ figures (Golden Rule #1). -->
+<div class="preview-ribbon show-operator-only" role="note">
+  <span class="pr-mark">PREVIEW</span>
+  <span class="pr-text">The report below shows mockup numbers until Phase-3 wires update_sweep_funnel() — only the sweep-funnel fields (data-bind) and the sweep-progress strip are live. Real pipeline state is in the heartbeat above.</span>
 </div>
 
 <header>
@@ -3165,6 +3273,8 @@
   </span>
 </footer>
 
+</main>
+
 <!-- ============================================================ -->
 <!-- REEL OVERLAY                                                 -->
 <!-- ============================================================ -->
@@ -3448,7 +3558,29 @@
   document.querySelectorAll('.export-dropdown button').forEach(btn => {
     btn.addEventListener('click', () => { expDrop.classList.remove('open'); exportAs(btn.dataset.aspect); });
   });
+  // DEC-DASHBOARD-UX-ANIMATE-001: html2canvas is lazy-loaded on the FIRST
+  // export click (it was the app's only external <head> dependency and gated
+  // the window 'load' event / entrance choreography on a slow CDN).
+  // window.__h2cFailed keeps its existing contract: once the CDN genuinely
+  // fails, every export attempt opens the "export engine unavailable" modal.
+  function ensureH2C() {
+    if (typeof html2canvas !== 'undefined') return Promise.resolve();
+    if (window.__h2cFailed) return Promise.reject(new Error('html2canvas unavailable'));
+    if (window.__h2cLoad) return window.__h2cLoad;
+    window.__h2cLoad = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      s.onload = () => resolve();
+      s.onerror = () => { window.__h2cFailed = true; reject(new Error('html2canvas failed to load')); };
+      document.head.appendChild(s);
+    });
+    return window.__h2cLoad;
+  }
   function exportAs(aspect) {
+    ensureH2C().then(() => exportNow(aspect))
+      .catch(() => document.getElementById('modalBack').classList.add('open'));
+  }
+  function exportNow(aspect) {
     if (window.__h2cFailed || typeof html2canvas === 'undefined') {
       document.getElementById('modalBack').classList.add('open');
       return;
@@ -3989,6 +4121,11 @@
     let lastFunnelPayload = '';
 
     async function pollState() {
+      // Hidden-tab pause (DEC-DASHBOARD-UX-ANIMATE-001): a background tab
+      // holds no socket open for this poll; visibilitychange below fires an
+      // immediate refresh tick on return. Pure scheduling — the skip-render
+      // memo + bound-field semantics are unchanged.
+      if (document.hidden) return;
       try {
         const res = await fetch('/api/v1/state');
         if (!res.ok) return;  // server hiccup; next tick retries
@@ -4019,6 +4156,7 @@
     if (window.location.protocol !== 'file:') {
       pollState();  // first call immediate so the page is fresh on load
       setInterval(pollState, 2000);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) pollState(); });
     }
   })();
 
@@ -4047,10 +4185,21 @@
     const sweepBoundEls = document.querySelectorAll('[data-sweep]');
     let lastSweepPayload = '';
     async function pollSweepProgress() {
+      // Hidden-tab pause — see pollState; visibilitychange refreshes on return.
+      if (document.hidden) return;
       try {
         const res = await fetch('/api/v1/sweep-progress');
-        if (!res.ok) return;  // server hiccup; next tick retries
+        if (!res.ok) {
+          // Heartbeat hook (DEC-DASHBOARD-UX-ANIMATE-001): surface the honest
+          // "unreachable — retrying" state; the panel itself keeps its
+          // silent-retry contract.
+          if (window.__bxHbSweepErr) window.__bxHbSweepErr(res.status);
+          return;  // server hiccup; next tick retries
+        }
         const sp = await res.json();
+        // Heartbeat hook: the hero's sweep slot rides THIS fetch — zero extra
+        // sockets. Fires before the idle-return so "idle" renders honestly.
+        if (window.__bxHbSweep) window.__bxHbSweep(sp);
         if (!sp || sp.state === 'idle') return;  // nothing running yet
         const panel = document.getElementById('sweepProgressPanel');
         // Un-hide BEFORE the skip gate so the first running snapshot always
@@ -4067,13 +4216,175 @@
           else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
           el.textContent = (v === null || v === undefined) ? '' : String(v);
         });
-      } catch (e) { /* network blip; next tick retries */ }
+      } catch (e) {
+        if (window.__bxHbSweepErr) window.__bxHbSweepErr(e);
+        /* network blip; next tick retries */
+      }
     }
     if (window.location.protocol !== 'file:') {
       pollSweepProgress();
       setInterval(pollSweepProgress, 2000);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) pollSweepProgress(); });
     }
   })();
+
+  // ==================== DEC-DASHBOARD-UX-ANIMATE-001 — heartbeat + motion budget ====================
+  // Live system-heartbeat hero: three async slots, each resolving skeleton →
+  // data / honest idle / honest "unreachable — retrying". All DOM writes go
+  // through textContent (zero innerHTML sinks). The sweep slot rides the
+  // existing /api/v1/sweep-progress poller via the window.__bxHbSweep hooks;
+  // pull-rate + liveproof poll on their own gentle cadences (5 s / 10 s),
+  // paused while the tab is hidden.
+  (function () {
+    const hb = document.getElementById('bxHeartbeat');
+    if (!hb) return;
+    const slots = {
+      pull: { body: document.getElementById('hbPullBody'), dot: document.getElementById('hbPullDot') },
+      sweep: { body: document.getElementById('hbSweepBody'), dot: document.getElementById('hbSweepDot') },
+      proof: { body: document.getElementById('hbProofBody'), dot: document.getElementById('hbProofDot') },
+    };
+    // Per-slot render memo: identical (tone + lines) → zero DOM writes
+    // (skip-render discipline, DEC-DASHBOARD-JS-PERF-001 style).
+    const lastSig = { pull: '', sweep: '', proof: '' };
+
+    function setDot(dot, state) {
+      if (!dot) return;
+      dot.classList.remove('live-ok', 'live-warn', 'live-down');
+      if (state === 'ok') dot.classList.add('live-ok');
+      else if (state === 'warn') dot.classList.add('live-warn');
+      else if (state === 'down') dot.classList.add('live-down');
+      // anything else: neutral grey (honest idle)
+    }
+
+    // tone: ok | warn | bad | idle | '' (plain). Resolves the skeleton — the
+    // slot is REPLACED with real text, never left shimmering.
+    function setSlot(key, tone, main, note) {
+      const slot = slots[key];
+      if (!slot.body) return;
+      const sig = tone + '|' + main + '|' + (note || '');
+      if (sig === lastSig[key]) return;  // unchanged → zero DOM writes
+      lastSig[key] = sig;
+      while (slot.body.firstChild) slot.body.removeChild(slot.body.firstChild);
+      const big = document.createElement('div');
+      big.className = 'hb-big' + (tone ? ' hb-' + tone : '');
+      big.textContent = main;
+      slot.body.appendChild(big);
+      if (note) {
+        const sub = document.createElement('div');
+        sub.className = 'hb-note';
+        sub.textContent = note;
+        slot.body.appendChild(sub);
+      }
+      setDot(slot.dot, tone === 'ok' ? 'ok' : tone === 'warn' ? 'warn' : tone === 'bad' ? 'down' : '');
+    }
+
+    function fmtRps(n) {
+      return (typeof n === 'number' && isFinite(n)) ? n.toFixed(n >= 10 ? 0 : 1) : '0';
+    }
+
+    // ── sweep slot: fed by the existing 2 s poller via the hooks above ──
+    window.__bxHbSweep = function (sp) {
+      if (!sp || sp.state === 'idle') { setSlot('sweep', 'idle', 'idle — no sweep running', 'start one from the Results page or the CLI'); return; }
+      const pct = (sp.percent === null || sp.percent === undefined) ? '0' : String(sp.percent);
+      const rate = (typeof sp.combos_per_sec === 'number') ? sp.combos_per_sec : 0;
+      const main = String(sp.state) + ' · ' + pct + '% done';
+      const note = String(sp.evaluated ?? 0) + '/' + String(sp.enumerated ?? 0) + ' tuples · ' +
+        fmtRps(rate) + ' tuples/s · ' + String(sp.survivors ?? 0) + ' survivors';
+      // state machine: idle → running → done | error (engine/sweep_progress.py)
+      setSlot('sweep', sp.state === 'error' ? 'bad' : 'ok', main, note);
+    };
+    window.__bxHbSweepErr = function (_e) {
+      setSlot('sweep', 'bad', 'sweep feed unreachable — retrying', 'the 2 s poller keeps retrying automatically');
+    };
+
+    // ── pull slot: /api/v1/pull/rate every 5 s ──
+    async function pollPull() {
+      if (document.hidden) return;
+      try {
+        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/pull/rate', 10000) : fetch('/api/v1/pull/rate'));
+        if (!r.ok) { setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 5 s'); return; }
+        const d = await r.json();
+        const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
+        if (state === 'flowing') {
+          setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
+            'pull active · measured completed rate');
+        } else if (state === 'stalled') {
+          setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
+        } else if (state === 'done') {
+          setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
+        } else {
+          setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
+        }
+      } catch (e) {
+        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'retries every 5 s');
+      }
+    }
+
+    // ── proof slot: /api/v1/liveproof every 10 s ──
+    const KIND_TONE = { pass: 'ok', na: 'idle', warn: 'warn', fail: 'bad', error: 'bad' };
+    const KIND_RANK = { ok: 0, idle: 1, warn: 2, bad: 3 };
+    function verdictTone(block) {
+      const v = block && block.verdict;
+      if (!v) return null;
+      return KIND_TONE[v.kind] || 'warn';
+    }
+    async function pollProof() {
+      if (document.hidden) return;
+      try {
+        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/liveproof', 10000) : fetch('/api/v1/liveproof'));
+        if (!r.ok) { setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 10 s'); return; }
+        const d = await r.json();
+        const pre = verdictTone(d && d.preflight);
+        const prb = verdictTone(d && d.probes);
+        if (pre === null && prb === null) {
+          setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
+          return;
+        }
+        const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
+        const head = (d.preflight && d.preflight.verdict && d.preflight.verdict.headline) ||
+                     (d.probes && d.probes.verdict && d.probes.verdict.headline) || '';
+        if (worst === 'ok') setSlot('proof', 'ok', 'all checks pass', head);
+        else if (worst === 'idle') setSlot('proof', 'idle', 'not applicable', head);
+        else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
+        else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
+      } catch (e) {
+        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'retries every 10 s');
+      }
+    }
+
+    if (window.location.protocol !== 'file:') {
+      pollPull();
+      pollProof();
+      setInterval(pollPull, 5000);
+      setInterval(pollProof, 10000);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollPull(); pollProof(); } });
+    } else {
+      // Standalone design review (file://): no endpoints exist — resolve the
+      // skeletons to an honest static note instead of infinite shimmer.
+      setSlot('pull', 'idle', 'offline preview', 'live endpoints available when served by the dashboard');
+      setSlot('sweep', 'idle', 'offline preview', 'live endpoints available when served by the dashboard');
+      setSlot('proof', 'idle', 'offline preview', 'live endpoints available when served by the dashboard');
+    }
+  })();
+
+  // Motion budget (DEC-DASHBOARD-UX-ANIMATE-001): pause EVERY animation while
+  // the tab is hidden (BXUI.initVisibilityPause → .bx-paused on <html>), and
+  // freeze the heaviest ambient loops (ticker / verdict shimmer+particles /
+  // equity glow) while their section is scrolled offscreen — richer feel at
+  // LOWER runtime cost. Reduced-motion users never start these anyway
+  // (the canonical .001ms kill block above).
+  window.addEventListener('load', () => {
+    if (window.BXUI && BXUI.initVisibilityPause) BXUI.initVisibilityPause();
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach((en) => en.target.classList.toggle('bx-anim-off', !en.isIntersecting));
+      }, { rootMargin: '80px' });
+      ['.hook-banner', '.verdict', '.equity-wrap'].forEach((sel) => {
+        const n = document.querySelector(sel);
+        if (n) io.observe(n);
+      });
+    }
+  });
 </script>
 
 </body>
