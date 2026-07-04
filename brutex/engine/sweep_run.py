@@ -67,7 +67,7 @@ uses — an oversized sweep is a conscious choice, not an accident.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -904,10 +904,11 @@ def _build_trade_sim(
 def _reattribute_chunk_failure(
     bars: Sequence[CandleBar],
     bar_bits: Sequence[int],
-    chunk: Sequence[tuple[int, str]],
+    chunk: Sequence[int],
     cfg: SweepRunConfig,
     direction_label: str,
     batch_exc: Exception,
+    run_id_of: Callable[[int], str],
 ) -> NoReturn:
     """A batched trade-sim chunk raised — attribute the culprit mask, then fail LOUD.
 
@@ -915,7 +916,10 @@ def _reattribute_chunk_failure(
     mask at a time through the ORACLE (:func:`metrics_for_mask` — the exact
     pre-wiring per-mask chain, engine-agnostic: it attributes a Python-fallback
     chunk failure identically). The FIRST mask that re-raises gets the standard
-    fingerprint (:func:`_combo_error`, chained from ITS error). ``MemoryError``
+    fingerprint (:func:`_combo_error`, chained from ITS error), its run-identity
+    resolved via *run_id_of* (lazy recompute on the digest path, the eager
+    probe-time value on the legacy path — byte-identical either way because
+    :func:`mask_run_id` is pure; DEC-SWEEP-STREAMING-RANK-001). ``MemoryError``
     during re-attribution re-raises BARE (the global-stop law holds under
     memory pressure too — never a downgrade to a tuple skip).
 
@@ -938,7 +942,7 @@ def _reattribute_chunk_failure(
         direction=direction_label,
         k=cfg.k,
     )
-    for mask, run_id in chunk:
+    for mask in chunk:
         try:
             metrics_for_mask(
                 bars,
@@ -953,10 +957,10 @@ def _reattribute_chunk_failure(
         except MemoryError:
             raise
         except Exception as exc:
-            raise _combo_error(mask, run_id, cfg, direction_label, exc) from exc
+            raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
     raise SweepComboError(
         f"trade-sim chunk of {len(chunk)} masks "
-        f"(0x{chunk[0][0]:032x}..0x{chunk[-1][0]:032x}) in "
+        f"(0x{chunk[0]:032x}..0x{chunk[-1]:032x}) in "
         f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: batched simulation raised "
         f"{type(batch_exc).__name__}: {batch_exc}, but every mask passed the per-mask "
         f"Python-oracle re-run — a batch/kernel-level failure; the oracle results are NOT "
@@ -992,8 +996,13 @@ def run_persisted_sweep(
     3. Emit the ``SWEEP_START`` audit line.
     4. Build the Stage-1A ``bar_bits`` **once**.
     5. Enumerate the K-of-bits masks; for each: prune conflicts; on the legacy
-       no-digest path, skip already-seen identities (O(1) Bloom→exact, BEFORE
-       any trade sim); else collect the ``(mask, run_id)`` survivor.
+       no-digest path, compute the run-identity eagerly (the dedup probe keys
+       on it) and skip already-seen identities (O(1) Bloom→exact, BEFORE any
+       trade sim); on the digest path collect the bare mask — the run-identity
+       is NOT computed per enumerated mask there
+       (DEC-SWEEP-STREAMING-RANK-001): probes are bypassed and marks skipped,
+       so its only consumers (the :class:`SweepComboError` fingerprint + the
+       finalist rows) recompute it lazily from the pure :func:`mask_run_id`.
     6. Stage-1B coarse pre-filter (``cfg.min_hits``): drop survivors that fire on
        too few bars to ever rank (still counted as ``evaluated`` + marked seen).
     7. Backtest the kept survivors — the wired resident Rust trade-sim
@@ -1168,13 +1177,10 @@ def run_persisted_sweep(
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
-    survivors: list[tuple[int, str]] = []
-    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
-        enumerated += 1
-        if has_conflict(mask):
-            conflict_pruned += 1
-            continue
-        run_id = mask_run_id(
+
+    def _lazy_run_id(mask: int) -> str:
+        """Recompute one mask's run-identity on demand (:func:`mask_run_id` is pure)."""
+        return mask_run_id(
             mask=mask,
             direction=direction_label,
             instrument=cfg.instrument,
@@ -1185,31 +1191,59 @@ def run_persisted_sweep(
             indicator_version=cfg.indicator_version,
             code_commit_sha=cfg.code_commit_sha,
         )
-        if not bypass_dedup and dedup.seen(run_id):
+
+    survivors: list[int] = []
+    #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
+    #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
+    survivor_run_ids: list[str] = []
+    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
+        enumerated += 1
+        if has_conflict(mask):
+            conflict_pruned += 1
+            continue
+        if bypass_dedup:
+            # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
+            # path the dedup probes are BYPASSED (sentinel-authoritative redo,
+            # above) and ``mark_many`` is SKIPPED (below), so a survivor's
+            # run_id has exactly TWO consumers — the SweepComboError
+            # fingerprint and the finalist rows — both recomputed on demand
+            # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
+            # canonical inputs, Golden Rule #4: same bytes, computed later).
+            # Skipping the eager per-enumerated-mask hash deletes O(survivors)
+            # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
+            survivors.append(mask)
+            continue
+        run_id = _lazy_run_id(mask)
+        if dedup.seen(run_id):
             skipped_dedup += 1
             continue
-        survivors.append((mask, run_id))
+        survivors.append(mask)
+        survivor_run_ids.append(run_id)
 
     # Stage-1B coarse pre-filter — drop survivors that can never reach the
     # trade-count gate (still "evaluated": we decided their fate + mark them seen).
     kept = survivors
     if cfg.min_hits > 0 and survivors:
-        survivor_masks = [mask for mask, _ in survivors]
         # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
         # are bit-identical (same SUPERSET kernel) so the kept set never differs.
         hits = (
-            kernel.count_hits(survivor_masks)
+            kernel.count_hits(survivors)
             if kernel is not None
-            else count_supermasks(bar_bits, survivor_masks)
+            else count_supermasks(bar_bits, survivors)
         )
-        kept = [
-            (mask, run_id)
-            for (mask, run_id), hit in zip(survivors, hits, strict=True)
-            if hit >= cfg.min_hits
-        ]
+        kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
     evaluated = len(survivors)
 
-    run_id_by_mask = dict(survivors)
+    # ONE run-identity resolver for every downstream consumer (finalist rows +
+    # the SweepComboError fingerprints): the digest path recomputes lazily
+    # (O(finalists + errors) BLAKE3 instead of O(survivors)); the legacy path
+    # reuses the exact probe-time values already paid for above (eager
+    # semantics untouched — the dedup probe genuinely needs them).
+    run_id_of: Callable[[int], str]
+    if bypass_dedup:
+        run_id_of = _lazy_run_id
+    else:
+        run_id_of = dict(zip(survivors, survivor_run_ids, strict=True)).__getitem__
     # Combo evaluation — the wired resident Rust trade-sim
     # (DEC-SWEEP-RUST-TRADESIM-WIRE-001, wiring the bit-identity-proven
     # DEC-SWEEP-RUST-TRADESIM-001 kernel): one ResidentTradeSim per tuple (built
@@ -1241,7 +1275,7 @@ def run_persisted_sweep(
             chunk = kept[chunk_start : chunk_start + chunk_size]
             try:
                 chunk_trades = sim.simulate_masks(
-                    [mask for mask, _ in chunk],
+                    chunk,
                     direction=cfg.direction,
                     stop_loss_paisa=cfg.sl_paisa,
                     take_profit_paisa=cfg.tp_paisa,
@@ -1264,8 +1298,10 @@ def run_persisted_sweep(
             except MemoryError:
                 raise
             except Exception as exc:
-                _reattribute_chunk_failure(bars, bar_bits, chunk, cfg, direction_label, exc)
-            for (mask, run_id), trades in zip(chunk, chunk_trades, strict=True):
+                _reattribute_chunk_failure(
+                    bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of
+                )
+            for mask, trades in zip(chunk, chunk_trades, strict=True):
                 try:
                     metrics = metrics_from_trades(
                         bars,
@@ -1276,7 +1312,7 @@ def run_persisted_sweep(
                 except MemoryError:
                     raise
                 except Exception as exc:
-                    raise _combo_error(mask, run_id, cfg, direction_label, exc) from exc
+                    raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
                 pairs.append((mask, metrics))
     ranked = rank_combos(pairs, overfit=cfg.overfit)
     finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
@@ -1285,7 +1321,7 @@ def run_persisted_sweep(
     for rc in finalists:
         row = ranked_combo_to_result_row(
             rc,
-            run_id=run_id_by_mask[rc.mask],
+            run_id=run_id_of(rc.mask),
             instrument=cfg.instrument,
             tf=cfg.tf,
             direction=direction_label,
@@ -1335,7 +1371,7 @@ def run_persisted_sweep(
     # write to the (now off-heap LMDB) exact tier; skip it (DEC-SWEEP-DEDUP-LMDB-001).
     # The sentinel below is the redo authority on this path, so ``n_marked``
     # honestly reads 0 (no marks were written).
-    marked = 0 if bypass_dedup else dedup.mark_many(run_id for _, run_id in survivors)
+    marked = 0 if bypass_dedup else dedup.mark_many(survivor_run_ids)
     # Completion sentinel STRICTLY LAST (DEC-MARK-MANY-SENTINEL-001): its
     # presence proves flush + sidecar + mark all completed; a crash anywhere
     # before this line leaves it absent → the next run redoes the FULL tuple.
