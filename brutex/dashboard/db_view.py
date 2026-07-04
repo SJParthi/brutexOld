@@ -342,7 +342,8 @@ _DAILY_INTERVAL: Final[str] = "1day"
 #: +05:30 IST offset (330 minutes; India has no DST — CLAUDE.md §6) to the UTC
 #: wall-clock before truncating, so it is independent of the ambient DuckDB
 #: session ``TimeZone`` (the operator runs Asia/Kolkata). Used by the derived-1day
-#: date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O full-stored-life span.
+#: date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O full-stored-life span +
+#: the ``session_days`` distinct-IST-date count (DEC-SPOT-SESSION-DAYS-IST-TZ-001).
 _IST_DATE_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')::DATE"
 
 #: The SQL fragment for a bar's **UTC calendar date** — the legacy intraday date
@@ -1317,14 +1318,19 @@ def summarize_spot_datasets(
         # completeness bar counts above what the deduped readers actually serve.
         # ``session_days`` (DEC-SPOT-PARTIAL-RANGE-CHIP-001): ONE extra scalar in
         # the SAME single footer aggregate — the count of DISTINCT IST calendar
-        # dates (timestamps are stored UTC; IST is fixed +05:30, no DST) holding
-        # at least one bar. Feeds the /completeness session-density range audit
-        # with ZERO extra passes over the lake.
+        # dates holding at least one bar, via the COMMON :data:`_IST_DATE_EXPR`
+        # (AT TIME ZONE 'UTC' BEFORE the +05:30 shift, so the date is independent
+        # of the ambient DuckDB session ``TimeZone`` — a bare CAST-to-DATE on the
+        # TIMESTAMPTZ column resolves in the session zone and split one NSE
+        # session into two dates on a negative-offset host, inflating
+        # ``session_days`` and masking sparsity; DEC-SPOT-SESSION-DAYS-IST-TZ-001).
+        # Feeds the /completeness session-density range audit with ZERO extra
+        # passes over the lake.
         agg_rows = _aggregate_parquet_resilient(
             conn,
             lake_root / "bars" / exchange / segment / symbol / interval,
             f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp"), '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
-            "COUNT(DISTINCT CAST((\"timestamp\" + INTERVAL '330 minutes') AS DATE)) "
+            f"COUNT(DISTINCT {_IST_DATE_EXPR}) "  # nosec B608 - constant expr; path bound
             "FROM read_parquet(?, union_by_name=true)",
             source=f"spot:{exchange}/{segment}/{symbol}/{interval}",
         )
