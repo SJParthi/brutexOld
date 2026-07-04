@@ -62,6 +62,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import sleep as _time_sleep
+from typing import Final
 
 import structlog
 
@@ -1562,6 +1563,77 @@ def _deep_strike_expected_empty(
     return _expected
 
 
+#: The mass-empty breaker's vendor-health CANARY coordinates
+#: (DEC-EMPTY-BREAKER-CANARY-001): the NIFTY spot index is the repo's most
+#: liquid, always-listed series (CLAUDE.md §6 Track-1 universe) — its recent
+#: sessions can only come back empty when the VENDOR is unhealthy (throttle /
+#: soft-ban / mis-addressing episode), never from genuine no-data.
+_CANARY_EXCHANGE: Final[str] = "NSE"
+_CANARY_SEGMENT: Final[str] = "CASH"
+_CANARY_SYMBOL: Final[str] = "NSE-NIFTY"
+#: Calendar days the canary window spans — 7 always contains ≥ 3 NSE trading
+#: sessions (a weekend + holiday cluster cannot blank a whole week), and at
+#: 1-minute it tiles into ONE 30-day vendor chunk = exactly ONE vendor call.
+_CANARY_LOOKBACK_DAYS: Final[int] = 7
+
+
+def make_breaker_canary_probe(
+    client: GrowwClientProtocol,
+    *,
+    pace: Pacer | None = None,
+    now_utc: Callable[[], datetime] | None = None,
+) -> Callable[[], bool]:
+    """Build the breaker's ONE-call vendor-health canary over *client* — pure closure.
+
+    DEC-EMPTY-BREAKER-CANARY-001. The probe fetches the last
+    :data:`_CANARY_LOOKBACK_DAYS` calendar days of :data:`_CANARY_SYMBOL` spot
+    1-minute candles through the SAME client (and the SAME *pace* rate gate —
+    the canary is one governed vendor call, never a cap bypass, CLAUDE.md §2
+    Rule 6): bars returned ⇒ ``True`` (the vendor serves data right now — the
+    breaker's mass empties are genuine no-data); a clean empty OR any raised
+    error ⇒ ``False`` (an unreachable/erroring vendor is exactly the
+    unhealthy case — the breaker halts as today; the probe itself NEVER
+    raises). One ``empty_breaker.canary_probe`` log per invocation names the
+    verdict.
+    """
+
+    def _probe() -> bool:
+        try:
+            if pace is not None:
+                pace()
+            end = (now_utc() if now_utc is not None else datetime.now(UTC)).date()
+            bars = fetch_candle_windows(
+                client,
+                exchange=_CANARY_EXCHANGE,
+                segment=_CANARY_SEGMENT,
+                groww_symbol=_CANARY_SYMBOL,
+                interval="1minute",
+                start=end - timedelta(days=_CANARY_LOOKBACK_DAYS),
+                end=end,
+                drop_volume=True,  # an INDEX carries no traded volume
+            )
+        except Exception as exc:  # pylint: disable=broad-except — an erroring canary is NOT health evidence
+            _LOG.warning(
+                "empty_breaker.canary_probe",
+                symbol=_CANARY_SYMBOL,
+                healthy=False,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                note="canary fetch raised — treated as vendor-unhealthy",
+            )
+            return False
+        healthy = len(bars) > 0
+        _LOG.info(
+            "empty_breaker.canary_probe",
+            symbol=_CANARY_SYMBOL,
+            bars=len(bars),
+            healthy=healthy,
+        )
+        return healthy
+
+    return _probe
+
+
 def run_groww_option_ingest(
     client: GrowwClientProtocol,
     sink: BarSink,
@@ -1589,6 +1661,7 @@ def run_groww_option_ingest(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
+    breaker_health_probe: Callable[[], bool] | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
@@ -1711,6 +1784,15 @@ def run_groww_option_ingest(
     whole-chain empty burst (the proven M&M-``&`` shape) still trips (Golden
     Rule #10: the residual false-positive budget on genuinely-illiquid in-band
     chains rides on the env-tunable thresholds, not a silent exclusion).
+    *breaker_health_probe* (DEC-EMPTY-BREAKER-CANARY-001) threads the resolved
+    breaker's vendor-health canary: consulted ONCE, single-flight, when a trip
+    rule first fires — a HEALTHY canary (data returned) means the mass empties
+    are genuine (e.g. a 2020-era dead chain at the bucket head), so the phase
+    is NOT halted (the settle law governs the empties) and the trip evidence
+    resets; an unhealthy/erroring canary halts exactly as today. Ignored when
+    an explicit *empty_breaker* instance is injected (that instance carries its
+    own probe, if any); ``None`` (the default) is byte-identical to the
+    pre-canary behaviour.
 
     *storm_breaker* (DEC-VENDOR-DOWN-BREAKER-001): the vendor-down error-storm
     breaker + dead-credential StillStale escalator, threaded verbatim into every
@@ -1740,7 +1822,13 @@ def run_groww_option_ingest(
         empty_breaker
         if empty_breaker is not None
         else resolve_empty_breaker(
-            expected_empty=_deep_strike_expected_empty(empty_retry_by_symbol, empty_retry_attempts)
+            expected_empty=_deep_strike_expected_empty(empty_retry_by_symbol, empty_retry_attempts),
+            # Vendor-health canary (DEC-EMPTY-BREAKER-CANARY-001): consulted ONCE
+            # before a trip latches — a healthy canary means the mass empties are
+            # genuine (a 2020-era dead chain at the bucket head), not a throttle,
+            # so the phase is NOT halted. None (every non-wired caller) keeps the
+            # trip-halts-immediately behaviour byte-identical.
+            health_probe=breaker_health_probe,
         )
     )
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): route every contract write through
@@ -2106,6 +2194,7 @@ __all__ = [
     "ingest_option_contract",
     "ingest_underlying_futures",
     "ingest_underlying_options",
+    "make_breaker_canary_probe",
     "plan_contract_windows",
     "reconcile_fno_ledger_windows",
     "reconcile_fno_ledger_with_lake",

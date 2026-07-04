@@ -575,13 +575,15 @@ class TestCompletenessScoreboard:
             bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
         )
         calls = {"n": 0}
-        real = _app_module.summarize_spot_datasets
+        # DEC-COMPLETENESS-FNO-SKIP-001: the shared scan is now the FNO-pruned
+        # verdict wrapper (same cache entry, same sharing law).
+        real = _app_module.summarize_spot_verdict_datasets
 
         def _counting(conn: object, lake: Path) -> list[dict[str, Any]]:
             calls["n"] += 1
             return real(conn, lake)
 
-        monkeypatch.setattr(_app_module, "summarize_spot_datasets", _counting)
+        monkeypatch.setattr(_app_module, "summarize_spot_verdict_datasets", _counting)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         # Three reads that each USED to re-run the full scan; now they share one.
         first = client.get("/api/v1/completeness/scoreboard")
