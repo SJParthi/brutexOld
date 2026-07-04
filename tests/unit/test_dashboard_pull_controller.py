@@ -2795,9 +2795,7 @@ class TestSkippedAuditWired:
             adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
         )
 
-    def test_pull_reopens_a_skipped_window_and_persists_the_cursor(
-        self, tmp_path: Path
-    ) -> None:
+    def test_pull_reopens_a_skipped_window_and_persists_the_cursor(self, tmp_path: Path) -> None:
         from brutex.data.window_ledger import REOPENED_MARKER
         from brutex.data.window_ledger_store import (
             load_skipped_audit_cursor,
@@ -2811,9 +2809,7 @@ class TestSkippedAuditWired:
         audits = [log for log in logs if log["event"] == "pull.skipped_audit"]
         assert len(audits) == 1 and audits[0]["reopened"] == 1
         persisted = load_window_ledger(tmp_path)
-        row = next(
-            r for r in persisted.records() if r.security_id == "NSE-NIFTY-25Jan24-21000-CE"
-        )
+        row = next(r for r in persisted.records() if r.security_id == "NSE-NIFTY-25Jan24-21000-CE")
         # Demoted FAILED + REOPENED (breaker-exempt) and NOT resurrected by the
         # pull-end merge-on-save (the reopened tombstone) — re-fetchable by the
         # NEXT F&O phase. Stored bars untouched by construction (DATA-SAFE).

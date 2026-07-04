@@ -1747,9 +1747,7 @@ class TestSkippedAuditStore:
             path.write_text(body, encoding="utf-8")
             with capture_logs() as logs:
                 assert load_skipped_audit_cursor(tmp_path) is None
-            assert [log["event"] for log in logs] == [
-                "window_ledger.skipped_audit_cursor_invalid"
-            ]
+            assert [log["event"] for log in logs] == ["window_ledger.skipped_audit_cursor_invalid"]
 
     def test_wrong_key_shape_is_tolerated_loudly(self, tmp_path: Path) -> None:
         import json
@@ -1830,12 +1828,8 @@ class TestSkippedAuditStore:
         def _enospc(*_a: Any, **_kw: Any) -> None:
             raise OSError(28, "No space left on device")
 
-        monkeypatch.setattr(
-            "brutex.data.atomic_io.atomic_write_simple", _enospc
-        )
+        monkeypatch.setattr("brutex.data.atomic_io.atomic_write_simple", _enospc)
         with capture_logs() as logs:
             save_skipped_audit_cursor(tmp_path, pull_id="p1", cursor_key=None)  # never raises
-        assert [log["event"] for log in logs] == [
-            "window_ledger.skipped_audit_cursor_save_failed"
-        ]
+        assert [log["event"] for log in logs] == ["window_ledger.skipped_audit_cursor_save_failed"]
         assert store_module.load_skipped_audit_cursor(tmp_path) is None

@@ -23,9 +23,7 @@ from structlog.testing import capture_logs
 _NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 
 
-def _row(
-    symbol: str, interval: str = "1minute", status: str = "SUCCESS"
-) -> tuple[Any, ...]:
+def _row(symbol: str, interval: str = "1minute", status: str = "SUCCESS") -> tuple[Any, ...]:
     """One serialised 13-tuple ledger row (only idx 1/2/5 are census-read)."""
     return (
         "groww",
@@ -152,9 +150,7 @@ class TestBuildCensus:
         assert sum(s.startswith("written-unsettled") for s in census.samples) == 5
 
     def test_empty_inputs_are_a_clean_census(self) -> None:
-        census = build_written_vs_settled_census(
-            [], [], intervals=("1minute",), symbols=()
-        )
+        census = build_written_vs_settled_census([], [], intervals=("1minute",), symbols=())
         assert census == WrittenSettledCensus(
             settled_unwritten=0, written_unsettled=0, samples=(), scanned=0
         )

@@ -2841,9 +2841,7 @@ def test_fno_pull_emits_written_settled_mismatch_warning(
     )
     save_window_ledger(seeded, tmp_lake)
 
-    monkeypatch.setattr(
-        hp, "run_groww_option_ingest", lambda *_a, **_kw: _empty_ingest_report()
-    )
+    monkeypatch.setattr(hp, "run_groww_option_ingest", lambda *_a, **_kw: _empty_ingest_report())
     sdk = _FakeSDK()
     sink = _RecordingSink()
     selected = registry.list_contracts(underlying="NIFTY")
@@ -2863,6 +2861,4 @@ def test_fno_pull_emits_written_settled_mismatch_warning(
     assert len(warnings) == 1
     assert warnings[0]["source"] == "fno"
     assert warnings[0]["settled_unwritten"] == 1
-    assert warnings[0]["samples"] == [
-        "settled-unwritten: 'NSE-NIFTY-25Jan24-21000-CE' '1minute'"
-    ]
+    assert warnings[0]["samples"] == ["settled-unwritten: 'NSE-NIFTY-25Jan24-21000-CE' '1minute'"]

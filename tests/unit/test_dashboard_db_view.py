@@ -1547,9 +1547,7 @@ class TestLedgerDeltaAwareness:
         self._append_delta(tmp_path, "BANKNIFTY")
         conn = duckdb.connect()
         try:
-            rows = phase_progress_payload(
-                conn, _ledger_path(tmp_path), current_phase="spot"
-            )
+            rows = phase_progress_payload(conn, _ledger_path(tmp_path), current_phase="spot")
         finally:
             conn.close()
         spot_row = next(r for r in rows if r["phase"] == "spot")

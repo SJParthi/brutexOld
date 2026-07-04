@@ -1243,9 +1243,7 @@ def load_skipped_audit_cursor(
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
-        _LOG.warning(
-            "window_ledger.skipped_audit_cursor_invalid", path=str(path), error=str(exc)
-        )
+        _LOG.warning("window_ledger.skipped_audit_cursor_invalid", path=str(path), error=str(exc))
         return None
     if not isinstance(payload, dict) or not isinstance(payload.get("last_audit_pull_id"), str):
         _LOG.warning(
