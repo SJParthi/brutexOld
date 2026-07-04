@@ -49,6 +49,12 @@ def test_empty_snapshot_is_all_zero() -> None:
         "rps_1s_max": 0,
         "latency_ms_p95": 0.0,
         "in_flight": 0,
+        # ADDITIVE lifetime/failure keys (DEC-PULL-TELEMETRY-TRIAD-001) — the six keys
+        # above are the pre-existing contract, pinned byte-identical by this test.
+        "issued": 0,
+        "completed": 0,
+        "failed": 0,
+        "failed_rps": 0.0,
     }
 
 
@@ -196,3 +202,94 @@ def test_in_flight_balances_under_concurrency() -> None:
     snap = meter.snapshot()
     assert snap["in_flight"] == 0  # no lost update across 2000 interleaved brackets
     assert snap["rps_1s_max"] <= workers * iterations  # the peak can never exceed issued
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Lifetime issued/completed/failed totals + failed_rps (DEC-PULL-TELEMETRY-TRIAD-001)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def test_lifetime_totals_count_issued_completed_and_failed() -> None:
+    """``issued``/``completed``/``failed`` are lifetime totals: 5 issued = 3 ok + 2 failed."""
+    meter = CallMeter(clock=_Clock(), emit_log=False)
+    for _ in range(3):
+        _record(meter, completed=True)
+    for _ in range(2):
+        _record(meter, completed=False)
+    snap = meter.snapshot()
+    assert snap["issued"] == 5
+    assert snap["completed"] == 3
+    assert snap["failed"] == 2
+
+
+def test_lifetime_totals_never_reset_after_window_eviction() -> None:
+    """The rolling windows evict; the LIFETIME totals do not (the 06:00-blip accounting)."""
+    clock = _Clock()
+    meter = CallMeter(clock=clock, emit_log=False)
+    _record(meter, completed=False)
+    _record(meter, completed=True)
+    clock.advance(ACHIEVED_WINDOW_S + 1.0)  # both instants age out of the windows
+    snap = meter.snapshot()
+    assert snap["effective_rps"] == 0.0  # windowed gauges evicted
+    assert snap["failed_rps"] == 0.0
+    assert snap["issued"] == 2  # lifetime totals survive
+    assert snap["completed"] == 1
+    assert snap["failed"] == 1
+
+
+def test_failed_rps_is_a_trailing_window_average_with_eviction() -> None:
+    """``failed_rps`` mirrors ``effective_rps``: failures-in-window / the FIXED window."""
+    clock = _Clock()
+    meter = CallMeter(clock=clock, emit_log=False)
+    for _ in range(5):
+        _record(meter, completed=False)
+    snap = meter.snapshot()
+    assert snap["failed_rps"] == round(5 / ACHIEVED_WINDOW_S, 2)
+    assert snap["effective_rps"] == 0.0  # failures never feed the achieved gauges
+    clock.advance(ACHIEVED_WINDOW_S + 0.5)
+    assert meter.snapshot()["failed_rps"] == 0.0  # aged out
+
+
+def test_failed_stop_evicts_stale_completions_too() -> None:
+    """A failed stop runs the SAME eviction, so a later snapshot never over-reads."""
+    clock = _Clock()
+    meter = CallMeter(clock=clock, emit_log=False)
+    _record(meter, completed=True)
+    clock.advance(ACHIEVED_WINDOW_S + 1.0)
+    _record(meter, completed=False)  # the failed bracket evicts the stale completion
+    snap = meter.snapshot()
+    assert snap["effective_rps"] == 0.0
+    assert snap["failed_rps"] == round(1 / ACHIEVED_WINDOW_S, 2)
+
+
+def test_existing_snapshot_keys_are_byte_identical_under_mixed_traffic() -> None:
+    """PARITY PIN (Session-B contract): the six pre-existing keys read the SAME values a
+    pre-DEC-PULL-TELEMETRY-TRIAD-001 meter produced for the same traffic — the new keys
+    are STRICTLY additive (failures still never feed the achieved gauges)."""
+    clock = _Clock()
+    meter = CallMeter(clock=clock, emit_log=False)
+    _record(meter, elapsed_ms=100.0, completed=True)
+    _record(meter, elapsed_ms=999.0, completed=False)  # failed latency NEVER recorded
+    clock.advance(0.5)
+    _record(meter, elapsed_ms=200.0, completed=True)
+    snap = meter.snapshot()
+    legacy = {
+        k: snap[k]
+        for k in (
+            "effective_rps",
+            "rate_achieved",
+            "rps_1s",
+            "rps_1s_max",
+            "latency_ms_p95",
+            "in_flight",
+        )
+    }
+    assert legacy == {
+        "effective_rps": round(2 / ACHIEVED_WINDOW_S, 2),
+        "rate_achieved": round(2 / ACHIEVED_WINDOW_S, 2),
+        "rps_1s": 2,
+        "rps_1s_max": 2,
+        "latency_ms_p95": 200.0,  # p95 over {100, 200} — the failed 999 ms is absent
+        "in_flight": 0,
+    }
+    assert set(snap) - set(legacy) == {"issued", "completed", "failed", "failed_rps"}

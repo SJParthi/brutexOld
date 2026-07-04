@@ -9,7 +9,9 @@
  * right of the page (the COLLAPSED default — same small footprint as before, so it does
  * NOT reflow or cover any page content):
  *
- *   - a STALL light: green = flowing, red = stalled, dark = idle (no pull running);
+ *   - a STALL light: green = flowing, red = stalled OR failing (issuing but every call
+ *     fails — the meter's measured failed_rps, DEC-PULL-TELEMETRY-TRIAD-001), dark =
+ *     idle (no pull running);
  *   - req/sec  (achieved / allowed, with the 8 r/s ceiling);
  *   - req/min  (rolling-60s issue count, with the 500/min cap);
  *   - req/10min (MEASURED rolling-600s issue count — the new metric);
@@ -325,9 +327,17 @@
       return;
     }
     // "idle" and "done" (pull just finished — DEC-RATE-STALL-PULL-GATE-001) both take
-    // the dark idle styling; the state TEXT still shows the honest backend word.
+    // the dark idle styling; "failing" (issuing-but-all-failing, the meter's measured
+    // failed_rps — DEC-PULL-TELEMETRY-TRIAD-001) takes the RED stalled styling; the
+    // state TEXT still shows the honest backend word.
     el.classList.remove("flowing", "stalled", "idle");
-    el.classList.add(state === "flowing" || state === "stalled" ? state : "idle");
+    var cls = "idle";
+    if (state === "flowing") {
+      cls = "flowing";
+    } else if (state === "stalled" || state === "failing") {
+      cls = "stalled";
+    }
+    el.classList.add(cls);
   }
 
   function setText(id, value) {

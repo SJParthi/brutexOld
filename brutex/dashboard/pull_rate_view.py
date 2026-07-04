@@ -41,6 +41,10 @@ the wall-clock age of its last update, :func:`build_pull_rate_view` derives a
   achieved r/s at/below :data:`STALL_RPS_FLOOR`, or (when the caller asserts
   ``pull_active=True``) NO tick within ``stale_after_s`` at all → a RED light. STALLED
   is NEVER shown when the caller knows no pull is running.
+* ``failing`` — the meter-fed variant of ``stalled`` where the transport meter's MEASURED
+  ``failed_rps`` shows calls actively burning while the completed-rate sits at/below the
+  floor (an issuing-but-ALL-FAILING pull — DEC-PULL-TELEMETRY-TRIAD-001, the #1022
+  follow-up): a RED light with the honest "failing" word; ``stalled`` stays ``True``.
 * ``flowing`` — a recent tick with achieved r/s above the floor → a GREEN light.
 
 ``pull_active=None`` (the default) means the caller has NO pull-run signal (e.g. the
@@ -107,6 +111,13 @@ FLOW_STALLED: Final[str] = "stalled"
 #: dark light, honest label, never a red "stalled" on a completed pull
 #: (DEC-RATE-STALL-PULL-GATE-001).
 FLOW_DONE: Final[str] = "done"
+#: An ISSUING-but-ALL-FAILING pull (DEC-PULL-TELEMETRY-TRIAD-001, closing the #1022
+#: flagged follow-up): the meter's MEASURED completed-rate sits at/below the stall floor
+#: while its MEASURED ``failed_rps`` shows calls actively burning — the honest verdict is
+#: this DISTINCT red "failing" (calls are being spent and every one fails), not the
+#: ambiguous "stalled" (nothing happening at all). ``stalled`` stays ``True`` for it, so
+#: every existing red-light consumer keeps treating it as degraded.
+FLOW_FAILING: Final[str] = "failing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +176,13 @@ class PullRateView:
         (measured completed) slot (the over-report + fake-alive bug this decision fixes). Zeroed
         when idle. Always populated (it is a pure projection of ``recent_minute``), so the spot
         phase also carries it as a secondary view alongside its real ``req_per_sec_achieved``.
+    req_per_sec_failed
+        The transport meter's MEASURED rolling failed-calls rate (``failed_rps`` — calls
+        that FAILED per second over the meter's trailing window;
+        DEC-PULL-TELEMETRY-TRIAD-001). The evidence behind the :data:`FLOW_FAILING`
+        verdict: an issuing-but-all-failing pull shows the burn rate here while
+        ``req_per_sec_achieved`` honestly reads ~0. ``0.0`` when the meter is absent
+        (the admission-only phases push no failure measurement) and zeroed when idle.
     recent_429_count
         Recent vendor 429 hits (``recent_hits``) — context for WHY the achieved rate may
         sit below the ceiling. Zeroed when idle.
@@ -188,6 +206,7 @@ class PullRateView:
     req_per_10min: int
     req_per_hour_measured: int
     req_per_min_rate: float
+    req_per_sec_failed: float
     recent_429_count: int
     seconds_since_update: float
     ceiling_rps: float
@@ -217,6 +236,7 @@ def build_pull_rate_view(
     recent_600s: int = 0,
     recent_3600s: int = 0,
     meter_present: bool = True,
+    failed_rps: float = 0.0,
     pull_active: bool | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
@@ -257,6 +277,15 @@ def build_pull_rate_view(
         signal (``recent_minute == 0`` ⇒ stalled / idle) and ``req_per_sec_achieved`` stays a
         HONEST ``0`` (no fabricated completed-rate), the per-minute admission average being
         carried separately in :attr:`~PullRateView.req_per_min_rate`.
+    failed_rps
+        The transport meter's MEASURED rolling failed-calls rate (the meter snapshot's
+        ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001, closing the #1022 flagged
+        follow-up). On the METER-FED path (``meter_present=True``) a completed-rate
+        at/below the stall floor WITH ``failed_rps > 0`` reads the distinct
+        :data:`FLOW_FAILING` verdict — the pull IS burning calls and every one fails —
+        instead of the ambiguous "stalled" (``stalled`` stays ``True`` either way, so
+        red-light consumers are unchanged). The default ``0.0`` (an older panel / no
+        meter / no failures) is BYTE-IDENTICAL to the pre-decision projection.
     pull_active
         The caller's AUTHORITATIVE pull-run signal (DEC-RATE-STALL-PULL-GATE-001).
         ``False`` = the caller KNOWS no pull is running (the dashboard's
@@ -304,6 +333,7 @@ def build_pull_rate_view(
             req_per_10min=0,
             req_per_hour_measured=0,
             req_per_min_rate=0.0,
+            req_per_sec_failed=0.0,
             recent_429_count=0,
             seconds_since_update=seconds_since_update,
             ceiling_rps=CEILING_RPS_LIMIT,
@@ -335,23 +365,33 @@ def build_pull_rate_view(
     req_per_min_rate = recent_minute / 60.0
 
     if meter_present:
-        # The spot phase: ``effective_rps`` is the transport CallMeter's MEASURED completed-rate,
-        # so the verdict reads it directly — an issued-but-all-failing pull (admissions happening
-        # but nothing COMPLETING) reads STALLED because its measured completed-rate is at/below the
-        # floor. ``req_per_sec_achieved`` carries that real measured number.
+        # The meter-fed path: ``effective_rps`` is the transport CallMeter's MEASURED
+        # completed-rate, so the verdict reads it directly — an issued-but-all-failing pull
+        # (admissions happening but nothing COMPLETING) reads at/below the floor. With the
+        # meter's MEASURED ``failed_rps`` now threaded in (DEC-PULL-TELEMETRY-TRIAD-001),
+        # that case splits honestly: failures actively burning ⇒ the DISTINCT "failing"
+        # verdict (calls spent, all failing — the #1022 flagged follow-up); no failures ⇒
+        # the plain "stalled" (nothing happening). ``failed_rps=0.0`` (the default — an
+        # older panel / no failures) keeps the projection byte-identical.
         stalled = effective_rps <= stall_rps_floor
+        failing = stalled and failed_rps > 0.0
         achieved = effective_rps
+        measured_failed_rps = failed_rps
     else:
         # The metadata + F&O phases: the meter is unreachable from the sampler seam, so there is
         # NO measured completed-rate. Fall back to the controller's ADMISSION signal — a pull with
         # ZERO admissions in the trailing minute is idle/stalled; any admissions ⇒ flowing — and
         # keep ``achieved`` an HONEST 0 (never the fabricated ``recent_minute / 60`` the old
         # sampler poured into this slot, which both over-reported AND blinded the stall verdict).
+        # NO ``failing`` verdict here: with no meter there is no measured failure rate to
+        # evidence it (the honest envelope — never a fabricated "failing").
         stalled = recent_minute == 0
+        failing = False
         achieved = 0.0
+        measured_failed_rps = 0.0
 
     return PullRateView(
-        flow_state=FLOW_STALLED if stalled else FLOW_FLOWING,
+        flow_state=FLOW_FAILING if failing else (FLOW_STALLED if stalled else FLOW_FLOWING),
         active=True,
         stalled=stalled,
         req_per_sec_achieved=achieved,
@@ -366,6 +406,9 @@ def build_pull_rate_view(
         req_per_10min=recent_600s,
         req_per_hour_measured=recent_3600s,
         req_per_min_rate=req_per_min_rate,
+        # The MEASURED failed-calls rate rides along as evidence on the active view; the
+        # meter-less phases carry an honest 0.0 (no failure measurement exists there).
+        req_per_sec_failed=measured_failed_rps,
         recent_429_count=recent_429_count,
         seconds_since_update=seconds_since_update,
         ceiling_rps=CEILING_RPS_LIMIT,
@@ -384,6 +427,7 @@ def build_pull_rate_view_merged(
     panel_recent_600s: int = 0,
     panel_recent_3600s: int = 0,
     panel_meter_present: bool = True,
+    panel_failed_rps: float = 0.0,
     panel_pull_active: bool | None = None,
     bridge_effective_rps: float | None = None,
     bridge_current_rps: float | None = None,
@@ -394,6 +438,7 @@ def build_pull_rate_view_merged(
     bridge_recent_600s: int | None = None,
     bridge_recent_3600s: int | None = None,
     bridge_meter_present: bool = True,
+    bridge_failed_rps: float | None = None,
     bridge_pull_active: bool | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
@@ -434,6 +479,15 @@ def build_pull_rate_view_merged(
         sampler) — DEC-RATE-WIDGET-FNO-HONEST-001. Threaded into
         :func:`build_pull_rate_view` so the ``stalled`` verdict reads the measured rate when
         present and the admission signal otherwise. Default ``True`` (the meter-fed contract).
+    panel_failed_rps
+        The in-memory panel's MEASURED rolling failed-calls rate (the meter snapshot's
+        ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001), threaded into
+        :func:`build_pull_rate_view` so an issuing-but-all-failing meter-fed pull reads
+        the distinct :data:`FLOW_FAILING` verdict. Default ``0.0`` — byte-identical to
+        the pre-decision projection.
+    bridge_failed_rps
+        The bridge snapshot's failed-calls rate (``None`` when the bridge file is absent
+        or predates the field — projected as an honest ``0.0``, never fabricated).
     bridge_effective_rps, bridge_current_rps, bridge_recent_minute, bridge_recent_429_count
         The bridge snapshot's measured rate fields (``None`` when no bridge file is present).
     bridge_seconds_since_update
@@ -484,6 +538,7 @@ def build_pull_rate_view_merged(
             recent_600s=bridge_recent_600s if bridge_recent_600s is not None else 0,
             recent_3600s=bridge_recent_3600s if bridge_recent_3600s is not None else 0,
             meter_present=bridge_meter_present,
+            failed_rps=bridge_failed_rps if bridge_failed_rps is not None else 0.0,
             pull_active=bridge_pull_active,
             last_update_monotonic=0.0,
             now_monotonic=bridge_seconds_since_update,
@@ -499,6 +554,7 @@ def build_pull_rate_view_merged(
         recent_600s=panel_recent_600s,
         recent_3600s=panel_recent_3600s,
         meter_present=panel_meter_present,
+        failed_rps=panel_failed_rps,
         pull_active=panel_pull_active,
         last_update_monotonic=0.0 if math.isfinite(panel_seconds_since_update) else float("-inf"),
         now_monotonic=panel_seconds_since_update
@@ -513,6 +569,7 @@ __all__ = [
     "CEILING_PER_MIN_LIMIT",
     "CEILING_RPS_LIMIT",
     "FLOW_DONE",
+    "FLOW_FAILING",
     "FLOW_FLOWING",
     "FLOW_IDLE",
     "FLOW_STALLED",
