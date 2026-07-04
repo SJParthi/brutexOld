@@ -132,19 +132,20 @@ def _dedup() -> ComboDedup:
 # RE-ATTRIBUTION path.
 
 
-class _ForcedFallbackSim(ResidentTradeSim):
+def _forced_fallback_sim(
+    bars: Sequence[CandleBar], bar_bits: Sequence[int], *, tf_minutes: int
+) -> ResidentTradeSim:
     """A ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
 
     Patched over ``sweep_run.ResidentTradeSim`` to force the WHOLE sweep onto the
     bit-identical Python oracle (the wired-vs-unwired forcing seam — the same
-    ``_rust = None`` mechanism the rust_trade_sim fallback tests use).
+    instance-level ``_rust = None`` mechanism the rust_trade_sim fallback tests
+    use; a FACTORY rather than a subclass, so no ``__init__`` overwrites the
+    attribute the superclass ctor just built).
     """
-
-    def __init__(
-        self, bars: Sequence[CandleBar], bar_bits: Sequence[int], *, tf_minutes: int
-    ) -> None:
-        super().__init__(bars, bar_bits, tf_minutes=tf_minutes)
-        self._rust = None
+    sim = ResidentTradeSim(bars, bar_bits, tf_minutes=tf_minutes)
+    sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
+    return sim
 
 
 def _chunk_raising_sim(exc_factory: Callable[[], BaseException]) -> type[ResidentTradeSim]:
@@ -172,10 +173,16 @@ class _ShortChunkSim(ResidentTradeSim):
         return super().simulate_masks(masks, **kwargs)[:-1]
 
 
-def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[ResidentTradeSim]:
-    """A ResidentTradeSim subclass whose CONSTRUCTION raises — ctor-failure injection."""
+def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[object]:
+    """A ResidentTradeSim STAND-IN whose CONSTRUCTION raises — ctor-failure injection.
 
-    class _CtorRaisesSim(ResidentTradeSim):
+    Deliberately NOT a subclass: the fake must raise BEFORE any sim state exists
+    (there is no half-built superclass to ``__init__``), and the sweep only ever
+    CALLS the patched ``sweep_run.ResidentTradeSim`` name, so a
+    signature-compatible stand-in exercises the exact production ctor wrap.
+    """
+
+    class _CtorRaisesSim:
         def __init__(self, *args: object, **kwargs: object) -> None:
             raise exc_factory()
 
@@ -2021,7 +2028,7 @@ class TestTradeSimPathObservability:
         bars = _trending_bars()
         cfg = _make_config()
         wired = _run_sweep(tmp_path, "w", bars, cfg)
-        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
         with capture_logs() as logs:
             fallback = _run_sweep(tmp_path, "f", bars, cfg)
         events = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
@@ -2506,7 +2513,7 @@ class TestU128EnvelopeThroughSweep:
             start_equity_paisa=cfg.start_equity_paisa,
         )
         assert direct.total_trades > 0
-        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
         fallback = _run_sweep(tmp_path, "f", bars, cfg)
         assert wired.persisted == fallback.persisted == 1
         assert wired.store_content_hash == fallback.store_content_hash
@@ -2528,7 +2535,7 @@ class TestU128EnvelopeThroughSweep:
         # … and the sweep-level path signal reads Python.
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is False
-        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
         fallback = _run_sweep(tmp_path, "f", bars, cfg, kernel=kernel)
         assert wired.store_content_hash == fallback.store_content_hash
         assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
@@ -2562,7 +2569,7 @@ class TestMixedEraCheckpointResume:
 
         # Era 1: the tuple completes on the PYTHON engine (pre-wiring build).
         with monkeypatch.context() as m:
-            m.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+            m.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
             first = _run_sweep(tmp_path, "t", bars, cfg, digest=digest)
         assert first.sentinel_written
         python_era_bytes = store_path.read_bytes()

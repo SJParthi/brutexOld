@@ -112,10 +112,6 @@ from brutex.engine.trade_sim import (
 from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    # ``fno_math`` is imported lazily at construction (the wheel may be absent);
-    # the name is needed statically for the ``_rust`` attribute annotation only.
-    import fno_math
-
     from brutex.data.models import CandleBar
 
     # ``ClosedTrade`` is imported lazily at its construction site (see the note in
@@ -300,7 +296,12 @@ class ResidentTradeSim:
         # never crosses the FFI boundary; the whole object serves the bit-exact
         # Python oracle instead, and says so LOUDLY (never a silent divergence,
         # never a raise the pure-Python engine would not have raised).
-        self._rust: fno_math.ResidentSweepSim | None = None
+        # ``fno_math`` is imported ONCE, lazily, at the construction just below
+        # (the wheel may be absent — the SINGLE import site), so the resident
+        # kernel handle is typed ``object`` with a targeted ignore at its one
+        # call site — the same lazy-wheel convention
+        # :class:`~brutex.engine.combo_mask.ResidentBarBuffer` uses.
+        self._rust: object | None = None
         reason = _construction_fallback_reason(self._bar_bits, open_p, high_p, low_p, close_p)
         if reason is None:
             try:
@@ -427,7 +428,7 @@ class ResidentTradeSim:
         sl_next_open = policy.stop_loss is LevelFill.NEXT_OPEN
         tp_next_open = policy.take_profit is LevelFill.NEXT_OPEN
         tp_first = policy.same_bar is SameBarTie.TP_FIRST
-        raw = rust.simulate_masks(
+        raw = rust.simulate_masks(  # type: ignore[attr-defined]
             list(masks),
             direction is Side.BUY,
             stop_loss_paisa,

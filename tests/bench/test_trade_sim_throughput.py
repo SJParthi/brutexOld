@@ -254,22 +254,21 @@ def test_resident_trade_sim_wired_vs_fallback_speedup() -> None:
     from brutex.engine.rust_trade_sim import ResidentTradeSim
     from brutex.strategies.types import Side
 
-    class _ForcedFallbackTradeSim(ResidentTradeSim):
-        """Kernel-disabled twin — the same subclass seam the unit/golden
-        `_ForcedFallbackSim` uses (protected access is subclass-legal)."""
-
-        def __init__(
-            self, bars: Sequence[CandleBar], bits: Sequence[int], *, tf_minutes: int
-        ) -> None:
-            super().__init__(bars, bits, tf_minutes=tf_minutes)
-            self._rust = None
+    def _forced_fallback_trade_sim(
+        bars: Sequence[CandleBar], bits: Sequence[int], *, tf_minutes: int
+    ) -> ResidentTradeSim:
+        """Kernel-disabled twin — the same instance-level ``_rust = None``
+        factory seam the unit/golden `_forced_fallback_sim` fakes use."""
+        sim = ResidentTradeSim(bars, bits, tf_minutes=tf_minutes)
+        sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
+        return sim
 
     bars, bits = _make_candle_window(6_000)
     masks = _make_masks(24)
     sl, tp = 8_000, 12_000
     sim = ResidentTradeSim(bars, bits, tf_minutes=1)
     assert sim.rust_active, "wheel is built in CI — the wired arm must engage the kernel"
-    fallback = _ForcedFallbackTradeSim(bars, bits, tf_minutes=1)
+    fallback = _forced_fallback_trade_sim(bars, bits, tf_minutes=1)
     assert not fallback.rust_active
 
     def _rust_arm() -> None:
