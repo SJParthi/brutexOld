@@ -21,7 +21,12 @@ pins the parity — a drift on EITHER side fails that side's golden test):
   any depth. Everything else is excluded by construction (``target/``,
   ``tests/``, ``fuzz/``, ``python/``, ``benches/``, ``Cargo.lock``,
   ``build.rs``, …). Symlinks are followed (both sides use is-dir / is-file
-  predicates that follow links).
+  predicates that follow links). HONEST residual (Golden Rule #10): the
+  excluded ``python/`` shim IS shipped wheel behaviour — maturin's mixed
+  layout packages ``rust/<crate>/python/<pkg>/__init__.py`` into the wheel —
+  so a wheel stale ONLY in the shim escapes this digest (and the freshness
+  stages, which fingerprint the compiled module, not shim content); folding
+  the shim into a future FRAMING v2 is the named follow-up.
 * **Ordering** — entries sorted ascending by the UTF-8 BYTES of the relative
   path (``/``-separated, no leading ``./``). UTF-8 byte order equals code
   point order, so this matches Rust's byte-wise ``String`` sort exactly; the

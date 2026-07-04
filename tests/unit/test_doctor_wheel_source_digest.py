@@ -25,6 +25,7 @@ the freshness stage + the shared ``BRUTEX_SKIP_WHEEL_FRESHNESS`` escape.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import types
 from pathlib import Path
@@ -39,6 +40,42 @@ from brutex.doctor import (
 from brutex.wheel_digest import SourceDigestError, crate_source_digest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _skip_if_local_wheels_stale() -> None:
+    """Skip a live-PASS assertion on a LOCAL machine with a stale wheel.
+
+    The live-PASS tests require the installed wheels to be freshly built
+    from THIS tree. In CI that holds by construction (ci.yml installs
+    `./rust/*` from the job checkout) — so under CI (the `CI` env GitHub
+    Actions always sets) this NEVER skips and a mismatch fails loudly, a
+    real regression. Locally, a developer with a stale wheel is EXACTLY the
+    class the doctor deliberately downgrades to a non-fatal WARN — a red
+    unit suite there would be self-inflicted noise, so the tests skip with
+    the exact rebuild command instead (hostile-review fold,
+    DEC-RUST-SOURCE-DIGEST-TWIN-001). A wheel that fails to IMPORT does NOT
+    skip — the tests then fail loudly, because that is breakage, not
+    staleness.
+    """
+    if os.environ.get("CI"):
+        return
+    stale: list[str] = []
+    for module_name, crate in (
+        ("trading_core._trading_core", "rust/trading-core"),
+        ("fno_math._fno_math", "rust/fno-math"),
+    ):
+        try:
+            compiled = importlib.import_module(module_name)
+        except ImportError:
+            return  # broken, not stale — let the tests fail loudly
+        if getattr(compiled, "__source_digest__", None) != crate_source_digest(REPO_ROOT / crate):
+            stale.append(crate)
+    if stale:
+        pytest.skip(
+            "installed wheel(s) stale vs this checkout (the exact class the "
+            "doctor downgrades to a non-fatal WARN) — rebuild via "
+            "`maturin develop --release` in " + " and ".join(stale)
+        )
 
 
 def _mini_crate(tmp_path: Path) -> Path:
@@ -76,10 +113,14 @@ class TestLiveWheels:
     This is the live proof the PR promises: build.rs baked the digest, the
     doctor recomputes it with the Python twin over the checkout, and the two
     agree byte-for-byte. In CI the wheels are always built from the job's
-    own checkout, so this holds there by construction.
+    own checkout, so this holds there by construction — and these tests
+    HARD-assert there. On a LOCAL machine with a genuinely stale wheel they
+    skip with the rebuild command instead (see
+    :func:`_skip_if_local_wheels_stale`).
     """
 
     def test_trading_core_live_pass_via_default_crate_root(self) -> None:
+        _skip_if_local_wheels_stale()
         result = check_wheel_source_digest(env={})
         assert result.name == "wheel_source_digest"
         assert result.status == "PASS"
@@ -89,6 +130,7 @@ class TestLiveWheels:
         assert crate_source_digest(REPO_ROOT / "rust" / "trading-core") in result.detail
 
     def test_fno_math_live_pass_via_default_crate_root(self) -> None:
+        _skip_if_local_wheels_stale()
         result = check_fno_math_wheel_source_digest(env={})
         assert result.name == "wheel_source_digest_fno_math"
         assert result.status == "PASS"
@@ -96,6 +138,7 @@ class TestLiveWheels:
         assert crate_source_digest(REPO_ROOT / "rust" / "fno-math") in result.detail
 
     def test_installed_stamp_matches_twin_recompute_directly(self) -> None:
+        _skip_if_local_wheels_stale()
         # Belt-and-suspenders: the raw baked attribute equals the twin's
         # recompute for BOTH wheels (no doctor plumbing in between). The
         # compiled submodules load dynamically — repo convention, they carry
@@ -110,6 +153,38 @@ class TestLiveWheels:
         )
 
 
+class TestLocalStaleSkipGuard:
+    """The live-PASS skip guard itself: local-stale skips, CI never does."""
+
+    def test_local_stale_wheel_skips_naming_rebuild_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No CI env + a stale trading_core stamp → the guard skips and the
+        # message names the exact rebuild command + the stale crate dir.
+        monkeypatch.delenv("CI", raising=False)
+        _fake_compiled(monkeypatch, "trading_core", "_trading_core", __source_digest__="0" * 64)
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            _skip_if_local_wheels_stale()
+        assert "maturin develop --release" in str(excinfo.value)
+        assert "rust/trading-core" in str(excinfo.value)
+        assert "stale" in str(excinfo.value)
+
+    def test_ci_env_never_skips_even_when_stale(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Under CI the wheels are built from the job checkout by
+        # construction, so a mismatch is a REAL regression — the guard must
+        # return silently and let the live assertions fail loudly.
+        monkeypatch.setenv("CI", "true")
+        _fake_compiled(monkeypatch, "trading_core", "_trading_core", __source_digest__="0" * 64)
+        _skip_if_local_wheels_stale()
+
+    def test_broken_import_does_not_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A wheel that fails to IMPORT is breakage, not staleness — the
+        # guard returns silently so the live tests fail loudly.
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setitem(sys.modules, "trading_core._trading_core", None)
+        _skip_if_local_wheels_stale()
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Branch coverage — every arm of the common helper
 # ────────────────────────────────────────────────────────────────────────
@@ -122,6 +197,7 @@ class TestCheckWheelSourceDigest:
         assert "BRUTEX_SKIP_WHEEL_FRESHNESS=1" in result.detail
 
     def test_env_override_other_value_does_not_skip(self) -> None:
+        _skip_if_local_wheels_stale()  # asserts a live PASS, same envelope
         result = check_wheel_source_digest(env={"BRUTEX_SKIP_WHEEL_FRESHNESS": "0"})
         assert result.status == "PASS"
 
@@ -183,6 +259,26 @@ class TestCheckWheelSourceDigest:
         assert result.status == "WARN"
         assert "source-digest recompute failed" in result.detail
         assert "non-UTF-8 file name synthetic" in result.detail
+
+    def test_warn_when_twin_recompute_hits_recursion_limit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An adversarial symlink CYCLE under src/ makes the twin's recursive
+        # walk raise RecursionError — which is NOT an OSError, so before the
+        # hostile-review fold it escaped the recompute catch and CRASHED
+        # run_doctor instead of WARNing. Driven via a monkeypatched recompute
+        # (a real ~1000-deep cycle walk is wasteful and depth-limit
+        # dependent); the exception TYPE is the thing under test.
+        root = _mini_crate(tmp_path)
+
+        def _cycle(_: Path) -> str:
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr("brutex.doctor.crate_source_digest", _cycle)
+        result = check_wheel_source_digest(crate_root=root, env={})
+        assert result.status == "WARN"
+        assert "source-digest recompute failed" in result.detail
+        assert "maximum recursion depth exceeded" in result.detail
 
     def test_warn_on_mismatch_names_both_digests(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -249,6 +345,7 @@ class TestFnoMathTwinBinding:
 
 class TestSourceDigestAggregation:
     def test_run_doctor_includes_both_digest_stages_live(self, tmp_path: Path) -> None:
+        _skip_if_local_wheels_stale()  # live PASS through the aggregate
         report = run_doctor(
             audit_dir=tmp_path / "no_audit",
             runtime_file=tmp_path / "no_runtime.json",

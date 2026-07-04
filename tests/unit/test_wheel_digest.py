@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import blake3
@@ -33,6 +34,46 @@ def _write(tree: Path, rel: str, data: bytes) -> None:
     target = tree / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
+
+
+def _write_non_utf8_named_file(directory: Path, name_bytes: bytes) -> None:
+    """Create a file whose NAME is not valid UTF-8, or skip where impossible.
+
+    Linux (CI) accepts arbitrary filename bytes, so the framing's loud
+    rejection is exercised there on every run. The §8 reference machine
+    (Apple M4 Pro / APFS) REFUSES non-UTF-8 names at ``write`` time (EILSEQ)
+    — on such a filesystem the rejection arm is untestable, so the test must
+    SKIP with the reason, never error out mid-setup (hostile-review fold,
+    DEC-RUST-SOURCE-DIGEST-TWIN-001).
+    """
+    bad = os.path.join(os.fsdecode(bytes(directory)), os.fsdecode(name_bytes))
+    try:
+        Path(bad).write_bytes(b"junk")
+    except OSError as exc:
+        pytest.skip(
+            f"filesystem refuses non-UTF-8 file names ({exc!r}) — the framing "
+            "rejection arm is exercised on Linux CI"
+        )
+
+
+def _casefold_nfd_dedup(files: dict[str, bytes]) -> dict[str, bytes]:
+    """Drop drawn names that collide on a case-/normalization-insensitive FS.
+
+    APFS default volumes (the §8 reference machine) fold case AND normalize
+    Unicode, so two hypothesis-drawn names like ``src/A.rs`` / ``src/a.rs``
+    would land in ONE on-disk file while the oracle frames two entries. Keyed
+    on ``NFD``-normalized ``casefold()`` — a superset of APFS's folding for
+    the drawn alphabet — first drawn name wins, deterministic for shrinking.
+    """
+    unique: dict[str, bytes] = {}
+    seen: set[str] = set()
+    for rel, data in files.items():
+        folded = unicodedata.normalize("NFD", rel).casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        unique[rel] = data
+    return unique
 
 
 def _manual_digest(entries: list[tuple[str, bytes]]) -> str:
@@ -121,8 +162,7 @@ class TestCollectDigestFiles:
         # BEFORE suffix classification on both sides — so even a non-.rs bad
         # name rejects, keeping the two sides byte-identical about the set.
         (tmp_path / "src").mkdir()
-        bad = os.path.join(os.fsdecode(bytes(tmp_path / "src")), os.fsdecode(b"bad\xffname.txt"))
-        Path(bad).write_bytes(b"junk")
+        _write_non_utf8_named_file(tmp_path / "src", b"bad\xffname.txt")
         with pytest.raises(SourceDigestError, match="non-UTF-8 file name"):
             collect_digest_files(tmp_path)
 
@@ -197,8 +237,7 @@ class TestCrateSourceDigest:
 
     def test_non_utf8_rs_name_raises_source_digest_error(self, tmp_path: Path) -> None:
         (tmp_path / "src").mkdir()
-        bad = os.path.join(os.fsdecode(bytes(tmp_path / "src")), os.fsdecode(b"bad\xff.rs"))
-        Path(bad).write_bytes(b"junk")
+        _write_non_utf8_named_file(tmp_path / "src", b"bad\xff.rs")
         with pytest.raises(SourceDigestError, match="non-UTF-8 file name"):
             crate_source_digest(tmp_path)
 
@@ -219,13 +258,19 @@ class TestCrateSourceDigest:
 
         Bounded property (Golden Rule #12 — 7 test types): file names drawn
         from letters/digits (incl. Latin-Extended, exercising multi-byte
-        UTF-8 in the sort key), contents arbitrary bytes.
+        UTF-8 in the sort key), contents arbitrary bytes. Drawn names are
+        first deduplicated on their casefolded-NFD form
+        (:func:`_casefold_nfd_dedup`) so a case-/normalization-insensitive
+        filesystem (APFS default volumes — the §8 reference machine) can
+        never collapse two drawn stems into one on-disk file while the
+        oracle frames both — the property stays deterministic everywhere.
         """
+        unique = _casefold_nfd_dedup(files)
         with tempfile.TemporaryDirectory() as raw:
             tree = Path(raw)
-            for rel, data in files.items():
+            for rel, data in unique.items():
                 _write(tree, rel, data)
-            assert crate_source_digest(tree) == _manual_digest(list(files.items()))
+            assert crate_source_digest(tree) == _manual_digest(list(unique.items()))
 
 
 class TestRealCrateTrees:

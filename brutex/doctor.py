@@ -815,7 +815,8 @@ def _check_one_wheel_source_digest(
     * No crate source tree next to the installed ``brutex`` package (a
       wheel-only install with no repo checkout) → SKIP, honestly not
       checkable.
-    * Twin recompute fails (unreadable tree / non-UTF-8 name) → WARN.
+    * Twin recompute fails (unreadable tree / non-UTF-8 name / a
+      symlink-cycle ``RecursionError``) → WARN.
     * Digest mismatch → **WARN (non-fatal)** naming BOTH hex digests + the
       actionable ``maturin develop --release`` rebuild hint (consistent with
       the freshness stage's WARN semantics — an operator observation, never
@@ -828,7 +829,13 @@ def _check_one_wheel_source_digest(
     wheel — this stage has no CI teeth and claims none. The digest INPUT is
     read from the checkout by pure Python and hashed with the ``blake3``
     PyPI package (a BruteX base dependency), so a stale wheel cannot
-    influence its own expected value.
+    influence its own expected value. ONE NAMED residual: FRAMING v1
+    excludes the crate's ``python/`` shim, yet maturin's mixed layout
+    packages ``rust/<crate>/python/<pkg>/__init__.py`` INTO the wheel — so
+    a local wheel stale ONLY in the shim escapes all four wheel stages
+    (this digest covers the compiled kernel's source; the freshness stages
+    fingerprint the compiled module's version+symbols, not shim content).
+    Folding the shim into a future FRAMING v2 is the named follow-up.
     """
     env_map: Mapping[str, str] = os.environ if env is None else env
     if env_map.get("BRUTEX_SKIP_WHEEL_FRESHNESS") == "1":
@@ -870,7 +877,10 @@ def _check_one_wheel_source_digest(
 
     try:
         expected_digest = crate_source_digest(root)
-    except (OSError, SourceDigestError) as exc:
+    # RecursionError: an adversarial symlink CYCLE under src/ makes the
+    # twin's recursive walk exceed the interpreter limit — WARN, never a
+    # doctor crash (hostile-review fold, DEC-RUST-SOURCE-DIGEST-TWIN-001).
+    except (OSError, RecursionError, SourceDigestError) as exc:
         return CheckResult(
             name=spec.check_name,
             status="WARN",
