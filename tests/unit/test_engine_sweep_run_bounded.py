@@ -39,6 +39,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
+from brutex.engine.sweep_driver import metrics_from_trades
 from brutex.engine.sweep_mem_budget import (
     BATCH_RANK_BYTES_PER_KEPT,
     BOUNDED_RANK_MODE_ENV,
@@ -364,12 +365,11 @@ class TestBoundedFinalistRecompute:
 
     def test_reordered_metrics_stream_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The positional-pairing belt trips if the eval spine ever reorders."""
-        import brutex.engine.sweep_run as sweep_run_module
 
         def _reordering_iter(*args: Any, **kwargs: Any) -> Any:
             yield 999, None  # a mask that was never requested
 
-        monkeypatch.setattr(sweep_run_module, "_iter_mask_metrics", _reordering_iter)
+        monkeypatch.setattr("brutex.engine.sweep_run._iter_mask_metrics", _reordering_iter)
         selected = BoundedRankResult(
             finalists=(BoundedFinalist(mask=1, composite_score=0.0, deflated_sharpe=None),),
             n_ranked=1,
@@ -390,18 +390,15 @@ class TestBoundedFinalistRecompute:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A recompute-phase failure raises the standard SweepComboError fingerprint."""
-        import brutex.engine.sweep_run as sweep_run_module
-
-        real = sweep_run_module.metrics_from_trades
         calls = {"n": 0}
 
         def _tail(*args: Any, **kwargs: Any) -> Any:
             calls["n"] += 1
             if calls["n"] > 5:  # the 5 streamed masks pass; the recompute fails
                 raise RuntimeError("recompute boom")
-            return real(*args, **kwargs)
+            return metrics_from_trades(*args, **kwargs)
 
-        monkeypatch.setattr(sweep_run_module, "metrics_from_trades", _tail)
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _tail)
         _set_env(monkeypatch, "on", _BIG_BUDGET)
         with pytest.raises(SweepComboError, match=r"combo 0x[0-9a-f]{32} \(run_id=") as excinfo:
             _run(tmp_path, "boom", _make_config())
