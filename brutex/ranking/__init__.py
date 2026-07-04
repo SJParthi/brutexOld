@@ -60,7 +60,7 @@ import math
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Final, cast
 
 from brutex.metrics.compute import ResultMetrics
 from brutex.ranking.overfit import (
@@ -101,6 +101,13 @@ _W_RISK_EFFICIENCY = 0.15
 
 #: Z-score clamp (spec: per-leaderboard z-score clamped to [-3, +3]).
 _Z_CLAMP = 3.0
+
+#: How many z-normalised composite terms the leaderboard scores (the 7 columns
+#: :func:`composite_term_inputs` emits, in its documented order). PUBLIC because
+#: the bounded columnar rank (:mod:`brutex.engine.sweep_stream`,
+#: DEC-SWEEP-STREAMING-RANK-001) sizes its term arrays off it — ONE constant so
+#: the two paths can never disagree on the term count (CLAUDE.md §11 COMMON).
+N_COMPOSITE_TERMS: Final[int] = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +265,170 @@ def _zscores(values: Sequence[float]) -> list[float]:
     return [max(-_Z_CLAMP, min(_Z_CLAMP, (v - mean) / std)) for v in values]
 
 
+def composite_term_inputs(
+    m: ResultMetrics,
+) -> tuple[float, float, float, float, float, float, float]:
+    """The 7 composite z-term inputs for ONE result, in leaderboard column order.
+
+    ``(sharpe, sortino, calmar, profit_factor − 1.0, recovery, win_rate ×
+    win_loss_ratio, risk_efficiency)`` — each already ``_f``-projected
+    (``None`` → ``0.0``), exactly as :func:`rank_combos` has always derived its
+    z-score columns. PUBLIC single source of truth (CLAUDE.md §11 COMMON,
+    DEC-SWEEP-STREAMING-RANK-001): the batch rank builds its columns through
+    this function AND the bounded columnar rank
+    (:class:`brutex.engine.sweep_stream.SurvivorColumns`) stores these exact
+    float64 values at append time — the same expression on the same inputs, so
+    the two paths are bit-identical by construction, not by test discipline.
+    """
+    return (
+        _f(m.sharpe_ratio),
+        _f(m.sortino_ratio),
+        _f(m.calmar_ratio),
+        # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): z-scores are
+        # translation-invariant — shifting every survivor's (PF − 1.0) by the same
+        # constant leaves (v − mean)/std mathematically identical (float rounding can
+        # differ at ULP level on some pools, which cannot meaningfully reorder a
+        # leaderboard) — so mutmut's ``- 1.0`` → ``+ 1.0`` / ``- 2.0`` mutants are
+        # provably equivalent. The spec's ``Profit_Factor - 1.0`` form is kept for
+        # readability, not arithmetic effect.
+        _f(m.profit_factor) - 1.0,  # pragma: no mutate
+        _f(m.recovery_factor),
+        m.win_rate * _f(m.win_loss_ratio),
+        _risk_efficiency(m),
+    )
+
+
+def composite_scores(
+    term_columns: Sequence[Sequence[float]], dsr_contrib: Sequence[float]
+) -> list[float]:
+    """Z-normalise the 7 term columns and fold the weighted composite per survivor.
+
+    THE one composite expression (CLAUDE.md §11 COMMON) — the exact
+    left-associated weighted sum the spec pins, shared by :func:`rank_combos`
+    and the bounded columnar rank so a future weight change can never silently
+    fork the two paths. *term_columns* must be the
+    :data:`N_COMPOSITE_TERMS` columns in :func:`composite_term_inputs` order,
+    each aligned to one (post-gate, post-overfit) survivor population;
+    *dsr_contrib* is the per-survivor weighted Deflated-Sharpe z-term (all
+    zeros when the 8th term is inactive — see :func:`dsr_z_contributions`).
+
+    O(terms × survivors) time, O(survivors) space; each column goes through the
+    SAME :func:`_zscores` left-fold (no vectorised/pairwise reduction — that
+    would change bits).
+    """
+    if len(term_columns) != N_COMPOSITE_TERMS:
+        raise ValueError(
+            f"composite_scores expects {N_COMPOSITE_TERMS} term columns, got {len(term_columns)}"
+        )
+    z = [_zscores(column) for column in term_columns]
+    return [
+        (
+            _W_SHARPE * z[0][i]
+            + _W_SORTINO * z[1][i]
+            + _W_CALMAR * z[2][i]
+            + _W_PROFIT_FACTOR * z[3][i]
+            + _W_RECOVERY * z[4][i]
+            + _W_WIN_WLR * z[5][i]
+            + _W_RISK_EFFICIENCY * z[6][i]
+            + dsr_contrib[i]
+        )
+        for i in range(len(dsr_contrib))
+    ]
+
+
+def dsr_z_contributions(
+    dsr_by_survivor: Sequence[float] | None,
+    n_survivors: int,
+    overfit: OverfitGateConfig | None,
+) -> list[float]:
+    """The per-survivor weighted Deflated-Sharpe z-term (the opt-in 8th term).
+
+    ``dsr_by_survivor`` is non-``None`` exactly when the overfit gate ran AND
+    was deflatable (then *overfit* is the active config whose ``weight`` scales
+    the z-scored DSRs); otherwise every survivor contributes ``0.0`` — the
+    legacy seven-term composite. Shared by both rank paths (COMMON).
+    """
+    if dsr_by_survivor is None:
+        return [0.0] * n_survivors
+    z_dsr = _zscores(dsr_by_survivor)
+    # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): ``typing.cast``
+    # is a runtime no-op, so its type-string mutant is provably equivalent.
+    # The cast sits on its own line so the ``weight * z`` arithmetic below
+    # STAYS inside the mutation surface.
+    overfit_cfg = cast("OverfitGateConfig", overfit)  # pragma: no mutate
+    return [overfit_cfg.weight * z for z in z_dsr]
+
+
+def ensure_unique_survivor_masks(masks: Sequence[int]) -> None:
+    """ENFORCE the unique-mask precondition the deterministic total order depends on.
+
+    The tie-break keys on ``mask`` (DEC-RANKING-TIEBREAK-001), so a DUPLICATE
+    mask among the rank-reaching survivors would silently reintroduce
+    input-order-dependent ordering; detect it and FAIL LOUD with the offending
+    mask(s) named — a deterministic, auditable error instead of latent
+    nondeterminism. ONE guard shared by :func:`rank_combos` and the bounded
+    columnar rank (COMMON), so the two paths raise the byte-identical message.
+    """
+    if len(set(masks)) != len(masks):
+        counts = Counter(masks)
+        dupes = sorted(mask for mask, count in counts.items() if count > 1)
+        raise ValueError(
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            f"tie-break keys on it); duplicate survivor mask(s): {dupes}"
+        )
+
+
+def overfit_gate_positions(
+    pool_sharpes: Sequence[float | None],
+    survivor_inputs: Sequence[tuple[float | None, int, float | None, float | None]],
+    overfit: OverfitGateConfig,
+) -> tuple[list[int], list[float]] | None:
+    """The 6th (overfit) gate CORE over scalar columns — shared by both rank paths.
+
+    Deflates each survivor's Sharpe against the **whole** *pool_sharpes*
+    population (the authoritative multiple-testing trial count
+    ``N = len(pool_sharpes)`` + its cross-trial variance ``V`` — the TWO
+    populations of the spec: the pool is every backtested candidate, the
+    survivors are the gate-passing subset). Each *survivor_inputs* row is
+    ``(sharpe_ratio, total_trades, skewness, kurtosis)`` — the exact
+    :func:`deflated_sharpe_for` inputs, with ``None`` preserved (never
+    NaN-encoded: the deflation's ``None`` fallbacks are semantic).
+
+    Returns
+    -------
+    tuple[list[int], list[float]] | None
+        ``None`` when the pool cannot be deflated (< 2 finite Sharpes or zero
+        cross-trial variance — the gate ABSTAINS, Golden Rule #10); else the
+        kept survivor POSITIONS (indices into *survivor_inputs*, ascending
+        input order) and their aligned Deflated Sharpe values.
+    """
+    dispersion = pool_sharpe_dispersion(pool_sharpes)
+    if not dispersion.deflatable:
+        return None
+    n_trials = len(pool_sharpes)
+    kept_positions: list[int] = []
+    kept_dsrs: list[float] = []
+    for position, (sharpe, total_trades, skew, kurt) in enumerate(survivor_inputs):
+        dsr = deflated_sharpe_for(
+            sharpe,
+            total_trades,
+            skew,
+            kurt,
+            n_trials=n_trials,
+            trial_sharpe_variance=dispersion.variance,
+            cfg=overfit,
+        )
+        if passes_overfit_gate(dsr, overfit):
+            kept_positions.append(position)
+            # passes_overfit_gate guarantees dsr is a float (never None) here; the
+            # cast keeps the typed DSR leaderboard precise without re-checking.
+            # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): ``typing.cast``
+            # is a runtime no-op, so mutmut's type-string mutant ("float" →
+            # "XXfloatXX") is provably equivalent — nothing behavioural on this line.
+            kept_dsrs.append(cast("float", dsr))  # pragma: no mutate
+    return kept_positions, kept_dsrs
+
+
 def _overfit_gate(
     candidates: Sequence[tuple[int, ResultMetrics]],
     survivors: list[tuple[int, ResultMetrics]],
@@ -276,6 +447,9 @@ def _overfit_gate(
     second element is ``None`` (no DSR term), so the leaderboard falls back to its
     seven single-result terms rather than a fabricated deflation (Golden Rule #10).
 
+    A thin ``(mask, metrics)``-pairs adapter over :func:`overfit_gate_positions`
+    (the shared scalar core — DEC-SWEEP-STREAMING-RANK-001, CLAUDE.md §11 COMMON).
+
     Returns
     -------
     tuple[list[tuple[int, ResultMetrics]], list[float] | None]
@@ -283,31 +457,15 @@ def _overfit_gate(
         Sharpe values (aligned to ``kept``), or ``None`` DSR list when the pool
         was not deflatable (abstain).
     """
-    dispersion = pool_sharpe_dispersion([m.sharpe_ratio for _, m in candidates])
-    if not dispersion.deflatable:
+    outcome = overfit_gate_positions(
+        [m.sharpe_ratio for _, m in candidates],
+        [(m.sharpe_ratio, m.total_trades, m.skewness, m.kurtosis) for _, m in survivors],
+        overfit,
+    )
+    if outcome is None:
         return survivors, None
-    n_trials = len(candidates)
-    kept: list[tuple[int, ResultMetrics]] = []
-    kept_dsrs: list[float] = []
-    for mask, m in survivors:
-        dsr = deflated_sharpe_for(
-            m.sharpe_ratio,
-            m.total_trades,
-            m.skewness,
-            m.kurtosis,
-            n_trials=n_trials,
-            trial_sharpe_variance=dispersion.variance,
-            cfg=overfit,
-        )
-        if passes_overfit_gate(dsr, overfit):
-            kept.append((mask, m))
-            # passes_overfit_gate guarantees dsr is a float (never None) here; the
-            # cast keeps the typed DSR leaderboard precise without re-checking.
-            # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): ``typing.cast``
-            # is a runtime no-op, so mutmut's type-string mutant ("float" →
-            # "XXfloatXX") is provably equivalent — nothing behavioural on this line.
-            kept_dsrs.append(cast("float", dsr))  # pragma: no mutate
-    return kept, kept_dsrs
+    kept_positions, kept_dsrs = outcome
+    return [survivors[position] for position in kept_positions], kept_dsrs
 
 
 def rank_combos(
@@ -368,48 +526,26 @@ def rank_combos(
     if not survivors:
         return []
 
-    z_sharpe = _zscores([_f(m.sharpe_ratio) for _, m in survivors])
-    z_sortino = _zscores([_f(m.sortino_ratio) for _, m in survivors])
-    z_calmar = _zscores([_f(m.calmar_ratio) for _, m in survivors])
-    # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): z-scores are
-    # translation-invariant — shifting every survivor's (PF − 1.0) by the same
-    # constant leaves (v − mean)/std mathematically identical (float rounding can
-    # differ at ULP level on some pools, which cannot meaningfully reorder a
-    # leaderboard) — so mutmut's ``- 1.0`` → ``+ 1.0`` / ``- 2.0`` mutants are
-    # provably equivalent. The spec's ``Profit_Factor - 1.0`` form is kept for
-    # readability, not arithmetic effect.
-    z_pf = _zscores([_f(m.profit_factor) - 1.0 for _, m in survivors])  # pragma: no mutate
-    z_recovery = _zscores([_f(m.recovery_factor) for _, m in survivors])
-    z_win_wlr = _zscores([m.win_rate * _f(m.win_loss_ratio) for _, m in survivors])
-    z_risk_eff = _zscores([_risk_efficiency(m) for _, m in survivors])
-
+    # The 7 z-term columns + the opt-in 8th (DSR) contribution + the weighted
+    # composite fold all go through the SHARED internals
+    # (``composite_term_inputs`` / ``dsr_z_contributions`` / ``composite_scores``
+    # — DEC-SWEEP-STREAMING-RANK-001): the bounded columnar rank calls the SAME
+    # functions on the SAME float64 values in the SAME survivor order, so batch
+    # and bounded composites are bit-identical by construction. Each value below
+    # is the exact expression this function always computed (transposing
+    # per-survivor tuples into columns changes no arithmetic).
+    term_rows = [composite_term_inputs(m) for _, m in survivors]
+    term_columns = tuple([row[term] for row in term_rows] for term in range(N_COMPOSITE_TERMS))
     # 8th term (opt-in): the Deflated-Sharpe z-term — ``overfit`` is non-None
     # exactly when ``dsr_by_survivor`` is a list (the gate ran and was deflatable).
-    if dsr_by_survivor is not None:
-        z_dsr = _zscores(dsr_by_survivor)
-        # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): ``typing.cast``
-        # is a runtime no-op, so its type-string mutant is provably equivalent.
-        # The cast sits on its own line so the ``weight * z`` arithmetic below
-        # STAYS inside the mutation surface.
-        overfit_cfg = cast("OverfitGateConfig", overfit)  # pragma: no mutate
-        dsr_contrib = [overfit_cfg.weight * z for z in z_dsr]
-    else:
-        dsr_contrib = [0.0] * len(survivors)
+    dsr_contrib = dsr_z_contributions(dsr_by_survivor, len(survivors), overfit)
+    composites = composite_scores(term_columns, dsr_contrib)
 
     ranked = [
         RankedCombo(
             mask=mask,
             metrics=m,
-            composite_score=(
-                _W_SHARPE * z_sharpe[i]
-                + _W_SORTINO * z_sortino[i]
-                + _W_CALMAR * z_calmar[i]
-                + _W_PROFIT_FACTOR * z_pf[i]
-                + _W_RECOVERY * z_recovery[i]
-                + _W_WIN_WLR * z_win_wlr[i]
-                + _W_RISK_EFFICIENCY * z_risk_eff[i]
-                + dsr_contrib[i]
-            ),
+            composite_score=composites[i],
             deflated_sharpe=None if dsr_by_survivor is None else dsr_by_survivor[i],
         )
         for i, (mask, m) in enumerate(survivors)
@@ -424,15 +560,9 @@ def rank_combos(
     # nondeterminism into a deterministic, auditable error rather than an
     # order-dependent ranking. (Checked over the gate SURVIVORS — the only rows that
     # reach the sort; a duplicate among gate-rejected combos is irrelevant to the
-    # ordering and never raised.)
-    masks = [rc.mask for rc in ranked]
-    if len(set(masks)) != len(masks):
-        counts = Counter(masks)
-        dupes = sorted(mask for mask, count in counts.items() if count > 1)
-        raise ValueError(
-            "rank_combos requires a unique mask per candidate (the deterministic "
-            f"tie-break keys on it); duplicate survivor mask(s): {dupes}"
-        )
+    # ordering and never raised. The guard body is the SHARED
+    # ``ensure_unique_survivor_masks`` so the bounded rank raises byte-identically.)
+    ensure_unique_survivor_masks([rc.mask for rc in ranked])
     # Deterministic TOTAL order: primary key is the composite score DESCENDING, with
     # the unique ``mask`` ASCENDING as the final tie-break, so the key
     # ``(-composite_score, mask)`` is a strict total order — two distinct survivors can
@@ -451,8 +581,14 @@ def rank_combos(
 
 __all__ = [
     "MIN_TRADES",
+    "N_COMPOSITE_TERMS",
     "OverfitGateConfig",
     "RankedCombo",
+    "composite_scores",
+    "composite_term_inputs",
+    "dsr_z_contributions",
+    "ensure_unique_survivor_masks",
+    "overfit_gate_positions",
     "passes_gates",
     "rank_combos",
 ]
