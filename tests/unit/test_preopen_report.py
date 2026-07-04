@@ -1273,10 +1273,10 @@ def test_build_daily_basis_overlay_recovers_row(tmp_path: Path) -> None:
         ],
     )
     datasets = [("NSE", "CASH", "DRIFTED")]
-    span = {"start": date(2026, 5, 1), "end": date(2026, 5, 31)}
-    without = build_preopen_rows(_conn(), tmp_path, datasets=datasets, **span)
+    start, end = date(2026, 5, 1), date(2026, 5, 31)
+    without = build_preopen_rows(_conn(), tmp_path, datasets=datasets, start=start, end=end)
     assert [r.day for r in without] == []  # skipped: 05-12 reads as a missing bar
     _write_overlay(tmp_path, "2026-05-12")
-    with_overlay = build_preopen_rows(_conn(), tmp_path, datasets=datasets, **span)
+    with_overlay = build_preopen_rows(_conn(), tmp_path, datasets=datasets, start=start, end=end)
     assert [r.day for r in with_overlay] == [date(2026, 5, 13)]
     assert with_overlay[0].prev_close == Decimal("110")

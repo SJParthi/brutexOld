@@ -187,11 +187,13 @@ class TestScopeLock:
         from brutex.strategies.types import FibAnchorKind
 
         calls: list[dict[str, object]] = []
-        real = fib_mod.lookup_prev_day_ohlc
+        # ``lookup_prev_day_ohlc`` is fib_definitions' imported collaborator (a
+        # module attribute, not a re-export) — resolve via getattr for mypy.
+        real = getattr(fib_mod, "lookup_prev_day_ohlc")  # noqa: B009
 
         def _spy(*args: object, **kwargs: object) -> object:
             calls.append(dict(kwargs))
-            return real(*args, **kwargs)  # type: ignore[arg-type]
+            return real(*args, **kwargs)
 
         monkeypatch.setattr(fib_mod, "lookup_prev_day_ohlc", _spy)
         daily = {

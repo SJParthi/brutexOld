@@ -10,6 +10,7 @@ We use the NSE calendar to skip weekends and holidays correctly.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date
 
 import pytest
@@ -206,7 +207,7 @@ def _candle(d: date, base: int = 100_00) -> DailyCandle:
     )
 
 
-def _stale_warns(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _stale_warns(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
     return [e for e in logs if e["event"] == PREV_DAY_STALE_ANCHOR_EVENT]
 
 

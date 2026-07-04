@@ -17,6 +17,7 @@ and is deliberately never used here).
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -135,7 +136,7 @@ def _seed_lake(
     save_window_ledger(ledger, lake_root)
 
 
-def _events(logs: list[dict[str, object]], name: str) -> list[dict[str, object]]:
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
     return [e for e in logs if e["event"] == name]
 
 
