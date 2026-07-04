@@ -262,6 +262,95 @@ class TestSpotStoredReadEquality:
         assert cands.snapshots[0].bar_count == 4
 
 
+# ── prefer_resample under a live pull (DEC-MOVERS-GATE-PREBUILD-SCOPE-001) ─
+
+
+def _poison_stored_5minute(lake: Path, symbol: str = "NIFTY") -> None:
+    """A STALE stored 5-minute partition whose close the fresh 1-minute can never yield.
+
+    Simulates the mid-fetch hazard the ``prefer_resample`` switch closes: the
+    stored TF partitions are rewritten only by the pipeline's FINAL prebuild,
+    so during a fetch they can predate the freshly-landing 1-minute bars.
+    """
+    _write(
+        lake,
+        segment="INDEX",
+        symbol=symbol,
+        interval="5minute",
+        bars=[_bar(day=_DAY, hour=9, minute=15, close="99999", volume=1)],
+    )
+
+
+class TestPreferResampleUnderPull:
+    def test_prefer_resample_bypasses_stale_stored_partition(self, tmp_path: Path) -> None:
+        """REGRESSION (DEC-MOVERS-GATE-PREBUILD-SCOPE-001; fail-before proven):
+        on origin/main ``compute_spot_candidates`` has no ``prefer_resample``
+        parameter (this test errors with ``TypeError``), and behaviourally the
+        aligned stored partition ALWAYS won — the ``prefer_resample=False`` arm
+        below pins exactly that old behaviour serving the POISONED stale close.
+        With ``prefer_resample=True`` (the route's pull-active switch) the read
+        bypasses the stale stored partition and reproduces the fresh 1-minute
+        resample byte-identically."""
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        # The truth: what the fresh 1-minute data resamples to (no stored TF yet).
+        reference = compute_spot_candidates(
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
+        )
+        assert (reference.stored_reads, reference.resampled_reads) == (0, 1)
+        # A STALE stored partition lands (prior pull's prebuild, poisoned close).
+        _poison_stored_5minute(tmp_path)
+        stored_first = compute_spot_candidates(
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
+        )
+        assert (stored_first.stored_reads, stored_first.resampled_reads) == (1, 0)
+        assert stored_first.snapshots != reference.snapshots  # the stale poison is visible
+        # The pull-active switch: the resample wins — fresh, byte-identical to truth.
+        fresh = compute_spot_candidates(
+            lake_root=tmp_path,
+            interval="5minute",
+            date=_DAY.isoformat(),
+            time="09:19",
+            prefer_resample=True,
+        )
+        assert (fresh.stored_reads, fresh.resampled_reads) == (0, 1)
+        assert fresh.snapshots == reference.snapshots
+
+    def test_read_intraday_bars_prefer_resample_skips_stored(self, tmp_path: Path) -> None:
+        # Even with a stored partition present AND a bucket-final-aligned cutoff
+        # (the exact case the stored read normally serves), prefer_resample=True
+        # takes the 1-minute resample — from_stored is honestly False.
+        from brutex.dashboard.movers_snapshot import _read_intraday_bars
+
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        _materialize_spot(tmp_path, "NIFTY")
+        bars, from_stored = _read_intraday_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="5minute",
+            day=_DAY,
+            minutes=5,
+            cutoff_min=9 * 60 + 19,
+            prefer_resample=True,
+        )
+        assert from_stored is False
+        assert bars  # the resample served the same session
+        # And the default (no pull) still serves the stored partition — the
+        # stored-first behaviour is byte-identical when the switch is off.
+        _, default_from_stored = _read_intraday_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="5minute",
+            day=_DAY,
+            minutes=5,
+            cutoff_min=9 * 60 + 19,
+        )
+        assert default_from_stored is True
+
+
 # ── read_stored_day_frame edges ───────────────────────────────────────────
 
 

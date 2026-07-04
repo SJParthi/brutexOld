@@ -419,7 +419,13 @@ async function load() {
         renderHead(); renderRows();
       }
       wasGated = true; lastGatedKey = gatedKey;
-      $("asof").textContent = `as-of ${(j.date||"")} — gated`;
+      /* Honest gate scope + duration (DEC-MOVERS-GATE-PREBUILD-SCOPE-001): the
+         gate covers ONLY the pipeline's PREBUILD phase now — name the phase and
+         show how long it has been gating. gated_for_s refreshes on every 5 s
+         retry (this line sits OUTSIDE the paint-once shell). textContent only —
+         never innerHTML for a dynamic string (the repo's XSS-guard convention). */
+      const gatedFor = (typeof j.gated_for_s === "number") ? ` · ${Math.round(j.gated_for_s)}s` : "";
+      $("asof").textContent = `as-of ${(j.date||"")} — gated (${j.phase||"prebuild"}${gatedFor})`;
       $("noteText").textContent = j.note || "prebuild in progress — movers available when finished.";
       clearTimeout(gateTimer);
       gateTimer = setTimeout(load, GATE_RETRY_MS);

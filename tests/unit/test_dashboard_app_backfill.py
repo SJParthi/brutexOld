@@ -285,6 +285,10 @@ def test_coverage_options_empty_when_no_lake_root(nolake_client: TestClient) -> 
     assert resp.json() == {
         "headline": {"underlyings": 0, "series": 0, "total_bars": 0},
         "rows": [],
+        # Freshness honesty fields (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
+        # the no-lake degrade keeps the same shape as the real path.
+        "duty_degraded": False,
+        "snapshot_age_s": 0.0,
     }
 
 
