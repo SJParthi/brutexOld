@@ -43,7 +43,7 @@ Phase 3 implementation (`brutex/costs/groww_options.py`) follows this spec exact
 |---|---|---|
 | **STT** | Round to **nearest rupee**, half-up at 50 paise | Rule 11, Securities Transaction Tax Rules 2004 (verbatim: "shall be rounded off to the nearest rupee") |
 | **Stamp duty** | Round to **nearest rupee**, half-up | Indian Stamp Rules 2019 (PIB 1635399, SEBI FAQ) |
-| **GST** | Round each component (CGST/SGST or IGST) **separately** to nearest rupee | Section 170, CGST Act 2017 (verbatim text) |
+| **GST** | Round the **TOTAL** tax ONCE to nearest rupee, then split CGST/SGST for display — per **DEC-COST-001** (§4), which superseded this row's original "each component separately" reading of Section 170 (rounding each at 9% created a systematic +₹1 overcharge ~50% of trades) | Section 170, CGST Act 2017; DEC-COST-001 hostile-review fix 2026-05-16 |
 | Brokerage | Round to paise (no statutory rule) | Industry practice: `ROUND_HALF_UP` to 2 decimals |
 | NSE/BSE exchange | Round to paise (no statutory rule) | Industry practice |
 | SEBI turnover | Round to paise (no statutory rule) | Industry practice |
@@ -103,110 +103,127 @@ Per industry-published broker examples + Section 170 CGST + Rule 11 STT Rules:
         net_pnl           = gross_pnl - total
 ```
 
-## 5. Worked examples (test fixtures for Phase 3)
+## 5. Worked examples (enforced calculator oracles)
+
+> **REGENERATED 2026-07-03 (R2-OC-9)** from the ACTUAL output of the shipped
+> calculator (`brutex.costs.calculator.compute_trade_cost`). The previous
+> hand-derived tables had drifted from the code: they rounded CGST/SGST
+> **separately** (the exact pre-DEC-COST-001 +₹1 overcharge this doc's §4
+> claims to have fixed — Example 3 said ₹52.19 where the calculator produces
+> **₹51.18**), mis-rounded a sub-paise SEBI fee to ₹0.01, and ignored that the
+> calculator bakes the **flat 1-tick adverse slippage per side** (§19
+> resolution 2 / TRACK2_OPTIONS_SPEC §9) into the fills, which changes each
+> notional and hence every rate-based charge.
+>
+> Fixture parameters common to Examples 1-4: trade date **2026-05-15** (IST;
+> post-1-Apr-2026 STT regime 0.15%; lot sizes per
+> `brutex/options/lot_size_history.py`: NIFTY 65 / BANKNIFTY 30 / SENSEX 20),
+> long_call, Groww, intra-state GST. Fills = buy at open + ₹0.05, sell at
+> open − ₹0.05. Examples 1-4 are **byte-exact enforced oracles** — the golden
+> test `tests/golden/test_costs_verified_examples.py` recomputes each scenario
+> through the real calculator and asserts every figure below, so this section
+> can no longer drift silently. Example 5 (Muhurat) is **SPEC-ONLY** — see its
+> banner.
 
 ### Example 1: NIFTY ATM call, 1 lot, ₹100 → ₹120 (post-1-Apr-2026)
 
-- Underlying: NIFTY
-- Lot size: 65 (Jan 2026 onwards)
-- Buy: ₹100/unit × 65 = **₹6,500 notional**
-- Sell: ₹120/unit × 65 = **₹7,800 notional**
-- Gross PnL: **+₹1,300**
+- Lot size: 65 (trade-date basis) → n_shares = 65
+- Buy fill ₹100.05 × 65 = **₹6,503.25 notional** (650,325 paisa)
+- Sell fill ₹119.95 × 65 = **₹7,796.75 notional** (779,675 paisa)
+- Gross PnL (slippage baked into fills): **+₹1,293.50**
 
-| Component | Buy side | Sell side | Total | Rule applied |
-|---|---|---|---|---|
-| Brokerage | -20.00 | -20.00 | -40.00 | ₹20 flat per order |
-| STT (0.15% × ₹7,800 = ₹11.70) | 0 | — | **-12** | round to nearest ₹ (11.70 → 12 since ≥ 0.50) |
-| NSE exchange (0.03503%) | -2.28 | -2.73 | -5.01 | paise |
-| SEBI (0.0001%) | -0.01 | -0.01 | -0.02 | paise (per-side rounded) |
-| IPFT NSE (0.0005%) | -0.03 | -0.04 | -0.07 | paise |
-| Stamp duty (0.003% × ₹6,500 = ₹0.195) | -0 | 0 | **-0** | round to rupee (0.195 < 0.50 → 0) |
-| GST base = 40 + 5.01 + 0.02 + 0.07 = ₹45.10 | | | | |
-| CGST 9% × 45.10 = ₹4.06 | -2 | -2 | -4 | round to rupee |
-| SGST 9% × 45.10 = ₹4.06 | -2 | -2 | -4 | round to rupee |
-| **TOTAL CHARGES** | | | **-65.10** | |
-| **NET PnL** | | | **+1,234.90** | gross 1,300 − 65.10 |
-
-(NOTE: spec §8.2 originally said ₹65.12; corrected here to ₹65.10 per statutory rounding.)
+| Component | Total | Rule applied |
+|---|---|---|
+| Brokerage | -40.00 | ₹20 flat per order × 2 legs |
+| STT (0.15% × ₹7,796.75 = ₹11.695) | **-12.00** | round to nearest ₹ (statutory) |
+| NSE exchange (0.03503% × both notionals) | -5.01 | paise |
+| SEBI (0.0001% × both notionals) | -0.02 | paise (per-side rounded) |
+| IPFT NSE (0.0005% × both notionals) | -0.07 | paise |
+| Stamp duty (0.003% × ₹6,503.25 = ₹0.195) | **-0.00** | round to rupee (0.195 < 0.50 → 0) |
+| GST base = 40.00 + 5.01 + 0.02 + 0.07 = ₹45.10 | | |
+| GST 18% × 45.10 = ₹8.118 → **rounded ONCE** | **-8.00** | DEC-COST-001 (total, NOT CGST/SGST each) |
+| **TOTAL CHARGES** | **-65.10** | |
+| **NET PnL** | **+1,228.40** | gross 1,293.50 − 65.10 |
 
 ### Example 2: NIFTY ATM call, 5 lots (multi-lot scenario)
 
-Same trade parameters, but 5 lots instead of 1:
-- Buy notional: ₹6,500 × 5 = ₹32,500
-- Sell notional: ₹7,800 × 5 = ₹39,000
-- Gross PnL: +₹6,500
+Same premiums, 5 lots → n_shares = 325:
+- Buy fill ₹100.05 × 325 = ₹32,516.25; sell fill ₹119.95 × 325 = ₹38,983.75
+- Gross PnL: +₹6,467.50
 
 | Component | Value | Rule |
 |---|---|---|
-| Brokerage | **-40** | ₹20 flat per ORDER (regardless of lot count!) |
-| STT 0.15% × ₹39,000 = ₹58.50 | **-59** | round to rupee (half-up at 0.50) |
-| NSE exch 0.03503% × ₹71,500 | -25.05 | paise |
-| SEBI 0.0001% × ₹71,500 | -0.07 | paise (per-side rounded) |
-| IPFT 0.0005% × ₹71,500 | -0.36 | paise |
-| Stamp 0.003% × ₹32,500 = ₹0.975 | **-1** | round to rupee (0.975 → 1) |
-| GST base = 40 + 25.05 + 0.07 + 0.36 = ₹65.48 | | |
-| GST 18% × 65.48 = ₹11.79 (CGST ₹5.89 + SGST ₹5.89, each → ₹6) | -12 | |
-| **TOTAL CHARGES** | **-137.48** | |
-| **NET PnL** | **+6,362.52** | gross 6,500 − 137.48 |
+| Brokerage | **-40.00** | ₹20 flat per ORDER (regardless of lot count!) |
+| STT 0.15% × ₹38,983.75 = ₹58.4756 | **-58.00** | round to rupee (the old -59 used the no-slippage ₹39,000) |
+| NSE exch 0.03503% × both notionals | -25.05 | paise |
+| SEBI 0.0001% × both notionals | -0.07 | paise (per-side rounded) |
+| IPFT 0.0005% × both notionals | -0.35 | paise (the old -0.36 used no-slippage notionals) |
+| Stamp 0.003% × ₹32,516.25 = ₹0.9755 | **-1.00** | round to rupee (≥ 0.50 → 1) |
+| GST base = 40.00 + 25.05 + 0.07 + 0.35 = ₹65.47 | | |
+| GST 18% × 65.47 = ₹11.7846 → rounded ONCE | **-12.00** | DEC-COST-001 |
+| **TOTAL CHARGES** | **-136.47** | (was ₹137.48 pre-regeneration) |
+| **NET PnL** | **+6,331.03** | gross 6,467.50 − 136.47 |
 
-**Per-lot cost (5 lots): ₹137.48 / 5 = ₹27.50/lot** — significantly cheaper than per-1-lot (₹65.10) due to brokerage spread over 5 lots.
+**Per-lot cost (5 lots): ₹136.47 / 5 = ₹27.29/lot** — significantly cheaper than per-1-lot (₹65.10) due to brokerage amortization over 5 lots.
 
 ### Example 3: BANKNIFTY ATM, 1 lot, ₹50 → ₹60
 
-- Lot size: 30
-- Buy notional: 30 × ₹50 = ₹1,500
-- Sell notional: 30 × ₹60 = ₹1,800
-- Gross PnL: +₹300
+- Lot size: 30 → n_shares = 30
+- Buy fill ₹50.05 × 30 = ₹1,501.50; sell fill ₹59.95 × 30 = ₹1,798.50
+- Gross PnL: +₹297.00
 
 | Component | Value | Rule |
 |---|---|---|
 | Brokerage | -40.00 | flat |
-| STT 0.15% × ₹1,800 = ₹2.70 | **-3** | round to rupee |
-| NSE exch 0.03503% × ₹3,300 | -1.16 | paise |
-| SEBI | -0.01 | paise |
+| STT 0.15% × ₹1,798.50 = ₹2.6978 | **-3.00** | round to rupee |
+| NSE exch 0.03503% × both notionals | -1.16 | paise |
+| SEBI (0.0001% → ₹0.0033 unrounded) | **-0.00** | paise — rounds to ZERO (the old -0.01 was wrong) |
 | IPFT | -0.02 | paise |
-| Stamp 0.003% × ₹1,500 = ₹0.045 | **-0** | round (<0.50) |
-| GST base = 40 + 1.16 + 0.01 + 0.02 = ₹41.19 | | |
-| GST 18% × 41.19 = ₹7.41 → CGST ₹3.71 → ₹4 + SGST ₹4 | -8 | round to rupee |
-| **TOTAL CHARGES** | **-52.19** | |
-| **NET PnL** | **+247.81** | gross 300 − 52.19 |
+| Stamp 0.003% × ₹1,501.50 = ₹0.045 | **-0.00** | round (< 0.50) |
+| GST base = 40.00 + 1.16 + 0.00 + 0.02 = ₹41.18 | | |
+| GST 18% × 41.18 = ₹7.4124 → rounded ONCE | **-7.00** | DEC-COST-001 (NOT CGST ₹4 + SGST ₹4 = ₹8) |
+| **TOTAL CHARGES** | **-51.18** | (the old ₹52.19 was the round-twice + SEBI-₹0.01 drift) |
+| **NET PnL** | **+245.82** | gross 297.00 − 51.18 |
 
-Cost = 17.4% of gross move. **Trade barely viable** due to high cost-as-% on small premiums.
+Cost = 17.2% of the post-slippage gross move. **Trade barely viable** due to high cost-as-% on small premiums.
 
 ### Example 4: SENSEX ATM, 1 lot, ₹80 → ₹100 (BSE)
 
-- Lot size: 20
-- Buy notional: 20 × ₹80 = ₹1,600
-- Sell notional: 20 × ₹100 = ₹2,000
-- Gross PnL: +₹400
+- Lot size: 20 → n_shares = 20
+- Buy fill ₹80.05 × 20 = ₹1,601.00; sell fill ₹99.95 × 20 = ₹1,999.00
+- Gross PnL: +₹398.00
 
 | Component | Value | Rule |
 |---|---|---|
 | Brokerage | -40.00 | flat |
-| STT 0.15% × ₹2,000 = ₹3.00 | **-3** | round to rupee |
-| BSE exch 0.03250% × ₹3,600 | -1.17 | paise (BSE rate) |
-| SEBI | -0.01 | paise |
-| IPFT BSE | **-0** | UNVERIFIED — BSE IPFT may be 0 |
-| Stamp 0.003% × ₹1,600 = ₹0.048 | -0 | round (<0.50) |
-| GST base = 40 + 1.17 + 0.01 + 0 = ₹41.18 | | |
-| GST 18% × 41.18 = ₹7.41 → CGST/SGST each ₹4 | -8 | round to rupee |
-| **TOTAL CHARGES** | **-52.17** | |
-| **NET PnL** | **+347.83** | gross 400 − 52.17 |
+| STT 0.15% × ₹1,999.00 = ₹2.9985 | **-3.00** | round to rupee |
+| BSE exch 0.03250% × both notionals | -1.17 | paise (BSE rate) |
+| SEBI (₹0.0036 unrounded) | **-0.00** | paise — rounds to zero (the old -0.01 was wrong) |
+| IPFT BSE | **-0.00** | UNVERIFIED — BSE IPFT treated as 0 |
+| Stamp 0.003% × ₹1,601.00 = ₹0.048 | -0.00 | round (< 0.50) |
+| GST base = 40.00 + 1.17 + 0.00 + 0.00 = ₹41.17 | | |
+| GST 18% × 41.17 = ₹7.4106 → rounded ONCE | **-7.00** | DEC-COST-001 |
+| **TOTAL CHARGES** | **-51.17** | (was ₹52.17 pre-regeneration — same round-twice drift) |
+| **NET PnL** | **+346.83** | gross 398.00 − 51.17 |
 
-### Example 5: NIFTY Muhurat session trade
+### Example 5: NIFTY Muhurat session trade — SPEC-ONLY (NOT an enforced oracle)
+
+> **HONESTY BANNER (Golden Rule #10):** `compute_trade_cost` has **no Muhurat
+> branch today** — brokerage is always the flat per-order fee regardless of
+> session. This example documents the INTENDED behaviour (₹0 brokerage during
+> Muhurat per §12) and CANNOT be regenerated through the calculator, so it is
+> NOT covered by `tests/golden/test_costs_verified_examples.py`. Implementing
+> the Muhurat waiver in the calculator is open future work.
 
 Same as Example 1 but during Muhurat (e.g., Diwali Nov 1, 2024 evening):
 
 | Component | Value | Rule |
 |---|---|---|
-| Brokerage | **-0** | Muhurat session = ₹0 brokerage |
-| All other charges | same as Example 1 | unchanged |
-| GST base | 0 + 5.01 + 0.02 + 0.07 = ₹5.10 | excludes brokerage (it's 0) |
-| GST 18% × 5.10 = ₹0.92 → CGST/SGST each ₹0.46 → ₹0 each | -0 | round (<0.50) |
-| Stamp | -0 | |
-| STT | -12 | |
-| **TOTAL CHARGES** | **-17.10** | (was ₹65.10) |
-| **Savings vs normal** | **+₹48.00** | ₹40 brokerage + ₹8 GST waived |
+| Brokerage | **-0** | Muhurat session = ₹0 brokerage (NOT implemented in code) |
+| All other charges | same shape as Example 1 | unchanged |
+| GST base | 0 + exch + SEBI + IPFT (excludes the waived brokerage) | |
+| GST 18% of the small base → rounded ONCE | ≈ -0/-1 | DEC-COST-001 round-once (the old CGST/SGST-each arithmetic here was also pre-DEC-COST-001) |
+| STT | -12 | unchanged by Muhurat |
 
 ## 6. Edge cases handled
 
@@ -571,6 +588,8 @@ This is the Phase 3 deliverable spec. Implementation follows in
 | _(future)_ | BSE IPFT rate locked | After operator verifies via BSE page |
 | _(future)_ | Groww rate card primary verification | After operator screenshot groww.co/pricing |
 | _(future)_ | GST rounding (rupee vs paise) reconciliation | After Level-1 contract note |
+| 2026-07-03 | §5 Examples 1-4 REGENERATED from the real calculator's output (Ex3 ₹52.19 → ₹51.18; Ex2 ₹137.48 → ₹136.47; Ex4 ₹52.17 → ₹51.17) + enforced by `tests/golden/test_costs_verified_examples.py`; Example 5 marked SPEC-ONLY; §3 GST row reconciled to DEC-COST-001 round-once | R2-OC-9: the hand-derived tables violated the doc's own DEC-COST-001 (CGST/SGST rounded separately), mis-rounded a sub-paise SEBI fee to ₹0.01, and ignored the 1-tick-slippage-in-fills |
+| 2026-07-03 | §20 Known limitations added (ETC pre-Oct-2024 UNVERIFIED placeholder; GST-on-SEBI boundary not implemented; lot-size trade-date-vs-vintage caveat; 2021 lot-history floor vs 2020 data floor → per-trade LOT_SIZE_UNKNOWN reject; Muhurat spec-only) | R2-OC-3 / R2-OC-4/5 honesty audit (Golden Rules #1 + #10) |
 
 ## 18. Annual Income Tax Module (Phase 4 deliverable)
 
@@ -694,3 +713,16 @@ conducted. Results:
 4. **Keep my spec's edge cases** (multi-lot, Muhurat, women's discount, Groww API, BSE) — Claude chat missed these.
 
 Net: This spec now contains **EVERYTHING from both sources**, with disagreements resolved per citation strength.
+
+## 20. Known limitations (honest envelope — Golden Rules #1 + #10)
+
+Added 2026-07-03 (R2-OC-3 / R2-OC-4/5 audit). Each row is a DOCUMENTED,
+deliberate limitation — none is silently papered over in code.
+
+| # | Limitation | Direction / impact | Status |
+|---|---|---|---|
+| 1 | **ETC pre-2024-10-01 rates UNVERIFIED.** The exchange transaction charge now rides a date-regime table (the same `rate_for_date` mechanism as STT, `brutex/costs/constants.py`), but only the CURRENT rates (NSE 0.03503% / BSE 0.03250%, effective 2024-10-01 — NSE FA64232 / BSE notice 27-Sep-2024) are verified. The table applies the current rate to ALL dates via an explicit UNVERIFIED placeholder row. | The widely-reported pre-Oct-2024 NSE rate (~0.0495–0.050%, itself UNVERIFIED offline) was HIGHER, so pre-2024-10-01 trades are likely **UNDER-costed**. | OPEN — closes when the prior NSE/BSE fee circulars are sourced; the regime table takes the real rows without re-architecting. |
+| 2 | **GST-on-SEBI date boundary NOT implemented.** The SEBI turnover fee sits in the GST base for ALL dates. The claim that SEBI fees became GST-liable only from ~2022-07-18 has **no in-repo citation** (searched 2026-07-03), so per Golden Rule #1 no boundary was encoded. | If the claim holds, pre-boundary trades are **OVER-charged** by 18% of the sub-rupee SEBI fee — conservative (never understates cost). | OPEN — implement only with a citable GST notification. |
+| 3 | **Lot size keyed by TRADE date, not contract VINTAGE.** `TradeCostBreakdown.lot_size_basis = "trade_date"`: the lot is the one in effect on `entry_dt_ist.date()` per `lot_size_history.py`. A real exchange revision applies per-contract from a specific expiry onward, so in a transition window the bases disagree — e.g. NIFTY **2024-11-19 → lot 25** vs **2024-11-20 → lot 75** (SEBI ₹15L notional revision), a 3× sizing difference. | Real sizing error possible in lot-transition windows only. | OPEN — per-circular NSE contract-level rollout dates are UNVERIFIED offline; no vintage logic is faked. The basis is stamped on every breakdown so consumers can audit. |
+| 4 | **Lot-size history floor (2021-01-01) is ABOVE the data floor (2020-01-01, `GROWW_HISTORY_FLOOR`).** 2020 lot sizes for NIFTY/BANKNIFTY/SENSEX are UNVERIFIED offline (searched the repo 2026-07-03 — no citable values), so `get_lot_size` still raises for 2020 dates. | A 2020-dated signal is REJECTED per-trade by the options executor (`RejectReason.LOT_SIZE_UNKNOWN`, counted on `OptionsRuleResult.n_rejected_lot_size_unknown`) — the sim completes instead of crashing; no lot is ever fabricated. | OPEN — closes when citable 2020 lot sizes land in `lot_size_history.py`. |
+| 5 | **Example 5 (Muhurat ₹0 brokerage) is spec-only.** `compute_trade_cost` has no Muhurat branch. | A Muhurat-session trade is charged normal brokerage — **OVER-charged** by ₹40 + its GST (conservative). | OPEN future work. |

@@ -155,7 +155,15 @@ def test_golden_run_id_is_byte_stable() -> None:
 # and the run-id encoding widened to %032x — both move the deterministic hash.
 # Re-locked AGAIN for DEC-NIFTY-FIB-AXIS-001: the ``fib_anchor`` key entered the
 # params layout, so each persisted row's run_id (and thus the store bytes) moved.
-_GOLDEN_CONTENT_HASH = "b21c8e8709feed280555eb88da74d7fc116fad9434a980ec3850e140f09abb47"
+# Re-locked AGAIN for the R2-OC-2 overnight-entry-leak fix: this fixture's 12
+# synthetic days each end at 11:15 IST (never reaching a forced-exit bar), so a
+# mask firing on a day's LAST bar previously filled at the NEXT day's 09:16 open
+# — a cross-session overnight entry (audited pre-fix: 11+9+2 such fills on masks
+# 1<<0 / 1<<2 / 1<<4, every one an instant −80 stop-loss on the daily gap; masks
+# 1<<1 / 1<<3 had none and are byte-identical). Dropping those fills changes the
+# trade streams → per-mask metrics → one more mask passes the rank gates
+# (ranked/persisted 4 → 5) and the store bytes move BY DESIGN.
+_GOLDEN_CONTENT_HASH = "2387cc884944768ee271fad117edb953f538d4d6d2d3b3c1c4b9ca3f4bd4d147"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:
@@ -165,8 +173,8 @@ def test_golden_summary_is_stable(tmp_path: Path) -> None:
     assert summary.conflict_pruned == 0
     assert summary.skipped_dedup == 0
     assert summary.evaluated == 5
-    assert summary.ranked == 4
-    assert summary.persisted == 4
+    assert summary.ranked == 5
+    assert summary.persisted == 5
 
 
 def test_golden_store_is_deterministic_across_runs(tmp_path: Path) -> None:

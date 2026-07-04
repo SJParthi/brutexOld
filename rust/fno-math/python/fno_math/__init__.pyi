@@ -93,16 +93,20 @@ class ResidentBars:
     def count_supermask(self, mask: int) -> int: ...
 
 class ResidentSweepSim:
-    """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + bar_bits.
+    """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + sessions + bar_bits.
 
     DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). The per-bar SL/TP/forced-exit
     state machine (the Python `TradeSimWalker`) ported to Rust + fused with the
-    per-mask entry projection. The `O(N_bars)` Python→Rust copy of the 5 columns +
-    flags + bar_bits is paid ONCE in `__init__`; subsequent `simulate_masks` /
-    `count_trades` calls marshal only `masks`. Frozen + immutable (only `n_bars`
-    is exposed). All money is int64 paisa; the price→paisa conversion + forced-exit
-    detection are done in Python (the single source of truth) so the trades are
-    bit-identical to `brutex.engine.trade_sim.simulate_trades`.
+    per-mask entry projection. The `O(N_bars)` Python→Rust copy of the columns +
+    flags + session ordinals + bar_bits is paid ONCE in `__init__`; subsequent
+    `simulate_masks` / `count_trades` calls marshal only `masks`. Frozen +
+    immutable (only `n_bars` is exposed). All money is int64 paisa; the
+    price→paisa conversion, the forced-exit detection AND the per-bar session
+    identity (`session_idx[i]` = bar `i`'s IST calendar-date ordinal) are done in
+    Python (the single source of truth) so the trades are bit-identical to
+    `brutex.engine.trade_sim.simulate_trades`. A pending entry only fills on a
+    bar with the SAME `session_idx` it armed on — a cross-session fill (the
+    overnight-gap leak, R2-OC-2) is dropped.
 
     Unequal column lengths raise `ValueError`.
     """
@@ -114,6 +118,7 @@ class ResidentSweepSim:
         low: list[int],
         close: list[int],
         is_forced: list[bool],
+        session_idx: list[int],
         bar_bits: list[int],
     ) -> None: ...
     @property

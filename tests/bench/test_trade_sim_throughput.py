@@ -72,7 +72,12 @@ def _make_sim(n_bars: int) -> ResidentSweepSim:
         close_p.append(o + (wobble % 30))
         # A few condition bits per bar so masks fire intermittently.
         bar_bits.append((seed * (i + 7)) & 0x000F_FFFF)
-    return fno_math.ResidentSweepSim(open_p, high_p, low_p, close_p, is_forced, bar_bits)
+    # Single synthetic session (no forced bars either) — session_idx all-0 keeps
+    # the bench window shape identical to the pre-session-gate kernel.
+    session_idx: list[int] = [0] * n_bars
+    return fno_math.ResidentSweepSim(
+        open_p, high_p, low_p, close_p, is_forced, session_idx, bar_bits
+    )
 
 
 def _make_masks(n: int) -> list[int]:

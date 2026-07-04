@@ -29,10 +29,11 @@ from brutex.strategies.types import Side
 pytestmark = pytest.mark.golden
 
 _DAY = date(2024, 1, 2)
+_NEXT_DAY = date(2024, 1, 3)  # the next NSE session (Wednesday)
 
 
-def _bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
-    ts = datetime(_DAY.year, _DAY.month, _DAY.day, hh, mm, tzinfo=IST).astimezone(UTC)
+def _bar(hh: int, mm: int, o: str, h: str, lo: str, c: str, *, day: date = _DAY) -> CandleBar:
+    ts = datetime(day.year, day.month, day.day, hh, mm, tzinfo=IST).astimezone(UTC)
     return CandleBar(
         timestamp=ts,
         open=Decimal(o),
@@ -59,8 +60,19 @@ def _corpus() -> list[tuple[str, list[CandleBar], int, Side, int | None, int | N
         _bar(15, 19, "103", "109", "100", "105"),
         _bar(15, 20, "105", "112", "104", "110"),  # >= 15:20 → forced
     ]
+    # A window stepping ACROSS a trading-day boundary (session's last stored
+    # bar → the next session's 09:15 open) — the R2-OC-2 overnight-gap shape.
+    # mask=0 fires every bar, so the corpus case exercises drop + re-arm + the
+    # legitimate same-session fill on day-2.
+    two_session = [
+        _bar(15, 28, "100", "101", "99", "100"),
+        _bar(15, 29, "100", "101", "99", "100"),  # day-1's last stored bar
+        _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),  # +19 gap
+        _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
+    ]
     default = FillPolicy()
     return [
+        ("cross_session_boundary", two_session, 0, Side.BUY, None, None, default),
         ("long_end_of_data", morning, 0, Side.BUY, None, None, default),
         ("long_sl_at_level", morning, 0, Side.BUY, 800, None, default),
         ("long_tp_at_level", morning, 0, Side.BUY, None, 600, default),
@@ -152,3 +164,61 @@ class TestAbsoluteFrozenValues:
             exit_ts=bars[2].timestamp,
             direction=Side.BUY,
         )
+
+    def test_cross_session_last_bar_signal_yields_no_trade_both_sides(self) -> None:
+        # R2-OC-2 ABSOLUTE pin: a signal on day-1's LAST stored bar (15:29 IST)
+        # followed by day-2's 09:15 open produces ZERO trades on BOTH the Rust
+        # kernel AND the Python oracle — a lock-step drift that re-grew the
+        # overnight-entry leak in both at once (pre-fix BOTH produced one trade
+        # entering at 119.00, the +19 overnight gap at zero slippage) fails here.
+        bars = [
+            _bar(15, 28, "100", "101", "99", "100"),
+            _bar(15, 29, "100", "101", "99", "100"),  # signal (bit0) fires HERE only
+            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),
+            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
+        ]
+        signals = [False, True, False, False]
+        raw = build_bar_bits(bars)
+        bits = [(b | 1) if sig else (b & ~1) for b, sig in zip(raw, signals, strict=True)]
+        kernel = ResidentTradeSim(bars, bits, tf_minutes=1).simulate_masks([1], direction=Side.BUY)
+        oracle = simulate_trades(
+            bars, mask_to_entry_signals(bits, 1), direction=Side.BUY, tf_minutes=1
+        )
+        assert kernel == [[]]  # Rust kernel: NO overnight trade
+        assert oracle == []  # Python oracle: NO overnight trade
+        assert kernel == [oracle]  # byte-identical verdicts
+
+    def test_cross_session_day1_trade_is_untouched_exact_values(self) -> None:
+        # The anti-shared-drift twin for the SAME two-session shape: a mid-day
+        # day-1 signal still yields exactly its day-1 trade (hand-computed) on
+        # both sides — the drop rule removes ONLY the overnight fill.
+        bars = [
+            _bar(11, 0, "100", "101", "99", "100"),  # signal (bit0), well before 15:20
+            _bar(11, 1, "100.50", "102", "100", "101"),  # entry @ open 100.50
+            _bar(11, 2, "101", "103", "100.25", "102"),  # in-session ride
+            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),
+            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
+        ]
+        signals = [True, False, False, False, False]
+        raw = build_bar_bits(bars)
+        bits = [(b | 1) if sig else (b & ~1) for b, sig in zip(raw, signals, strict=True)]
+        kernel = ResidentTradeSim(bars, bits, tf_minutes=1).simulate_masks([1], direction=Side.BUY)
+        oracle = simulate_trades(
+            bars, mask_to_entry_signals(bits, 1), direction=Side.BUY, tf_minutes=1
+        )
+        # Entry open[1]=100.50=10050p. bar1 (102,100): fav=150, adv=50. bar2
+        # (103,100.25): fav=250, adv=25. Position is OPEN at the session step —
+        # the walker holds through the gap (exit-side semantics unchanged) —
+        # bar3 (120,118): fav=1950, adv=0; bar4 (120.50,119): fav=2000. End of
+        # data → close at close[4]=119.50=11950p.
+        expected = ClosedTrade(
+            pnl_paisa=1900,
+            mfe_paisa=2000,
+            mae_paisa=50,
+            holding_bars=4,
+            entry_ts=bars[1].timestamp,
+            exit_ts=bars[4].timestamp,
+            direction=Side.BUY,
+        )
+        assert oracle == [expected]
+        assert kernel == [[expected]]
