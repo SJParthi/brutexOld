@@ -44,6 +44,28 @@ def test_started_at_stamped_on_start() -> None:
     assert snap.phase_started_at == snap.started_at
 
 
+def test_elapsed_seconds_tracks_the_run_and_clamps_negative() -> None:
+    p = PullProgress(clock=_ticking_clock())
+    p.start(total=2)
+    p.advance()
+    assert p.snapshot().elapsed_seconds == 1.0  # start@1 → advance@2
+    # A never-started snapshot (updated_at == started_at == 0) clamps to 0, and a
+    # hand-built out-of-order snapshot can never read negative.
+    assert PullProgress(clock=_ticking_clock()).snapshot().elapsed_seconds == 0.0
+    skewed = ProgressSnapshot(
+        state=STATE_RUNNING,
+        total=1,
+        completed=0,
+        failed=0,
+        bars=0,
+        current="",
+        detail="",
+        updated_at=1.0,
+        started_at=5.0,
+    )
+    assert skewed.elapsed_seconds == 0.0
+
+
 def test_eta_none_when_idle() -> None:
     # Never started → no rate, not running → an honest None (never a fake 0).
     snap = PullProgress(clock=_ticking_clock()).snapshot()

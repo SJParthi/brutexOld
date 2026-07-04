@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import pytest
 import structlog.testing
-
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 
 
@@ -31,7 +30,9 @@ def test_on_bars_receives_each_folded_delta_exactly_once(
     try:
         pipeline.fold_totals(bars_appended=375, conflicts=0)
         pipeline.fold_totals(bars_appended=0, conflicts=0)
-        pipeline.fold_totals(bars_appended=42, conflicts=1, series_key=("NIFTY24JAN22000CE", "1minute"))
+        pipeline.fold_totals(
+            bars_appended=42, conflicts=1, series_key=("NIFTY24JAN22000CE", "1minute")
+        )
     finally:
         pipeline.drain()
     # Exactly the folded deltas, in order, once each — the no-double-count invariant

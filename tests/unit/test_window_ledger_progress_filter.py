@@ -35,8 +35,16 @@ def _mixed_ledger() -> WindowLedger:
     """Spot + option + future rows in ONE ledger — the real cross-market shape."""
     ledger = WindowLedger()
     # Spot (the pollution source): 2 settled SUCCESS + 1 PLANNED.
-    ledger.record(_key("groww", "NIFTY", "1minute"), raw_bars=100, error_type=None, bars_appended=100, now=_NOW)
-    ledger.record(_key("groww", "SENSEX", "1minute"), raw_bars=50, error_type=None, bars_appended=50, now=_NOW)
+    ledger.record(
+        _key("groww", "NIFTY", "1minute"),
+        raw_bars=100,
+        error_type=None,
+        bars_appended=100,
+        now=_NOW,
+    )
+    ledger.record(
+        _key("groww", "SENSEX", "1minute"), raw_bars=50, error_type=None, bars_appended=50, now=_NOW
+    )
     ledger.plan(_key("groww", "BANKNIFTY", "1minute"), now=_NOW)
     # F&O: one option SUCCESS, one option PLANNED, one future FAILED.
     ledger.record(
@@ -93,9 +101,21 @@ class TestProgressCountsFilters:
     def test_current_label_comes_from_the_filtered_subset_only(self) -> None:
         ledger = WindowLedger()
         later = datetime(2026, 7, 4, 11, 0, tzinfo=UTC)
-        ledger.record(_key("groww-option", "OPT", "1minute"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        ledger.record(
+            _key("groww-option", "OPT", "1minute"),
+            raw_bars=1,
+            error_type=None,
+            bars_appended=1,
+            now=_NOW,
+        )
         # The spot row is attempted LATER — unfiltered it wins the current label …
-        ledger.record(_key("groww", "SPOT", "1minute"), raw_bars=1, error_type=None, bars_appended=1, now=later)
+        ledger.record(
+            _key("groww", "SPOT", "1minute"),
+            raw_bars=1,
+            error_type=None,
+            bars_appended=1,
+            now=later,
+        )
         assert ledger.progress_counts().current == "SPOT 1minute"
         # … but the F&O-scoped fold must never name a spot symbol as "current".
         scoped = ledger.progress_counts(markets=frozenset({"groww-option"}))

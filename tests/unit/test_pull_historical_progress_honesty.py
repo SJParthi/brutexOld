@@ -26,7 +26,6 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.registry_store import RegistryStore
@@ -151,9 +150,7 @@ def test_sync_mode_on_bars_carries_the_per_pair_real_bars(
     """
     monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
     deltas: list[int] = []
-    report = _pull(
-        registry, lake_root=tmp_lake, dry_run=False, on_bars=deltas.append
-    )
+    report = _pull(registry, lake_root=tmp_lake, dry_run=False, on_bars=deltas.append)
     bars_appended = getattr(report, "bars_appended", None)
     assert bars_appended == 3  # one canned bar per contract
     assert sum(deltas) == 3  # exactly once each — never doubled
@@ -173,9 +170,7 @@ def test_async_mode_on_bars_advances_by_exactly_the_folded_deltas(
     """
     monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
     deltas: list[int] = []
-    report = _pull(
-        registry, lake_root=tmp_lake, dry_run=False, on_bars=deltas.append
-    )
+    report = _pull(registry, lake_root=tmp_lake, dry_run=False, on_bars=deltas.append)
     assert getattr(report, "bars_appended", None) == 3
     assert sum(deltas) == 3  # the no-double-count invariant
     assert [d for d in deltas if d > 0] == [1, 1, 1]  # one real delta per folded window

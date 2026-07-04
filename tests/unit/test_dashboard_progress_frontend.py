@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from brutex.dashboard.app import DashboardState, _render_universe_html, build_app
+from fastapi.testclient import TestClient
 
 _RATE_MONITOR_JS = (
     Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static" / "bx-rate-monitor.js"

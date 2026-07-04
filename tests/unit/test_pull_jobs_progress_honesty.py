@@ -16,7 +16,6 @@ import threading
 from collections.abc import Callable
 
 import pytest
-
 from brutex.dashboard import pull_jobs
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.pull_progress import STATE_DONE, PullProgress
@@ -153,8 +152,7 @@ def test_add_bars_is_thread_safe_under_concurrent_folds() -> None:
     def work(on_progress: ProgressHook) -> None:
         del on_progress
         threads = [
-            threading.Thread(target=lambda: [job.add_bars(1) for _ in range(200)])
-            for _ in range(4)
+            threading.Thread(target=lambda: [job.add_bars(1) for _ in range(200)]) for _ in range(4)
         ]
         for t in threads:
             t.start()

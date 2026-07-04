@@ -878,6 +878,7 @@ def _run_phase(
                 contract_windows=contract_windows,
             )
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
+
     # Honest live F&O progress (DEC-PULL-PROGRESS-HONESTY-001): a THROTTLED, market/
     # interval-FILTERED absolute fold of the pull's own ledger, pushed to the caller's
     # on_ledger_sync per per-pair tick (≤ once per LIVE_SYNC_INTERVAL_S). REUSES the
