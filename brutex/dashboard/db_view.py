@@ -1207,8 +1207,13 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
-    stored, NOT whether the full ``2020 → today`` range is complete.
-    Partial-date-range detection is an explicit follow-up, not claimed here.
+    stored, NOT whether the full ``2020 → today`` range is complete. What IS
+    now audited (DEC-SPOT-PARTIAL-RANGE-CHIP-001): ``session_days`` — the
+    COUNT of DISTINCT IST calendar dates holding at least one bar, one extra
+    scalar in the SAME footer aggregate — feeds the ``/completeness`` amber
+    ``settled_partial_range`` session-density verdict. The PER-WINDOW
+    trading-day gap audit and the options-side range audit remain explicit
+    follow-ups, not claimed.
 
     Parameters
     ----------
@@ -1224,7 +1229,7 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
 
             {"exchange", "segment", "symbol", "interval",
              "bars": <int>, "first_date": <YYYY-MM-DD|None>,
-             "last_date": <YYYY-MM-DD|None>}
+             "last_date": <YYYY-MM-DD|None>, "session_days": <int>}
     """
     rows: list[dict[str, Any]] = []
     for dataset in list_candle_datasets(lake_root):
@@ -1241,10 +1246,16 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
+        # ``session_days`` (DEC-SPOT-PARTIAL-RANGE-CHIP-001): ONE extra scalar in
+        # the SAME single footer aggregate — the count of DISTINCT IST calendar
+        # dates (timestamps are stored UTC; IST is fixed +05:30, no DST) holding
+        # at least one bar. Feeds the /completeness session-density range audit
+        # with ZERO extra passes over the lake.
         agg_rows = _aggregate_parquet_resilient(
             conn,
             lake_root / "bars" / exchange / segment / symbol / interval,
-            f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp") '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
+            f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp"), '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
+            "COUNT(DISTINCT CAST((\"timestamp\" + INTERVAL '330 minutes') AS DATE)) "
             "FROM read_parquet(?, union_by_name=true)",
             source=f"spot:{exchange}/{segment}/{symbol}/{interval}",
         )
@@ -1258,6 +1269,7 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
                 "bars": int(agg[0]) if agg else 0,
                 "first_date": _ist_date(agg[1]) if agg else None,
                 "last_date": _ist_date(agg[2]) if agg else None,
+                "session_days": int(agg[3]) if agg else 0,
             }
         )
     return rows

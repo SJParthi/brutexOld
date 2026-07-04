@@ -101,7 +101,7 @@
   <header>
     <div class="brandmark" aria-hidden="true">B</div>
     <div class="logo">BruteX</div>
-    <div class="sub">Spot coverage — one row per dataset · fetch-window chip = ledger-settled within planned ranges (trading-day gap audit not claimed)</div>
+    <div class="sub">Spot coverage — one row per dataset · fetch-window chip = ledger-settled within planned ranges (range density feeds the /completeness amber chip; per-window gap audit not claimed)</div>
     <nav class="topnav" aria-label="Primary">
       <a href="/">Operator</a>
       <span class="sep">·</span>
@@ -222,7 +222,7 @@ async function poll() {
     dsEl.textContent = h.datasets ?? "—";
     barzEl.textContent = num(h.total_bars);
     statusEl.textContent = (h.datasets ?? "—") + " datasets · " + num(h.total_bars)
-      + " bars · chip = ledger-settled within planned ranges (gap audit not claimed)";
+      + " bars · chip = ledger-settled within planned ranges (range density → /completeness amber chip; per-window gap audit not claimed)";
     renderSpot(body.rows || []);
     lastLiveLine = "live · " + (body.rows || []).length + " datasets";
     liveTxt.textContent = lastLiveLine;

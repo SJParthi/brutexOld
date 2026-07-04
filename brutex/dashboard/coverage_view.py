@@ -193,8 +193,11 @@ def spot_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*. This headline reports HOW MANY spot datasets exist and their
-    total bar count; it does NOT assert any date range is complete —
-    partial-date-range detection is an explicit follow-up (DEC-COVERAGE-SPOT-001).
+    total bar count; it does NOT assert any date range is complete. A
+    session-density range audit now feeds the ``/completeness`` amber
+    ``settled_partial_range`` chip (DEC-SPOT-PARTIAL-RANGE-CHIP-001); the
+    per-window trading-day gap audit and the options-side range audit remain
+    follow-ups (DEC-COVERAGE-SPOT-001).
 
     Returns
     -------

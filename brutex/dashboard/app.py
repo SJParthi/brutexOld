@@ -3635,7 +3635,11 @@ def build_app(
         counts as *pulled*; each row's ``completeness`` chip asserts ONLY
         ledger-settledness over planner-planned ranges
         (DEC-SPOT-COVERAGE-COMPLETENESS-001 — partially executes the #397
-        follow-up; a trading-day gap audit is NOT claimed). When no lake root
+        follow-up). A session-density RANGE audit now feeds the
+        ``/completeness`` amber ``settled_partial_range`` chip
+        (DEC-SPOT-PARTIAL-RANGE-CHIP-001 — ``session_days`` rides this same
+        SPOT scan); the PER-WINDOW trading-day gap audit and the options-side
+        range audit remain follow-ups, NOT claimed. When no lake root
         is wired (a store opened without a filesystem path) the payload is an
         empty summary, never a 500.
         """

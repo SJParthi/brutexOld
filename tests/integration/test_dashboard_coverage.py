@@ -261,6 +261,7 @@ class TestSpotCoverageApi:
                 "bars": 2,
                 "first_date": "2024-03-01",
                 "last_date": "2024-03-02",
+                "session_days": 2,
                 "completeness": "no_ledger_record",
                 "windows_settled": None,
                 "windows_pending": None,
@@ -685,6 +686,55 @@ class TestCompletenessScoreboard:
         assert entry["log_level"] == "warning"
         assert entry["stray_lake_symbols"] == [repr("NSE-M&M")]
         assert entry["unmatched_scored_symbols"] == [repr("M&M")]
+
+    def test_sparse_settled_range_reads_amber_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SPOT-PARTIAL-RANGE-CHIP-001 end-to-end: a SETTLED symbol whose real lake
+        holds only 3 session-days over a 3-month span reads the amber
+        ``settled_partial_range`` on the /completeness scoreboard — the ``session_days``
+        scalar rides the real ``summarize_spot_datasets`` scan, the ledger rollup is
+        settled (nothing left to re-pull), yet the range density (3 / ~60 sessions)
+        honestly fails the 0.95 floor. Pre-fix this read a false ``full``."""
+        s = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        s.upsert_many(
+            [_eq("SPARSECO")],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-sparse",
+            csv_source_sha256="0" * 64,
+        )
+        # A REAL sparse lake: Jan-2020-anchored (the floor passes) but only 3 distinct
+        # session dates across Jan→Mar 2020 (one write per month partition).
+        writer = ParquetWriter(lake_root=tmp_path)
+        for ts, close in [
+            (datetime(2020, 1, 1, 9, 15, tzinfo=UTC), "100.4"),
+            (datetime(2020, 2, 3, 9, 15, tzinfo=UTC), "100.8"),
+            (datetime(2020, 3, 31, 9, 15, tzinfo=UTC), "101.00"),
+        ]:
+            writer.write(
+                exchange="NSE",
+                segment="CASH",
+                symbol="SPARSECO",
+                interval="1minute",
+                bars=[_bar(ts, close)],
+            )
+        # A fully-SETTLED ledger rollup for the cell (5 settled, 0 pending, 0 failed) —
+        # the base verdict is ``full``; only the range audit can downgrade it.
+        monkeypatch.setattr(
+            _app_module,
+            "spot_window_rollup",
+            lambda _lake: {("SPARSECO", "1minute"): (5, 0, 0)},
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=s))
+        try:
+            body = client.get("/api/v1/completeness/scoreboard").json()
+        finally:
+            s.close()
+        per_symbol = {row["symbol"]: row for row in body["spot"]["per_symbol"]}
+        assert per_symbol["SPARSECO"]["1minute"] == "settled_partial_range"
+        assert per_symbol["SPARSECO"]["1minute_start"] == "2020-01-01"
+        # …and it does NOT inflate the FULL 1-minute aggregate.
+        assert body["spot"]["by_category"]["equity"]["full_1minute"] == 0
 
     def test_reconcile_diagnostic_silent_when_lake_key_matches_scored(self, tmp_path: Path) -> None:
         """The clean counterpart: when the lake partition key EQUALS the scored ``symbol_name``

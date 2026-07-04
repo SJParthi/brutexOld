@@ -1811,8 +1811,34 @@ def test_summarize_spot_datasets_reports_bars_and_date_span(
             "bars": 2,
             "first_date": "2024-03-01",
             "last_date": "2024-03-02",
+            "session_days": 2,
         }
     ]
+
+
+def test_summarize_spot_datasets_session_days_counts_distinct_ist_dates(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # DEC-SPOT-PARTIAL-RANGE-CHIP-001: ``session_days`` counts DISTINCT IST calendar
+    # dates (not bars, not UTC dates). Three bars: two on the SAME IST date (one of
+    # them crossing the UTC boundary — 2024-03-01 20:30 UTC is 2024-03-02 02:00 IST)
+    # plus one on a second IST date → bars=3 but session_days=2.
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _bar(datetime(2024, 3, 1, 20, 30, tzinfo=UTC), "100.4"),  # IST 2024-03-02
+            _bar(datetime(2024, 3, 2, 9, 15, tzinfo=UTC), "100.8"),  # IST 2024-03-02
+            _bar(datetime(2024, 3, 4, 9, 15, tzinfo=UTC), "101.0"),  # IST 2024-03-04
+        ],
+    )
+    [row] = summarize_spot_datasets(store.connection, tmp_path)
+    assert row["bars"] == 3
+    assert row["session_days"] == 2
+    assert row["first_date"] == "2024-03-02" and row["last_date"] == "2024-03-04"
 
 
 def test_summarize_spot_datasets_multiple_sets(store: InstrumentStore, tmp_path: Path) -> None:
@@ -1843,6 +1869,7 @@ def test_summarize_spot_datasets_skips_one_corrupt_file(
             "bars": 2,
             "first_date": "2024-03-01",
             "last_date": "2024-03-02",
+            "session_days": 2,
         }
     ]
     skips = [e for e in logs if e["event"] == "coverage.parquet_skip"]
@@ -1871,6 +1898,7 @@ def test_summarize_spot_datasets_all_unreadable_reports_zero(
             "bars": 0,
             "first_date": None,
             "last_date": None,
+            "session_days": 0,
         }
     ]
     unreadable = [e for e in logs if e["event"] == "coverage.parquet_unreadable"]
