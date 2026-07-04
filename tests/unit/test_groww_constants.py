@@ -274,3 +274,40 @@ def test_resolve_token_param_path_default_when_unset_or_blank(monkeypatch) -> No
         assert c.resolve_token_param_path(env_name, default) == default
         monkeypatch.setenv(env_name, "   ")
         assert c.resolve_token_param_path(env_name, default) == default
+
+
+# ── resolve_smooth_pacing_mode — the TRI-STATE resolver (DEC-SMOOTH-PACING-AUTOLATCH-001) ──
+
+
+def test_resolve_smooth_pacing_mode_unset_is_adaptive(monkeypatch) -> None:
+    """Unset env → ADAPTIVE (the new default: latch-armed, pacing byte-identical)."""
+    from brutex.adapters.rate_common import SMOOTH_PACING_ADAPTIVE
+
+    monkeypatch.delenv(c.GROWW_SMOOTH_PACING_ENV, raising=False)
+    assert c.resolve_smooth_pacing_mode() == SMOOTH_PACING_ADAPTIVE
+
+
+def test_resolve_smooth_pacing_mode_truthy_is_on(monkeypatch) -> None:
+    from brutex.adapters.rate_common import SMOOTH_PACING_ON
+
+    for raw in ("1", "true", "TRUE", "Yes", " on "):
+        monkeypatch.setenv(c.GROWW_SMOOTH_PACING_ENV, raw)
+        assert c.resolve_smooth_pacing_mode() == SMOOTH_PACING_ON
+
+
+def test_resolve_smooth_pacing_mode_explicit_falsy_is_off(monkeypatch) -> None:
+    """The escape hatch: "0"/"false"/"no"/"off" disables the gate AND the latch."""
+    from brutex.adapters.rate_common import SMOOTH_PACING_OFF
+
+    for raw in ("0", "false", "No", " OFF "):
+        monkeypatch.setenv(c.GROWW_SMOOTH_PACING_ENV, raw)
+        assert c.resolve_smooth_pacing_mode() == SMOOTH_PACING_OFF
+
+
+def test_resolve_smooth_pacing_mode_blank_or_unknown_degrades_to_adaptive(monkeypatch) -> None:
+    """A bad env value never FORCES smoothing — it degrades to the safe adaptive default."""
+    from brutex.adapters.rate_common import SMOOTH_PACING_ADAPTIVE
+
+    for raw in ("", "  ", "maybe", "2"):
+        monkeypatch.setenv(c.GROWW_SMOOTH_PACING_ENV, raw)
+        assert c.resolve_smooth_pacing_mode() == SMOOTH_PACING_ADAPTIVE

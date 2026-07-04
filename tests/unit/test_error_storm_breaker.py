@@ -655,7 +655,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     return monkeypatch
 
 
-@pytest.mark.usefixtures("clean_env")
+@pytest.mark.usefixtures("clean_env")  # pyright: ignore[reportUntypedClassDecorator]
 class TestResolveEnvConfig:
     def test_defaults(self) -> None:
         b = resolve_error_storm_breaker()
@@ -808,7 +808,9 @@ class TestAuthorisationStormArm:
         """An authz observation neither counts toward nor resets vendor-down / stale."""
         b = _breaker(min_symbols=3, min_failures=5, streak=4, authz_min=99)
         _fail_n(b, 2, symbol="T1")
-        b.observe_transport_failure("A", error_type="stale", window_key=_next_key(), still_stale=True)
+        b.observe_transport_failure(
+            "A", error_type="stale", window_key=_next_key(), still_stale=True
+        )
         before = b.counts()
         _authz_n(b, ["Z1", "Z2"])
         assert b.counts() == before  # vendor-down + stale state byte-unchanged

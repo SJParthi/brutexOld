@@ -17,7 +17,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-
 from brutex.adapters.rate_common import (
     _GOVERNOR_LOOP_CAP,
     _SMOOTH_LOOP_CAP,
@@ -1342,9 +1341,7 @@ class TestTrailingWindowIssueLog:
 # ── DEC-SMOOTH-PACING-AUTOLATCH-001 — tri-state mode + one-way auto-latch ────────
 
 
-def _adaptive(
-    *, ceiling_rps: float = 8.0
-) -> tuple[RateController, _Clock, list[float]]:
+def _adaptive(*, ceiling_rps: float = 8.0) -> tuple[RateController, _Clock, list[float]]:
     """Build an ADAPTIVE-mode controller with the fake clock + sleep-log harness."""
     clock = _Clock()
     slept: list[float] = []
@@ -1370,9 +1367,9 @@ def _seed_burst(ctl: RateController, *, second: int, count: int) -> None:
     burst shape the operator observed — ``rps_1s_max`` above the AIMD rate —
     is synthesised at the ring, exactly the evidence surface the latch scans).
     """
-    with ctl._lock:  # noqa: SLF001 — whitebox harness (the file's convention)
+    with ctl._lock:
         for _ in range(count):
-            ctl._record_issue_locked(float(second))  # noqa: SLF001
+            ctl._record_issue_locked(float(second))
 
 
 class TestSmoothPacingModeResolution:
@@ -1480,15 +1477,15 @@ class TestSmoothPacingAutoLatch:
         ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
         _seed_burst(ctl, second=int(clock.t), count=9)
         ctl.on_rate_limit()
-        assert ctl._last_issue_ts == float("-inf")  # noqa: SLF001
-        assert ctl._smooth_wait_locked(ctl._clock()) == 0.0  # noqa: SLF001
+        assert ctl._last_issue_ts == float("-inf")
+        assert ctl._smooth_wait_locked(ctl._clock()) == 0.0
 
     def test_recent_bucket_counts_zero_span_is_empty(self) -> None:
         """Degenerate scan spans (0 / negative seconds) read as no evidence."""
         ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
         _seed_burst(ctl, second=int(clock.t), count=3)
-        with ctl._lock:  # noqa: SLF001
-            assert ctl._recent_bucket_counts_locked(ctl._clock(), 0) == []  # noqa: SLF001
+        with ctl._lock:
+            assert ctl._recent_bucket_counts_locked(ctl._clock(), 0) == []
 
     def test_aimd_ladder_and_caps_unchanged_by_the_latch(self) -> None:
         """The latch only flips the smooth gate — the 429 step-down maths is untouched."""
