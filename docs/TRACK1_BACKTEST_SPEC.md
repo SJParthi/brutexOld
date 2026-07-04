@@ -1099,7 +1099,15 @@ blake3(strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖
 ```
 
 Where:
-- `data_snapshot_hash` = blake3 of input Parquet bytes (DVC-tracked)
+- `data_snapshot_hash` = the FULL-CONTENT streamed BLAKE3 of the loaded
+  data window (`brutex.engine.stage3_wire.data_snapshot_hash`, preimage
+  `bxsnap2|`): the scope labels plus, per `(symbol, interval)` slice,
+  EVERY bar's 7 fields (ts/O/H/L/C/volume/OI) — any single-bar difference
+  in any slice produces a different hash (DEC-SNAPSHOT-HASH-FULL-001;
+  supersedes the sampled count+endpoints fingerprint AND the earlier
+  "blake3 of input Parquet bytes (DVC-tracked)" wording — the file-bytes
+  variant lives on separately as `Catalog.data_snapshot_hash`, FR-CAT-004,
+  which is a lake-provenance hash, never the run identity)
 - `indicator_version` = semver from `pyproject.toml`
 - `code_commit_hash` = git SHA, GPG-signed
 
