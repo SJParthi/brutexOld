@@ -116,7 +116,7 @@ def month_partition_files(base: Path, months: Iterable[tuple[int, int]]) -> list
     repeated month is read once and the order is deterministic (Golden Rule #7).
 
     CORRECTNESS BASIS (the invariant this bounding rests on, pinned by
-    ``tests/unit/test_nse_session_utc_month_invariant.py``): every NSE trading
+    ``tests/unit/test_calendar_nse_utc_month_invariant.py``): every NSE trading
     session — regular, special-weekend Budget Saturday/Sunday, and the Diwali
     Muhurat evening — opens AND closes on the SAME UTC calendar date as its IST
     session date (09:15–15:30 IST = 03:45–10:00 UTC; even a Muhurat close at

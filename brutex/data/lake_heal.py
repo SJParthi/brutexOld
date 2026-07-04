@@ -916,7 +916,7 @@ def _rebuild_tf_months(
     no longer the whole O(symbol-history) 1-minute tree; sound because an NSE
     session never crosses a UTC month boundary, so a month's intraday-TF bars
     derive fully from that month's own 1-minute partition — invariant pinned by
-    ``test_nse_session_utc_month_invariant.py``, byte-equality vs the full
+    ``test_calendar_nse_utc_month_invariant.py``, byte-equality vs the full
     rebuild pinned by the roundtrip suite). The quarantine-delete loop is
     already month-scoped, so writes land only in the deleted months
     (keep-first makes any overlap a no-op). A rebuild failure leaves the
