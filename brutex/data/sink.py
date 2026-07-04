@@ -29,12 +29,40 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
-from brutex.data.parquet_writer import ParquetWriter, WriteResult
+from brutex.data.parquet_writer import (
+    ParquetWriter,
+    WriteResult,
+    fold_max_close_delta,
+    max_conflict_close_delta,
+)
 from brutex.data.partition import partition_for_timestamp
+
+
+def vendor_surface_from_write_results(
+    results: Sequence[WriteResult],
+) -> tuple[int, Decimal | None]:
+    """Fold per-partition write results into ``(dup_rows_dropped, max_close_delta)``.
+
+    DEC-VENDOR-CONFLICT-SURFACE-001 — the ONE fold from a call's
+    :class:`~brutex.data.parquet_writer.WriteResult` tuple to the two honest
+    vendor-behaviour counters an append reports (CLAUDE.md §11 COMMON): the SUM
+    of within-batch vendor duplicate rows dropped, and the MAX absolute
+    keep-first close delta across every recorded conflict (exact Decimal —
+    ``None`` when no conflict carried a close anywhere). Shared by
+    :class:`ParquetBarSink` and the pooled
+    :class:`~brutex.data.write_consumer.WriteConsumerSink` merge so the two
+    production sinks can never drift.
+    """
+    dup_rows = sum(wr.vendor_dup_rows_dropped for wr in results)
+    delta: Decimal | None = None
+    for wr in results:
+        delta = fold_max_close_delta(delta, max_conflict_close_delta(wr.conflicts))
+    return dup_rows, delta
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +96,24 @@ class SinkAppendResult:
         Per-partition :class:`WriteResult` tuples, in write order.
         Empty for sinks that don't actually write (e.g.
         :class:`NullBarSink`).
+    vendor_dup_rows_dropped
+        WITHIN-BATCH duplicate vendor rows the writer collapsed across this
+        call's partitions (DEC-VENDOR-CONFLICT-SURFACE-001 — the sum of each
+        :attr:`~brutex.data.parquet_writer.WriteResult.vendor_dup_rows_dropped`).
+        ``0`` for a duplicate-free append and for non-writing sinks.
+    max_close_delta
+        The MAX absolute vendor-vs-stored close delta across every keep-first
+        conflict this call recorded (exact Decimal rupees — prices are Decimal,
+        never float, CLAUDE.md §6). ``None`` when the call recorded no conflict
+        — honestly distinct from a real ``Decimal("0")`` delta.
     """
 
     bars_appended: int
     partitions_written: int
     write_results: tuple[WriteResult, ...]
     bars_net_new: int = 0
+    vendor_dup_rows_dropped: int = 0
+    max_close_delta: Decimal | None = None
 
 
 @runtime_checkable
@@ -230,12 +270,17 @@ class ParquetBarSink:
         # across the partitions this call touched: a re-pull whose bars are all already in
         # the lake merges to ``bars_added == 0`` per partition, so net-new is 0 there. The
         # on-disk merge already dedups idempotently — this only ADDS an honest count field,
-        # changing NO existing control flow.
+        # changing NO existing control flow. The two vendor-behaviour counters
+        # (DEC-VENDOR-CONFLICT-SURFACE-001) ride the COMMON fold so the pull can
+        # surface them instead of the log swallowing them.
+        dup_rows, max_delta = vendor_surface_from_write_results(results)
         return SinkAppendResult(
             bars_appended=len(bars),
             partitions_written=len(results),
             write_results=tuple(results),
             bars_net_new=sum(wr.bars_added for wr in results),
+            vendor_dup_rows_dropped=dup_rows,
+            max_close_delta=max_delta,
         )
 
 
@@ -244,4 +289,5 @@ __all__ = [
     "NullBarSink",
     "ParquetBarSink",
     "SinkAppendResult",
+    "vendor_surface_from_write_results",
 ]
