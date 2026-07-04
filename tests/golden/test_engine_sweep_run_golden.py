@@ -314,6 +314,15 @@ def test_golden_rust_metrics_on_arm_is_byte_identical_and_engages(
     assert len(engaged) == 1  # the metrics kernel actually served masks
     assert wired.store_content_hash == _GOLDEN_CONTENT_HASH
     assert rust_arm.store_content_hash == _GOLDEN_CONTENT_HASH
+    # The whole summary tally set matches across arms, not just the hash.
+    assert (rust_arm.enumerated, rust_arm.evaluated, rust_arm.ranked, rust_arm.persisted) == (
+        wired.enumerated,
+        wired.evaluated,
+        wired.ranked,
+        wired.persisted,
+    )
+    assert rust_arm.skipped_dedup == wired.skipped_dedup
+    assert rust_arm.conflict_pruned == wired.conflict_pruned
     assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
 
 
