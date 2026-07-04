@@ -31,6 +31,7 @@ from brutex.data.greeks_enrich import (
     STATUS_OK,
     STYLE_AMERICAN_APPROX,
     STYLE_EUROPEAN_EXACT,
+    EnrichStats,
     GreeksEnrichTarget,
     enrich_greeks_for_targets,
     enrich_option_bars,
@@ -45,7 +46,6 @@ if TYPE_CHECKING:
     from brutex.data.fno_symbol import FnoSymbolParts
 
 _CE_SYMBOL = "NSE-NIFTY-25Jan24-21500-CE"
-_EXPIRY = date(2024, 1, 25)
 _BAR_TS = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)  # 09:15 IST, ten days out
 _WINDOW = (date(2024, 1, 1), date(2024, 1, 20))
 _SPOT = Decimal("21500")
@@ -88,7 +88,7 @@ def _enrich_rows(
     spot_by_ts: dict[datetime, Decimal] | None = None,
     rate_source: object = _RATE,
     style_flag: int = STYLE_EUROPEAN_EXACT,
-) -> tuple[list[FnoGreeksBar], object]:
+) -> tuple[list[FnoGreeksBar], EnrichStats]:
     return enrich_option_bars(
         rows,
         parts=_parts(symbol),
