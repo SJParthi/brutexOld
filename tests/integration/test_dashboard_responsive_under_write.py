@@ -10,9 +10,10 @@ async server for the duration of the write.
 This test reproduces the writer's hold and asserts two reads stay fast:
 
 * ``GET /api/v1/state`` — a pure in-memory snapshot. It must return ~instantly
-  even while a background thread holds the store lock for ~1 s, proving the
-  event loop is no longer serialised behind the writer (every blocking read is
-  now offloaded via ``run_in_threadpool``, so the loop stays free).
+  even while a background thread holds the store lock for ``_WRITER_HOLD_S``,
+  proving the event loop is no longer serialised behind the writer (every
+  blocking read is now offloaded via ``run_in_threadpool``, so the loop stays
+  free).
 * ``GET /api/v1/coverage/spot`` — primed once so the SummaryCache serves it from
   memory (O(1)) within the 2 s TTL floor. A cache-served poll touches neither the
   lake nor the store lock, so it returns 200 well under the writer's hold time.
@@ -57,17 +58,23 @@ from fastapi.testclient import TestClient
 #: the lock the instant the (fast) read returns, so the full hold elapses ONLY on
 #: the regression path (a blocked read waits out the whole window). A wider hold
 #: therefore buys a larger pass/fail separation at zero healthy-run cost
-#: (DEC-DASHBOARD-FASTREAD-FLAKE-001).
-_WRITER_HOLD_S: float = 2.0
+#: (DEC-DASHBOARD-FASTREAD-FLAKE-001; widened again 2 s → 4 s by
+#: DEC-DASHBOARD-FASTREAD-FLAKE-002).
+_WRITER_HOLD_S: float = 4.0
 
-#: A generous per-read ceiling — ``_WRITER_HOLD_S / 4`` (0.5 s). The discriminating
+#: A generous per-read ceiling — ``_WRITER_HOLD_S / 4`` (1.0 s). The discriminating
 #: signal is "far below the writer's hold": a cache/in-memory read completes in
-#: single-digit ms (~100x under this budget), while the old blocking path waits
+#: single-digit ms (~250x under this budget), while the old blocking path waits
 #: ~``_WRITER_HOLD_S`` (4x OVER this budget → a clear, unambiguous fail). The prior
 #: 0.2 s ceiling flaked on loaded CI runners (a 4.8 ms scheduling spike over 0.2 s
-#: spuriously failed + blocked a merge); 0.5 s keeps strong regression separation
-#: with ~25x jitter headroom on the healthy path (DEC-DASHBOARD-FASTREAD-FLAKE-001).
-_READ_BUDGET_S: float = 0.5
+#: spuriously failed + blocked a merge — DEC-DASHBOARD-FASTREAD-FLAKE-001, widened
+#: to 0.5 s); the 0.5 s ceiling then ALSO flaked once the suite grew to ~12.5k
+#: tests (~17 min on a shared GHA runner): a 556.2 ms scheduling spike over 0.5 s
+#: failed a cache-served read that a revert-proof blocked path would have held for
+#: the FULL 2 s hold (PR #1093 run 28689390506). 1.0 s keeps the unambiguous 4x
+#: regression separation with ~2x the jitter headroom on the healthy path
+#: (DEC-DASHBOARD-FASTREAD-FLAKE-002).
+_READ_BUDGET_S: float = 1.0
 
 
 def _idx(symbol: str) -> Instrument:
