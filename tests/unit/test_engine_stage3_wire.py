@@ -44,6 +44,7 @@ from brutex.engine.stage3_wire import (
     Stage3RefinedCell,
     Stage3WireError,
     _cell_sort_key,
+    _data_snapshot_hash_v1,
     _side_for_direction,
     _timeframe_for_label,
     cascade_specs_for_refined_cells,
@@ -284,6 +285,54 @@ class TestDataSnapshotHash:
         assert _data_snapshot_hash(**_SCOPE, slices=slices) == data_snapshot_hash(
             **_SCOPE, slices=slices
         )
+
+
+# ────── _data_snapshot_hash_v1 (RETIRED sampled diagnostic) ──────
+
+
+class TestDataSnapshotHashV1Legacy:
+    """The RETIRED v1 sampled derivation — recount DIAGNOSTIC only, never identity.
+
+    Kept module-private for ``sweep-verify --recount``'s "legacy v1 identity"
+    verdict; its documented unsoundness is WHY the full-content v2 exists
+    (DEC-SNAPSHOT-HASH-FULL-001).
+    """
+
+    def test_deterministic_hex_over_multi_slice_grid(self) -> None:
+        # Non-empty + single-bar + EMPTY slices — both loop arms exercised.
+        grid = {
+            ("NIFTY", "1minute"): _trending_bars(2),
+            ("BANKNIFTY", "1minute"): [_bar(0, 0, 100.0, 101.0)],
+            ("SENSEX", "1minute"): [],
+        }
+        a = _data_snapshot_hash_v1(**_SCOPE, slices=grid)
+        b = _data_snapshot_hash_v1(**_SCOPE, slices=grid)
+        assert a == b
+        assert len(a) == 64 and a == a.lower()
+
+    def test_v1_weakness_interior_edit_aliases(self) -> None:
+        # The documented v1 unsoundness pin (DEC-SNAPSHOT-HASH-FULL-001): an
+        # interior-bar edit that preserves count + first/last timestamp+close
+        # produces the SAME v1 hash — the exact aliasing bug the full-content
+        # v2 kills (v2 asserted-distinct below).
+        base = [_bar(0, m, 100.0, 101.0) for m in range(5)]
+        edited = list(base)
+        edited[2] = _bar(0, 2, 100.0, 999.0)  # middle bar; endpoints untouched
+        assert _data_snapshot_hash_v1(
+            **_SCOPE, slices={("NIFTY", "1minute"): base}
+        ) == _data_snapshot_hash_v1(**_SCOPE, slices={("NIFTY", "1minute"): edited})
+        assert data_snapshot_hash(
+            **_SCOPE, slices={("NIFTY", "1minute"): base}
+        ) != data_snapshot_hash(**_SCOPE, slices={("NIFTY", "1minute"): edited})
+
+    def test_count_and_endpoint_changes_change_the_hash(self) -> None:
+        base = [_bar(0, m, 100.0, 101.0) for m in range(5)]
+        a = _data_snapshot_hash_v1(**_SCOPE, slices={("NIFTY", "1minute"): base})
+        # Count change (also moves the sampled last endpoint).
+        assert a != _data_snapshot_hash_v1(**_SCOPE, slices={("NIFTY", "1minute"): base[:-1]})
+        # Last-endpoint close edit at the SAME count + timestamps.
+        endpoint = [*base[:-1], _bar(0, 4, 100.0, 250.0)]
+        assert a != _data_snapshot_hash_v1(**_SCOPE, slices={("NIFTY", "1minute"): endpoint})
 
 
 # ────── recover_survivor_cell (review F4) ──────

@@ -31,6 +31,7 @@ from brutex.adapters.groww.constants import (
     OPTION_SEGMENT,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
+from brutex.adapters.groww.errors import GrowwTimeoutError
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
     SUSPECTED_PARTIAL_WINDOW_EVENT,
@@ -46,6 +47,7 @@ from brutex.adapters.groww.option_ingest import (
     ingest_option_contract,
     ingest_underlying_futures,
     ingest_underlying_options,
+    make_breaker_canary_probe,
     plan_contract_windows,
     reconcile_fno_ledger_windows,
     run_groww_option_ingest,
@@ -2375,10 +2377,27 @@ class TestSuspiciousEmptyFlag:
         pairs = {k: _ireport(windows=1, bars=10) for k in pairs}
         assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
 
-    def test_below_threshold_not_flagged(self) -> None:
-        # Only 2 empty contracts (< _ALL_EMPTY_MIN_CONTRACTS) → not suspicious.
+    def test_low_leg_two_clean_empty_flags(self) -> None:
+        # REWRITTEN by DEC-SILENT-VANISH-LOWLEG-001 (was ``test_below_threshold_not_flagged``,
+        # which pinned the 1-2-leg gap as intended): a PURE 2-leg all-clean-empty chain —
+        # no skip / transient / clamp / quarantine sibling — NOW flags, marked low_leg.
         contracts, pairs = _empty_chain("WIPRO", 2)
-        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+        scan = scan_underlying_all_empty(pairs, contracts)
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="WIPRO", attempted_pairs=2, stored_bars=0, low_leg=True
+            ),
+        )
+
+    def test_low_leg_one_clean_empty_flags(self) -> None:
+        # The 1-leg illiquid twin: a single clean-empty leg with NO disqualifying sibling flags.
+        contracts, pairs = _empty_chain("JIOFIN", 1)
+        scan = scan_underlying_all_empty(pairs, contracts)
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="JIOFIN", attempted_pairs=1, stored_bars=0, low_leg=True
+            ),
+        )
 
     def test_skip_only_not_flagged(self) -> None:
         # All ledger-skips (skipped_windows=1) → 0 attempted → never-tried, not flagged.
@@ -2405,6 +2424,92 @@ class TestSuspiciousEmptyFlag:
         pairs = {("NSE-GHOST-99-FUT", "1day"): _ireport(windows=1, bars=0)}
         assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
 
+    # ── DEC-SILENT-VANISH-LOWLEG-001: every excluded false-positive shape regression-pinned.
+    # The low-leg Tier B rule must NOT reintroduce the shapes the #919 guards exclude —
+    # each disqualifying sibling shape is pinned individually.
+
+    def test_low_leg_skip_sibling_not_flagged(self) -> None:
+        # RE-PULL shape: 1 clean-empty + 1 ledger-skipped sibling → NOT flagged (an
+        # already-settled sibling means this is not a fresh whole-chain vendor answer).
+        contracts, _ = _empty_chain("HDFC", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=1, skipped=1),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_transient_sibling_not_flagged(self) -> None:
+        # TRANSIENT-storm shape: 1 clean-empty + 1 still-failing sibling → NOT flagged.
+        contracts, _ = _empty_chain("SBIN", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=1, still_failed=1),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_empty_clamp_sibling_not_flagged(self) -> None:
+        # EMPTY-CLAMP shape: 1 clean-empty + 1 windows==0 no-op sibling → NOT flagged.
+        contracts, _ = _empty_chain("ITC", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=0),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_quarantined_sibling_not_flagged(self) -> None:
+        # QUARANTINE shape: 1 clean-empty + 1 terminally-quarantined sibling (never enters
+        # ``pairs``) → NOT flagged — "every attempted contract was a clean empty" is false.
+        contracts, _ = _empty_chain("TATASTEEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        scan = scan_underlying_all_empty(pairs, contracts, [contracts[1].symbol])
+        assert not scan.has_suspicious()
+
+    def test_low_leg_stored_bars_sibling_not_flagged(self) -> None:
+        # MIXED chain: 1 clean-empty + 1 clean-with-bars → stored > 0 → NOT flagged.
+        contracts, _ = _empty_chain("INFY", 2)
+        pairs = {
+            (contracts[0].symbol, "1day"): _ireport(windows=1, bars=0),
+            (contracts[1].symbol, "1day"): _ireport(windows=1, bars=11),
+        }
+        assert not scan_underlying_all_empty(pairs, contracts).has_suspicious()
+
+    def test_low_leg_unknown_failed_symbol_is_ignored(self) -> None:
+        # A quarantined symbol NOT in contract_list is defensively dropped (mirrors the
+        # unknown-pair drop) — it cannot disqualify an unrelated 1-leg clean-empty chain.
+        contracts, pairs = _empty_chain("RELIANCE", 1)
+        scan = scan_underlying_all_empty(pairs, contracts, ["NSE-GHOST-99-FUT"])
+        assert [r.underlying for r in scan.suspicious] == ["RELIANCE"]
+
+    def test_low_leg_never_planned_sibling_still_flags(self) -> None:
+        # HONEST-residual pin (docstring-documented, accepted): a NEVER-PLANNED sibling —
+        # a far-future contract skipped at planning time (fno.window_not_open,
+        # DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
+        # IngestReport pair, no failure) — is structurally INVISIBLE to Tier B, so a
+        # 1-clean-empty-near-leg + 1-not-yet-open-far-leg chain STILL flags low_leg=True.
+        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically);
+        # observe-only WARN noise, deliberately not mechanised away.
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        # contracts[1] was never planned: absent from pairs AND from failed_symbols.
+        scan = scan_underlying_all_empty(pairs, contracts, [])
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(underlying="BEL", attempted_pairs=1, stored_bars=0, low_leg=True),
+        )
+
+    def test_tier_a_ignores_nonclean_and_failed_siblings(self) -> None:
+        # The ≥3 Tier A rule must NOT become stricter: 3 clean empties + a skipped sibling
+        # + a quarantined sibling STILL flag (non-clean/failed siblings ignored, as shipped),
+        # and the report is NOT low_leg.
+        contracts = [_udl_fut(f"NSE-VEDL-{i:02d}-FUT", "VEDL") for i in range(5)]
+        pairs = {(c.symbol, "1day"): _ireport(windows=1, bars=0) for c in contracts[:3]}
+        pairs[contracts[3].symbol, "1day"] = _ireport(windows=1, skipped=1)
+        scan = scan_underlying_all_empty(pairs, contracts, [contracts[4].symbol])
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="VEDL", attempted_pairs=3, stored_bars=0, low_leg=False
+            ),
+        )
+
     def test_multi_underlying_only_empty_flagged(self) -> None:
         empty_c, empty_p = _empty_chain("M&M", 3)
         good_c, good_p = _empty_chain("TCS", 3)
@@ -2421,6 +2526,20 @@ class TestSuspiciousEmptyFlag:
         assert len(warns) == 1
         assert warns[0]["underlying"] == repr("M&M")
         assert warns[0]["attempted_pairs"] == 4 and warns[0]["stored_bars"] == 0
+        assert warns[0]["low_leg"] is False  # a Tier A whole-chain flag, not the low-leg tier
+
+    def test_emit_logs_low_leg_marker(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-001: a Tier B flag carries low_leg=True in the payload
+        # so triage can weigh a 1-leg warning lower than a whole-chain one.
+        contracts, pairs = _empty_chain("WIPRO", 1)
+        scan = scan_underlying_all_empty(pairs, contracts)
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(scan, pull_id="pid-1")
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("WIPRO")
+        assert warns[0]["attempted_pairs"] == 1
+        assert warns[0]["low_leg"] is True
 
     def test_emit_silent_when_clean(self) -> None:
         with capture_logs() as logs:
@@ -2459,6 +2578,49 @@ class TestSuspiciousEmptyFlag:
         assert report.bars_appended == 0
         warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
         assert len(warns) == 1 and warns[0]["underlying"] == repr("NIFTY")
+
+    def test_run_ingest_fires_low_leg_flag_end_to_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-001: a 1-leg chain whose only contract fetches
+        # cleanly-empty fires the WARNING through the sync driver, marked low_leg.
+        monkeypatch.setattr(_oi, "fetch_option_candles", lambda *a, **k: [])
+        with capture_logs() as logs:
+            report = run_groww_option_ingest(
+                _client(_FakeSDK(payload=_candles())),
+                _Sink(),
+                contracts=[_ce("NSE-NIFTY-02Jan25-28500-CE")],
+                intervals=["1day"],
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                now_ist=_now,
+            )
+        assert report.bars_appended == 0
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("NIFTY")
+        assert warns[0]["low_leg"] is True
+
+    def test_run_ingest_quarantined_sibling_suppresses_low_leg_flag(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-001: the sync driver threads its quarantined failures
+        # into the scan — a 2-leg chain with 1 clean-empty + 1 terminally-quarantined leg
+        # must NOT flag (the quarantine never enters ``pairs``, so without the threading
+        # it would be indistinguishable from a genuine 1-leg all-clean-empty chain).
+        good = _ce("NSE-NIFTY-02Jan25-28500-CE")
+        bad = _ce("NSE-NIFTY-02Jan25-99999-PE")
+        sdk = _FakeSDK(payload=_EMPTY, raise_for={bad.symbol: GrowwAPIBadRequestException("nope")})
+        with capture_logs() as logs:
+            report = run_groww_option_ingest(
+                _client(sdk),
+                _Sink(),
+                contracts=[good, bad],
+                intervals=["1day"],
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),
+                now_ist=_now,
+            )
+        assert report.failed_pairs == 1  # the quarantine happened
+        assert [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT] == []
 
     def test_run_ingest_skips_scan_in_async_pipeline_mode(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2620,6 +2782,7 @@ def _raw_window(
         raw_bars=bars,
         fetch_count=1,
         settle_empty=False,
+        old_window=False,
         attempt=0,
     )
 
@@ -2925,23 +3088,23 @@ def test_budget_transient_empty_then_data_strike_not_skipped() -> None:
     assert report.bars_appended == 1  # data captured despite the reduced empty budget
 
 
-def test_budget_reduced_empty_strike_remains_refetchable_next_pull() -> None:
-    """PERMUTATION 8 — a wrongly-empty reduced-budget window is RE-FETCHABLE on the next pull.
+def test_old_empty_settle_recoverable_via_reopen_skipped() -> None:
+    """PERMUTATION 8 REWRITTEN under DEC-OLD-EMPTY-SINGLE-CONFIRM-001.
 
-    A reduced-budget strike that returns a clean empty is recorded but its ONE in-pull fetch is
-    BELOW the CONFIRMED_EMPTY_MIN_FETCHES (2) old-gap fast-settle threshold, so it is NEVER
-    settled SKIPPED permanently — a later idempotent pull re-attempts it (the recovery net,
-    keep-first sink + durable ledger). Even a vendor-bug 200-empty is recoverable.
+    CONSCIOUSLY SUPERSEDES the #1172 "one reduced-budget clean empty never
+    settles" pin (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): the operator decreed a
+    SINGLE clean empty on an expired window settles SKIPPED in the same pass
+    (the round-2 re-confirmation sweep cost hours). The recovery net for a
+    vendor-bug 200-empty is now the MANUAL ``brutex reopen-skipped``
+    (``WindowLedger.reopen_skipped``) — pinned here: reopen → the next pull
+    re-fetches → data recovered + stored (keep-first sink, no permanent loss).
     """
     deep = _opt(18000)
     ledger = WindowLedger()
-    # an OLD window (clock 6 months later) so the fast-settle WOULD fire IF fetch_count >= 2;
-    # the reduced budget makes fetch_count == 1, so it must NOT fast-settle.
     sdk = _PerSymbolSDK()
     _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
     rec = ledger.records()[0]
     assert rec.in_pull_fetches == 1  # only one fetch this pull (reduced)
-    # NOT fast-settled SKIPPED (needs >= 2 in-pull fetches) — so still re-fetchable next pull.
     key = WindowKey(
         market=GROWW_OPTION_COVERAGE_MARKET,
         security_id=deep.symbol,
@@ -2949,12 +3112,82 @@ def test_budget_reduced_empty_strike_remains_refetchable_next_pull() -> None:
         start=date(2024, 1, 1),
         end=date(2024, 1, 5),
     )
-    assert not ledger.is_skippable(key)  # a later pull re-attempts it — no permanent loss
-
-    # And the second pull DOES re-fetch it (the recovery net actually re-attempts).
+    # The single-confirm law: settled NOW (expired window, genuine clean empty).
+    assert ledger.is_skippable(key)
+    # MANUAL recovery: the operator re-opens the settle...
+    assert ledger.reopen_skipped() == 1
+    assert not ledger.is_skippable(key)
+    # ...and the next pull re-fetches it — data recovered + stored.
     sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})  # now it has data
+    report = _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert sdk2.fetches[deep.symbol] == 1  # re-fetched after the reopen
+    assert report.bars_appended == 1
+
+
+def test_old_empty_single_confirm_settles_in_pass_one_zero_round2_calls() -> None:
+    """DEC-OLD-EMPTY-SINGLE-CONFIRM-001 — the until-clean ZERO-extra-calls proof.
+
+    CONSCIOUSLY SUPERSEDES the #1172 cumulative-cross-pull pin
+    (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): the 2026-07-03 production run spent
+    hours in a round-2 sweep re-confirming every deep-wing empty because an OLD
+    window needed 2 confirmations. Now ONE clean-empty fetch on an expired
+    (old) window settles it SKIPPED in the SAME pass — pass 2 makes ZERO
+    vendor calls for it (no round-2 re-fetch).
+    """
+    from brutex.data.window_ledger import SKIPPED
+
+    deep = _opt(18000)
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id=deep.symbol,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 5),
+    )
+    ledger = WindowLedger()
+    # Pass 1 — ONE clean empty (reduced budget = 1 fetch) settles SKIPPED NOW.
+    sdk1 = _PerSymbolSDK()
+    _run_with_budget(sdk1, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert sdk1.fetches[deep.symbol] == 1
+    rec = ledger.records()[0]
+    assert rec.status == SKIPPED  # settled off the SINGLE clean empty, this pass
+    assert rec.last_error == "vendor confirmed no trades (1 clean attempt, expired window)"
+    assert ledger.is_skippable(key)
+    # Pass 2 (the until-clean round-2 sweep) — ZERO vendor calls for it.
+    sdk2 = _PerSymbolSDK()
     _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
-    assert sdk2.fetches[deep.symbol] == 1  # re-fetched on the next pull → data recovered
+    assert deep.symbol not in sdk2.fetches, "no round-2 re-confirmation fetch may fire"
+
+
+def test_old_empty_transient_never_settles_and_data_wins() -> None:
+    """DATA-SAFETY law under DEC-OLD-EMPTY-SINGLE-CONFIRM-001 — "if uncertain, fetch".
+
+    A transient-only pull (429 storm, no clean answer) settles NOTHING even on
+    an OLD window — the window stays re-fetchable, and when data finally
+    arrives it is stored (a 429 is never no-data evidence; only a genuine,
+    unsuppressed clean empty settles).
+    """
+    deep = _opt(18000)
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id=deep.symbol,
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 5),
+    )
+    ledger = WindowLedger()
+    # Pull 1 — an all-429 transient storm: NOT clean-empty evidence, never settles.
+    sdk1 = _PerSymbolSDK({deep.symbol: lambda _i: GrowwAPIRateLimitException("429")})
+    _run_with_budget(
+        sdk1, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=1, ledger=ledger
+    )
+    assert not ledger.is_skippable(key)  # still re-fetchable — a 429 is not evidence
+    # Pull 2 — DATA arrives: stored, never masked.
+    sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})
+    report = _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert report.bars_appended == 1
+    assert ledger.records()[0].status == "SUCCESS"
+    assert ledger.records()[0].empty_streak == 0
 
 
 def test_budget_none_map_byte_identical_full_budget() -> None:
@@ -3486,6 +3719,7 @@ class TestEmptyBreakerOptionSpine:
             raw_bars=[],
             fetch_count=2,
             settle_empty=True,  # computed pre-trip on the producer
+            old_window=True,  # even the budget-aware cumulative arm must stay suppressed
             attempt=0,
         )
         report = _process_option_window_tail(
@@ -3502,3 +3736,118 @@ class TestEmptyBreakerOptionSpine:
         assert rec.status == _EMPTY_STATUS  # NOT SKIPPED — settle suppressed
         assert rec.empty_streak == 0  # untrusted empty: streak preserved
         assert not ledger.is_skippable(key)
+
+
+# ── make_breaker_canary_probe (DEC-EMPTY-BREAKER-CANARY-001) ─────────────────
+
+
+class _CanarySDK:
+    """A recording SDK fake for the canary probe (captures full call kwargs)."""
+
+    def __init__(self, payload: Mapping[str, object] | Exception) -> None:
+        self._payload = payload
+        self.calls: list[dict[str, object]] = []
+
+    def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
+        self.calls.append(dict(kw))
+        if isinstance(self._payload, BaseException):
+            raise self._payload
+        return self._payload
+
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+
+class TestBreakerCanaryProbe:
+    """The one-call NIFTY-spot vendor-health canary the F&O phase wires."""
+
+    def test_data_bearing_canary_is_healthy_and_paced(self) -> None:
+        """Bars returned ⇒ True; the shared pace gate ran BEFORE the fetch
+        (one governed vendor call — never a rate-cap bypass)."""
+        sdk = _CanarySDK(_candles())
+        paced: list[int] = []
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1),
+            pace=lambda: paced.append(1),
+        )
+        with capture_logs() as logs:
+            assert probe() is True
+        assert paced == [1]
+        # ONE canary fetch, addressed at the NIFTY spot index (CASH segment).
+        assert len(sdk.calls) == 1
+        assert sdk.calls[0]["groww_symbol"] == "NSE-NIFTY"
+        assert sdk.calls[0]["segment"] == "CASH"
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_probe"]
+        assert event["healthy"] is True
+        assert event["bars"] == 1
+
+    def test_clean_empty_canary_is_unhealthy(self) -> None:
+        """A clean-but-EMPTY canary answer is the vendor-unhealthy verdict."""
+        sdk = _CanarySDK({"candles": []})
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+        )
+        with capture_logs() as logs:
+            assert probe() is False
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_probe"]
+        assert event["healthy"] is False
+
+    def test_raising_canary_is_unhealthy_never_raises(self) -> None:
+        """A transport error on the canary is False + logged — never a raise."""
+        sdk = _CanarySDK(GrowwTimeoutError("canary timeout"))
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+        )
+        with capture_logs() as logs:
+            assert probe() is False
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_probe"]
+        assert event["healthy"] is False
+        assert event["error_type"] == "GrowwTimeoutError"
+
+    def test_canary_window_is_bounded_and_recent(self) -> None:
+        """The canary spans exactly the 7-day lookback ending 'today' — ONE
+        vendor chunk at 1-minute (30-day tier), never a wide range."""
+        sdk = _CanarySDK(_candles())
+        now = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+        probe = make_breaker_canary_probe(
+            GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1),
+            now_utc=lambda: now,
+        )
+        assert probe() is True
+        assert len(sdk.calls) == 1  # one 7-day range = one 30-day-tier chunk
+        call = sdk.calls[0]
+        assert str(call["start_time"]).startswith("2026-06-26")
+        assert str(call["end_time"]).startswith("2026-07-0")
+
+    def test_run_ingest_threads_probe_into_resolved_breaker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``run_groww_option_ingest(breaker_health_probe=…)`` reaches
+        ``resolve_empty_breaker(health_probe=…)`` (the arming pin — a dropped
+        kwarg would ship the canary DORMANT)."""
+        captured: list[object] = []
+        real_resolve = _oi.resolve_empty_breaker
+
+        def _spy_resolve(**kwargs: object) -> object:
+            captured.append(kwargs.get("health_probe"))
+            return real_resolve(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(_oi, "resolve_empty_breaker", _spy_resolve)
+
+        def _probe() -> bool:  # pragma: no cover — identity only
+            return True
+
+        sdk = _FakeSDK(payload=_candles())
+        run_groww_option_ingest(
+            _client(sdk),
+            _Sink(),
+            contracts=[_ce()],
+            intervals=("1day",),
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            breaker_health_probe=_probe,
+        )
+        assert captured == [_probe]

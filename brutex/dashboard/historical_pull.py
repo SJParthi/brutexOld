@@ -74,10 +74,12 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
+    OPTION_SEGMENT,
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno_window_opens_on
@@ -95,6 +97,7 @@ from brutex.adapters.groww.option_ingest import (
     ProgressHook,
     contract_exchange,
     emit_underlying_all_empty,
+    make_breaker_canary_probe,
     reconcile_fno_ledger_windows,
     run_groww_option_ingest,
 )
@@ -879,6 +882,20 @@ def _run_phase(
     # records a hash of EXACTLY what Groww sent. Skipped for a dry-run (no real
     # vendor bytes to attest); best-effort inside the hook — it can never halt a pull.
     capture_hook_factory = None if dry_run else make_capture_hook_factory(lake_root)
+    # Vendor-down error-storm breaker + dead-credential StillStale escalation
+    # (DEC-VENDOR-DOWN-BREAKER-001): ONE per-phase breaker shared by every market
+    # bucket / until-clean round (any success resets it, so a recovering vendor never
+    # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
+    # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
+    storm_breaker = None if dry_run else resolve_error_storm_breaker()
+    # Mass-empty breaker CANARY (DEC-EMPTY-BREAKER-CANARY-001): armed ONLY for a
+    # REAL live pull (a dry-run threads None — the same gating as the storm
+    # breaker above). Before the mid-run EmptySettleBreaker halts the whole F&O
+    # phase it fetches ONE known-liquid NIFTY-spot canary window through THIS
+    # phase's client (+ the shared pace gate — 1 governed vendor call): a
+    # healthy canary means the mass empties are genuine (a 2020-era dead chain
+    # at the bucket head), so the phase continues instead of false-halting.
+    breaker_canary = None if dry_run else make_breaker_canary_probe(client, pace=pace)
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional)."""
@@ -936,6 +953,8 @@ def _run_phase(
                     capture_hook_factory=capture_hook_factory,
                     write_pool=write_pool,
                     fetch_pipeline=fetch_pipeline,
+                    breaker_health_probe=breaker_canary,
+                    storm_breaker=storm_breaker,
                 )
             except GrowwAuthError as exc:
                 # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1166,6 +1185,78 @@ def _resolve_minute_windows(
             continue
         windows[contract.symbol] = window
     return windows
+
+
+def _heal_lake_after_pull(
+    *,
+    rebuilt: Sequence[_RebuiltContract],
+    windows: dict[str, tuple[date, date]],
+    lake_root: Path,
+) -> None:
+    """L2 lake heal over the just-pulled F&O contracts (DEC-LAKE-HEAL-001).
+
+    The F&O twin of the dashboard spot pull's ``_heal_after_pull`` glue: one
+    COMMON :func:`~brutex.data.lake_heal.heal_after_pull` call over the
+    rebuilt contracts' ``(exchange, "FNO", groww_symbol)`` coordinates,
+    bounded to the UNION of their resolved minute-window spans (a months
+    SUPERSET of every per-contract span — bounded, never the whole lake).
+    Runs BEFORE :func:`_enrich_greeks_from_minute` (and before the pipeline's
+    final prebuild phase — DEC-PIPELINE-AUTOPREBUILD-001 — which derives the
+    intraday TFs + ``1day``) so every downstream derivation reads clean
+    1-minute. A contract with no resolved window, or whose exchange is
+    unresolvable, contributes no target; zero targets is a no-op.
+    :class:`~brutex.data.errors.LakeWriteHalt` RE-RAISES (a disk-full heal
+    halts the pull exactly like any lake write); every OTHER error is
+    swallowed + logged ``lake_heal.post_pull_error`` (a heal bug never fails
+    a successful pull — the ``_enrich_greeks_from_minute`` guard convention).
+    The catalog at ``<lake>/catalog.duckdb`` is opened best-effort WHEN THE
+    FILE EXISTS (the L3 sweeper's convention, via the COMMON
+    :func:`~brutex.data.lake_heal.open_lake_catalog`) so a healed partition's
+    rotated ``raw_hash`` reaches the catalog immediately — an open failure
+    logs + proceeds with ``catalog=None``, never blocking the pull.
+    """
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
+    from brutex.observability.correlation import current_pull_id
+
+    targets: list[tuple[str, str, str]] = []
+    spans: list[tuple[date, date]] = []
+    for _row, contract in rebuilt:
+        window = windows.get(contract.symbol)
+        if window is None:
+            continue
+        try:
+            exchange = contract_exchange(contract)
+        except ValueError:
+            # Also skipped (same guard) by ``_enrich_greeks_from_minute``.
+            continue
+        targets.append((exchange, OPTION_SEGMENT, contract.symbol))
+        spans.append(window)
+    if not targets:
+        return
+    scope = f"pull:{current_pull_id()}"
+    try:
+        with lake_heal_audit(lake_root) as audit:
+            catalog = open_lake_catalog(lake_root)
+            try:
+                heal_after_pull(
+                    lake_root=lake_root,
+                    targets=targets,
+                    start=min(win_start for win_start, _win_end in spans),
+                    end=max(win_end for _win_start, win_end in spans),
+                    scope=scope,
+                    catalog=catalog,
+                    audit=audit,
+                    on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+                )
+            finally:
+                if catalog is not None:
+                    catalog.close()
+    except LakeWriteHalt:
+        raise
+    except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull
+        _LOG.warning("lake_heal.post_pull_error", scope=scope, error=str(exc))
 
 
 def _enrich_greeks_from_minute(
@@ -1532,13 +1623,24 @@ def pull_contract_candles(
     # double-warn). Reuses the SAME COMMON ``emit_underlying_all_empty`` (fully guarded — can NEVER
     # break the pull). Observe-only: no return/ledger/engine change; ENGINE stays NIFTY/BANKNIFTY/SENSEX.
     if fetch_pipeline is not None:
-        emit_underlying_all_empty(minute.merged_pairs, [contract for _row, contract in rebuilt])
+        # ``failed_symbols`` (DEC-SILENT-VANISH-LOWLEG-001): the phase's terminally
+        # quarantined contract symbols, so the LOW-LEG Tier B rule can disqualify a
+        # 1-2-leg underlying with a quarantined sibling (quarantines never enter pairs).
+        emit_underlying_all_empty(
+            minute.merged_pairs,
+            [contract for _row, contract in rebuilt],
+            failed_symbols=minute.failure_symbols,
+        )
 
     # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the mid-pull F&O 1-day derivation that ran
     # here (``_derive_daily_from_minute``) is REMOVED — derived data (intraday TFs +
     # the derived ``1day``) is written ONLY by the pipeline's final prebuild phase
     # (brutex.dashboard.pipeline_prebuild), strictly after a fully-successful fetch.
     if not dry_run:
+        # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
+        # Greeks enrichment below (and the pipeline's later prebuild phase)
+        # reads clean 1-minute (LakeWriteHalt re-raises).
+        _heal_lake_after_pull(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
         # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
         # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
         # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute

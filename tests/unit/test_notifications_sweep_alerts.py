@@ -20,11 +20,14 @@ from dataclasses import dataclass
 
 import pytest
 from brutex.notifications.sweep_alerts import (
+    CRASH_LOOP_RELAUNCH_THRESHOLD,
     SweepAlerter,
+    emit_lake_heal_alert,
     emit_pull_halt_alert,
     escape_markdown_v2,
 )
 from brutex.notifications.telegram import (
+    DEDUPE_WINDOW_SECONDS,
     TelegramEvent,
     TelegramEventKind,
     TelegramSeverity,
@@ -232,6 +235,34 @@ class TestAlerts:
         # The body is MarkdownV2-escaped (underscore → `\_`), so assert the escaped forms.
         assert escape_markdown_v2("disk_full") in ev.message
         assert escape_markdown_v2("Pull HALTED") in ev.message
+
+    def test_vendor_down(self) -> None:
+        """vendor_down (DEC-VENDOR-DOWN-BREAKER-001): CRITICAL, WAIT-worded, deduped."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).vendor_down(failed_windows=30, distinct_symbols=4)
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "vendor-down"
+        assert escape_markdown_v2("VENDOR DOWN") in ev.message
+        assert escape_markdown_v2("WAIT") in ev.message
+        assert escape_markdown_v2("NOT our credential") in ev.message
+        assert "30" in ev.message and "4" in ev.message
+        # The vendor-down wording must never read as the credential-dead alert.
+        assert escape_markdown_v2("LAMBDA BROKER DEAD") not in ev.message
+
+    def test_credential_dead(self) -> None:
+        """credential_dead (DEC-VENDOR-DOWN-BREAKER-001): CRITICAL, operator-action-worded."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).credential_dead(reason="GrowwCredentialDeadError")
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "credential-dead:GrowwCredentialDeadError"
+        assert escape_markdown_v2("OUR CREDENTIAL / LAMBDA BROKER DEAD") in ev.message
+        assert escape_markdown_v2("OPERATOR ACTION NEEDED") in ev.message
+        # The credential-dead wording must never read as the vendor-down alert.
+        assert escape_markdown_v2("VENDOR DOWN") not in ev.message
 
     def test_pull_degraded(self) -> None:
         """pull_degraded mirrors rate_breach: WARN, deduped per rule, carries the detail."""
@@ -452,3 +483,359 @@ class TestStress:
         alerter = SweepAlerter(notifier=flaky)
         results = [alerter.rate_breach(current_rps=3.0, recent_hits=i) for i in range(1_000)]
         assert all(r is False for r in results)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# lake_heal_report + emit_lake_heal_alert (DEC-LAKE-HEAL-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FakeHealAction:
+    """Typed :class:`LakeHealActionLike` stand-in (matches ``lake_heal.HealAction``)."""
+
+    dropped: int
+    conflicts: int
+    quarantine_path: str | None
+
+
+@dataclass(frozen=True)
+class FakeHealReport:
+    """Typed :class:`LakeHealReportLike` stand-in (matches ``lake_heal.HealReport``)."""
+
+    mode: str
+    findings: int
+    healed: int
+    actions: tuple[FakeHealAction, ...]
+
+
+class TestLakeHealReport:
+    def test_heal_batch_warns_with_counts(self) -> None:
+        fake = FakeNotifier()
+        ok = SweepAlerter(notifier=fake).lake_heal_report(
+            mode="auto",
+            findings=3,
+            healed=3,
+            quarantined=2,
+            dropped=5,
+            conflicts=1,
+            scope="reconcile",
+        )
+        assert ok is True
+        (event,) = fake.published
+        assert event.kind == TelegramEventKind.QUARANTINE_NEW
+        assert event.severity == TelegramSeverity.WARN
+        assert event.dedupe_key == "lake-heal:reconcile"
+        assert "findings\\=3" in event.message
+        assert "healed\\=3" in event.message
+        assert "quarantined\\=2" in event.message
+        assert "dropped\\=5" in event.message
+        assert "conflicts\\=1" in event.message
+
+    def test_observe_with_findings_is_critical(self) -> None:
+        """Poison found, NOTHING fixed (observe mode) → CRITICAL."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).lake_heal_report(
+            mode="observe",
+            findings=2,
+            healed=0,
+            quarantined=0,
+            dropped=0,
+            conflicts=0,
+            scope="startup-sweep",
+        )
+        (event,) = fake.published
+        assert event.severity == TelegramSeverity.CRITICAL
+        assert "NOTHING fixed" in event.message
+        assert event.dedupe_key == "lake-heal:startup-sweep"
+
+    def test_refused_mass_heal_is_critical(self) -> None:
+        """Findings but healed==0 (a refused / all-errored auto batch) → CRITICAL."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).lake_heal_report(
+            mode="auto",
+            findings=11,
+            healed=0,
+            quarantined=0,
+            dropped=0,
+            conflicts=0,
+            scope="pull:abc",
+        )
+        (event,) = fake.published
+        assert event.severity == TelegramSeverity.CRITICAL
+
+    def test_disabled_notifier_returns_false(self) -> None:
+        ok = SweepAlerter(resolver=lambda: None).lake_heal_report(
+            mode="auto",
+            findings=1,
+            healed=1,
+            quarantined=1,
+            dropped=1,
+            conflicts=0,
+            scope="reconcile",
+        )
+        assert ok is False
+
+
+class TestEmitLakeHealAlert:
+    def _report(self, *, findings: int = 2, healed: int = 2, mode: str = "auto") -> FakeHealReport:
+        return FakeHealReport(
+            mode=mode,
+            findings=findings,
+            healed=healed,
+            actions=(
+                FakeHealAction(dropped=3, conflicts=1, quarantine_path="/q/a.parquet"),
+                FakeHealAction(dropped=2, conflicts=0, quarantine_path=None),
+            ),
+        )
+
+    def test_maps_report_sums_onto_alert(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[dict[str, object]] = []
+
+        class _FakeAlerter:
+            def lake_heal_report(self, **kwargs: object) -> bool:
+                calls.append(kwargs)
+                return True
+
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", _FakeAlerter)
+        emit_lake_heal_alert(self._report(), scope="pull:xyz")
+        (kwargs,) = calls
+        assert kwargs == {
+            "mode": "auto",
+            "findings": 2,
+            "healed": 2,
+            "quarantined": 1,  # only the action WITH a quarantine path
+            "dropped": 5,
+            "conflicts": 1,
+            "scope": "pull:xyz",
+        }
+
+    def test_zero_findings_never_alerts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A clean scan never alerts (the skip-entirely contract)."""
+
+        class _BoomAlerter:
+            def lake_heal_report(self, **_kwargs: object) -> bool:
+                raise AssertionError("a zero-findings report must not reach the alerter")
+
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", _BoomAlerter)
+        report = FakeHealReport(mode="auto", findings=0, healed=0, actions=())
+        emit_lake_heal_alert(report, scope="reconcile")  # no raise = never reached
+
+    def test_swallows_its_own_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The blanket guard: an alert failure can never fail the heal."""
+
+        class _RaisingAlerter:
+            def lake_heal_report(self, **_kwargs: object) -> bool:
+                raise RuntimeError("simulated alert failure")
+
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", _RaisingAlerter)
+        emit_lake_heal_alert(self._report(), scope="reconcile")  # must not raise
+
+    def test_real_heal_report_satisfies_protocol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The REAL ``lake_heal.HealReport`` structurally satisfies the alert
+        protocol (the cross-layer seam pin; imported lazily — this module
+        stays wheel-free at module scope)."""
+        pytest.importorskip("polars")
+        from brutex.data.lake_heal import HealAction, HealReport
+
+        report = HealReport(
+            mode="auto",
+            findings=1,
+            healed=1,
+            skipped=0,
+            errors=0,
+            refused_mass_heal=False,
+            actions=(
+                HealAction(
+                    action="LAKE_HEAL_DEDUP",
+                    partition="bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet",
+                    kept=2,
+                    dropped=1,
+                    moved=0,
+                    conflicts=0,
+                    raw_hash_before="a" * 64,
+                    raw_hash_after="b" * 64,
+                    quarantine_path="/lake/.quarantine/ts/x.parquet",
+                ),
+            ),
+            quarantine_root="/lake/.quarantine/ts",
+            recall=None,
+        )
+        fake = FakeNotifier()
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", lambda: SweepAlerter(notifier=fake))
+        emit_lake_heal_alert(report, scope="reconcile")
+        (event,) = fake.published
+        assert event.kind == TelegramEventKind.QUARANTINE_NEW
+        assert event.severity == TelegramSeverity.WARN
+        assert "quarantined\\=1" in event.message
+
+
+# ────────────────────────────────────────────────────────────────────────
+# child_relaunched (DEC-SUPERVISOR-CRASHLOOP-ALERT-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestChildRelaunched:
+    def test_single_relaunch_is_warn_with_exit_code(self) -> None:
+        """An isolated relaunch is a WARN push naming the child + exit code."""
+        fake = FakeNotifier()
+        assert SweepAlerter(notifier=fake).child_relaunched(
+            child="supervisor:sweep-daemon",
+            exit_code=1,
+            signal=None,
+            relaunch_count=1,
+            detail="uptime 5.0s, backoff 1.0s, restart #1 this run",
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.CHILD_RELAUNCHED
+        assert ev.severity == TelegramSeverity.WARN
+        assert ev.dedupe_key == "child-relaunch:supervisor:sweep-daemon"
+        assert escape_markdown_v2("supervisor:sweep-daemon") in ev.message
+        assert escape_markdown_v2("exit code 1") in ev.message
+        assert escape_markdown_v2("restart #1 this run") in ev.message
+        # An isolated relaunch must never read as the crash-loop escalation.
+        assert escape_markdown_v2("CRASH LOOP") not in ev.message
+
+    def test_signal_death_names_the_signal(self) -> None:
+        """A death-by-signal relaunch names the killing signal, not the raw code."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="supervisor:sweep-daemon",
+            exit_code=-9,
+            signal=9,
+            relaunch_count=1,
+            detail="uptime 2.0s, backoff 1.0s, restart #1 this run",
+        )
+        ev = fake.published[0]
+        assert escape_markdown_v2("signal 9") in ev.message
+        assert escape_markdown_v2("exit code -9") not in ev.message
+
+    def test_crash_loop_threshold_escalates_to_critical(self) -> None:
+        """relaunch_count >= the threshold flips to CRITICAL with its own dedupe key."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="supervisor:sweep-daemon",
+            exit_code=-9,
+            signal=9,
+            relaunch_count=CRASH_LOOP_RELAUNCH_THRESHOLD,
+            detail="uptime 2.0s, backoff 4.0s, restart #3 this run",
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.CHILD_RELAUNCHED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        # DISTINCT key so the WARN-tier dedupe window can never swallow it.
+        assert ev.dedupe_key == "child-crash-loop:supervisor:sweep-daemon"
+        assert escape_markdown_v2("CRASH LOOP") in ev.message
+        assert escape_markdown_v2("3×") in ev.message
+
+    def test_below_threshold_stays_warn(self) -> None:
+        """One below the threshold is still the WARN tier (boundary pin)."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="c",
+            exit_code=2,
+            signal=None,
+            relaunch_count=CRASH_LOOP_RELAUNCH_THRESHOLD - 1,
+            detail="d",
+        )
+        assert fake.published[0].severity == TelegramSeverity.WARN
+
+    def test_threshold_constant_value(self) -> None:
+        """The crash-loop bar is 3 in-window relaunches (the decision's contract)."""
+        assert CRASH_LOOP_RELAUNCH_THRESHOLD == 3
+
+    def test_kind_has_real_dedupe_window(self) -> None:
+        """CHILD_RELAUNCHED carries a >0 notifier window so a loop coalesces."""
+        assert DEDUPE_WINDOW_SECONDS[TelegramEventKind.CHILD_RELAUNCHED] == 300.0
+
+    def test_disabled_notifier_returns_false(self) -> None:
+        """Silent no-op when Telegram is disabled (resolver yields None)."""
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert not alerter.child_relaunched(
+            child="c", exit_code=1, signal=None, relaunch_count=1, detail="d"
+        )
+
+    def test_publish_raise_is_swallowed(self) -> None:
+        """A raising notifier is swallowed — best-effort contract (returns False)."""
+        fake = FakeNotifier(raise_on_publish=True)
+        assert not SweepAlerter(notifier=fake).child_relaunched(
+            child="c", exit_code=1, signal=None, relaunch_count=1, detail="d"
+        )
+
+    def test_relaunch_body_names_the_give_up_alert(self) -> None:
+        """The relaunch body's "keeps relaunching until the cap" clause must not
+        go stale at the give-up moment — it names the terminal CRITICAL that
+        fires there (hostile-review MINOR-3)."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="c", exit_code=1, signal=None, relaunch_count=1, detail="d"
+        )
+        assert escape_markdown_v2("a terminal CRITICAL fires if it gives up") in (
+            fake.published[0].message
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# supervisor_gave_up (DEC-SUPERVISOR-CRASHLOOP-ALERT-001, MINOR-3 fold)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSupervisorGaveUp:
+    def test_gave_up_is_critical_with_facts(self) -> None:
+        """The terminal give-up is ALWAYS CRITICAL and names child + cap + death."""
+        fake = FakeNotifier()
+        assert SweepAlerter(notifier=fake).supervisor_gave_up(
+            child="supervisor:sweep-daemon",
+            exit_code=1,
+            signal=None,
+            restarts=5,
+            max_restarts=5,
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.SUPERVISOR_GAVE_UP
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "supervisor-gave-up:supervisor:sweep-daemon"
+        assert escape_markdown_v2("GAVE UP") in ev.message
+        assert escape_markdown_v2("supervisor:sweep-daemon") in ev.message
+        assert escape_markdown_v2("exit code 1") in ev.message
+        assert escape_markdown_v2("5 consecutive crash(es)") in ev.message
+        # The body states the operational truth: nothing relaunches from here.
+        assert escape_markdown_v2("The sweep is DOWN") in ev.message
+        assert escape_markdown_v2("no further relaunches") in ev.message
+
+    def test_signal_death_names_the_signal(self) -> None:
+        """A give-up whose last death was by signal names the killing signal."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).supervisor_gave_up(
+            child="c", exit_code=-9, signal=9, restarts=3, max_restarts=3
+        )
+        ev = fake.published[0]
+        assert escape_markdown_v2("signal 9") in ev.message
+        assert escape_markdown_v2("exit code -9") not in ev.message
+
+    def test_kind_has_zero_dedupe_window(self) -> None:
+        """A terminal verdict fires once per run — a coalescing window could
+        only ever swallow it, so the notifier window is 0."""
+        assert DEDUPE_WINDOW_SECONDS[TelegramEventKind.SUPERVISOR_GAVE_UP] == 0.0
+
+    def test_disabled_notifier_returns_false(self) -> None:
+        """Silent no-op when Telegram is disabled (resolver yields None)."""
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert not alerter.supervisor_gave_up(
+            child="c", exit_code=1, signal=None, restarts=1, max_restarts=1
+        )
+
+    def test_publish_raise_is_swallowed(self) -> None:
+        """A raising notifier is swallowed — best-effort contract (returns False)."""
+        fake = FakeNotifier(raise_on_publish=True)
+        assert not SweepAlerter(notifier=fake).supervisor_gave_up(
+            child="c", exit_code=1, signal=None, restarts=1, max_restarts=1
+        )

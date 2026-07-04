@@ -96,6 +96,19 @@ def _lookup_lot_size(instrument: str, trade_date: object) -> int:
 
     Returns the lot size in effect on ``trade_date`` per the
     8-transition history in ``brutex.options.lot_size_history``.
+
+    DOCUMENTED LIMITATION (lot-size VINTAGE — see also
+    ``TradeCostBreakdown.lot_size_basis`` + COSTS_VERIFIED.md §20): the
+    lookup is keyed by the TRADE date, not the CONTRACT's vintage. A real
+    exchange lot revision applies per-contract from a specific expiry
+    onward, so around a transition the two can disagree — e.g. NIFTY
+    2024-11-19 resolves lot 25 while 2024-11-20 resolves lot 75 (the
+    SEBI ₹15L notional revision), a 3× sizing jump keyed purely on the
+    trade date even though a still-listed pre-revision contract kept its
+    old lot until its own expiry. The per-circular NSE contract-level
+    rollout dates are UNVERIFIED offline (Golden Rule #1), so no vintage
+    logic is faked; the breakdown carries ``lot_size_basis="trade_date"``
+    so downstream consumers can see which basis priced the trade.
     """
     underlying = OptionsUnderlying(instrument)
     return get_lot_size(underlying, trade_date)  # type: ignore[arg-type]
@@ -244,7 +257,11 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     stt_paisa = _round_to_rupee(stt_paisa_raw)
 
     # ── Step 6: exchange transaction charge (both sides on premium) ─────
-    exch_rate_bps_x100 = C.exchange_charge_bps_x100(trade.instrument)
+    # Date-regime-selected like STT (COMMON rate_for_date mechanism). Only
+    # the current post-2024-10-01 rates are VERIFIED; pre-boundary dates
+    # ride an explicit UNVERIFIED same-rate placeholder (likely UNDER-
+    # costed) — see brutex.costs.constants' TODO(UNVERIFIED) ETC block.
+    exch_rate_bps_x100 = C.exchange_charge_bps_x100(trade.instrument, trade.entry_dt_ist.date())
     exch_buy_paisa = _round_to_paisa(buy_notional_paisa * exch_rate_bps_x100)
     exch_sell_paisa = _round_to_paisa(sell_notional_paisa * exch_rate_bps_x100)
     exch_paisa = exch_buy_paisa + exch_sell_paisa
@@ -269,6 +286,13 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # Section 170 CGST mandates rounding the total tax, not each component.
     # gst_split (intra/inter state) only affects how the total is DISPLAYED
     # to the operator, NOT how it's computed.
+    #
+    # UNVERIFIED date-boundary note (Golden Rule #1): the SEBI turnover fee
+    # is included in the GST base for ALL dates. A claimed GST-on-SEBI-fee
+    # introduction boundary (~2022-07-18) has NO in-repo citation, so it is
+    # deliberately NOT implemented; if the claim holds, a pre-boundary trade
+    # is OVER-charged by 18% of the (sub-rupee) SEBI fee — conservative.
+    # See COSTS_VERIFIED.md §20 known limitations.
     gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
     gst_paisa_raw = (gst_base_paisa * C.GST_TOTAL_BPS_X100) // 10_000_000
     gst_paisa = _round_to_rupee(gst_paisa_raw)
@@ -316,4 +340,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         # outcome, so the exercise branch (§4.2) is never reached here.
         used_exercise_branch=False,
         n_orders_per_leg=1,  # iceberg slicing not yet implemented (§6b deferred)
+        # The lot size above was keyed by the TRADE date, not the contract's
+        # vintage — the honest basis stamp (see _lookup_lot_size's limitation).
+        lot_size_basis="trade_date",
     )

@@ -80,6 +80,7 @@ from brutex.dashboard.movers_snapshot import (
     value_crore_str,
     value_meets_volume_floor,
 )
+from brutex.data.fno_symbol import expiry_year_in_window
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
@@ -236,7 +237,12 @@ def _parse_expiry_token(token: str) -> date_cls | None:
     The token is exactly 7 chars: a 2-digit day, a 3-letter month abbreviation
     (title-case, in :data:`_MONTHS`), and a 2-digit year (``20YY``). Any other
     shape, an unknown month, or an out-of-range day yields ``None`` so the
-    caller skips the malformed contract rather than raising.
+    caller skips the malformed contract rather than raising. The resolved year
+    must also pass the SHARED :func:`~brutex.data.fno_symbol.expiry_year_in_window`
+    sanity window (DEC-FNO-EXPIRY-YEAR-PIVOT-001) — ``30Jun75`` is junk, NOT a
+    2075 expiry — so this shape-stricter twin can never diverge from the
+    canonical :func:`~brutex.data.fno_symbol.parse_expiry_token` on which
+    resolved years are accepted (CLAUDE.md §11 COMMON).
     """
     if len(token) != _EXPIRY_TOKEN_LEN:
         return None
@@ -246,8 +252,11 @@ def _parse_expiry_token(token: str) -> date_cls | None:
     month = _MONTHS.get(month_abbr)
     if month is None:
         return None
+    year = _CENTURY + int(year_str)
+    if not expiry_year_in_window(year):
+        return None
     try:
-        return date_cls(_CENTURY + int(year_str), month, int(day_str))
+        return date_cls(year, month, int(day_str))
     except ValueError:
         # Day out of range for the month (e.g. 31Feb) — malformed, skip honestly.
         return None

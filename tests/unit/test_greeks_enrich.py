@@ -344,9 +344,10 @@ class TestComputeBarStatuses:
         assert bar.delta is not None and bar.delta < 0.05
 
     def test_zero_price_bar_is_bad_input(self) -> None:
-        # An OTM strike (intrinsic 0) with a zero close: the below-intrinsic
-        # pre-screen passes (0 < 0 is False); the kernel rejects a zero price
-        # loudly → stamped BAD_INPUT, quarantined to the one bar.
+        # A zero close is a BAD INPUT stamped by the explicit non-positive
+        # pre-check (before the parity floor screen), regardless of moneyness
+        # — the ITM twin is pinned in test_greeks_enrich_audit_regressions
+        # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3).
         row = _row(close="0")
         row["open"] = 0.0
         row["high"] = 0.0
@@ -401,11 +402,18 @@ class TestEnrichOptionBars:
         assert stats.reused == 0 and stats.changed == 2
 
     def test_current_ok_rows_are_reused_verbatim(self) -> None:
+        # CHANGED PIN (DEC-GREEKS-CORRECTNESS-AUDIT-001): the reuse gate now
+        # VALUE-checks the current rate + spot join, so the old "empty join
+        # proves no recompute" trick would honestly demote to no_spot instead
+        # of reusing. The no-recompute proof is a planted sentinel iv: a
+        # recompute would replace it, a verbatim restate keeps it.
         first, _ = _enrich_one(_row(close="200"))
+        assert first.iv is not None
+        sentinel = first.iv + 0.01
         stored = _row(
             close="200",
             overlay={
-                "iv": first.iv,
+                "iv": sentinel,
                 "delta": first.delta,
                 "gamma": first.gamma,
                 "theta": first.theta,
@@ -420,13 +428,13 @@ class TestEnrichOptionBars:
         bars, stats = enrich_option_bars(
             [stored],
             parts=_parts(_CE_SYMBOL),
-            spot_by_ts={},  # PROVES no recompute: an empty join would stamp no_spot
+            spot_by_ts={_BAR_TS: _SPOT},
             rate_source=_RATE,
             style_flag=STYLE_EUROPEAN_EXACT,
         )
         assert stats.reused == 1 and stats.changed == 0
         assert stats.solved == 0 and stats.nulls == 0
-        assert bars[0].iv == first.iv
+        assert bars[0].iv == sentinel  # restated verbatim — NOT re-solved
         assert bars[0].greeks_provenance_id == first.greeks_provenance_id
 
     def test_stale_input_stamp_is_recomputed(self) -> None:
@@ -504,6 +512,28 @@ class TestEnrichDriver:
         assert report.enriched == 0
         assert report.targets == 2
         assert any(e["event"] == "greeks_enrich.target_undecodable" for e in logs)
+
+    def test_pivot_junk_expiry_counts_undecodable_and_warns(self, tmp_path: Path) -> None:
+        # DEC-FNO-EXPIRY-YEAR-PIVOT-001 regression: "30Jun75" used to pivot to a
+        # fabricated 1975 expiry and be ENRICHED as a real contract. The year-window
+        # reject makes parse_fno_symbol return None, so the existing undecodable
+        # counter + structlog WARNING fire (the honest reject surface).
+        with capture_logs() as logs:
+            report = enrich_greeks_for_targets(
+                targets=self._targets("NSE-NIFTY-30Jun75-24000-CE"),
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row()],
+                read_spot=lambda _t, _p: SpotJoin({}, None),
+                write_bars=lambda _t, _b: 0,
+            )
+        assert report.undecodable == 1
+        assert report.enriched == 0
+        assert any(
+            e["event"] == "greeks_enrich.target_undecodable"
+            and e["symbol"] == "NSE-NIFTY-30Jun75-24000-CE"
+            for e in logs
+        )
 
     def test_zero_targets_is_a_zero_report(self, tmp_path: Path) -> None:
         report = enrich_greeks_for_targets(targets=[], lake_root=tmp_path, rate_source=_RATE)
