@@ -696,6 +696,58 @@ class TestMoversApi:
         assert (body2["stored_reads"], body2["resampled_reads"]) == (1, 0)
         assert body2["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
 
+    def test_raising_pull_probe_is_swallowed_to_idle_read(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The ``_pull_live`` closure's never-break-a-read guarantee (app.py):
+        an injected pull-active probe that RAISES is swallowed to ``False``
+        (the documented "a raising probe is swallowed" except-arm), so the
+        movers read serves the byte-identical IDLE stored-first path — a 200
+        with ``stored_reads == 1``, never a 500, never a resample switch."""
+        # Same lake shape as the pin above: fresh 1-minute session + a stale
+        # aligned stored 5minute partition whose poisoned close identifies
+        # which read path served the row.
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15 + i, close=str(22000 + i * 10), volume=100 + i)
+                for i in range(5)
+            ],
+        )
+        writer.write(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol="NIFTY",
+            interval="5minute",
+            bars=[_min_bar(hour=9, minute=15, close="99999", volume=1)],
+        )
+
+        def _wedged_probe() -> bool:
+            raise RuntimeError("pull-job probe wedged")
+
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store, pull_active_probe=_wedged_probe)
+        )
+        resp = client.get(
+            "/api/v1/movers",
+            params={
+                "asset": "spot",
+                "interval": "5minute",
+                "date": "2024-06-13",
+                "time": "09:19",
+            },
+        )
+        assert resp.status_code == 200  # the probe error never breaks the read
+        body = resp.json()
+        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves,
+        # byte-identical to the idle arm of the pin above.
+        assert (body["stored_reads"], body["resampled_reads"]) == (1, 0)
+        assert body["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+
     def test_no_date_defaults_to_latest_available_day(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
