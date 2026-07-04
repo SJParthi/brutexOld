@@ -443,3 +443,81 @@ def test_p09_forced_exit_no_trade_survives_1520(
         assert trade.entry_ts < boundary_ts
         # ...and none survives past it (force-closed at the boundary at the latest).
         assert trade.exit_ts <= boundary_ts
+
+
+# ── Cross-session pending-entry drop (R2-OC-2) ──────────────────────────────
+#
+# No trade's entry FILL may land on a different IST session date than the bar
+# its signal armed on. The walker fills an armed entry on the VERY NEXT bar, so
+# the invariant is exactly: the entry bar and its immediate predecessor share
+# one IST calendar date — equivalently, no trade ever ENTERS on the first bar
+# of a session. Pre-fix, a signal on day-1's last stored bar filled at day-2's
+# 09:15 open (the overnight-entry leak this property would have caught).
+
+# Day-2 09:15 IST == 03:45 UTC — the next NSE session's open anchor.
+_DAY2_OPEN_UTC = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)
+
+
+@st.composite
+def _two_session_scenarios(draw: st.DrawFn) -> tuple[list[CandleBar], list[bool], list[bool]]:
+    """Draw a feed whose bars from ``split`` onward roll to the NEXT session.
+
+    Day-1 bars anchor at 15:10 IST (so some windows also cross the 15:20
+    forced boundary); day-2 bars restart at the 09:15 IST session open.
+    ``split in {0, n}`` degenerates to a single-session feed.
+    """
+    n = draw(st.integers(min_value=2, max_value=30))
+    split = draw(st.integers(min_value=0, max_value=n))
+    day1_anchor = _FORCED_OPEN_UTC + timedelta(minutes=330)  # 15:10 IST day-1
+    bars: list[CandleBar] = []
+    for minute in range(n):
+        open_p = draw(_PRICE_PAISA)
+        close_p = draw(_PRICE_PAISA)
+        if minute < split:
+            anchor, offset = day1_anchor, minute
+        else:
+            anchor, offset = _DAY2_OPEN_UTC, minute - split
+        bars.append(
+            _bar_at(offset, open_p, close_p, draw(_WICK_PAISA), draw(_WICK_PAISA), anchor=anchor)
+        )
+    entry = draw(st.lists(st.booleans(), min_size=n, max_size=n))
+    exit_ = draw(st.lists(st.booleans(), min_size=n, max_size=n))
+    return bars, entry, exit_
+
+
+@given(
+    scenario=_two_session_scenarios(),
+    direction=st.sampled_from([Side.BUY, Side.SELL]),
+    sl=st.none() | _LEG_PAISA,
+    tp=st.none() | _LEG_PAISA,
+    policy=_POLICIES,
+)
+@settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
+def test_entry_fill_never_crosses_a_session_boundary(
+    scenario: tuple[list[CandleBar], list[bool], list[bool]],
+    direction: Side,
+    sl: int | None,
+    tp: int | None,
+    policy: FillPolicy,
+) -> None:
+    """R2-OC-2: every entry fill shares its arming bar's IST session date."""
+    bars, entry, exit_ = scenario
+    trades = simulate_trades(
+        bars,
+        entry,
+        direction=direction,
+        tf_minutes=1,
+        stop_loss_paisa=sl,
+        take_profit_paisa=tp,
+        exit_signals=exit_,
+        policy=policy,
+    )
+    ts_to_idx = {bar.timestamp: i for i, bar in enumerate(bars)}
+    for trade in trades:
+        k = ts_to_idx[trade.entry_ts]
+        # An entry always fills on the bar AFTER its arming bar, so k >= 1 and
+        # the arming bar is bars[k - 1]; both must share one IST session date.
+        assert k >= 1
+        armed_day = bars[k - 1].timestamp.astimezone(IST).date()
+        fill_day = bars[k].timestamp.astimezone(IST).date()
+        assert armed_day == fill_day

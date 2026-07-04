@@ -765,6 +765,165 @@ class TestSessionAwareForcedExit:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Cross-session pending-entry drop (R2-OC-2 — the overnight-entry leak)
+# ────────────────────────────────────────────────────────────────────────
+
+_NEXT_DAY = date(2024, 1, 3)  # the next NSE session (Wednesday)
+_FRIDAY = date(2024, 1, 5)  # a regular NSE trading Friday
+_MONDAY = date(2024, 1, 8)  # the Monday after the weekend gap
+
+
+class TestCrossSessionPendingEntryDrop:
+    """R2-OC-2: a pending entry never fills across a trading-day boundary.
+
+    Pre-fix, a signal on a session's LAST stored bar (e.g. 15:29 IST) armed
+    ``_pending_entry`` and the next pushed bar — the NEXT session's 09:15 open,
+    ~18h later — opened the position, silently capturing the whole overnight
+    gap at zero slippage. The fill gate now drops a pending entry whose fill
+    bar falls on a different IST session date than its signal bar.
+    """
+
+    @pytest.mark.parametrize("direction", [Side.BUY, Side.SELL])
+    def test_last_bar_signal_does_not_fill_next_session(self, direction: Side) -> None:
+        # THE regression: signal on day-1's last stored bar (15:29 IST); the
+        # feed then steps to day-2's 09:15 open with a 19-point overnight gap.
+        # Pre-fix: one trade entering at 119.00 next-session open. Now: NO trade.
+        bars = [
+            _bar(15, 28, "100", "101", "99", "100"),
+            _bar(15, 29, "100", "101", "99", "100"),  # signal on the session's last bar
+            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),  # +19 gap
+            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
+        ]
+        signals = [False, True, False, False]
+        trades = simulate_trades(bars, signals, direction=direction, tf_minutes=1)
+        assert trades == []
+
+    def test_1528_signal_still_dropped_by_forced_rule(self) -> None:
+        # Regression 2 — the PRE-EXISTING forced-bar drop is untouched: a signal
+        # at 15:28 arms, its fill bar 15:29 is >= 15:20 (a forced-exit bar) so
+        # the entry drops SAME-session; nothing may fill on day-2 either.
+        bars = [
+            _bar(15, 28, "100", "101", "99", "100"),  # signal
+            _bar(15, 29, "100", "101", "99", "100"),  # forced bar → drop (existing rule)
+            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),
+            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
+        ]
+        signals = [True, False, False, False]
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+        assert trades == []
+
+    def test_mid_day_signal_unchanged_exact_trade(self) -> None:
+        # Regression 3 — a mid-session signal is byte-for-byte UNCHANGED by the
+        # fix (verified against the pre-fix walker): entry at the next bar's
+        # open, forced exit at 15:20, exact ClosedTrade pinned field-by-field.
+        bars = [
+            _bar(11, 0, "100", "101", "99", "100"),  # signal
+            _bar(11, 1, "100.50", "102", "100", "101"),  # entry @ open 100.50
+            _bar(11, 2, "101", "103", "100.25", "102"),  # ride
+            _bar(15, 20, "104", "105", "103", "104.50"),  # forced @ open 104.00
+            _bar(9, 15, "90", "91", "89", "90", day=_NEXT_DAY),  # next session
+        ]
+        signals = [True, False, False, False, False]
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=350,  # forced fill 10400 − entry 10050
+                mfe_paisa=350,  # (open, open) fold at the forced bar
+                mae_paisa=50,  # bar 11:01 low 100.00 vs entry 100.50
+                holding_bars=3,
+                entry_ts=_ts(11, 1),
+                exit_ts=_ts(15, 20),
+                direction=Side.BUY,
+            )
+        ]
+
+    def test_single_session_feed_unchanged_exact_trade(self) -> None:
+        # A single-session feed is byte-identical to the pre-fix walker: the
+        # same-session fill path is the one every prior test exercised.
+        bars = [
+            _bar(10, 0, "100", "101", "99", "100"),  # signal
+            _bar(10, 1, "100.20", "101", "100", "100.80"),  # entry @ open 100.20
+            _bar(10, 2, "100.80", "101.50", "100.50", "101"),  # end-of-data close
+        ]
+        signals = [True, False, False]
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=80,  # close 10100 − entry 10020
+                mfe_paisa=130,  # high 101.50 vs entry 100.20
+                mae_paisa=20,  # low 100.00 vs entry 100.20
+                holding_bars=2,
+                entry_ts=_ts(10, 1),
+                exit_ts=_ts(10, 2),
+                direction=Side.BUY,
+            )
+        ]
+
+    def test_signal_on_final_feed_bar_never_opens(self) -> None:
+        # A signal on the WHOLE feed's last bar has no next bar at all: the
+        # pending entry evaporates at finish() (pre-existing path, kept pinned).
+        bars = [
+            _bar(10, 0, "100", "101", "99", "100"),
+            _bar(10, 1, "100.20", "101", "100", "100.80"),  # signal, then feed ends
+        ]
+        signals = [False, True]
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+        assert trades == []
+
+    @pytest.mark.parametrize(
+        ("day1", "day2"),
+        [(_DAY, _NEXT_DAY), (_FRIDAY, _MONDAY)],
+        ids=["one-calendar-day", "weekend-gap"],
+    )
+    def test_gap_width_is_irrelevant_both_drop(self, day1: date, day2: date) -> None:
+        # The drop keys on SESSION-date inequality, not gap width: a Tue→Wed
+        # step and a Fri→Mon weekend step both drop the pending entry.
+        bars = [
+            _bar(15, 29, "100", "101", "99", "100", day=day1),  # signal
+            _bar(9, 15, "119", "120", "118", "119", day=day2),
+            _bar(9, 16, "119.50", "120.50", "119", "119.50", day=day2),
+        ]
+        signals = [True, False, False]
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+        assert trades == []
+
+    def test_next_session_signal_still_fills_within_its_session(self) -> None:
+        # The drop never eats a GENUINE next-session signal: day-1's last-bar
+        # signal drops at day-2's 09:15 bar, but a signal ON that 09:15 bar
+        # re-arms (on a bar that ran the forced check — the resolved-date reuse
+        # path in (C)) and fills at 09:16 within its own session.
+        bars = [
+            _bar(15, 29, "100", "101", "99", "100"),  # day-1 signal → armed
+            _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),  # drop; signal → re-arm
+            _bar(9, 16, "119.50", "120.50", "119", "119.60", day=_NEXT_DAY),  # entry
+            _bar(9, 17, "119.80", "120.80", "119.30", "120", day=_NEXT_DAY),
+        ]
+        signals = [True, True, False, False]
+        trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1)
+        assert len(trades) == 1
+        assert trades[0].entry_ts == _ts(9, 16, day=_NEXT_DAY)
+        assert trades[0].pnl_paisa == 50  # close 120.00 − entry 119.50
+
+    def test_streaming_push_drops_cross_session_like_run(self) -> None:
+        # The streaming push/finish path shares the state machine: the drop
+        # behaves identically bar-by-bar.
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        assert walker.push(_bar(15, 29, "100", "101", "99", "100"), entry_signal=True) is None
+        assert (
+            walker.push(_bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY), entry_signal=False)
+            is None
+        )
+        assert (
+            walker.push(
+                _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
+                entry_signal=False,
+            )
+            is None
+        )
+        assert walker.finish() is None
+
+
+# ────────────────────────────────────────────────────────────────────────
 # India VIX reference stamp (DEC-VIX-TRADE-STAMP-001)
 # ────────────────────────────────────────────────────────────────────────
 
