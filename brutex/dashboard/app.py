@@ -223,6 +223,7 @@ from brutex.data.timeframe_materialize import MaterializeResult, materialize_lak
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
+from brutex.observability.power_keepawake import keep_awake
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -3307,8 +3308,16 @@ def build_app(
             if not dry_run:
                 _prebuild_gate.begin()
             try:
-                with RatePanelSampler(
-                    session_rate=_session_rate, observer=make_rate_observer(state)
+                # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake
+                # for the WHOLE pipeline run (spot → metadata → historical →
+                # prebuild → movers) — a sleeping Mac silently paused a real
+                # 6.5 h pull mid-flight. Best-effort: non-darwin / missing
+                # caffeinate is a logged no-op, never a raise.
+                with (
+                    keep_awake("brutex pull pipeline"),
+                    RatePanelSampler(
+                        session_rate=_session_rate, observer=make_rate_observer(state)
+                    ),
                 ):
                     report = run_full_pipeline(
                         run_spot=_run_spot,
