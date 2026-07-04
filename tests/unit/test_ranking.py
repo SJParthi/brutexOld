@@ -338,6 +338,27 @@ class TestTieBreakDeterminism:
             "tie-break keys on it); duplicate survivor mask(s): [5]"
         )
 
+    def test_duplicate_message_names_only_the_duplicated_mask(self) -> None:
+        # Three survivors: mask 5 twice (the genuine duplicate) plus a UNIQUE
+        # bystander mask 7. The error must list ONLY the duplicated mask —
+        # ``[5]`` — never the unique survivor. Kills the chronic
+        # ``count > 1`` → ``count >= 1`` dupes-filter survivor (mutmut mutant
+        # 190 of the ranking/DSR math pass, DEC-MUTATION-SURVIVOR-KILL-001):
+        # that mutant reports EVERY survivor mask (``[5, 7]``), accusing a
+        # non-duplicated mask — invisible to the existing duplicate test whose
+        # survivors all share one mask (``[5]`` either way).
+        cand = [
+            (5, _m(sharpe_ratio=2.0)),
+            (5, _m(sharpe_ratio=1.0)),
+            (7, _m(sharpe_ratio=1.5)),
+        ]
+        with pytest.raises(ValueError) as exc:
+            rank_combos(cand)
+        assert str(exc.value) == (
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            "tie-break keys on it); duplicate survivor mask(s): [5]"
+        )
+
     def test_duplicate_among_rejected_does_not_raise(self) -> None:
         # The uniqueness check is over the gate SURVIVORS only — a duplicate mask
         # among gate-REJECTED combos never reaches the sort and must NOT raise.
