@@ -47,6 +47,7 @@ from brutex.dashboard.coverage_view import (
     COMPLETENESS_PENDING,
     COMPLETENESS_SETTLED,
 )
+from brutex.data.lake_keys import resolve_spot_key
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 
 _LOG = structlog.get_logger("brutex.dashboard.completeness")
@@ -373,24 +374,14 @@ def _resolve_spot_category(
     scored key (so the row is grouped + displayed under the clean symbol) + its category, or
     ``None`` if no class matches — a genuinely unscored stray STAYS dropped, never fabricated
     onto the board (Golden Rule #1: this only surfaces data that physically exists on disk).
+
+    DEC-LAKE-HEAL-001: the ladder body moved verbatim to the COMMON pure
+    :func:`brutex.data.lake_keys.resolve_spot_key` (so the data-side lake
+    scanner/healer share it without a ``data → dashboard`` import); this is now a
+    thin byte-equivalent delegating wrapper (the ``cli._emit_pull_halt_alert`` →
+    ``sweep_alerts.emit_pull_halt_alert`` pattern, #889).
     """
-    category = categories.get(symbol)
-    if category is not None:
-        return symbol, category
-    stripped = symbol.strip()
-    if stripped != symbol:
-        category = categories.get(stripped)
-        if category is not None:
-            return stripped, category
-    exch = exchange.strip()
-    if exch:
-        prefix = f"{exch}-"
-        if stripped.startswith(prefix):
-            candidate = stripped.removeprefix(prefix)
-            category = categories.get(candidate)
-            if category is not None:
-                return candidate, category
-    return None
+    return resolve_spot_key(symbol, exchange, categories)
 
 
 def _per_symbol_spot(

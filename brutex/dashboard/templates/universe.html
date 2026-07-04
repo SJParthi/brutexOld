@@ -661,6 +661,20 @@
        style="margin-left:10px;color:var(--blue);text-decoration:none;font-size:12px;">⤓ CSV</a>
   </div>
 
+  <!-- Lake uniqueness (DEC-LAKE-HEAL-001): the duplicate-census verdict from the ONE
+       bounded invariant scanner (intra-file dup · foreign-month rows · legacy-key drift;
+       options tree (side,ts) dups). CLEAN = zero findings; poisoned counts shown, with the
+       ENGINE-index (NIFTY/BANKNIFTY/SENSEX) verdict called out in red when hit. Served by
+       GET /api/v1/universe/lake-uniqueness behind the generation-stamped cache — the first
+       compute per generation is honestly O(files); the 15 s poll is an O(1) handoff. -->
+  <div id="lakepanel" role="status" aria-live="polite"
+       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Lake uniqueness (dup census)</b>
+    <span id="lakeverdict" style="font-weight:600;"></span>
+    <span id="lakedetail" style="color:var(--muted);"></span>
+  </div>
+
   <main class="grid" aria-label="Instrument drill-down">
     <section class="col" aria-labelledby="h-instruments">
       <h3 id="h-instruments">Instruments</h3>
@@ -1087,6 +1101,38 @@ async function loadEconomicsIntegrity() {
       detail.textContent = " · " + (m.underlyings_with_lot_revisions || 0) +
         " cross-expiry revisions (informational)";
     }
+  } catch (e) { /* transient — keep the last shown verdict */ }
+}
+
+async function loadLakeUniqueness() {
+  /* Read-only: the lake duplicate-census verdict (DEC-LAKE-HEAL-001). CLEAN when the
+     bounded scan found zero findings; otherwise the poisoned finding count, with the
+     ENGINE-index (NIFTY/BANKNIFTY/SENSEX) verdict called out — the operator's headline
+     answer. Built with textContent ONLY (the universe.html CodeQL XSS guard).
+     Never throws — keeps the last shown verdict on a transient fetch error. */
+  try {
+    const r = await fetch("/api/v1/universe/lake-uniqueness");
+    if (!r.ok) return;
+    const m = await r.json();
+    const panel = document.getElementById("lakepanel");
+    const verdict = document.getElementById("lakeverdict");
+    const detail = document.getElementById("lakedetail");
+    if (!panel || !m.present) return;
+    panel.style.display = "block";
+    if (m.findings_total === 0) {
+      verdict.textContent = " ✅ CLEAN";
+      verdict.style.color = "#4ade80";
+    } else if (m.engine_clean) {
+      verdict.textContent = " ❌ " + m.findings_total + " poisoned";
+      verdict.style.color = "#f87171";
+    } else {
+      verdict.textContent = " ❌ " + m.findings_total + " poisoned · engine indexes POISONED";
+      verdict.style.color = "#f87171";
+    }
+    const segs = (m.segments || []).map(s => s.segment + " " + s.clean + "/" + s.files)
+      .join(" · ");
+    detail.textContent = " · " + segs + " · mode=" + m.mode +
+      " · healed " + (m.healed_total || 0) + " · " + (m.engine_detail || "");
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
 
@@ -1876,6 +1922,8 @@ async function bootstrap() {
   setInterval(loadMasterIntegrity, 15000);
   loadEconomicsIntegrity();
   setInterval(loadEconomicsIntegrity, 15000);
+  loadLakeUniqueness();
+  setInterval(loadLakeUniqueness, 15000);
 }
 bootstrap();
 </script>

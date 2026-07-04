@@ -314,6 +314,68 @@ class TestOpenCatalogContextManager:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# delete_partition (DEC-LAKE-HEAL-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDeletePartition:
+    """``Catalog.delete_partition`` — the healer's dangling-row eraser."""
+
+    def test_delete_partition_removes_row_and_is_idempotent(self, tmp_path: Path) -> None:
+        """A present row deletes (True); a repeat delete is a False no-op; the
+        sibling row survives (a heal that quarantine-MOVES one file never
+        touches the others' rows)."""
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            cat.upsert(_entry(month=1))
+            cat.upsert(_entry(month=2))
+            assert cat.count() == 2
+            deleted = cat.delete_partition(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+            assert deleted is True
+            assert cat.count() == 1
+            assert (
+                cat.get(
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol="NSE-NIFTY",
+                    interval="1minute",
+                    year=2024,
+                    month=1,
+                )
+                is None
+            )
+            again = cat.delete_partition(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+            assert again is False
+            assert cat.count() == 1  # the February row is untouched
+
+    def test_delete_partition_closed_catalog_raises(self, tmp_path: Path) -> None:
+        cat = Catalog.open(tmp_path / "catalog.duckdb")
+        cat.close()
+        with pytest.raises(CatalogError, match="closed"):
+            cat.delete_partition(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Real-lake happy paths — get_bars / data_snapshot_hash / closed guards
 # (DEC-LAKE-READ-UNIQUE-001: the per-touched-file coverage gate maps
 # catalog.py to THIS stem suite, so the happy paths formerly exercised only
