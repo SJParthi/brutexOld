@@ -1654,6 +1654,79 @@ def test_make_cli_rate_bridge_on_window_reraises_lake_write_halt(
     assert excinfo.value.reason == "disk_full"
 
 
+def test_per_window_publish_carries_pull_active_true(tmp_path: Path) -> None:
+    """DEC-CLI-BRIDGE-PULL-ACTIVE-001: each per-window publish stamps pull_active=True."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    wrapped = cli._make_cli_rate_bridge_on_window(lambda: None, tmp_path, controller, object())
+    wrapped()
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    assert snap.pull_active is True
+
+
+def test_publish_cli_pull_inactive_publishes_false(tmp_path: Path) -> None:
+    """The end-of-pull finalize publishes ONE snapshot with pull_active=False."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    cli._publish_cli_pull_inactive(tmp_path, controller, object())
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    assert snap.pull_active is False
+    assert snap.current_rps == controller.snapshot()["current_rps"]
+    # A bare object() adapter has no client.meter → the meter-None branch (achieved 0).
+    assert snap.effective_rps == 0.0
+
+
+def test_publish_cli_pull_inactive_none_controller_is_noop(tmp_path: Path) -> None:
+    """A dry-run / inspect pull (no controller) publishes NOTHING at pull end."""
+    cli._publish_cli_pull_inactive(tmp_path, None, object())
+    assert not (tmp_path / ".rate" / "pull_rate.json").exists()
+
+
+def test_publish_cli_pull_inactive_uses_meter_when_present(tmp_path: Path) -> None:
+    """A real client.meter snapshot feeds the final publish's achieved rps."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    class _Meter:
+        def snapshot(self) -> dict[str, object]:
+            return {"effective_rps": 3.25}
+
+    class _Client:
+        meter = _Meter()
+
+    class _Adapter:
+        client = _Client()
+
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    cli._publish_cli_pull_inactive(tmp_path, controller, _Adapter())
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    assert snap.effective_rps == 3.25
+    assert snap.pull_active is False
+
+
+def test_publish_cli_pull_inactive_swallows_every_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The finalize swallows EVERYTHING — even LakeWriteHalt — the pull is already ending."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.errors import LakeWriteHalt
+
+    def _halt(*_a: Any, **_k: Any) -> None:
+        raise LakeWriteHalt("disk_full")
+
+    monkeypatch.setattr("brutex.data.rate_bridge.publish_from_snapshots", _halt)
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    # Must NOT raise (contrast: the per-window hook re-raises LakeWriteHalt).
+    cli._publish_cli_pull_inactive(tmp_path, controller, object())
+
+
 # ── Pull-health monitor on the CLI fetch path (DEC-PULL-HEALTH-CLI-WIRING-001) ──
 
 

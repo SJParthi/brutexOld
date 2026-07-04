@@ -3047,6 +3047,10 @@ _build_pull_health_monitor` build failure) is a no-op.
                 meter_snap,
                 wall_time=time.time(),
                 monotonic=time.monotonic(),
+                # DEC-CLI-BRIDGE-PULL-ACTIVE-001: each per-window publish carries the
+                # AUTHORITATIVE "a pull IS running" signal, so the dashboard's stall
+                # verdict is gated exactly like a dashboard pull's.
+                pull_active=True,
             )
         except LakeWriteHalt:
             # Disk-full / OOM is a genuine pull-wide stop — let it propagate so the existing
@@ -3070,6 +3074,56 @@ _build_pull_health_monitor` build failure) is a no-op.
                 log.warning("cli.pull_health.observe_failed", exc_info=True)
 
     return _on_window
+
+
+def _publish_cli_pull_inactive(lake_root: Path, controller: Any, adapter: Any) -> None:
+    """Best-effort publish ONE final ``pull_active=False`` bridge snapshot at pull end.
+
+    DEC-CLI-BRIDGE-PULL-ACTIVE-001: the per-window bridge publishes ``pull_active=True``
+    while the CLI pull runs; this final publish (invoked from ``cmd_fetch``'s ``finally``,
+    after the pipeline drain + the durable ledger persist) flips the flag to ``False`` so
+    the dashboard widget reads an honest ``done``/``idle`` the moment the pull ends —
+    never a red "stalled" mislabel on a just-finished CLI pull.
+
+    Wholly best-effort: EVERY error — including a :class:`~brutex.data.errors.LakeWriteHalt`
+    — is swallowed + logged, because the pull is already ENDING and its real outcome (a
+    clean exit, a crash, or a re-raised halt) must never be masked by a visibility
+    side-effect. A ``None`` *controller* (``--dry-run`` / ``--inspect`` — no bridge was
+    ever published) is a no-op, preserving the persistence-free contract.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (locates the ``.rate`` sidecar dir).
+    controller
+        The live pull's :class:`~brutex.adapters.rate_common.RateController`, or ``None``.
+    adapter
+        The market adapter; its ``client.meter`` supplies the final throughput snapshot.
+    """
+    if controller is None:
+        return
+
+    import time
+
+    import structlog
+
+    from brutex.data.rate_bridge import publish_from_snapshots
+
+    try:
+        meter = getattr(getattr(adapter, "client", None), "meter", None)
+        meter_snap: Mapping[str, Any] = meter.snapshot() if meter is not None else {}
+        publish_from_snapshots(
+            lake_root,
+            controller.snapshot(),
+            meter_snap,
+            wall_time=time.time(),
+            monotonic=time.monotonic(),
+            pull_active=False,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        structlog.get_logger("brutex.cli.rate_bridge").warning(
+            "cli.rate_bridge.finalize_failed", exc_info=True
+        )
 
 
 def cmd_fetch(
@@ -3646,6 +3700,12 @@ def cmd_fetch(
             drain_fetch_pipeline(fetch_pipeline)
             drain_write_consumer(write_consumer)
             end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+            # Final bridge publish (DEC-CLI-BRIDGE-PULL-ACTIVE-001): flip pull_active
+            # → False so the dashboard widget reads done/idle the moment the pull
+            # ends. Best-effort — swallows EVERYTHING (even LakeWriteHalt): the pull
+            # is already exiting and its real outcome must never be masked. A None
+            # controller (--dry-run / --inspect) is a no-op.
+            _publish_cli_pull_inactive(resolved, rate_controller, adapter)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger

@@ -1498,6 +1498,7 @@ def build_app(
         bridge_recent_1s: int | None = None
         bridge_recent_600s: int | None = None
         bridge_recent_3600s: int | None = None
+        bridge_pull_active: bool | None = None
         bridge_lake_root = _rate_bridge_lake_root_or_none(instrument_store)
         if bridge_lake_root is not None:
             from brutex.data.rate_bridge import read_rate_snapshot
@@ -1512,6 +1513,7 @@ def build_app(
                 bridge_recent_1s = snapshot.recent_1s
                 bridge_recent_600s = snapshot.recent_600s
                 bridge_recent_3600s = snapshot.recent_3600s
+                bridge_pull_active = snapshot.pull_active
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
@@ -1526,8 +1528,9 @@ def build_app(
             # DEC-RATE-STALL-PULL-GATE-001: the AUTHORITATIVE pull-run signal — the
             # in-process panel is only ever fed by THIS app's pulls, so its stall
             # verdict is gated on the job actually running: a just-completed pull
-            # reads "done"/"idle", never a red "stalled" (the CLI bridge below has no
-            # active flag, so its side keeps the tick-freshness fallback).
+            # reads "done"/"idle", never a red "stalled". The CLI bridge carries its
+            # OWN flag since schema v3 (DEC-CLI-BRIDGE-PULL-ACTIVE-001) — a pre-v3 /
+            # flagless file reads None (the honest tick-freshness fallback).
             panel_pull_active=_pull_active_probe(),
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
@@ -1537,6 +1540,7 @@ def build_app(
             bridge_recent_1s=bridge_recent_1s,
             bridge_recent_600s=bridge_recent_600s,
             bridge_recent_3600s=bridge_recent_3600s,
+            bridge_pull_active=bridge_pull_active,
         )
         return JSONResponse(view.to_dict())
 
