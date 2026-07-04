@@ -15,6 +15,7 @@ import pytest
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
     MAX_QUARANTINED_NAMES,
@@ -334,6 +335,11 @@ def test_pipeline_complete_note_with_no_candle_subreport() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _warm(n: int, *, failed: int = 0) -> MoversWarmResult:
+    """A warm-result literal for the warm spies (DEC-MOVERS-WARM-PROGRESS-001)."""
+    return MoversWarmResult(warmed=n, failed=failed, total=n + failed)
+
+
 def _clean_phases() -> tuple[
     _Spy[BulkSpotReport], _Spy[MetadataPullReport], _Spy[CompositePullReport]
 ]:
@@ -350,7 +356,7 @@ def test_pipeline_warms_all_segments_after_prebuild() -> None:
     # prebuild runs, THEN each segment warms; the per-segment map carries each
     # count, the total is the sum, and the note names every warmed segment.
     spot, meta, hist = _clean_phases()
-    w_spot, w_fut, w_opt = _Spy(3), _Spy(1), _Spy(4)
+    w_spot, w_fut, w_opt = _Spy(_warm(3)), _Spy(_warm(1)), _Spy(_warm(4))
     report = run_full_pipeline(
         run_spot=spot,
         run_metadata=meta,
@@ -382,10 +388,10 @@ def test_pipeline_order_prebuild_runs_before_any_movers_warm() -> None:
         order.append("prebuild")
         return _outcome()
 
-    def _warm(segment: str) -> Callable[[], int]:
-        def _w() -> int:
+    def _warm_seg(segment: str) -> Callable[[], MoversWarmResult]:
+        def _w() -> MoversWarmResult:
             order.append(f"warm_{segment}")
-            return 1
+            return _warm(1)
 
         return _w
 
@@ -394,9 +400,9 @@ def test_pipeline_order_prebuild_runs_before_any_movers_warm() -> None:
         run_spot=spot,
         run_metadata=meta,
         run_historical=hist,
-        warm_spot_movers=_warm("spot"),
-        warm_futures_movers=_warm("futures"),
-        warm_options_movers=_warm("options"),
+        warm_spot_movers=_warm_seg("spot"),
+        warm_futures_movers=_warm_seg("futures"),
+        warm_options_movers=_warm_seg("options"),
         run_prebuild=_prebuild,
     )
     assert order == ["prebuild", "warm_spot", "warm_futures", "warm_options"]
@@ -411,7 +417,7 @@ def test_pipeline_early_spot_warm_removed_on_metadata_stop() -> None:
     spot = _Spy(_spot())
     meta = _Spy(_metadata(contract_failures=1))  # metadata FAILS after spot
     hist = _Spy(_composite(historical=_historical_inner()))
-    w_spot, w_fut, w_opt = _Spy(5), _Spy(9), _Spy(9)
+    w_spot, w_fut, w_opt = _Spy(_warm(5)), _Spy(_warm(9)), _Spy(_warm(9))
     report = run_full_pipeline(
         run_spot=spot,
         run_metadata=meta,
@@ -433,7 +439,7 @@ def test_pipeline_no_warm_when_prebuild_absent() -> None:
     is "fetch clean AND the prebuild ran" (there is no fresh derived data to
     warm over without the prebuild)."""
     spot, meta, hist = _clean_phases()
-    w_spot, w_fut, w_opt = _Spy(2), _Spy(2), _Spy(2)
+    w_spot, w_fut, w_opt = _Spy(_warm(2)), _Spy(_warm(2)), _Spy(_warm(2))
     report = run_full_pipeline(
         run_spot=spot,
         run_metadata=meta,
@@ -453,7 +459,7 @@ def test_pipeline_partial_warmers_warm_only_injected_segments() -> None:
     # Only futures + options warmers injected → spot absent from the map,
     # proving per-segment independence of the injection.
     spot, meta, hist = _clean_phases()
-    w_fut, w_opt = _Spy(2), _Spy(6)
+    w_fut, w_opt = _Spy(_warm(2)), _Spy(_warm(6))
     report = run_full_pipeline(
         run_spot=spot,
         run_metadata=meta,
@@ -477,7 +483,7 @@ def test_pipeline_segment_warm_zero_is_honest_not_absent() -> None:
         run_spot=spot,
         run_metadata=meta,
         run_historical=hist,
-        warm_spot_movers=_Spy(0),
+        warm_spot_movers=_Spy(_warm(0)),
         run_prebuild=_Spy(_outcome()),
     )
     assert report.segment_movers_warmed == {"spot": 0}
@@ -492,7 +498,7 @@ def test_pipeline_skips_warms_and_prebuild_when_historical_not_clean() -> None:
     spot = _Spy(_spot())
     meta = _Spy(_metadata())
     hist = _Spy(_composite(historical=_historical_inner(failed_pairs=1)))
-    w_spot, w_fut, w_opt = _Spy(3), _Spy(5), _Spy(5)
+    w_spot, w_fut, w_opt = _Spy(_warm(3)), _Spy(_warm(5)), _Spy(_warm(5))
     prebuild = _Spy(_outcome())
     report = run_full_pipeline(
         run_spot=spot,
@@ -513,7 +519,7 @@ def test_pipeline_skips_warms_and_prebuild_when_historical_not_clean() -> None:
 
 def test_pipeline_skips_all_warms_when_stopped_at_spot() -> None:
     # An early spot stop never warms ANY segment — no warmer is consulted.
-    w_spot, w_fut, w_opt = _Spy(3), _Spy(3), _Spy(3)
+    w_spot, w_fut, w_opt = _Spy(_warm(3)), _Spy(_warm(3)), _Spy(_warm(3))
     report = run_full_pipeline(
         run_spot=_Spy(_spot(auth_aborted=True)),
         run_metadata=_Spy(_metadata()),
@@ -579,7 +585,7 @@ def test_pipeline_prebuild_crash_marker_renders_crashed_note_not_built_zero() ->
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
         run_historical=_Spy(_composite(historical=_historical_inner())),
-        warm_spot_movers=lambda: warmed.append("spot") or 0,
+        warm_spot_movers=lambda: warmed.append("spot") or _warm(0),
         run_prebuild=_Spy(_outcome(symbols_built=0, total_bars=0, ok=False, crashed="ValueError")),
     )
     assert ", prebuild CRASHED (ValueError)" in report.note
@@ -691,7 +697,7 @@ def test_pipeline_failed_prebuild_outcome_recorded_but_no_warm() -> None:
     # (the guarded crash path, or per-symbol failures) is STILL folded into the
     # report honestly — but NO movers warm fires (a failed prebuild's derived
     # partitions may be stale/absent, so warming would cache a wrong snapshot).
-    w_spot = _Spy(2)
+    w_spot = _Spy(_warm(2))
     report = run_full_pipeline(
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
@@ -710,7 +716,7 @@ def test_pipeline_failed_prebuild_outcome_recorded_but_no_warm() -> None:
 
 def test_pipeline_successful_prebuild_warms() -> None:
     # The positive twin of the chunk-2 gate: an ok=True prebuild DOES warm.
-    w_spot = _Spy(2)
+    w_spot = _Spy(_warm(2))
     report = run_full_pipeline(
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
@@ -730,9 +736,9 @@ def test_pipeline_warms_movers_and_prebuilds_together() -> None:
         run_spot=_Spy(_spot()),
         run_metadata=_Spy(_metadata()),
         run_historical=_Spy(_composite(historical=_historical_inner())),
-        warm_spot_movers=_Spy(2),
-        warm_futures_movers=_Spy(1),
-        warm_options_movers=_Spy(1),
+        warm_spot_movers=_Spy(_warm(2)),
+        warm_futures_movers=_Spy(_warm(1)),
+        warm_options_movers=_Spy(_warm(1)),
         run_prebuild=_Spy(_outcome(symbols_built=5, total_bars=77)),
     )
     assert report.movers_warmed == 4  # 2 (spot) + 1 (futures) + 1 (options)
@@ -1144,8 +1150,8 @@ def test_pipeline_movers_warm_logs_started_and_done() -> None:
             run_spot=_Spy(_spot()),
             run_metadata=_Spy(_metadata()),
             run_historical=_Spy(_composite(historical=_historical_inner())),
-            warm_spot_movers=lambda: 3,
-            warm_futures_movers=lambda: 1,
+            warm_spot_movers=lambda: _warm(3),
+            warm_futures_movers=lambda: _warm(1),
             run_prebuild=_outcome,
         )
     started = [e for e in logs if e["event"] == "pipeline.movers_warm.started"]
@@ -1186,3 +1192,57 @@ def test_pipeline_report_fs_note_absent_when_fine_grained() -> None:
     assert report.fs_allocation_note is None
     assert "⚠ COARSE" not in report.note
     assert report.to_dict()["fs_allocation_note"] is None
+
+
+def test_pipeline_movers_warm_failed_jobs_named_in_note() -> None:
+    """DEC-MOVERS-WARM-PROGRESS-001: swallowed best-effort warm failures are
+    COUNTED per segment + NAMED in the completion note — never hidden behind
+    the warmed counts (Golden Rule #1)."""
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_spot_movers=_Spy(_warm(2, failed=1)),
+        warm_futures_movers=_Spy(_warm(1, failed=2)),
+        warm_options_movers=_Spy(_warm(4)),
+        run_prebuild=_Spy(_outcome()),
+    )
+    assert report.segment_movers_failed == {"spot": 1, "futures": 2}
+    assert report.segment_movers_warmed == {"spot": 2, "futures": 1, "options": 4}
+    assert "movers spot 2 + futures 1 + options 4 snapshot(s) warmed" in report.note
+    assert "(3 warm job(s) FAILED)" in report.note
+    assert report.to_dict()["segment_movers_failed"] == {"spot": 1, "futures": 2}
+
+
+def test_pipeline_movers_warm_no_failures_keeps_note_clean() -> None:
+    """Zero failed warm jobs ⇒ no FAILED clause (the clean note is byte-stable)."""
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        warm_spot_movers=_Spy(_warm(3)),
+        run_prebuild=_Spy(_outcome()),
+    )
+    assert report.segment_movers_failed == {}
+    assert "FAILED" not in report.note
+    assert report.to_dict()["segment_movers_failed"] == {}
+
+
+def test_pipeline_movers_warm_done_log_carries_failed_map() -> None:
+    """The pipeline.movers_warm.done log names the per-segment failed counts."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner())),
+            warm_spot_movers=lambda: _warm(3, failed=2),
+            run_prebuild=_outcome,
+        )
+    done = [e for e in logs if e["event"] == "pipeline.movers_warm.done"]
+    assert len(done) == 1
+    assert done[0]["warmed"] == {"spot": 3}
+    assert done[0]["failed"] == {"spot": 2}
