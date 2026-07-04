@@ -1617,7 +1617,7 @@ hostile-review pass._
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
   DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
   runner/driver guards above never covered) now has its own three-layer
-  defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1180): structural
+  defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1181): structural
   causality (audit-verified — Stage-1A updates prior-bar history AFTER
   evaluation; the trade sim enters at the next bar's open) + PERMANENT
   suffix-independence property gates
