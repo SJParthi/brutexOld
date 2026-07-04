@@ -1036,7 +1036,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Proceed even when the projected wall-clock (tuple_count × an "
             "UNBENCHMARKED per-tuple estimate, override via "
-            "BRUTEX_SWEEP_PER_TRIAL_SECONDS) exceeds the CLAUDE.md §8 2-4-day "
+            "BRUTEX_SWEEP_PER_TUPLE_SECONDS) exceeds the CLAUDE.md §8 2-4-day "
             "envelope. Default: REFUSE with the honest projection "
             "(DEC-SLA-LAUNCH-GUARD-001); acknowledging proceeds with a LOUD "
             "warning. Manual sweep-all only — the unattended daemon never "
@@ -4263,7 +4263,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
     # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001): project the grid's
     # wall-clock as tuple_count × an UNBENCHMARKED per-tuple estimate
-    # (BRUTEX_SWEEP_PER_TRIAL_SECONDS overrides) and REFUSE a launch projected
+    # (BRUTEX_SWEEP_PER_TUPLE_SECONDS overrides) and REFUSE a launch projected
     # past the CLAUDE.md §8 2-4-day envelope unless the operator passed
     # --acknowledge-sla-overrun (then WARN loudly and proceed). Honest per
     # Golden Rule #10: an estimate-based plausibility screen — it never

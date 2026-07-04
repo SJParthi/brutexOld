@@ -228,15 +228,17 @@ def _never_stop() -> bool:
 
 
 class RelaunchAlerter(Protocol):
-    """Structural type for the operator-alert sink the relaunch branch fires.
+    """Structural type for the operator-alert sink the relaunch + give-up branches fire.
 
     Matched by :class:`brutex.notifications.sweep_alerts.SweepAlerter` (whose
     :meth:`child_relaunched` decides the WARN-vs-CRITICAL severity from the
-    in-window *relaunch_count*) and by any test fake exposing the same
-    one-method surface — so the supervisor never imports the notifications
-    package (DEC-SUPERVISOR-CRASHLOOP-ALERT-001). Best-effort by contract: the
+    in-window *relaunch_count*, and whose :meth:`supervisor_gave_up` is the
+    terminal CRITICAL — the sweep is DOWN and nothing will relaunch it) and by
+    any test fake exposing the same two-method surface — so the supervisor
+    never imports the notifications package
+    (DEC-SUPERVISOR-CRASHLOOP-ALERT-001). Best-effort by contract: the
     supervisor swallows + logs ANY exception the sink raises, so a buggy
-    alerter can never crash or block the relaunch loop.
+    alerter can never crash or block the relaunch loop or the give-up verdict.
     """
 
     def child_relaunched(
@@ -249,6 +251,18 @@ class RelaunchAlerter(Protocol):
         detail: str,
     ) -> bool:
         """Emit one relaunch alert; return ``True`` iff a live notifier was attempted."""
+        raise NotImplementedError
+
+    def supervisor_gave_up(
+        self,
+        *,
+        child: str,
+        exit_code: int,
+        signal: int | None,
+        restarts: int,
+        max_restarts: int,
+    ) -> bool:
+        """Emit the terminal give-up alert; return ``True`` iff a live notifier was attempted."""
         raise NotImplementedError
 
 
@@ -540,6 +554,13 @@ class ProcessSupervisor:
                     restarts,
                     exit_code,
                 )
+                # Terminal give-up CRITICAL (DEC-SUPERVISOR-CRASHLOOP-ALERT-001,
+                # hostile-review MINOR-3 fold): the sweep is DOWN and nothing
+                # will relaunch it — the single most alert-worthy state, so it
+                # must never rely on the in-window relaunch count having reached
+                # the crash-loop bar first (a max_restarts < threshold policy or
+                # a slow, backoff-spaced loop would otherwise give up silently).
+                self._alert_gave_up(exit_code=exit_code, restarts=restarts)
                 return SupervisorResult(SupervisorOutcome.GAVE_UP, restarts, last_exit_code)
 
             delay = self.policy.delay_for(consecutive)
@@ -674,6 +695,33 @@ class ProcessSupervisor:
         except Exception:  # pylint: disable=broad-exception-caught — best-effort alert seam
             logger.exception(
                 "supervisor: relaunch alert failed; the relaunch itself proceeds unaffected"
+            )
+
+    def _alert_gave_up(self, *, exit_code: int, restarts: int) -> None:
+        """Fire the terminal give-up alert, best-effort (never changes the verdict).
+
+        Hands the give-up facts to the injected :class:`RelaunchAlerter`'s
+        :meth:`~RelaunchAlerter.supervisor_gave_up` — WHICH owns the CRITICAL
+        severity (the sweep is DOWN; no further relaunches). A POSIX
+        death-by-signal (negative ``returncode``) is surfaced as the killing
+        signal number, mirroring :meth:`_alert_relaunch`. ANY exception from
+        the alerter is swallowed + logged — the give-up verdict, audit stamp,
+        and exit state stay byte-unchanged (Golden Rule #10); with no alerter
+        wired this is a silent no-op.
+        """
+        if self.alerter is None:
+            return
+        try:
+            self.alerter.supervisor_gave_up(
+                child=self.subject,
+                exit_code=exit_code,
+                signal=-exit_code if exit_code < 0 else None,
+                restarts=restarts,
+                max_restarts=self.policy.max_restarts,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort alert seam
+            logger.exception(
+                "supervisor: give-up alert failed; the give-up verdict stands unaffected"
             )
 
     def _stamp(self, action: str, payload: dict[str, Any]) -> None:

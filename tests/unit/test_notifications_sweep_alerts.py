@@ -769,3 +769,73 @@ class TestChildRelaunched:
         assert not SweepAlerter(notifier=fake).child_relaunched(
             child="c", exit_code=1, signal=None, relaunch_count=1, detail="d"
         )
+
+    def test_relaunch_body_names_the_give_up_alert(self) -> None:
+        """The relaunch body's "keeps relaunching until the cap" clause must not
+        go stale at the give-up moment — it names the terminal CRITICAL that
+        fires there (hostile-review MINOR-3)."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).child_relaunched(
+            child="c", exit_code=1, signal=None, relaunch_count=1, detail="d"
+        )
+        assert escape_markdown_v2("a terminal CRITICAL fires if it gives up") in (
+            fake.published[0].message
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# supervisor_gave_up (DEC-SUPERVISOR-CRASHLOOP-ALERT-001, MINOR-3 fold)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSupervisorGaveUp:
+    def test_gave_up_is_critical_with_facts(self) -> None:
+        """The terminal give-up is ALWAYS CRITICAL and names child + cap + death."""
+        fake = FakeNotifier()
+        assert SweepAlerter(notifier=fake).supervisor_gave_up(
+            child="supervisor:sweep-daemon",
+            exit_code=1,
+            signal=None,
+            restarts=5,
+            max_restarts=5,
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.SUPERVISOR_GAVE_UP
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "supervisor-gave-up:supervisor:sweep-daemon"
+        assert escape_markdown_v2("GAVE UP") in ev.message
+        assert escape_markdown_v2("supervisor:sweep-daemon") in ev.message
+        assert escape_markdown_v2("exit code 1") in ev.message
+        assert escape_markdown_v2("5 consecutive crash(es)") in ev.message
+        # The body states the operational truth: nothing relaunches from here.
+        assert escape_markdown_v2("The sweep is DOWN") in ev.message
+        assert escape_markdown_v2("no further relaunches") in ev.message
+
+    def test_signal_death_names_the_signal(self) -> None:
+        """A give-up whose last death was by signal names the killing signal."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).supervisor_gave_up(
+            child="c", exit_code=-9, signal=9, restarts=3, max_restarts=3
+        )
+        ev = fake.published[0]
+        assert escape_markdown_v2("signal 9") in ev.message
+        assert escape_markdown_v2("exit code -9") not in ev.message
+
+    def test_kind_has_zero_dedupe_window(self) -> None:
+        """A terminal verdict fires once per run — a coalescing window could
+        only ever swallow it, so the notifier window is 0."""
+        assert DEDUPE_WINDOW_SECONDS[TelegramEventKind.SUPERVISOR_GAVE_UP] == 0.0
+
+    def test_disabled_notifier_returns_false(self) -> None:
+        """Silent no-op when Telegram is disabled (resolver yields None)."""
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert not alerter.supervisor_gave_up(
+            child="c", exit_code=1, signal=None, restarts=1, max_restarts=1
+        )
+
+    def test_publish_raise_is_swallowed(self) -> None:
+        """A raising notifier is swallowed — best-effort contract (returns False)."""
+        fake = FakeNotifier(raise_on_publish=True)
+        assert not SweepAlerter(notifier=fake).supervisor_gave_up(
+            child="c", exit_code=1, signal=None, restarts=1, max_restarts=1
+        )

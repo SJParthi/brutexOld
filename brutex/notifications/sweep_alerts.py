@@ -443,14 +443,65 @@ class SweepAlerter:
             dedupe_key = f"child-relaunch:{child}"
         message = escape_markdown_v2(
             f"{head}. {detail}. The supervisor keeps relaunching until the "
-            "max-restart cap; investigate the child's crash cause (an OOM "
-            "SIGKILL loop will not heal itself)."
+            "max-restart cap (a terminal CRITICAL fires if it gives up); "
+            "investigate the child's crash cause (an OOM SIGKILL loop will "
+            "not heal itself)."
         )
         return self._publish(
             kind=TelegramEventKind.CHILD_RELAUNCHED,
             severity=severity,
             message=message,
             dedupe_key=dedupe_key,
+        )
+
+    def supervisor_gave_up(
+        self,
+        *,
+        child: str,
+        exit_code: int,
+        signal: int | None,
+        restarts: int,
+        max_restarts: int,
+    ) -> bool:
+        """Alert that the supervisor GAVE UP — the sweep is DOWN (CRITICAL, terminal).
+
+        Fired ONCE by :class:`brutex.orchestrator.supervisor.ProcessSupervisor`
+        when the max-restart cap is exhausted (DEC-SUPERVISOR-CRASHLOOP-ALERT-001,
+        hostile-review MINOR-3 fold): from this moment NOTHING relaunches the
+        child, so this is the single most alert-worthy state — it must reach
+        the operator even when ``max_restarts`` is below the crash-loop
+        escalation bar or the crashes were spaced wider than the rolling
+        window. Always CRITICAL; the dedupe key is per child and the event
+        kind carries a zero coalescing window (a terminal verdict fires once
+        per run, never storms).
+
+        Parameters
+        ----------
+        child
+            The supervised child's name (the supervisor's audit ``subject``).
+        exit_code
+            The child's LAST raw ``returncode`` (NEGATIVE = death-by-signal).
+        signal
+            The killing signal number when the child died by signal, else
+            ``None``.
+        restarts
+            Total relaunches the supervisor attempted this run.
+        max_restarts
+            The exhausted consecutive-crash cap.
+        """
+        died_by = f"signal {signal}" if signal is not None else f"exit code {exit_code}"
+        message = escape_markdown_v2(
+            f"🛑 Sweep supervisor GAVE UP: child {child} exhausted the "
+            f"max-restart cap ({max_restarts} consecutive crash(es); "
+            f"{restarts} restart(s) this run; last death: {died_by}). "
+            "The sweep is DOWN — no further relaunches will be attempted; "
+            "fix the crash cause, then restart the supervisor manually."
+        )
+        return self._publish(
+            kind=TelegramEventKind.SUPERVISOR_GAVE_UP,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"supervisor-gave-up:{child}",
         )
 
     def pull_degraded(self, *, rule: str, achieved: float, allowed: float, detail: str) -> bool:

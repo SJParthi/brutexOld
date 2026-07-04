@@ -983,9 +983,10 @@ class TestSignalStopLatch:
 
 @dataclass
 class RecordingAlerter:
-    """Captures every ``child_relaunched`` call; matches ``RelaunchAlerter``."""
+    """Captures every alert call; matches the two-method ``RelaunchAlerter``."""
 
     calls: list[dict[str, Any]] = field(default_factory=list)
+    gave_up_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def child_relaunched(
         self,
@@ -1007,12 +1008,35 @@ class RecordingAlerter:
         )
         return True
 
+    def supervisor_gave_up(
+        self,
+        *,
+        child: str,
+        exit_code: int,
+        signal: int | None,
+        restarts: int,
+        max_restarts: int,
+    ) -> bool:
+        self.gave_up_calls.append(
+            {
+                "child": child,
+                "exit_code": exit_code,
+                "signal": signal,
+                "restarts": restarts,
+                "max_restarts": max_restarts,
+            }
+        )
+        return True
+
 
 class RaisingAlerter:
-    """An alerter whose ``child_relaunched`` always raises (best-effort proof)."""
+    """An alerter whose every method always raises (best-effort proof)."""
 
     def child_relaunched(self, **_kwargs: Any) -> bool:
         raise RuntimeError("simulated alerter failure")
+
+    def supervisor_gave_up(self, **_kwargs: Any) -> bool:
+        raise RuntimeError("simulated give-up alerter failure")
 
 
 class TestRelaunchAlert:
@@ -1165,8 +1189,11 @@ class TestRelaunchAlert:
         assert result.outcome is SupervisorOutcome.CLEAN_EXIT
         assert alerter.calls == []
 
-    def test_give_up_alerts_only_per_relaunch(self) -> None:
-        """The give-up exit itself does not alert — only the relaunches before it."""
+    def test_give_up_fires_terminal_alert_with_facts(self) -> None:
+        """The give-up verdict fires ONE terminal ``supervisor_gave_up`` alert
+        naming the child, the last death, and the exhausted cap — even when
+        ``max_restarts`` is below the crash-loop escalation bar (the silent
+        give-up gap the hostile review flagged, MINOR-3)."""
         clock = FakeClock()
         children = [
             FakeChild(code=1, uptime=1.0, clock=clock),
@@ -1176,6 +1203,7 @@ class TestRelaunchAlert:
         policy = BackoffPolicy(max_restarts=1)
         sup = ProcessSupervisor(
             launch=ScriptedLauncher(children),
+            subject="supervisor:sweep-daemon",
             policy=policy,
             clock=clock,
             sleeper=RecordingSleeper(),
@@ -1185,4 +1213,79 @@ class TestRelaunchAlert:
         result = sup.run()
 
         assert result.outcome is SupervisorOutcome.GAVE_UP
-        assert len(alerter.calls) == 1  # the single relaunch, not the give-up
+        assert len(alerter.calls) == 1  # the single relaunch before the cap
+        assert alerter.gave_up_calls == [
+            {
+                "child": "supervisor:sweep-daemon",
+                "exit_code": 1,
+                "signal": None,
+                "restarts": 1,
+                "max_restarts": 1,
+            }
+        ]
+
+    def test_give_up_alert_maps_signal_death(self) -> None:
+        """A give-up whose last death was by signal surfaces the signal number."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=-9, uptime=1.0, clock=clock),
+            FakeChild(code=-9, uptime=1.0, clock=clock),
+        ]
+        alerter = RecordingAlerter()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            policy=BackoffPolicy(max_restarts=1),
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=alerter,
+        )
+
+        result = sup.run()
+
+        assert result.outcome is SupervisorOutcome.GAVE_UP
+        assert alerter.gave_up_calls[0]["exit_code"] == -9
+        assert alerter.gave_up_calls[0]["signal"] == 9
+
+    def test_raising_give_up_alerter_never_changes_the_verdict(self) -> None:
+        """A raising give-up alerter is swallowed + logged; the GAVE_UP verdict,
+        audit stamps, and exit state stay byte-unchanged (best-effort proof)."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=1, uptime=1.0, clock=clock),
+            FakeChild(code=1, uptime=1.0, clock=clock),
+        ]
+        audit = RecordingAuditSink()
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            policy=BackoffPolicy(max_restarts=1),
+            audit=audit,
+            clock=clock,
+            sleeper=RecordingSleeper(),
+            alerter=RaisingAlerter(),
+        )
+
+        result = sup.run()
+
+        assert result.outcome is SupervisorOutcome.GAVE_UP
+        assert result.restarts == 1
+        assert result.last_exit_code == 1
+        assert _actions(audit) == [AUDIT_ACTION_RESTART, AUDIT_ACTION_GIVE_UP]
+
+    def test_give_up_without_alerter_is_silent_noop(self) -> None:
+        """``alerter=None`` short-circuits the give-up alert — behaviour is
+        byte-identical to the pre-alert supervisor."""
+        clock = FakeClock()
+        children = [
+            FakeChild(code=1, uptime=1.0, clock=clock),
+            FakeChild(code=1, uptime=1.0, clock=clock),
+        ]
+        sup = ProcessSupervisor(
+            launch=ScriptedLauncher(children),
+            policy=BackoffPolicy(max_restarts=1),
+            clock=clock,
+            sleeper=RecordingSleeper(),
+        )
+
+        result = sup.run()
+
+        assert result.outcome is SupervisorOutcome.GAVE_UP
