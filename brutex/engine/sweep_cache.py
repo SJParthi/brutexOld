@@ -42,6 +42,7 @@ LMDB store grows O(N) in the number of distinct combos retained.
 from __future__ import annotations
 
 import json
+import math
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -49,12 +50,15 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Final, Self
 
 import blake3
+import structlog
 
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only imports (wheel-bound at runtime)
     from brutex.data.lmdb_membership import LmdbMembership
     from brutex.orchestrator.bloom import BloomFilter
+
+_LOG = structlog.get_logger(__name__)
 
 #: Default Bloom capacity for the sweep dedup cache. ~5M distinct combos at the
 #: default FPR is ~21 MB of bit array — comfortably inside the §8 envelope while
@@ -74,8 +78,12 @@ DEFAULT_MAP_SIZE_MB: Final[int] = 2 * 1024
 #: count) for the sweep dedup cache. Resolution order: explicit
 #: ``bloom_capacity`` argument > this env var > :data:`DEFAULT_BLOOM_CAPACITY`
 #: (see :func:`resolve_sweep_cache_bloom_capacity`). The paired CLI flag is
-#: ``--sweep-cache-bloom-capacity`` — the remedy for the FAIL_CLOSED
-#: >capacity resume refusal (:class:`SweepCacheCapacityError`).
+#: ``--sweep-cache-bloom-capacity``. Since the STEP-1 bounded auto-grow
+#: (DEC-ENGINE-MISC-PACK-001) a within-wall >capacity resume self-heals
+#: (:func:`_auto_grow_capacity`); the knob remains the way to PRE-SIZE a big
+#: sweep up front — it is NOT a remedy for the above-the-16 GiB-wall refusal
+#: (:class:`SweepCacheCapacityError`), where only a looser ``bloom_fpr`` or
+#: the sharded / mmap'd Bloom follow-up helps.
 SWEEP_CACHE_BLOOM_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY"
 
 #: Sub-directory under the cache root holding the LMDB exact-membership env.
@@ -87,18 +95,22 @@ class SweepCacheError(BruteXError):
 
 
 class SweepCacheCapacityError(SweepCacheError):
-    """The persisted L2 exact-store already holds more digests than the L1 Bloom
-    capacity can accommodate.
+    """The persisted L2 exact-store cannot be faithfully mirrored into an L1 Bloom.
 
-    Raised by :meth:`SweepCache.open` when a resume finds more previously-recorded
-    digests than the configured ``bloom_capacity`` — repopulating the Bloom would
-    overflow its FAIL_CLOSED capacity gate mid-rebuild
-    (:class:`brutex.orchestrator.bloom.BloomCapacityExceeded`). FAIL_CLOSED, never
-    silent: the operator must re-open with a larger ``bloom_capacity`` — the
-    ``--sweep-cache-bloom-capacity`` flag or the
-    :data:`SWEEP_CACHE_BLOOM_CAPACITY_ENV` environment variable — so the
-    resume's Bloom faithfully reflects every persisted digest (Golden Rule #5 —
-    no silent FPR drift).
+    Since the STEP-1 bounded auto-grow (DEC-ENGINE-MISC-PACK-001), a resume whose
+    persisted digest count exceeds the configured ``bloom_capacity`` is first
+    RESIZED via :func:`_auto_grow_capacity` — ``max(persisted,
+    ceil(capacity × 1.25))`` — provided the grown bit array still fits the
+    :data:`brutex.orchestrator.bloom.MAX_BLOOM_BYTES` 16 GiB hardware-envelope
+    wall (CLAUDE.md §8). This error is therefore raised by
+    :meth:`SweepCache.open` ONLY when the grown sizing would bust that wall:
+    FAIL_CLOSED, never silent (Golden Rule #5 — no silent FPR drift, no
+    partially-populated Bloom). Above the wall a ``bloom_capacity`` raise cannot
+    help — the remedies are loosening ``bloom_fpr`` or the sharded / mmap'd
+    Bloom follow-up the wall has always named. (The pre-sizing invariant check
+    in :meth:`SweepCache._rebuild_bloom_from_exact` also raises this — kept as
+    defence-in-depth, unreachable from :meth:`SweepCache.open` once the
+    capacity is pre-sized.)
     """
 
 
@@ -184,6 +196,85 @@ def resolve_sweep_cache_bloom_capacity(
 
     resolved = resolve_positive_int_env(SWEEP_CACHE_BLOOM_CAPACITY_ENV, explicit, env=env)
     return DEFAULT_BLOOM_CAPACITY if resolved is None else resolved
+
+
+def _auto_grow_capacity(configured_capacity: int, persisted: int, fpr_target: float) -> int:
+    """Resolve the EFFECTIVE resume Bloom capacity — STEP-1 bounded auto-grow.
+
+    DEC-ENGINE-MISC-PACK-001: a resume whose persisted L2 exact-store already
+    holds more digests than the configured ``bloom_capacity`` used to
+    FAIL_CLOSED unconditionally, forcing a manual knob turn on every organic
+    overflow. STEP 1 grows the capacity AUTOMATICALLY — but only inside the
+    hardware envelope:
+
+    * ``persisted <= configured_capacity`` → the configured capacity,
+      byte-identical behaviour (no grow, no log);
+    * otherwise → ``grown = max(persisted, ceil(configured_capacity × 1.25))``
+      (the ``max`` is required for correctness: a bare ``ceil(cap × 1.25)`` can
+      still be < *persisted* and would overflow the FAIL_CLOSED Bloom gate
+      mid-rebuild), IFF the grown sizing fits the
+      :data:`brutex.orchestrator.bloom.MAX_BLOOM_BYTES` 16 GiB wall
+      (:func:`brutex.orchestrator.bloom._compute_m_bytes` — the pure sizing
+      helper exposed for exactly this audit). A grow is LOUD: one
+      ``sweep_cache.bloom_auto_grow`` structlog event names the deviation from
+      the operator knob (Golden Rules #1/#8 — the knob was exceeded, say so).
+
+    Above the wall the refusal STAYS (:class:`SweepCacheCapacityError`,
+    FAIL_CLOSED — Golden Rule #5): a larger in-RAM Bloom would break the §8
+    envelope, and a ``bloom_capacity`` raise cannot help — the message names
+    the honest remedies (loosen ``bloom_fpr``, or the sharded / mmap'd Bloom
+    follow-up). BLAST RADIUS (honest, Golden Rule #10): the production
+    MASK-digest path never builds a Bloom at all (``brutex.cli`` passes
+    ``plan_launch_dedup(grid, digest_path=True)`` — a no-alloc raising sink);
+    the only production Bloom is the TUPLE-tier :meth:`SweepCache.open`, so
+    this grow affects the tuple-resume path only.
+
+    Parameters
+    ----------
+    configured_capacity
+        The operator-resolved ``bloom_capacity`` knob value.
+    persisted
+        The persisted L2 exact-store digest count (``len(exact)``).
+    fpr_target
+        The Bloom false-positive-rate target the filter will be built with.
+
+    Returns
+    -------
+    int
+        The effective capacity to build the resume Bloom with — always
+        ``>= persisted``.
+
+    Raises
+    ------
+    SweepCacheCapacityError
+        When the grown capacity's bit array would exceed the 16 GiB wall.
+    """
+    if persisted <= configured_capacity:
+        return configured_capacity
+    # Imported lazily — bloom pulls the runtime-only fastbloom_rs wheel; this
+    # module must stay importable without it (same rationale as the resolvers).
+    from brutex.orchestrator.bloom import MAX_BLOOM_BYTES, _compute_m_bytes
+
+    grown = max(persisted, math.ceil(configured_capacity * 1.25))
+    m_bytes = _compute_m_bytes(grown, fpr_target)
+    if m_bytes > MAX_BLOOM_BYTES:
+        raise SweepCacheCapacityError(
+            f"resume: persisted exact-store holds {persisted:_} digests; the auto-grown "
+            f"bloom_capacity {grown:_} needs a {m_bytes:_}-byte bit array, exceeding "
+            f"MAX_BLOOM_BYTES={MAX_BLOOM_BYTES:_} (the 16 GiB hardware-envelope wall, "
+            f"CLAUDE.md §8) — FAIL_CLOSED (Golden Rule #5, no partially-populated Bloom). "
+            f"Raising --sweep-cache-bloom-capacity / {SWEEP_CACHE_BLOOM_CAPACITY_ENV} "
+            f"cannot help above the wall: loosen bloom_fpr, or wait for the sharded / "
+            f"mmap'd Bloom follow-up."
+        )
+    _LOG.warning(
+        "sweep_cache.bloom_auto_grow",
+        persisted=persisted,
+        configured_capacity=configured_capacity,
+        grown_capacity=grown,
+        m_bytes=m_bytes,
+    )
+    return grown
 
 
 def combo_digest(
@@ -314,6 +405,17 @@ class SweepCache:
         treat every persisted digest as Bloom-negative and re-run the entire
         prior sweep.
 
+        **STEP-1 bounded auto-grow (DEC-ENGINE-MISC-PACK-001):** the exact store
+        is opened FIRST and the Bloom capacity is pre-sized from its persisted
+        count via :func:`_auto_grow_capacity` — a resume holding MORE digests
+        than the configured ``bloom_capacity`` auto-grows to
+        ``max(persisted, ceil(capacity × 1.25))`` (one loud
+        ``sweep_cache.bloom_auto_grow`` event) instead of refusing, provided
+        the grown bit array fits the 16 GiB
+        :data:`~brutex.orchestrator.bloom.MAX_BLOOM_BYTES` wall; above the wall
+        the FAIL_CLOSED refusal stays, naming the sharded / mmap'd Bloom
+        follow-up. A within-capacity resume is byte-identical to before.
+
         Parameters
         ----------
         path
@@ -333,14 +435,14 @@ class SweepCache:
         Raises
         ------
         SweepCacheCapacityError
-            If the persisted exact store already holds more digests than
-            the resolved ``bloom_capacity`` — repopulating would overflow the
-            Bloom's FAIL_CLOSED capacity gate. FAIL_CLOSED: the operator must
-            re-open with a larger ``bloom_capacity``
-            (``--sweep-cache-bloom-capacity`` /
-            :data:`SWEEP_CACHE_BLOOM_CAPACITY_ENV`; Golden Rule #5, no silent
-            FPR drift). The just-opened exact store is closed before the raise
-            so the refused open leaks no LMDB environment.
+            If the persisted exact store holds more digests than the resolved
+            ``bloom_capacity`` AND the auto-grown capacity's bit array would
+            exceed the 16 GiB :data:`~brutex.orchestrator.bloom.MAX_BLOOM_BYTES`
+            wall (:func:`_auto_grow_capacity`). FAIL_CLOSED (Golden Rule #5, no
+            silent FPR drift); the message names the honest above-the-wall
+            remedies (loosen ``bloom_fpr`` / the sharded follow-up). The
+            just-opened exact store is closed before the raise so the refused
+            open leaks no LMDB environment.
         ValueError
             If either knob (explicit or env) is not a positive integer.
         """
@@ -353,13 +455,18 @@ class SweepCache:
         resolved_capacity = resolve_sweep_cache_bloom_capacity(bloom_capacity)
         resolved_map_mb = resolve_sweep_cache_map_mb(map_size_mb)
         path.mkdir(parents=True, exist_ok=True)
-        bloom = BloomFilter(capacity=resolved_capacity, fpr_target=bloom_fpr)
         exact = LmdbMembership.open(path / _EXACT_SUBDIR, map_size_mb=resolved_map_mb)
         try:
-            cls._rebuild_bloom_from_exact(bloom, exact, bloom_capacity=resolved_capacity)
-        except SweepCacheCapacityError:
-            # Never leak the LMDB env on a refused open — the operator's very
-            # next action is re-opening the SAME path with a larger capacity.
+            # Pre-size the Bloom from the persisted ground truth BEFORE building
+            # it (STEP-1 auto-grow, DEC-ENGINE-MISC-PACK-001) — the wall refusal
+            # happens here, never mid-rebuild.
+            effective_capacity = _auto_grow_capacity(resolved_capacity, len(exact), bloom_fpr)
+            bloom = BloomFilter(capacity=effective_capacity, fpr_target=bloom_fpr)
+            cls._rebuild_bloom_from_exact(bloom, exact, bloom_capacity=effective_capacity)
+        except Exception:
+            # Never leak the LMDB env on a refused open (a wall refusal, a Bloom
+            # config error, a rebuild fault) — the operator's very next action is
+            # re-opening the SAME path. Narrowly re-raised as-is.
             exact.close()
             raise
         return cls(bloom=bloom, exact=exact)
@@ -380,7 +487,10 @@ class SweepCache:
         the Bloom can hold FAILS_CLOSED with :class:`SweepCacheCapacityError`
         rather than tripping the Bloom's own :class:`BloomCapacityExceeded`
         part-way through the rebuild (which would leave a partially-populated
-        Bloom).
+        Bloom). Since the STEP-1 auto-grow (DEC-ENGINE-MISC-PACK-001) :meth:`open`
+        pre-sizes ``bloom_capacity >= persisted`` via :func:`_auto_grow_capacity`,
+        so this guard is DEFENCE-IN-DEPTH — unreachable from :meth:`open`, kept
+        as the invariant check for any direct caller.
         """
         persisted = len(exact)
         if persisted == 0:

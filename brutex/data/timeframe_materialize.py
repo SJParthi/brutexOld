@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
 
+from brutex.data.derive_lock import derive_write_lock
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
     DAILY_TF_MINUTES,
@@ -361,47 +362,61 @@ def materialize_lake_timeframes(
     NOT an O(1)-total claim (Golden Rule #10). Returns the per-TF written
     counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
     integration-tested by the round-trip tests.
+
+    **Cross-process derive signal (DEC-ENGINE-MISC-PACK-001):** the WHOLE
+    per-symbol materialise runs under the exclusive
+    :func:`~brutex.data.derive_lock.derive_write_lock` (the fixed
+    ``<lake_root>/.locks/derive.lock`` flock), so a concurrent reader in a
+    SEPARATE process — the ``/movers`` stored-first read probing
+    :func:`~brutex.data.derive_lock.derive_in_progress` — can never observe a
+    half-refreshed TF set as its stored source. Held PER CALL (one symbol) and
+    released between symbols, so a multi-symbol prebuild never starves readers
+    for its whole duration; lock ORDER is derive → per-partition flock (writer
+    only), never the reverse — no cycle.
     """
-    read_1m = make_lake_read_1m(
-        lake_root=lake_root,
-        exchange=exchange,
-        segment=segment,
-        symbol=symbol,
-        with_open_interest=kind is not PrebuildKind.SPOT,
-    )
-    write_tf = make_lake_write_tf(
-        lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-    )
-    resampler = intraday_resampler_for(kind)
-    if not include_daily:
-        return materialize_timeframes(
-            tfs=tfs, read_1m=read_1m, write_tf=write_tf, resampler=resampler
+    with derive_write_lock(lake_root):
+        read_1m = make_lake_read_1m(
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            with_open_interest=kind is not PrebuildKind.SPOT,
         )
-
-    from datetime import UTC, datetime
-
-    from brutex.calendars.nse import IST
-    from brutex.data.spot_daily_resample import fill_daily_from_minute, make_lake_write_1day
-
-    # Read the 1-minute base ONCE and share the frame between the intraday
-    # derivation and the daily derivation (halves the partition I/O).
-    df_1m = read_1m()
-    intraday = materialize_timeframes(
-        tfs=tfs, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
-    )
-    before = daily_before if daily_before is not None else datetime.now(UTC).astimezone(IST).date()
-    daily = fill_daily_from_minute(
-        read_1m=lambda: df_1m,
-        write_1day=make_lake_write_1day(
+        write_tf = make_lake_write_tf(
             lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-        ),
-        before=before,
-        resample_fn=daily_resample_fn_for(kind),
-    )
-    return MaterializeResult(
-        written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
-        skipped=intraday.skipped,
-    )
+        )
+        resampler = intraday_resampler_for(kind)
+        if not include_daily:
+            return materialize_timeframes(
+                tfs=tfs, read_1m=read_1m, write_tf=write_tf, resampler=resampler
+            )
+
+        from datetime import UTC, datetime
+
+        from brutex.calendars.nse import IST
+        from brutex.data.spot_daily_resample import fill_daily_from_minute, make_lake_write_1day
+
+        # Read the 1-minute base ONCE and share the frame between the intraday
+        # derivation and the daily derivation (halves the partition I/O).
+        df_1m = read_1m()
+        intraday = materialize_timeframes(
+            tfs=tfs, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
+        )
+        before = (
+            daily_before if daily_before is not None else datetime.now(UTC).astimezone(IST).date()
+        )
+        daily = fill_daily_from_minute(
+            read_1m=lambda: df_1m,
+            write_1day=make_lake_write_1day(
+                lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+            ),
+            before=before,
+            resample_fn=daily_resample_fn_for(kind),
+        )
+        return MaterializeResult(
+            written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
+            skipped=intraday.skipped,
+        )
 
 
 __all__ = [
