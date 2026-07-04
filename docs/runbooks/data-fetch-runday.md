@@ -215,6 +215,7 @@ write no real data and pace no real account requests).
 
 - **Network/creds blocker + unblock path:** this runbook + DEC-SESSION-HOOK-LIVESTATE-001 (MIGRATION #298).
 - **Cross-process pull single-flight (per lake) + CLI wiring + two-lake-root residual:** DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION #996); `brutex/adapters/groww/pull_singleflight.py`, `brutex/cli.py` (`_enter_pull_singleflight`). **Account-keyed second lock (single-host residual closed):** DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 (MIGRATION #1285).
+- **Wedged-volume write-health breaker:** DEC-WRITE-HEALTH-BREAKER-001 (MIGRATION #1281, incl. the fix-round fold — the F&O health key groups by UNDERLYING so the shipped 2-consecutive / 3-distinct defaults can trip on both spines; a pull whose defers span fewer than 3 distinct health keys keeps per-window defers); `brutex/data/write_breaker.py`; kill switch `BRUTEX_WRITE_BREAKER=off`.
 - **Index symbols + scope:** Golden Rule #3; `ingest.py:37`.
 - **Rate-limit + chunk windows:** CLAUDE.md §6.
 - **Auth (Groww API key + TOTP shared secret):** CLAUDE.md §6; `brutex/adapters/groww/auth.py`.
