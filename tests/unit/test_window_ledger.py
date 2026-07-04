@@ -247,6 +247,166 @@ class TestDegradedDemotion:
         assert status == EMPTY
 
 
+class TestDegradedTombstone:
+    """DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001 — `degraded_keys` feeds the merge-on-save
+    so a concurrent pull's disk SUCCESS can never silently override a degraded demotion
+    (the third instance of the `_pruned`/`_reopened` tombstone shape)."""
+
+    def test_degraded_demotion_tombstones_key(self) -> None:
+        # BUG-REGRESSION (fix b): the SUCCESS→FAILED interior-gap demotion must be
+        # tombstoned exactly as reopen_skipped's demotions are — before the fix
+        # `degraded_keys()` did not exist and the merge-on-save let a concurrent
+        # disk SUCCESS resurrect over the demotion.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=10,
+            error_type=None,
+            bars_appended=10,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert status == FAILED
+        assert ledger.records()[0].last_error == "INTERIOR_GAP"
+        assert ledger.degraded_keys() == frozenset(
+            {("dhan", "NIFTY", "1minute", "2021-01-01", "2021-04-01")}
+        )
+
+    def test_degraded_accept_gap_not_tombstoned(self) -> None:
+        # The accept-gap SKIPPED settle at the threshold is a legitimately terminal
+        # rank-3 row — it must NOT be pinned against a concurrent SUCCESS. Threshold
+        # 1 makes the FIRST degraded record settle SKIPPED directly, so the
+        # `status == FAILED` guard is False and no tombstone is added.
+        ledger = WindowLedger(_threshold=1)
+        status = ledger.record(
+            _key(),
+            raw_bars=10,
+            error_type=None,
+            bars_appended=10,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert status == SKIPPED
+        assert ledger.degraded_keys() == frozenset()
+
+    def test_plain_records_not_tombstoned(self) -> None:
+        # `degraded_success` False across every plain outcome: a clean SUCCESS, a
+        # genuine EMPTY, and a transient FAILED (error_type set) never tombstone.
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        ledger.record(_key("BANKNIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(
+            _key("SENSEX"),
+            raw_bars=0,
+            error_type="GrowwRateLimitError",
+            bars_appended=0,
+            now=_NOW,
+        )
+        assert ledger.degraded_keys() == frozenset()
+
+    def test_degraded_keys_empty_by_default(self) -> None:
+        assert WindowLedger().degraded_keys() == frozenset()
+
+    def test_success_repull_discards_stale_tombstone(self) -> None:
+        # Hostile-review fold: a genuine COMPLETE re-record of the SAME key in the
+        # SAME process supersedes the demotion — the stale tombstone is discarded
+        # so the merge's more-settled rule applies to the new SUCCESS
+        # unconditionally (pre-fold the set was add-only, so the stale tombstone
+        # would have forced the memory row to win the merge outright forever).
+        ledger = WindowLedger(_threshold=3)
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert len(ledger.degraded_keys()) == 1
+        status = ledger.record(_key(), raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        assert status == SUCCESS
+        assert ledger.degraded_keys() == frozenset()
+
+    def test_accept_gap_settle_discards_prior_demotion_tombstone(self) -> None:
+        # Hostile-review fold: with threshold 2 the FIRST degraded record demotes
+        # (FAILED, tombstoned) and the SECOND reaches the threshold → SKIPPED
+        # (accept-gap). The "a SKIPPED settle is never tombstoned" contract now
+        # holds UNCONDITIONALLY — the earlier demotion's tombstone is discarded at
+        # the settle, so a concurrent disk SUCCESS may honestly displace the
+        # terminal row under the more-settled rule.
+        ledger = WindowLedger(_threshold=2)
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert len(ledger.degraded_keys()) == 1
+        final = ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        assert final == SKIPPED
+        assert ledger.degraded_keys() == frozenset()
+
+    def test_repullable_rerecord_keeps_tombstone(self) -> None:
+        # A transient FAILED (429) or a clean EMPTY re-record of the demoted key
+        # gives NO completeness evidence — the demotion stands and the tombstone
+        # is deliberately KEPT (discarding here would let a concurrent pull's disk
+        # SUCCESS re-mask the confirmed gap on our own save).
+        ledger = WindowLedger(_threshold=5)
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        tombstoned = ledger.degraded_keys()
+        assert len(tombstoned) == 1
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type="GrowwRateLimitError",
+            bars_appended=0,
+            now=_NOW,
+        )
+        assert ledger.degraded_keys() == tombstoned  # FAILED re-record keeps it
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.degraded_keys() == tombstoned  # EMPTY re-record keeps it too
+
+    def test_from_rows_has_no_degraded_tombstone(self) -> None:
+        # The tombstone is per-instance, never serialised: a demoted row round-trips
+        # its FAILED status but the restored ledger carries NO tombstone (idempotence
+        # pin — load→save→load stays a row fixed point, Golden Rule #7).
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=10,
+            error_type=None,
+            bars_appended=10,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="INTERIOR_GAP",
+        )
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.to_rows() == ledger.to_rows()
+        assert restored.degraded_keys() == frozenset()
+
+
 class TestEmptyStreakR1:
     """R1 (DEC-WINDOW-LEDGER-001): promote on the CONSECUTIVE EMPTY streak, not total attempts."""
 
