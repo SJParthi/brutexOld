@@ -1,6 +1,6 @@
 # ADR-0016 — Multicore sweep worker AUTO-default (`BRUTEX_SWEEP_WORKERS` unset → `max(1, min(cpu_count − 2, 8))`)
 
-**Decision ID:** `DEC-MULTICORE-SWEEP-AUTODEFAULT-001` (MIGRATION.md entry #1264)
+**Decision ID:** `DEC-MULTICORE-SWEEP-AUTODEFAULT-001` (MIGRATION.md entry #1269)
 **Date:** 2026-07-04
 **Status:** **ACCEPTED** — the flip this ADR owns ships in the same PR
 (resolution-only; the engine per-tuple path is untouched).
