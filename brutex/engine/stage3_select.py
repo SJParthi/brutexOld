@@ -42,6 +42,7 @@ tree in its store (an upstream site this PR deliberately does NOT touch).
 
 from __future__ import annotations
 
+import functools
 import heapq
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -72,6 +73,7 @@ class LeaderboardKey:
     mode: str
 
 
+@functools.total_ordering
 @dataclass(frozen=True, slots=True)
 class _HeapEntry:
     """One bounded-heap slot — ``<`` means "ranks strictly WORSE than".
@@ -96,6 +98,21 @@ class _HeapEntry:
     bit or strategy ranking breaks). ``NaN`` cannot occur: ``ResultRow``
     rejects non-finite metrics at construction, so ``!=``/``<`` here are
     total on the actual domain.
+
+    The ordering protocol is deliberately COMPLETE (CodeQL
+    ``py/incomplete-ordering``): :func:`functools.total_ordering` derives
+    ``__le__`` / ``__gt__`` / ``__ge__`` from :meth:`__lt__` + the
+    dataclass ``__eq__`` — the same discipline as ``_Outcome`` in
+    :mod:`brutex.engine.sweep_parallel` (CLAUDE.md §11 COMMON, one derivation
+    site — never hand-rolled twins). Its derivations (``a >= b ≡ not a < b``;
+    ``a > b ≡ not a < b and a != b``; ``a <= b ≡ a < b or a == b``) coincide
+    with the total-order identities (``a <= b ≡ not b < a``;
+    ``a > b ≡ b < a``) ONLY because the order is strict and TOTAL: ``seq``
+    is unique per input row, so incomparability (neither ``<`` holds) occurs
+    exactly on field-equal twins, where the dataclass ``__eq__`` is ``True``
+    — the two formulations agree on every pair in the domain. Heap semantics
+    are UNCHANGED: ``heapq`` only ever consults ``__lt__``, whose body is
+    byte-identical to the pre-completion definition.
     """
 
     sharpe: float
