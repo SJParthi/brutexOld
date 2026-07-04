@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -885,8 +885,12 @@ def test_pull_pipeline_seeds_discovery_memos_after_run(
     ):
         assert kwargs[cache_kw] is not None
     # The symbol_for_id provider is lazy (called inside the warm's guard).
-    assert callable(kwargs["symbol_for_id_fn"])
-    assert dict(kwargs["symbol_for_id_fn"]()) == {"13": "NIFTY"}
+    # Typed local binding (the production `warm_discovery_memos` signature):
+    # `callable()` on the raw `Any` narrows to `(...) -> object` under pyright,
+    # which would reject the `dict(...)` call below.
+    symbol_for_id_fn: Callable[[], Mapping[str, str]] = kwargs["symbol_for_id_fn"]
+    assert callable(symbol_for_id_fn)
+    assert dict(symbol_for_id_fn()) == {"13": "NIFTY"}
 
 
 def test_pull_pipeline_prebuild_global_stop_fails_job_alerts_and_releases_gate(
