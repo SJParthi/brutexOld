@@ -23,6 +23,10 @@ DEC-SWEEP-STREAMING-RANK-001 (part 2) through the REAL
   short-circuits BEFORE the budget guard (a finished tuple is never refused).
 """
 
+# Whitebox: `_rebuild_bounded_finalists` is exercised directly for its defensive
+# arms (empty selection / missing-sim / order-contract belt).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import json
@@ -216,9 +220,7 @@ class TestDualModeBitIdentity:
         assert engaged[0]["mode"] == "auto"
         assert engaged[0]["budget_bytes"] == int(_TINY_BUDGET)
         assert bounded == batch
-        assert (tmp_path / "auto.parquet").read_bytes() == (
-            tmp_path / "batch.parquet"
-        ).read_bytes()
+        assert (tmp_path / "auto.parquet").read_bytes() == (tmp_path / "batch.parquet").read_bytes()
 
     def test_forced_on_logs_at_info(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_env(monkeypatch, "on", _BIG_BUDGET)
@@ -353,6 +355,30 @@ class TestBoundedFinalistRecompute:
             _rebuild_bounded_finalists(
                 selected,
                 None,
+                _BARS,
+                [0] * len(_BARS),
+                _make_config(),
+                "bull",
+                lambda mask: "0" * 64,
+            )
+
+    def test_reordered_metrics_stream_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The positional-pairing belt trips if the eval spine ever reorders."""
+        import brutex.engine.sweep_run as sweep_run_module
+
+        def _reordering_iter(*args: Any, **kwargs: Any) -> Any:
+            yield 999, None  # a mask that was never requested
+
+        monkeypatch.setattr(sweep_run_module, "_iter_mask_metrics", _reordering_iter)
+        selected = BoundedRankResult(
+            finalists=(BoundedFinalist(mask=1, composite_score=0.0, deflated_sharpe=None),),
+            n_ranked=1,
+        )
+        sim = object()  # never touched — the patched spine ignores it
+        with pytest.raises(SweepComboError, match="order contract violated"):
+            _rebuild_bounded_finalists(
+                selected,
+                sim,  # type: ignore[arg-type]
                 _BARS,
                 [0] * len(_BARS),
                 _make_config(),

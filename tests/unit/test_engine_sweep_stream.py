@@ -159,9 +159,7 @@ class TestOwnedNbytes:
 
     def test_exact_payload_arithmetic_with_overfit(self) -> None:
         n = 9
-        columns = _columns(
-            [(i, make_result_metrics()) for i in range(n)], with_overfit=True
-        )
+        columns = _columns([(i, make_result_metrics()) for i in range(n)], with_overfit=True)
         arrays = (2 + 1 + N_COMPOSITE_TERMS + 3) * 8 * n  # + trades/skew/kurt
         bit_sets = 4 * math.ceil(n / 8)  # + skew/kurt None bits
         assert columns.owned_nbytes() == arrays + bit_sets
@@ -222,9 +220,7 @@ class TestRankSurvivorColumnsEqualsBatch:
         assert result.n_ranked == 0
 
     def test_empty_columns_yield_empty(self) -> None:
-        result = rank_survivor_columns(
-            SurvivorColumns(with_overfit=False), overfit=None, top_k=5
-        )
+        result = rank_survivor_columns(SurvivorColumns(with_overfit=False), overfit=None, top_k=5)
         assert result == type(result)(finalists=(), n_ranked=0)
 
     def test_zero_variance_single_survivor(self) -> None:
