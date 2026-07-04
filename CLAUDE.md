@@ -18,7 +18,31 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-03 (DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
+_Last updated: 2026-07-03 (DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294 —
+the ingest data-integrity pack, four boundary gaps as ONE change set: (a) the
+ingest-boundary session filter is now CALENDAR-AWARE (`brutex/data/session.py`
+`filter_to_trading_session` via `calendars/nse.get_session`, wired at BOTH ingest
+spines) — a bar on a NON-TRADING date (weekend/holiday leak) is dropped + COUNTED
+with EXACTLY ONE WARN per window, and an evening-muhurat / special-weekend bar is
+now KEPT (a sanctioned behavior change — the date-blind 09:15-15:30 filter wrongly
+dropped it); regular-day kept-set pinned byte-identical to the legacy filter;
+out-of-coverage dates (post-2026) abstain to the legacy fixed window; the daily
+path stays deliberately unfiltered; resamplers untouched by design (they derive
+from the stored, already-filtered 1-minute). (b) the parser's DEFENSIVE
+epoch-timestamp branch WARNs once per pull (`groww.parse.epoch_timestamp`; vendor
+epoch semantics UNVERIFIED — assumed Unix-UTC; parsing unchanged). (c) an
+ALL-FILTERED window (raw bars > 0, session-filter survivors == 0) is demoted to a
+re-pullable FAILED + `ALL_FILTERED` on the existing #1031 degraded machinery
+(bounded SKIPPED settle; SPOT gated on `detect_completeness_gaps` — the dry-run
+synthetic adapter would false-red ungated; F&O UNgated, its dry-run returns empty
+payloads — the F&O spine's FIRST demotion, all-filtered ONLY, the #1031
+observe-only stance for liquidity heuristics preserved; ORTHOGONAL to sink dedup —
+a full-dedup re-pull stays SUCCESS). (d) `SinkAppendResult.bars_net_new` (#1031
+computed it, never persisted) is threaded into the durable window ledger
+(`WindowLedgerRecord.bars_net_new`, optional-column back-compat: an OLD ledger
+loads `None` — honest unknown, NEVER a fabricated 0; `/db` grid column added).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-03 (DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
 MIGRATION.md #1145–#1146 — the pipeline pack. (1) #1145: derived timeframes (the 19
 intraday TFs + the derived `1day`, over SPOT + FUTURES + OPTIONS) are now written ONLY
 by the pull pipeline's ONE automatic FINAL prebuild stage, run strictly after a
@@ -266,7 +290,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/nice-wright-qmb2bz` (docs-debt + observability pack). Prior merged: **DEC-GREEKS-CORRECTNESS-AUDIT-001, MIGRATION.md #1188** —
+- **Active branch:** `claude/nice-wright-qmb2bz` (docs-debt + observability pack). Prior merged: (**DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294** — the
+  ingest data-integrity pack, four boundary gaps as ONE change set: **(a)** the ingest-boundary session filter is
+  CALENDAR-AWARE (NEW `brutex/data/session.py::filter_to_trading_session` judging each bar against its OWN IST date's
+  real NSE session via `calendars/nse.get_session`, wired at BOTH spine tails) — non-trading-date bars (weekend/holiday
+  leaks) dropped + COUNTED with EXACTLY ONE `*.session_filter.dropped` WARN per window; evening-muhurat +
+  special-weekend bars now KEPT (sanctioned behavior change); regular-day kept-set golden-pinned byte-identical to the
+  legacy filter; out-of-coverage dates abstain to the legacy fixed window; daily path deliberately unfiltered;
+  resamplers untouched by design (single choke point covers all 21 TFs); **(b)** the parser's defensive epoch branch
+  emits ONE `groww.parse.epoch_timestamp` WARN per pull (thread-safe pull-id guard + reset seam; vendor epoch semantics
+  UNVERIFIED — assumed Unix-UTC, an IST-naive epoch would shift bars +05:30, hence the loudness; parsing byte-unchanged);
+  **(c)** an ALL-FILTERED window (raw > 0, survivors == 0) demotes re-pullable FAILED + `session.ALL_FILTERED` on the
+  #1031 degraded machinery (bounded SKIPPED settle; SPOT gated on `detect_completeness_gaps` [dry-run synthetic bars
+  land on the window-start day → false-red ungated], F&O UNgated [its dry-run returns empty payloads] — the F&O spine's
+  FIRST demotion, all-filtered ONLY, #1031's observe-only liquidity-heuristic stance preserved; orthogonal to sink
+  dedup — a full-dedup re-pull stays SUCCESS, pinned both spines; genuine EMPTY byte-unchanged); **(d)**
+  `SinkAppendResult.bars_net_new` persisted into the window ledger (`WindowLedgerRecord.bars_net_new`, the
+  optional-column back-compat template appended LAST; an OLD ledger loads `None` — honest unknown, NEVER a fabricated
+  0; deferred/failed writes carry a KNOWN 0; `/db` window-ledger grid gains the column). ENGINE UNCHANGED
+  (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change; every touched module 100% line+branch;
+  ruff/ruff-format clean, mypy/pyright at the pre-change baseline (0 new diagnostics).
+  Prior merged: **DEC-GREEKS-CORRECTNESS-AUDIT-001, MIGRATION.md #1188** —
   the 7-lens adversarial correctness audit of the Greeks enrichment value chain
   (`brutex/data/greeks_enrich.py` + `brutex/options/risk_free.py`) + its fix round. AUDITED CLEAN: the
   near-expiry `T_FLOOR` boundary · kernel failure-band recovery · provenance pack/unpack losslessness

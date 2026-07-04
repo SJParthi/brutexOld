@@ -5622,7 +5622,7 @@ def build_app(
         DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
         security_id / interval /
         window dates / status / bars / attempts / last_error / streak / in-pull
-        fetches). READ-ONLY:
+        fetches / deduped net-new bars). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
@@ -5652,6 +5652,7 @@ def build_app(
             "last_attempt_at",
             "empty_streak",
             "in_pull_fetches",
+            "bars_net_new",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)
