@@ -266,7 +266,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pipeline-pack-04nyec` (**DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
+- **Active branch:** `claude/lake-heal-km3x7p` (**DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
+  lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
+  UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
+  + a fully AUTOMATIC keep-FIRST healer (`brutex/data/lake_heal.py`, default AUTO-ON, escape
+  hatch `BRUTEX_LAKE_HEAL=observe`): quarantine-COPY to `<lake>/.quarantine/<ts>/` → rewrite
+  THROUGH the normal write path (NEW public `ParquetWriter.heal_partition` — locks/P9/overlay/
+  raw_hash rotation all reused) → hash-chained audit JSONL + one Telegram alert per batch;
+  detection at L1 (free reconcile piggyback on `ReconcileResult.findings`, healed at the
+  `cascade_wire` reconcile chokepoint), L2 (post-pull, pulled-symbols × span-months, wired
+  at the post-drain seam in `pull_controller` + `historical_pull` — BEFORE the Greeks enrichment
+  + the pipeline's final prebuild derivations (the mid-pull daily derive was removed by
+  DEC-PIPELINE-AUTOPREBUILD-001 #1145, so the heal now guards those readers); `LakeWriteHalt` re-raises
+  into the pull-halt handling), L3 (one-time content-token-stamped startup sweep, throttled
+  daemon, boot can never crash); derived recall = 1day re-derive (latest-wins) + intraday-TF
+  DELETE-and-rebuild (keep-first would keep poison); census surfaces: `brutex lake
+  audit-unique` (exit 0/1/2), a bounded doctor check, a `/universe` chip — each answering
+  whether the ENGINE's index data (NIFTY/BANKNIFTY/SENSEX) carries dupes. HONEST: scan is
+  O(files) NOT O(1) (bench-pinned); options tree = census + `(side,ts)` dup heal only
+  (foreign/overlap heal a named follow-up); STRICTLY row-removing/row-reassigning, never
+  value-editing; the CLI `brutex fetch` path has no L2 seam (covered by L1/L3/census, a named
+  follow-up). All new modules + every touched module 100% line+branch; the #1067 pin suites
+  pass unmodified. ENGINE UNCHANGED, F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
+  Prior merged: **DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
   MIGRATION.md #1145–#1146** — the pipeline pack. **#1145:** ONE automatic timeframe PREBUILD phase — the 19 derived
   intraday TFs + the derived `1day`, over SPOT + FUTURES + OPTIONS — is now the pull pipeline's FINAL data stage, run
   strictly AFTER a fully-clean 1-minute fetch (NEW `dashboard/pipeline_prebuild.py` `run_pipeline_prebuild(_guarded)`
@@ -1507,7 +1529,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/pipeline-pack-04nyec`
+- **Active feature branch:** `claude/lake-heal-km3x7p`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

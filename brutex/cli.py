@@ -455,6 +455,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
 
+    # ── lake (DEC-LAKE-HEAL-001) — data-lake integrity tools ──
+    lake = sub.add_parser("lake", help="Data-lake integrity tools")
+    lake_sub = lake.add_subparsers(dest="lake_command", required=True)
+    lake_audit = lake_sub.add_parser(
+        "audit-unique",
+        help=(
+            "READ-ONLY census: per-segment clean/poisoned partition counts "
+            "+ the engine-index (NIFTY/BANKNIFTY/SENSEX) verdict"
+        ),
+    )
+    lake_audit.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    lake_audit.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help=(
+            "Emit the census as JSON (the SAME dict shape "
+            "GET /api/v1/universe/lake-uniqueness serves)"
+        ),
+    )
+    lake_audit.add_argument(
+        "--exchange",
+        default=None,
+        help="Only this exchange's bars/ tree (e.g. NSE; default: all)",
+    )
+    lake_audit.add_argument(
+        "--segment",
+        default=None,
+        help="Only this bars/ segment (INDEX / CASH / FNO; default: all)",
+    )
+    lake_audit.add_argument(
+        "--symbol",
+        default=None,
+        help="Only this symbol directory (default: all)",
+    )
+    lake_audit.add_argument(
+        "--interval",
+        default=None,
+        help="Only this interval directory (e.g. 1minute; default: all)",
+    )
+    lake_audit.add_argument(
+        "--no-options",
+        action="store_true",
+        help="Skip the expired-options tree (options/<series>/ dup census)",
+    )
+
     # ── reopen-skipped (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) — un-cement settles ──
     reopen_skipped = sub.add_parser(
         "reopen-skipped",
@@ -1412,6 +1463,98 @@ def cmd_catalog_reconcile(lake_root: Path | None) -> int:
     return EXIT_OK
 
 
+def cmd_lake_audit_unique(
+    *,
+    lake_root: Path | None,
+    as_json: bool,
+    exchange: str | None,
+    segment: str | None,
+    symbol: str | None,
+    interval: str | None,
+    no_options: bool,
+) -> int:
+    """READ-ONLY lake uniqueness census — ``brutex lake audit-unique`` (DEC-LAKE-HEAL-001).
+
+    Runs the ONE bounded invariant scanner
+    (:func:`brutex.data.lake_invariants.scan_lake_invariants`) over the lake —
+    NEVER heals; the command is read-only by contract — then folds the
+    per-segment census and prints it as a human table or ``--json`` (the SAME
+    dict shape ``GET /api/v1/universe/lake-uniqueness`` serves). Exit codes
+    (the ``cmd_audit_verify`` semantics): :data:`EXIT_OK` (0) clean,
+    :data:`EXIT_USER_ERROR` (1) re-documented here as "poisoned partitions
+    found", :data:`EXIT_INTERNAL_ERROR` (2) the scan itself errored.
+
+    HONEST cost (Golden Rule #10): the scan is O(files-in-scope) with one
+    key-column read per file (NOT O(1)) — bound it with the coordinate
+    filters on a deep lake.
+    """
+    import json
+
+    from brutex.data.lake_heal import (
+        load_heal_stats,
+        load_last_sweep,
+        resolve_lake_heal_mode,
+    )
+    from brutex.data.lake_invariants import (
+        OPTIONS_SEGMENT,
+        build_lake_census,
+        census_to_dict,
+        scan_lake_invariants,
+    )
+
+    resolved = _resolve_lake_root(lake_root)
+    try:
+        report = scan_lake_invariants(
+            resolved,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            include_options=not no_options,
+        )
+        census = build_lake_census(report)
+        payload = census_to_dict(
+            census,
+            mode=resolve_lake_heal_mode(),
+            stats=load_heal_stats(resolved),
+            last_sweep=load_last_sweep(resolved),
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught — exit-code contract
+        print(f"[brutex] lake audit-unique scan errored: {exc}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"lake audit-unique — {resolved}")
+        print(
+            f"{'segment':<9}{'files':>7}{'clean':>7}{'dup':>6}"
+            f"{'foreign':>9}{'overlap':>9}{'drift-dirs':>12}"
+        )
+        for row in census.segments:
+            if row.segment == OPTIONS_SEGMENT:
+                # Foreign/overlap/drift are OUT of the options-tree census scope
+                # (a named DEC-LAKE-HEAL-001 follow-up) — shown as "-", never a fake 0.
+                foreign, overlap, drift = "-", "-", "-"
+            else:
+                foreign = str(row.foreign_files)
+                overlap = str(row.overlap_files)
+                drift = str(row.drift_dirs)
+            print(
+                f"{row.segment:<9}{row.files:>7}{row.clean:>7}{row.dup_files:>6}"
+                f"{foreign:>9}{overlap:>9}{drift:>12}"
+            )
+        label, _, rest = census.engine_detail.partition(": ")
+        verdict = "CLEAN" if census.engine_clean else "POISONED"
+        print(f"engine indexes ({label.replace('/', ' / ')}): {verdict} — {rest}")
+        last_heal = payload["last_heal_utc"] or "never"
+        print(
+            f"mode={payload['mode']}  healed_total={payload['healed_total']}  "
+            f"quarantined_files_total={payload['quarantined_files_total']}  "
+            f"last_heal={last_heal}"
+        )
+    return EXIT_OK if census.findings_total == 0 else EXIT_USER_ERROR
+
+
 def cmd_reopen_skipped(
     *,
     lake_root: Path | None,
@@ -2043,6 +2186,32 @@ def _start_auto_resume_on_boot(
     ).start()
 
 
+def _start_lake_heal_sweep(
+    lake_root: Path, summary_cache: Any, log: Any
+) -> None:  # pragma: no cover — daemon-thread launcher over the 100%-tested sweeper
+    """Launch the ONE-TIME lake-heal startup sweep (L3, DEC-LAKE-HEAL-001) off the bind path.
+
+    Binds :class:`brutex.data.lake_heal.StartupSweeper` — the content-token-stamped
+    one-time sweep (sentinel ``.lake_heal/last_sweep.json``; a repeat boot over an
+    unchanged lake is a stat-walk no-op) — to the dashboard boot via the SAME
+    instant-launch daemon-thread seam :func:`_start_instrument_autoload` /
+    :func:`_start_auto_resume_on_boot` use, so the throttled O(files) scan never
+    blocks the uvicorn port bind. ``on_healed=summary_cache.mark_dirty`` bumps the
+    SAME write-generation every dashboard read cache keys on, so a heal is visible
+    on the very next poll (never a stale pre-heal payload — Golden Rule #1). The
+    sweeper's thread body is blanket-guarded inside ``lake_heal``
+    (``lake_heal.sweep_failed``) — boot can never crash on a sweep bug.
+    """
+    from brutex.data.lake_heal import StartupSweeper
+
+    log.info("lake_heal.sweep_launched", lake_root=str(lake_root))
+    StartupSweeper(
+        lake_root,
+        on_healed=summary_cache.mark_dirty,
+        catalog_path=lake_root / "catalog.duckdb",
+    ).start()
+
+
 def _build_liveproof_autorun(lake_root: Path) -> Any:
     """Construct the zero-command live-proof autorun holder for *lake_root*.
 
@@ -2130,7 +2299,12 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     try:
         import uvicorn
 
-        from brutex.dashboard.app import DashboardState, build_app
+        from brutex.dashboard.app import (
+            DashboardState,
+            _lake_revision_probe_or_none,
+            build_app,
+        )
+        from brutex.dashboard.summary_cache import SummaryCache
     except ImportError as exc:
         print(
             f'[brutex] dashboard requires fastapi+uvicorn — run: pip install -e ".[ui]"  ({exc})',
@@ -2240,6 +2414,14 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # keeps concurrent route reads safe against the loader's writes
     # (DEC-DASHBOARD-INSTANT-LAUNCH-001).
     _start_instrument_autoload(store, _log)
+    # ONE shared write-generation cache for this dashboard session (DEC-LAKE-HEAL-001):
+    # constructed HERE instead of letting build_app default-construct its own internally,
+    # so the L3 lake-heal startup sweep below can bump the SAME generation every dashboard
+    # read cache keys on when it heals a partition (recon-D §7 load-bearing note). The
+    # cross-process lake-revision probe (DEC-HARDENING-LEFTOVERS-001) is wired explicitly
+    # — build_app attaches it only when it default-constructs the cache, so an injected
+    # cache must carry its own probe or a CLI `brutex fetch` write would go undetected.
+    summary_cache = SummaryCache(revision_probe=_lake_revision_probe_or_none(store))
     # ZERO-COMMAND live-proof autorun (DEC-DOCTOR-LIVE-AUTORUN-001): build the
     # holder for THIS lake root so the app can serve /api/v1/liveproof, mirror
     # credential refusals onto the banner, and auto-run the one-time probes on
@@ -2265,7 +2447,13 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             allowed_hosts=allowed_hosts,
             host_guard="disabled" if "*" in allowed_hosts else "extended",
         )
-    app = build_app(state, instrument_store=store, liveproof=liveproof, allowed_hosts=allowed_hosts)
+    app = build_app(
+        state,
+        instrument_store=store,
+        summary_cache=summary_cache,
+        liveproof=liveproof,
+        allowed_hosts=allowed_hosts,
+    )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
     # ITSELF (the hard operator law). Guarded like the auto-resume launch so
@@ -2290,6 +2478,14 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         _start_auto_resume_on_boot(_resolve_lake_root(lake_root), _log)
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
         _log.warning("auto_resume.launch_failed", error=str(exc))
+    # DEC-LAKE-HEAL-001 L3: the ONE-TIME content-token-stamped lake-heal startup sweep
+    # (a repeat boot over an unchanged lake is a stat-walk no-op; a healed partition
+    # bumps summary_cache's generation via on_healed). Best-effort on the BIND path —
+    # the same "never crashes boot" guard contract as the auto-resume launch above.
+    try:
+        _start_lake_heal_sweep(_resolve_lake_root(lake_root), summary_cache, _log)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
+        _log.warning("lake_heal.launch_failed", error=str(exc))
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     # The /logs WEBPAGE was removed (DEC-DASHBOARD-LOGS-REMOVE-001); point at the
     # rotating file + the kept JSON data endpoint, not the dead page.
@@ -5813,6 +6009,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.catalog_command != "reconcile":
             parser.error(f"unknown catalog subcommand: {args.catalog_command}")
         return cmd_catalog_reconcile(lake_root=args.lake_root)
+    if args.command == "lake":
+        if args.lake_command != "audit-unique":
+            parser.error(f"unknown lake subcommand: {args.lake_command}")
+        return cmd_lake_audit_unique(
+            lake_root=args.lake_root,
+            as_json=args.as_json,
+            exchange=args.exchange,
+            segment=args.segment,
+            symbol=args.symbol,
+            interval=args.interval,
+            no_options=args.no_options,
+        )
     if args.command == "reopen-skipped":
         return cmd_reopen_skipped(
             lake_root=args.lake_root,

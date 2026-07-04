@@ -79,6 +79,7 @@ from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
+    OPTION_SEGMENT,
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno_window_opens_on
@@ -1176,6 +1177,78 @@ def _resolve_minute_windows(
     return windows
 
 
+def _heal_lake_after_pull(
+    *,
+    rebuilt: Sequence[_RebuiltContract],
+    windows: dict[str, tuple[date, date]],
+    lake_root: Path,
+) -> None:
+    """L2 lake heal over the just-pulled F&O contracts (DEC-LAKE-HEAL-001).
+
+    The F&O twin of the dashboard spot pull's ``_heal_after_pull`` glue: one
+    COMMON :func:`~brutex.data.lake_heal.heal_after_pull` call over the
+    rebuilt contracts' ``(exchange, "FNO", groww_symbol)`` coordinates,
+    bounded to the UNION of their resolved minute-window spans (a months
+    SUPERSET of every per-contract span — bounded, never the whole lake).
+    Runs BEFORE :func:`_enrich_greeks_from_minute` (and before the pipeline's
+    final prebuild phase — DEC-PIPELINE-AUTOPREBUILD-001 — which derives the
+    intraday TFs + ``1day``) so every downstream derivation reads clean
+    1-minute. A contract with no resolved window, or whose exchange is
+    unresolvable, contributes no target; zero targets is a no-op.
+    :class:`~brutex.data.errors.LakeWriteHalt` RE-RAISES (a disk-full heal
+    halts the pull exactly like any lake write); every OTHER error is
+    swallowed + logged ``lake_heal.post_pull_error`` (a heal bug never fails
+    a successful pull — the ``_enrich_greeks_from_minute`` guard convention).
+    The catalog at ``<lake>/catalog.duckdb`` is opened best-effort WHEN THE
+    FILE EXISTS (the L3 sweeper's convention, via the COMMON
+    :func:`~brutex.data.lake_heal.open_lake_catalog`) so a healed partition's
+    rotated ``raw_hash`` reaches the catalog immediately — an open failure
+    logs + proceeds with ``catalog=None``, never blocking the pull.
+    """
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
+    from brutex.observability.correlation import current_pull_id
+
+    targets: list[tuple[str, str, str]] = []
+    spans: list[tuple[date, date]] = []
+    for _row, contract in rebuilt:
+        window = windows.get(contract.symbol)
+        if window is None:
+            continue
+        try:
+            exchange = contract_exchange(contract)
+        except ValueError:
+            # Also skipped (same guard) by ``_enrich_greeks_from_minute``.
+            continue
+        targets.append((exchange, OPTION_SEGMENT, contract.symbol))
+        spans.append(window)
+    if not targets:
+        return
+    scope = f"pull:{current_pull_id()}"
+    try:
+        with lake_heal_audit(lake_root) as audit:
+            catalog = open_lake_catalog(lake_root)
+            try:
+                heal_after_pull(
+                    lake_root=lake_root,
+                    targets=targets,
+                    start=min(win_start for win_start, _win_end in spans),
+                    end=max(win_end for _win_start, win_end in spans),
+                    scope=scope,
+                    catalog=catalog,
+                    audit=audit,
+                    on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+                )
+            finally:
+                if catalog is not None:
+                    catalog.close()
+    except LakeWriteHalt:
+        raise
+    except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull
+        _LOG.warning("lake_heal.post_pull_error", scope=scope, error=str(exc))
+
+
 def _enrich_greeks_from_minute(
     *,
     rebuilt: Sequence[_RebuiltContract],
@@ -1554,6 +1627,10 @@ def pull_contract_candles(
     # the derived ``1day``) is written ONLY by the pipeline's final prebuild phase
     # (brutex.dashboard.pipeline_prebuild), strictly after a fully-successful fetch.
     if not dry_run:
+        # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
+        # Greeks enrichment below (and the pipeline's later prebuild phase)
+        # reads clean 1-minute (LakeWriteHalt re-raises).
+        _heal_lake_after_pull(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
         # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
         # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
         # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute

@@ -60,6 +60,11 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/catalog_reconcile.py": (
         "physical row-count audit — MUST see raw (possibly duplicated) rows to reconcile"
     ),
+    "brutex/data/lake_invariants.py": (
+        "invariant scanner (_read_key_columns) — MUST see raw rows to DETECT "
+        "intra-file duplicates; a dedup-gated read would hide the very defect "
+        "it exists to find (DEC-LAKE-HEAL-001)"
+    ),
     "brutex/dashboard/db_view.py": (
         "wired: pagers use DEDUP_PARQUET_SOURCE_SQL + QUALIFY; totals use distinct_count_sql"
     ),
