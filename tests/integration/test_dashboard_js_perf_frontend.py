@@ -279,8 +279,10 @@ def test_movers_ships_the_gated_paint_once_guard() -> None:
     html = _template("movers.html")
     assert "let wasGated = false;" in html
     assert "let lastGatedKey = null;" in html
-    # The paint-once key folds the asset tab + the server note.
-    assert 'const gatedKey = state.asset + "|" + (j.note || "");' in html
+    # The paint-once key folds the asset tab + the phase + the server note
+    # (the ticking elapsed rides #asof textContent, never a shell repaint —
+    # DEC-PREBUILD-GATE-HONEST-NOTE-001).
+    assert 'const gatedKey = state.asset + "|" + (j.phase || "") + "|" + (j.note || "");' in html
     assert "if (!(wasGated && gatedKey === lastGatedKey)) {" in html
 
 
@@ -292,8 +294,12 @@ def test_movers_prebuild_gate_still_uses_textcontent_and_5s_retry() -> None:
     html = _template("movers.html")
     assert (
         '$("noteText").textContent = j.note || '
-        '"prebuild in progress — movers available when finished.";'
+        '"pull pipeline running — movers gated until the prebuild and movers warm finish.";'
     ) in html
+    # The honest gated status line (DEC-PREBUILD-GATE-HONEST-NOTE-001) also
+    # renders via textContent only.
+    assert '$("asof").textContent = gatedStatus;' in html
+    assert "function fmtElapsed(s)" in html
     assert "const GATE_RETRY_MS = 5000;" in html
     assert "gateTimer = setTimeout(load, GATE_RETRY_MS);" in html
 
