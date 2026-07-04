@@ -42,6 +42,7 @@ from brutex.dashboard.movers_snapshot import parse_snapshot_date
 _LOG = structlog.get_logger(__name__)
 
 __all__ = [
+    "GENERIC_GATE_NOTE",
     "STATE_BLOCKING",
     "STATE_IDLE",
     "GateSnapshot",
@@ -54,6 +55,54 @@ STATE_IDLE: Final[str] = "idle"
 #: A pipeline pull is running (its prebuild has not been released yet) —
 #: movers return the honest gated payload without touching the lake.
 STATE_BLOCKING: Final[str] = "blocking"
+
+#: The phase-agnostic gated note — BYTE-IDENTICAL to the pre-phase-aware wording
+#: (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2), kept as the honest fallback whenever the
+#: caller has no phase signal (``phase=None`` / ``""``) or hands an unknown label
+#: (DEC-PIPELINE-PHASE-UI-HONESTY-001 — never a fabricated phase claim, Golden Rule #1).
+GENERIC_GATE_NOTE: Final[str] = (
+    "prebuild in progress — movers available when finished: the pull pipeline is "
+    "writing the derived timeframe partitions the movers read, so this screen is "
+    "gated until that final stage completes (it retries automatically; no action "
+    "needed)."
+)
+
+#: Per-phase HONEST gated notes (DEC-PIPELINE-PHASE-UI-HONESTY-001). The keys are
+#: EXACTLY the pipeline's real ``set_phase`` labels — ``spot`` / ``metadata`` /
+#: ``historical`` / ``movers`` / ``prebuild`` (verified exhaustive over every
+#: ``set_phase(`` call site; there is NO "greeks" label — the Greeks enrichment runs
+#: INSIDE the ``historical`` phase, so its note names it there). The gate is DOWN for
+#: the WHOLE pipeline run, so the old single "prebuild in progress" wording over-claimed
+#: during the spot/metadata/historical phases; each note now names what is ACTUALLY
+#: running while keeping the same promise: movers stay gated until the pipeline's FINAL
+#: prebuild stage completes and the screen recovers by itself.
+_PHASE_NOTES: Final[dict[str, str]] = {
+    "spot": (
+        "pull pipeline running — phase: spot 1-minute fetch. Movers are gated until "
+        "the pipeline's final timeframe prebuild completes (it retries automatically; "
+        "no action needed)."
+    ),
+    "metadata": (
+        "pull pipeline running — phase: F&O expiries + contracts metadata fetch. "
+        "Movers are gated until the pipeline's final timeframe prebuild completes "
+        "(it retries automatically; no action needed)."
+    ),
+    "historical": (
+        "pull pipeline running — phase: F&O historical 1-minute fetch (incl. the "
+        "Greeks enrichment). Movers are gated until the pipeline's final timeframe "
+        "prebuild completes (it retries automatically; no action needed)."
+    ),
+    "prebuild": (
+        "pull pipeline running — phase: timeframe prebuild, writing the derived "
+        "timeframe partitions the movers read. Movers recover the moment this final "
+        "stage completes (it retries automatically; no action needed)."
+    ),
+    "movers": (
+        "pull pipeline running — phase: movers warm-up (local cache warm, no vendor "
+        "calls). This screen recovers automatically in a few seconds; no action "
+        "needed."
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +196,7 @@ def gated_movers_payload(
     date: str | None,
     time: str | None,
     top_n: int,
+    phase: str | None = None,
 ) -> dict[str, Any]:
     """Build the honest 200 payload the ``/api/v1/movers`` route returns while gated.
 
@@ -160,8 +210,9 @@ def gated_movers_payload(
 
     The payload mirrors the normal snapshot echo shape (``interval`` / ``date``
     / ``time`` / ``top_n`` / ``instrument_count`` / ``skipped_count`` /
-    ``note``) with ``gated: true`` and NO ranked category lists — the page reads
-    ``j.gated`` and renders the note, then keeps polling until the gate lifts.
+    ``note``) with ``gated: true``, the normalised ``phase`` echo, and NO ranked
+    category lists — the page reads ``j.gated`` and renders the note, then keeps
+    polling until the gate lifts.
 
     Parameters
     ----------
@@ -173,6 +224,14 @@ def gated_movers_payload(
     interval, date, time, top_n
         The request's echo coordinates (``date`` blank ⇒ today, pure — the
         gated path never resolves the lake's latest day).
+    phase
+        The pipeline's CURRENT coarse phase label (the route reads it from the
+        background job's ``PullProgress`` snapshot — our own ``set_phase``
+        strings, never user input; DEC-PIPELINE-PHASE-UI-HONESTY-001). A known
+        label (``spot`` / ``metadata`` / ``historical`` / ``movers`` /
+        ``prebuild``) selects its honest per-phase note; ``None`` / ``""`` / an
+        unknown label falls back to :data:`GENERIC_GATE_NOTE` — BYTE-IDENTICAL
+        to the pre-phase-aware wording, never a fabricated phase claim.
 
     Raises
     ------
@@ -180,7 +239,14 @@ def gated_movers_payload(
         On a malformed *date* (the route maps it to a 400).
     """
     date_str = parse_snapshot_date(date).isoformat()
-    _LOG.info("movers.gate.blocked", state=snapshot.state, runs=snapshot.runs, asset=asset)
+    phase_str = phase or ""
+    _LOG.info(
+        "movers.gate.blocked",
+        state=snapshot.state,
+        runs=snapshot.runs,
+        asset=asset,
+        phase=phase_str,
+    )
     return {
         "gated": True,
         "interval": interval,
@@ -189,10 +255,6 @@ def gated_movers_payload(
         "top_n": top_n,
         "instrument_count": 0,
         "skipped_count": 0,
-        "note": (
-            "prebuild in progress — movers available when finished: the pull pipeline is "
-            "writing the derived timeframe partitions the movers read, so this screen is "
-            "gated until that final stage completes (it retries automatically; no action "
-            "needed)."
-        ),
+        "phase": phase_str,
+        "note": _PHASE_NOTES.get(phase_str, GENERIC_GATE_NOTE),
     }

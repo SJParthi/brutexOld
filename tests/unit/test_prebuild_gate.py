@@ -14,6 +14,8 @@ import threading
 
 import pytest
 from brutex.dashboard.prebuild_gate import (
+    _PHASE_NOTES,
+    GENERIC_GATE_NOTE,
     STATE_BLOCKING,
     STATE_IDLE,
     GateSnapshot,
@@ -141,6 +143,8 @@ def test_gated_payload_shape_is_honest_and_empty() -> None:
     assert payload["instrument_count"] == 0
     assert payload["skipped_count"] == 0
     assert "prebuild in progress — movers available when finished" in payload["note"]
+    # No phase signal ⇒ the honest phase echo is the cleared label.
+    assert payload["phase"] == ""
     # ZERO ranked category lists — the page renders the note, not fabricated rows.
     assert "price_gainers" not in payload
     # The raw ?asset= is LOG-only — never echoed into the payload (no reflected sink).
@@ -195,6 +199,84 @@ def test_gate_begin_logs_movers_gate_begin() -> None:
     assert events[0]["runs"] == 1
 
 
+# ── phase-aware gated notes (DEC-PIPELINE-PHASE-UI-HONESTY-001) ──────────
+
+
+#: The pipeline's REAL coarse ``set_phase`` labels — verified exhaustive over every
+#: ``set_phase(`` call site in ``brutex/dashboard/app.py`` (spot :2963 · metadata
+#: :2987 · historical :3012 · movers :3041 · prebuild :3238 on the audited baseline);
+#: there is NO "greeks" label (the Greeks enrichment rides INSIDE "historical").
+_REAL_PIPELINE_PHASES = ("spot", "metadata", "historical", "movers", "prebuild")
+
+
+def _gated(phase: str | None) -> dict[str, object]:
+    return gated_movers_payload(
+        _blocking_snapshot(),
+        asset="spot",
+        interval="1day",
+        date="2024-06-13",
+        time=None,
+        top_n=10,
+        phase=phase,
+    )
+
+
+def test_phase_notes_cover_exactly_the_real_pipeline_phases() -> None:
+    # The map covers EXACTLY the real set_phase labels — no fabricated "greeks"
+    # phase, no missing phase (a new pipeline phase must consciously extend it).
+    assert set(_PHASE_NOTES) == set(_REAL_PIPELINE_PHASES)
+
+
+def test_gated_payload_phase_notes_name_the_running_phase() -> None:
+    # Regression (fails before the fix): the note used to be ONE hardcoded
+    # "prebuild in progress" string for the WHOLE pipeline — an over-claim during
+    # the spot/metadata/historical phases. Each known phase now gets an honest
+    # note that names it, echoed alongside the phase itself.
+    for phase in _REAL_PIPELINE_PHASES:
+        payload = _gated(phase)
+        assert payload["phase"] == phase
+        note = payload["note"]
+        assert isinstance(note, str)
+        assert note == _PHASE_NOTES[phase]
+        assert phase in note  # the note NAMES what is actually running.
+        assert note != GENERIC_GATE_NOTE
+    # The fetch phases must no longer claim the prebuild is what's running.
+    for phase in ("spot", "metadata", "historical"):
+        assert "prebuild in progress" not in str(_gated(phase)["note"])
+
+
+def test_gated_payload_unknown_or_absent_phase_keeps_generic_note_byte_identical() -> None:
+    # The honest fallback (Golden Rule #1 — never a fabricated phase claim): no
+    # signal (None), a cleared label (""), or an unknown future label all fall
+    # back to the BYTE-IDENTICAL pre-phase-aware generic wording.
+    expected = (
+        "prebuild in progress — movers available when finished: the pull pipeline is "
+        "writing the derived timeframe partitions the movers read, so this screen is "
+        "gated until that final stage completes (it retries automatically; no action "
+        "needed)."
+    )
+    assert expected == GENERIC_GATE_NOTE
+    assert _gated(None)["note"] == expected
+    assert _gated(None)["phase"] == ""
+    assert _gated("")["note"] == expected
+    assert _gated("unknown-future-phase")["note"] == expected
+    assert _gated("unknown-future-phase")["phase"] == "unknown-future-phase"
+    # Default (phase omitted) is byte-compatible with the pre-phase payload note.
+    default_payload = gated_movers_payload(
+        _blocking_snapshot(), asset="spot", interval="1day", date="2024-06-13", time=None, top_n=10
+    )
+    assert default_payload["note"] == expected
+    assert default_payload["phase"] == ""
+
+
+def test_gated_payload_logs_the_phase() -> None:
+    with capture_logs() as logs:
+        _gated("historical")
+    events = [entry for entry in logs if entry["event"] == "movers.gate.blocked"]
+    assert len(events) == 1
+    assert events[0]["phase"] == "historical"
+
+
 # ── the movers.html gated-note rendering hook (string-presence pins) ─────
 
 
@@ -208,8 +290,10 @@ def test_movers_template_renders_gated_note_and_auto_recovers() -> None:
         Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates" / "movers.html"
     ).read_text(encoding="utf-8")
     assert "j.gated" in template
-    # The dynamic server note is set via textContent ONLY (XSS guard).
-    assert 'textContent = j.note || "prebuild in progress' in template
+    # The dynamic server note is set via textContent ONLY (XSS guard). The static
+    # fallback is phase-neutral (DEC-PIPELINE-PHASE-UI-HONESTY-001 — it fires only
+    # when the server note is falsy, so it must not over-claim a prebuild phase).
+    assert 'textContent = j.note || "pull pipeline in progress' in template
     # Auto-recovery: a retry timer re-polls until the gate lifts…
     assert "gateTimer = setTimeout(load, GATE_RETRY_MS)" in template
     # …and every non-gated load clears it.

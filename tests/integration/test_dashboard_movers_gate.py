@@ -140,3 +140,51 @@ class TestMoversGate:
         body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
         assert "gated" not in body
         assert "price_gainers" in body
+
+
+class TestMoversGatePhaseNote:
+    """Phase-aware gated notes end-to-end (DEC-PIPELINE-PHASE-UI-HONESTY-001).
+
+    The route reads the pipeline's CURRENT coarse phase via the injectable
+    ``pull_phase_probe`` seam (production default = this app's own
+    ``BackgroundPullJob.snapshot().phase``) and threads it into
+    ``gated_movers_payload`` — so the gated note names what is ACTUALLY running
+    instead of a blanket "prebuild in progress" during the fetch phases.
+    """
+
+    def test_gated_note_names_the_injected_phase(
+        self, store: InstrumentStore, gate: PrebuildGate
+    ) -> None:
+        phase_holder = {"phase": "spot"}
+        app = build_app(
+            DashboardState(),
+            instrument_store=store,
+            prebuild_gate=gate,
+            pull_phase_probe=lambda: phase_holder["phase"],
+        )
+        with TestClient(app) as client:
+            gate.begin()
+            body = client.get(
+                "/api/v1/movers", params={"asset": "spot", "date": "2024-06-13"}
+            ).json()
+            assert body["gated"] is True
+            assert body["phase"] == "spot"
+            assert "phase: spot 1-minute fetch" in body["note"]
+            assert "prebuild in progress" not in body["note"]
+            # The phase moves → the very next poll's note moves with it.
+            phase_holder["phase"] = "historical"
+            body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+            assert body["phase"] == "historical"
+            assert "phase: F&O historical 1-minute fetch" in body["note"]
+
+    def test_default_probe_reads_idle_job_as_generic_note(
+        self, client: TestClient, gate: PrebuildGate
+    ) -> None:
+        # No probe injected → the production default reads this app's own
+        # BackgroundPullJob phase ("" — nothing in flight) → the byte-compatible
+        # generic note + an empty phase echo (never a fabricated phase claim).
+        gate.begin()
+        body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+        assert body["gated"] is True
+        assert body["phase"] == ""
+        assert "prebuild in progress — movers available when finished" in body["note"]

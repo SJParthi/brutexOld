@@ -596,7 +596,12 @@ def test_pull_pipeline_gates_movers_while_running_then_releases_ok_true(
             # MID-RUN: the gate blocks and the movers route answers honestly.
             body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
             assert body["gated"] is True
-            assert "prebuild in progress" in body["note"]
+            # Phase-aware note (DEC-PIPELINE-PHASE-UI-HONESTY-001): the job is
+            # blocked INSIDE its spot phase, so the note names the spot fetch —
+            # no longer the blanket "prebuild in progress" over-claim.
+            assert body["phase"] == "spot"
+            assert "phase: spot 1-minute fetch" in body["note"]
+            assert "prebuild in progress" not in body["note"]
             assert compute_calls == []  # ZERO lake-reading computation while gated
         finally:
             proceed.set()
