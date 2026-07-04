@@ -51,6 +51,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.ingest_common import (
     gate_pull_credentials,
     label_synthetic,
@@ -159,8 +160,10 @@ from brutex.dashboard.preopen_report import (
     resolve_report_datasets,
 )
 from brutex.dashboard.pull_controller import (
+    GROWW_HISTORY_FLOOR,
     BulkSpotReport,
     SessionRateController,
+    default_date_range,
     pull_all_spot,
     pull_candles,
     resolve_candle_range,
@@ -2861,8 +2864,13 @@ def build_app(
         SPOT pull window AND narrow the metadata-pull YEAR grid. **Blank ⇒ the
         canonical default** ``[2020-01-01, previous trading day]`` (byte-identical
         to the pre-picker behaviour). The F&O HISTORICAL phase receives the dates
-        as an **EXPIRY scope** (DEC-FNO-EXPIRY-SCOPE-001): only expiries within
-        ``[from_date, to_date]`` (both inclusive) are candle-pulled — an
+        as an **EXPIRY scope** (DEC-FNO-EXPIRY-SCOPE-001, amended at the LIVE
+        edge by DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a DEFAULT-shaped bound is
+        lifted to unbounded before threading (``to_date`` at/after the
+        request-time previous day ⇒ ``scope_end=None`` so live/unexpired
+        contracts stay in scope; ``from_date`` at/below the 2020 floor ⇒
+        ``scope_start=None``) — only a GENUINELY narrowed range scopes: then
+        only expiries within ``[from_date, to_date]`` (both inclusive) are candle-pulled — an
         out-of-scope expiry is fetched not at all (zero vendor calls, zero
         ledger rows, one ``fno.expiry_out_of_scope`` log per expiry; stored
         bars untouched) — while each IN-scope contract keeps its per-contract
@@ -2904,6 +2912,22 @@ def build_app(
             fno_scope_end = _parse_iso_date_arg(to_date, "to_date") if to_date else None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # LIVE-EDGE scope normalization (DEC-EXPIRY-SCOPE-LIVE-EDGE-001, backend
+        # AUTHORITATIVE): the pickers pre-fill the canonical default and the
+        # frontend historically sent them whenever non-blank, so every default
+        # one-click pull carried scope_end = previous day — scoping OUT all
+        # live/unexpired contracts. A default-shaped bound (scope_end at/after
+        # the request-time previous day per the SAME resolve_candle_range law
+        # that pre-fills the picker; scope_start at/below GROWW_HISTORY_FLOOR)
+        # is lifted to None here, whatever the frontend sent. A genuinely
+        # narrowed range scopes exactly as before (DEC-FNO-EXPIRY-SCOPE-001
+        # untouched below the live edge).
+        fno_scope_start, fno_scope_end = normalize_expiry_scope(
+            fno_scope_start,
+            fno_scope_end,
+            envelope_end=date.fromisoformat(default_date_range()[1]),
+            floor=GROWW_HISTORY_FLOOR,
+        )
         try:
             targets, target_source = resolve_pull_targets(
                 symbols=symbols,
