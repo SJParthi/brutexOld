@@ -74,8 +74,7 @@ provenance — a resample made zero vendor calls). The raw lake builders
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -345,39 +344,50 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
         ``df_1m``, ascending by timestamp. Prices stay full-precision ``Decimal``
         (the lake-write sink snaps to the 2-dp tick grid, DEC-SPOT-PRICE-2DP-001).
     """
-    # Local import keeps polars out of this module's import graph for callers that
+    # Local imports keep polars out of this module's import graph for callers that
     # only need the dataclasses (CLAUDE.md §11 lazy dep, mirrors the materialiser).
-    from brutex.data.models import CandleBar
+    import polars as pl
+
     from brutex.data.tf_resampler import resample_1m_to_tf
+    from brutex.data.timeframe_materialize import frame_to_candle_bars
 
     if df_1m.is_empty():
         return []
 
     daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
 
-    bars: list[CandleBar] = []
-    for row in daily.iter_rows(named=True):
-        ist_date = row["ts_utc"].astimezone(_IST).date()
-        if ist_date >= before:
-            # Still-forming / incomplete session — never written as a final bar.
-            continue
-        # Re-stamp to midnight IST (== 18:30 UTC of the prior calendar day) so the
-        # UTC instant is byte-identical to a vendor-parsed "00:00:00 IST" daily bar.
-        stamp_utc = datetime(ist_date.year, ist_date.month, ist_date.day, tzinfo=_IST).astimezone(
-            UTC
+    # VECTORIZED filter + re-stamp (DEC-PREBUILD-GIL-VECTORIZE-001 — the former
+    # per-row `iter_rows` → `astimezone(_IST)` → `CandleBar(Decimal(str(...))×4)`
+    # loop was one of the two GIL-held prebuild sections starving the dashboard
+    # event loop; byte-identical output, see `frame_to_candle_bars`):
+    #
+    # 1. IST calendar date = the bar's instant shifted by the fixed +05:30 offset
+    #    (`_IST` — India has no DST, so a duration shift IS the timezone
+    #    conversion), then `.dt.date()` — identical to the former per-row
+    #    `row["ts_utc"].astimezone(_IST).date()`.
+    # 2. Still-forming / incomplete session (`ist_date >= before`) is DROPPED —
+    #    never written as a final bar (same guard, now a columnar filter).
+    # 3. Re-stamp to midnight IST (== 18:30 UTC of the prior calendar day): the
+    #    IST date at 00:00, tagged UTC, shifted BACK by the same offset — the
+    #    same UTC instant `datetime(y, m, d, tzinfo=_IST).astimezone(UTC)`
+    #    produced, so a resampled daily bar stays byte-identical to a
+    #    vendor-parsed "00:00:00 IST" one (the dedup identity; proven by the
+    #    vectorize regression tests).
+    ist_offset = _IST.utcoffset(None)  # timedelta(+05:30) — the ONE IST definition
+    complete = (
+        daily.with_columns((pl.col("ts_utc") + ist_offset).dt.date().alias("_ist_date"))
+        .filter(pl.col("_ist_date") < before)
+        .with_columns(
+            (
+                pl.col("_ist_date").cast(pl.Datetime("us")).dt.replace_time_zone("UTC") - ist_offset
+            ).alias("ts_utc")
         )
-        bars.append(
-            CandleBar(
-                timestamp=stamp_utc,
-                open=Decimal(str(row["open"])),
-                high=Decimal(str(row["high"])),
-                low=Decimal(str(row["low"])),
-                close=Decimal(str(row["close"])),
-                volume=int(row["volume"]),
-                open_interest=None,
-            )
-        )
-    return bars
+        # Select exactly the converter's input columns — also drops `_ist_date`
+        # and any OI column (spot/index daily bars carry `open_interest=None`
+        # regardless, the legacy loop's unconditional contract).
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+    )
+    return frame_to_candle_bars(complete, absent_open_interest=None)
 
 
 def resample_1m_to_daily_default(df_1m: pl.DataFrame, before: date) -> list[CandleBar]:
