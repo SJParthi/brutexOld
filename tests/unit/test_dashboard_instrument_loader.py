@@ -313,14 +313,21 @@ def test_default_run_id_factory(tmp_path: Path) -> None:
 def test_load_report_carries_security_id_collisions(tmp_path: Path) -> None:
     """A DISTINCT-name identity collision surfaces on the LOADER report.
 
-    Two NSE IDX rows share the numeric ``exchange_token`` ``7777`` — the same
-    ``(security_id, exch_id, segment)`` store identity — under DIFFERENT
-    trading_symbols. The store's write-boundary dedup drops one (last-wins +
-    a per-drop WARNING) and the count now rides the load report END-TO-END:
-    ``UpsertResult.security_id_collisions`` → ``result["security_id_collisions"]``
-    + the ``universe.load.groww`` counts line (fail-before: the loader DISCARDED
-    the UpsertResult, so the count was write-only —
-    DEC-MAPPING-COLLISION-HONESTY-001 review fold).
+    Two NSE CASH equities share the numeric ``exchange_token`` ``7777`` — the
+    same ``(security_id, exch_id, segment)`` store identity (the operator-observed
+    "13, NSE, CASH" collision class) — under DIFFERENT trading_symbols, each made
+    F&O-eligible by its own CE leg so both are admitted to the lean universe. The
+    store's write-boundary dedup drops one (last-wins + a per-drop WARNING) and the
+    count rides the load report END-TO-END: ``UpsertResult.security_id_collisions``
+    → ``result["security_id_collisions"]`` + the ``universe.load.groww`` counts line
+    (fail-before: the loader DISCARDED the UpsertResult, so the count was write-only
+    — DEC-MAPPING-COLLISION-HONESTY-001 review fold).
+
+    Reconciled at the DEC-DATA-SAFETY-LEFTOVERS-001 merge: the original fixture used
+    two IDX rows, but an INDEX identity collision is now intercepted UPSTREAM at
+    ``build_index`` (keep-first, DEC-INDEX-SURROGATE-COLLISION-DETECT-001) and never
+    reaches the store — the IDX arm is pinned separately below; the store→report
+    plumbing is exercised here via the CASH segment fix (d) deliberately scopes out.
     """
     collide_a = _row(
         exchange="NSE",
@@ -328,8 +335,11 @@ def test_load_report_carries_security_id_collisions(tmp_path: Path) -> None:
         trading_symbol="COLLIDEA",
         groww_symbol="NSE-COLLIDEA",
         name="Collide A",
-        instrument_type="IDX",
+        instrument_type="EQ",
         segment="CASH",
+        series="EQ",
+        lot_size="1",
+        tick_size="0.05",
     )
     collide_b = _row(
         exchange="NSE",
@@ -337,14 +347,45 @@ def test_load_report_carries_security_id_collisions(tmp_path: Path) -> None:
         trading_symbol="COLLIDEB",  # … DIFFERENT symbol_name → a counted collision
         groww_symbol="NSE-COLLIDEB",
         name="Collide B",
-        instrument_type="IDX",
+        instrument_type="EQ",
         segment="CASH",
+        series="EQ",
+        lot_size="1",
+        tick_size="0.05",
+    )
+    leg_a = _row(
+        exchange="NSE",
+        exchange_token="50801",
+        trading_symbol="COLLIDEA2661621800CE",
+        groww_symbol="NSE-COLLIDEA-16Jun26-300-CE",
+        instrument_type="CE",
+        segment="FNO",
+        underlying_symbol="COLLIDEA",
+        underlying_exchange_token="7777",
+        expiry_date="2026-06-16",
+        strike_price="300",
+        lot_size="1500",
+        tick_size="0.05",
+    )
+    leg_b = _row(
+        exchange="NSE",
+        exchange_token="50802",
+        trading_symbol="COLLIDEB2661621800CE",
+        groww_symbol="NSE-COLLIDEB-16Jun26-300-CE",
+        instrument_type="CE",
+        segment="FNO",
+        underlying_symbol="COLLIDEB",
+        underlying_exchange_token="7777",
+        expiry_date="2026-06-16",
+        strike_price="300",
+        lot_size="1500",
+        tick_size="0.05",
     )
     store = _store(tmp_path)
     with capture_logs() as logs:
         result = load_instrument_master(
             store,
-            http_get=lambda _url: _csv([collide_a, collide_b]),
+            http_get=lambda _url: _csv([collide_a, collide_b, leg_a, leg_b]),
             run_id_factory=lambda: "test-collide",
             constituent_opener=_empty_opener,
             constituent_cache_dir=tmp_path / "cache",
@@ -357,6 +398,59 @@ def test_load_report_carries_security_id_collisions(tmp_path: Path) -> None:
     groww_events = _events(logs, "universe.load.groww")
     assert len(groww_events) == 1
     assert groww_events[0]["security_id_collisions"] == 1
+
+
+def test_idx_same_token_collision_intercepted_at_build_index(tmp_path: Path) -> None:
+    """An IDX identity collision is caught UPSTREAM — the store never sees it.
+
+    Two NSE IDX rows sharing token ``7777`` collide on the ``(exch_id,
+    security_id)`` INDEX identity: since DEC-INDEX-SURROGATE-COLLISION-DETECT-001
+    the ``build_index`` chokepoint keep-first-drops the second with its own loud
+    ``instrument_master.index_security_id_collision`` WARNING, so the STORE-level
+    counter honestly reads 0 (nothing reached the write boundary) and only the
+    FIRST index is persisted — deterministic, never the store's last-wins.
+    Pins the combined post-merge semantics of DEC-MAPPING-COLLISION-HONESTY-001
+    + fix (d) (DEC-DATA-SAFETY-LEFTOVERS-001 merge reconciliation).
+    """
+    collide_a = _row(
+        exchange="NSE",
+        exchange_token="7777",
+        trading_symbol="COLLIDEA",
+        groww_symbol="NSE-COLLIDEA",
+        name="Collide A",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    collide_b = _row(
+        exchange="NSE",
+        exchange_token="7777",
+        trading_symbol="COLLIDEB",
+        groww_symbol="NSE-COLLIDEB",
+        name="Collide B",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    store = _store(tmp_path)
+    with capture_logs() as logs:
+        result = load_instrument_master(
+            store,
+            http_get=lambda _url: _csv([collide_a, collide_b]),
+            run_id_factory=lambda: "test-collide-idx",
+            constituent_opener=_empty_opener,
+            constituent_cache_dir=tmp_path / "cache",
+        )
+    # Intercepted at build_index: keep-first + the build-time WARNING …
+    build_warns = _events(logs, "instrument_master.index_security_id_collision")
+    assert len(build_warns) == 1
+    assert build_warns[0]["kept"] == "NSE-COLLIDEA"
+    assert build_warns[0]["dropped"] == "NSE-COLLIDEB"
+    # … so the STORE-level collision surfaces honestly as ZERO (never reached).
+    assert result["security_id_collisions"] == 0
+    assert len(_events(logs, "instrument_store.security_id_collision")) == 0
+    # Only the FIRST index is persisted (agrees with the in-memory index).
+    symbols = {inst.symbol_name for inst in store.list_index_equity_instruments()}
+    assert "COLLIDEA" in symbols
+    assert "COLLIDEB" not in symbols
 
 
 def test_malformed_header_raises(tmp_path: Path) -> None:

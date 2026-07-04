@@ -489,18 +489,6 @@ async function loadTables() {
       + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow
       + '<h3 style="margin-top:14px">F&amp;O registry</h3>' + expiriesRow + contractsRow;
     tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
-    tablesEl.querySelectorAll(".tbl[data-table]").forEach(el => {
-      el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
-    });
-    tablesEl.querySelectorAll(".tbl[data-candles]").forEach(el => {
-      el.addEventListener("click", () => selectCandles(el.getAttribute("data-candles")));
-    });
-    tablesEl.querySelectorAll(".tbl[data-ledger]").forEach(el => {
-      el.addEventListener("click", () => selectLedger(el.getAttribute("data-ledger")));
-    });
-    tablesEl.querySelectorAll(".tbl[data-registry]").forEach(el => {
-      el.addEventListener("click", () => selectRegistry(el.getAttribute("data-registry")));
-    });
     if (mode === "candles") markCandles();
     else if (mode === "registry") markRegistry(rstate.kind);
     else if (mode === "ledger") markLedger("window_ledger");
@@ -509,6 +497,23 @@ async function loadTables() {
     tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">offline</div>';
   }
 }
+
+/* Delegated sidebar clicks (DEC-DASHBOARD-JS-PERF-001): ONE listener on #tables
+   attached at boot — loadTables rebuilds the row markup freely (boot + every
+   Refresh) with NO per-row listener re-attachment (the old four
+   querySelectorAll/forEach loops). Mirrors the delegated copy handler on #data. */
+tablesEl.addEventListener("click", (ev) => {
+  const row = ev.target.closest(".tbl");
+  if (!row) return;
+  const table = row.getAttribute("data-table");
+  if (table) { selectTable(table); return; }
+  const lake = row.getAttribute("data-candles");
+  if (lake) { selectCandles(lake); return; }
+  const ledger = row.getAttribute("data-ledger");
+  if (ledger) { selectLedger(ledger); return; }
+  const registry = row.getAttribute("data-registry");
+  if (registry) selectRegistry(registry);
+});
 
 function markSelected(name) {
   /* Highlight the selected DuckDB master-table row; a null name can't
@@ -558,27 +563,29 @@ function ledgerGridHtml(body) {
     Number(body.offset || 0), Number(body.limit || 100));
 }
 
-function wireLedgerPager(body) {
-  const off = Number(body.offset || 0), lim = Number(body.limit || 100);
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { lstate.offset = Math.max(0, off - lim); runLedgerQuery(true); });
-  if (next) next.addEventListener("click", () => { lstate.offset = off + lim; runLedgerQuery(true); });
+function setLedgerPager(body) {
+  setGridPager(body, 100, (off) => { lstate.offset = off; runLedgerQuery(true); });
 }
 
 function renderLedgerView(body) {
   dataEl.innerHTML = ledgerHeadHtml(body) + '<div id="dbgrid">' + ledgerGridHtml(body) + '</div>';
-  wireLedgerPager(body);
+  setLedgerPager(body);
 }
 
 function updateLedgerGrid(body) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderLedgerView(body); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = ledgerGridHtml(body);
+  /* tbody-only swap when the column set is unchanged (DEC-DASHBOARD-JS-PERF-001);
+     any shape change falls back to the full grid rebuild. */
+  if (!patchGridRows(grid, body.columns || [], body.rows || [],
+      Number(body.total || 0), Number(body.offset || 0))) {
+    grid.innerHTML = ledgerGridHtml(body);
+  }
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = (body.columns || []).length + " cols · "
     + Number(body.total || 0).toLocaleString() + " rows";
-  wireLedgerPager(body);
+  setLedgerPager(body);
 }
 
 async function runLedgerQuery(gridOnly) {
@@ -652,27 +659,29 @@ function registryGridHtml(body) {
     Number(body.offset || 0), Number(body.limit || 100));
 }
 
-function wireRegistryPager(body) {
-  const off = Number(body.offset || 0), lim = Number(body.limit || 100);
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { rstate.offset = Math.max(0, off - lim); runRegistryQuery(true); });
-  if (next) next.addEventListener("click", () => { rstate.offset = off + lim; runRegistryQuery(true); });
+function setRegistryPager(body) {
+  setGridPager(body, 100, (off) => { rstate.offset = off; runRegistryQuery(true); });
 }
 
 function renderRegistryView(body) {
   dataEl.innerHTML = registryHeadHtml(body) + '<div id="dbgrid">' + registryGridHtml(body) + '</div>';
-  wireRegistryPager(body);
+  setRegistryPager(body);
 }
 
 function updateRegistryGrid(body) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderRegistryView(body); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = registryGridHtml(body);
+  /* tbody-only swap when the column set is unchanged (DEC-DASHBOARD-JS-PERF-001);
+     any shape change falls back to the full grid rebuild. */
+  if (!patchGridRows(grid, body.columns || [], body.rows || [],
+      Number(body.total || 0), Number(body.offset || 0))) {
+    grid.innerHTML = registryGridHtml(body);
+  }
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = (body.columns || []).length + " cols · "
     + Number(body.total || 0).toLocaleString() + " rows";
-  wireRegistryPager(body);
+  setRegistryPager(body);
 }
 
 async function runRegistryQuery(gridOnly) {
@@ -727,10 +736,45 @@ function updateRegistryBadges(counts) {
    lists and their helper were deleted with the COLUMNS strip. */
 
 /* Shared grid + Prev/Next pager HTML (used by both table + candle views).
-   The pager buttons get ids dbprev/dbnext; each view wires its own offset. */
-function gridAndPager(cols, rows, total, off, lim, note) {
+   The pager buttons get ids dbprev/dbnext; every view publishes its page window
+   into the ONE delegated pager via setGridPager (DEC-DASHBOARD-JS-PERF-001).
+   The builder is split into pure pieces (table-open / thead / tbody rows /
+   pager) so a grid-only update can swap JUST the tbody in place; concatenated,
+   the pieces produce the SAME esc()'d HTML the old single-string builder did
+   (plus the data-cols stamp on the <table> open tag). */
+function gridTableOpen(cols) {
+  /* The <table> open tag carries its rendered column list (JSON, esc()'d) so a
+     grid-only update can prove "same columns" against the LIVE DOM before doing
+     the narrower tbody-only patch — the DOM is the source of truth, so an error
+     or empty repaint can never leave a stale match behind. */
+  return '<table data-cols="' + esc(JSON.stringify(cols)) + '">';
+}
+function gridTheadHtml(cols) {
+  return '<thead><tr>' + cols.map(c => {
+    const t = colType(c);
+    return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
+  }).join("") + '</tr></thead>';
+}
+function gridRowsHtml(cols, rows) {
+  return rows.map(row =>
+    '<tr>' + row.map((cell, i) =>
+      cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
+    ).join("") + '</tr>'
+  ).join("");
+}
+function gridRangeText(from, to, total) {
+  return from.toLocaleString() + '–' + to.toLocaleString() + ' / ' + total.toLocaleString();
+}
+function gridPagerHtml(total, off, rowCount) {
   const from = total === 0 ? 0 : off + 1;
-  const to = off + rows.length;
+  const to = off + rowCount;
+  const hasPrev = off > 0, hasNext = to < total;
+  return '<div class="pager">'
+    + '<button id="dbprev"' + (hasPrev ? "" : " disabled") + '>‹ Prev</button>'
+    + '<span class="prange">' + gridRangeText(from, to, total) + '</span>'
+    + '<button id="dbnext"' + (hasNext ? "" : " disabled") + '>Next ›</button></div>';
+}
+function gridAndPager(cols, rows, total, off, lim, note) {
   let html = "";
   if (!rows.length) {
     /* Schema-when-empty: when the table has no rows BUT the backend returned its
@@ -738,34 +782,54 @@ function gridAndPager(cols, rows, total, off, lim, note) {
        columns exist, plus the honest note. With no columns at all, the plain
        "no rows" message. Never fabricates a data row (Golden Rule #1). */
     if (cols.length) {
-      const thead = '<thead><tr>' + cols.map(c => {
-        const t = colType(c);
-        return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
-      }).join("") + '</tr></thead>';
-      html += '<div class="gridwrap"><table>' + thead + '</table></div>';
+      html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols) + '</table></div>';
       html += '<div class="empty">' + esc(note || "no rows on this page") + '</div>';
     } else {
       html += '<div class="empty">no rows on this page</div>';
     }
   } else {
-    const thead = '<thead><tr>' + cols.map(c => {
-      const t = colType(c);
-      return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
-    }).join("") + '</tr></thead>';
-    const tbody = '<tbody>' + rows.map(row =>
-      '<tr>' + row.map((cell, i) =>
-        cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
-      ).join("") + '</tr>'
-    ).join("") + '</tbody>';
-    html += '<div class="gridwrap"><table>' + thead + tbody + '</table></div>';
+    html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols)
+      + '<tbody>' + gridRowsHtml(cols, rows) + '</tbody></table></div>';
   }
-  const hasPrev = off > 0, hasNext = to < total;
-  html += '<div class="pager">'
-    + '<button id="dbprev"' + (hasPrev ? "" : " disabled") + '>‹ Prev</button>'
-    + '<span class="prange">' + from.toLocaleString() + '–' + to.toLocaleString()
-    + ' / ' + total.toLocaleString() + '</span>'
-    + '<button id="dbnext"' + (hasNext ? "" : " disabled") + '>Next ›</button></div>';
+  html += gridPagerHtml(total, off, rows.length);
   return html;
+}
+
+/* In-place grid patch (DEC-DASHBOARD-JS-PERF-001): when #dbgrid already shows a
+   data table whose column set matches the incoming page, swap ONLY the tbody
+   rows (the SAME esc()'d row strings gridAndPager builds — narrower target) and
+   patch the pager buttons' disabled state + the range text via textContent, so
+   the .gridwrap scroll container (and its horizontal scroll position) survives
+   the paging click. Returns false when the shapes differ — no table/tbody yet,
+   an empty page, a column-set change — so the caller falls back to today's full
+   grid.innerHTML rebuild; error/empty states always take the full-rebuild path. */
+function patchGridRows(grid, cols, rows, total, off) {
+  if (!rows.length || !cols.length || !(total > 0)) return false;
+  const table = grid.querySelector(".gridwrap > table");
+  if (!table || table.getAttribute("data-cols") !== JSON.stringify(cols)) return false;
+  const tbody = table.querySelector("tbody");
+  const prev = grid.querySelector("#dbprev"), next = grid.querySelector("#dbnext");
+  const range = grid.querySelector(".pager .prange");
+  if (!tbody || !prev || !next || !range) return false;
+  tbody.innerHTML = gridRowsHtml(cols, rows);
+  const to = off + rows.length;
+  prev.disabled = !(off > 0);
+  next.disabled = !(to < total);
+  range.textContent = gridRangeText(off + 1, to, total);
+  return true;
+}
+
+/* ONE delegated Prev/Next pager (DEC-DASHBOARD-JS-PERF-001): every grid render /
+   update PUBLISHES its page window + rerun callback here instead of re-attaching
+   click listeners to the freshly-built #dbprev/#dbnext (the old per-render
+   wire*Pager helpers — a missed re-wire meant a silently dead pager). The
+   delegated listener on #data (attached once at boot, mirroring the delegated
+   copy handler) reads this state on each click. */
+const pagerState = { off: 0, lim: 100, onPage: null };
+function setGridPager(body, defLim, onPage) {
+  pagerState.off = body ? Number(body.offset || 0) : 0;
+  pagerState.lim = body ? Number(body.limit || defLim) : defLim;
+  pagerState.onPage = onPage;
 }
 
 /* ── Table mode (structured query) ── */
@@ -864,11 +928,8 @@ function tableGridHtml(body, err) {
     ? '<div class="empty qerr">' + esc(err) + '</div>'
     : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 50), body && body.note);
 }
-function wireTablePager(name, body) {
-  const off = body ? Number(body.offset || 0) : 0, lim = body ? Number(body.limit || 50) : 50;
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { dbOffset = Math.max(0, off - lim); runTableQuery(name, true); });
-  if (next) next.addEventListener("click", () => { dbOffset = off + lim; runTableQuery(name, true); });
+function setTablePager(name, body) {
+  setGridPager(body, 50, (off) => { dbOffset = off; runTableQuery(name, true); });
 }
 
 /* FULL render: head + control bar + grid container. Used on a fresh table
@@ -885,19 +946,22 @@ function renderTableView(name, body, err) {
   document.querySelectorAll("#filters .rm").forEach((b, i) => b.addEventListener("click", () => { readControlsInto(name); st.filters.splice(i, 1); renderTableView(name, body, err); }));
   const ap = document.getElementById("applyq");
   if (ap) ap.addEventListener("click", () => { readControlsInto(name); dbOffset = 0; runTableQuery(name, true); });
-  wireTablePager(name, body);
+  setTablePager(name, body);
 }
 
-/* GRID-ONLY update: replace #dbgrid + refresh the row-count sub; the control bar
-   stays put (DEC-DB-UNIVERSE-O1-LATENCY-001). */
+/* GRID-ONLY update: patch the tbody in place when the column set is unchanged
+   (DEC-DASHBOARD-JS-PERF-001), else replace #dbgrid; refresh the row-count sub;
+   the control bar stays put (DEC-DB-UNIVERSE-O1-LATENCY-001). */
 function updateTableGrid(name, body, err) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderTableView(name, body, err); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = tableGridHtml(body, err);
+  const patched = !err && !!body && patchGridRows(grid, body.columns || [], body.rows || [],
+    Number(body.total || 0), Number(body.offset || 0));
+  if (!patched) grid.innerHTML = tableGridHtml(body, err);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? ((body.columns || []).length + " cols · " + Number(body.total || 0).toLocaleString() + " rows match") : "";
-  wireTablePager(name, body);
+  setTablePager(name, body);
 }
 
 /* ── Candle mode (Parquet lake via read_parquet) ── */
@@ -1265,13 +1329,10 @@ function candleGridHtml(body, err) {
   return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote;
 }
 
-/* Wire the Prev/Next pager (lives INSIDE #dbgrid, so it is re-wired on every
-   grid update — the only listeners a grid-only update needs to re-attach). */
-function wireCandlePager(body) {
-  const off = body ? Number(body.offset || 0) : 0, lim = body ? Number(body.limit || 100) : 100;
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { cstate.offset = Math.max(0, off - lim); runCandleQuery(true); });
-  if (next) next.addEventListener("click", () => { cstate.offset = off + lim; runCandleQuery(true); });
+/* Publish the candle page window into the ONE delegated Prev/Next pager
+   (DEC-DASHBOARD-JS-PERF-001) — no per-render listener re-attachment. */
+function setCandlePager(body) {
+  setGridPager(body, 100, (off) => { cstate.offset = off; runCandleQuery(true); });
 }
 
 /* FULL render: head + control bar + grid container. Used on entering candle mode
@@ -1314,28 +1375,40 @@ function renderCandleView(body, err) {
     const pick = cstate.datasets.find(x => x.interval === cintv.value);
     if (pick) { cstate.key = dsKey(pick); cstate.offset = 0; runCandleQuery(false); }
   });
-  wireCandlePager(body);
+  setCandlePager(body);
 }
 
-/* GRID-ONLY update: replace #dbgrid + refresh the "N bars match" sub; the control
-   bar (incl. the date pickers) is left in place, so no datepicker MutationObserver
-   re-scan / rebuild fires on a paging click (DEC-DB-UNIVERSE-O1-LATENCY-001). */
+/* GRID-ONLY update: patch the tbody in place when the column set is unchanged
+   (DEC-DASHBOARD-JS-PERF-001), else replace #dbgrid; refresh the "N bars match"
+   sub; the control bar (incl. the date pickers) is left in place, so no
+   datepicker MutationObserver re-scan / rebuild fires on a paging click
+   (DEC-DB-UNIVERSE-O1-LATENCY-001). */
 function updateCandleGrid(body, err) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderCandleView(body, err); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = candleGridHtml(body, err);
+  /* The honesty step-note (DEC-MONEYNESS-REGISTRY-STEP-001) renders OUTSIDE the
+     table, so the tbody-only patch also requires its presence to be unchanged —
+     a confidence flip falls back to the full rebuild, never a stale note. */
+  const wantNote = !!(body && body.strike_step_confidence === "observed");
+  const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote")
+    && patchGridRows(grid, body.columns || [], body.rows || [],
+      Number(body.total || 0), Number(body.offset || 0));
+  if (!patched) grid.innerHTML = candleGridHtml(body, err);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
   setRangeChip(body);
-  wireCandlePager(body);
+  setCandlePager(body);
 }
 
 limitSel.addEventListener("change", () => {
   if (mode === "candles") { cstate.offset = 0; runCandleQuery(true); }
   else if (mode === "registry") { rstate.offset = 0; runRegistryQuery(true); }
   else if (mode === "ledger") { lstate.offset = 0; runLedgerQuery(true); }
-  else if (selected) selectTable(selected);
+  /* Table mode takes the SAME grid-only path as its three siblings
+     (DEC-DASHBOARD-JS-PERF-001): the control bar + qstate filters stay put —
+     the old selectTable() call tore down + rebuilt the whole view. */
+  else if (selected) { dbOffset = 0; runTableQuery(selected, true); }
 });
 refreshBtn.addEventListener("click", () => {
   loadTables();
@@ -1343,6 +1416,19 @@ refreshBtn.addEventListener("click", () => {
   else if (mode === "registry") selectRegistry(rstate.kind);
   else if (mode === "ledger") selectLedger("window_ledger");
   else if (selected) selectTable(selected);
+});
+
+/* Delegated Prev/Next pager clicks (DEC-DASHBOARD-JS-PERF-001): ONE listener on
+   #data attached at boot serves every view family — the buttons re-render freely
+   (full rebuild OR in-place disabled-state patch) and are never re-wired. A
+   disabled button never dispatches a click; the guard is defensive. */
+dataEl.addEventListener("click", (ev) => {
+  const b = ev.target.closest("#dbprev, #dbnext");
+  if (!b || b.disabled || typeof pagerState.onPage !== "function") return;
+  const off = b.id === "dbnext"
+    ? pagerState.off + pagerState.lim
+    : Math.max(0, pagerState.off - pagerState.lim);
+  pagerState.onPage(off);
 });
 
 /* DASH-UX D2: click any data cell to copy its value (DEC-DASHBOARD-DB-UX-001).

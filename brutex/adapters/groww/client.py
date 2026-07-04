@@ -40,6 +40,7 @@ from brutex.adapters.groww.deadline import run_with_deadline
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
     GrowwRateLimitError,
+    GrowwTokenStillStaleError,
     from_groww_exception,
     is_retryable,
 )
@@ -139,6 +140,16 @@ class GrowwClient:
     #: terminally (never an infinite loop). Counted SEPARATELY from :attr:`max_attempts`
     #: (the rate-limit/timeout budget) so an expiry mid-retry-storm still gets its bound.
     max_reauths: int = 1
+    #: TOKEN-STALE fetch-lane pause bound (seconds, DEC-TOKEN-STALE-PAUSE-001). When a
+    #: read-only-broker reauth re-read comes back STILL STALE (the 06:00-IST reset
+    #: window before the external Lambda's mint lands), ``_call`` PAUSES on the
+    #: refresher's :meth:`~brutex.adapters.groww.reauth.SdkRefresher.await_token_recovery`
+    #: instead of propagating — so the outage never reaches the window ladder and no
+    #: window attempts burn. ``None`` (the default, every build site) resolves the
+    #: env-tunable :func:`~brutex.adapters.groww.reauth.resolve_token_stale_wait_seconds`
+    #: (``BRUTEX_GROWW_TOKEN_STALE_WAIT_S``, default 420 s); an explicit ``0.0``
+    #: disables the pause (pre-gate behaviour — the stale error propagates at once).
+    token_stale_wait_seconds: float | None = None
     #: Hard per-call wall-clock deadline (seconds) — the historical-pull FREEZE GUARD
     #: (DEC-GROWW-PULL-CALL-DEADLINE-001). ``None`` (the default) keeps the bare
     #: behaviour for unit tests + dry-runs; the LIVE pull build sites inject
@@ -209,9 +220,15 @@ class GrowwClient:
         On a READ-ONLY shared-AWS host (DEC-BROKER-READONLY-REAUTH-REREAD-001) the refresher
         instead RE-READS the Lambda-minted token (never mints); a re-read that still holds the
         SAME dead token raises a RETRYABLE
-        :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` which propagates OUT
-        of this method exactly like the throttle — the window quarantines + re-pulls later
-        (``is_retryable`` is True), never a fail-loud restart.
+        :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` — which since
+        DEC-TOKEN-STALE-PAUSE-001 first PAUSES this call on the refresher's bounded,
+        single-flight-aware :meth:`~brutex.adapters.groww.reauth.SdkRefresher.\
+        await_token_recovery` (the 06:00-IST fetch-lane pause, gated by
+        :attr:`token_stale_wait_seconds`): a fresh token adopted within the shared
+        deadline retries this call with NO window attempt spent, while a deadline
+        expiry propagates the StillStale OUT of this method exactly like the throttle —
+        the window quarantines + re-pulls later (``is_retryable`` is True), never a
+        fail-loud restart.
 
         A terminal error (auth with no refresher / budget exhausted / bad-request /
         not-found / unknown), or a retryable one that exhausts the budget, re-raises the
@@ -265,7 +282,29 @@ class GrowwClient:
                     # Capture the generation BEFORE the re-mint so single-flight works:
                     # the refresher only re-mints if no other thread already has.
                     seen_generation = self.refresher.current_generation()
-                    new_generation = self.refresher.reauth(seen_generation)
+                    try:
+                        new_generation = self.refresher.reauth(seen_generation)
+                    except GrowwTokenStillStaleError:
+                        # TOKEN-STALE GATE (DEC-TOKEN-STALE-PAUSE-001): the read-only
+                        # broker holds no fresh token yet (the 06:00-IST reset window
+                        # before the external Lambda's mint). PAUSE the fetch lane —
+                        # bounded, single-flight-aware, watchdog-beating — instead of
+                        # propagating, so the outage never reaches the window ladder
+                        # and no window attempts burn (the forensic 111-FAILED-window
+                        # shape). On the shared deadline expiring, the refresher
+                        # re-raises the StillStale and it propagates OUT of _call
+                        # exactly as before the gate — a never-minting broker still
+                        # fails loudly and the window defers FAILED. ONLY this error
+                        # class engages the gate: a LOCAL-mint refresher re-mints
+                        # synchronously (never raises StillStale — no double-wait),
+                        # and a genuine terminal auth failure stays terminal.
+                        new_generation = self.refresher.await_token_recovery(
+                            seen_generation,
+                            wait_seconds=self.token_stale_wait_seconds,
+                            sleep=self.sleep,
+                            clock=self.clock,
+                            method=label,
+                        )
                     reauths += 1
                     attempt -= 1  # a re-auth retry must not spend the rate-limit budget
                     # OBSERVABILITY (DEC-GROWW-TOKEN-REAUTH-001): make the 06:00 IST daily-token

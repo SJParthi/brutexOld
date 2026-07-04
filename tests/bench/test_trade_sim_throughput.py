@@ -176,3 +176,123 @@ def test_trade_sim_absolute_combos_per_sec_printed() -> None:
         f"M4 Pro mask·bar/s {mask_bar_per_sec / 1e6:.1f} M below the 50 M target "
         f"(STANDARDS_100PCT.md §1 row 14) — the kernel or its SLA must be re-stated."
     )
+
+
+# ── wired-path speedup gate (DEC-SWEEP-RUST-TRADESIM-WIRE-001) ────────────────
+#
+# The gates above bench the RAW kernel (`count_trades`, no ClosedTrade
+# materialisation) — NOT the surface the production sweep actually calls. This
+# gate benches the WIRED surface, `ResidentTradeSim.simulate_masks` (FFI +
+# per-trade ClosedTrade construction included), as a RATIO against its own
+# forced-Python-fallback arm on the same window — so a wiring regression
+# (re-marshalling, per-trade object bloat) fails loudly while shared-runner
+# jitter cannot (a ratio of two same-process measurements; DEC-P0-020 honest
+# envelope: absolutes are printed, never asserted off the M4 Pro).
+# Measured: ~257-266× on this sparse fixture in-sandbox; the blueprint spike
+# read 40.5-45.2× at ~81 trades/mask (density-dependent). The floor is 15× —
+# far under both measurements (jitter-safe as a same-process ratio) yet high
+# enough that a real wiring regression costing an order of magnitude
+# (re-marshalling, per-trade object bloat) fails, not merely a near-total
+# loss of the kernel (the review's 5×-floor looseness finding).
+
+_WIRED_SPEEDUP_FLOOR: Final[float] = 15.0
+
+
+def _make_candle_window(n_bars: int) -> tuple[list, list[int]]:
+    """Deterministic CandleBar window on real NSE session dates + synthetic bits."""
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from brutex.calendars.nse import IST
+    from brutex.data.models import CandleBar
+
+    seed = 0x9E3779B97F4A7C15
+    bars: list[CandleBar] = []
+    bits: list[int] = []
+    per_day = 375  # a full 09:15–15:29 session of 1-minute bars
+    day = 0
+    minute = 0
+    for i in range(n_bars):
+        if minute == per_day:
+            minute = 0
+            day += 1
+        ts = (
+            datetime(2024, 1, 1, 9, 15, tzinfo=IST) + timedelta(days=day, minutes=minute)
+        ).astimezone(UTC)
+        minute += 1
+        wobble = ((seed * (i + 1)) >> 13) % 200 - 100
+        o = Decimal(10_000 + wobble) / 100
+        c = o + Decimal((wobble % 30) - 10) / 100
+        hi = max(o, c) + Decimal("1.50")
+        lo = min(o, c) - Decimal("1.50")
+        bars.append(
+            CandleBar(
+                timestamp=ts, open=o, high=hi, low=lo, close=c, volume=100, open_interest=None
+            )
+        )
+        bits.append((seed * (i + 7)) & 0x000F_FFFF)
+    return bars, bits
+
+
+def _best_of(n: int, fn) -> float:  # type: ignore[no-untyped-def]
+    best = float("inf")
+    for _ in range(n):
+        start = time.perf_counter()
+        fn()
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+@pytest.mark.slow
+@pytest.mark.bench
+def test_resident_trade_sim_wired_vs_fallback_speedup() -> None:
+    """The wired surface (`simulate_masks`, ClosedTrade included) beats its own
+    Python-oracle arm ≥ 15× — the production Phase-A lever, measured not assumed."""
+    from collections.abc import Sequence
+
+    from brutex.data.models import CandleBar
+    from brutex.engine.rust_trade_sim import ResidentTradeSim
+    from brutex.strategies.types import Side
+
+    def _forced_fallback_trade_sim(
+        bars: Sequence[CandleBar], bits: Sequence[int], *, tf_minutes: int
+    ) -> ResidentTradeSim:
+        """Kernel-disabled twin — the same instance-level ``_rust = None``
+        factory seam the unit/golden `_forced_fallback_sim` fakes use."""
+        sim = ResidentTradeSim(bars, bits, tf_minutes=tf_minutes)
+        sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
+        return sim
+
+    bars, bits = _make_candle_window(6_000)
+    masks = _make_masks(24)
+    sl, tp = 8_000, 12_000
+    sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+    assert sim.rust_active, "wheel is built in CI — the wired arm must engage the kernel"
+    fallback = _forced_fallback_trade_sim(bars, bits, tf_minutes=1)
+    assert not fallback.rust_active
+
+    def _rust_arm() -> None:
+        sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=sl, take_profit_paisa=tp)
+
+    def _python_arm() -> None:
+        fallback.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=sl, take_profit_paisa=tp)
+
+    _rust_arm()  # warm allocator + lazy ClosedTrade import on both arms
+    _python_arm()
+    rust_s = _best_of(3, _rust_arm)
+    python_s = _best_of(2, _python_arm)
+    ratio = python_s / max(rust_s, 1e-12)
+    n_combos = len(masks)
+    print(
+        f"\nWired ResidentTradeSim.simulate_masks vs Python-oracle arm "
+        f"(6,000 bars × {n_combos} masks):\n"
+        f"  rust   = {rust_s * 1e3:8.2f} ms  ({n_combos / rust_s:,.0f} combos/s)\n"
+        f"  python = {python_s * 1e3:8.2f} ms  ({n_combos / python_s:,.0f} combos/s)\n"
+        f"  ratio  = {ratio:.1f}×  (floor {_WIRED_SPEEDUP_FLOOR:.0f}×; density-dependent — "
+        f"the blueprint spike read ~40× at ~81 trades/mask, sparser windows read higher)\n"
+    )
+    assert ratio >= _WIRED_SPEEDUP_FLOOR, (
+        f"wired/fallback speedup {ratio:.1f}× fell below the {_WIRED_SPEEDUP_FLOOR:.0f}× floor "
+        f"— the Phase-A wiring surface regressed (re-marshalling / object bloat / lost "
+        f"release build), or the kernel silently stopped serving."
+    )

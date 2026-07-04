@@ -12,10 +12,26 @@ params)"* into a **reproducible, idempotent, audited** leaderboard on disk. It
          --mask_run_id (combo_hash)--> run-identity          (Golden Rule #4)
          --ComboDedup.seen--> skip already-evaluated         (Bloom→exact, O(1))
          --count_supermasks--> Stage-1B min-hits prefilter   (combo_mask)
-         --metrics_for_mask--> (mask, ResultMetrics)         (sweep_driver)
+         --ResidentTradeSim.simulate_masks--> trades         (rust_trade_sim, CHUNKED)
+         --metrics_from_trades--> (mask, ResultMetrics)      (sweep_driver tail)
          --rank_combos--> RankedCombo leaderboard            (ranking)
          --ranked_combo_to_result_row--> ResultRow           (the projector)
          --ResultsStore.append/flush--> Parquet sink         (results_store)
+
+The trade walk is the resident Rust kernel (DEC-SWEEP-RUST-TRADESIM-WIRE-001,
+wiring the bit-identity-proven DEC-SWEEP-RUST-TRADESIM-001 kernel into
+production): one :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim` is
+built per tuple (the OHLC→paisa conversion + session-aware forced-exit flags
+paid once), the kept masks are batch-simulated in bounded CHUNKS, and each
+mask's trade stream flows through the SAME
+:func:`~brutex.engine.sweep_driver.metrics_from_trades` tail
+:func:`~brutex.engine.sweep_driver.metrics_for_mask` uses — so the wired chain
+is byte-identical to the pure-Python one (the wired-vs-unwired store-hash
+golden enforces it), and an environment where the kernel cannot serve (stale
+wheel, u128 masks, out-of-envelope prices) degrades to the SAME Python oracle
+loudly, never silently. ``metrics_for_mask`` itself remains the per-mask
+ORACLE: a failed chunk is re-run through it one mask at a time to attribute the
+culprit (fail-loud-with-fingerprint preserved — see ``run_persisted_sweep``).
 
 Three invariants make this a *sweep RUN*, not just a sweep:
 
@@ -51,11 +67,11 @@ uses — an oversized sweep is a conscious choice, not an accident.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, runtime_checkable
 
 import structlog
 
@@ -69,12 +85,15 @@ from brutex.engine.combo_mask import (
     mask_to_entry_signals,
 )
 from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
     metrics_for_mask,
+    metrics_from_trades,
 )
+from brutex.engine.sweep_lookahead import maybe_guard_bars
 from brutex.engine.trade_sim import simulate_trades
 from brutex.engine.trial_stats import (
     TrialStatsError,
@@ -117,10 +136,42 @@ _LOG = structlog.get_logger("brutex.engine.sweep_run")
 
 #: Audit action labels — the three lines a full sweep emits, plus the single
 #: line a sentinel short-circuit emits (DEC-MARK-MANY-SENTINEL-001).
+#: DEC-SWEEP-RUST-TRADESIM-WIRE-001 adds NO audit action and NO payload field —
+#: the engine choice is engine-blind by design (run_id hashes mask/params/data/
+#: code, never the engine; the hash-chained audit stays byte-identical) and the
+#: path-selection signal lives in structlog ONLY.
 _ACTION_START: Final[str] = "SWEEP_START"
 _ACTION_FLUSH: Final[str] = "SWEEP_FLUSH"
 _ACTION_COMPLETE: Final[str] = "SWEEP_COMPLETE"
 _ACTION_RESUMED: Final[str] = "SWEEP_RESUMED"
+
+#: Hard cap on masks per resident-trade-sim batch call (DEC-SWEEP-RUST-TRADESIM-
+#: WIRE-001). Bounds the peak ``Vec<Vec<TradeRecord>>`` FFI marshal + the
+#: per-chunk ``ClosedTrade`` materialisation regardless of how many masks
+#: survive Stage-1B; chunking is a pure batching choice — order-preserving and
+#: result-invariant (pinned by the chunk-invariance tests).
+_TRADE_SIM_CHUNK_MASKS: Final[int] = 256
+
+#: Cell budget (``masks × bars``) per batch call — the DELIBERATELY-CONSERVATIVE
+#: memory bound for production bar counts (a multi-year 1-minute window is
+#: ~350k-560k bars; a fixed 256-mask chunk there could materialise tens of
+#: millions of trades at once). Per-mask trades ≤ n_bars/2, so one chunk's
+#: output is ≤ cells/2 trade tuples — bounded. 4·2^20 cells keeps the 256-mask
+#: chunk up to ~16k bars and still exceeds the kernel's 2^20 rayon threshold on
+#: big windows (the parallel arm stays reachable in single-process runs).
+_TRADE_SIM_CHUNK_CELLS: Final[int] = 4 << 20
+
+
+def _trade_sim_chunk_masks(n_bars: int) -> int:
+    """Masks per :meth:`ResidentTradeSim.simulate_masks` call for an ``n_bars`` window.
+
+    ``min(_TRADE_SIM_CHUNK_MASKS, _TRADE_SIM_CHUNK_CELLS // n_bars)`` floored at
+    1 — the count cap for small windows, the cell budget for deep 1-minute
+    windows (see the two constants). Chunk size NEVER changes results (only
+    peak memory / FFI batching); the chunk-invariance tests pin it.
+    """
+    by_cells = _TRADE_SIM_CHUNK_CELLS // max(1, n_bars)
+    return max(1, min(_TRADE_SIM_CHUNK_MASKS, by_cells))
 
 
 class SweepComboError(BruteXError):
@@ -639,6 +690,17 @@ def ranked_combo_to_result_row(
       which case both anchors are the 0.00 placeholder
       (``round_money(Decimal("0"))``) — documented, not fabricated.
 
+      This re-simulation deliberately stays on the pure-Python
+      :func:`~brutex.engine.trade_sim.simulate_trades` ORACLE — an explicit
+      DEC-SWEEP-RUST-TRADESIM-WIRE-001 non-goal, NOT an oversight: it runs once
+      per top-K FINALIST (low volume; the ~33B-trial hot path is the per-mask
+      sweep loop, not this projector). Since that loop is now the resident Rust
+      kernel, the "reproduce the ranked combo's trades exactly" contract above
+      spans TWO engines — it holds precisely because the kernel is
+      bit-identity-proven against this same oracle (45,863/45,863 trades, all 9
+      fields; the wired-vs-unwired store-hash golden trips on any drift, since
+      these price anchors are part of the hashed store bytes).
+
     Parameters
     ----------
     rc
@@ -773,6 +835,140 @@ def _sentinel_resume(store_path: Path, digest: str) -> TupleCompletionSentinel |
     return sentinel
 
 
+def _combo_error(
+    mask: int, run_id: str, cfg: SweepRunConfig, direction_label: str, exc: BaseException
+) -> SweepComboError:
+    """Build the fail-loud-with-fingerprint :class:`SweepComboError` for ONE combo.
+
+    ONE source of the fingerprint format (CLAUDE.md §11 COMMON) — mask hex +
+    run-id + tuple coordinate + k + the original error — shared by the wired
+    per-mask metrics tail, the chunk-failure re-attribution, and (verbatim) the
+    pre-wiring per-mask loop's message, so grid TUPLE_FAILED audit lines stay
+    format-identical across the Rust wiring.
+    """
+    return SweepComboError(
+        f"combo 0x{mask:032x} (run_id={run_id}) in "
+        f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: {exc}"
+    )
+
+
+def _build_trade_sim(
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    cfg: SweepRunConfig,
+    direction_label: str,
+) -> ResidentTradeSim:
+    """Build the tuple's resident trade-sim; map a failure to the #904 tuple-skip contract.
+
+    Built ONCE per tuple, AFTER the kernel n_bars/fib_anchor guards (so
+    ``bar_bits`` is final) and only when survivors exist. Construction converts
+    all four OHLC columns eagerly (the old per-mask walk converted lazily, only
+    bars a trade touched), so a corrupt price ANYWHERE in the window now fails
+    the tuple LOUDLY at construction instead of completing silently when no
+    trade happened to touch it (Golden Rule #1) — and the failure lands as a
+    :class:`SweepComboError` (grid drivers: tuple skip + ``TUPLE_FAILED`` +
+    non-zero verdict, DEC-ENGINE-TUPLE-SKIP-RESILIENT-001), NEVER a grid-wide
+    abort. ``MemoryError`` re-raises BARE first (OOM = GLOBAL stop,
+    DEC-LAKE-WRITE-HALT-001); ``KeyboardInterrupt``/``BaseException`` escape the
+    ``except Exception`` untouched. The identity guards the co-located-cache
+    design would have needed (tf_minutes/fib_anchor/n_bars consistency) are
+    structurally moot here: the sim is built from THIS tuple's own
+    ``bars``/``bar_bits``/``cfg.tf_minutes``, never cached across tuples.
+
+    The path choice is logged (``sweep_run.trade_sim_path``, INFO) so a
+    Python-degraded sweep is observable, not a silent 40× regression (Golden
+    Rule #10); the wrapper itself already WARNs on every fallback cause.
+    """
+    try:
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=cfg.tf_minutes)
+    except MemoryError:
+        # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a tuple skip.
+        raise
+    except Exception as exc:
+        raise SweepComboError(
+            f"trade-sim construction over {len(bars)} bars in "
+            f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: {exc}"
+        ) from exc
+    _LOG.info(
+        "sweep_run.trade_sim_path",
+        rust_active=sim.rust_active,
+        n_bars=sim.n_bars,
+        chunk_masks=_trade_sim_chunk_masks(sim.n_bars),
+        instrument=cfg.instrument,
+        tf=cfg.tf,
+        direction=direction_label,
+        k=cfg.k,
+    )
+    return sim
+
+
+def _reattribute_chunk_failure(
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    chunk: Sequence[int],
+    cfg: SweepRunConfig,
+    direction_label: str,
+    batch_exc: Exception,
+    run_id_of: Callable[[int], str],
+) -> NoReturn:
+    """A batched trade-sim chunk raised — attribute the culprit mask, then fail LOUD.
+
+    The batch call loses per-mask attribution, so the failed chunk is re-run one
+    mask at a time through the ORACLE (:func:`metrics_for_mask` — the exact
+    pre-wiring per-mask chain, engine-agnostic: it attributes a Python-fallback
+    chunk failure identically). The FIRST mask that re-raises gets the standard
+    fingerprint (:func:`_combo_error`, chained from ITS error), its run-identity
+    resolved via *run_id_of* (lazy recompute on the digest path, the eager
+    probe-time value on the legacy path — byte-identical either way because
+    :func:`mask_run_id` is pure; DEC-SWEEP-STREAMING-RANK-001). ``MemoryError``
+    during re-attribution re-raises BARE (the global-stop law holds under
+    memory pressure too — never a downgrade to a tuple skip).
+
+    If EVERY mask passes the oracle, the failure was batch-level (a PyO3
+    marshalling error, a kernel-only validator, a kernel bug): the oracle's
+    results are **NEVER adopted** — silently swapping engines mid-tuple would
+    mask a kernel-divergence signal and make engine provenance
+    non-deterministic across runs (Golden Rules #4/#10). Instead a
+    :class:`SweepComboError` naming the CHUNK (size + first/last mask hex +
+    tuple + the original error) raises, chained from the ORIGINAL batch
+    exception — the grid skips the tuple for a deterministic redo.
+    """
+    _LOG.warning(
+        "sweep_run.trade_sim_chunk_failed",
+        n_masks=len(chunk),
+        error=str(batch_exc),
+        error_type=type(batch_exc).__name__,
+        instrument=cfg.instrument,
+        tf=cfg.tf,
+        direction=direction_label,
+        k=cfg.k,
+    )
+    for mask in chunk:
+        try:
+            metrics_for_mask(
+                bars,
+                bar_bits,
+                mask,
+                direction=cfg.direction,
+                tf_minutes=cfg.tf_minutes,
+                stop_loss_paisa=cfg.sl_paisa,
+                take_profit_paisa=cfg.tp_paisa,
+                start_equity_paisa=cfg.start_equity_paisa,
+            )
+        except MemoryError:
+            raise
+        except Exception as exc:
+            raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+    raise SweepComboError(
+        f"trade-sim chunk of {len(chunk)} masks "
+        f"(0x{chunk[0]:032x}..0x{chunk[-1]:032x}) in "
+        f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: batched simulation raised "
+        f"{type(batch_exc).__name__}: {batch_exc}, but every mask passed the per-mask "
+        f"Python-oracle re-run — a batch/kernel-level failure; the oracle results are NOT "
+        f"adopted (engine provenance stays deterministic) and the tuple is skipped for redo"
+    ) from batch_exc
+
+
 def run_persisted_sweep(
     bars: Sequence[CandleBar],
     cfg: SweepRunConfig,
@@ -801,12 +997,25 @@ def run_persisted_sweep(
     3. Emit the ``SWEEP_START`` audit line.
     4. Build the Stage-1A ``bar_bits`` **once**.
     5. Enumerate the K-of-bits masks; for each: prune conflicts; on the legacy
-       no-digest path, skip already-seen identities (O(1) Bloom→exact, BEFORE
-       any trade sim); else collect the ``(mask, run_id)`` survivor.
+       no-digest path, compute the run-identity eagerly (the dedup probe keys
+       on it) and skip already-seen identities (O(1) Bloom→exact, BEFORE any
+       trade sim); on the digest path collect the bare mask — the run-identity
+       is NOT computed per enumerated mask there
+       (DEC-SWEEP-STREAMING-RANK-001): probes are bypassed and marks skipped,
+       so its only consumers (the :class:`SweepComboError` fingerprint + the
+       finalist rows) recompute it lazily from the pure :func:`mask_run_id`.
     6. Stage-1B coarse pre-filter (``cfg.min_hits``): drop survivors that fire on
        too few bars to ever rank (still counted as ``evaluated`` + marked seen).
-    7. Backtest the kept survivors (:func:`~brutex.engine.sweep_driver.metrics_for_mask`),
-       rank them (:func:`brutex.ranking.rank_combos`), take the top ``cfg.top_k``.
+    7. Backtest the kept survivors — the wired resident Rust trade-sim
+       (DEC-SWEEP-RUST-TRADESIM-WIRE-001): one
+       :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim` per tuple,
+       chunked :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks`
+       batches, then the per-mask
+       :func:`~brutex.engine.sweep_driver.metrics_from_trades` tail —
+       byte-identical to the pre-wiring per-mask
+       :func:`~brutex.engine.sweep_driver.metrics_for_mask` loop (which remains
+       the per-mask oracle for chunk-failure re-attribution). Rank them
+       (:func:`brutex.ranking.rank_combos`), take the top ``cfg.top_k``.
     8. Project each finalist to a :class:`ResultRow` and append to the store.
     9. Flush the store; write the trial-stats sidecar (digest path); mark
        **all** evaluated identities seen; then write the completion sentinel
@@ -874,6 +1083,14 @@ def run_persisted_sweep(
     """
     if not bars:
         raise ValueError("run_persisted_sweep: bars must be non-empty")
+    # Opt-in runtime look-ahead barrier (DEC-SWEEP-LOOKAHEAD-GUARD-001): the
+    # env flag is resolved ONCE here at setup — never inside any per-bar loop.
+    # OFF (the default) returns the SAME `bars` object (identity), so the hot
+    # path below is byte-identical and cost-unchanged; ON wraps the window in
+    # an index-guarded view that raises LookAheadError on any read ahead of
+    # the forward consumption front (see brutex.engine.sweep_lookahead for
+    # the honest envelope of what it catches vs. the property gates).
+    bars = maybe_guard_bars(bars)
     direction_label = _direction_label(cfg.direction)
 
     n_unique = len(set(cfg.condition_bits))
@@ -961,13 +1178,10 @@ def run_persisted_sweep(
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
-    survivors: list[tuple[int, str]] = []
-    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
-        enumerated += 1
-        if has_conflict(mask):
-            conflict_pruned += 1
-            continue
-        run_id = mask_run_id(
+
+    def _lazy_run_id(mask: int) -> str:
+        """Recompute one mask's run-identity on demand (:func:`mask_run_id` is pure)."""
+        return mask_run_id(
             mask=mask,
             direction=direction_label,
             instrument=cfg.instrument,
@@ -978,66 +1192,129 @@ def run_persisted_sweep(
             indicator_version=cfg.indicator_version,
             code_commit_sha=cfg.code_commit_sha,
         )
-        if not bypass_dedup and dedup.seen(run_id):
+
+    survivors: list[int] = []
+    #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
+    #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
+    survivor_run_ids: list[str] = []
+    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
+        enumerated += 1
+        if has_conflict(mask):
+            conflict_pruned += 1
+            continue
+        if bypass_dedup:
+            # Lazy run-identity (DEC-SWEEP-STREAMING-RANK-001): on the digest
+            # path the dedup probes are BYPASSED (sentinel-authoritative redo,
+            # above) and ``mark_many`` is SKIPPED (below), so a survivor's
+            # run_id has exactly TWO consumers — the SweepComboError
+            # fingerprint and the finalist rows — both recomputed on demand
+            # via ``run_id_of`` (``mask_run_id`` is a pure BLAKE3 of its 9
+            # canonical inputs, Golden Rule #4: same bytes, computed later).
+            # Skipping the eager per-enumerated-mask hash deletes O(survivors)
+            # BLAKE3 work + the (mask, run_id) tuple/str/dict retention.
+            survivors.append(mask)
+            continue
+        run_id = _lazy_run_id(mask)
+        if dedup.seen(run_id):
             skipped_dedup += 1
             continue
-        survivors.append((mask, run_id))
+        survivors.append(mask)
+        survivor_run_ids.append(run_id)
 
     # Stage-1B coarse pre-filter — drop survivors that can never reach the
     # trade-count gate (still "evaluated": we decided their fate + mark them seen).
     kept = survivors
     if cfg.min_hits > 0 and survivors:
-        survivor_masks = [mask for mask, _ in survivors]
         # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
         # are bit-identical (same SUPERSET kernel) so the kept set never differs.
         hits = (
-            kernel.count_hits(survivor_masks)
+            kernel.count_hits(survivors)
             if kernel is not None
-            else count_supermasks(bar_bits, survivor_masks)
+            else count_supermasks(bar_bits, survivors)
         )
-        kept = [
-            (mask, run_id)
-            for (mask, run_id), hit in zip(survivors, hits, strict=True)
-            if hit >= cfg.min_hits
-        ]
+        kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
     evaluated = len(survivors)
 
-    run_id_by_mask = dict(survivors)
-    # Combo evaluation (fail-loud-with-fingerprint): each `metrics_for_mask` is
-    # wrapped so a raise is re-thrown as a `SweepComboError` naming the exact
-    # offending combo (mask hex + run-id + tuple coordinate). Per
-    # "Resilient: skip + continue", the grid drivers catch THIS error and skip
-    # the WHOLE tuple — treated CONSERVATIVELY as tuple-wide (the safe
-    # redo-everything choice): the only per-combo-varying input is the mask, so a
-    # mask-specific edge cannot be ruled out; the tuple is left un-sentineled /
-    # un-cached so it redoes next run. A MemoryError is re-raised bare (OOM is a
-    # GLOBAL stop, DEC-LAKE-WRITE-HALT-001, never a per-tuple skip). On the success
-    # path `pairs` is byte-identical to the prior list comprehension (same order,
-    # same tuples).
+    # ONE run-identity resolver for every downstream consumer (finalist rows +
+    # the SweepComboError fingerprints): the digest path recomputes lazily
+    # (O(finalists + errors) BLAKE3 instead of O(survivors)); the legacy path
+    # reuses the exact probe-time values already paid for above (eager
+    # semantics untouched — the dedup probe genuinely needs them).
+    run_id_of: Callable[[int], str]
+    if bypass_dedup:
+        run_id_of = _lazy_run_id
+    else:
+        run_id_of = dict(zip(survivors, survivor_run_ids, strict=True)).__getitem__
+    # Combo evaluation — the wired resident Rust trade-sim
+    # (DEC-SWEEP-RUST-TRADESIM-WIRE-001, wiring the bit-identity-proven
+    # DEC-SWEEP-RUST-TRADESIM-001 kernel): one ResidentTradeSim per tuple (built
+    # under `_build_trade_sim`'s tuple-skip contract), the kept masks
+    # batch-simulated in bounded CHUNKS, each mask's trades fed through the SAME
+    # `metrics_from_trades` tail `metrics_for_mask` uses — byte-identical pairs
+    # in the SAME order as the pre-wiring per-mask loop (the wired-vs-unwired
+    # store-hash golden + chunk-invariance tests enforce it).
+    #
+    # Fail-loud-with-fingerprint is PRESERVED: a per-mask metrics-tail raise is
+    # re-thrown as a `SweepComboError` naming the exact offending combo (mask
+    # hex + run-id + tuple coordinate, `_combo_error`); a CHUNK failure loses
+    # per-mask attribution, so `_reattribute_chunk_failure` re-runs that chunk
+    # one mask at a time through the `metrics_for_mask` ORACLE to name the
+    # culprit — and if none re-raises (a batch/kernel-level failure) it fails
+    # LOUD naming the chunk, NEVER silently adopting the oracle's results. Per
+    # "Resilient: skip + continue", the grid drivers catch SweepComboError and
+    # skip the WHOLE tuple — treated CONSERVATIVELY as tuple-wide (the safe
+    # redo-everything choice); the tuple is left un-sentineled / un-cached so it
+    # redoes next run. A MemoryError is re-raised bare at EVERY level — the
+    # chunk call, the metrics tail, the re-attribution — BEFORE any wrap or
+    # oracle re-run (OOM is a GLOBAL stop, DEC-LAKE-WRITE-HALT-001, never a
+    # per-tuple skip and never a retry under memory pressure).
     pairs: list[tuple[int, ResultMetrics]] = []
-    for mask, _ in kept:
-        try:
-            metrics = metrics_for_mask(
-                bars,
-                bar_bits,
-                mask,
-                direction=cfg.direction,
-                tf_minutes=cfg.tf_minutes,
-                stop_loss_paisa=cfg.sl_paisa,
-                take_profit_paisa=cfg.tp_paisa,
-                start_equity_paisa=cfg.start_equity_paisa,
-            )
-        except MemoryError:
-            # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a per-tuple
-            # skip — re-raise bare so it aborts the whole sweep instead of being
-            # downgraded into a SweepComboError tuple-skip below.
-            raise
-        except Exception as exc:
-            raise SweepComboError(
-                f"combo 0x{mask:032x} (run_id={run_id_by_mask[mask]}) in "
-                f"{cfg.instrument}/{cfg.tf}/{direction_label} k={cfg.k}: {exc}"
-            ) from exc
-        pairs.append((mask, metrics))
+    if kept:
+        sim = _build_trade_sim(bars, bar_bits, cfg, direction_label)
+        chunk_size = _trade_sim_chunk_masks(len(bars))
+        for chunk_start in range(0, len(kept), chunk_size):
+            chunk = kept[chunk_start : chunk_start + chunk_size]
+            try:
+                chunk_trades = sim.simulate_masks(
+                    chunk,
+                    direction=cfg.direction,
+                    stop_loss_paisa=cfg.sl_paisa,
+                    take_profit_paisa=cfg.tp_paisa,
+                )
+                # Batch-contract guard: `simulate_masks` must RETURN exactly one
+                # trade list per mask (both arms do, by construction). A
+                # wrong-length return (a PyO3 marshalling bug, a kernel bug)
+                # raises HERE — inside the chunk try — so it rides the SAME
+                # re-attribution → SweepComboError tuple-skip ladder as a chunk
+                # that RAISES (the oracle passes every mask, so it fails LOUD
+                # naming the chunk), instead of escaping run_persisted_sweep as
+                # a bare error the grid drivers (#904) would turn into a
+                # grid-wide abort. The `strict=True` zip below is then a
+                # structurally-unreachable second belt.
+                if len(chunk_trades) != len(chunk):
+                    raise ValueError(
+                        f"simulate_masks returned {len(chunk_trades)} trade lists "
+                        f"for a chunk of {len(chunk)} masks — batch-contract violation"
+                    )
+            except MemoryError:
+                raise
+            except Exception as exc:
+                _reattribute_chunk_failure(
+                    bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of
+                )
+            for mask, trades in zip(chunk, chunk_trades, strict=True):
+                try:
+                    metrics = metrics_from_trades(
+                        bars,
+                        trades,
+                        start_equity_paisa=cfg.start_equity_paisa,
+                        tf_minutes=cfg.tf_minutes,
+                    )
+                except MemoryError:
+                    raise
+                except Exception as exc:
+                    raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+                pairs.append((mask, metrics))
     ranked = rank_combos(pairs, overfit=cfg.overfit)
     finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
 
@@ -1045,7 +1322,7 @@ def run_persisted_sweep(
     for rc in finalists:
         row = ranked_combo_to_result_row(
             rc,
-            run_id=run_id_by_mask[rc.mask],
+            run_id=run_id_of(rc.mask),
             instrument=cfg.instrument,
             tf=cfg.tf,
             direction=direction_label,
@@ -1095,7 +1372,7 @@ def run_persisted_sweep(
     # write to the (now off-heap LMDB) exact tier; skip it (DEC-SWEEP-DEDUP-LMDB-001).
     # The sentinel below is the redo authority on this path, so ``n_marked``
     # honestly reads 0 (no marks were written).
-    marked = 0 if bypass_dedup else dedup.mark_many(run_id for _, run_id in survivors)
+    marked = 0 if bypass_dedup else dedup.mark_many(survivor_run_ids)
     # Completion sentinel STRICTLY LAST (DEC-MARK-MANY-SENTINEL-001): its
     # presence proves flush + sidecar + mark all completed; a crash anywhere
     # before this line leaves it absent → the next run redoes the FULL tuple.

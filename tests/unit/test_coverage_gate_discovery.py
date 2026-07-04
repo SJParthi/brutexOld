@@ -207,6 +207,13 @@ class TestDiscoverTouchedModules:
         #     test_credentials*, so it CAN reach 100% standalone; kept excluded as a
         #     COMPLEMENT, gated by the dedicated static per-module gate (that exact pair)
         #     + the whole-package floor (DEC-AWS-ONLY-CREDS-001).
+        #   * brutex/engine/sweep_driver.py — the Stage-2 sweep driver, covered by
+        #     test_engine_sweep_driver.py (evaluate/sweep/rank + the public metrics
+        #     seams) + test_engine_walk_forward.py (the walk-forward half that lives in
+        #     sweep_driver.py — the EXACT stage1a.py shape); ~83% standalone against its
+        #     stem match, 100.00% with the pair; the static whole-engine gate runs
+        #     tests/unit/test_engine_*.py together at 100%
+        #     (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -217,6 +224,7 @@ class TestDiscoverTouchedModules:
                     "brutex/engine/stage1a.py",
                     "brutex/dashboard/movers_snapshot.py",
                     "brutex/config/credentials.py",
+                    "brutex/engine/sweep_driver.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE

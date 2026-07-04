@@ -1,6 +1,6 @@
 # ADR-0016 — Corporate-action adjustment layer (design sketch + hard gate)
 
-**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1180)
+**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1269)
 **Date:** 2026-07-03 (reconciled 2026-07-04 with DEC-ENGINE-SCOPE-GUARD-001, entry #1178)
 **Status:** **Proposed** — design sketch for a FUTURE layer. **NOT implemented.** The
 shipped enforcement is the sweep-entry scope gate of DEC-ENGINE-SCOPE-GUARD-001
@@ -191,7 +191,7 @@ the same reviewed PR that assigns its symbol id.
 ## 7. References
 
 - CLAUDE.md §2 Golden Rules #1, #3, #10; §6 (verified Groww facts)
-- MIGRATION.md #1180 (this decision), #1178 (DEC-ENGINE-SCOPE-GUARD-001 — the
+- MIGRATION.md #1269 (this decision), #1178 (DEC-ENGINE-SCOPE-GUARD-001 — the
   implemented gate), #200 (DEC-P0-063), #694 (NTM), #1006 (ADR-0012)
 - 2026-07-03 audit finding #5 (zero corporate-action code, grep-verified)
 - `brutex/engine/sweep_scope.py` + `brutex/universe.py` (the shipped gate),

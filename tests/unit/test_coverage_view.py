@@ -265,6 +265,17 @@ class TestBuildSpotCoveragePayload:
         assert payload["headline"]["total_bars"] == 3
         assert payload["rows"][0]["symbol"] == "NSE-NIFTY"
 
+    def test_payload_passes_open_substitution_fields_through(self) -> None:
+        # DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001: the ``{**row}`` annotation spread
+        # carries the summarize-side substitution counts through to the /coverage/spot
+        # payload (and thence the shared completeness inputs) unchanged.
+        row = _spot("NSE-NIFTY")
+        row["open_substituted_days"] = 4
+        row["session_days"] = 9
+        annotated = build_spot_coverage_payload([row])["rows"][0]
+        assert annotated["open_substituted_days"] == 4
+        assert annotated["session_days"] == 9
+
 
 class TestSpotCompleteness:
     """DEC-SPOT-COVERAGE-COMPLETENESS-001 — the honest-state chip ladder.
