@@ -137,10 +137,12 @@ from brutex.dashboard.movers_snapshot import (
     pending_asset_payload,
 )
 from brutex.dashboard.movers_warm import (
+    MoversWarmResult,
     futures_warm_grid,
     latest_movers_date,
     options_warm_grid,
     spot_warm_grid,
+    warm_coordinate_label,
     warm_movers_snapshots,
 )
 from brutex.dashboard.pipeline_prebuild import (
@@ -2990,6 +2992,9 @@ def build_app(
                 # per-phase view highlights the running phase (label only — the window
                 # tallies come from the ledger counts, never this string).
                 _pull_job.set_phase("spot")
+                # Honest gated-movers status (DEC-PREBUILD-GATE-HONEST-NOTE-001):
+                # name the running stage on the gate too (no-op when idle/dry-run).
+                _prebuild_gate.set_phase("spot")
                 # The operator-picked spot range (DEC-UNIVERSE-PULL-DATERANGE-001);
                 # blank ⇒ None ⇒ pull_all_spot's resolve_candle_range default
                 # [2020-01-01, prev-day] (byte-identical to the pre-picker pull).
@@ -3014,6 +3019,7 @@ def build_app(
                 # window-ledger rows, so the three window rows stay honestly "pending"
                 # (build_phase_progress highlights no window row on the metadata label).
                 _pull_job.set_phase("metadata")
+                _prebuild_gate.set_phase("metadata")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_expiries_contracts(
                         tradable,
@@ -3039,6 +3045,7 @@ def build_app(
                 # the counters keep moving instead of freezing at the metadata
                 # phase's "45/45 units, 0 bars" while millions of bars stream in.
                 _pull_job.set_phase("historical", pair_progress=True)
+                _prebuild_gate.set_phase("historical")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -3068,6 +3075,7 @@ def build_app(
                 # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
                 # observed during the movers warm is named "movers".
                 _pull_job.set_phase("movers")
+                _prebuild_gate.set_phase("movers")
                 try:
                     warm_date = latest_movers_date(lake_root)
                 except Exception as exc:  # pylint: disable=broad-except - best-effort warm
@@ -3078,17 +3086,19 @@ def build_app(
                 # post-pull generation (the pull bumped it) — the SAME the /movers route reads.
                 return warm_date, _summary_cache.generation
 
-            def _warm_spot_movers() -> int:
+            def _warm_spot_movers() -> MoversWarmResult:
                 """Per-segment SPOT warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when spot succeeds.
 
                 Pre-warms the whole spot grid (every exchange scope — DEC-MOVERS-WARM-GRID-001)
                 reusing the EXACT candidate_key + compute the /api/v1/movers route uses (no
                 drift, CLAUDE.md §11 COMMON). Best-effort via ``warm_movers_snapshots`` — a
-                warmer that raises is logged + counted 0, never failing the successful pull.
+                warmer that raises is logged + counted failed, never failing the successful
+                pull; per-coordinate progress logs + the gate's live i/N ride the SAME call
+                (DEC-MOVERS-WARM-PROGRESS-001).
                 """
                 resolved = _warm_for_date()
                 if resolved is None:
-                    return 0
+                    return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
 
                 def _make_spot_job(exch: str | None) -> Callable[[], int]:
@@ -3114,11 +3124,15 @@ def build_app(
 
                     return _spot_job
 
+                coords = spot_warm_grid()
                 return warm_movers_snapshots(
-                    [_make_spot_job(coord["exchange"]) for coord in spot_warm_grid()]
+                    [_make_spot_job(coord["exchange"]) for coord in coords],
+                    segment="spot",
+                    labels=[warm_coordinate_label(coord) for coord in coords],
+                    on_progress=_prebuild_gate.set_progress,
                 )
 
-            def _warm_futures_movers() -> int:
+            def _warm_futures_movers() -> MoversWarmResult:
                 """Per-segment FUTURES warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds.
 
                 Pre-warms the whole futures grid (exchange × Near/Next/Far —
@@ -3126,7 +3140,7 @@ def build_app(
                 """
                 resolved = _warm_for_date()
                 if resolved is None:
-                    return 0
+                    return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
@@ -3156,14 +3170,15 @@ def build_app(
 
                     return _fut_job
 
+                coords = futures_warm_grid()
                 return warm_movers_snapshots(
-                    [
-                        _make_fut_job(coord["exchange"], coord["expiry_tier"])
-                        for coord in futures_warm_grid()
-                    ]
+                    [_make_fut_job(coord["exchange"], coord["expiry_tier"]) for coord in coords],
+                    segment="futures",
+                    labels=[warm_coordinate_label(coord) for coord in coords],
+                    on_progress=_prebuild_gate.set_progress,
                 )
 
-            def _warm_options_movers() -> int:
+            def _warm_options_movers() -> MoversWarmResult:
                 """Per-segment OPTIONS warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds.
 
                 Pre-warms the whole options grid (exchange × Near/Next/Far × All/Monthly/Weekly
@@ -3173,7 +3188,7 @@ def build_app(
                 """
                 resolved = _warm_for_date()
                 if resolved is None:
-                    return 0
+                    return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
 
                 def _make_opt_job(
@@ -3225,13 +3240,17 @@ def build_app(
 
                     return _opt_job
 
+                coords = options_warm_grid()
                 return warm_movers_snapshots(
                     [
                         _make_opt_job(
                             coord["exchange"], coord["expiry_tier"], coord["expiry_track"]
                         )
-                        for coord in options_warm_grid()
-                    ]
+                        for coord in coords
+                    ],
+                    segment="options",
+                    labels=[warm_coordinate_label(coord) for coord in coords],
+                    on_progress=_prebuild_gate.set_progress,
                 )
 
             def _prebuild_timeframes() -> PrebuildOutcome:
@@ -3265,6 +3284,7 @@ def build_app(
                 # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
                 # observed here is named "prebuild", never blamed on "historical".
                 _pull_job.set_phase("prebuild")
+                _prebuild_gate.set_phase("prebuild")
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
@@ -4652,28 +4672,42 @@ def build_app(
         ``1day`` partition for ``basis=day`` (default), else the ``1minute``
         partition for ``basis=minute``. The picker for the pre-open report panel.
         READ-ONLY; empty when no lake.
+
+        DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
+        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
+        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        store reads run on a threadpool worker, NEVER the event loop.
+        Forensically proven (2026-07-04 run): this route ran the walk
+        SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
+        froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
+        requests burst-flushed on release). The store connection is built +
+        used inside the worker so its RLock stays on one thread
+        (DEC-DASHBOARD-FASTREAD-001).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
-        triples = resolve_report_datasets(lake_root.parent, basis=report_basis)
-        # Tag each report symbol with option-pullability so /reports can badge
-        # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
-        # the SAME store calls + single-source predicate the /universe explorer
-        # uses (no duplication). A symbol absent from the underlying universe
-        # (a spot-only dataset) defaults to NOT pullable.
-        pullable = {
-            (row["exchange"], row["symbol"]): row["option_pullable"]
-            for row in list_underlyings(
-                store.list_index_equity_instruments(),
-                fno_eligible=store.fno_eligible_underlyings(),
-                reference_only_ids=store.reference_only_security_ids(),
-            )
-        }
-        return JSONResponse(
-            {
+        lake = lake_root.parent
+
+        def _resolve() -> dict[str, Any]:
+            """Walk the lake + tag pullability off the event loop (threadpool)."""
+            triples = resolve_report_datasets(lake, basis=report_basis)
+            # Tag each report symbol with option-pullability so /reports can badge
+            # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
+            # the SAME store calls + single-source predicate the /universe explorer
+            # uses (no duplication). A symbol absent from the underlying universe
+            # (a spot-only dataset) defaults to NOT pullable.
+            pullable = {
+                (row["exchange"], row["symbol"]): row["option_pullable"]
+                for row in list_underlyings(
+                    store.list_index_equity_instruments(),
+                    fno_eligible=store.fno_eligible_underlyings(),
+                    reference_only_ids=store.reference_only_security_ids(),
+                )
+            }
+            return {
                 "symbols": [
                     {
                         "exchange": e,
@@ -4685,7 +4719,8 @@ def build_app(
                 ],
                 "basis": report_basis,
             }
-        )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
 
     @app.get("/api/v1/reports/preopen.xlsx")
     async def api_preopen_xlsx(
@@ -4744,8 +4779,10 @@ def build_app(
             symbols=wanted,
         )
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
+        # The workbook serialisation is CPU-bound over every report row — off the
+        # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
         return Response(
-            content=render_xlsx(rows, title=title),
+            content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
@@ -4812,7 +4849,11 @@ def build_app(
             if isinstance(lake_root, Path)
             else []
         )
-        blob = render_report_zip(rows, mode=report_mode, min_pct=Decimal(str(min_pct)))
+        # One xlsx per year + zip packing is CPU-bound over every report row —
+        # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        blob = await run_in_threadpool(
+            render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
+        )
         # Self-describing download name (DEC-REPORT-FILENAME-001): mode (+ the
         # top-mover threshold where it applies) + basis + the selected symbols +
         # the range — replaces the selection-blind static "preopen_report.zip".
@@ -5114,7 +5155,11 @@ def build_app(
         from brutex.observability.logging import resolve_log_file
 
         path = resolve_log_file()
-        records = tail_records(path, max_lines=lines)
+        # A bounded read, but still DISK I/O — on a stalled/contended volume a
+        # synchronous tail would wedge the event loop with every other request
+        # behind it, so it rides the same threadpool offload as the lake reads
+        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
     # ── Database viewer (DEC-DB-VIEWER-001) ─────────────────────────
