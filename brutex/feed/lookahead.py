@@ -34,6 +34,25 @@ future index — done by the property tests and by the manual
 ``brutex verify-lookahead`` recheck. So the two guards are complementary, not
 literally redundant coverage of the same failure at the same site.
 
+**The brute-force SWEEP path (DEC-SWEEP-LOOKAHEAD-GUARD-001):** the two guards
+above wire only the library-strategy path (runner/driver); the sweep spine
+(``run_persisted_sweep`` → Stage-1A → trade sim) historically had NO runtime
+guard. It now has three layers: (1) **structural causality** (audit-verified:
+Stage-1A updates prior-bar history only AFTER evaluation; the trade sim enters
+at the NEXT bar's open); (2) **permanent suffix-independence property gates**
+(``tests/property/test_sweep_suffix_independence.py`` — bar-bits / resample /
+full-spine trades over ``bars[0..N]`` are bit-identical whether ``bars[N+1..]``
+are absent, mutated, or extreme; these run in CI forever and are the layer that
+catches a future-information flow through DERIVED state); and (3) an **opt-in
+instrumented barrier** (:mod:`brutex.engine.sweep_lookahead`, env
+``BRUTEX_SWEEP_LOOKAHEAD_GUARD=1``, default OFF) that wraps the sweep's bar
+window in an index-guarded sequence REUSING this module's
+:class:`LookAheadBarrier` — its honest envelope: it catches an indexed / sliced
+/ reversed bar read AHEAD of the sweep's forward consumption front (strongest
+during the first sequential pass), NOT a leak through already-derived per-bar
+state, and when OFF the sweep receives its original bars object unchanged
+(byte-identical, cost-unchanged hot path).
+
 **O(1) discipline (CLAUDE.md Rule #5):** every :meth:`LookAheadBarrier.access`
 / :meth:`LookAheadBarrier.advance_to` call is **O(1) per operation** — a couple
 of integer comparisons and (optionally) one list append. This is emphatically

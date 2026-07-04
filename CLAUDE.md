@@ -266,7 +266,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-heal-km3x7p` (**DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
+- **Active branch:** `claude/ci-fork-pr-harden-s7v3xq` (**DEC-CI-FORK-PR-HARDEN-001,
+  MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
+  redteam-test + docs ONLY, ZERO `brutex/` code touched: (1) `auto-merge.yml`'s trust gate
+  no longer trusts the SPOOFABLE `claude/*` head-branch NAME (a stranger's fork named
+  `claude/anything` would have been auto-squash-merged to main on green CI) — trust is now
+  the explicit author allowlist (SJParthi, dependabot[bot], renovate[bot]) OR a LIVE-API
+  `author_association` ∈ {OWNER, MEMBER, COLLABORATOR}, decision logged; every other
+  auto-merge gate byte-for-byte unchanged. (2) `pre-merge-gate.yml` (a `workflow_run` job
+  with `pull-requests: write`) no longer checks out the PR head SHA and executes
+  `scripts/ci/pre-merge-check.sh` FROM THE PR TREE (arbitrary code with the job token) —
+  checkout pinned to base `main` + `persist-credentials: false`, the PR number passed as
+  DATA only (verified: the script reads only the gh API, never the working tree);
+  `auto-merge.yml` gains the same base-pinned checkout for its rollup-gate script, also
+  fixing the latent no-checkout defect that left the DEC-MERGE-LIVE-ROLLUP-001 rollup gate
+  fail-closed INERT (every auto-merge since #944 refused with gated=false on the missing
+  script). Sweep: pre-merge-gate.yml was the ONLY privileged-trigger job checking out a
+  PR-controlled ref; a directory-wide redteam pin keeps it that way (NEW
+  `tests/redteam/test_redteam_fork_pr_harden.py`, 10 tests incl. FUNCTIONAL execution of
+  the real trust-check script with a stubbed `gh`: claude/*-named fork from a
+  non-member → trusted=false, allowlist/OWNER/MEMBER/COLLABORATOR → trusted=true). HONEST
+  (Golden Rule #10): server-side branch protection (require PR + `CI OK (aggregate gate)`
+  + up-to-date branch + restricted merge; Actions → "Require approval for all outside
+  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1176,
+  NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
   + a fully AUTOMATIC keep-FIRST healer (`brutex/data/lake_heal.py`, default AUTO-ON, escape
@@ -1533,7 +1557,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/lake-heal-km3x7p`
+- **Active feature branch:** `claude/ci-fork-pr-harden-s7v3xq`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -1591,7 +1615,23 @@ hostile-review pass._
   the same site, and NOT a perf path; the accessor is O(1) per bar access (NOT
   an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
-  DEC-DOC-DRIFT-RECONCILE-001).
+  DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
+  runner/driver guards above never covered) now has its own three-layer
+  defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1181): structural
+  causality (audit-verified — Stage-1A updates prior-bar history AFTER
+  evaluation; the trade sim enters at the next bar's open) + PERMANENT
+  suffix-independence property gates
+  (`tests/property/test_sweep_suffix_independence.py`: Stage-1A bar_bits, the
+  resample path, and full-spine trades over bars `0..N` are bit-identical
+  whether bars `N+1..` are absent, mutated, or extreme — the layer that
+  catches a leak through DERIVED state) + an OPT-IN instrumented barrier
+  (`brutex.engine.sweep_lookahead`, env `BRUTEX_SWEEP_LOOKAHEAD_GUARD=1`,
+  default OFF) wrapping the sweep's bar window in an index-guarded sequence
+  that REUSES `LookAheadBarrier` — honest envelope: it catches an indexed /
+  sliced / reversed read AHEAD of the forward consumption front (strongest on
+  the first sequential pass), NOT derived-state leaks; OFF returns the
+  identical bars object, so the hot path is byte-identical + cost-unchanged
+  (identity contract + A/B bench + the existing sweep O(1) gates).
 - **Money display = 2 decimals, money-only** (DEC-MONEY-2DP-001) — every
   paisa→rupee display goes through `brutex.money` (`format_inr` /
   `round_money` / `paisa_to_rupees`). NEVER round statistical metrics (Sharpe,
