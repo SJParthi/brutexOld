@@ -323,9 +323,15 @@ def test_dashboard_auto_resume_launch_failure_never_blocks_serving(
 def test_dashboard_without_file_handler_keeps_plain_stdout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No rotating-file handler → stdout is NOT wrapped; no-lake branch serves."""
+    """No rotating-file handler → stdout is NOT wrapped; the default lake resolves.
+
+    R2-OCLI-F6 asymmetry fix: ``brutex dashboard`` WITHOUT --lake-root now
+    resolves the default lake ($BRUTEX_LAKE_ROOT here) and opens a real
+    InstrumentStore — it no longer silently serves with NO store.
+    """
     pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
     pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
     probes: dict[str, Any] = {}
     _stub_dashboard_runtime(monkeypatch, tmp_path, probes, probe_stream=False)
     monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
@@ -346,7 +352,8 @@ def test_dashboard_without_file_handler_keeps_plain_stdout(
     out = capsys.readouterr().out
     assert "[brutex] dashboard → http://0.0.0.0:9095  (Ctrl-C to stop)" in out
     assert probes["port"] == 9095
-    assert not (tmp_path / "instruments.duckdb").exists()
+    # The default lake resolved from $BRUTEX_LAKE_ROOT → a real store opened.
+    assert (tmp_path / "instruments.duckdb").exists()
 
 
 def test_dashboard_autoload_runs_off_the_bind_path(
