@@ -1,6 +1,6 @@
 """Bounded-memory bench for the Stage-3 survivor selection (`stage3_select`).
 
-DEC-SWEEP-STREAMING-RANK-002 (#1269, part 2 of DEC-SWEEP-STREAMING-RANK-001
+DEC-SWEEP-STREAMING-RANK-002 (#1294, part 2 of DEC-SWEEP-STREAMING-RANK-001
 #1184/#1187). ``group_survivors`` used to ACCUMULATE every candidate row per
 :class:`LeaderboardKey` and two-pass sort — O(candidates) RAM. It now streams
 the rows through a bounded per-key top-K heap, so for a FIXED ``top_k`` the
@@ -20,7 +20,7 @@ suite's golden-equality job, not this bench's.
 
 The gate's TEETH are executable, per the repo precedent
 (DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1026):
-``test_gate_has_teeth_accumulate_all_exceeds_ceiling`` runs the pre-#1269
+``test_gate_has_teeth_accumulate_all_exceeds_ceiling`` runs the pre-#1294
 accumulate-all shape through the SAME harness and asserts it BLOWS the
 ceiling — so the bound can never silently go vacuous.
 """
@@ -44,7 +44,7 @@ _TOP_K = 64
 
 #: Flat-peak ceiling: a 10× candidate growth may not even double the traced
 #: peak (measured ratio ≈ 1.0 — the heap holds the SAME 64 entries either
-#: way; per-row allocations are transient). The pre-#1269 accumulate-all
+#: way; per-row allocations are transient). The pre-#1294 accumulate-all
 #: implementation measures ≈ 10× here — PINNED executably by the teeth test
 #: below, not just this comment — so the bound has real teeth while
 #: carrying generous headroom against allocator/CI noise.
@@ -91,7 +91,7 @@ def _select_bounded(rows: Iterator[ResultRow]) -> _Boards:
 
 
 def _select_accumulate_all(rows: Iterator[ResultRow]) -> _Boards:
-    """TEETH oracle — the pre-#1269 accumulate-ALL-then-two-pass-sort shape.
+    """TEETH oracle — the pre-#1294 accumulate-ALL-then-two-pass-sort shape.
 
     Mirrors the unit suite's ``_group_survivors_reference`` (the verbatim
     old implementation) but consumes the SAME streamed iterator as the
@@ -140,7 +140,7 @@ class TestGroupSurvivorsPeakRamIsBoundedInCandidates:
         )
 
     def test_gate_has_teeth_accumulate_all_exceeds_ceiling(self) -> None:
-        """The pre-#1269 accumulate-all shape BLOWS the same ceiling (~10×).
+        """The pre-#1294 accumulate-all shape BLOWS the same ceiling (~10×).
 
         Runs the old retention strategy through the IDENTICAL harness
         (same generator, same K, same ratio law) and asserts it FAILS the

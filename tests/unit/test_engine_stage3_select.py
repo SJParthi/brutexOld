@@ -9,9 +9,9 @@ the ``top_k < 1`` guards on BOTH entry points, the deterministic leaderboard
 iteration order, and the real-Parquet disk round-trip through
 ``load_results_tree`` (missing root raises; empty tree yields {}).
 
-DEC-SWEEP-STREAMING-RANK-002 (#1269) replaced the accumulate-then-two-pass-sort
+DEC-SWEEP-STREAMING-RANK-002 (#1294) replaced the accumulate-then-two-pass-sort
 core with a bounded per-key top-K heap; ``_group_survivors_reference`` below is
-a VERBATIM copy of the pre-#1269 implementation and the golden-equality suite
+a VERBATIM copy of the pre-#1294 implementation and the golden-equality suite
 (:class:`TestGoldenEqualityVsReference`) pins byte-identical output (``repr``
 string equality — key order AND per-board row order AND every row field) over
 adversarial fixtures: equal-Sharpe tie clusters larger than K, duplicate
@@ -207,7 +207,7 @@ class TestSelectStage3Survivors:
 def _group_survivors_reference(
     rows: list[ResultRow], *, top_k: int = DEFAULT_STAGE3_TOP_K
 ) -> dict[LeaderboardKey, tuple[ResultRow, ...]]:
-    """VERBATIM pre-#1269 implementation — the golden oracle for byte-identity.
+    """VERBATIM pre-#1294 implementation — the golden oracle for byte-identity.
 
     Copied unchanged from ``group_survivors`` as merged by DEC-STAGE3-TOPK-001
     (the O(candidates)-RAM accumulate-then-two-pass-sort the bounded heap of
@@ -350,7 +350,7 @@ class TestHeapEntryOrdering:
 
 
 class TestGoldenEqualityVsReference:
-    """New bounded-heap output is byte-identical to the pre-#1269 reference."""
+    """New bounded-heap output is byte-identical to the pre-#1294 reference."""
 
     K = 3
 

@@ -15,7 +15,7 @@ Design (CLAUDE.md §11 COMMON — reuse, never re-implement):
 * :func:`group_survivors` is the **pure** core: group rows by
   :class:`LeaderboardKey`, keep each leaderboard's top-*top_k* in a BOUNDED
   per-key min-heap (DEC-SWEEP-STREAMING-RANK-002 — O(top_k) rows retained per
-  key instead of the pre-#1269 accumulate-then-sort O(rows)), then emit the
+  key instead of the pre-#1294 accumulate-then-sort O(rows)), then emit the
   kept rows in EXACTLY the proven store discipline order (``sharpe_ratio``
   descending, ties broken by ``run_id`` ascending, deeper ties by insertion
   order — byte-identical to the original stable two-pass sort, mirroring
@@ -91,7 +91,7 @@ class _HeapEntry:
     row, so the order is a STRICT total order and eviction is deterministic:
     among equal-lowest-Sharpe entries the LARGEST ``run_id`` sits at the root
     and is evicted first (``run_id`` asc is preferred), byte-identical to the
-    pre-#1269 accumulate-then-sort trim (Golden Rule #4).
+    pre-#1294 accumulate-then-sort trim (Golden Rule #4).
 
     ``sharpe`` is carried at FULL precision, never rounded (the
     DEC-MONEY-2DP-001 boundary: money only — statistical metrics keep every
@@ -146,7 +146,7 @@ def group_survivors(
 
     RAM is BOUNDED (DEC-SWEEP-STREAMING-RANK-002): each key holds at most
     *top_k* rows in a min-heap while *rows* streams through — O(top_k) space
-    per leaderboard instead of the pre-#1269 O(candidates) accumulate-then-
+    per leaderboard instead of the pre-#1294 O(candidates) accumulate-then-
     two-pass-sort — and the emitted selection is byte-identical to that old
     path (pinned by the golden-equality suite against a verbatim reference
     copy of the old implementation).
