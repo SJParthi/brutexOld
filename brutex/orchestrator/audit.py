@@ -697,12 +697,49 @@ class BufferedAuditCollector:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _read_entries_with_torn_tail(path: Path) -> tuple[list[AuditEntry], bool]:
-    """Read every entry from *path*, tolerating a single torn final line.
+def _iter_committed_entries(path: Path) -> Iterator[AuditEntry]:
+    """Generator body of :func:`iter_entries` — one parsed entry per committed line.
 
-    Returns the parsed entries plus a flag that is ``True`` when the file's
-    LAST line was a **torn tail** — an interrupted append left behind by a
-    crash / ``SIGKILL`` mid-write (DEC-AUDIT-TORN-TAIL-001).
+    Applies the DEC-AUDIT-TORN-TAIL-001 discriminator line by line (see
+    :func:`iter_entries` for the full contract): an unterminated FINAL line is
+    an uncommitted torn tail and is skipped, a blank committed line is benign
+    filler, and a malformed committed (newline-terminated) line is REAL
+    corruption and raises :class:`AuditError` naming ``path:line_no``. Peak
+    memory is O(1) — one raw line + one parsed entry at a time, never the
+    whole log (DEC-AUDIT-VERIFY-STREAM-001; the port of
+    :func:`brutex.engine.sweep_audit._iter_committed_entries`'s pattern).
+    """
+    with open(path, encoding="utf-8") as f:
+        for line_no, raw in enumerate(f, start=1):
+            if not raw.endswith("\n"):
+                # Unterminated final line == interrupted append == torn tail.
+                # A purely-blank unterminated tail (e.g. the crash struck right
+                # at the start of the record) carries no entry but is still the
+                # torn remnant the resume path truncates; a content-bearing one
+                # is the partial/complete-but-unterminated record. Either way it
+                # is uncommitted: skip it (only the FILE's final line can ever
+                # lack the "\n" — the writer appends `line + "\n"` in one write).
+                continue
+            line = raw.rstrip("\n")
+            if not line:
+                # A blank committed line (newline-terminated) is benign filler
+                # and is skipped without affecting the chain.
+                continue
+            try:
+                yield AuditEntry.from_json_line(line)
+            except AuditError as exc:
+                raise AuditError(f"{path}:{line_no}: {exc}") from exc
+
+
+def iter_entries(path: Path) -> Iterator[AuditEntry]:
+    """Stream every committed entry from *path* WITHOUT verifying the chain.
+
+    The O(1)-memory streaming primitive (DEC-AUDIT-VERIFY-STREAM-001) behind
+    :func:`read_entries` and :func:`verify_chain` — the SHA-256 orchestrator
+    twin of :func:`brutex.engine.sweep_audit.iter_entries` (that chain is
+    BLAKE3; they deliberately do not import one another): entries are parsed
+    one line at a time, so a multi-GB audit log is scanned without ever
+    materialising the whole chain into a list.
 
     Torn-tail discriminator (hash-chain-safe)
     -----------------------------------------
@@ -714,14 +751,62 @@ def _read_entries_with_torn_tail(path: Path) -> tuple[list[AuditEntry], bool]:
     whether its JSON is partial or even complete-but-unterminated — is an
     UNCOMMITTED torn tail and is skipped so an unattended resume can recover
     from the last complete, hash-valid entry instead of dying with
-    :class:`AuditError`.
+    :class:`AuditError`. Everything that IS newline-terminated is a committed
+    record and is parsed strictly: a malformed line that carries a trailing
+    newline is REAL corruption and still raises. Mid-file integrity is NOT
+    weakened — only an unterminated tail is forgiven, and the hash chain over
+    the committed prefix is still verified by :func:`verify_chain`.
 
-    Everything that IS newline-terminated is a committed record and is parsed
-    strictly: a malformed line that carries a trailing newline (so it is NOT
-    the file's final line) is REAL corruption and still raises
-    :class:`AuditError`. Mid-file integrity is NOT weakened — only an
-    unterminated tail is forgiven, and the hash chain over the committed prefix
-    is still verified by :func:`verify_chain`.
+    Parameters
+    ----------
+    path
+        The audit ``.jsonl`` file.
+
+    Returns
+    -------
+    Iterator[AuditEntry]
+        Lazily-parsed committed entries in file order.
+
+    Raises
+    ------
+    AuditError
+        Immediately (at call time) if the file is missing; during iteration if
+        any committed (newline-terminated) line is malformed / missing
+        required fields.
+    """
+    if not path.exists():
+        raise AuditError(f"Audit log not found: {path}")
+    return _iter_committed_entries(path)
+
+
+def _has_torn_tail(path: Path) -> bool:
+    """Return ``True`` iff *path* ends in an unterminated (torn) final line — O(1).
+
+    The same predicate :func:`_read_tail_entry` computes inline (the file does
+    not end in ``"\\n"``): an unterminated final line is an interrupted append
+    (DEC-AUDIT-TORN-TAIL-001). An empty file has no lines, so it is never torn.
+    One ``seek`` + a single-byte read — never the whole log.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size == 0:
+            return False
+        f.seek(size - 1)
+        return f.read(1) != b"\n"
+
+
+def _read_entries_with_torn_tail(path: Path) -> tuple[list[AuditEntry], bool]:
+    """Read every entry from *path*, tolerating a single torn final line.
+
+    Returns the parsed entries plus a flag that is ``True`` when the file's
+    LAST line was a **torn tail** — an interrupted append left behind by a
+    crash / ``SIGKILL`` mid-write (DEC-AUDIT-TORN-TAIL-001). Re-expressed over
+    the streaming :func:`iter_entries` + the O(1) :func:`_has_torn_tail`
+    predicate (DEC-AUDIT-VERIFY-STREAM-001) — the discriminator lives in ONE
+    place (CLAUDE.md §11 COMMON); the list materialisation here is this
+    variant's deliberate contract. See :func:`iter_entries` for the full
+    torn-tail discriminator.
 
     Raises
     ------
@@ -729,32 +814,8 @@ def _read_entries_with_torn_tail(path: Path) -> tuple[list[AuditEntry], bool]:
         If the file is missing, or any committed (newline-terminated) line is
         malformed / missing required fields.
     """
-    if not path.exists():
-        raise AuditError(f"Audit log not found: {path}")
-    entries: list[AuditEntry] = []
-    torn_tail = False
-    with open(path, encoding="utf-8") as f:
-        for line_no, raw in enumerate(f, start=1):
-            terminated = raw.endswith("\n")
-            line = raw.rstrip("\n")
-            if not terminated:
-                # Unterminated final line == interrupted append == torn tail.
-                # A purely-blank unterminated tail (e.g. the crash struck right
-                # at the start of the record) carries no entry but is still the
-                # torn remnant the resume path truncates; a content-bearing one
-                # is the partial/complete-but-unterminated record. Either way it
-                # is uncommitted: skip it and flag the tail for truncation.
-                torn_tail = True
-                continue
-            if not line:
-                # A blank committed line (newline-terminated) is benign filler
-                # and is skipped without affecting the chain.
-                continue
-            try:
-                entries.append(AuditEntry.from_json_line(line))
-            except AuditError as exc:
-                raise AuditError(f"{path}:{line_no}: {exc}") from exc
-    return entries, torn_tail
+    entries = list(iter_entries(path))
+    return entries, _has_torn_tail(path)
 
 
 def _read_entries(path: Path) -> list[AuditEntry]:
@@ -980,7 +1041,17 @@ def _truncate_torn_tail(path: Path) -> None:
 
 
 def verify_chain(path: Path) -> int:
-    """Read *path* and verify the hash chain.
+    """Stream *path* and verify the SHA-256 hash chain end-to-end — O(1) memory.
+
+    Iterates :func:`iter_entries` one entry at a time
+    (DEC-AUDIT-VERIFY-STREAM-001 — the port of the
+    :func:`brutex.engine.sweep_audit.verify_chain` generator pattern), carrying
+    only the previous ``entry_hash`` + the running count — a multi-GB audit log
+    verifies without materialising the whole chain into memory (the prior
+    implementation built the full entry list first). The per-entry checks are
+    unchanged: seq ordering, ``prev_hash`` linkage, recomputed ``entry_hash``
+    (including the tampered non-finite-payload mapping to
+    :class:`AuditChainCorruption`).
 
     Returns the number of entries verified. Raises
     :exc:`AuditChainCorruption` on the first mismatch with details
@@ -1004,11 +1075,10 @@ def verify_chain(path: Path) -> int:
         Number of entries successfully verified. A value of ``0`` means
         the file exists but is empty (trivially valid).
     """
-    entries = _read_entries(path)
-
     prev_hash = GENESIS_PREV_HASH
+    verified = 0
 
-    for expected_seq, entry in enumerate(entries):
+    for expected_seq, entry in enumerate(iter_entries(path)):
         # 1. seq is a strictly increasing 0-based counter
         if entry.seq != expected_seq:
             raise AuditChainCorruption(
@@ -1050,8 +1120,9 @@ def verify_chain(path: Path) -> int:
                 reason="entry_hash does not match recomputed hash (content tampered)",
             )
         prev_hash = entry.entry_hash
+        verified += 1
 
-    return len(entries)
+    return verified
 
 
 def read_entries(path: Path) -> list[AuditEntry]:
@@ -1076,6 +1147,7 @@ __all__ = [
     "AuditWriter",
     "BufferedAuditCollector",
     "BufferedAuditRecord",
+    "iter_entries",
     "read_entries",
     "verify_chain",
 ]
