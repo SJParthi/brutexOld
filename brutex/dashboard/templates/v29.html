@@ -3492,6 +3492,36 @@
       });
     });
 
+    // Shared trailing-edge debounce (DEC-DASHBOARD-JS-PERF-001): the wrapped
+    // fn runs ONCE, ~ms after the LAST call, always with the final values.
+    const debounce = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
+
+    // #comboMeta static structure — built ONCE on the first filter run (lazy,
+    // so the initial "Showing top …" markup stays untouched until a filter is
+    // used, exactly like the innerHTML rewrite this replaces); afterwards only
+    // the count <strong> is patched via textContent, and only when it changed.
+    // No innerHTML sink at all on this path (createElement + textContent).
+    let comboMetaCountEl = null;
+    let comboMetaLastVisible = null;
+    function renderComboMeta(visible) {
+      if (visible === comboMetaLastVisible) return;
+      comboMetaLastVisible = visible;
+      if (!comboMetaCountEl) {
+        const meta = document.getElementById('comboMeta');
+        meta.textContent = 'Showing ';
+        comboMetaCountEl = document.createElement('strong');
+        comboMetaCountEl.style.color = 'var(--text)';
+        meta.appendChild(comboMetaCountEl);
+        meta.appendChild(document.createTextNode(' of '));
+        const totalEl = document.createElement('strong');
+        totalEl.style.color = 'var(--text)';
+        totalEl.textContent = '12,847';
+        meta.appendChild(totalEl);
+        meta.appendChild(document.createTextNode(' passing combos'));
+      }
+      comboMetaCountEl.textContent = String(visible);
+    }
+
     function applyFilters() {
       const inst = document.getElementById('fInst').value;
       const tf = document.getElementById('fTF').value;
@@ -3500,11 +3530,13 @@
       const minDSR = parseFloat(document.getElementById('fDSR').value) || 0;
       let visible = 0;
       document.querySelectorAll('#combosBody tr').forEach(row => {
-        const rowInst = row.children[2].textContent.trim();
-        const rowTF = row.children[3].textContent.trim();
-        const rowDir = row.children[4].textContent.trim();
-        const rowSharpe = parseFloat(row.children[8].dataset.sort || 0);
-        const rowDSR = parseFloat(row.children[9].dataset.sort || 0);
+        // Column order per the thead: Rank0 Combo1 Strategy2 Inst3 TF4 Dir5
+        // Trades6 Gross7 Charges8 Net9 Smooth10 RealEdge11 Score12.
+        const rowInst = row.children[3].textContent.trim();
+        const rowTF = row.children[4].textContent.trim();
+        const rowDir = row.children[5].textContent.trim();
+        const rowSharpe = parseFloat(row.children[10].dataset.sort || 0);
+        const rowDSR = parseFloat(row.children[11].dataset.sort || 0);
         const ok = (!inst || rowInst === inst)
                 && (!tf || rowTF === tf)
                 && (!dir || rowDir.includes(dir))
@@ -3513,15 +3545,18 @@
         row.style.display = ok ? '' : 'none';
         if (ok) visible++;
       });
-      document.getElementById('comboMeta').innerHTML = `Showing <strong style="color:var(--text)">${visible}</strong> of <strong style="color:var(--text)">12,847</strong> passing combos`;
+      renderComboMeta(visible);
     }
+    const applyFiltersDebounced = debounce(applyFilters, 200);
     ['fInst', 'fTF', 'fDir', 'fSharpe', 'fDSR'].forEach(id => {
-      document.getElementById(id).addEventListener('change', applyFilters);
-      document.getElementById(id).addEventListener('input', applyFilters);
+      // ONE 'input' binding ('input' fires on select changes too in evergreen
+      // browsers) — the prior 'change'+'input' double-bind ran the row filter
+      // twice per select change and once per keystroke, undebounced.
+      document.getElementById(id).addEventListener('input', applyFiltersDebounced);
     });
     document.getElementById('filterReset').addEventListener('click', () => {
       ['fInst', 'fTF', 'fDir', 'fSharpe', 'fDSR'].forEach(id => document.getElementById(id).value = '');
-      applyFilters();
+      applyFilters();  // reset stays SYNCHRONOUS — immediate feedback
     });
 
     // Row click → switch to Metrics tab
@@ -3553,6 +3588,12 @@
       { id: 'sCPCV', label: 'vCPCV', prefix: '≥', suffix: '%', dec: 0 }
     ];
 
+    // Reality-banner state key (DEC-DASHBOARD-JS-PERF-001): the ~600-char
+    // banner innerHTML is reassigned ONLY when the branch (or its embedded
+    // numbers) changes, not on every slider drag tick. The strings below are
+    // static template text — no server/user data reaches this existing sink.
+    let lastBannerKey = '';
+
     function updatePassCount() {
       const win  = parseFloat(document.getElementById('sWin').value);
       const loss = parseFloat(document.getElementById('sLoss').value);
@@ -3572,15 +3613,19 @@
       if (el) el.textContent = count.toLocaleString('en-IN');
       const banner = document.getElementById('realityBanner');
       if (banner) {
-        if (count === 0) {
-          banner.classList.add('error');
-          banner.querySelector('.txt').innerHTML = '<strong>⚠ Zero combos pass these thresholds.</strong> You\'re asking for something the data does NOT contain. Try relaxing the strictest one (most likely Win Rate &gt; 80% or Max DD &lt; 2%). The sweep distribution shows what\'s actually achievable — 100% win rate without hidden risk does not exist.';
-        } else if (win >= 80) {
-          banner.classList.remove('error');
-          banner.querySelector('.txt').innerHTML = '<strong>Heads up:</strong> Win rate ≥' + win + '% is rare (' + count + ' combos pass). These tend to be low-frequency strategies — fewer trades, smaller total profit. If "extreme massive target profit" is your priority, consider lowering Win Rate to 60-72% range where high-trade-count strategies live.';
-        } else {
-          banner.classList.remove('error');
-          banner.querySelector('.txt').innerHTML = '<strong>Reality check on "only winning" / 100% win rate:</strong> No real strategy hits 100% without hidden tail risk (e.g. selling deep-OTM options has 95%+ win rate but one bad day wipes years of gains). Sustainable strategies in the BruteX sweep cluster around <strong>55-72% win rate</strong>. Above 80% exists but trades rarely (low frequency, high selectivity). Your <strong>"extreme massive target profit"</strong> aim is best achieved by combos in the 60-72% win-rate range with high trade count — that\'s where the Sweet Spot sort puts them.';
+        const bannerKey = count === 0 ? 'zero' : (win >= 80 ? 'high:' + win + ':' + count : 'normal');
+        if (bannerKey !== lastBannerKey) {
+          lastBannerKey = bannerKey;
+          if (count === 0) {
+            banner.classList.add('error');
+            banner.querySelector('.txt').innerHTML = '<strong>⚠ Zero combos pass these thresholds.</strong> You\'re asking for something the data does NOT contain. Try relaxing the strictest one (most likely Win Rate &gt; 80% or Max DD &lt; 2%). The sweep distribution shows what\'s actually achievable — 100% win rate without hidden risk does not exist.';
+          } else if (win >= 80) {
+            banner.classList.remove('error');
+            banner.querySelector('.txt').innerHTML = '<strong>Heads up:</strong> Win rate ≥' + win + '% is rare (' + count + ' combos pass). These tend to be low-frequency strategies — fewer trades, smaller total profit. If "extreme massive target profit" is your priority, consider lowering Win Rate to 60-72% range where high-trade-count strategies live.';
+          } else {
+            banner.classList.remove('error');
+            banner.querySelector('.txt').innerHTML = '<strong>Reality check on "only winning" / 100% win rate:</strong> No real strategy hits 100% without hidden tail risk (e.g. selling deep-OTM options has 95%+ win rate but one bad day wipes years of gains). Sustainable strategies in the BruteX sweep cluster around <strong>55-72% win rate</strong>. Above 80% exists but trades rarely (low frequency, high selectivity). Your <strong>"extreme massive target profit"</strong> aim is best achieved by combos in the 60-72% win-rate range with high trade count — that\'s where the Sweet Spot sort puts them.';
+          }
         }
       }
     }
@@ -3933,6 +3978,16 @@
       return String(n);
     }
 
+    // DEC-DASHBOARD-JS-PERF-001: the [data-bind] set is STATIC in this
+    // template (no node with the attribute is ever added or removed at
+    // runtime), so cache the NodeList once instead of re-querying the whole
+    // document every 2 s tick.
+    const stateBoundEls = document.querySelectorAll('[data-bind]');
+    // Last-rendered funnel payload — a byte-identical re-fetch is skipped
+    // entirely (zero DOM writes on an unchanged tick). CLIENT-side compare
+    // only; backend payloads are frozen (no generation field added).
+    let lastFunnelPayload = '';
+
     async function pollState() {
       try {
         const res = await fetch('/api/v1/state');
@@ -3943,7 +3998,10 @@
         // DATA badge stays visible per §6.4 step 5).
         const funnel = snap.sweep_funnel;
         if (!funnel) return;
-        document.querySelectorAll('[data-bind]').forEach(function (el) {
+        const payload = JSON.stringify(funnel);
+        if (payload === lastFunnelPayload) return;  // unchanged → skip render
+        lastFunnelPayload = payload;
+        stateBoundEls.forEach(function (el) {
           const key = el.getAttribute('data-bind');
           if (funnel[key] !== undefined && funnel[key] !== null) {
             el.textContent = formatNumber(funnel[key]);
@@ -3983,6 +4041,11 @@
       if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
       return n.toFixed(n >= 10 ? 0 : 1);
     }
+    // DEC-DASHBOARD-JS-PERF-001: static [data-sweep] set — cached once, and a
+    // byte-identical snapshot is skipped (zero DOM writes on an unchanged
+    // tick). CLIENT-side compare only; backend payloads are frozen.
+    const sweepBoundEls = document.querySelectorAll('[data-sweep]');
+    let lastSweepPayload = '';
     async function pollSweepProgress() {
       try {
         const res = await fetch('/api/v1/sweep-progress');
@@ -3990,8 +4053,13 @@
         const sp = await res.json();
         if (!sp || sp.state === 'idle') return;  // nothing running yet
         const panel = document.getElementById('sweepProgressPanel');
+        // Un-hide BEFORE the skip gate so the first running snapshot always
+        // reveals the panel (re-assigning hidden=false is a no-op after that).
         if (panel) panel.hidden = false;
-        document.querySelectorAll('[data-sweep]').forEach(function (el) {
+        const payload = JSON.stringify(sp);
+        if (payload === lastSweepPayload) return;  // unchanged → skip render
+        lastSweepPayload = payload;
+        sweepBoundEls.forEach(function (el) {
           const key = el.getAttribute('data-sweep');
           let v = sp[key];
           if (key === 'eta_seconds') v = fmtEta(v);
