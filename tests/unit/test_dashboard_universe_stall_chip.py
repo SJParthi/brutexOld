@@ -161,8 +161,7 @@ def _nifty() -> Instrument:
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
     """A TestClient over a real wired store; credentials redirected to a tmp file."""
     monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
         store.upsert_many(
             [_nifty()],
             snapshot_date=date(2024, 1, 2),
@@ -171,8 +170,6 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClie
         )
         with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
             yield c
-    finally:
-        store.close()
 
 
 def test_pull_progress_payload_carries_stall_fields(client: TestClient) -> None:
