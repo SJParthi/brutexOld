@@ -1029,6 +1029,20 @@ def build_parser() -> argparse.ArgumentParser:
             "SweepCacheCapacityError)"
         ),
     )
+    sweep_all.add_argument(
+        "--acknowledge-sla-overrun",
+        action="store_true",
+        dest="acknowledge_sla_overrun",
+        help=(
+            "Proceed even when the projected wall-clock (tuple_count × an "
+            "UNBENCHMARKED per-tuple estimate, override via "
+            "BRUTEX_SWEEP_PER_TUPLE_SECONDS) exceeds the CLAUDE.md §8 2-4-day "
+            "envelope. Default: REFUSE with the honest projection "
+            "(DEC-SLA-LAUNCH-GUARD-001); acknowledging proceeds with a LOUD "
+            "warning. Manual sweep-all only — the unattended daemon never "
+            "acknowledges an overrun"
+        ),
+    )
 
     # ── sweep-daemon (DEC-SWEEP-SCHEDULER-001) — scheduled/daemon sweep runner ──
     # The AUTOMATIC twin of `sweep-all` (CLAUDE.md §11 manual⇄automatic duality):
@@ -3694,65 +3708,72 @@ def cmd_fetch(
                 raise
 
         until_outcome = None
-        try:
-            if until_clean:
-                # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
-                # rounds — each a full pass over the SHARED window ledger (re-fetches
-                # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
-                # SAME retry engine via run_until_clean, until clean / token dead / outer
-                # budget spent. Bounded round count (never an O(1)-total claim). The
-                # driver itself is vendor-neutral (pure 4-way decision + an injected
-                # round_runner) and lives in the vendor-neutral ingest_common home.
-                from brutex.adapters.ingest_common import (
-                    DEFAULT_MAX_ROUNDS,
-                    UntilCleanRound,
-                    run_until_clean,
-                )
+        # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
+        # whole fetch (including every until-clean round + the drain/persist
+        # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
+        # Best-effort: non-darwin / missing caffeinate is a logged no-op.
+        from brutex.observability.power_keepawake import keep_awake
 
-                fetch_passes: list[Any] = []
-
-                def _round_runner() -> UntilCleanRound:
-                    """One until-clean round = one full fetch pass; recorded for the summary.
-
-                    Groww's report has no ``auth_cause`` string (no fail-fast latch — the
-                    documented divergence; it derives ``auth_aborted`` from the quarantined
-                    failures), so the round leaves ``auth_cause`` at its ``None`` default.
-                    """
-                    res = _one_fetch_pass(True)
-                    fetch_passes.append(res)
-                    return UntilCleanRound(
-                        still_failed_windows=res.report.still_failed_windows,
-                        auth_aborted=res.report.auth_aborted,
+        with keep_awake("brutex fetch"):
+            try:
+                if until_clean:
+                    # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
+                    # rounds — each a full pass over the SHARED window ledger (re-fetches
+                    # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
+                    # SAME retry engine via run_until_clean, until clean / token dead / outer
+                    # budget spent. Bounded round count (never an O(1)-total claim). The
+                    # driver itself is vendor-neutral (pure 4-way decision + an injected
+                    # round_runner) and lives in the vendor-neutral ingest_common home.
+                    from brutex.adapters.ingest_common import (
+                        DEFAULT_MAX_ROUNDS,
+                        UntilCleanRound,
+                        run_until_clean,
                     )
 
-                rounds_budget = (
-                    until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
-                )
-                until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
-                result = fetch_passes[0]
-            else:
-                result = _one_fetch_pass(do_retry)
-        finally:
-            # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
-            # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
-            # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
-            # `sink.append` which may FEED the write consumer, so the pipeline must be drained
-            # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
-            # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
-            # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
-            # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
-            # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
-            # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
-            # error is swallowed so the ledger persist still runs.
-            drain_fetch_pipeline(fetch_pipeline)
-            drain_write_consumer(write_consumer)
-            end_pull_ledger(ledger, resolved, dry_run=_no_persist)
-            # Final bridge publish (DEC-CLI-BRIDGE-PULL-ACTIVE-001): flip pull_active
-            # → False so the dashboard widget reads done/idle the moment the pull
-            # ends. Best-effort — swallows EVERYTHING (even LakeWriteHalt): the pull
-            # is already exiting and its real outcome must never be masked. A None
-            # controller (--dry-run / --inspect) is a no-op.
-            _publish_cli_pull_inactive(resolved, rate_controller, adapter)
+                    fetch_passes: list[Any] = []
+
+                    def _round_runner() -> UntilCleanRound:
+                        """One until-clean round = one full fetch pass; recorded for the summary.
+
+                        Groww's report has no ``auth_cause`` string (no fail-fast latch — the
+                        documented divergence; it derives ``auth_aborted`` from the quarantined
+                        failures), so the round leaves ``auth_cause`` at its ``None`` default.
+                        """
+                        res = _one_fetch_pass(True)
+                        fetch_passes.append(res)
+                        return UntilCleanRound(
+                            still_failed_windows=res.report.still_failed_windows,
+                            auth_aborted=res.report.auth_aborted,
+                        )
+
+                    rounds_budget = (
+                        until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
+                    )
+                    until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
+                    result = fetch_passes[0]
+                else:
+                    result = _one_fetch_pass(do_retry)
+            finally:
+                # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
+                # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
+                # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
+                # `sink.append` which may FEED the write consumer, so the pipeline must be drained
+                # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
+                # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
+                # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
+                # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
+                # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
+                # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
+                # error is swallowed so the ledger persist still runs.
+                drain_fetch_pipeline(fetch_pipeline)
+                drain_write_consumer(write_consumer)
+                end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+                # Final bridge publish (DEC-CLI-BRIDGE-PULL-ACTIVE-001): flip pull_active
+                # → False so the dashboard widget reads done/idle the moment the pull
+                # ends. Best-effort — swallows EVERYTHING (even LakeWriteHalt): the pull
+                # is already exiting and its real outcome must never be masked. A None
+                # controller (--dry-run / --inspect) is a no-op.
+                _publish_cli_pull_inactive(resolved, rate_controller, adapter)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -4095,6 +4116,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     sweep_cache_map_mb: int | None = None,
     sweep_cache_bloom_capacity: int | None = None,
     allow_out_of_scope: bool = False,
+    acknowledge_sla_overrun: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -4352,6 +4374,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         except Stage3WireError as exc:
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
+
+    # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001): project the grid's
+    # wall-clock as tuple_count × an UNBENCHMARKED per-tuple estimate
+    # (BRUTEX_SWEEP_PER_TUPLE_SECONDS overrides) and REFUSE a launch projected
+    # past the CLAUDE.md §8 2-4-day envelope unless the operator passed
+    # --acknowledge-sla-overrun (then WARN loudly and proceed). Honest per
+    # Golden Rule #10: an estimate-based plausibility screen — it never
+    # certifies the §8 SLA (which remains UNMEASURED) either way.
+    from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla
+
+    try:
+        sla = check_sweep_sla(count_sweep_tuples(grid), acknowledge=acknowledge_sla_overrun)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.REFUSED:
+        print(f"[brutex] {sla.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.ACKNOWLEDGED:
+        print(f"[brutex] WARNING: {sla.acknowledged_warning()}")
 
     # Dead launch Bloom KILLED (R2-SL-F1): this launcher runs the production
     # DIGEST path — ``run_one_tuple`` always passes a non-None
@@ -4872,6 +4914,14 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
         f"[brutex] supervisor starting — child: {' '.join(argv)} — audit: {audit_path}",
     )
 
+    # Crash-loop operator alert (DEC-SUPERVISOR-CRASHLOOP-ALERT-001): every
+    # abnormal-exit relaunch fires one best-effort, deduped Telegram push
+    # (CRITICAL once 3 relaunches land within the rolling window), so a child
+    # OOM-SIGKILL-looping all night can never stay silent. Best-effort + a
+    # silent no-op when Telegram is disabled (the default) — the supervisor's
+    # relaunch behaviour is byte-unchanged.
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
     with SweepAuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
         supervisor = ProcessSupervisor(
             launch=build_subprocess_launcher(argv),
@@ -4884,6 +4934,7 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
                 if shutdown_grace_seconds is not None
                 else DEFAULT_SHUTDOWN_GRACE_SECONDS
             ),
+            alerter=SweepAlerter(),
         )
         result = supervisor.run()
 
@@ -6363,6 +6414,7 @@ def main(argv: list[str] | None = None) -> int:
             sweep_cache_map_mb=args.sweep_cache_map_mb,
             sweep_cache_bloom_capacity=args.sweep_cache_bloom_capacity,
             allow_out_of_scope=args.allow_out_of_scope,
+            acknowledge_sla_overrun=args.acknowledge_sla_overrun,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.

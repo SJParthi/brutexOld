@@ -20,6 +20,8 @@ pytest.importorskip("trading_core", reason="greeks enrichment needs the trading_
 
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
+    DEGENERATE_TIME_VALUE_REL,
+    STATUS_BELOW_INTRINSIC,
     STATUS_OK,
     enrich_option_bars,
     expiry_instant_utc,
@@ -135,14 +137,31 @@ class TestStoredNoArbProperties:
     @settings(max_examples=25, deadline=None)
     @given(sigma=st.floats(min_value=0.08, max_value=0.6), strike=_STRIKE_GRID)
     def test_iv_round_trip_recovers_sigma(self, sigma: float, strike: int) -> None:
-        bar = _enrich(_ce(strike), _kernel_premium(strike, sigma, is_call=True))
+        premium = _kernel_premium(strike, sigma, is_call=True)
+        bar = _enrich(_ce(strike), premium)
         pid = bar.greeks_provenance_id
         assert pid is not None
-        assert unpack_greeks_provenance(pid).status == STATUS_OK
-        assert bar.iv is not None
-        # The stored IV reprices the kernel-generated premium — the kernel's own
-        # 1e-9 verification bound, relaxed only for the premium's f64 quantization.
-        assert bar.iv == pytest.approx(sigma, rel=5e-6, abs=5e-7)
+        rate = _RATE.rate_on(_TS.date())
+        parts = parse_fno_symbol(_ce(strike))
+        assert parts is not None
+        t = t_years_act365(_TS, expiry_instant_utc(parts.expiry))
+        floor = max(0.0, float(_SPOT) - strike * math.exp(-rate.rate * t))
+        if premium <= floor + DEGENERATE_TIME_VALUE_REL * premium:
+            # ~zero time value (deep-ITM at low sigma): sigma is NOT
+            # recoverable from the premium — any sigma across a wide band
+            # reprices it within the kernel's verification tolerance, so the
+            # enrichment honestly refuses instead of storing an arbitrary
+            # root (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-1; the pre-fix pin
+            # asserted STATUS_OK here, i.e. the artifact itself).
+            assert unpack_greeks_provenance(pid).status == STATUS_BELOW_INTRINSIC
+            assert bar.iv is None
+        else:
+            assert unpack_greeks_provenance(pid).status == STATUS_OK
+            assert bar.iv is not None
+            # The stored IV reprices the kernel-generated premium — the
+            # kernel's own 1e-9 verification bound, relaxed only for the
+            # premium's f64 quantization.
+            assert bar.iv == pytest.approx(sigma, rel=5e-6, abs=5e-7)
 
     @settings(max_examples=15, deadline=None)
     @given(sigma=st.floats(min_value=0.1, max_value=0.5))
