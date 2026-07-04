@@ -226,9 +226,7 @@ def test_combo_mask_doctests_pass() -> None:
     """
     import doctest
 
-    import brutex.engine.combo_mask as combo_mask_module
-
-    results = doctest.testmod(combo_mask_module)
+    results = doctest.testmod(combo_mask)
     assert results.failed == 0
     assert results.attempted > 0
 
