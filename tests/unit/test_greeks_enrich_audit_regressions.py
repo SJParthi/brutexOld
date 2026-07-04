@@ -367,6 +367,74 @@ class TestReuseGateValueHardening:
         assert spy.calls == 1  # pre-fix: 3 (once per bar)
 
 
+class TestSpotSnapConvergence:
+    """SPOTJOIN-3 (FIX-6): a legacy non-2dp spot close converges, no rewrite loop.
+
+    The fresh bar carried the RAW join Decimal while the writer snaps
+    ``spot_at_bar`` to 2dp at the lake boundary, so a legacy non-2dp spot
+    partition made every pass read ``fresh != stored`` — ``enriched=1`` and a
+    spurious flock-guarded rewrite attempt FOREVER. The join spot is now
+    snapped once at bar-build time (``round_money`` — spot_at_bar ONLY, never
+    a Greek/iv/t/rate, DEC-MONEY-2DP-001), so the second pass reads
+    ``already_current``.
+    """
+
+    def test_legacy_non_2dp_spot_converges_on_second_pass(self, tmp_path: Path) -> None:
+        pl = pytest.importorskip("polars")
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+
+        def _bar(close: str, *, oi: int | None) -> CandleBar:
+            d = Decimal(close)
+            return CandleBar(
+                timestamp=_BAR_TS,
+                open=d,
+                high=d,
+                low=d,
+                close=d,
+                volume=10,
+                open_interest=oi,
+            )
+
+        sink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[_bar("30000.11", oi=None)],
+        )
+        # Plant the legacy non-2dp close DIRECTLY (no supported write path can
+        # produce one today — the writer snaps at the lake boundary).
+        spot_part = lake / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "01.parquet"
+        frame = pl.read_parquet(spot_part)
+        frame = frame.with_columns(pl.lit(30000.1099999998).alias("close"))
+        frame.write_parquet(spot_part)
+
+        symbol = "NSE-NIFTY-25Jan24-30000-CE"
+        sink.append(
+            exchange="NSE",
+            segment="FNO",
+            symbol=symbol,
+            interval="1minute",
+            bars=[_bar("200", oi=100)],
+        )
+        targets = [
+            GreeksEnrichTarget(exchange="NSE", symbol=symbol, start=_WINDOW[0], end=_WINDOW[1])
+        ]
+        r1 = enrich_greeks_for_targets(targets=targets, lake_root=lake, rate_source=_RATE)
+        assert r1.enriched == 1 and r1.bars_solved == 1
+        r2 = enrich_greeks_for_targets(targets=targets, lake_root=lake, rate_source=_RATE)
+        # Pre-fix: enriched == 1 on EVERY pass (never-converging rewrite loop).
+        assert r2.already_current == 1 and r2.enriched == 0
+        option_part = lake / "bars" / "NSE" / "FNO" / symbol / "1minute" / "2024" / "01.parquet"
+        assert pl.read_parquet(option_part)["spot_at_bar"].to_list() == [30000.11]
+
+
 class TestDegenerateTimeValueScreen:
     """IVX-1 (FIX-2, subsumes IVX-4): at-floor premiums stamp BELOW_INTRINSIC.
 

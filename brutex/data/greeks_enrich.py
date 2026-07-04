@@ -67,6 +67,7 @@ from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
 from brutex.data.spot_daily_resample import ist_span_partition_files
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
+from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.greeks import T_FLOOR_YEARS, GreeksInputError, compute_greeks
 from brutex.options.risk_free import (
@@ -761,8 +762,25 @@ def _compute_bar(
     style_flag: int,
     source_id: int,
 ) -> FnoGreeksBar:
-    """Price one bar's overlay through the pre-screen + the shared kernel."""
+    """Price one bar's overlay through the pre-screen + the shared kernel.
+
+    The join spot is snapped to the 2-decimal tick grid ONCE here
+    (:func:`~brutex.money.round_money`, ``ROUND_HALF_UP`` —
+    DEC-GREEKS-CORRECTNESS-AUDIT-001 SPOTJOIN-3), so the stored
+    ``spot_at_bar`` is byte-identical to what the lake writer's boundary snap
+    would store and the changed-comparison converges even against a legacy
+    non-2dp spot partition (pre-fix: a never-ending ``enriched=1`` rewrite
+    loop). The snap applies to ``spot_at_bar``/the solve input ONLY — never
+    to any Greek, ``iv``, ``t_years_used`` or ``rate_used``
+    (DEC-MONEY-2DP-001 forbids rounding statistics). The kernel's admission
+    verdict (``GreeksResult.admissible``) is deliberately NOT stored this
+    round — it is exactly re-derivable downstream as ``abs(delta) >= 0.02
+    and vega * 100 >= 1e-6`` over the stored columns.
+    """
     import math
+
+    if spot is not None:
+        spot = round_money(spot)
 
     def _null(status: int, *, with_spot: Decimal | None) -> FnoGreeksBar:
         return _null_bar(
