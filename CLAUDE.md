@@ -45,12 +45,16 @@ ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-03 (DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
 MIGRATION.md #1145–#1146 — the pipeline pack. (1) #1145: derived timeframes (the 19
 intraday TFs + the derived `1day`, over SPOT + FUTURES + OPTIONS) are now written ONLY
-by the pull pipeline's ONE automatic FINAL prebuild stage, run strictly after a
-fully-clean 1-minute fetch — every MID-PULL derived write is REMOVED
+by the pull pipeline's ONE automatic FINAL prebuild stage — run on EVERY completed pull
+over the CLEAN symbol set (every target minus the UNCAPPED quarantined names, excluded
++ headlined; DEC-PREBUILD-CLEANSET-001, MIGRATION.md #1221, supersedes the #1145
+strictly-after-a-fully-clean-fetch all-or-nothing gate) — every MID-PULL derived write
+is REMOVED
 (`pull_controller._resample_daily_after_pull` + the `BRUTEX_AUTO_DERIVE_TFS` autoderive
 + `historical_pull._derive_daily_from_minute`) and the manual "Pre-build timeframes"
 button + `derive-timeframes` route are DELETED; the movers warm runs AFTER the prebuild
-gated on `fetch_clean AND PrebuildOutcome.ok` (supersedes the early-spot-warm arm of
+gated on `PrebuildOutcome.ok` over that clean set (the `fetch_clean` arm dropped by
+DEC-PREBUILD-CLEANSET-001; supersedes the early-spot-warm arm of
 DEC-PIPELINE-SEGMENT-MOVERS-001); `/api/v1/movers` is honestly GATED while the prebuild
 runs (`PrebuildGate`, 200 `gated:true` "prebuild in progress" payload with ZERO lake
 reads, 5 s self-recovering auto-retry, dry-run never gates); spot movers read the
@@ -387,7 +391,11 @@ hostile-review pass._
   Prior merged: **DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
   MIGRATION.md #1145–#1146** — the pipeline pack. **#1145:** ONE automatic timeframe PREBUILD phase — the 19 derived
   intraday TFs + the derived `1day`, over SPOT + FUTURES + OPTIONS — is now the pull pipeline's FINAL data stage, run
-  strictly AFTER a fully-clean 1-minute fetch (NEW `dashboard/pipeline_prebuild.py` `run_pipeline_prebuild(_guarded)`
+  strictly AFTER a fully-clean 1-minute fetch [the fully-clean `fetch_clean` gate arm is SUPERSEDED by
+  DEC-PREBUILD-CLEANSET-001 #1221: the prebuild now runs on EVERY completed-chain pull over the CLEAN symbol set —
+  `run_prebuild` receives the UNCAPPED `derive_quarantined_name_set` as an `exclude_symbols` exclusion set, so one
+  quarantined symbol no longer starves the other ~N−1 of derived TFs; a fully-quarantined pull degrades honestly
+  (`pipeline.prebuild.all_excluded` warning + an ok 0-built outcome)] (NEW `dashboard/pipeline_prebuild.py` `run_pipeline_prebuild(_guarded)`
   binding the SHARED `materialize_lake_timeframes(include_daily=True)`; `gated_prebuild`'s halt-on-first-phase gate
   REMOVED — per-symbol quarantine, every phase always runs, `halted_after` deleted; OPTIONS materialised for REAL via
   `discover_option_contracts` + one common `_run_contract_phase`, superseding DEC-PREBUILD-SELECT-001's on-demand no-op).
@@ -396,7 +404,9 @@ hostile-review pass._
   trimmed to the doctor's `compare_derived_freshness`) and the MANUAL surface is DELETED (the universe "Pre-build
   timeframes" button + the 188-line `POST /api/v1/universe/derive-timeframes` route; `sweep_preflight` + `doctor`
   repointed at the pipeline stage). The movers warm moves AFTER the prebuild and fires iff `fetch_clean AND
-  PrebuildOutcome.ok` — all three segments together (supersedes the early-spot-warm arm of
+  PrebuildOutcome.ok` [the `fetch_clean` arm dropped by DEC-PREBUILD-CLEANSET-001 #1221 — the warm now fires iff
+  `PrebuildOutcome.ok` over the clean set, so a dirty-fetch day still warms the CLEAN symbols, honestly omitting the
+  headlined quarantined ones] — all three segments together (supersedes the early-spot-warm arm of
   DEC-PIPELINE-SEGMENT-MOVERS-001 #951); while the prebuild runs, `/api/v1/movers` is honestly GATED (NEW
   `prebuild_gate.PrebuildGate` injected into `build_app`; a 200 `gated:true` "prebuild in progress" payload with ZERO
   lake reads; `movers.html` renders it via `textContent` + a 5 s auto-retry so the screen self-recovers; release in a
@@ -1388,7 +1398,10 @@ hostile-review pass._
    `1d` daily anchor is resampled to midnight-IST from the stored 1-minute and
    written to the lake's 1-day partition — since DEC-PIPELINE-AUTOPREBUILD-001
    (MIGRATION.md #1145) by the pull pipeline's automatic FINAL prebuild stage,
-   never mid-pull, never separately vendor-fetched).
+   never mid-pull, never separately vendor-fetched; since
+   DEC-PREBUILD-CLEANSET-001 (MIGRATION.md #1221) that stage runs on every
+   completed pull over the CLEAN symbol set — quarantined symbols excluded +
+   headlined, no longer gated on a fully-clean fetch).
    Rolling `2020-01-01 → today` range (the data pull floor
    — `GROWW_HISTORY_FLOOR`; DEC-PULL-FLOOR-2020-001, 2026-06-13, MIGRATION.md
    entry #722 — supersedes the prior conservative `2021-01-01` floor of
@@ -1812,7 +1825,7 @@ bruteX/
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |
 | 1-minute granularity at the 2020 boundary | **UNVERIFIED** — Phase-0 probe gate (rows may not truly start Jan-2020 at 1m) | `groww/constants.py:107`; `adr/0009-...-migration.md:113-114` |
 | Candle intervals (SDK supports) | `1/2/3/5/10/15/30 minute`, `1hour`, `4hour`, `1day`, `1week`, `1month` | `groww/constants.py:57-70`; `groww/api-reference/04-annexures.md:85-98` |
-| Candle interval — Track 1 spot | **`1minute` ONLY fetched** (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 — `resolve_fetch_intervals` always returns `("1minute",)`); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED from the stored 1-minute, never separately vendor-fetched — since DEC-PIPELINE-AUTOPREBUILD-001 #1145 written ONLY by the pull pipeline's automatic FINAL prebuild stage (`materialize_lake_timeframes(include_daily=True)`; the midnight-IST `1day` via the shared `spot_daily_resample.make_lake_write_1day`), NEVER mid-pull (`_resample_daily_after_pull` + the `BRUTEX_AUTO_DERIVE_TFS` autoderive + the manual `derive-timeframes` route are REMOVED). The granularity dropdown + the bhavcopy cross-check of DEC-PULL-1DAY-FIRST-001 (#723) are REMOVED | `dashboard/pull_controller.py` (`GROWW_FETCH_INTERVALS`, `resolve_fetch_intervals`); `dashboard/pipeline_prebuild.py`; `data/timeframe_materialize.py`; `data/spot_daily_resample.py` |
+| Candle interval — Track 1 spot | **`1minute` ONLY fetched** (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 — `resolve_fetch_intervals` always returns `("1minute",)`); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED from the stored 1-minute, never separately vendor-fetched — since DEC-PIPELINE-AUTOPREBUILD-001 #1145 written ONLY by the pull pipeline's automatic FINAL prebuild stage (`materialize_lake_timeframes(include_daily=True)`; the midnight-IST `1day` via the shared `spot_daily_resample.make_lake_write_1day`; since DEC-PREBUILD-CLEANSET-001 #1221 run on every completed pull over the CLEAN symbol set — quarantined symbols excluded via `exclude_symbols`, not gated on a fully-clean fetch), NEVER mid-pull (`_resample_daily_after_pull` + the `BRUTEX_AUTO_DERIVE_TFS` autoderive + the manual `derive-timeframes` route are REMOVED). The granularity dropdown + the bhavcopy cross-check of DEC-PULL-1DAY-FIRST-001 (#723) are REMOVED | `dashboard/pull_controller.py` (`GROWW_FETCH_INTERVALS`, `resolve_fetch_intervals`); `dashboard/pipeline_prebuild.py`; `data/timeframe_materialize.py`; `data/spot_daily_resample.py` |
 | Chunk window — by interval tier | **1/2/3/5m → 30d · 10/15/30m → 90d · 1h+/1d/1w/1mo → 180d** per call (richer than a single split) | `groww/constants.py:76-89`; `groww/chunks.py:34-60`; `groww/api-reference/03-backtesting.md:238-246` |
 | Candle response shape | **ROW-arrays** — `{"candles": [[ts, open, high, low, close, volume, open_interest], ...]}`; OI `null` for non-FNO | `groww/parser.py:1-18,104-124`; `groww/api-reference/03-backtesting.md:202-236` |
 | **Price unit** | **RUPEES (float)** from Groww — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `groww/api-reference/03-backtesting.md:202` |
