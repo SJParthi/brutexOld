@@ -530,6 +530,140 @@ def test_pull_pipeline_blank_dates_thread_unbounded_scope_to_historical(
     assert historical_calls[0]["scope_end"] is None
 
 
+# ── live-edge expiry scope (DEC-EXPIRY-SCOPE-LIVE-EDGE-001) ───────────────────
+
+
+def test_pull_pipeline_default_prefill_dates_thread_unbounded_scope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The picker's PRE-FILL defaults thread an UNBOUNDED expiry scope.
+
+    THE live-edge bug (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): the frontend sent the
+    pre-filled ``[2020-01-01, prev-day]`` defaults whenever non-blank — ALWAYS —
+    so every default one-click pull carried ``scope_end = prev-day`` and scoped
+    OUT all live/unexpired contracts. The backend normalizer is AUTHORITATIVE:
+    default-shaped bounds are lifted to ``None`` even when the frontend sends
+    them, while the SPOT phase still receives the raw strings verbatim.
+    """
+    from brutex.dashboard.pull_controller import default_date_range
+
+    _pin_creds_present(monkeypatch)
+    spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    from_iso, to_iso = default_date_range()
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": from_iso, "to_date": to_iso},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    # SPOT: the raw strings, verbatim (the spot window law is untouched).
+    assert spot_calls[0]["from_date"] == from_iso
+    assert spot_calls[0]["to_date"] == to_iso
+    # HISTORICAL: the default-shaped bounds are LIFTED — live expiries in scope.
+    assert len(historical_calls) == 1
+    assert historical_calls[0]["scope_start"] is None
+    assert historical_calls[0]["scope_end"] is None
+
+
+def test_pull_pipeline_default_dates_keep_live_expiry_contract_ingested(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ingest-spy teeth: with default dates a LIVE-expiry contract IS in scope.
+
+    Runs the REAL ``partition_contracts_by_scope`` law over a live/unexpired
+    contract with EXACTLY the scope bounds the route threaded — before the
+    live-edge fix the partition scoped it OUT (zero vendor calls); now it stays
+    IN SCOPE, so the historical phase ingests it (DEC-EXPIRY-SCOPE-LIVE-EDGE-001).
+    """
+    from datetime import datetime, timedelta
+
+    from brutex.adapters.groww.expiry_scope import partition_contracts_by_scope
+    from brutex.dashboard.pull_controller import default_date_range
+    from brutex.data.registry_store import ContractRow
+
+    _pin_creds_present(monkeypatch)
+    live_expiry = date.today() + timedelta(days=20)
+    live_contract = ContractRow(
+        exch="NSE",
+        underlying="NIFTY",
+        expiry_date=live_expiry,
+        contract_symbol=f"NSE-NIFTY-{live_expiry.strftime('%d%b%y')}-21000-CE",
+        strike=21000.0,
+        side="CE",
+        candle_status="none",
+        last_run_id="live-edge-test",
+        fetched_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+    )
+    in_scope_counts: list[int] = []
+
+    def _historical(*args: Any, **kwargs: Any) -> CompositePullReport:
+        part = partition_contracts_by_scope(
+            [live_contract],
+            scope_start=kwargs["scope_start"],
+            scope_end=kwargs["scope_end"],
+        )
+        in_scope_counts.append(len(part.in_scope))
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _historical)
+    from_iso, to_iso = default_date_range()
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": from_iso, "to_date": to_iso},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert in_scope_counts == [1], "the live-expiry contract must be IN scope (ingested)"
+
+
+def test_pull_pipeline_narrowed_to_date_still_scopes(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GENUINELY narrowed to_date (prev-day − 1) still scopes exactly as today.
+
+    #1146 permutation-preservation (DEC-FNO-EXPIRY-SCOPE-001 untouched below the
+    live edge): only a DEFAULT-shaped bound lifts; one day earlier passes
+    through as the parsed scope bound.
+    """
+    from datetime import timedelta
+
+    from brutex.dashboard.pull_controller import default_date_range
+
+    _pin_creds_present(monkeypatch)
+    _spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    narrowed = date.fromisoformat(default_date_range()[1]) - timedelta(days=1)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2021-03-01", "to_date": narrowed.isoformat()},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert historical_calls[0]["scope_start"] == date(2021, 3, 1)
+    assert historical_calls[0]["scope_end"] == narrowed
+
+
+def test_pull_pipeline_below_floor_from_date_scope_start_lifted(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A from_date at/below the 2020 floor lifts ``scope_start`` to None.
+
+    Behaviour-identical for the lake (nothing predates the floor) but the scope
+    log stops naming a phantom bound (DEC-EXPIRY-SCOPE-LIVE-EDGE-001).
+    """
+    _pin_creds_present(monkeypatch)
+    _spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2019-01-01", "to_date": "2021-01-01"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert historical_calls[0]["scope_start"] is None
+    assert historical_calls[0]["scope_end"] == date(2021, 1, 1)
+
+
 # ── the movers PREBUILD GATE binding (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2) ──
 
 

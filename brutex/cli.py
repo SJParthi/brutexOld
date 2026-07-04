@@ -278,6 +278,18 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--allow-out-of-scope",
+        action="store_true",
+        dest="allow_out_of_scope",
+        help=(
+            "RESEARCH ONLY: proceed even when a requested symbol is outside the "
+            "brute-force engine scope (NIFTY/BANKNIFTY/SENSEX spot + NIFTY futures, "
+            "CLAUDE.md §2 Rule 3 / ADR-0012). Loud WARNING + audit-stamped "
+            "scope_override=True; REFUSED on sweep-daemon (unattended runs never "
+            "override) — DEC-ENGINE-SCOPE-GUARD-001"
+        ),
+    )
+    parser.add_argument(
         "--data-snapshot-hash",
         default=None,
         dest="data_snapshot_hash",
@@ -970,6 +982,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
+    sweep.add_argument(
+        "--allow-out-of-scope",
+        action="store_true",
+        dest="allow_out_of_scope",
+        help=(
+            "RESEARCH ONLY: proceed even when the symbol is outside the brute-force "
+            "engine scope (NIFTY/BANKNIFTY/SENSEX spot + NIFTY futures, CLAUDE.md "
+            "§2 Rule 3 / ADR-0012) — DEC-ENGINE-SCOPE-GUARD-001"
+        ),
+    )
 
     # ── sweep-all (DEC-SWEEP-ORCHESTRATOR-001) — full multi-parameter grid ──
     sweep_all = sub.add_parser(
@@ -1005,6 +1027,20 @@ def build_parser() -> argparse.ArgumentParser:
             "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY or the module default; raise it "
             "when a >capacity resume is refused FAIL_CLOSED with "
             "SweepCacheCapacityError)"
+        ),
+    )
+    sweep_all.add_argument(
+        "--acknowledge-sla-overrun",
+        action="store_true",
+        dest="acknowledge_sla_overrun",
+        help=(
+            "Proceed even when the projected wall-clock (tuple_count × an "
+            "UNBENCHMARKED per-tuple estimate, override via "
+            "BRUTEX_SWEEP_PER_TUPLE_SECONDS) exceeds the CLAUDE.md §8 2-4-day "
+            "envelope. Default: REFUSE with the honest projection "
+            "(DEC-SLA-LAUNCH-GUARD-001); acknowledging proceeds with a LOUD "
+            "warning. Manual sweep-all only — the unattended daemon never "
+            "acknowledges an overrun"
         ),
     )
 
@@ -3571,59 +3607,66 @@ def cmd_fetch(
                 raise
 
         until_outcome = None
-        try:
-            if until_clean:
-                # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
-                # rounds — each a full pass over the SHARED window ledger (re-fetches
-                # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
-                # SAME retry engine via run_until_clean, until clean / token dead / outer
-                # budget spent. Bounded round count (never an O(1)-total claim). The
-                # driver itself is vendor-neutral (pure 4-way decision + an injected
-                # round_runner) and lives in the vendor-neutral ingest_common home.
-                from brutex.adapters.ingest_common import (
-                    DEFAULT_MAX_ROUNDS,
-                    UntilCleanRound,
-                    run_until_clean,
-                )
+        # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
+        # whole fetch (including every until-clean round + the drain/persist
+        # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
+        # Best-effort: non-darwin / missing caffeinate is a logged no-op.
+        from brutex.observability.power_keepawake import keep_awake
 
-                fetch_passes: list[Any] = []
-
-                def _round_runner() -> UntilCleanRound:
-                    """One until-clean round = one full fetch pass; recorded for the summary.
-
-                    Groww's report has no ``auth_cause`` string (no fail-fast latch — the
-                    documented divergence; it derives ``auth_aborted`` from the quarantined
-                    failures), so the round leaves ``auth_cause`` at its ``None`` default.
-                    """
-                    res = _one_fetch_pass(True)
-                    fetch_passes.append(res)
-                    return UntilCleanRound(
-                        still_failed_windows=res.report.still_failed_windows,
-                        auth_aborted=res.report.auth_aborted,
+        with keep_awake("brutex fetch"):
+            try:
+                if until_clean:
+                    # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
+                    # rounds — each a full pass over the SHARED window ledger (re-fetches
+                    # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
+                    # SAME retry engine via run_until_clean, until clean / token dead / outer
+                    # budget spent. Bounded round count (never an O(1)-total claim). The
+                    # driver itself is vendor-neutral (pure 4-way decision + an injected
+                    # round_runner) and lives in the vendor-neutral ingest_common home.
+                    from brutex.adapters.ingest_common import (
+                        DEFAULT_MAX_ROUNDS,
+                        UntilCleanRound,
+                        run_until_clean,
                     )
 
-                rounds_budget = (
-                    until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
-                )
-                until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
-                result = fetch_passes[0]
-            else:
-                result = _one_fetch_pass(do_retry)
-        finally:
-            # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
-            # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
-            # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
-            # `sink.append` which may FEED the write consumer, so the pipeline must be drained
-            # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
-            # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
-            # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
-            # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
-            # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
-            # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
-            # error is swallowed so the ledger persist still runs.
-            drain_fetch_pipeline(fetch_pipeline)
-            drain_write_consumer(write_consumer)
-            end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+                    fetch_passes: list[Any] = []
+
+                    def _round_runner() -> UntilCleanRound:
+                        """One until-clean round = one full fetch pass; recorded for the summary.
+
+                        Groww's report has no ``auth_cause`` string (no fail-fast latch — the
+                        documented divergence; it derives ``auth_aborted`` from the quarantined
+                        failures), so the round leaves ``auth_cause`` at its ``None`` default.
+                        """
+                        res = _one_fetch_pass(True)
+                        fetch_passes.append(res)
+                        return UntilCleanRound(
+                            still_failed_windows=res.report.still_failed_windows,
+                            auth_aborted=res.report.auth_aborted,
+                        )
+
+                    rounds_budget = (
+                        until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
+                    )
+                    until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
+                    result = fetch_passes[0]
+                else:
+                    result = _one_fetch_pass(do_retry)
+            finally:
+                # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
+                # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
+                # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
+                # `sink.append` which may FEED the write consumer, so the pipeline must be drained
+                # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
+                # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
+                # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
+                # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
+                # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
+                # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
+                # error is swallowed so the ledger persist still runs.
+                drain_fetch_pipeline(fetch_pipeline)
+                drain_write_consumer(write_consumer)
+                end_pull_ledger(ledger, resolved, dry_run=_no_persist)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -3764,6 +3807,7 @@ def cmd_sweep(
     sort_by: str,
     validate_oos: bool,
     oos_only: bool,
+    allow_out_of_scope: bool = False,
 ) -> int:
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
@@ -3779,9 +3823,31 @@ def cmd_sweep(
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_report import sweep_report
+
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2):
+    # refuse an out-of-engine-scope launch BEFORE any lake I/O. Report-only
+    # command, but an out-of-scope brute-force IS the violation.
+    from brutex.engine.sweep_scope import check_sweep_scope
     from brutex.feed.replay import ReplayFeed
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
+
+    scope = check_sweep_scope(
+        [symbol], exchange=exchange, segment=segment, allow_out_of_scope=allow_out_of_scope
+    )
+    if not scope.ok:
+        print(f"[brutex] {scope.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if scope.overridden:
+        import structlog
+
+        print(f"[brutex] {scope.override_warning()}")
+        structlog.get_logger("brutex.sweep").warning(
+            "sweep.scope_override",
+            symbols=[verdict.symbol for verdict in scope.refused],
+            exchange=exchange,
+            segment=segment,
+        )
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -3942,6 +4008,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     allow_missing_slices: bool = False,
     sweep_cache_map_mb: int | None = None,
     sweep_cache_bloom_capacity: int | None = None,
+    allow_out_of_scope: bool = False,
+    acknowledge_sla_overrun: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -3991,6 +4059,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     out_root = results_root if results_root is not None else resolved_lake / "sweeps"
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): refuse
+    # an out-of-engine-scope launch BEFORE the catalog reconcile + bar load —
+    # refusal costs ZERO lake I/O and beats the misleading preflight
+    # "ZERO bars" message. The CLI-only --allow-out-of-scope research escape
+    # proceeds LOUDLY (WARNING + structlog + audit stamp, Golden Rule #8).
+    from brutex.engine.sweep_scope import check_sweep_scope
+
+    scope = check_sweep_scope(
+        symbol_list, exchange=exchange, segment=segment, allow_out_of_scope=allow_out_of_scope
+    )
+    if not scope.ok:
+        print(f"[brutex] {scope.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if scope.overridden:
+        import structlog
+
+        print(f"[brutex] {scope.override_warning()}")
+        structlog.get_logger("brutex.sweep").warning(
+            "sweep.scope_override",
+            symbols=[verdict.symbol for verdict in scope.refused],
+            exchange=exchange,
+            segment=segment,
+        )
     interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
     for interval in interval_list:
         if interval not in INTERVAL_SECONDS:
@@ -4143,6 +4234,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         grid_kwargs["max_combos"] = max_combos
     if overfit_gate:
         grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
+    if scope.overridden:
+        # Layer-1 opt-out rides the SAME operator decision as the Layer-2
+        # override (DEC-ENGINE-SCOPE-GUARD-001) — set ONLY when symbols were
+        # actually refused, so an in-scope grid never carries the unsafe flag.
+        grid_kwargs["unsafe_allow_out_of_scope_instruments"] = True
     # Stage-3 knobs (DEC-STAGE3-WIRE-001): None ⇒ keep the SweepGridConfig
     # defaults (the ONE source of the engine defaults). The on-grid SL/TP
     # fail-fast runs inside SweepGridConfig.__post_init__ (review F5).
@@ -4171,6 +4267,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         except Stage3WireError as exc:
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
+
+    # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001): project the grid's
+    # wall-clock as tuple_count × an UNBENCHMARKED per-tuple estimate
+    # (BRUTEX_SWEEP_PER_TUPLE_SECONDS overrides) and REFUSE a launch projected
+    # past the CLAUDE.md §8 2-4-day envelope unless the operator passed
+    # --acknowledge-sla-overrun (then WARN loudly and proceed). Honest per
+    # Golden Rule #10: an estimate-based plausibility screen — it never
+    # certifies the §8 SLA (which remains UNMEASURED) either way.
+    from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla
+
+    try:
+        sla = check_sweep_sla(count_sweep_tuples(grid), acknowledge=acknowledge_sla_overrun)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.REFUSED:
+        print(f"[brutex] {sla.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.ACKNOWLEDGED:
+        print(f"[brutex] WARNING: {sla.acknowledged_warning()}")
 
     # Dead launch Bloom KILLED (R2-SL-F1): this launcher runs the production
     # DIGEST path — ``run_one_tuple`` always passes a non-None
@@ -4247,6 +4363,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 map_size_mb=cache_knobs.map_size_mb,
             ) as cache,
         ):
+            # Audit the scope override on the hash-chained launch log (Golden Rule
+            # #8): a research launch that let out-of-scope symbols through is a
+            # material action and must be traceable in the tree's own audit.
+            if scope.overridden:
+                ingest_audit.append(
+                    action="SWEEP_SCOPE_OVERRIDE",
+                    subject="sweep-all:scope",
+                    payload={
+                        "scope_override": True,
+                        "symbols": [verdict.symbol for verdict in scope.refused],
+                        "exchange": exchange,
+                        "segment": segment,
+                    },
+                )
             dedup = plan_launch_dedup(grid, digest_path=True)
             guards = SweepGuards(
                 audit=sup_audit,
@@ -4677,6 +4807,14 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
         f"[brutex] supervisor starting — child: {' '.join(argv)} — audit: {audit_path}",
     )
 
+    # Crash-loop operator alert (DEC-SUPERVISOR-CRASHLOOP-ALERT-001): every
+    # abnormal-exit relaunch fires one best-effort, deduped Telegram push
+    # (CRITICAL once 3 relaunches land within the rolling window), so a child
+    # OOM-SIGKILL-looping all night can never stay silent. Best-effort + a
+    # silent no-op when Telegram is disabled (the default) — the supervisor's
+    # relaunch behaviour is byte-unchanged.
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
     with SweepAuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
         supervisor = ProcessSupervisor(
             launch=build_subprocess_launcher(argv),
@@ -4689,6 +4827,7 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
                 if shutdown_grace_seconds is not None
                 else DEFAULT_SHUTDOWN_GRACE_SECONDS
             ),
+            alerter=SweepAlerter(),
         )
         result = supervisor.run()
 
@@ -5007,6 +5146,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "indicator_version": indicator,
         "code_commit_sha": code_sha,
         "top_k": top,
+        # DEC-ENGINE-SCOPE-GUARD-001: verifying recorded work, not launching —
+        # a legacy out-of-scope tree must stay verifiable, so the Layer-1
+        # config invariant is opted out at this ONE forensic rebuild site.
+        "unsafe_allow_out_of_scope_instruments": True,
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
@@ -5102,6 +5245,25 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 "[brutex] sweep-verify --recount: recorded context does NOT match the "
                 "current environment:\n  " + "\n  ".join(mismatches)
             )
+            # Legacy-era diagnostic (DEC-SNAPSHOT-HASH-FULL-001): a snapshot
+            # mismatch whose RECORDED hash matches the retired v1 SAMPLED
+            # derivation over the SAME fresh slices is a pre-upgrade tree, not
+            # necessarily changed data — name it so the operator knows the
+            # remedy. O(#slices) extra cost, mismatch branch only; the refusal
+            # ladder below is UNCHANGED (a v1 match was never verdict-grade).
+            if snapshot != fresh_snapshot:
+                from brutex.engine.stage3_wire import _data_snapshot_hash_v1
+
+                legacy_v1 = _data_snapshot_hash_v1(
+                    exchange=exchange, segment=segment, start=start, end=end, slices=slices
+                )
+                if snapshot == legacy_v1:
+                    print(
+                        "[brutex] note: the recorded hash matches the LEGACY sampled "
+                        "derivation (pre-DEC-SNAPSHOT-HASH-FULL-001) over the current "
+                        "lake — findings INCONCLUSIVE by design; re-sweep to mint a "
+                        "v2 identity."
+                    )
         if mismatches and not allow_context_mismatch:
             print(
                 "[brutex] recount REFUSED (a recount under changed inputs is not an "
@@ -6108,6 +6270,7 @@ def main(argv: list[str] | None = None) -> int:
             sort_by=args.sort_by,
             validate_oos=args.validate_oos,
             oos_only=args.oos_only,
+            allow_out_of_scope=args.allow_out_of_scope,
         )
     if args.command == "sweep-all":
         return cmd_sweep_all(
@@ -6143,10 +6306,23 @@ def main(argv: list[str] | None = None) -> int:
             allow_missing_slices=args.allow_missing_slices,
             sweep_cache_map_mb=args.sweep_cache_map_mb,
             sweep_cache_bloom_capacity=args.sweep_cache_bloom_capacity,
+            allow_out_of_scope=args.allow_out_of_scope,
+            acknowledge_sla_overrun=args.acknowledge_sla_overrun,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
     if args.command == "sweep-daemon":
+        # DEC-ENGINE-SCOPE-GUARD-001: the research escape hatch is NEVER
+        # available on the unattended daemon — refuse loudly instead of
+        # silently ignoring the flag (Golden Rule #10 honesty).
+        if args.allow_out_of_scope:
+            print(
+                "[brutex] sweep-daemon REFUSED: --allow-out-of-scope is a manual "
+                "research escape hatch and is not available on the unattended "
+                "daemon (DEC-ENGINE-SCOPE-GUARD-001)",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
         return cmd_sweep_daemon(
             schedule=args.schedule,
             once=args.once,

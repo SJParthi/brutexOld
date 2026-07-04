@@ -97,6 +97,7 @@ from brutex.adapters.groww.option_ingest import (
     ProgressHook,
     contract_exchange,
     emit_underlying_all_empty,
+    make_breaker_canary_probe,
     reconcile_fno_ledger_windows,
     run_groww_option_ingest,
 )
@@ -921,6 +922,14 @@ def _run_phase(
     # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
     # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
     storm_breaker = None if dry_run else resolve_error_storm_breaker()
+    # Mass-empty breaker CANARY (DEC-EMPTY-BREAKER-CANARY-001): armed ONLY for a
+    # REAL live pull (a dry-run threads None — the same gating as the storm
+    # breaker above). Before the mid-run EmptySettleBreaker halts the whole F&O
+    # phase it fetches ONE known-liquid NIFTY-spot canary window through THIS
+    # phase's client (+ the shared pace gate — 1 governed vendor call): a
+    # healthy canary means the mass empties are genuine (a 2020-era dead chain
+    # at the bucket head), so the phase continues instead of false-halting.
+    breaker_canary = None if dry_run else make_breaker_canary_probe(client, pace=pace)
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional)."""
@@ -978,6 +987,7 @@ def _run_phase(
                     capture_hook_factory=capture_hook_factory,
                     write_pool=write_pool,
                     fetch_pipeline=fetch_pipeline,
+                    breaker_health_probe=breaker_canary,
                     storm_breaker=storm_breaker,
                 )
             except GrowwAuthError as exc:

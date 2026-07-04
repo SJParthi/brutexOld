@@ -30,8 +30,14 @@
 #   a. Resolve the PR; then re-resolve its CURRENT head SHA (not the
 #      trigger's SHA) so the gates check the commit that will be merged
 #      (DEC-AUTOMERGE-RACE-FIX-001).
-#   b. Check trusted actor (SJParthi, dependabot[bot], renovate[bot],
-#      or any branch with head ref starting `claude/`).
+#   b. Check trusted actor: the explicit author allowlist (SJParthi,
+#      dependabot[bot], renovate[bot]) OR the PR author's
+#      author_association ∈ {OWNER, MEMBER, COLLABORATOR}, resolved
+#      LIVE from the GitHub API. The old "any branch with head ref
+#      starting `claude/`" rule was REMOVED (DEC-CI-FORK-PR-HARDEN-001):
+#      a branch NAME is attacker-chosen — a stranger's fork named
+#      claude/anything would have been auto-squash-merged to main once
+#      CI went green.
 #   c. Check that the `CI OK (aggregate gate)` check run is success.
 #   d. Check GitHub mergeability — refuse `dirty` (conflict) / `behind`
 #      (stale base) / `mergeable == false` (DEC-AUTOMERGE-SAFETY-001 / G1,
@@ -97,6 +103,19 @@ jobs:
       )
     timeout-minutes: 5
     steps:
+      - name: Checkout the BASE repo's trusted tree (for pre-merge-check.sh)
+        uses: actions/checkout@v7
+        with:
+          # DEC-CI-FORK-PR-HARDEN-001: the rollup-gate step below executes
+          # scripts/ci/pre-merge-check.sh. Pin the checkout to the base
+          # repo's `main` so the executed script is ALWAYS the trusted,
+          # reviewed copy — never anything a PR (fork or otherwise)
+          # controls. (This also fixes a latent defect: the workflow had
+          # NO checkout step at all, so the rollup gate could only ever
+          # fail closed on a missing script file.)
+          ref: main
+          persist-credentials: false
+
       - name: Find associated PR
         id: find-pr
         env:
@@ -172,9 +191,27 @@ jobs:
         id: trust-check
         if: steps.find-pr.outputs.pr_number != ''
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
           AUTHOR: ${{ steps.find-pr.outputs.author }}
           HEAD_REF: ${{ steps.find-pr.outputs.head_ref }}
           IS_DRAFT: ${{ steps.find-pr.outputs.is_draft }}
+        # DEC-CI-FORK-PR-HARDEN-001: the old rule here additionally trusted
+        # ANY PR whose head BRANCH NAME started with `claude/`. On a PUBLIC
+        # repo that is spoofable — a stranger forks, names the branch
+        # claude/anything, and this workflow would have auto-squash-merged
+        # the fork to main once CI went green. The branch-name rule is
+        # REMOVED. Trust is now:
+        #   (a) the explicit author allowlist
+        #       (SJParthi, dependabot[bot], renovate[bot]); OR
+        #   (b) the PR author's author_association ∈
+        #       {OWNER, MEMBER, COLLABORATOR}, resolved LIVE from the
+        #       GitHub API (never from any attacker-controlled field).
+        # A fork PR from a random user reads FIRST_TIME_CONTRIBUTOR /
+        # CONTRIBUTOR / NONE → NOT trusted → never auto-merged. The real
+        # automation (owner-authored claude/* PRs, author SJParthi = OWNER)
+        # is covered by BOTH (a) and (b), so no regression.
         run: |
           set -euo pipefail
           if [[ "${IS_DRAFT}" == "true" ]]; then
@@ -184,17 +221,21 @@ jobs:
           fi
           case "${AUTHOR}" in
             SJParthi|dependabot\[bot\]|renovate\[bot\])
-              echo "Author ${AUTHOR} is trusted"
+              echo "trust decision: TRUSTED — author ${AUTHOR} is on the explicit allowlist (branch ${HEAD_REF})"
               echo "trusted=true" >> "$GITHUB_OUTPUT"
               exit 0
               ;;
           esac
-          if [[ "${HEAD_REF}" == claude/* ]]; then
-            echo "Head ref ${HEAD_REF} starts with claude/ — trusted"
-            echo "trusted=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "::notice::Author ${AUTHOR} on branch ${HEAD_REF} is NOT trusted; skipping"
+          association=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+            --jq '.author_association // "NONE"')
+          case "${association}" in
+            OWNER|MEMBER|COLLABORATOR)
+              echo "trust decision: TRUSTED — author ${AUTHOR} has author_association=${association} (branch ${HEAD_REF})"
+              echo "trusted=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "::notice::trust decision: NOT TRUSTED — author ${AUTHOR} (author_association=${association}) on branch ${HEAD_REF}; skipping auto-merge. Branch-name trust was removed by DEC-CI-FORK-PR-HARDEN-001 — a fork branch named claude/* is NOT trusted."
           echo "trusted=false" >> "$GITHUB_OUTPUT"
 
       - name: Verify ci-ok aggregate is green (on the PR's CURRENT head)

@@ -185,6 +185,50 @@ class TestSweepGridConfig:
         with pytest.raises(ValueError, match="must not contain Side.HOLD"):
             _grid(directions=[Side.BUY, Side.HOLD])
 
+    # ── Layer-1 engine-scope hard invariant (DEC-ENGINE-SCOPE-GUARD-001) ──
+
+    @pytest.mark.parametrize("symbol", ["INDIAVIX", "RELIANCE", "BANKNIFTY-FUT-2026-07-30"])
+    def test_out_of_scope_instrument_rejected_at_construction(self, symbol: str) -> None:
+        with pytest.raises(ValueError, match="outside the brute-force engine scope"):
+            _grid(instruments=[symbol])
+
+    def test_unsafe_flag_allows_out_of_scope_construction(self) -> None:
+        grid = _grid(instruments=["INDIAVIX"], unsafe_allow_out_of_scope_instruments=True)
+        assert list(grid.instruments) == ["INDIAVIX"]
+
+    @pytest.mark.parametrize(
+        "symbol", ["NIFTY", "BANKNIFTY", "SENSEX", "NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"]
+    )
+    def test_in_scope_instruments_construct_by_default(self, symbol: str) -> None:
+        assert list(_grid(instruments=[symbol]).instruments) == [symbol]
+
+    def test_scope_flag_is_identity_safe(self) -> None:
+        """Regression pin (DEC-ENGINE-SCOPE-GUARD-001): the new field enters NO identity.
+
+        ``_tuple_digest`` / ``_grid_descriptor`` (via ``grid_identity``) /
+        ``_tuple_cache_params`` (via ``tuple_cache_key``) are explicit field
+        enumerations — a grid with the flag EXPLICIT (True or False) must be
+        byte-identical in every digest/checkpoint/cache identity to the
+        default-flag grid, so pre-existing checkpoints, dedup entries and
+        store paths never churn.
+        """
+        from brutex.engine.sweep_orchestrator import _tuple_digest, tuple_store_path
+        from brutex.engine.sweep_supervisor import grid_identity, tuple_cache_key
+
+        default_grid = _grid()
+        explicit_false = _grid(unsafe_allow_out_of_scope_instruments=False)
+        explicit_true = _grid(unsafe_allow_out_of_scope_instruments=True)
+        assert grid_identity(default_grid) == grid_identity(explicit_false)
+        assert grid_identity(default_grid) == grid_identity(explicit_true)
+        base_tuple = next(iter_sweep_tuples(default_grid))
+        for other in (explicit_false, explicit_true):
+            other_tuple = next(iter_sweep_tuples(other))
+            assert _tuple_digest(base_tuple, default_grid) == _tuple_digest(other_tuple, other)
+            assert tuple_cache_key(base_tuple, default_grid) == tuple_cache_key(other_tuple, other)
+            assert tuple_store_path(Path("r"), base_tuple, default_grid) == tuple_store_path(
+                Path("r"), other_tuple, other
+            )
+
     @pytest.mark.parametrize(
         "field", ["mode", "data_snapshot_hash", "indicator_version", "code_commit_sha"]
     )
@@ -466,7 +510,9 @@ class TestRunSweepGrid:
         pytest.importorskip("polars")
         bars = _trending_bars()
         # 2 instruments: NIFTY has bars (runs), GHOST has none (skipped).
-        grid = _grid(instruments=["NIFTY", "GHOST"])
+        # Synthetic GHOST name by test intent (a no-bars skip needs a symbol the
+        # lake lacks) — Layer-1 scope opt-out (DEC-ENGINE-SCOPE-GUARD-001).
+        grid = _grid(instruments=["NIFTY", "GHOST"], unsafe_allow_out_of_scope_instruments=True)
 
         def bars_for(instrument: str, _tf: str) -> list[CandleBar]:
             return bars if instrument == "NIFTY" else []
@@ -617,7 +663,10 @@ class TestRunSweepGridResilientSkip:
         def _always_raise(*_args: object, **_kwargs: object) -> object:
             raise RuntimeError("corrupt window")
 
-        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _always_raise)
+        # The wired per-mask METRICS TAIL (DEC-SWEEP-RUST-TRADESIM-WIRE-001) —
+        # raising here produces the real fingerprinted SweepComboError exactly
+        # as the pre-wiring per-mask metrics_for_mask seam did.
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _always_raise)
 
         with AuditWriter.open(tmp_path / "grid.jsonl") as audit:
             summary = run_sweep_grid(

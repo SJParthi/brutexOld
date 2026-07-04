@@ -289,6 +289,26 @@ def test_psr_radicand_message_is_exact() -> None:
     )
 
 
+def test_psr_non_finite_message_is_exact() -> None:
+    """The non-finite-input ``ValueError`` text is pinned byte-exact.
+
+    Kills the four chronic string-literal survivors on the finite-guard
+    message (mutmut mutants 14-17 of the ranking/DSR math pass,
+    DEC-MUTATION-SURVIVOR-KILL-001): mutmut wraps EACH of the message's four
+    string/f-string segments in ``XX…XX`` one at a time, and the existing
+    ``match="must be finite"`` substring check passes every one of those
+    wraps (the matched substring sits inside an unmutated segment each
+    time). A single full-message equality kills all four — any segment wrap
+    changes the assembled string.
+    """
+    with pytest.raises(ValueError) as exc:
+        probabilistic_sharpe_ratio(1.0, 0.0, 100, float("nan"), GAUSSIAN_KURTOSIS)
+    assert str(exc.value) == (
+        "PSR inputs must be finite; got "
+        "observed_sharpe=1.0, benchmark_sharpe=0.0, skew=nan, kurtosis=3.0"
+    )
+
+
 def test_expected_max_zero_trials_message_is_exact() -> None:
     """The ``n_trials < 1`` ``ValueError`` text is pinned byte-exact."""
     with pytest.raises(ValueError) as exc:
