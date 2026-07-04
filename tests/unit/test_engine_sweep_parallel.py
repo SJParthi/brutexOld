@@ -232,6 +232,37 @@ class TestAutoSweepWorkers:
         assert mod.auto_sweep_workers(cpu) == expected
 
 
+class TestSmallGridFactor:
+    """The env-tunable small-grid demotion factor (ADR-0016 §5, review MINOR-1)."""
+
+    def test_unset_is_the_default(self) -> None:
+        assert mod.small_grid_factor({}) == mod.SMALL_GRID_FACTOR == 2
+
+    def test_blank_is_the_default(self) -> None:
+        assert mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: "   "}) == 2
+
+    def test_valid_override_is_verbatim(self) -> None:
+        assert mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: "5"}) == 5
+
+    def test_zero_is_valid_and_disables(self) -> None:
+        assert mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: "0"}) == 0
+
+    @pytest.mark.parametrize("raw", ["two", "-1", "2.5"])
+    def test_invalid_falls_back_to_default_and_warns(self, raw: str) -> None:
+        with capture_logs() as logs:
+            factor = mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: raw})
+        assert factor == mod.SMALL_GRID_FACTOR
+        (event,) = logs
+        assert event["event"] == "sweep.small_grid_factor.invalid"
+        assert event["log_level"] == "warning"
+        assert event["requested_env"] == repr(raw)
+        assert event["fallback"] == mod.SMALL_GRID_FACTOR
+
+    def test_reads_from_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(mod.SMALL_GRID_FACTOR_ENV, "3")
+        assert mod.small_grid_factor() == 3
+
+
 class TestResolveSweepWorkers:
     @pytest.mark.parametrize(
         ("cpu", "expected"),
@@ -248,6 +279,7 @@ class TestResolveSweepWorkers:
         assert event["log_level"] == "info"
         assert event["reason"] == "auto"
         assert event["requested_env"] == repr(None)
+        assert event["env_invalid"] is False
         assert event["cpu_count"] == 14
         assert event["auto"] == 8
         assert event["tuple_count"] is None
@@ -314,6 +346,7 @@ class TestResolveSweepWorkers:
         assert event["log_level"] == "warning"
         assert event["reason"] == "env_invalid_auto"
         assert event["requested_env"] == repr(raw)
+        assert event["env_invalid"] is True
         assert event["resolved"] == 8
 
     def test_small_grid_boundary_below_resolves_sequential(self) -> None:
@@ -332,6 +365,38 @@ class TestResolveSweepWorkers:
         assert resolved == 8
         (event,) = logs
         assert event["reason"] == "auto"
+
+    def test_factor_env_moves_the_small_grid_boundary(self) -> None:
+        # BRUTEX_SWEEP_SMALL_GRID_FACTOR=1 on cpu=14 (auto=8): the strict
+        # boundary moves to `< 1*auto` — 7 → sequential, 8 → auto.
+        env = {mod.SMALL_GRID_FACTOR_ENV: "1"}
+        assert mod.resolve_sweep_workers(env, tuple_count=7, cpu_count_fn=lambda: 14) == 1
+        assert mod.resolve_sweep_workers(env, tuple_count=8, cpu_count_fn=lambda: 14) == 8
+
+    def test_factor_env_zero_disables_the_demotion(self) -> None:
+        # factor=0 → `tuple_count < 0` never true — even a 1-tuple grid goes auto
+        # (the operator lever for a few-but-huge-tuple grid, ADR-0016 §5).
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SMALL_GRID_FACTOR_ENV: "0"}, tuple_count=1, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 8
+        (event,) = logs
+        assert event["reason"] == "auto"
+
+    def test_invalid_factor_env_keeps_default_and_warns(self) -> None:
+        # An invalid factor value falls back to the default 2× rule (tiny grid
+        # still demoted) and emits its OWN warning alongside the resolved event.
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SMALL_GRID_FACTOR_ENV: "huge"}, tuple_count=3, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 1
+        factor_event, resolved_event = logs
+        assert factor_event["event"] == "sweep.small_grid_factor.invalid"
+        assert factor_event["log_level"] == "warning"
+        assert resolved_event["event"] == "sweep.workers.resolved"
+        assert resolved_event["reason"] == "small_grid_sequential"
 
     def test_small_grid_never_tagged_when_auto_is_one(self) -> None:
         # auto==1 already IS sequential — the small-grid demotion is a no-op and
@@ -363,6 +428,9 @@ class TestResolveSweepWorkers:
         assert event["log_level"] == "warning"
         assert event["reason"] == "small_grid_sequential"
         assert event["requested_env"] == repr("banana")
+        # NIT-1: the invalid-env cause stays FILTERABLE even when the
+        # small-grid fallback takes the `reason` slot.
+        assert event["env_invalid"] is True
 
     def test_reads_from_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(mod.SWEEP_WORKERS_ENV, "5")

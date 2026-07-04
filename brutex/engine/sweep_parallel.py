@@ -186,11 +186,62 @@ AUTO_SWEEP_WORKERS_CAP: Final[int] = 8
 #: "2 reserved" cores — daily apps run concurrently on the reference M4 Pro).
 AUTO_SWEEP_WORKERS_RESERVED_CPUS: Final[int] = 2
 
-#: Small-grid factor: a sweep with ``tuple_count < SMALL_GRID_FACTOR × auto``
+#: Small-grid factor DEFAULT: a sweep with ``tuple_count < factor × auto``
 #: resolves to 1 (sequential) on the AUTO path — pool spawn + result
 #: marshalling overhead is not worth paying when there are fewer than ~2
 #: tuples per prospective worker (an explicit env override is never demoted).
+#: HONEST caveat (ADR-0016 §5): the demotion keys on tuple COUNT, not per-tuple
+#: WORK — a few-but-huge-tuple grid is demoted too, so the factor is
+#: env-tunable via :data:`SMALL_GRID_FACTOR_ENV` (``0`` disables the demotion).
 SMALL_GRID_FACTOR: Final[int] = 2
+
+#: Environment variable overriding :data:`SMALL_GRID_FACTOR` (the operator
+#: lever for a compute-heavy SMALL grid — e.g. 15 multi-year tuples on a
+#: 14-core box — which the count-keyed heuristic would otherwise demote to one
+#: core). ``0`` disables the small-grid demotion entirely; unset/blank keeps
+#: the default; an invalid value (non-integer / negative) falls back to the
+#: default and is logged LOUDLY at WARNING.
+SMALL_GRID_FACTOR_ENV: Final[str] = "BRUTEX_SWEEP_SMALL_GRID_FACTOR"
+
+
+def small_grid_factor(env: dict[str, str] | None = None) -> int:
+    """Resolve the small-grid demotion factor — env-tunable (ADR-0016 §5).
+
+    Reads :data:`SMALL_GRID_FACTOR_ENV` from *env* (default
+    :data:`os.environ`): unset/blank → :data:`SMALL_GRID_FACTOR`; a valid
+    integer ``>= 0`` → that value verbatim (``0`` DISABLES the small-grid
+    demotion — ``tuple_count < 0`` is never true); an INVALID value
+    (non-integer / negative) → the default, logged at WARNING on the
+    ``sweep.small_grid_factor.invalid`` event naming the value via ``repr``
+    (mirrors the :func:`resolve_sweep_workers` invalid-env loudness). O(1).
+
+    Parameters
+    ----------
+    env
+        Environment mapping (defaults to :data:`os.environ`) — injectable for
+        tests.
+
+    Returns
+    -------
+    int
+        The demotion factor (``>= 0``).
+    """
+    source = os.environ if env is None else env
+    raw = source.get(SMALL_GRID_FACTOR_ENV)
+    if raw is None or not raw.strip():
+        return SMALL_GRID_FACTOR
+    try:
+        parsed = int(raw)
+    except ValueError:
+        parsed = -1  # sentinel: falls through to the invalid branch below.
+    if parsed < 0:
+        _LOG.warning(
+            "sweep.small_grid_factor.invalid",
+            requested_env=repr(raw),
+            fallback=SMALL_GRID_FACTOR,
+        )
+        return SMALL_GRID_FACTOR
+    return parsed
 
 
 def auto_sweep_workers(cpu_count: int | None) -> int:
@@ -276,16 +327,20 @@ def resolve_sweep_workers(
       invalid value is logged LOUDLY at WARNING level on the
       ``sweep.workers.resolved`` event.
     * **small grid** — on the AUTO path only, when *tuple_count* is known and
-      ``tuple_count < SMALL_GRID_FACTOR × auto`` (and ``auto > 1``), resolve
-      to 1 (sequential): pool spawn + marshalling overhead is not worth fewer
-      than ~2 tuples per worker.
+      ``tuple_count < factor × auto`` (and ``auto > 1``), resolve to 1
+      (sequential): pool spawn + marshalling overhead is not worth fewer than
+      ~2 tuples per worker. The factor is :func:`small_grid_factor` — the
+      :data:`SMALL_GRID_FACTOR` default (2), env-tunable via
+      :data:`SMALL_GRID_FACTOR_ENV` (``0`` disables the demotion — the
+      operator lever for a few-but-huge-tuple grid, ADR-0016 §5).
 
     Emits ONE ``sweep.workers.resolved`` structlog event per call
     (WARNING when the env value was invalid, else INFO) carrying
-    ``requested_env`` (repr) / ``cpu_count`` / ``auto`` / ``tuple_count`` /
-    ``resolved`` / ``reason`` — ``reason`` is one of ``env_explicit`` /
-    ``env_invalid_auto`` / ``auto`` / ``small_grid_sequential`` /
-    ``cpu_count_none``. O(1).
+    ``requested_env`` (repr) / ``env_invalid`` (bool — filterable even when
+    the small-grid fallback takes the ``reason`` slot) / ``cpu_count`` /
+    ``auto`` / ``tuple_count`` / ``resolved`` / ``reason`` — ``reason`` is one
+    of ``env_explicit`` / ``env_invalid_auto`` / ``auto`` /
+    ``small_grid_sequential`` / ``cpu_count_none``. O(1).
 
     Parameters
     ----------
@@ -325,10 +380,11 @@ def resolve_sweep_workers(
             else:
                 explicit = parsed
 
+    factor = small_grid_factor(env)  # None → os.environ, same as `source`.
     if explicit is not None:
         resolved = explicit
         reason = "env_explicit"
-    elif auto > 1 and tuple_count is not None and tuple_count < SMALL_GRID_FACTOR * auto:
+    elif auto > 1 and tuple_count is not None and tuple_count < factor * auto:
         resolved = SEQUENTIAL_SWEEP_WORKERS
         reason = "small_grid_sequential"
     elif invalid:
@@ -346,6 +402,7 @@ def resolve_sweep_workers(
     log(
         "sweep.workers.resolved",
         requested_env=repr(raw),
+        env_invalid=invalid,
         cpu_count=cpu,
         auto=auto,
         tuple_count=tuple_count,

@@ -48,11 +48,16 @@ make multicore the default — deferred behind this ADR.
 4. **INVALID env (non-integer / `< 1`) → AUTO** (reason `env_invalid_auto`,
    logged at WARNING — see §4, the invariant reversal this ADR owns).
 5. **Small-grid fallback (AUTO path only):** when the caller supplies the
-   sweep's `tuple_count` and `tuple_count < 2 × auto` (with `auto > 1`),
+   sweep's `tuple_count` and `tuple_count < factor × auto` (with `auto > 1`),
    resolve to 1 (reason `small_grid_sequential`) — pool spawn + result
    marshalling is not worth fewer than ~2 tuples per prospective worker. The
-   boundary is strict: `tuple_count == 2·auto − 1` → 1, `== 2·auto` → auto.
-   The CLI launcher (`cmd_sweep_all`) threads `count_sweep_tuples(grid)` in —
+   boundary is strict: `tuple_count == factor·auto − 1` → 1, `== factor·auto`
+   → auto. The factor defaults to `SMALL_GRID_FACTOR = 2` and is env-tunable
+   via `BRUTEX_SWEEP_SMALL_GRID_FACTOR` (`small_grid_factor`; a valid integer
+   `>= 0` is verbatim, `0` DISABLES the demotion; an invalid value falls back
+   to the default, logged at WARNING on `sweep.small_grid_factor.invalid` —
+   the operator lever the hostile review's MINOR-1 asked for, see §5). The
+   CLI launcher (`cmd_sweep_all`) threads `count_sweep_tuples(grid)` in —
    the one call site that knows the grid. An explicit env override is never
    demoted by this rule.
 
@@ -89,7 +94,10 @@ operator-authorized flip, not an accident:
 - **Not silent.** The invalid value is logged LOUDLY: the ONE
   `sweep.workers.resolved` event is emitted at WARNING level whenever the env
   value was invalid, naming the offending value via `repr` — pinned by a
-  dedicated regression test.
+  dedicated regression test — and carries a dedicated `env_invalid` boolean
+  field, so an alert filtering on the cause still catches the
+  invalid-env-plus-small-grid permutation whose `reason` slot reads
+  `small_grid_sequential` (review NIT-1).
 - **Safety floor.** Parallelism engaged this way is the SAME goldens-pinned
   byte-identical path; the blast radius of the reversal is resource usage,
   never correctness.
@@ -109,8 +117,22 @@ operator-authorized flip, not an accident:
   the 8-worker default — the #1080 "~6–8×" remains a PROJECTION pending the
   same deferred core-scaling bench. The cap is a conservative ceiling inside
   the "10 cores used by sweep, 2 reserved" envelope, not a measured optimum.
-- The small-grid `2×` factor and the `−2` CPU reservation are HEURISTICS
-  (operator-tunable via this one module), not measured optima.
+- The small-grid `2×` factor and the `−2` CPU reservation are HEURISTICS,
+  not measured optima. **The demotion keys on tuple COUNT, not per-tuple
+  WORK** (review MINOR-1): a 15-tuple grid on the 14-core box resolves
+  sequential even when each tuple is a multi-year compute-heavy run — up to
+  ~auto× wall-time deliberately traded for spawn-overhead safety, with only
+  the INFO `small_grid_sequential` log to notice it by. The operator levers
+  are `BRUTEX_SWEEP_SMALL_GRID_FACTOR` (lower it, or `0` to disable the
+  demotion) or an explicit `BRUTEX_SWEEP_WORKERS`; a work-aware heuristic
+  (bars × tuples) is NOT attempted here.
+- **Resume interplay** (review NIT-2): the threaded `tuple_count` is the FULL
+  grid product (`count_sweep_tuples`), NOT the remaining un-done work — a
+  resume of an almost-complete 1000-tuple grid still resolves parallel and
+  spins the spawn pool just to skip the sentinel-complete tuples. Correct
+  (the crash-resume golden pins the bytes), pure spawn overhead; a
+  remaining-work count would need the checkpoint read hoisted before the
+  resolver and is deliberately not done here.
 - A CI runner or laptop with `cpu_count ≤ 3` auto-resolves to 1 — sequential
   behavior there is byte-identical to pre-ADR.
 
@@ -122,21 +144,36 @@ operator-authorized flip, not an accident:
 - `DEFAULT_SWEEP_WORKERS` (=1, no longer the default) is renamed
   `SEQUENTIAL_SWEEP_WORKERS` (the opt-out + small-grid fallback constant);
   `auto_sweep_workers` / `AUTO_SWEEP_WORKERS_CAP` /
-  `AUTO_SWEEP_WORKERS_RESERVED_CPUS` / `SMALL_GRID_FACTOR` are new public
-  names.
-- CI suites that require the sequential path already set
-  `BRUTEX_SWEEP_WORKERS=1` explicitly (the opt-out) and are unaffected.
+  `AUTO_SWEEP_WORKERS_RESERVED_CPUS` / `SMALL_GRID_FACTOR` /
+  `SMALL_GRID_FACTOR_ENV` / `small_grid_factor` are new public names.
+- CI suites that require the sequential path pin `BRUTEX_SWEEP_WORKERS=1`
+  explicitly (the opt-out). Correction (review MINOR-3): the two
+  `cmd_sweep_all` suites that previously set NOTHING —
+  `tests/integration/test_cli_snapshot_hash.py` and
+  `tests/integration/test_cli_sweep_scope.py` — were kept sequential only
+  incidentally by the small-grid fallback (their grids are 1-tuple); this PR
+  gives each an autouse `=1` fixture so the sequential requirement is
+  explicit and survives any future grid widening (review NIT-3).
 
 ## 7. Verification
 
 `tests/unit/test_engine_sweep_parallel.py` — cpu fixtures {1, 2, 4, 10, 14,
 None} through the injectable seam; env-override-beats-auto; explicit-1
-opt-out; invalid-env→auto with the WARNING log pinned; the strict small-grid
-boundary (`2·auto − 1` → 1, `2·auto` → auto); small-grid never demotes an
-explicit override; the `sweep.workers.resolved` event fields. END-TO-END:
-`tests/integration/test_cli_sweep_all_dedup.py`
-`test_cmd_sweep_all_small_grid_auto_resolves_sequential` — a real tiny
+opt-out; invalid-env→auto with the WARNING log + `env_invalid` field pinned;
+the strict small-grid boundary (`2·auto − 1` → 1, `2·auto` → auto);
+small-grid never demotes an explicit override; the `sweep.workers.resolved`
+event fields; `TestSmallGridFactor` — the `BRUTEX_SWEEP_SMALL_GRID_FACTOR`
+default/verbatim/`0`-disables/invalid-warns cells plus the resolver-level
+boundary-move, factor-`0`-goes-auto and invalid-factor-warns permutations.
+END-TO-END (`tests/integration/test_cli_sweep_all_dedup.py`): BOTH arms —
+`test_cmd_sweep_all_small_grid_auto_resolves_sequential` (a real tiny
 `cmd_sweep_all` sweep with env unset on a simulated 14-core box dispatches the
-SEQUENTIAL path (the parallel driver poisoned to fail the test if entered).
-The #1080 byte-identity goldens pass UNMODIFIED. `sweep_parallel.py` at 100%
-line + 100% branch.
+SEQUENTIAL path; the parallel driver poisoned to fail the test if entered)
+AND its exact inverse `test_cmd_sweep_all_big_grid_auto_dispatches_parallel`
+(review MINOR-2: env unset on a simulated 4-core box, a REAL 4-tuple grid at
+the strict `2·auto` boundary dispatches the PARALLEL driver for real —
+`run_supervised_grid` poisoned, the "parallel mode — 2 workers" banner
+asserted — so a composition-point regression that mis-threads `tuple_count`
+and demotes everything to sequential trips the poison). The #1080
+byte-identity goldens pass UNMODIFIED. `sweep_parallel.py` at 100% line +
+100% branch.
