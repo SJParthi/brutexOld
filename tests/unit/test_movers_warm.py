@@ -20,10 +20,12 @@ from brutex.dashboard.movers_warm import (
     WARM_EXCHANGES,
     WARM_OPTIONS_TIERS,
     WARM_OPTIONS_TRACKS,
+    MoversWarmResult,
     futures_warm_grid,
     latest_movers_date,
     options_warm_grid,
     spot_warm_grid,
+    warm_coordinate_label,
     warm_movers_snapshots,
 )
 from brutex.data.models import CandleBar
@@ -106,20 +108,105 @@ def test_latest_movers_date_none_on_corrupt_lake(tmp_path: Path) -> None:
 
 def test_warm_counts_only_non_empty_jobs() -> None:
     # 3 jobs: spot warmed 5, futures warmed 0 (empty), options warmed 2 → 2 non-empty.
-    assert warm_movers_snapshots([lambda: 5, lambda: 0, lambda: 2]) == 2
+    result = warm_movers_snapshots([lambda: 5, lambda: 0, lambda: 2])
+    assert result == MoversWarmResult(warmed=2, failed=0, total=3)
 
 
 def test_warm_empty_job_list_is_zero() -> None:
-    assert warm_movers_snapshots([]) == 0
+    assert warm_movers_snapshots([]) == MoversWarmResult(warmed=0, failed=0, total=0)
 
 
-def test_warm_swallows_a_raising_job_counts_it_zero() -> None:
-    # A transient lake-read race in one warmer is logged + counted 0, never re-raised —
-    # the already-successful pull is never failed by a warm hiccup.
+def test_warm_swallows_a_raising_job_counts_it_failed() -> None:
+    # A transient lake-read race in one warmer is logged + counted FAILED (never
+    # re-raised — the already-successful pull is never failed by a warm hiccup;
+    # the failed count reaches the completion note, DEC-MOVERS-WARM-PROGRESS-001).
     def _boom() -> int:
         raise RuntimeError("transient lake read race")
 
-    assert warm_movers_snapshots([lambda: 3, _boom, lambda: 1]) == 2
+    result = warm_movers_snapshots([lambda: 3, _boom, lambda: 1])
+    assert result == MoversWarmResult(warmed=2, failed=1, total=3)
+
+
+# ── DEC-MOVERS-WARM-PROGRESS-001: per-coordinate progress + observer seam ──
+
+
+def test_warm_emits_progress_log_per_coordinate() -> None:
+    # One `movers.warm.progress` line per completed coordinate — key i/N +
+    # segment + per-job/cumulative elapsed — a BOUNDED cadence (grid ≤ 39).
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        warm_movers_snapshots([lambda: 2, lambda: 0], segment="spot", labels=["all", "NSE"])
+    progress = [e for e in logs if e["event"] == "movers.warm.progress"]
+    assert [(e["key"], e["index"], e["total"]) for e in progress] == [
+        ("all", 1, 2),
+        ("NSE", 2, 2),
+    ]
+    assert all(e["segment"] == "spot" for e in progress)
+    assert all(e["job_elapsed_s"] >= 0 and e["elapsed_s"] >= 0 for e in progress)
+    done = [e for e in logs if e["event"] == "movers.warm.segment_done"]
+    assert len(done) == 1
+    assert done[0]["warmed"] == 1 and done[0]["failed"] == 0 and done[0]["total"] == 2
+
+
+def test_warm_failed_job_logs_key_and_counts() -> None:
+    from structlog.testing import capture_logs
+
+    def _boom() -> int:
+        raise RuntimeError("boom")
+
+    with capture_logs() as logs:
+        result = warm_movers_snapshots([_boom], segment="options", labels=["BSE|far|weekly"])
+    assert result == MoversWarmResult(warmed=0, failed=1, total=1)
+    failed = [e for e in logs if e["event"] == "movers.warm.job_failed"]
+    assert len(failed) == 1
+    assert failed[0]["key"] == "BSE|far|weekly"
+    assert failed[0]["segment"] == "options"
+    assert failed[0]["index"] == 1 and failed[0]["total"] == 1
+
+
+def test_warm_on_progress_observer_sees_i_of_n() -> None:
+    # The gate seam (DEC-PREBUILD-GATE-HONEST-NOTE-001): (0,N) before the first
+    # job, advancing per coordinate, (N,N) after the last.
+    seen: list[tuple[int, int]] = []
+    warm_movers_snapshots(
+        [lambda: 1, lambda: 0, lambda: 2],
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+    assert seen == [(0, 3), (1, 3), (2, 3), (3, 3)]
+
+
+def test_warm_on_progress_observer_error_never_breaks_the_warm() -> None:
+    # A raising observer is a caller bug worth a log line — never an abort.
+    def _bad(done: int, total: int) -> None:
+        raise RuntimeError("observer bug")
+
+    result = warm_movers_snapshots([lambda: 4], on_progress=_bad)
+    assert result == MoversWarmResult(warmed=1, failed=0, total=1)
+
+
+def test_warm_short_labels_fall_back_to_index() -> None:
+    # A labels list shorter than jobs never crashes — the tail falls back to
+    # the 1-based index (defensive; the callers zip from the same grid).
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        warm_movers_snapshots([lambda: 1, lambda: 1], segment="spot", labels=["only-one"])
+    progress = [e for e in logs if e["event"] == "movers.warm.progress"]
+    assert [e["key"] for e in progress] == ["only-one", "2"]
+
+
+def test_warm_coordinate_label_renders_grid_dicts() -> None:
+    assert warm_coordinate_label({"exchange": None}) == "all"
+    assert warm_coordinate_label({"exchange": "NSE", "expiry_tier": "near"}) == "NSE|near"
+    assert (
+        warm_coordinate_label({"exchange": "BSE", "expiry_tier": "far", "expiry_track": "monthly"})
+        == "BSE|far|monthly"
+    )
+    assert (
+        warm_coordinate_label({"exchange": None, "expiry_tier": "next", "expiry_track": "all"})
+        == "all|next|all"
+    )
 
 
 # ── DEC-MOVERS-WARM-GRID-001: the post-pull warm grids (pure, exhaustive) ──

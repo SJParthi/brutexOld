@@ -326,6 +326,15 @@ function updateHeadSort() {
   });
 }
 function numify(v){ const n = parseFloat(String(v ?? "").replace(/[₹,%\s]/g,"").replace(/,/g,"")); return isNaN(n)?null:n; }
+/* Compact elapsed formatter for the gated status line (DEC-PREBUILD-GATE-HONEST-NOTE-001):
+   seconds → "42s" / "7m 05s" / "2h 14m". Null/invalid reads "0s" (honest floor). */
+function fmtElapsed(s){
+  const n = Math.max(0, Math.floor(Number(s) || 0));
+  const h = Math.floor(n/3600), m = Math.floor((n%3600)/60), sec = n%60;
+  if (h > 0) return `${h}h ${String(m).padStart(2,"0")}m`;
+  if (m > 0) return `${m}m ${String(sec).padStart(2,"0")}s`;
+  return `${sec}s`;
+}
 function renderRows() {
   const cols = ASSETS[state.asset].cols;
   let data = rowsData.slice();
@@ -411,16 +420,27 @@ async function load() {
       lastPayload = null;  /* a pill switch must re-fetch, never re-render the gated shell. */
       lastRenderSig = null;  /* the gate lift must always repaint the real table. */
       rowsData = [];
-      const gatedKey = state.asset + "|" + (j.note || "");
+      const gatedKey = state.asset + "|" + (j.phase || "") + "|" + (j.note || "");
       if (!(wasGated && gatedKey === lastGatedKey)) {
-        /* Paint the empty gated shell ONCE per (asset, note); each identical 5 s
-           retry skips the thead/tbody rebuild and only refreshes the textContent
-           lines below — same pixels (DEC-DASHBOARD-JS-PERF-001). */
+        /* Paint the empty gated shell ONCE per (asset, phase, note); each identical
+           5 s retry skips the thead/tbody rebuild and only refreshes the textContent
+           lines below — same pixels (DEC-DASHBOARD-JS-PERF-001). The ticking elapsed
+           rides the cheap #asof textContent line, never a shell repaint. */
         renderHead(); renderRows();
       }
       wasGated = true; lastGatedKey = gatedKey;
-      $("asof").textContent = `as-of ${(j.date||"")} — gated`;
-      $("noteText").textContent = j.note || "prebuild in progress — movers available when finished.";
+      /* Honest live status (DEC-PREBUILD-GATE-HONEST-NOTE-001): name the running
+         final stage + how long the pipeline has been at it (+ the movers-warm i/N
+         when reported), instead of a bare "gated". textContent only — never
+         innerHTML for server strings (DEC-DASHBOARD-XSS-HARDENING-001). */
+      let gatedStatus = `as-of ${(j.date||"")} — gated`;
+      if (j.phase) {
+        const warm = (j.warm_total != null && j.warm_done != null)
+          ? ` — movers warm ${j.warm_done}/${j.warm_total}` : "";
+        gatedStatus = `final stage: ${j.phase}${warm} — running ${fmtElapsed(j.elapsed_s)} (auto-refreshes)`;
+      }
+      $("asof").textContent = gatedStatus;
+      $("noteText").textContent = j.note || "pull pipeline running — movers gated until the prebuild and movers warm finish.";
       clearTimeout(gateTimer);
       gateTimer = setTimeout(load, GATE_RETRY_MS);
       return;
