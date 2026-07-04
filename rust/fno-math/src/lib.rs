@@ -66,6 +66,12 @@ pub mod python;
 /// to Rust + fused with the per-mask entry projection over a resident bar window.
 pub mod trade_sim;
 
+/// DEC-SWEEP-RUST-METRICS-001 (#1186): Phase-B sweep-metrics kernel — the fused
+/// per-mask equity fold + drawdown scan (`build_equity_curve` +
+/// `_drawdown_stats`), bit-identical to the Python oracle inside the 2^52
+/// f64-exactness envelope the Python wrapper pre-guards.
+pub mod metrics;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -94,6 +100,7 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s_nthreads, m)?)?;
     m.add_class::<python::ResidentBars>()?;
     m.add_class::<trade_sim::ResidentSweepSim>()?;
+    m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())
 }
