@@ -3135,8 +3135,16 @@ def cmd_fetch(
     # `is_terminal_auth_failure` at the except site (they re-raise unchanged, exactly
     # as they propagated before this tuple caught them).
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+    from brutex.adapters.error_storm_breaker import (
+        VendorDownError,
+        resolve_error_storm_breaker,
+    )
     from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
-    from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
+    from brutex.adapters.groww.errors import (
+        GrowwAuthError,
+        GrowwCredentialDeadError,
+        is_terminal_auth_failure,
+    )
     from brutex.adapters.groww.pull_pipeline import (
         build_fetch_pipeline,
         build_write_consumer,
@@ -3167,7 +3175,15 @@ def cmd_fetch(
         DailyQuotaExceeded,
         QuotaInvariantError,
         MassEmptySettleHalt,
+        # DEC-GROWW-AUTH-HALT-001: a TERMINAL GrowwAuthError halts (the RETRYABLE
+        # auth-family subclasses are carved back out at the except site).
         GrowwAuthError,
+        # DEC-VENDOR-DOWN-BREAKER-001: a tripped vendor-down error-storm breaker /
+        # dead-credential escalation halts the pull the same graceful way
+        # (GrowwCredentialDeadError is the TERMINAL auth escalation — a
+        # GrowwAuthError subclass, listed explicitly as the breaker's halt class).
+        VendorDownError,
+        GrowwCredentialDeadError,
     )
 
     resolved = _resolve_lake_root(lake_root)
@@ -3504,6 +3520,13 @@ def cmd_fetch(
         # ledger-recorded first.
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
+        # Vendor-down error-storm breaker + dead-credential StillStale escalation
+        # (DEC-VENDOR-DOWN-BREAKER-001): ONE per-pull breaker shared by every pass /
+        # until-clean round (any success resets it, so a recovering vendor never trips).
+        # Armed ONLY for a REAL live pull — a ``--dry-run`` (synthetic adapter) threads
+        # ``None`` so it can never observe synthetic outcomes (the same gating as
+        # ``detect_completeness_gaps`` below).
+        storm_breaker = None if dry_run else resolve_error_storm_breaker()
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -3531,6 +3554,7 @@ def cmd_fetch(
                     # land on the window's first day) leaves it OFF so it never false-reds
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
+                    storm_breaker=storm_breaker,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or

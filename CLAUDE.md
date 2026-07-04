@@ -266,7 +266,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-heal-km3x7p` (**DEC-LAKE-HEAL-001, MIGRATION.md #1174** — the
+- **Active branch:** `claude/lake-heal-km3x7p` (**DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
   + a fully AUTOMATIC keep-FIRST healer (`brutex/data/lake_heal.py`, default AUTO-ON, escape
