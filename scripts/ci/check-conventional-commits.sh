@@ -25,6 +25,18 @@
 #   example: fix(engine): O(1) regression in bar lookup
 #   example: docs(requirements): add FR-MATH section
 #
+# Scope: one or more [a-z0-9_/-]+ segments, comma-separated
+# (e.g. fix(options,calendars): ...). Comma-delimited multi-scope is
+# accepted for parity with the reference parser
+# (conventional-commits-parser, used by commitlint AND Release Please —
+# this repo's release automation), which parses it as a single scope
+# token; the SPEC's grammar does not forbid it. This matters here
+# because published commits are never amended or force-pushed
+# (CLAUDE.md §3), so the checker must accept ecosystem-valid subjects
+# that the automation already handles rather than force a history
+# rewrite. Empty scopes `()`/empty segments `(a,)` and compound TYPES
+# (`ci+chore:`) remain rejected — the type allowlist is untouched.
+#
 # Usage:
 #   check-conventional-commits.sh <from-rev> <to-rev>
 #   check-conventional-commits.sh --msg-file <path>
@@ -44,7 +56,7 @@
 
 set -euo pipefail
 
-REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+\))?!?: .+'
+REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+(,[a-z0-9_/-]+)*\))?!?: .+'
 
 print_help() {
     cat >&2 <<'EOF'

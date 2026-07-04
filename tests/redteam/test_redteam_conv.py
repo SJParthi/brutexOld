@@ -86,3 +86,73 @@ def test_checker_rejects_compound_prefix(tmp_path: Path) -> None:
         f"This is exactly the bypass Agent D found.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+@pytest.mark.skipif(not _checker_path().exists(), reason="conventional-commits checker not present")
+@pytest.mark.parametrize(
+    ("subject", "expect_ok"),
+    [
+        # Comma-separated multi-scope is ACCEPTED — parity with the
+        # reference parser (conventional-commits-parser, used by
+        # commitlint + Release Please), which parses it as one scope
+        # token. Published commits are never amended/force-pushed
+        # (CLAUDE.md §3), so the checker must accept ecosystem-valid
+        # subjects (regression: PR #1085 commit 0a86a18).
+        ("fix(options,calendars): comma-separated multi-scope is valid", True),
+        ("feat(a,b,c): three comma-separated scope segments", True),
+        # The teeth stay in: empty scope, empty segment, compound type.
+        ("fix(): empty scope stays rejected", False),
+        ("fix(options,): trailing empty scope segment stays rejected", False),
+        ("fix(,calendars): leading empty scope segment stays rejected", False),
+        ("ci+chore: compound type stays rejected", False),
+    ],
+)
+def test_checker_scope_comma_policy(tmp_path: Path, subject: str, expect_ok: bool) -> None:
+    """Comma multi-scope accepted; empty/compound forms still rejected."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "redteam",
+        "GIT_AUTHOR_EMAIL": "rt@x",
+        "GIT_COMMITTER_NAME": "redteam",
+        "GIT_COMMITTER_EMAIL": "rt@x",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, env=env)
+
+    (tmp_path / "f.txt").write_text("hello", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "chore: baseline commit for redteam fixture"],
+        cwd=tmp_path,
+        check=True,
+        env=env,
+    )
+
+    (tmp_path / "f.txt").write_text("hello v2", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", subject],
+        cwd=tmp_path,
+        check=True,
+        env=env,
+    )
+
+    result = subprocess.run(
+        ["bash", str(_checker_path())],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    if expect_ok:
+        assert result.returncode == 0, (
+            f"checker REJECTED a commitlint-valid subject {subject!r}.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    else:
+        assert result.returncode != 0, (
+            f"checker ACCEPTED a malformed subject {subject!r} — the gate lost its teeth.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
