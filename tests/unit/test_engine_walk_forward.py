@@ -24,6 +24,7 @@ from brutex.engine.stage1a import (
 )
 from brutex.engine.sweep_driver import (
     FoldResult,
+    WalkForwardResult,
     evaluate_combo_walk_forward,
     verify_walk_forward_no_lookahead,
     walk_forward_sweep,
@@ -446,3 +447,43 @@ def test_evaluate_and_sweep_empty_bars_raise() -> None:
         evaluate_combo_walk_forward([], required_mask=0, direction=Side.BUY, tf_minutes=1)
     with pytest.raises(ValueError, match="non-empty"):
         walk_forward_sweep([], [0], direction=Side.BUY, tf_minutes=1)
+
+
+def test_walk_forward_dual_arm_rust_metrics_flag_is_bit_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEC-SWEEP-RUST-METRICS-001: the COMMON metrics seam arms walk-forward too.
+
+    ``BRUTEX_SWEEP_RUST_METRICS`` flips the drawdown engine under
+    ``metrics_from_trades`` for EVERY consumer — this pins the non-sweep
+    consumer: run_hash AND every per-fold train/test metric are equal across
+    the two arms (raw ``==`` on full-precision floats, never approx —
+    CLAUDE.md §4)."""
+    bars = _stream(25)
+
+    def _run() -> WalkForwardResult:
+        return evaluate_combo_walk_forward(
+            bars,
+            0,
+            direction=Side.SELL,
+            tf_minutes=1,
+            stop_loss_paisa=20,
+            take_profit_paisa=20,
+            train_days=10,
+            test_days=5,
+            step_days=5,
+        )
+
+    monkeypatch.delenv("BRUTEX_SWEEP_RUST_METRICS", raising=False)
+    off = _run()
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
+    on = _run()
+    assert off.run_hash == on.run_hash
+    assert off.pass_rate == on.pass_rate
+    assert off.mean_test_sharpe == on.mean_test_sharpe
+    assert off.min_test_sharpe == on.min_test_sharpe
+    assert len(off.fold_results) == len(on.fold_results)
+    for fr_off, fr_on in zip(off.fold_results, on.fold_results, strict=True):
+        assert fr_off.train_metrics == fr_on.train_metrics
+        assert fr_off.test_metrics == fr_on.test_metrics
+        assert fr_off.test_gates_held == fr_on.test_gates_held
