@@ -552,11 +552,11 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     >>> count_combos(0)
     1
     >>> count_combos(1)
-    52
+    60
     >>> count_combos(2)
-    1326
+    1770
     >>> count_combos(3)
-    22100
+    34220
     >>> count_combos(0, n=5)
     1
     >>> count_combos(3, n=5)
