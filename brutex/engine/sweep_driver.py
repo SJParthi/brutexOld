@@ -240,7 +240,7 @@ def metrics_for_mask(
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
     )
-    return _metrics_from_trades(
+    return metrics_from_trades(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
 
@@ -273,7 +273,7 @@ def _simulate_window(
     )
 
 
-def _metrics_from_trades(
+def metrics_from_trades(
     bars: Sequence[CandleBar],
     trades: Sequence[ClosedTrade],
     *,
@@ -282,9 +282,14 @@ def _metrics_from_trades(
 ) -> ResultMetrics:
     """Build the equity curve from already-simulated trades and compute metrics.
 
-    The trade→metrics half of :func:`metrics_for_mask`, factored out so the
-    walk-forward scorer reuses the identical equity + metrics convention after it
-    has run the P-06 confinement guard over the trades (CLAUDE.md §11 COMMON).
+    The trade→metrics half of :func:`metrics_for_mask` — the ONE public COMMON
+    seam (CLAUDE.md §11) for turning an already-simulated trade stream into a
+    :class:`~brutex.metrics.compute.ResultMetrics`. Consumers: the walk-forward
+    scorer (after its P-06 confinement guard), and the production sweep's wired
+    per-mask metrics tail (:mod:`brutex.engine.sweep_run`,
+    DEC-SWEEP-RUST-TRADESIM-WIRE-001 — the resident Rust kernel batch-simulates
+    the trades, then each mask's stream flows through THIS identical tail, so
+    the wired chain is byte-identical to :func:`metrics_for_mask`'s).
     """
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
@@ -818,7 +823,7 @@ def _score_fold(
         take_profit_paisa=take_profit_paisa,
     )
     _assert_trades_confined(test_bars, test_trades)
-    test_metrics = _metrics_from_trades(
+    test_metrics = metrics_from_trades(
         test_bars, test_trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
     return FoldResult(
@@ -1044,6 +1049,7 @@ __all__ = [
     "evaluate_combo",
     "evaluate_combo_walk_forward",
     "metrics_for_mask",
+    "metrics_from_trades",
     "rank_sweep",
     "rank_sweep_over_bits",
     "sweep_masks",

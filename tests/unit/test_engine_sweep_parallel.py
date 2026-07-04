@@ -391,7 +391,10 @@ class TestRunTupleInWorker:
         def _boom(*_a: object, **_k: object) -> None:
             raise ValueError("combo blew up")
 
-        monkeypatch.setattr(sr, "metrics_for_mask", _boom)
+        # The wired per-mask METRICS TAIL (DEC-SWEEP-RUST-TRADESIM-WIRE-001) —
+        # raising here produces the real fingerprinted SweepComboError exactly
+        # as the pre-wiring per-mask metrics_for_mask seam did.
+        monkeypatch.setattr(sr, "metrics_from_trades", _boom)
         grid = _grid()
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
         tuple_ = next(iter_sweep_tuples(grid))
