@@ -159,6 +159,18 @@ STATUS_NO_RATE: Final[int] = 4
 STATUS_BAD_INPUT: Final[int] = 5
 STATUS_BELOW_INTRINSIC: Final[int] = 6
 
+#: Human-readable name per packed status — the ``null_reasons`` telemetry
+#: labels (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-6).
+_STATUS_NAMES: Final[dict[int, str]] = {
+    STATUS_OK: "ok",
+    STATUS_NO_SPOT: "no_spot",
+    STATUS_NO_SOLUTION: "no_solution",
+    STATUS_AT_EXPIRY: "at_expiry",
+    STATUS_NO_RATE: "no_rate",
+    STATUS_BAD_INPUT: "bad_input",
+    STATUS_BELOW_INTRINSIC: "below_intrinsic",
+}
+
 #: NSE / BSE F&O contracts expire at the 15:30 IST market close of the expiry
 #: date (CLAUDE.md §7 trading hours) — the expiry INSTANT the ``T`` convention
 #: anchors on.
@@ -410,6 +422,11 @@ class EnrichStats:
         the ``latest-wins`` merge leaves the stored raw row untouched (never a
         fabricated bar, never a whole-contract quarantine). Defaults to ``0``
         so a stats object built without the field reads as "no rows skipped".
+    null_reasons
+        The per-status breakdown of ``nulls`` this pass: sorted
+        ``(status_name, count)`` pairs, non-zero counts only (CTR-6 — the
+        telemetry that surfaces a whole-chain ``no_spot``). The driver logs
+        it as a dict on ``greeks_enrich.target_enriched``. Defaults empty.
     """
 
     solved: int
@@ -417,6 +434,7 @@ class EnrichStats:
     reused: int
     changed: int
     skipped: int = 0
+    null_reasons: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,7 +472,11 @@ class GreeksEnrichReport:
         counted under ``enriched`` — partitions durably landed by a target
         that then ERRORED are honestly NOT included (see ``errored``).
     bars_solved, bars_null, bars_reused
-        Bar-level tallies summed across the written targets.
+        Bar-level tallies summed across the written targets. The per-reason
+        breakdown of ``bars_null`` (the ``no_spot`` tally the plan asks for)
+        is the ``null_reasons`` dict each ``greeks_enrich.target_enriched``
+        log line carries (:attr:`EnrichStats.null_reasons`) — the report
+        itself keeps only the total.
     bars_skipped
         Rows dropped by the non-finite price screen, summed across EVERY read
         target (including ``already_current`` ones — a skip is tallied even
@@ -588,6 +610,7 @@ def enrich_option_bars(
 
     bars: list[FnoGreeksBar] = []
     solved = nulls = reused = changed = skipped = 0
+    reasons: dict[int, int] = {}
     for row in rows:
         ts = utc_instant(row["timestamp"])  # type: ignore[arg-type]
         stored_overlay = _overlay_of_row(row)
@@ -702,14 +725,21 @@ def enrich_option_bars(
             source_id=source_id,
         )
         bars.append(bar)
-        if unpack_greeks_provenance(bar.greeks_provenance_id or 0).status == STATUS_OK:
+        status = unpack_greeks_provenance(bar.greeks_provenance_id or 0).status
+        if status == STATUS_OK:
             solved += 1
         else:
             nulls += 1
+            reasons[status] = reasons.get(status, 0) + 1
         if _overlay_of_bar(bar) != stored_overlay:
             changed += 1
     return bars, EnrichStats(
-        solved=solved, nulls=nulls, reused=reused, changed=changed, skipped=skipped
+        solved=solved,
+        nulls=nulls,
+        reused=reused,
+        changed=changed,
+        skipped=skipped,
+        null_reasons=tuple(sorted((_STATUS_NAMES[s], c) for s, c in reasons.items())),
     )
 
 
@@ -1193,6 +1223,7 @@ def enrich_greeks_for_targets(
                 bars=written,
                 solved=stats.solved,
                 nulls=stats.nulls,
+                null_reasons=dict(stats.null_reasons),
                 reused=stats.reused,
                 style=_style_for_segment(join.segment),
             )

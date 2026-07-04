@@ -327,6 +327,57 @@ class TestSpotKeyRecoveryLadder:
         assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
 
 
+class TestNullReasonsTelemetry:
+    """CTR-6 (FIX-11): the per-status NULL breakdown actually reaches the logs.
+
+    ``GreeksEnrichReport`` documented the ``no_spot`` tally as "``bars_null``
+    broken down in the logs", but no log event carried a per-reason
+    breakdown. ``EnrichStats.null_reasons`` now tallies every non-OK stamp
+    and the driver emits it on ``greeks_enrich.target_enriched`` — also the
+    telemetry that surfaces a SPOTJOIN-2-class whole-chain ``no_spot``.
+    """
+
+    def test_stats_carry_sorted_nonzero_reason_pairs(self) -> None:
+        no_spot_ts = _BAR_TS + timedelta(minutes=1)
+        below_ts = _BAR_TS + timedelta(minutes=2)
+        rows = [
+            _row(close=1700.0),  # solves (floor ≈ 1536.5 at spot 21500)
+            _row(no_spot_ts, close=200.0),  # no spot minute
+            _row(below_ts, close=1400.0),  # below the parity floor
+        ]
+        _bars, stats = _enrich_rows(
+            rows,
+            symbol="NSE-NIFTY-25Jan24-20000-CE",
+            spot_by_ts={_BAR_TS: _SPOT, below_ts: _SPOT},
+        )
+        assert stats.solved == 1 and stats.nulls == 2
+        assert stats.null_reasons == (("below_intrinsic", 1), ("no_spot", 1))
+
+    def test_all_solved_reads_empty_reasons(self) -> None:
+        _bars, stats = _enrich_rows([_row(close=200.0)])
+        assert stats.null_reasons == ()
+
+    def test_driver_logs_the_breakdown_on_target_enriched(self, tmp_path: Path) -> None:
+        no_spot_ts = _BAR_TS + timedelta(minutes=1)
+        rows = [_row(close=200.0), _row(no_spot_ts, close=200.0)]
+        with capture_logs() as logs:
+            enrich_greeks_for_targets(
+                targets=[
+                    GreeksEnrichTarget(
+                        exchange="NSE", symbol=_CE_SYMBOL, start=_WINDOW[0], end=_WINDOW[1]
+                    )
+                ],
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: rows,
+                read_spot=lambda _t, _p: SpotJoin({_BAR_TS: _SPOT}, "INDEX"),
+                write_bars=lambda _t, b: len(list(b)),  # type: ignore[arg-type]
+            )
+        enriched_events = [e for e in logs if e["event"] == "greeks_enrich.target_enriched"]
+        assert len(enriched_events) == 1
+        assert enriched_events[0]["null_reasons"] == {"no_spot": 1}
+
+
 class TestLakeWriteHaltReRaise:
     """CTR-2 (FIX-8): a pull-wide global stop is never per-target quarantined.
 
