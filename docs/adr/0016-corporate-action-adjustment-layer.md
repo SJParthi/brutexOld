@@ -1,6 +1,6 @@
 # ADR-0016 — Corporate-action adjustment layer (design sketch + hard gate)
 
-**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1177)
+**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1178)
 **Date:** 2026-07-03
 **Status:** **Proposed** — design sketch for a FUTURE layer. **NOT implemented.** The ONLY
 shipped artifact of this ADR is the enforcement gate (`brutex/engine/scope_guard.py`) that
@@ -173,6 +173,6 @@ the real futures instrument label in the same reviewed PR that assigns its symbo
 ## 7. References
 
 - CLAUDE.md §2 Golden Rules #1, #3, #10; §6 (verified Groww facts)
-- MIGRATION.md #1177 (this decision), #200 (DEC-P0-063), #694 (NTM), #1006 (ADR-0012)
+- MIGRATION.md #1178 (this decision), #200 (DEC-P0-063), #694 (NTM), #1006 (ADR-0012)
 - 2026-07-03 audit finding #5 (zero corporate-action code, grep-verified)
 - `brutex/engine/scope_guard.py` (the shipped gate), `tests/unit/test_engine_scope_guard.py`
