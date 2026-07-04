@@ -158,6 +158,86 @@ class TestPackBandValidation:
         assert pid == 1380609
 
 
+class TestForeignMonthPoisonBounded:
+    """G-RACE-1 (FIX-5): a foreign-month duplicate can never mutate canonical OHLCV.
+
+    ``read_option_rows`` keep-FIRST dedups across the span's month files, so a
+    #911-class poisoned EARLIER file carrying a canonical-month timestamp WON
+    the dedup and the latest-wins enrich write then overwrote the authoritative
+    keep-first 1-minute OHLCV — the mutation the writer's own law forbids.
+    Each month file is now bounded to its OWN UTC (year, month) before concat.
+    """
+
+    def test_poisoned_earlier_month_file_cannot_overwrite_canonical_ohlcv(
+        self, tmp_path: Path
+    ) -> None:
+        pl = pytest.importorskip("polars")
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+
+        def _bar(ts: datetime, close: str, *, volume: int, oi: int | None) -> CandleBar:
+            d = Decimal(close)
+            return CandleBar(
+                timestamp=ts, open=d, high=d, low=d, close=d, volume=volume, open_interest=oi
+            )
+
+        sink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[_bar(_BAR_TS, "21500", volume=7, oi=None)],
+        )
+        # Canonical January row: close 200 / vol 10 / oi 100.
+        sink.append(
+            exchange="NSE",
+            segment="FNO",
+            symbol=_CE_SYMBOL,
+            interval="1minute",
+            bars=[_bar(_BAR_TS, "200", volume=10, oi=100)],
+        )
+        # A December month file poisoned with the SAME January timestamp but
+        # divergent OHLCV (close 210 / vol 7 / oi 70) — today's writer cannot
+        # create one; plant it directly (the audited pre-existing-dup state).
+        dec_ts = datetime(2023, 12, 15, 4, 0, tzinfo=UTC)
+        sink.append(
+            exchange="NSE",
+            segment="FNO",
+            symbol=_CE_SYMBOL,
+            interval="1minute",
+            bars=[_bar(dec_ts, "210", volume=7, oi=70)],
+        )
+        base = lake / "bars" / "NSE" / "FNO" / _CE_SYMBOL / "1minute"
+        dec_part = base / "2023" / "12.parquet"
+        frame = pl.read_parquet(dec_part)
+        frame = frame.with_columns(
+            pl.Series("timestamp", [_BAR_TS], dtype=frame.schema["timestamp"])
+        )
+        frame.write_parquet(dec_part)
+
+        report = enrich_greeks_for_targets(
+            targets=[
+                GreeksEnrichTarget(
+                    exchange="NSE", symbol=_CE_SYMBOL, start=date(2023, 12, 1), end=_WINDOW[1]
+                )
+            ],
+            lake_root=lake,
+            rate_source=_RATE,
+        )
+        assert report.errored == 0
+        stored = pl.read_parquet(base / "2024" / "01.parquet")
+        # Pre-fix: the December poison won the keep-first read dedup and the
+        # latest-wins write stamped close=210/vol=7/oi=70 into January.
+        assert stored["close"].to_list() == [200.0]
+        assert stored["volume"].to_list() == [10]
+        assert stored["open_interest"].to_list() == [100]
+
+
 class TestDegenerateInputHandling:
     """IVX-2 + IVX-3 (FIX-4): NaN/negative inputs degrade per-bar, never per-contract.
 

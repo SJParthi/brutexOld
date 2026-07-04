@@ -883,7 +883,13 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
     — O(pulled-window), never O(lake-depth)) and SCHEMA-TOLERANT per file: a
     legacy 7-column partition gains ``None``-filled overlay columns, an
     enriched 17-column partition passes its stored overlay through — so a
-    mixed tree (e.g. a crash mid-enrich) can never break the pass. Rows are
+    mixed tree (e.g. a crash mid-enrich) can never break the pass. Each month
+    file is additionally bounded to its OWN UTC ``(year, month)`` — the lake
+    partitions by UTC month (``partition_for_timestamp``; the
+    DEC-LAKE-HEAL-001 "foreign row" invariant), so a #911-class poisoned
+    duplicate sitting in a FOREIGN month file can never win the keep-first
+    dedup and be re-written into a canonical partition by the latest-wins
+    enrich write (DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-1). Rows are
     filtered to the half-open IST date window ``[start, end)`` and sorted
     ascending.
     """
@@ -905,6 +911,15 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
                 ).alias(name)
                 for name in missing
             )
+        # Bound the file to its OWN UTC month — the path is constructed by
+        # ist_span_partition_files as <base>/<yyyy>/<mm>.parquet, so the
+        # file's canonical (year, month) is recoverable from it exactly.
+        file_path = Path(file)
+        year = int(file_path.parent.name)
+        month = int(file_path.stem)
+        df = df.filter(
+            (pl.col("timestamp").dt.year() == year) & (pl.col("timestamp").dt.month() == month)
+        )
         frames.append(df.select(*base_columns, *GREEKS_OVERLAY_FIELDS))
     merged = pl.concat(frames)
     # Keep-FIRST read dedup BEFORE the sort (DEC-LAKE-READ-UNIQUE-001): a
