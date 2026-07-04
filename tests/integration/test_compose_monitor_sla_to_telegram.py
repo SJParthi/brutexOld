@@ -145,7 +145,10 @@ class TestSLABreachReachesTelegram:
         assert first_send_event.dedupe_key == "ingest_lag_p99_seconds"
         assert second_send_event.dedupe_key == "ingest_lag_p99_seconds"
         # The first send is the breach (state transition NORMAL → BREACHED).
-        assert "ingest_lag_p99_seconds" in first_send_event.message
+        # The body is MarkdownV2-escaped at the _publish_telegram funnel
+        # (R2-OCLI-F1) — the raw rule name arrives with `_` escaped.
+        assert "ingest_lag_p99_seconds" not in first_send_event.message
+        assert r"ingest\_lag\_p99\_seconds" in first_send_event.message
 
     def test_no_publish_when_value_stays_normal(
         self,
