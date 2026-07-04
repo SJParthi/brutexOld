@@ -56,10 +56,12 @@ from brutex.dashboard.gated_prebuild import (
     underlying_match_tokens,
 )
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
+from brutex.data.fs_probe import probe_allocation_granularity
 from brutex.data.timeframe_materialize import PrebuildKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from pathlib import Path
 
     from brutex.dashboard.fno_cascade import FnoCascadeIndex, FnoContract
     from brutex.data.timeframe_materialize import MaterializeResult
@@ -119,6 +121,13 @@ class PrebuildOutcome:
         "ran, built 0" and "CRASHED before building anything" are honestly
         distinguishable in the pipeline note (Golden Rule #1). A pull-wide
         global-stop never sets this — it RE-RAISES out of the guard instead.
+    fs_note
+        The one-line COARSE-allocation warning from the lake-root probe
+        (DEC-LAKE-FS-PROBE-001 — the prebuild writes ~0.5-1M tiny Parquet
+        files, so an exFAT-class cluster wastes 30-300 GB of slack); ``None``
+        when the filesystem is fine-grained, the probe was unavailable, or no
+        ``lake_root`` was given. Folded into ``PipelinePullReport``'s
+        ``fs_allocation_note`` + note by the pipeline.
     """
 
     symbols_built: int
@@ -127,6 +136,7 @@ class PrebuildOutcome:
     failed_count: int
     ok: bool
     crashed: str | None = None
+    fs_note: str | None = None
 
 
 def run_pipeline_prebuild(
@@ -137,6 +147,7 @@ def run_pipeline_prebuild(
     fno_segment: str = FNO_CANDLE_LAKE_SEGMENT,
     source: str = "pipeline",
     exclude_symbols: frozenset[str] = frozenset(),
+    lake_root: Path | None = None,
 ) -> PrebuildOutcome:
     """Compose + run the SPOT → FUTURES → OPTIONS prebuild over *instruments*.
 
@@ -186,6 +197,13 @@ def run_pipeline_prebuild(
         excludes EVERY instrument degrades honestly: the run still completes
         (a ``pipeline.prebuild.all_excluded`` warning, then an ``ok=True``
         0-built outcome), never a crash.
+    lake_root
+        When given, the lake root is allocation-probed at start
+        (DEC-LAKE-FS-PROBE-001 — the prebuild is the ~0.5-1M-tiny-file
+        writer, so a COARSE exFAT-class cluster is warned LOUDLY before the
+        slack is spent); the probe's one-line note rides
+        :attr:`PrebuildOutcome.fs_note` + the start log. ``None`` (the
+        default) skips the probe — byte-identical to the pre-probe behaviour.
 
     Returns
     -------
@@ -193,6 +211,11 @@ def run_pipeline_prebuild(
         The built/bars/failures rollup for the pipeline report.
     """
     started = time.monotonic()
+    # Allocation probe FIRST (DEC-LAKE-FS-PROBE-001): warn about a coarse
+    # cluster BEFORE the tiny-file fan-out spends the slack. Best-effort by
+    # construction (the probe never raises).
+    fs_probe = probe_allocation_granularity(lake_root) if lake_root is not None else None
+    fs_note = fs_probe.note if fs_probe is not None else None
     kept = [inst for inst in instruments if not (underlying_match_tokens(inst) & exclude_symbols)]
     excluded_count = len(instruments) - len(kept)
     if excluded_count and not kept:
@@ -219,6 +242,7 @@ def run_pipeline_prebuild(
         # quarantined underlyings the clean-set exclusion removed (0 on a
         # clean pull — the pre-cleanset payload plus this one key).
         excluded_symbols=excluded_count,
+        fs_allocation=fs_note if fs_note is not None else "ok",
     )
 
     def _materialize_spot(inst: Instrument) -> MaterializeResult:
@@ -270,6 +294,7 @@ def run_pipeline_prebuild(
         failed=failed_names[:MAX_REPORTED_FAILURES],
         failed_count=len(failed_names),
         ok=report.ok,
+        fs_note=fs_note,
     )
     _LOG.info(
         "pipeline.prebuild.done",
@@ -289,6 +314,7 @@ def run_pipeline_prebuild_guarded(
     fno_segment: str = FNO_CANDLE_LAKE_SEGMENT,
     source: str = "pipeline",
     exclude_symbols: frozenset[str] = frozenset(),
+    lake_root: Path | None = None,
 ) -> PrebuildOutcome:
     """Crash-guarded :func:`run_pipeline_prebuild` for the route seam.
 
@@ -321,6 +347,7 @@ def run_pipeline_prebuild_guarded(
             fno_segment=fno_segment,
             source=source,
             exclude_symbols=exclude_symbols,
+            lake_root=lake_root,
         )
     except Exception as exc:  # pylint: disable=broad-except - the route seam must never crash the job
         # Imported inside the handler (mirrors is_pull_halt's own lazy-import

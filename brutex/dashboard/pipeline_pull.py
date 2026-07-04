@@ -349,6 +349,13 @@ class PipelinePullReport:
         did not run. The note renders ``", prebuild CRASHED (ErrorType)"``
         instead of the benign "pre-built for 0 symbol(s)" clause, so a crash
         is never mistakable for "ran, built 0" (Golden Rule #1).
+    fs_allocation_note
+        The lake-root allocation probe's one-line COARSE warning
+        (DEC-LAKE-FS-PROBE-001 — ``PrebuildOutcome.fs_note``): the prebuild
+        writes ~0.5-1M tiny Parquet files, so an exFAT-class cluster wastes
+        30-300 GB of pure slack; named here AND in the note so the operator
+        sees it before the disk fills. ``None`` when the filesystem is
+        fine-grained, the probe was unavailable, or the phase did not run.
     quarantined_symbols
         The deduped, sorted names of symbols a phase QUARANTINED per-symbol
         without stopping the chain (:func:`derive_quarantined_symbols` — spot
@@ -373,6 +380,7 @@ class PipelinePullReport:
     prebuild_total_bars: int | None = None
     prebuild_failed: tuple[str, ...] = ()
     prebuild_crashed: str | None = None
+    fs_allocation_note: str | None = None
     quarantined_symbols: tuple[str, ...] = ()
     quarantined_count: int = 0
 
@@ -405,6 +413,7 @@ class PipelinePullReport:
             "prebuild_total_bars": self.prebuild_total_bars,
             "prebuild_failed": list(self.prebuild_failed),
             "prebuild_crashed": self.prebuild_crashed,
+            "fs_allocation_note": self.fs_allocation_note,
             "quarantined_symbols": list(self.quarantined_symbols),
             "quarantined_count": self.quarantined_count,
             "spot": self.spot.to_dict() if self.spot is not None else None,
@@ -481,6 +490,10 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))
         suffix = f" (+{more} more)" if more > 0 else ""
         clause += f", prebuild failures: {shown}{suffix}"
+    if prebuild.fs_note is not None:
+        # DEC-LAKE-FS-PROBE-001: a COARSE-allocation lake volume is named in the
+        # headline too — the slack is spent by exactly this phase's tiny files.
+        clause += f", ⚠ {prebuild.fs_note}"
     return clause
 
 
@@ -755,6 +768,7 @@ def run_full_pipeline(
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
+        fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
         quarantined_symbols=quarantined,
         quarantined_count=quarantined_count,
     )
