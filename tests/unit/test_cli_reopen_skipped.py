@@ -104,6 +104,30 @@ class TestReopenSkippedCommand:
         rc = cli.main(["reopen-skipped", "--lake-root", str(tmp_path / "empty")])
         assert rc == cli.EXIT_USER_ERROR
 
+    def test_delta_only_lake_is_a_live_ledger_not_a_refusal(self, tmp_path: Path) -> None:
+        # P2 fix-round regression (DEC-REOPEN-DELTA-AWARE-001): a base-less lake
+        # holding only deltas (a first pull's mid-flight crash checkpoint,
+        # DEC-LEDGER-DELTA-FLUSH-001) is a LIVE ledger — exactly the state
+        # load_or_migrate_window_ledger loads via the delta fold — so the
+        # command must operate on it, not refuse "no window ledger found".
+        from brutex.data.window_ledger_store import append_ledger_delta, ledger_path
+
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+        )
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        assert not ledger_path(tmp_path).is_file()  # genuinely base-less
+        rc = cli.main(["reopen-skipped", "--lake-root", str(tmp_path)])
+        assert rc == cli.EXIT_OK
+        restored = load_window_ledger(tmp_path)
+        assert [r.status for r in restored.records()] == [FAILED]  # re-opened
+
     def test_refuses_while_a_pull_holds_the_account_lock(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
