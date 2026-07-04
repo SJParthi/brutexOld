@@ -38,9 +38,7 @@ _TS1 = datetime(2021, 1, 4, 4, 6, tzinfo=UTC)
 
 def _bar(ts: datetime, *, close: str = "100.00") -> CandleBar:
     c = Decimal(close)
-    return CandleBar(
-        timestamp=ts, open=c, high=c, low=c, close=c, volume=5, open_interest=None
-    )
+    return CandleBar(timestamp=ts, open=c, high=c, low=c, close=c, volume=5, open_interest=None)
 
 
 def _inst() -> Instrument:

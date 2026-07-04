@@ -60,9 +60,7 @@ class TestParquetBarSinkVendorSurface:
         assert result.vendor_dup_rows_dropped == 2
         assert result.max_close_delta is None  # identical duplicates — no conflict
 
-    def test_max_close_delta_is_exact_decimal_max_across_partitions(
-        self, tmp_path: Path
-    ) -> None:
+    def test_max_close_delta_is_exact_decimal_max_across_partitions(self, tmp_path: Path) -> None:
         """Keep-first restates in two partitions max-fold to the exact larger delta."""
         sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
         sink.append(bars=[_bar(6, 1, close="100.00"), _bar(7, 1, close="200.00")], **_COORDS)

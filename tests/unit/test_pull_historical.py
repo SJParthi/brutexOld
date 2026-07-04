@@ -2877,23 +2877,23 @@ class TestVendorSurfacePhaseThreading:
         """JSON honesty: the Decimal renders as its string, never a float round-trip."""
         from decimal import Decimal
 
-        base = dict(
-            dry_run=False,
-            intervals=("1minute",),
-            contracts_selected=1,
-            contracts_completed=1,
-            bars_appended=10,
-            windows=1,
-            failed_pairs=0,
-            still_failed_windows=0,
-            auth_aborted=False,
-            note="ok",
-            phase1_clean=True,
-            phase1_complete=("C",),
-            start_dates={"C": "2024-01-01"},
-            minute_requested=True,
-            minute_skipped=False,
-        )
+        base = {
+            "dry_run": False,
+            "intervals": ("1minute",),
+            "contracts_selected": 1,
+            "contracts_completed": 1,
+            "bars_appended": 10,
+            "windows": 1,
+            "failed_pairs": 0,
+            "still_failed_windows": 0,
+            "auth_aborted": False,
+            "note": "ok",
+            "phase1_clean": True,
+            "phase1_complete": ("C",),
+            "start_dates": {"C": "2024-01-01"},
+            "minute_requested": True,
+            "minute_skipped": False,
+        }
         with_delta = HistoricalPullReport(
             **base,  # type: ignore[arg-type]
             conflicts=25,

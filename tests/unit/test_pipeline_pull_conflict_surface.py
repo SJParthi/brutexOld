@@ -170,9 +170,7 @@ class TestConflictAlertSeam:
             run_metadata=_metadata,
             run_historical=lambda: _composite(_hist(vendor_dup_rows_dropped=5)),
         )
-        assert calls == [
-            {"conflicts": 1, "max_close_delta": Decimal("2.00"), "dup_rows": 5}
-        ]
+        assert calls == [{"conflicts": 1, "max_close_delta": Decimal("2.00"), "dup_rows": 5}]
 
     def test_gate_stopped_run_does_not_hit_the_completion_seam(
         self, monkeypatch: pytest.MonkeyPatch
@@ -214,7 +212,7 @@ class TestDiskGuardHeadline:
     def test_note_names_the_skip_and_movers_do_not_warm(self) -> None:
         warmed: list[str] = []
         report = run_full_pipeline(
-            run_spot=lambda: _spot(),
+            run_spot=_spot,
             run_metadata=_metadata,
             run_historical=lambda: _composite(_hist()),
             warm_spot_movers=lambda: warmed.append("spot") or 1,
@@ -228,7 +226,7 @@ class TestDiskGuardHeadline:
 
     def test_unguarded_prebuild_reports_false(self) -> None:
         report = run_full_pipeline(
-            run_spot=lambda: _spot(),
+            run_spot=_spot,
             run_metadata=_metadata,
             run_historical=lambda: _composite(_hist()),
             run_prebuild=lambda: PrebuildOutcome(

@@ -3293,9 +3293,7 @@ def build_app(
                         # OPEN on any measurement error.
                         disk_guard=make_disk_guard(
                             lake_root,
-                            instrument_store.get_meta
-                            if instrument_store is not None
-                            else None,
+                            instrument_store.get_meta if instrument_store is not None else None,
                         ),
                     )
                     # Post-run observation (best-effort, never raises): persist

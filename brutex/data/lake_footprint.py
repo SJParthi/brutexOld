@@ -110,6 +110,11 @@ _SOURCE_INTERVAL: Final[str] = "1minute"
 #: literal so this module imports nothing heavy).
 _FNO_SEGMENT: Final[str] = "FNO"
 
+#: Minimum relative-path depth of a real partition file
+#: (``<exchange>/<segment>/<symbol>/<interval>/…/<mm>.parquet`` — anything
+#: shallower carries no interval component and is not a partition file).
+_MIN_PARTITION_DEPTH: Final[int] = 5
+
 #: Decimal quantum for persisted/derived multipliers (4 dp — a ratio display,
 #: NOT money; DEC-MONEY-2DP-001 governs rupee display only).
 _MULTIPLIER_QUANTUM: Final[Decimal] = Decimal("0.0001")
@@ -195,7 +200,7 @@ def measure_lake_footprint(lake_root: Path) -> LakeFootprint:
             # Layout: <exchange>/<segment>/<symbol>/<interval>/<yyyy>/<mm>.parquet
             # (≥ 5 components ⇒ parts[3] is the interval; anything shallower is
             # not a partition file and is skipped).
-            if len(parts) < 5:
+            if len(parts) < _MIN_PARTITION_DEPTH:
                 continue
             segment, interval = parts[1], parts[3]
             try:
@@ -295,12 +300,10 @@ def record_lake_footprint(
         source_1m_bytes=overall.source_1m_bytes,
         derived_bytes=overall.derived_bytes,
         multiplier=None if overall.multiplier is None else str(overall.multiplier),
-        multiplier_spot=None if footprint.spot.multiplier is None else str(
-            footprint.spot.multiplier
-        ),
-        multiplier_fno=None if footprint.fno.multiplier is None else str(
-            footprint.fno.multiplier
-        ),
+        multiplier_spot=None
+        if footprint.spot.multiplier is None
+        else str(footprint.spot.multiplier),
+        multiplier_fno=None if footprint.fno.multiplier is None else str(footprint.fno.multiplier),
     )
     return footprint
 

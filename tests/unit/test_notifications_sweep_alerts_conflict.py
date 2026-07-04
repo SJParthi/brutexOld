@@ -125,9 +125,7 @@ class TestEmitVendorConflictAlert:
         monkeypatch.setattr(sweep_alerts.SweepAlerter, "vendor_conflict_drift", _boom)
         with capture_logs() as logs:
             assert (
-                emit_vendor_conflict_alert(
-                    conflicts=1, max_close_delta=Decimal("5.00"), dup_rows=0
-                )
+                emit_vendor_conflict_alert(conflicts=1, max_close_delta=Decimal("5.00"), dup_rows=0)
                 is False
             )
         assert any(e["event"] == "vendor_conflict_alert_failed" for e in logs)
