@@ -695,6 +695,7 @@ jobs:
           if compgen -G "tests/unit/test_greeks_enrich.py" > /dev/null; then
             pytest --cov=brutex.data.greeks_enrich --cov=brutex.data.spot_join --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_greeks_enrich.py tests/unit/test_data_spot_join.py \
+              tests/unit/test_greeks_enrich_audit_regressions.py \
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
               tests/golden/test_greeks_enrich_golden.py
@@ -936,8 +937,14 @@ jobs:
           # quota_tracker two-file compose above). Without it the new
           # recovery code reads 92.76% (lines 421, 661-675 uncovered) under
           # this per-module gate even though the aggregate gate is 100%.
+          # DEC-AUDIT-VERIFY-STREAM-001 (MIGRATION.md #1261): the streaming
+          # verify_chain (public iter_entries + the O(1) torn-tail probe)
+          # ships a dedicated suite, test_orchestrator_audit_stream.py —
+          # composed here so this static pairing carries ALL of audit.py's
+          # covering unit files (the PR #1090/#1096 lesson: a new test file
+          # for a gated module joins that module's static pairing).
           if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py tests/unit/test_audit_torn_tail.py
+            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py tests/unit/test_audit_torn_tail.py tests/unit/test_orchestrator_audit_stream.py
           else
             echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
           fi
