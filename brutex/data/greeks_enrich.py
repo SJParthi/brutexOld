@@ -607,9 +607,10 @@ def enrich_option_bars(
     nullable stored overlay): reuse the stored overlay ONLY when its stamp
     matches the current inputs with :data:`STATUS_OK` **and** its stored
     ``rate_used`` / ``spot_at_bar`` equal the values this pass would solve
-    with **and** its style flag matches (the value-hardened gate of
-    DEC-GREEKS-CORRECTNESS-AUDIT-001 — a stamp cannot represent a rate/spot
-    VALUE change under unchanged source kinds). Anything else recomputes:
+    with — the spot compared after the 2dp ``round_money`` snap, i.e. the
+    exact solve input — **and** its style flag matches (the value-hardened
+    gate of DEC-GREEKS-CORRECTNESS-AUDIT-001 — a stamp cannot represent a
+    rate/spot VALUE change under unchanged source kinds). Anything else recomputes:
     a coverage-shrunk rate CSV or a vanished spot minute honestly DEMOTES a
     previously-OK bar to :data:`STATUS_NO_RATE` / :data:`STATUS_NO_SPOT` on
     the recompute — never a frozen stale Greek. For a recompute, derive ``T``
@@ -701,7 +702,7 @@ def enrich_option_bars(
                 and rate is not None
                 and _as_float(row.get("rate_used")) == rate.rate
                 and spot is not None
-                and _as_decimal(row.get("spot_at_bar")) == spot
+                and _as_decimal(row.get("spot_at_bar")) == round_money(spot)
             ):
                 # Already solved under the CURRENT inputs — restate verbatim.
                 # The stamp bits alone are NOT sufficient: the spot 1-minute
@@ -714,7 +715,12 @@ def enrich_option_bars(
                 # pass would solve with, and the style flag to match; any
                 # mismatch falls through to the honest recompute below, which
                 # re-solves or DEMOTES (NO_RATE / NO_SPOT) and lets the
-                # latest-wins write heal the lake.
+                # latest-wins write heal the lake. The spot is compared
+                # AFTER the 2dp ``round_money`` snap because the SNAPPED spot
+                # IS the recompute's solve input (`_compute_bar` snaps first,
+                # SPOTJOIN-3) — value-identical to recomputing, and a legacy
+                # non-2dp spot partition keeps the O(reuse) fast path instead
+                # of re-solving every bar on every pass (review fold).
                 bars.append(
                     FnoGreeksBar(
                         timestamp=ts,

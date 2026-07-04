@@ -799,6 +799,20 @@ class TestReuseGateValueHardening:
         assert stats.changed == 0
         assert bars[0].iv == true_iv + 0.01
 
+    def test_legacy_non_2dp_join_spot_still_reuses(self) -> None:
+        # Review fold: the gate compares the SNAPPED join spot
+        # (``round_money(spot)``) — value-identical to a recompute because the
+        # snapped spot IS the solve input (SPOTJOIN-3), so a legacy non-2dp
+        # spot partition keeps the O(reuse) fast path. Pre-fold the RAW join
+        # Decimal never equalled its own 2dp stored ``spot_at_bar``, so such
+        # partitions paid a full kernel re-solve on every pass forever.
+        stored = _stored_row_from(self._solved())
+        raw = Decimal("21500.0000000001")  # snaps to the stored 21500.00
+        bars, stats = _enrich_rows([stored], spot_by_ts={_BAR_TS: raw})
+        assert stats.reused == 1  # pre-fold: reused == 0 (re-solved each pass)
+        assert stats.solved == 0 and stats.changed == 0
+        assert bars[0].iv == stored["iv"]
+
     def test_rate_on_called_once_per_date(self) -> None:
         # RF-5: the setdefault memo evaluated rate_on eagerly per BAR; the
         # explicit two-step memo calls it once per DATE.
