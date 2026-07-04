@@ -46,6 +46,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -110,6 +111,7 @@ from brutex.dashboard.fno_underlying import (
 )
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
+from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_revision import lake_revision
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -901,6 +903,127 @@ def _registry_unreadable_payload(columns: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
+# ── Host / cross-origin hardening (R2-DS-F1) ────────────────────────────────
+# The dashboard carries no auth/CSRF tokens, so a browser on the operator's
+# machine can be induced to fire state-changing POSTs at this localhost
+# service (CSRF fire-and-forget) or reach it under an attacker-controlled
+# Host via DNS rebinding. Two thin guards close that: a Host-header allowlist
+# (Starlette ``TrustedHostMiddleware``) + a same-origin check on
+# state-changing methods. The pure decision logic lives in the module-level
+# helpers below so it is directly unit-testable at 100% line+branch; the
+# async middleware registered in :func:`build_app` is the thin glue.
+
+# The loopback-only DEFAULT_ALLOWED_HOSTS constant lives in the LEAF module
+# :mod:`brutex.dashboard.host_allowlist` (re-exported here via ``__all__``) so
+# the CLI launcher can read it without importing this module — see that
+# module's docstring for the cyclic-import rationale.
+
+#: State-changing methods the cross-origin guard enforces on. GET / HEAD /
+#: OPTIONS are never checked — they must stay side-effect-free reads.
+_ORIGIN_GUARDED_METHODS: Final[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: 403 detail returned for a browser-initiated cross-site state change.
+_CROSS_ORIGIN_DETAIL: Final = "cross-origin request blocked"
+
+
+def _trusted_host_patterns(allowed_hosts: Sequence[str] | None) -> list[str]:
+    """Normalize an allowed-host list into Starlette ``TrustedHostMiddleware`` patterns.
+
+    Starlette compares the request's ``Host`` header with any ``:port`` suffix
+    STRIPPED, and asserts that a pattern contains no ``*`` beyond a leading
+    ``*.`` domain wildcard — so the operator-facing ``host:*`` (any-port)
+    spelling is normalized to its bare host here, deduplicated
+    order-preserving, and empty entries are dropped.
+
+    Parameters
+    ----------
+    allowed_hosts
+        Operator-supplied allowlist, or ``None`` for the loopback-only
+        default (:data:`DEFAULT_ALLOWED_HOSTS`).
+
+    Returns
+    -------
+    list[str]
+        Deduplicated bare-host patterns safe to hand to Starlette.
+    """
+    entries = DEFAULT_ALLOWED_HOSTS if allowed_hosts is None else tuple(allowed_hosts)
+    patterns: list[str] = []
+    for entry in entries:
+        host = entry[:-2] if entry.endswith(":*") else entry
+        if host and host not in patterns:
+            patterns.append(host)
+    return patterns
+
+
+def _origin_header_host(value: str) -> str | None:
+    """Extract the lowercased ``host[:port]`` from an ``Origin``/``Referer`` value.
+
+    Parameters
+    ----------
+    value
+        The raw header value, e.g. ``"http://localhost:8000"`` or
+        ``"http://localhost:8000/universe"``.
+
+    Returns
+    -------
+    str | None
+        The lowercased network location, or ``None`` when none can be parsed
+        (the opaque ``Origin: null`` a sandboxed cross-site frame sends, a
+        malformed URL raising ``ValueError``, or a bare path) — the caller
+        treats an unparsable PRESENT header as cross-origin, never as a pass.
+    """
+    try:
+        netloc = urlsplit(value).netloc
+    except ValueError:
+        return None
+    return netloc.lower() or None
+
+
+def _cross_origin_reason(
+    method: str,
+    request_host: str | None,
+    origin: str | None,
+    referer: str | None,
+) -> str | None:
+    """Decide whether a request is a browser cross-origin state change.
+
+    Rules (R2-DS-F1): only methods in :data:`_ORIGIN_GUARDED_METHODS` are
+    checked; a request with NEITHER ``Origin`` NOR ``Referer`` is always
+    allowed (CLI / curl / non-browser clients send neither); when an
+    ``Origin`` is present it is authoritative (``Referer`` is consulted only
+    when ``Origin`` is absent); the header's ``host[:port]`` must equal the
+    request's own ``Host`` header (case-insensitive) or the request is
+    refused — an unparsable header or a missing ``Host`` refuses too (fail
+    closed, never a pass on a malformed value).
+
+    Parameters
+    ----------
+    method
+        The HTTP request method.
+    request_host
+        The request's own ``Host`` header, or ``None`` when absent.
+    origin
+        The ``Origin`` header, or ``None`` when absent.
+    referer
+        The ``Referer`` header, or ``None`` when absent.
+
+    Returns
+    -------
+    str | None
+        ``None`` to allow the request, else the 403 detail string.
+    """
+    if method.upper() not in _ORIGIN_GUARDED_METHODS:
+        return None
+    source = origin if origin is not None else referer
+    if source is None:
+        return None
+    source_host = _origin_header_host(source)
+    own_host = (request_host or "").strip().lower()
+    if source_host is not None and own_host and source_host == own_host:
+        return None
+    return _CROSS_ORIGIN_DETAIL
+
+
 def build_app(
     state: DashboardState,
     *,
@@ -912,6 +1035,7 @@ def build_app(
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
+    allowed_hosts: Sequence[str] | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -997,6 +1121,16 @@ def build_app(
         as before; ``build_app`` itself never STARTS a preflight (the
         launcher seam in ``cli.cmd_dashboard`` does), so constructing an app
         stays side-effect-free.
+    allowed_hosts
+        Optional ``Host``-header allowlist for the DNS-rebinding guard
+        (R2-DS-F1). Entries may carry an any-port ``:*`` suffix (normalized
+        via :func:`_trusted_host_patterns` — Starlette strips the port before
+        matching). ``None`` (the default) allows ONLY the loopback names
+        (``127.0.0.1`` / ``localhost``, any port) — ``testserver`` is NOT in
+        the production default (tests re-point ``TestClient`` at
+        ``http://localhost`` via the root conftest fixture, or inject this
+        parameter). The CLI launcher passes the actual bound host when
+        serving beyond loopback (``cli._dashboard_allowed_hosts``).
 
     Returns
     -------
@@ -1021,6 +1155,7 @@ def build_app(
             Response,
         )
         from fastapi.staticfiles import StaticFiles
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
     except ImportError as exc:
         raise RuntimeError(
             "FastAPI is not installed. Install with `pip install "
@@ -1044,6 +1179,35 @@ def build_app(
         StaticFiles(directory=Path(__file__).resolve().parent / "static"),
         name="static",
     )
+
+    # ── Host / cross-origin hardening (R2-DS-F1) ─────────────────────────────
+    # Registration ORDER matters: Starlette wraps middlewares so the LAST one
+    # added is OUTERMOST. The origin guard is added FIRST (innermost of the
+    # three), then TrustedHost, then the request logger below — so a request
+    # flows logger → TrustedHost (400 on an unknown Host: DNS-rebinding guard)
+    # → origin guard (403 on a browser cross-site state change: CSRF guard)
+    # → routes, and every refusal is still request-logged. The guard's pure
+    # decision logic lives in the module-level `_cross_origin_reason` (100%
+    # line+branch unit-tested); this async wrapper is the thin glue.
+    @app.middleware("http")
+    async def _origin_guard(request: Any, call_next: Any) -> Any:
+        """Refuse browser cross-origin state-changing requests with a 403.
+
+        Enforced only for POST/PUT/PATCH/DELETE; a request with neither
+        ``Origin`` nor ``Referer`` (CLI / curl) always passes. See
+        :func:`_cross_origin_reason` for the full rule set.
+        """
+        reason = _cross_origin_reason(
+            request.method,
+            request.headers.get("host"),
+            request.headers.get("origin"),
+            request.headers.get("referer"),
+        )
+        if reason is not None:
+            return JSONResponse({"detail": reason}, status_code=403)
+        return await call_next(request)
+
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_host_patterns(allowed_hosts))
 
     @app.middleware("http")
     async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue
@@ -6647,6 +6811,7 @@ connect();
 
 
 __all__ = [
+    "DEFAULT_ALLOWED_HOSTS",
     "DashboardState",
     "PhaseSnapshot",
     "RateLimitPanel",
