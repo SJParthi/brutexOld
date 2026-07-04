@@ -198,19 +198,36 @@ function renderSpot(rows) {
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 
+/* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the raw response
+   text last rendered — an identical body skips JSON.parse + the KPI/status
+   writes + the whole renderSpot innerHTML rebuild (client-side compare only;
+   the payload carries no generation/etag field, backend frozen — and a server
+   generation token alone would be WRONG here anyway: the completeness-chip
+   rollup deliberately lives OUTSIDE the SummaryCache, the C8 freshness
+   contract, so the exact text compare is the correct gate). null after any
+   error so the next good body always renders; lastLiveLine replays the honest
+   heartbeat on skipped ticks. */
+let lastPayloadTxt = null;
+let lastLiveLine = "";
+
 async function poll() {
   try {
     const r = await fetch("/api/v1/coverage/spot");
-    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
-    const body = await r.json();
+    if (!r.ok) { lastPayloadTxt = null; liveTxt.textContent = "error " + r.status; return; }
+    const txt = await r.text();
+    if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return; }
+    lastPayloadTxt = txt;
+    const body = JSON.parse(txt);
     const h = body.headline || {};
     dsEl.textContent = h.datasets ?? "—";
     barzEl.textContent = num(h.total_bars);
     statusEl.textContent = (h.datasets ?? "—") + " datasets · " + num(h.total_bars)
       + " bars · chip = ledger-settled within planned ranges (gap audit not claimed)";
     renderSpot(body.rows || []);
-    liveTxt.textContent = "live · " + (body.rows || []).length + " datasets";
+    lastLiveLine = "live · " + (body.rows || []).length + " datasets";
+    liveTxt.textContent = lastLiveLine;
   } catch (e) {
+    lastPayloadTxt = null;
     liveTxt.textContent = "offline";
   }
 }

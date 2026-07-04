@@ -18,6 +18,7 @@ fallback, and thread-safety under a concurrent fan-out.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from datetime import date
 
 import pytest
@@ -35,6 +36,7 @@ from brutex.adapters.empty_circuit_breaker import (
     MassEmptySettleHalt,
     resolve_empty_breaker,
 )
+from structlog.testing import capture_logs
 
 _END = date(2021, 4, 1)
 
@@ -794,3 +796,172 @@ class TestHaltGenericConstruction:
         halt = MassEmptySettleHalt()
         assert "(unspecified rule)" in str(halt)
         assert "( rule)" not in str(halt)
+
+
+# ── vendor-health canary (DEC-EMPTY-BREAKER-CANARY-001) ──────────────────────
+
+
+def _canary_trip_breaker(probe: Callable[[], bool] | None) -> EmptySettleBreaker:
+    """A breaker whose FRACTION rule trips on the 3rd counted empty (min floors 1)."""
+    return EmptySettleBreaker(
+        consecutive_limit=0,  # isolate the fraction rule
+        fraction_limit=0.8,
+        min_observations=3,
+        min_series=1,
+        fraction_min_series=1,
+        health_probe=probe,
+    )
+
+
+class TestBreakerCanary:
+    """The trip-time vendor-health canary seam."""
+
+    def test_healthy_canary_suppresses_the_halt_and_logs(self) -> None:
+        """Canary returns DATA ⇒ the empties are genuine ⇒ NO halt, one log.
+
+        THE register-#6 false-halt: a genuinely-empty 2020-era chain at the
+        bucket head tripped the breaker and halted the whole F&O phase; a
+        healthy canary now proves the vendor fine and the pull continues (the
+        settle law governs the empties).
+        """
+        probes: list[int] = []
+
+        def _healthy() -> bool:
+            probes.append(1)
+            return True
+
+        breaker = _canary_trip_breaker(_healthy)
+        with capture_logs() as logs:
+            _observe_empties(breaker, 3)  # crosses the fraction rule — no raise
+        assert probes == [1], "exactly ONE canary call at the trip moment"
+        assert not breaker.tripped
+        assert breaker.allow_settle()
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_vendor_healthy"]
+        assert event["trip_rule"] == "fraction"
+        assert event["empty_windows"] == 3
+
+    def test_healthy_canary_resets_evidence_and_rearms(self) -> None:
+        """After a healthy canary the evidence RESETS; a later storm re-probes.
+
+        Bounded cost: ≤ 1 canary call per evidence cycle — the trip condition
+        must re-accumulate from zero before the probe fires again; a REAL
+        throttle beginning later is still caught (the second, unhealthy probe
+        halts)."""
+        verdicts = [True, False]
+        probes: list[bool] = []
+
+        def _probe() -> bool:
+            verdict = verdicts[len(probes)]
+            probes.append(verdict)
+            return verdict
+
+        breaker = _canary_trip_breaker(_probe)
+        _observe_empties(breaker, 3)  # first trip → healthy canary → reset
+        assert breaker.counts() == (0, 0, 0), "evidence resets after a healthy canary"
+        _observe_empties(breaker, 2)  # rebuild BELOW the trip — no second probe yet
+        assert probes == [True]
+        with pytest.raises(MassEmptySettleHalt):
+            _observe_empties(breaker, 1)  # third counted empty re-trips → unhealthy → HALT
+        assert probes == [True, False]
+        assert breaker.tripped
+
+    def test_unhealthy_canary_halts_exactly_as_today(self) -> None:
+        """Canary ALSO empty ⇒ the trip latches + raises with the counts."""
+        breaker = _canary_trip_breaker(lambda: False)
+        with pytest.raises(MassEmptySettleHalt) as exc:
+            _observe_empties(breaker, 3)
+        assert breaker.tripped
+        assert not breaker.allow_settle()
+        assert exc.value.trip_rule == "fraction"
+        assert exc.value.empty_windows == 3
+
+    def test_raising_canary_is_unhealthy_and_halts(self) -> None:
+        """A RAISING probe is NOT health evidence — halt, with the error logged."""
+
+        def _boom() -> bool:
+            raise RuntimeError("canary transport died")
+
+        breaker = _canary_trip_breaker(_boom)
+        with capture_logs() as logs, pytest.raises(MassEmptySettleHalt):
+            _observe_empties(breaker, 3)
+        (event,) = [e for e in logs if e["event"] == "empty_breaker.canary_probe_error"]
+        assert event["error_type"] == "RuntimeError"
+
+    def test_no_probe_is_byte_identical_trip_now(self) -> None:
+        """DEFAULT-PRESERVATION pin: ``health_probe=None`` halts on the trip
+        observation itself — today's behaviour, byte-identical."""
+        breaker = _canary_trip_breaker(None)
+        with pytest.raises(MassEmptySettleHalt):
+            _observe_empties(breaker, 3)
+        assert breaker.tripped
+
+    def test_settles_paused_while_probe_in_flight(self) -> None:
+        """``allow_settle`` reads False DURING the canary (a trip candidate
+        exists; an unhealthy verdict would make those settles poison)."""
+        seen: list[bool] = []
+        holder: list[EmptySettleBreaker] = []
+
+        def _probe() -> bool:
+            seen.append(holder[0].allow_settle())
+            return True
+
+        breaker = _canary_trip_breaker(_probe)
+        holder.append(breaker)
+        _observe_empties(breaker, 3)
+        assert seen == [False], "settling must be suppressed while the canary is in flight"
+        assert breaker.allow_settle(), "released after the healthy verdict"
+
+    def test_probe_single_flight_under_concurrent_observers(self) -> None:
+        """16 threads crossing the trip together fire EXACTLY one canary call."""
+        started = threading.Barrier(16)
+        release = threading.Event()
+        probes: list[int] = []
+
+        def _slow_probe() -> bool:
+            probes.append(1)
+            release.wait(timeout=10)
+            return True
+
+        breaker = EmptySettleBreaker(
+            consecutive_limit=0,
+            fraction_limit=0.5,
+            min_observations=4,
+            min_series=1,
+            fraction_min_series=1,
+            health_probe=_slow_probe,
+        )
+        errors: list[Exception] = []
+
+        def _worker(i: int) -> None:
+            started.wait(timeout=10)
+            try:
+                breaker.observe_empty(f"S{i}:1minute", symbol=f"S{i}", window_end=_END)
+            except MassEmptySettleHalt:  # pragma: no cover — healthy canary, no halt expected
+                pass
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(16)]
+        for t in threads:
+            t.start()
+        # Let the prober reach the probe, then release it.
+        for _ in range(1000):
+            if probes:
+                break
+            threading.Event().wait(0.005)
+        release.set()
+        for t in threads:
+            t.join(timeout=10)
+        assert errors == []
+        assert probes == [1], "the canary is single-flight — exactly one probe"
+        assert not breaker.tripped
+
+    def test_resolver_threads_health_probe(self) -> None:
+        """``resolve_empty_breaker(health_probe=…)`` lands on the instance;
+        the default stays None (byte-identical construction)."""
+
+        def _probe() -> bool:  # pragma: no cover — identity only
+            return True
+
+        assert resolve_empty_breaker(health_probe=_probe).health_probe is _probe
+        assert resolve_empty_breaker().health_probe is None

@@ -249,7 +249,16 @@ jobs:
     # last log lines all passing); PR #1085 touches 10+ modules so the
     # touched-module gate alone outgrew the remaining budget. Wall-clock
     # budget only — no gate is weakened. Continues the 15->25->40 ratchet.
-    timeout-minutes: 55
+    # 40 -> 60 (2026-07-04, DEC-TOKEN-STALE-PAUSE-001 PR #1107): the merged
+    # tree re-crossed 40m — run 28694858559 job 85102679929 started 04:27:04Z,
+    # cancelled 05:07:17Z (40m13s) MID strict per-module gate (step 10, on
+    # universe_pull) with EVERY executed test green and the whole-package
+    # coverage step already SUCCESS at 100.00%: zero real failures, pure
+    # wall-time growth (the #1102/#1105 sibling merges + this PR's 21 tests).
+    # 60 keeps an honest hang guard with ~45% headroom over the observed
+    # ~40m wall time. Continues the 15->25->40 ratchet (60 = the higher of
+    # the two concurrent 2026-07-04 raises, union-resolved at merge).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -672,6 +681,7 @@ jobs:
           if compgen -G "tests/unit/test_greeks_enrich.py" > /dev/null; then
             pytest --cov=brutex.data.greeks_enrich --cov=brutex.data.spot_join --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_greeks_enrich.py tests/unit/test_data_spot_join.py \
+              tests/unit/test_greeks_enrich_audit_regressions.py \
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
               tests/golden/test_greeks_enrich_golden.py
@@ -913,8 +923,14 @@ jobs:
           # quota_tracker two-file compose above). Without it the new
           # recovery code reads 92.76% (lines 421, 661-675 uncovered) under
           # this per-module gate even though the aggregate gate is 100%.
+          # DEC-AUDIT-VERIFY-STREAM-001 (MIGRATION.md #1261): the streaming
+          # verify_chain (public iter_entries + the O(1) torn-tail probe)
+          # ships a dedicated suite, test_orchestrator_audit_stream.py —
+          # composed here so this static pairing carries ALL of audit.py's
+          # covering unit files (the PR #1090/#1096 lesson: a new test file
+          # for a gated module joins that module's static pairing).
           if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py tests/unit/test_audit_torn_tail.py
+            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py tests/unit/test_audit_torn_tail.py tests/unit/test_orchestrator_audit_stream.py
           else
             echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
           fi
@@ -1774,8 +1790,13 @@ jobs:
           # are covered by tests/unit/test_dashboard_db_ux_pack.py, which MUST
           # join this gate so its coverage of those lines registers (without it
           # the module reads 99.19%).
+          # DEC-COMPLETENESS-FNO-SKIP-001: the FNO-pruned spot verdict scan
+          # (summarize_spot_verdict_datasets + the list_candle_datasets
+          # `intervals` walk filter) is covered by
+          # tests/unit/test_completeness_fno_skip.py, which MUST also join
+          # this gate (without it the module reads 99.74% — lines 935/1241).
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_completeness_fno_skip.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
