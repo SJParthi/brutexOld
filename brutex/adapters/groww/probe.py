@@ -427,7 +427,13 @@ def probe_depth(
                 ),
             )
         floor_first = hi_first
-        while hi - lo > 1 and calls < budget:
+        while hi - lo > 1:
+            # ``calls`` is nonlocal-mutated inside ``_window_rows`` — checked at the
+            # TOP of each iteration (an explicit break, not a compound loop guard, so
+            # a static analyser that cannot see the closure mutation never misreads
+            # the budget check as constant).
+            if calls >= budget:
+                break
             mid = (lo + hi) // 2
             mid_rows, mid_first = _window_rows(boundary + timedelta(days=mid))
             if mid_rows:
