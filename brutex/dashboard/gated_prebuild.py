@@ -13,7 +13,7 @@ pre-builds the selected underlyings' derived timeframes in ORDERED PHASES —
   DEC-PREBUILD-SELECT-001, whose ``halted_after`` field is removed);
 * only a GLOBAL-STOP error (:class:`~brutex.data.errors.LakeWriteHalt` —
   disk-full / OOM — or a genuine code bug outside
-  :data:`_PER_SYMBOL_DATA_ERRORS`) PROPAGATES and halts the run.
+  :func:`_per_symbol_data_errors`) PROPAGATES and halts the run.
 
 The SPOT phase materialises each selected UNDERLYING's spot timeframes. The
 FUTURES phase, per underlying, DISCOVERS its FUT contracts in the F&O candle
@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from brutex.data.errors import ResampleInputError
+from brutex.data.errors import ResampleInputError, parquet_read_skip_errors
 from brutex.data.timeframe_materialize import PrebuildKind
 from brutex.observability.progress_beat import emit_progress_beat
 
@@ -55,18 +55,46 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
-#: The per-symbol DATA-fault quarantine set for the phases
-#: (DEC-PREBUILD-SELECT-001; widened by DEC-LAKE-WRITE-UNIQUE-001).
-#: ``ValueError`` / ``OSError`` are the materialise core's historical data-error
-#: surface; :class:`~brutex.data.errors.ResampleInputError` is the canonical
-#: resampler's input tripwire (DEC-RESAMPLER-INPUT-GUARD-001) — raised when ONE
-#: symbol's stored 1-minute partition is POISONED (duplicate / out-of-order
-#: timestamps). The poisoned symbol is quarantined + reported in ``failed`` and
-#: every other symbol still runs. DELIBERATELY the narrow subclass, NOT
-#: ``DataLakeError`` broadly: :class:`~brutex.data.errors.LakeWriteHalt` (a
-#: sibling ``DataLakeError`` — disk-full / OOM, a pull-wide global stop) must
-#: STILL propagate, never be miscounted as a per-symbol failure.
-_PER_SYMBOL_DATA_ERRORS: tuple[type[Exception], ...] = (ValueError, OSError, ResampleInputError)
+
+def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
+    """The per-symbol DATA-fault quarantine set, resolved LAZILY at except time.
+
+    (DEC-PREBUILD-SELECT-001; widened by DEC-LAKE-WRITE-UNIQUE-001 +
+    DEC-PREBUILD-CORRUPT-SKIP-001.) ``ValueError`` is the materialise core's
+    historical data-error surface; :class:`~brutex.data.errors.ResampleInputError`
+    is the canonical resampler's input tripwire (DEC-RESAMPLER-INPUT-GUARD-001) —
+    raised when ONE symbol's stored 1-minute partition is POISONED (duplicate /
+    out-of-order timestamps); the rest is the COMMON data-layer
+    unreadable-Parquet set :func:`brutex.data.errors.parquet_read_skip_errors`
+    (``polars.exceptions.PolarsError`` + ``OSError`` — the corrupt / truncated /
+    version-incompatible month-file surface, the same one-bad-file-never-kills-
+    the-pass discipline as DEC-MOVERS-CORRUPT-SKIP-001 #886 /
+    DEC-FETCH-PARSER-HARDENING-001 #1038). A quarantined symbol is reported in
+    ``failed`` and every other symbol still runs.
+
+    DELIBERATELY narrow, NOT ``DataLakeError`` broadly:
+    :class:`~brutex.data.errors.LakeWriteHalt` (a sibling ``DataLakeError`` —
+    disk-full / OOM, a pull-wide global stop) must STILL propagate, never be
+    miscounted as a per-symbol failure; a genuine code bug (``KeyError`` /
+    ``TypeError`` / …) propagates too.
+
+    A FUNCTION, not a module constant, because ``parquet_read_skip_errors``
+    imports ``polars`` inside its call: the tuple is built only when an
+    exception is already unwinding (O(1); after the first import, one
+    ``sys.modules`` hit) and this module stays importable without polars.
+    HONEST wheel-free fallback (Golden Rule #10): where polars is NOT installed
+    (it lives in the optional ``[data]`` extra; the unit suite runs wheel-free)
+    ``parquet_read_skip_errors`` raises ``ModuleNotFoundError`` — caught here,
+    falling back to the file-level ``(OSError,)`` alone. Nothing is lost: with
+    no polars installed, no ``PolarsError`` can ever be raised, so the fallback
+    is NOT a swallowed signal.
+    """
+    try:
+        skip: tuple[type[BaseException], ...] = parquet_read_skip_errors()
+    except ModuleNotFoundError:
+        skip = (OSError,)
+    return (ValueError, ResampleInputError, *skip)
+
 
 #: The instrument-type token the F&O candle lake's decoded ``instrument_type``
 #: carries for a future (:func:`brutex.data.fno_symbol.parse_fno_symbol`).
@@ -272,9 +300,11 @@ def _run_spot_phase(
     """SPOT phase: materialise each selected underlying's spot timeframes.
 
     Each underlying is materialised independently — one that RAISES a data error
-    (:data:`_PER_SYMBOL_DATA_ERRORS` — ``ValueError`` / ``OSError`` / the
-    resampler's :class:`~brutex.data.errors.ResampleInputError` on a poisoned
-    stored partition) is recorded in ``failed`` (the rest still run, so ALL
+    (:func:`_per_symbol_data_errors` — ``ValueError`` / ``OSError`` / a corrupt
+    stored Parquet month file (``polars.exceptions.PolarsError``,
+    DEC-PREBUILD-CORRUPT-SKIP-001) / the resampler's
+    :class:`~brutex.data.errors.ResampleInputError` on a poisoned stored
+    partition) is recorded in ``failed`` (the rest still run, so ALL
     failures are named); a genuine bug (``KeyError`` / ``TypeError`` / …) or a
     pull-wide :class:`~brutex.data.errors.LakeWriteHalt` PROPAGATES (never
     miscounted as a per-symbol data failure).
@@ -291,7 +321,7 @@ def _run_spot_phase(
         emit_progress_beat()
         try:
             result = materialize_spot(inst)
-        except _PER_SYMBOL_DATA_ERRORS as exc:
+        except _per_symbol_data_errors() as exc:
             _LOG.warning(
                 "universe.prebuild.spot_failed",
                 symbol=inst.symbol_name,
@@ -329,7 +359,7 @@ def _run_contract_phase(
     ``succeeded`` / ``failed`` are keyed by CONTRACT symbol (not underlying), so
     a partial failure names the exact contract. An underlying with NO discovered
     contracts contributes nothing — an honest skip, never a fabricated bar. A
-    data error (:data:`_PER_SYMBOL_DATA_ERRORS`) in discovery OR materialise is
+    data error (:func:`_per_symbol_data_errors`) in discovery OR materialise is
     recorded as a failure and the loop CONTINUES; a genuine bug (and a pull-wide
     :class:`~brutex.data.errors.LakeWriteHalt`) propagates.
     """
@@ -340,7 +370,7 @@ def _run_contract_phase(
     for inst in underlyings:
         try:
             contracts = contracts_for(inst)
-        except _PER_SYMBOL_DATA_ERRORS as exc:
+        except _per_symbol_data_errors() as exc:
             _LOG.warning(
                 "universe.prebuild.contract_discovery_failed",
                 phase=phase.value,
@@ -357,7 +387,7 @@ def _run_contract_phase(
             emit_progress_beat()
             try:
                 result = materialize_contract(contract)
-            except _PER_SYMBOL_DATA_ERRORS as exc:
+            except _per_symbol_data_errors() as exc:
                 _LOG.warning(
                     "universe.prebuild.contract_failed",
                     phase=phase.value,
@@ -416,7 +446,7 @@ def run_gated_prebuild(
     ``failed`` (the phase continues to the next symbol AND the chain continues
     to the later phases — "one bad symbol never aborts a stage"); only a
     global-stop error (:class:`~brutex.data.errors.LakeWriteHalt`, or a genuine
-    code bug outside :data:`_PER_SYMBOL_DATA_ERRORS`) PROPAGATES. This
+    code bug outside :func:`_per_symbol_data_errors`) PROPAGATES. This
     supersedes the halt-on-first-phase-failure gate of DEC-PREBUILD-SELECT-001.
 
     * **SPOT** — materialise each selected underlying's spot timeframes (the
