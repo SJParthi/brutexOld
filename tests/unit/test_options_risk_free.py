@@ -262,3 +262,75 @@ class TestLoadRiskFreeCsv:
             assert got.rate == expected
             assert got.source == "csv:prop"
             assert got.version == RISK_FREE_SOURCE_VERSION
+
+
+class TestCsvRateSourceConstructionValidation:
+    """DEC-GREEKS-CORRECTNESS-AUDIT-001 RF-2: construction-time validation.
+
+    A hand-built :class:`CsvRateSource` used to bypass the ``[0, 1)`` band
+    entirely (only the blessed :func:`load_risk_free_csv` factory validated),
+    so a rogue ``rate=-0.5`` flowed into the kernel and was STORED. The
+    ``__post_init__`` now makes the documented "can never silently reach a
+    Greeks solve" promise true for EVERY construction path.
+    """
+
+    def test_out_of_band_rate_rejected_at_construction(self) -> None:
+        with pytest.raises(RiskFreeError, match=r"rates\[0\].*must lie in"):
+            CsvRateSource(dates=(date(2026, 1, 1),), rates=(-0.5,), source="csv:rogue")
+
+    def test_non_finite_rate_rejected_at_construction(self) -> None:
+        with pytest.raises(RiskFreeError, match=r"rates\[1\].*must be finite"):
+            CsvRateSource(
+                dates=(date(2026, 1, 1), date(2026, 1, 2)),
+                rates=(0.06, math.nan),
+                source="csv:rogue",
+            )
+
+    def test_length_mismatch_rejected(self) -> None:
+        with pytest.raises(RiskFreeError, match="1 dates but 2 rates"):
+            CsvRateSource(dates=(date(2026, 1, 1),), rates=(0.06, 0.07), source="csv:rogue")
+
+    def test_unsorted_dates_rejected(self) -> None:
+        with pytest.raises(RiskFreeError, match="strictly ascending"):
+            CsvRateSource(
+                dates=(date(2026, 1, 2), date(2026, 1, 1)),
+                rates=(0.06, 0.07),
+                source="csv:rogue",
+            )
+
+    def test_duplicate_dates_rejected(self) -> None:
+        with pytest.raises(RiskFreeError, match="strictly ascending"):
+            CsvRateSource(
+                dates=(date(2026, 1, 1), date(2026, 1, 1)),
+                rates=(0.06, 0.07),
+                source="csv:rogue",
+            )
+
+    def test_blessed_loader_output_still_constructs(self, tmp_path: Path) -> None:
+        # load_risk_free_csv output already satisfies the invariants — the
+        # validation is a no-behaviour-change for the blessed path.
+        src = load_risk_free_csv(_write_csv(tmp_path, _HAPPY_CSV))
+        rebuilt = CsvRateSource(dates=src.dates, rates=src.rates, source=src.source)
+        assert rebuilt.rate_on(_D) == src.rate_on(_D)
+
+
+class TestCsvEncodingFailure:
+    """DEC-GREEKS-CORRECTNESS-AUDIT-001 RF-3: UnicodeDecodeError → RiskFreeError.
+
+    A UTF-16 / binary CSV (an Excel/PowerShell save) used to escape the
+    documented ``Raises RiskFreeError`` contract with a raw
+    :class:`UnicodeDecodeError`; the loader now maps the encoding failure into
+    the same loud :class:`RiskFreeError` as every other broken-CSV shape.
+    """
+
+    def test_utf16_csv_raises_riskfree_error(self, tmp_path: Path) -> None:
+        path = tmp_path / "utf16.csv"
+        path.write_text("date,yield,tenor_days\n2026-01-01,0.065,91\n", encoding="utf-16")
+        with pytest.raises(RiskFreeError, match="cannot read risk-free CSV"):
+            load_risk_free_csv(path)
+
+    def test_binary_garbage_raises_riskfree_error(self, tmp_path: Path) -> None:
+        path = tmp_path / "binary.csv"
+        path.write_bytes(b"date,yield,tenor_days\n2026-01-01,0.06\xe9,91\n")
+        with pytest.raises(RiskFreeError, match="encoding"):
+            load_risk_free_csv(path)
