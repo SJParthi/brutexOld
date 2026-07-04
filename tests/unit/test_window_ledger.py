@@ -24,6 +24,8 @@ from brutex.data.window_ledger import (
     SUCCESS,
     LedgerProgress,
     WindowLedger,
+    expired_window_settle_reason,
+    is_expired_window_settle_reason,
 )
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
@@ -744,20 +746,26 @@ class TestSettleEmpty:
         assert ledger.is_skippable(_key()) is False
 
 
-class TestBudgetAwareOldGapSettle:
-    """DEC-DEAD-STRIKE-LEDGER-SETTLE-001: the old-gap settle accumulates confirmations ACROSS pulls.
+class TestOldEmptySingleConfirm:
+    """DEC-OLD-EMPTY-SINGLE-CONFIRM-001: an OLD window settles off ONE clean empty.
 
-    A reduced empty-retry budget (1 fetch/pull, DEC-FETCH-PER-WINDOW-GUARANTEE-001) can
-    never reach ``CONFIRMED_EMPTY_MIN_FETCHES`` (2) inside one pull, so ``record`` now
-    counts ``prior.empty_streak + in_pull_fetches`` for an OLD window
-    (``old_window=True``) — two independent pulls' clean empties meet the same
-    2-confirmation bar the one-pull fast-settle demands. The data-safety law is pinned
-    too: SUCCESS resets, FAILED never counts, a suppressed empty neither bumps nor
-    settles, and a recent window keeps the conservative streak.
+    Operator-decreed 2026-07-04 — CONSCIOUSLY SUPERSEDES the budget-aware
+    cumulative arm of DEC-DEAD-STRIKE-LEDGER-SETTLE-001 (#1172, the prior
+    ``TestBudgetAwareOldGapSettle`` suite): the 2026-07-03 production run spent
+    hours in a round-2 until-clean sweep re-confirming every deep-wing empty
+    because an OLD window needed ``prior_streak + in_pull_fetches >= 2``. An
+    expired window (``old_window=True``) now settles ``SKIPPED`` on a SINGLE
+    genuine, unsuppressed clean-EMPTY fetch, with the honest
+    "1 clean attempt, expired window" reason stamped. The data-safety law is
+    pinned unchanged: RECENT windows keep the 3-streak law byte-identical,
+    SUCCESS wins, a FAILED transient never settles, a breaker-suppressed empty
+    neither bumps nor settles (the #1129 breaker + #919 detector stay the
+    systemic-glitch guards; ``brutex reopen-skipped`` is the manual recovery).
     """
 
-    def test_first_reduced_pull_stays_refetchable(self) -> None:
-        # ONE clean empty (1 in-pull fetch) is NOT confirmation — "if uncertain, fetch".
+    def test_old_window_single_clean_empty_settles_in_pass_one(self) -> None:
+        # THE new law: one clean empty on an expired window settles SKIPPED NOW —
+        # no round-2 re-fetch (was EMPTY + re-fetchable under #1172).
         ledger = WindowLedger()
         status = ledger.record(
             _key(),
@@ -768,12 +776,15 @@ class TestBudgetAwareOldGapSettle:
             in_pull_fetches=1,
             old_window=True,
         )
-        assert status == EMPTY
-        assert ledger.records()[0].empty_streak == 1
-        assert ledger.is_skippable(_key()) is False
+        assert status == SKIPPED
+        record = ledger.records()[0]
+        assert record.empty_streak == EMPTY_TERMINAL_THRESHOLD  # forced — settled shape
+        assert record.last_error == "vendor confirmed no trades (1 clean attempt, expired window)"
+        assert ledger.is_skippable(_key()) is True
 
-    def test_cumulative_second_pull_settles(self) -> None:
-        # Pull 1: streak 1. Pull 2: prior_streak(1) + in_pull_fetches(1) == 2 → SKIPPED.
+    def test_settle_reason_counts_genuine_prior_clean_pulls(self) -> None:
+        # A pre-change ledger row carrying a genuine streak keeps the honest count:
+        # one prior clean-empty pull + this one reads "2 clean attempts".
         ledger = WindowLedger()
         ledger.record(
             _key(),
@@ -782,7 +793,7 @@ class TestBudgetAwareOldGapSettle:
             bars_appended=0,
             now=_NOW,
             in_pull_fetches=1,
-            old_window=True,
+            old_window=False,  # recorded as a RECENT empty on pull 1 (streak 1)
         )
         status = ledger.record(
             _key(),
@@ -791,31 +802,16 @@ class TestBudgetAwareOldGapSettle:
             bars_appended=0,
             now=_LATER,
             in_pull_fetches=1,
-            old_window=True,
+            old_window=True,  # the window has since aged past the horizon
         )
         assert status == SKIPPED
-        record = ledger.records()[0]
-        assert record.empty_streak == EMPTY_TERMINAL_THRESHOLD  # forced — same as fast-settle
-        assert record.attempts == 2
-        assert ledger.is_skippable(_key()) is True
-
-    def test_single_pull_two_fetches_settles_without_settle_empty_hint(self) -> None:
-        # The cumulative rule SUBSUMES the one-pull fast-settle: 0 + 2 >= 2 settles pull 1.
-        ledger = WindowLedger()
-        status = ledger.record(
-            _key(),
-            raw_bars=0,
-            error_type=None,
-            bars_appended=0,
-            now=_NOW,
-            in_pull_fetches=2,
-            old_window=True,
+        assert ledger.records()[0].last_error == (
+            "vendor confirmed no trades (2 clean attempts, expired window)"
         )
-        assert status == SKIPPED
-        assert ledger.records()[0].empty_streak == EMPTY_TERMINAL_THRESHOLD
 
     def test_recent_window_keeps_conservative_streak(self) -> None:
-        # old_window=False → the cumulative arm never fires; two empties stay EMPTY 2/3.
+        # UNCHANGED (#1172 pin kept verbatim): old_window=False → the settle arm
+        # never fires; two empties stay EMPTY 2/3 — the 3-streak law byte-identical.
         ledger = WindowLedger()
         for now in (_NOW, _LATER):
             status = ledger.record(
@@ -828,60 +824,26 @@ class TestBudgetAwareOldGapSettle:
                 old_window=False,
             )
         assert status == EMPTY
-        assert ledger.records()[0].empty_streak == 2
+        record = ledger.records()[0]
+        assert record.empty_streak == 2
+        assert record.last_error is None  # no expired-window stamp on a recent empty
         assert ledger.is_skippable(_key()) is False
 
-    def test_success_resets_cumulative_evidence_and_stores_data(self) -> None:
-        # A window that COULD still have data wins: bars on pull 2 → SUCCESS, streak 0 —
-        # the prior clean-empty evidence never masks real data.
+    def test_failed_transient_never_settles_even_when_old(self) -> None:
+        # A 429/timeout is NOT evidence the window is empty — an OLD window's
+        # transient stays FAILED + re-pullable; the NEXT clean empty settles.
         ledger = WindowLedger()
-        ledger.record(
-            _key(),
-            raw_bars=0,
-            error_type=None,
-            bars_appended=0,
-            now=_NOW,
-            in_pull_fetches=1,
-            old_window=True,
-        )
-        status = ledger.record(
-            _key(),
-            raw_bars=9,
-            error_type=None,
-            bars_appended=9,
-            now=_LATER,
-            in_pull_fetches=1,
-            old_window=True,
-        )
-        assert status == SUCCESS
-        record = ledger.records()[0]
-        assert record.empty_streak == 0
-        assert record.bars == 9
-
-    def test_failed_never_counts_and_never_settles(self) -> None:
-        # A 429/timeout between empties PRESERVES the streak but is never a confirmation:
-        # empty(1) → FAILED (streak kept, no settle) → empty (1 + 1 == 2) settles.
-        ledger = WindowLedger()
-        ledger.record(
-            _key(),
-            raw_bars=0,
-            error_type=None,
-            bars_appended=0,
-            now=_NOW,
-            in_pull_fetches=1,
-            old_window=True,
-        )
         status = ledger.record(
             _key(),
             raw_bars=0,
             error_type="GrowwRateLimitError",
             bars_appended=0,
-            now=_LATER,
+            now=_NOW,
             in_pull_fetches=3,  # transient fetches are NOT clean-empty evidence
             old_window=True,
         )
         assert status == FAILED
-        assert ledger.records()[0].empty_streak == 1  # preserved, not bumped
+        assert ledger.records()[0].empty_streak == 0
         assert ledger.is_skippable(_key()) is False
         status = ledger.record(
             _key(),
@@ -892,13 +854,14 @@ class TestBudgetAwareOldGapSettle:
             in_pull_fetches=1,
             old_window=True,
         )
-        assert status == SKIPPED  # 1 prior clean-empty pull + this pull's clean empty
+        assert status == SKIPPED  # the single-confirm law — settled on the clean empty
 
-    def test_suppressed_empty_neither_bumps_nor_settles(self) -> None:
-        # A breaker-suppressed empty is UNTRUSTED: no streak bump, no cumulative settle —
-        # a throttle-shaped empty can never cement a dead strike.
+    def test_suppressed_empty_neither_bumps_nor_settles_even_when_old(self) -> None:
+        # A breaker-suppressed empty is UNTRUSTED (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001):
+        # even under the single-confirm law it can NEVER cement an old window —
+        # a throttle-shaped empty stays retryable.
         ledger = WindowLedger()
-        ledger.record(
+        status = ledger.record(
             _key(),
             raw_bars=0,
             error_type=None,
@@ -906,23 +869,15 @@ class TestBudgetAwareOldGapSettle:
             now=_NOW,
             in_pull_fetches=1,
             old_window=True,
-        )
-        status = ledger.record(
-            _key(),
-            raw_bars=0,
-            error_type=None,
-            bars_appended=0,
-            now=_LATER,
-            in_pull_fetches=1,
-            old_window=True,
             suppress_settle=True,
         )
         assert status == EMPTY
-        assert ledger.records()[0].empty_streak == 1  # preserved — no poisoned progress
+        assert ledger.records()[0].empty_streak == 0  # preserved — no poisoned progress
         assert ledger.is_skippable(_key()) is False
 
     def test_old_window_ignored_for_success(self) -> None:
-        # old_window on a bars-returning fetch is a no-op — data always wins.
+        # UNCHANGED (#1172 pin): old_window on a bars-returning fetch is a no-op —
+        # data always wins.
         ledger = WindowLedger()
         status = ledger.record(
             _key(),
@@ -935,6 +890,63 @@ class TestBudgetAwareOldGapSettle:
         )
         assert status == SUCCESS
         assert ledger.records()[0].empty_streak == 0
+
+    def test_settle_empty_hint_still_settles_with_the_expired_reason(self) -> None:
+        # The in-pull fast-settle hint (DEC-OLD-GAP-FAST-SETTLE-001 settle_empty)
+        # keeps working and now ALSO stamps the honest expired-window reason.
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=2,
+            settle_empty=True,
+        )
+        assert status == SKIPPED
+        assert is_expired_window_settle_reason(ledger.records()[0].last_error)
+
+    def test_reopen_skipped_reopens_a_single_confirm_settle(self) -> None:
+        # The manual recovery (brutex reopen-skipped) un-cements a single-confirm
+        # settle: streak reset, REOPENED marker, re-fetchable.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=1,
+            old_window=True,
+        )
+        assert ledger.is_skippable(_key()) is True
+        reopened = ledger.reopen_skipped()
+        assert reopened == 1
+        assert ledger.is_skippable(_key()) is False
+        assert ledger.records()[0].empty_streak == 0
+
+
+class TestExpiredWindowSettleReason:
+    """The pure reason helpers (DEC-OLD-EMPTY-SINGLE-CONFIRM-001)."""
+
+    def test_singular_reads_the_decreed_string(self) -> None:
+        assert expired_window_settle_reason(1) == (
+            "vendor confirmed no trades (1 clean attempt, expired window)"
+        )
+
+    def test_plural_counts_read_attempts(self) -> None:
+        assert expired_window_settle_reason(3) == (
+            "vendor confirmed no trades (3 clean attempts, expired window)"
+        )
+
+    def test_predicate_matches_only_the_stamp(self) -> None:
+        assert is_expired_window_settle_reason(expired_window_settle_reason(1))
+        assert is_expired_window_settle_reason(expired_window_settle_reason(2))
+        assert not is_expired_window_settle_reason(None)
+        assert not is_expired_window_settle_reason("GrowwRateLimitError")
+        assert not is_expired_window_settle_reason("vendor confirmed no trades (1 clean attempt)")
+        assert not is_expired_window_settle_reason("something, expired window)")
 
 
 def test_confirmed_empty_min_fetches_single_source_of_truth() -> None:
