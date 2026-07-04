@@ -93,6 +93,7 @@ from brutex.engine.sweep_driver import (
     metrics_for_mask,
     metrics_from_trades,
 )
+from brutex.engine.sweep_lookahead import maybe_guard_bars
 from brutex.engine.trade_sim import simulate_trades
 from brutex.engine.trial_stats import (
     TrialStatsError,
@@ -1072,6 +1073,14 @@ def run_persisted_sweep(
     """
     if not bars:
         raise ValueError("run_persisted_sweep: bars must be non-empty")
+    # Opt-in runtime look-ahead barrier (DEC-SWEEP-LOOKAHEAD-GUARD-001): the
+    # env flag is resolved ONCE here at setup — never inside any per-bar loop.
+    # OFF (the default) returns the SAME `bars` object (identity), so the hot
+    # path below is byte-identical and cost-unchanged; ON wraps the window in
+    # an index-guarded view that raises LookAheadError on any read ahead of
+    # the forward consumption front (see brutex.engine.sweep_lookahead for
+    # the honest envelope of what it catches vs. the property gates).
+    bars = maybe_guard_bars(bars)
     direction_label = _direction_label(cfg.direction)
 
     n_unique = len(set(cfg.condition_bits))
