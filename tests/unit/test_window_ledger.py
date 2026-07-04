@@ -1413,8 +1413,8 @@ class TestDirtyTracking:
         assert [row[1] for row in ledger.dirty_rows()] == ["ACME", "ZEE"]  # key order
         # A dirty key whose row was pruned meanwhile is silently skipped (a
         # delta cannot express a deletion — the pull-end save owns prunes).
-        with ledger._lock:  # test-only surgical delete  # noqa: SLF001
-            del ledger._by_window[self._wk(_key("ACME"))]  # noqa: SLF001
+        with ledger._lock:  # test-only surgical delete
+            del ledger._by_window[self._wk(_key("ACME"))]
         assert [row[1] for row in ledger.dirty_rows()] == ["ZEE"]
 
     def test_clear_dirty_clears_exactly_the_given_keys(self) -> None:

@@ -1561,7 +1561,6 @@ class TestLedgerDeltaAwareness:
     def test_phase_progress_folds_pending_deltas(self, tmp_path: Path) -> None:
         """Mid-pull the live phase rows count over the fold, not the frozen base."""
         import duckdb
-
         from brutex.data.window_ledger_store import ledger_path as _ledger_path
 
         base = WindowLedger()
