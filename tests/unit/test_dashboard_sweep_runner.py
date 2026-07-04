@@ -90,8 +90,8 @@ def test_custom_values_are_normalised() -> None:
         tp="2500",
         top=50,
         mode="B",
-        exchange="bse",
-        segment="index",
+        exchange=" BSE ",
+        segment=" INDEX ",
         start="2022-03-01",
         end="2023-09-30",
         today=_TODAY,
@@ -104,8 +104,10 @@ def test_custom_values_are_normalised() -> None:
     assert req.tp == "2500"
     assert req.top == 50
     assert req.mode == "B"
-    assert req.exchange == "bse"  # non-blank passthrough (case preserved)
-    assert req.segment == "index"
+    # Non-blank passthrough is trimmed; case must be lake-exact (a lowercase
+    # coordinate is now REFUSED by the DEC-ENGINE-SCOPE-GUARD-001 scope law).
+    assert req.exchange == "BSE"
+    assert req.segment == "INDEX"
     assert req.start == "2022-03-01"
     assert req.end == "2023-09-30"
 
@@ -180,6 +182,22 @@ def test_unparseable_end_date_raises() -> None:
 def test_end_before_start_raises() -> None:
     with pytest.raises(ValueError, match="must not precede start"):
         resolve_sweep_request(start="2024-01-01", end="2023-12-31", today=_TODAY)
+
+
+def test_out_of_engine_scope_symbol_raises_the_scope_refusal() -> None:
+    """DEC-ENGINE-SCOPE-GUARD-001 Layer 2: an out-of-scope symbol is a ValueError.
+
+    The dashboard resolver refuses an out-of-engine-scope launch with the
+    full ``ScopeReport.refusal_message()`` (symbol + law + remedy) — the
+    route layer maps this ValueError to a 400 (proven separately in
+    ``test_dashboard_sweep_run_route.py``).
+    """
+    with pytest.raises(ValueError, match="sweep REFUSED") as excinfo:
+        resolve_sweep_request(symbols="RELIANCE", today=_TODAY)
+    message = str(excinfo.value)
+    assert "RELIANCE" in message
+    assert f"{DEFAULT_EXCHANGE}/{DEFAULT_SEGMENT}" in message
+    assert "NIFTY/BANKNIFTY/SENSEX" in message  # the law + remedy tail
 
 
 def test_explicit_none_leg_passes_through() -> None:
