@@ -239,6 +239,134 @@ class TestDegenerateInputHandling:
         assert _status_of(bars[0]) == STATUS_BAD_INPUT
 
 
+def _stored_row_from(bar: FnoGreeksBar, *, close: float = 200.0) -> dict[str, object]:
+    """A lake row carrying *bar*'s solved overlay as its STORED columns."""
+    spot_at_bar = bar.spot_at_bar
+    return _row(
+        close=close,
+        overlay={
+            "iv": bar.iv,
+            "delta": bar.delta,
+            "gamma": bar.gamma,
+            "theta": bar.theta,
+            "vega": bar.vega,
+            "rho": bar.rho,
+            "spot_at_bar": None if spot_at_bar is None else float(spot_at_bar),
+            "t_years_used": bar.t_years_used,
+            "rate_used": bar.rate_used,
+            "greeks_provenance_id": bar.greeks_provenance_id,
+        },
+    )
+
+
+class _CountingFixedRate:
+    """A RiskFreeSource spy counting ``rate_on`` calls (RF-5's dead memo pin)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def rate_on(self, on_date: date) -> RiskFreeRate:
+        del on_date
+        self.calls += 1
+        return RiskFreeRate(rate=0.065, source="fixed", version=1)
+
+
+class TestReuseGateValueHardening:
+    """RF-1/PROV-1/CTR-1/B76-1/G-RACE-2 + SPOTJOIN-1 + PROV-3 (FIX-1).
+
+    The reuse fast path compared ONLY the packed input stamp — never the rate
+    VALUE, the current spot join, or the style flag — so a revised risk-free
+    CSV / re-configured fixed rate / healed spot lake silently reused stale
+    Greeks forever (``already_current``, zero writes, no log). The gate now
+    value-checks ``rate_used`` and ``spot_at_bar`` and the style flag; any
+    mismatch falls through to the honest recompute.
+    """
+
+    def _solved(self, **kwargs: object) -> FnoGreeksBar:
+        bars, _stats = _enrich_rows([_row(close=200.0)], **kwargs)  # type: ignore[arg-type]
+        assert _status_of(bars[0]) == STATUS_OK
+        return bars[0]
+
+    def test_rate_value_change_recomputes_and_heals(self) -> None:
+        # Same source KIND (fixed) + same version, different VALUE — the
+        # exact five-lens headline (stamp bits identical, rate invisible).
+        stored = _stored_row_from(self._solved())
+        bars, stats = _enrich_rows([stored], rate_source=FixedRateSource(rate=0.08))
+        assert stats.reused == 0  # pre-fix: reused == 1, changed == 0
+        assert stats.solved == 1 and stats.changed == 1
+        assert bars[0].rate_used == 0.08
+        old_iv = stored["iv"]
+        assert isinstance(old_iv, float)
+        assert bars[0].iv is not None and bars[0].iv != old_iv
+
+    def test_coverage_shrunk_rate_demotes_to_no_rate(self) -> None:
+        covering = CsvRateSource(dates=(date(2024, 1, 1),), rates=(0.065,), source="csv:a.csv")
+        stored = _stored_row_from(self._solved(rate_source=covering))
+        pid = stored["greeks_provenance_id"]
+        assert isinstance(pid, int)
+        assert unpack_greeks_provenance(pid).rate_source_id == RATE_SOURCE_ID_CSV
+        # The replacement CSV no longer covers the bar date → honest DEMOTION.
+        late = CsvRateSource(dates=(date(2025, 1, 1),), rates=(0.06,), source="csv:b.csv")
+        bars, stats = _enrich_rows([stored], rate_source=late)
+        assert stats.reused == 0  # pre-fix: reused verbatim despite rate None
+        assert _status_of(bars[0]) == STATUS_NO_RATE
+        assert bars[0].iv is None and stats.changed == 1
+
+    def test_spot_value_change_recomputes(self) -> None:
+        # Post DEC-LAKE-HEAL-001 the spot 1-minute lake is mutable — a healed
+        # spot partition must invalidate the stored Greeks at that minute.
+        stored = _stored_row_from(self._solved())
+        bars, stats = _enrich_rows([stored], spot_by_ts={_BAR_TS: Decimal("21520")})
+        assert stats.reused == 0  # pre-fix: stale 21500-spot Greeks restated
+        assert stats.solved == 1 and stats.changed == 1
+        assert bars[0].spot_at_bar == Decimal("21520")
+        old_iv = stored["iv"]
+        assert isinstance(old_iv, float)
+        assert bars[0].iv is not None and bars[0].iv != old_iv
+
+    def test_vanished_spot_demotes_to_no_spot(self) -> None:
+        stored = _stored_row_from(self._solved())
+        bars, stats = _enrich_rows([stored], spot_by_ts={})
+        assert stats.reused == 0  # pre-fix: reused with a spot no longer in the lake
+        assert _status_of(bars[0]) == STATUS_NO_SPOT
+        assert bars[0].iv is None and stats.changed == 1
+
+    def test_style_flip_recomputes_the_stamp(self) -> None:
+        stored = _stored_row_from(self._solved(style_flag=STYLE_EUROPEAN_EXACT))
+        bars, stats = _enrich_rows([stored], style_flag=STYLE_AMERICAN_APPROX)
+        assert stats.reused == 0  # pre-fix: the OLD style flag was pinned forever
+        assert stats.changed == 1
+        pid = bars[0].greeks_provenance_id
+        assert pid is not None
+        assert unpack_greeks_provenance(pid).style_flag == STYLE_AMERICAN_APPROX
+        # Identical model inputs → identical Greek VALUES; only the stamp moves.
+        assert bars[0].iv == stored["iv"]
+
+    def test_reuse_fires_only_when_all_values_match(self) -> None:
+        # A planted sentinel iv PROVES the hit path restates verbatim without
+        # recomputing (a recompute would replace the sentinel with the true iv).
+        stored = _stored_row_from(self._solved())
+        true_iv = stored["iv"]
+        assert isinstance(true_iv, float)
+        stored["iv"] = true_iv + 0.01
+        bars, stats = _enrich_rows([stored])
+        assert stats.reused == 1
+        # ``changed`` compares against the SAME stored row, so the verbatim
+        # restate of the sentinel is byte-equal → 0. A recompute would have
+        # replaced the sentinel and read changed == 1.
+        assert stats.changed == 0
+        assert bars[0].iv == true_iv + 0.01
+
+    def test_rate_on_called_once_per_date(self) -> None:
+        # RF-5: the setdefault memo evaluated rate_on eagerly per BAR; the
+        # explicit two-step memo calls it once per DATE.
+        spy = _CountingFixedRate()
+        rows = [_row(_BAR_TS + timedelta(minutes=i), close=200.0) for i in range(3)]
+        spots = {_BAR_TS + timedelta(minutes=i): _SPOT for i in range(3)}
+        _enrich_rows(rows, spot_by_ts=spots, rate_source=spy)
+        assert spy.calls == 1  # pre-fix: 3 (once per bar)
+
+
 class TestDegenerateTimeValueScreen:
     """IVX-1 (FIX-2, subsumes IVX-4): at-floor premiums stamp BELOW_INTRINSIC.
 

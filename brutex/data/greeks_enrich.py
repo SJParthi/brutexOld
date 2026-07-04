@@ -536,9 +536,16 @@ def enrich_option_bars(
     """Compute the Greeks overlay for one option contract's bars — pure core.
 
     Per bar (each *rows* mapping carries the 7 physical columns plus the
-    nullable stored overlay): reuse the stored overlay when its stamp already
-    matches the current inputs with :data:`STATUS_OK` (no recompute); else
-    derive ``T`` (Act/365 to 15:30 IST expiry), join the same-minute spot,
+    nullable stored overlay): reuse the stored overlay ONLY when its stamp
+    matches the current inputs with :data:`STATUS_OK` **and** its stored
+    ``rate_used`` / ``spot_at_bar`` equal the values this pass would solve
+    with **and** its style flag matches (the value-hardened gate of
+    DEC-GREEKS-CORRECTNESS-AUDIT-001 — a stamp cannot represent a rate/spot
+    VALUE change under unchanged source kinds). Anything else recomputes:
+    a coverage-shrunk rate CSV or a vanished spot minute honestly DEMOTES a
+    previously-OK bar to :data:`STATUS_NO_RATE` / :data:`STATUS_NO_SPOT` on
+    the recompute — never a frozen stale Greek. For a recompute, derive ``T``
+    (Act/365 to 15:30 IST expiry), join the same-minute spot,
     look up the stamped rate, pre-screen the honest-NULL families
     (:data:`STATUS_AT_EXPIRY` / :data:`STATUS_NO_SPOT` / :data:`STATUS_NO_RATE`
     / :data:`STATUS_BELOW_INTRINSIC`), and only then solve
@@ -593,12 +600,52 @@ def enrich_option_bars(
         raw_oi = row.get("open_interest")
         oi = None if raw_oi is None else int(raw_oi)  # type: ignore[call-overload]
 
+        # Hoisted ABOVE the reuse gate (DEC-GREEKS-CORRECTNESS-AUDIT-001):
+        # the gate value-checks the CURRENT rate + spot, so both lookups must
+        # exist before the reuse decision. The explicit two-step memo replaces
+        # the old ``setdefault`` form, whose default argument evaluated
+        # ``rate_on`` eagerly on EVERY bar (RF-5 — the memo was dead code).
+        bar_date = (ts + timedelta(hours=5, minutes=30)).date()
+        if bar_date not in rate_by_date:
+            rate_by_date[bar_date] = rate_source.rate_on(bar_date)
+        rate = rate_by_date[bar_date]
+        spot = spot_by_ts.get(ts)
+        if spot is not None and (not spot.is_finite() or spot <= 0):
+            # A non-finite / non-positive JOIN spot is unusable — degrade to
+            # the honest NO_SPOT NULL (never a stored NaN spot, never a
+            # whole-contract quarantine; DEC-GREEKS-CORRECTNESS-AUDIT-001
+            # IVX-2's NaN-spot arm).
+            _LOG.warning(
+                "greeks_enrich.spot_invalid",
+                underlying=parts.underlying,
+                ts=ts.isoformat(),
+                spot=str(spot),
+            )
+            spot = None
+
         if isinstance(stored_pid, int):
             stored = unpack_greeks_provenance(stored_pid)
-            if (stored_pid & _INPUTS_MASK) == current_inputs and stored.status == STATUS_OK:
-                # Already solved under the CURRENT inputs — restate verbatim
-                # (Greeks are a pure function of the immutable bar + spot;
-                # the keep-first 1-minute OHLCV can never have changed).
+            if (
+                (stored_pid & _INPUTS_MASK) == current_inputs
+                and stored.status == STATUS_OK
+                and stored.style_flag == style_flag
+                and rate is not None
+                and _as_float(row.get("rate_used")) == rate.rate
+                and spot is not None
+                and _as_decimal(row.get("spot_at_bar")) == spot
+            ):
+                # Already solved under the CURRENT inputs — restate verbatim.
+                # The stamp bits alone are NOT sufficient: the spot 1-minute
+                # lake is MUTABLE post DEC-LAKE-HEAL-001 (heal/quarantine/
+                # re-derive rewrites), and a rate VALUE can move under an
+                # unchanged source kind (a revised BRUTEX_RISK_FREE_CSV, a
+                # re-configured fixed rate) with no stamp bit to show for it.
+                # Reuse therefore additionally requires the stored
+                # ``rate_used`` / ``spot_at_bar`` to EQUAL the values this
+                # pass would solve with, and the style flag to match; any
+                # mismatch falls through to the honest recompute below, which
+                # re-solves or DEMOTES (NO_RATE / NO_SPOT) and lets the
+                # latest-wins write heal the lake.
                 bars.append(
                     FnoGreeksBar(
                         timestamp=ts,
@@ -623,22 +670,7 @@ def enrich_option_bars(
                 reused += 1
                 continue
 
-        bar_date = (ts + timedelta(hours=5, minutes=30)).date()
-        rate = rate_by_date.setdefault(bar_date, rate_source.rate_on(bar_date))
         t_years = t_years_act365(ts, expiry_at)
-        spot = spot_by_ts.get(ts)
-        if spot is not None and (not spot.is_finite() or spot <= 0):
-            # A non-finite / non-positive JOIN spot is unusable — degrade to
-            # the honest NO_SPOT NULL (never a stored NaN spot, never a
-            # whole-contract quarantine; DEC-GREEKS-CORRECTNESS-AUDIT-001
-            # IVX-2's NaN-spot arm).
-            _LOG.warning(
-                "greeks_enrich.spot_invalid",
-                underlying=parts.underlying,
-                ts=ts.isoformat(),
-                spot=str(spot),
-            )
-            spot = None
         bar = _compute_bar(
             ts=ts,
             open_=open_,
