@@ -26,8 +26,9 @@ Channel``.
 * **HTTP via urllib.request** — stdlib only, no third-party dep.
   Per-call timeout prevents the worker from hanging.
 * **Dedupe via TTL cache** — last-seen timestamp per ``(kind, dedupe_key)``.
-  When the current call is within the window, drop. Window expires via
-  lazy eviction during publish.
+  When the current call is within the window, drop. The stamp is recorded
+  only AFTER a successful send — a FAILED send never suppresses the next
+  identical alert. Window expires via lazy eviction during publish.
 * **Synchronous test mode** — pass a ``transport`` callable to the
   constructor and the notifier skips the worker thread, calling
   the transport inline on publish. Tests use this to avoid threading.
@@ -50,6 +51,7 @@ if config.enabled:
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import logging
 import os
@@ -96,6 +98,20 @@ ENV_API_BASE: Final[str] = "BRUTEX_TELEGRAM_API_BASE"
 #: HTTP "successful response" status range per RFC 9110 §15.3.
 HTTP_OK_MIN: Final[int] = 200
 HTTP_OK_MAX: Final[int] = 300
+
+#: Values that LOOK like an operator meant "enable" but are NOT the exact
+#: opt-in string ``"true"`` — each of these silently DISABLES critical
+#: alerting, so :meth:`TelegramConfig.from_env` logs a LOUD warning when it
+#: sees one (R2-CS-2).
+_TRUTHY_BUT_NOT_TRUE: Final[frozenset[str]] = frozenset(
+    {"1", "yes", "on", "y", "t", "enable", "enabled"}
+)
+
+#: URL schemes accepted for ``BRUTEX_TELEGRAM_API_BASE``. A scheme-less base
+#: makes ``urllib.request.Request(url)`` raise a ``ValueError`` whose message
+#: embeds the FULL URL including the bot token — refused at parse time so the
+#: token can never reach a log line (R2-OCLI-F6 token-leak guard).
+_ALLOWED_API_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -177,10 +193,15 @@ DEDUPE_WINDOW_SECONDS: Final[dict[str, float]] = {
 
 @dataclass(frozen=True, slots=True)
 class TelegramConfig:
-    """Loaded from env. Immutable after construction."""
+    """Loaded from env. Immutable after construction.
 
-    bot_token: str
-    chat_id: str
+    The bot token and chat id are SECRETS — both carry ``repr=False`` so an
+    accidental ``repr()``/``str()`` of a config (log line, exception message,
+    debugger dump) can never leak them (R2-CS-5).
+    """
+
+    bot_token: str = field(repr=False)
+    chat_id: str = field(repr=False)
     enabled: bool
     api_base: str = DEFAULT_API_BASE
     http_timeout: float = DEFAULT_HTTP_TIMEOUT
@@ -200,10 +221,25 @@ class TelegramConfig:
         Raises
         ------
         TelegramConfigError
-            If enabled but the bot token or chat id is missing.
+            If enabled but the bot token or chat id is missing, or if the
+            ``BRUTEX_TELEGRAM_API_BASE`` override is not an ``http(s)`` URL
+            (a scheme-less base would leak the bot token through urllib's
+            ``ValueError`` message — R2-OCLI-F6).
         """
         enabled_raw = os.environ.get(ENV_ENABLED, "false").strip().lower()
         enabled = enabled_raw == "true"
+        if enabled_raw in _TRUTHY_BUT_NOT_TRUE:
+            # LOUD honesty warning (R2-CS-2): '1'/'yes'/'on'/… look truthy but
+            # only the EXACT string 'true' opts in — without this warning a
+            # near-miss value silently disables CRITICAL alerting.
+            logger.warning(
+                "telegram_enabled_value_not_true: %s=%r looks truthy but only the exact "
+                "string 'true' enables Telegram — critical alerting stays DISABLED. "
+                "Set %s=true to enable.",
+                ENV_ENABLED,
+                enabled_raw,
+                ENV_ENABLED,
+            )
 
         token = os.environ.get(ENV_BOT_TOKEN, "").strip()
         chat_id = os.environ.get(ENV_CHAT_ID, "").strip()
@@ -219,6 +255,23 @@ class TelegramConfig:
                 f"{ENV_ENABLED}=true but {ENV_CHAT_ID} is not set. "
                 f"See docs/runbooks/telegram-setup.md."
             )
+        if enabled:
+            # Parse-time scheme validation (R2-OCLI-F6): a scheme-less
+            # api_base makes urllib.request.Request(url) raise a ValueError
+            # whose message embeds the FULL bot-token URL. Refuse here, with
+            # a message that names only the env var + scheme — never the URL.
+            try:
+                scheme = urllib.parse.urlsplit(api_base or DEFAULT_API_BASE).scheme.lower()
+            except ValueError as exc:
+                raise TelegramConfigError(
+                    f"{ENV_API_BASE} is not a parseable URL. Use an http:// or https:// base."
+                ) from exc
+            if scheme not in _ALLOWED_API_SCHEMES:
+                raise TelegramConfigError(
+                    f"{ENV_API_BASE} scheme {scheme!r} is not http(s). A scheme-less "
+                    f"base would leak the bot token via urllib's ValueError message; "
+                    f"set an explicit http:// or https:// base."
+                )
 
         return cls(
             bot_token=token,
@@ -278,17 +331,31 @@ class TelegramBucket:
     def check_dedupe_locked(self, kind: str, dedupe_key: str, now: float) -> bool:
         """Return True if the event should be dropped as duplicate.
 
+        PURE check — does NOT stamp the last-seen time. The stamp is
+        recorded via :meth:`record_dedupe_locked` only AFTER a successful
+        send, so a FAILED send never suppresses identical follow-up alerts
+        for the whole dedupe window (dedupe-before-send fix, R2-OCLI-F4).
         Caller holds ``self._lock``.
         """
         window = DEDUPE_WINDOW_SECONDS.get(kind, 0.0)
         if window <= 0.0:
             return False
-        key = (kind, dedupe_key)
-        last_seen = self._dedupe_cache.get(key)
-        if last_seen is not None and (now - last_seen) < window:
-            return True
-        self._dedupe_cache[key] = now
-        return False
+        last_seen = self._dedupe_cache.get((kind, dedupe_key))
+        return last_seen is not None and (now - last_seen) < window
+
+    def record_dedupe_locked(self, kind: str, dedupe_key: str, now: float) -> None:
+        """Stamp the dedupe last-seen time for a SUCCESSFULLY sent event.
+
+        Called by :meth:`TelegramNotifier._send_one` only when the transport
+        reported success — never at publish time — so a failed send leaves
+        no stamp behind (the "rollback" is that nothing was stamped).
+        No-op for kinds with a zero window: nothing would ever read the
+        stamp and skipping keeps the cache bounded to deduped kinds.
+        Caller holds ``self._lock``.
+        """
+        if DEDUPE_WINDOW_SECONDS.get(kind, 0.0) <= 0.0:
+            return
+        self._dedupe_cache[(kind, dedupe_key)] = now
 
     def evict_expired_dedupe_locked(self, now: float) -> None:
         """Drop dedupe keys older than the max window so the cache stays bounded."""
@@ -325,13 +392,17 @@ def _default_transport(config: TelegramConfig, event: TelegramEvent) -> bool:
         }
     ).encode("utf-8")
 
-    req = urllib.request.Request(  # noqa: S310 — URL is under our control
-        url,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
     try:
+        # Request construction runs INSIDE the try: a malformed URL (e.g. a
+        # scheme-less api_base) raises ValueError HERE, and its message embeds
+        # the FULL URL including the bot token — it must never escape to a
+        # caller that logs str(exc) (R2-OCLI-F6 token-leak guard).
+        req = urllib.request.Request(  # noqa: S310 — URL is under our control
+            url,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
         with urllib.request.urlopen(  # nosec B310 — URL is constructed from our own BASE_URL constant  # noqa: S310
             req, timeout=config.http_timeout
         ) as resp:
@@ -342,6 +413,11 @@ def _default_transport(config: TelegramConfig, event: TelegramEvent) -> bool:
         return False
     except urllib.error.URLError as exc:
         logger.warning("telegram_url_error", extra={"reason": str(exc.reason)})
+        return False
+    except ValueError as exc:
+        # Log ONLY the exception type — the ValueError message contains the
+        # full bot-token URL, so neither str(exc) nor the URL is ever logged.
+        logger.warning("telegram_invalid_url", extra={"error_type": type(exc).__name__})
         return False
     except (TimeoutError, OSError) as exc:
         logger.warning("telegram_network_error", extra={"error": str(exc)})
@@ -410,6 +486,15 @@ class TelegramNotifier:
         if self._synchronous or self._running:
             return
         self._running = True
+        # Guarded drain-on-exit (R2-OCLI-F2): the CLI fire-and-forget alert
+        # paths (the CRITICAL pull-halt alert, sweep_complete) publish via a
+        # process-singleton notifier that no exit path stops — the daemon
+        # worker was simply killed at interpreter shutdown with those events
+        # still in the queue. atexit handlers run BEFORE daemon threads are
+        # killed, so a bounded stop() here drains them. stop() is idempotent
+        # and unregisters the hook, so a cleanly-stopped notifier neither
+        # double-stops nor stays pinned in memory until process exit.
+        atexit.register(self.stop)
         self._worker = threading.Thread(
             target=self._worker_loop,
             name="brutex-telegram-notifier",
@@ -418,16 +503,34 @@ class TelegramNotifier:
         self._worker.start()
 
     def stop(self, *, timeout: float = 2.0) -> None:
-        """Graceful shutdown. Drains pending events with a timeout."""
+        """Graceful shutdown — DRAINS queued events, then stops the worker.
+
+        Ordering is the exit-drain guarantee (R2-OCLI-F2): the poison pill
+        is enqueued FIRST (behind every already-queued event), the worker is
+        joined WITH *timeout* so it sends everything up to the pill, and
+        only THEN is ``_running`` flipped False. (The old order flipped
+        ``_running`` before the pill, letting the worker's
+        ``while self._running`` check exit early and silently DROP queued
+        events — e.g. the CRITICAL pull-halt alert published moments before
+        CLI exit.) If the pill cannot be enqueued (queue full) or the worker
+        outlives *timeout*, the final ``_running = False`` still guarantees
+        the daemon worker exits on its next loop check — ``stop()`` itself
+        never blocks longer than ~0.5 s (pill enqueue) + *timeout* (join).
+        """
         if not self._running:
             return
-        self._running = False
-        # Poison pill
+        # Poison pill FIRST — the worker keeps draining while _running is True.
         with contextlib.suppress(queue.Full):
             self._queue.put(None, timeout=0.5)
         if self._worker is not None:
             self._worker.join(timeout=timeout)
             self._worker = None
+        self._running = False
+        # A cleanly-stopped notifier no longer needs the exit-drain hook
+        # (keeping it would also pin this instance in memory until exit).
+        # Safe when called FROM the atexit hook itself, and a no-op if the
+        # hook was never registered.
+        atexit.unregister(self.stop)
 
     def __enter__(self) -> Self:
         if not self._synchronous and not self._running:
@@ -488,7 +591,18 @@ class TelegramNotifier:
             self._send_one(event)
 
     def _send_one(self, event: TelegramEvent) -> None:
-        """Send a single :class:`TelegramEvent` via the configured transport."""
+        """Send a single :class:`TelegramEvent` via the configured transport.
+
+        Dedupe is stamped ONLY on a successful send (R2-OCLI-F4): a failed
+        send leaves no stamp, so the next identical alert is not suppressed.
+        A send-time re-check drops identical events that raced past the
+        publish-time check while an earlier copy was still in flight.
+        """
+        with self._bucket._lock:  # pyright: ignore[reportPrivateUsage]  # DEC-P0-017: TelegramNotifier owns its TokenBucket; direct lock access avoids exposing the mutex through the public bucket surface.
+            if self._bucket.check_dedupe_locked(event.kind, event.dedupe_key, time.monotonic()):
+                self._bucket.dropped_on_dedupe += 1
+                return
+
         try:
             ok = self._transport(self._config, event)
         except Exception as exc:
@@ -500,6 +614,8 @@ class TelegramNotifier:
             if ok:
                 self._bucket.sent += 1
                 self._bucket.last_success_at = now
+                # Stamp the dedupe last-seen only AFTER the successful send.
+                self._bucket.record_dedupe_locked(event.kind, event.dedupe_key, now)
             else:
                 self._bucket.dropped_on_failure += 1
                 self._bucket.last_failure_at = now

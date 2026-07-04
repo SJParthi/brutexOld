@@ -50,6 +50,11 @@ import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Final
+from urllib.parse import urlparse
+
+import structlog
+
+_LOG = structlog.get_logger(__name__)
 
 #: Base URL for NSE per-index constituent CSVs. Overridable via the
 #: ``BRUTEX_NSE_CONSTITUENTS_BASE_URL`` env var so an operator behind a
@@ -364,8 +369,67 @@ def _fetch_max_retries() -> int:
     return value if value >= 1 else _FETCH_RETRIES_DEFAULT
 
 
-def _default_opener(url: str) -> str:  # pragma: no cover - live network only
-    """Fetch *url* and return its text body (the real urllib opener).
+#: SSRF allowlist for the live constituent-CSV fetch — DEFENSE-IN-DEPTH, the
+#: constituent twin of the instrument-master ``_check_url`` guard
+#: (``brutex/adapters/groww/instrument_loader.py``) and the bhavcopy
+#: ``BHAVCOPY_ALLOWED_HOSTS`` discipline. Exactly the hosts the built-in
+#: defaults resolve to: the :data:`NSE_CONSTITUENTS_BASE_URL` default host
+#: (``nsearchives.nseindia.com``) + the operator-verified NIFTY Total Market
+#: host (``www.niftyindices.com``, plus its bare apex). DELIBERATELY FIXED —
+#: not env-extensible: an env-override URL (the ``BRUTEX_NSE_CONSTITUENTS_BASE_URL``
+#: base or a ``BRUTEX_INDEX_CSV_FILENAMES`` full URL) must STILL land on one of
+#: these hosts over ``https``, or :func:`_default_opener` refuses LOUDLY
+#: (a repointed mirror off these hosts needs a code change + review, never a
+#: silent env flip — the SSRF trap this closes).
+NSE_CONSTITUENT_ALLOWED_HOSTS: Final[frozenset[str]] = frozenset(
+    {
+        "nsearchives.nseindia.com",
+        "niftyindices.com",
+        "www.niftyindices.com",
+    }
+)
+
+
+def _check_constituent_url(url: str) -> None:
+    """Refuse any constituent-CSV URL that is not ``https`` on an allowlisted host.
+
+    INDEPENDENT guard inside the live opener (defense-in-depth — it re-validates
+    whatever URL resolution produced, so neither an env-override base/full URL
+    nor a code drift can point the real network fetch off the NSE/niftyindices
+    hosts, mirroring the instrument-master ``_check_url``). PURE + 100% tested;
+    raises a clear :class:`ValueError` (logged via structlog) on any violation.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in NSE_CONSTITUENT_ALLOWED_HOSTS:
+        _LOG.warning(
+            "nse_constituents.url_rejected",
+            url=url,
+            scheme=parsed.scheme,
+            host=parsed.hostname,
+            allowed_hosts=sorted(NSE_CONSTITUENT_ALLOWED_HOSTS),
+        )
+        raise ValueError(
+            f"refusing non-allowlisted constituent-CSV URL {url!r} — the live fetch "
+            f"requires https on one of {sorted(NSE_CONSTITUENT_ALLOWED_HOSTS)} "
+            "(an env-override host must still be on this fixed allowlist)"
+        )
+
+
+def _default_opener(url: str) -> str:
+    """Fetch *url* and return its text body (the real urllib opener, SSRF-guarded).
+
+    The allowlist check (:func:`_check_constituent_url`) runs FIRST — an
+    ``http://`` URL or a non-allowlisted host raises :class:`ValueError` before
+    any network I/O. The network body itself lives in :func:`_open_live_url`
+    (``# pragma: no cover`` — live only). Callers inject a fake ``opener`` in
+    tests; this default is reached ONLY on a cold cache / post-TTL refresh.
+    """
+    _check_constituent_url(url)
+    return _open_live_url(url)
+
+
+def _open_live_url(url: str) -> str:  # pragma: no cover - live network only
+    """The raw urllib fetch behind :func:`_default_opener` (already allowlist-checked).
 
     LIVE ONLY (``# pragma: no cover``): NSE bot-blocks these endpoints
     and this build environment network-blocks ``nseindia.com``, so this
@@ -394,9 +458,11 @@ def _default_opener(url: str) -> str:  # pragma: no cover - live network only
             "Referer": "https://www.niftyindices.com/",
         },
     )
-    # The S310 (ruff) + B310 (bandit) suppressions are honest: the URL is a fixed
-    # https NSE host built by ``constituent_url`` (never file:/ or a custom
-    # scheme); the whole opener is live-network-only glue (``# pragma: no cover``).
+    # The S310 (ruff) + B310 (bandit) suppressions are honest: the URL has been
+    # ENFORCED https on an allowlisted NSE/niftyindices host by
+    # ``_check_constituent_url`` in ``_default_opener`` before this body runs
+    # (never file:/ or a custom scheme); the network body is live-only glue
+    # (``# pragma: no cover``).
     # Bounded retry (env-tunable attempts, env-tunable read timeout, short backoff)
     # so a slow first-byte / transient throttle recovers instead of cratering the
     # universe — but bounded far below the old fixed 90 s.
@@ -587,6 +653,7 @@ __all__ = [
     "INDEX_CSV_FILENAMES",
     "INDEX_CSV_FILENAMES_OVERRIDE_ENV",
     "NSE_CONSTITUENTS_BASE_URL",
+    "NSE_CONSTITUENT_ALLOWED_HOSTS",
     "ConstituentRow",
     "constituent_url",
     "convention_constituent_url",

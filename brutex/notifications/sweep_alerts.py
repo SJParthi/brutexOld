@@ -44,7 +44,7 @@ clean (the same precedent as :mod:`brutex.observability.standard_monitor`).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Final, Protocol
 
 from brutex.notifications.telegram import (
@@ -222,6 +222,55 @@ class SweepSummaryLike(Protocol):
     def tuples_failed(self) -> int:
         """Tuples that raised mid-evaluation and were skipped this run."""
         ...
+
+
+class LakeHealActionLike(Protocol):
+    """The per-action slice of a lake-heal report the alert body sums over.
+
+    Structural (DEC-LAKE-HEAL-001) — matches
+    ``brutex.data.lake_heal.HealAction`` without importing the data layer
+    (this module stays wheel-free at import time, and the data layer keeps
+    its alert seam injected — no ``data ↔ notifications`` module edge).
+    """
+
+    @property
+    def dropped(self) -> int:
+        """Rows dropped by this action (dup collapse + removals)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def conflicts(self) -> int:
+        """Keep-first conflicts recorded while moving rows home."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def quarantine_path(self) -> str | None:
+        """Where the original bytes were quarantined (``None`` = no copy)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class LakeHealReportLike(Protocol):
+    """The batch-report slice of ``brutex.data.lake_heal.HealReport`` the alert reads."""
+
+    @property
+    def mode(self) -> str:
+        """The heal mode the batch ran under (``auto`` / ``observe``)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def findings(self) -> int:
+        """Findings handed to the batch."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def healed(self) -> int:
+        """Findings actually healed."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def actions(self) -> Sequence[LakeHealActionLike]:
+        """The per-partition heal actions taken."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 class SweepAlerter:
@@ -414,6 +463,113 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def lake_heal_report(
+        self,
+        *,
+        mode: str,
+        findings: int,
+        healed: int,
+        quarantined: int,
+        dropped: int,
+        conflicts: int,
+        scope: str,
+    ) -> bool:
+        """Alert the outcome of ONE lake-heal batch (DEC-LAKE-HEAL-001).
+
+        One alert per heal batch, on the existing ``QUARANTINE_NEW`` kind (no
+        new dedupe-window row needed; ``dedupe_key`` scopes it per heal seam).
+        Severity is WARNING for a batch that FIXED something, and CRITICAL when
+        poison was found but NOTHING was fixed (``findings > 0 and healed == 0``
+        — the observable covering BOTH the ``mode=observe`` "found, nothing
+        touched" case and a refused mass-heal / all-errored batch), because the
+        operator must act. Body is MarkdownV2-escaped; best-effort
+        :meth:`_publish` (never blocks/crashes).
+
+        Parameters
+        ----------
+        mode
+            The heal mode the batch ran under (``auto`` / ``observe``).
+        findings, healed, quarantined, dropped, conflicts
+            The batch tallies (findings handed in, findings healed, quarantine
+            copies made, rows dropped, keep-first conflicts recorded).
+        scope
+            The seam token (``"reconcile"`` / ``"pull:<id>"`` /
+            ``"startup-sweep"``) — the dedupe key suffix.
+        """
+        if findings > 0 and healed == 0:
+            severity = TelegramSeverity.CRITICAL
+            head = "🛑 Lake poison found, NOTHING fixed"
+        else:
+            severity = TelegramSeverity.WARN
+            head = "🧹 Lake heal"
+        message = escape_markdown_v2(
+            f"{head} ({scope}): mode={mode}, findings={findings}, healed={healed}, "
+            f"quarantined={quarantined}, dropped={dropped}, conflicts={conflicts}. "
+            f"Originals preserved under <lake>/.quarantine/ — never auto-deleted."
+        )
+        return self._publish(
+            kind=TelegramEventKind.QUARANTINE_NEW,
+            severity=severity,
+            message=message,
+            dedupe_key=f"lake-heal:{scope}",
+        )
+
+    def vendor_down(self, *, failed_windows: int, distinct_symbols: int) -> bool:
+        """Alert that the VENDOR looks DOWN — the pull halted; WAIT then re-run (CRITICAL).
+
+        Fired ONCE by the error-storm breaker
+        (:class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`,
+        DEC-VENDOR-DOWN-BREAKER-001) at its trip transition: sustained
+        ladder-exhausted transport failures across multiple DISTINCT symbols with
+        ZERO successes — the whole-vendor-outage shape. The wording is deliberately
+        DISTINCT from :meth:`credential_dead` (this one says WAIT — nothing on the
+        operator's side is broken) and from the generic :meth:`pull_halted`. The
+        counts are non-secret integers; the ``dedupe_key`` coalesces a repeated
+        vendor-down verdict into one push.
+        """
+        message = escape_markdown_v2(
+            f"🛑 VENDOR DOWN — Groww transport is failing pull-wide: {failed_windows} "
+            f"windows exhausted their retry ladders across {distinct_symbols} distinct "
+            "symbols with ZERO successes. This looks like a vendor/network outage, NOT "
+            "our credential. The pull HALTED gracefully — WAIT for the vendor to "
+            "recover, then re-run; nothing is lost (the durable ledger + idempotent "
+            "sink re-pull exactly the missing windows)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key="vendor-down",
+        )
+
+    def credential_dead(self, *, reason: str) -> bool:
+        """Alert that OUR credential / token-broker Lambda is DEAD — operator action (CRITICAL).
+
+        Fired ONCE by the error-storm breaker's dead-credential escalation
+        (DEC-VENDOR-DOWN-BREAKER-001): K consecutive StillStale re-reads spanning
+        ≥ T minutes with ZERO adopted-token successes — past the healthy 06:00-IST
+        rotation shape (DEC-BROKER-READONLY-REAUTH-REREAD-001's honest envelope).
+        The wording is deliberately DISTINCT from :meth:`vendor_down`: here the
+        vendor is (as far as we can tell) fine and WAITING will NOT help — the
+        operator must re-provision the credential or fix the token-broker Lambda.
+        *reason* must stay a short NON-SECRET token (never a token/secret value —
+        the :meth:`pull_halted` rule).
+        """
+        message = escape_markdown_v2(
+            f"🔐 OUR CREDENTIAL / LAMBDA BROKER DEAD — OPERATOR ACTION NEEDED: {reason}. "
+            "Every token re-read still returns the same dead token (zero adopted-token "
+            "successes), so every fetch is auth-stalled and the pull HALTED gracefully. "
+            "Waiting will NOT fix this — re-provision the Groww API key / TOTP secret "
+            "or repair the token-broker Lambda, then re-run; bars already written are "
+            "safe (idempotent re-pull)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"credential-dead:{reason}",
+        )
+
     def symbol_window_failure(
         self,
         *,
@@ -565,13 +721,56 @@ def emit_pull_halt_alert(exc: Exception) -> None:
         )
 
 
+def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
+    """Fire a best-effort Telegram alert for one lake-heal batch (DEC-LAKE-HEAL-001).
+
+    The COMMON module helper mirroring :func:`emit_pull_halt_alert` — the ONE
+    place the heal seams (`cascade_wire` reconcile, the dashboard pull glue, the
+    startup sweeper) map a ``brutex.data.lake_heal.HealReport`` onto
+    :meth:`SweepAlerter.lake_heal_report`. Skips entirely when
+    ``report.findings == 0`` (a clean scan never alerts). The whole body is
+    wrapped in a blanket ``try/except`` so the fire-and-forget contract is
+    STRUCTURAL: an alert failure is swallowed + logged and can NEVER fail the
+    heal. Silent no-op when Telegram is disabled (the default).
+
+    Parameters
+    ----------
+    report
+        The heal batch outcome (structural — any ``HealReport``-shaped value).
+    scope
+        The seam token (``"reconcile"`` / ``"pull:<id>"`` / ``"startup-sweep"``).
+    """
+    import structlog
+
+    try:
+        if report.findings == 0:
+            return
+        actions = list(report.actions)
+        SweepAlerter().lake_heal_report(
+            mode=report.mode,
+            findings=report.findings,
+            healed=report.healed,
+            quarantined=sum(1 for action in actions if action.quarantine_path is not None),
+            dropped=sum(action.dropped for action in actions),
+            conflicts=sum(action.conflicts for action in actions),
+            scope=scope,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the heal
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "lake_heal_alert_failed"
+        )
+
+
 __all__ = [
+    "LakeHealActionLike",
+    "LakeHealReportLike",
     "NotifierResolver",
     "RateControllerLike",
     "SweepAlerter",
     "SweepSummaryLike",
     "SymbolFailureLike",
     "WorkerEventLike",
+    "emit_lake_heal_alert",
     "emit_pull_halt_alert",
     "escape_markdown_v2",
 ]

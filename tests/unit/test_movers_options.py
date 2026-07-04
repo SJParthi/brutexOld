@@ -39,7 +39,7 @@ from brutex.dashboard.movers_options import (
     rank_value,
     rank_volume,
 )
-from brutex.data.moneyness import Moneyness
+from brutex.data.moneyness import Moneyness, StepConfidence
 
 # ── _tier_expiry_by_underlying (Near/Next/Far resolution) ──────────────────
 
@@ -1030,3 +1030,86 @@ class TestCalendarOnlyExpiryNote:
             calendar_only_expiry=False,
         )
         assert "pull the F&O" in payload["note"]
+
+
+class TestStrikeStepConfidence:
+    """DEC-MONEYNESS-REGISTRY-STEP-001 — the honest strike-grid confidence label."""
+
+    def _m(
+        self,
+        *,
+        strike_step: Decimal | None,
+        strike_step_confidence: StepConfidence | None,
+    ) -> OptionMover:
+        return compute_option_mover(
+            underlying="NIFTY",
+            expiry=date(2025, 6, 30),
+            strike=Decimal("24000"),
+            opt_type="CE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            exchange="NSE",
+            ltp=Decimal("164"),
+            volume=1000,
+            value_paisa=16_400_000,
+            oi=1100,
+            prev_close=Decimal("100"),
+            spot_ltp=Decimal("23622.9"),
+            prev_oi=1000,
+            strike_step=strike_step,
+            strike_step_confidence=strike_step_confidence,
+        )
+
+    def test_registry_confidence_is_surfaced_with_a_step(self) -> None:
+        m = self._m(strike_step=Decimal("50"), strike_step_confidence=StepConfidence.REGISTRY)
+        assert m.strike_step_confidence is StepConfidence.REGISTRY
+        assert m.moneyness_label == "OTM +8"
+
+    def test_observed_confidence_is_surfaced_with_a_step(self) -> None:
+        m = self._m(strike_step=Decimal("50"), strike_step_confidence=StepConfidence.OBSERVED)
+        assert m.strike_step_confidence is StepConfidence.OBSERVED
+
+    def test_confidence_is_dropped_without_a_step(self) -> None:
+        # No step ⇒ nothing displayed to qualify ⇒ never a dangling flag (Rule #1).
+        m = self._m(strike_step=None, strike_step_confidence=StepConfidence.OBSERVED)
+        assert m.strike_step_confidence is None
+        assert m.atm_offset is None
+
+    def test_step_without_a_label_floors_to_observed(self) -> None:
+        # DEC-FNO-HONESTY-PACK-001: a real step passed WITHOUT a confidence gets the
+        # honest LOW-confidence floor — a displayed grid can never serialise
+        # `strike_step_confidence: null`, which the payload doc defines as
+        # "no grid presented" (the latent split guarded in BOTH directions).
+        m = self._m(strike_step=Decimal("50"), strike_step_confidence=None)
+        assert m.strike_step_confidence is StepConfidence.OBSERVED
+        assert m.atm_offset is not None  # the grid really is presented
+
+    def test_no_step_and_no_label_is_none(self) -> None:
+        m = self._m(strike_step=None, strike_step_confidence=None)
+        assert m.strike_step_confidence is None
+
+    def test_row_projection_serialises_the_confidence(self) -> None:
+        payload = build_options_payload(
+            [
+                self._m(
+                    strike_step=Decimal("50"),
+                    strike_step_confidence=StepConfidence.OBSERVED,
+                )
+            ],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+        )
+        assert payload["highest_oi"][0]["strike_step_confidence"] == "observed"
+
+    def test_row_projection_serialises_none_confidence(self) -> None:
+        payload = build_options_payload(
+            [self._m(strike_step=None, strike_step_confidence=None)],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+        )
+        assert payload["highest_oi"][0]["strike_step_confidence"] is None

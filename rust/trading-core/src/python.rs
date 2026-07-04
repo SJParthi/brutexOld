@@ -39,13 +39,28 @@ const FIB_LEVELS_LEN: usize = 15;
 /// The inner indicators (`compute_pivot_levels` / `compute_fib_levels`) do
 /// integer arithmetic that, under the crate's `overflow-checks = true` release
 /// profile, **panics** on overflow (a finance-safety choice, see `lib.rs`). The
-/// largest derived pivot magnitude is `r4 = pdh + 3·(p − pdl)` (bounded by
-/// `4·pdh − 3·pdl`) and the largest fib intermediate is `pdh + 3.236·range`;
-/// the sum `pdh + pdl + pdc` is bounded by `3·pdh`. Constraining every anchor to
-/// `|x| ≤ i64::MAX / 8` makes ALL of these (≤ `7·(i64::MAX/8) < i64::MAX`)
-/// provably overflow-free, so a hostile/garbage FFI caller gets a clean
-/// `ValueError` instead of a panic → `abort` (SIGABRT under `panic = "abort"`,
-/// which would crash the whole interpreter — a DoS).
+/// largest derived pivot magnitude is now `r5 = pdh + 4·(p − pdl)` / its mirror
+/// `s5 = pdl − 4·(pdh − p)` — the PR-2 **coefficient-4** ladder rungs
+/// (`indicators/pivots.rs`; DEC-NIFTY-INDICATORS-001) that SUPERSEDE the
+/// coefficient-3 `r4 = pdh + 3·(p − pdl)` this bound was originally derived
+/// against.
+///
+/// Coefficient-4 derivation, with every anchor constrained to
+/// `|x| ≤ M = i64::MAX / 8`: R4's loose `p ≤ pdh` bound no longer suffices at
+/// coefficient 4 (it only shows `|r5| ≤ M + 4·2M = 9M`, which exceeds
+/// `i64::MAX ≈ 8M`). But `compute_pivot_levels`' always-on asserts guarantee
+/// `pdl ≤ pdc ≤ pdh`, so `p = round_half_even((pdh + pdl + pdc)/3)
+/// ≤ (2·pdh + pdl)/3 + 1`, hence `p − pdl ≤ ⅔·(pdh − pdl) + 1 ≤ 4M/3 + 1` and
+/// `4·(p − pdl) ≤ 16M/3 + 4`; therefore
+/// `|r5| ≤ M + 16M/3 + 4 = 19M/3 + 4 ≈ 6.34·M < i64::MAX` (symmetrically for
+/// `s5` via `pdh − p ≤ ⅔·(pdh − pdl) + 1`). The largest fib intermediate is
+/// `pdh + 3.236·range ≤ M + 3.236·2M < 7.5·M` and the pivot sum
+/// `pdh + pdl + pdc` is bounded by `3·M`, so ALL intermediates stay strictly
+/// below `8·M ≤ i64::MAX`: STILL provably overflow-free at coefficient 4 with
+/// the SAME ceiling — the constant did NOT need lowering. A hostile/garbage
+/// FFI caller thus gets a clean `ValueError` instead of a panic → `abort`
+/// (SIGABRT under `panic = "abort"`, which would crash the whole interpreter —
+/// a DoS).
 ///
 /// This ceiling is ≈ 1.15·10¹⁸ paisa = ₹1.15·10¹⁶ — over 200 billion× the
 /// largest golden anchor (≈ 5·10⁶) and far above the property domain
@@ -1005,6 +1020,49 @@ fn py_ema_step(alpha: f64, close: f64, prior: f64) -> f64 {
     ema_step(alpha, close, prior)
 }
 
+/// Largest proleptic-Gregorian day-ordinal a Python `datetime.date` can carry
+/// (`date.max.toordinal()` == 9999-12-31). Every BruteX caller derives its
+/// ordinal via `date.toordinal()` (≥ 1), so bounding the FFI edge to
+/// `[1, MAX_DAY_ORDINAL]` rejects only garbage — and keeps the inner
+/// `ordinal - 1` subtraction (metadata.rs) provably clear of the `i64::MIN`
+/// overflow that would trip `overflow-checks = true` → panic → `abort`
+/// (SIGABRT) under `panic = "abort"`.
+const MAX_DAY_ORDINAL: i64 = 3_652_059;
+
+/// Largest civil seconds-since-midnight (23:59:59). Both `tod_seconds` and
+/// `session_open_seconds` are seconds-since-IST-midnight, so `[0, 86_399]` is
+/// the exact valid domain — and bounds the inner `tod - open` subtraction far
+/// away from i64 overflow.
+const MAX_CIVIL_SECONDS: i64 = 86_399;
+
+/// Range guard for a proleptic-Gregorian day-ordinal at the FFI boundary
+/// (`[1, MAX_DAY_ORDINAL]` — the exact Python `date.toordinal()` domain).
+/// Pure (`Result<_, String>`, no `PyErr`) so the no-libpython `cargo test`
+/// covers both branches.
+fn day_ordinal_in_range(name: &str, value: i64) -> Result<(), String> {
+    if (1..=MAX_DAY_ORDINAL).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name} ({value}) out of the proleptic-Gregorian ordinal range \
+             [1, {MAX_DAY_ORDINAL}] (Python date.toordinal() domain)"
+        ))
+    }
+}
+
+/// Range guard for a civil seconds-since-midnight at the FFI boundary
+/// (`[0, MAX_CIVIL_SECONDS]`). Pure, both branches `cargo test`-covered.
+fn civil_seconds_in_range(name: &str, value: i64) -> Result<(), String> {
+    if (0..=MAX_CIVIL_SECONDS).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name} ({value}) out of the civil seconds-since-midnight range \
+             [0, {MAX_CIVIL_SECONDS}]"
+        ))
+    }
+}
+
 /// Derive the eval-path per-bar metadata (DEC-NIFTY-ROLL-METADATA-001) — the
 /// shared Rust core BruteX's `brutex.feed.bar_metadata` shim delegates to so the
 /// backtest + TickVault derive IDENTICAL `tod_seconds` / weekday / minute-of-
@@ -1014,8 +1072,13 @@ fn py_ema_step(alpha: f64, close: f64, prior: f64) -> f64 {
 /// passes the bar's IST CIVIL components (no timezone library here): the trading-
 /// date proleptic-Gregorian ordinal, the wall-clock h/m/s, the session-open
 /// seconds-since-midnight (resolved from the shared NSE calendar), and the active
-/// contract's expiry ordinal. Pure — no `PyErr` path (every input is a primitive),
-/// so the no-libpython `cargo test` covers the derivation directly.
+/// contract's expiry ordinal.
+///
+/// The RANGE guards live HERE at the FFI boundary (the same convention as
+/// [`py_seconds_of_day`]): out-of-domain ordinals / civil components raise a
+/// clean `ValueError` instead of tripping an inner `overflow-checks` panic →
+/// `abort` (SIGABRT) under `panic = "abort"` — e.g. a garbage `hour = 2_000_000`
+/// would overflow `hour * 3600` unguarded (the pre-guard repro).
 #[pyfunction]
 #[pyo3(name = "derive_bar_metadata", signature = (
     day_ordinal, hour, minute, second, session_open_seconds, expiry_ordinal,
@@ -1027,7 +1090,35 @@ fn py_derive_bar_metadata(
     second: u32,
     session_open_seconds: i64,
     expiry_ordinal: i64,
-) -> (u32, u8, i32, bool) {
+) -> PyResult<(u32, u8, i32, bool)> {
+    derive_bar_metadata_impl(
+        day_ordinal,
+        hour,
+        minute,
+        second,
+        session_open_seconds,
+        expiry_ordinal,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+/// Pure logic for [`py_derive_bar_metadata`] — `Result<_, String>` so the
+/// range guards + the delegation are unit-covered without a libpython link
+/// (mirrors [`seconds_of_day_impl`], which it reuses for the h/m/s guard).
+fn derive_bar_metadata_impl(
+    day_ordinal: i64,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    session_open_seconds: i64,
+    expiry_ordinal: i64,
+) -> Result<(u32, u8, i32, bool), String> {
+    day_ordinal_in_range("day_ordinal", day_ordinal)?;
+    day_ordinal_in_range("expiry_ordinal", expiry_ordinal)?;
+    civil_seconds_in_range("session_open_seconds", session_open_seconds)?;
+    // Reuses the SAME h/m/s guard py_seconds_of_day fronts, so the garbage
+    // `hour = 2_000_000` class cannot bypass it through this entry point.
+    seconds_of_day_impl(hour, minute, second)?;
     let m = crate::indicators::metadata::derive_bar_metadata(
         day_ordinal,
         hour,
@@ -1036,30 +1127,58 @@ fn py_derive_bar_metadata(
         session_open_seconds,
         expiry_ordinal,
     );
-    (
+    Ok((
         m.tod_seconds,
         m.weekday,
         m.minute_of_session,
         m.is_expiry_day,
-    )
+    ))
 }
 
 /// The weekday `0 = Mon … 6 = Sun` of a proleptic-Gregorian day-ordinal
 /// (== Python `date.weekday()` for `date.toordinal()`). Shared so BruteX +
-/// TickVault agree bit-for-bit (DEC-NIFTY-ROLL-METADATA-001).
+/// TickVault agree bit-for-bit (DEC-NIFTY-ROLL-METADATA-001). The ordinal is
+/// RANGE-guarded to the Python `date.toordinal()` domain `[1, 3_652_059]` at
+/// this FFI boundary — a garbage `-2^63` ordinal raises a clean `ValueError`
+/// instead of overflowing the inner `ordinal - 1` → panic → `abort` (SIGABRT)
+/// under `panic = "abort"`. (The inner pure fn stays defensively total over
+/// non-positive ordinals for the native TickVault link.)
 #[pyfunction]
 #[pyo3(name = "weekday_from_ordinal", signature = (day_ordinal,))]
-fn py_weekday_from_ordinal(day_ordinal: i64) -> u8 {
-    crate::indicators::metadata::weekday_from_ordinal(day_ordinal)
+fn py_weekday_from_ordinal(day_ordinal: i64) -> PyResult<u8> {
+    weekday_from_ordinal_impl(day_ordinal).map_err(PyValueError::new_err)
+}
+
+/// Pure logic for [`py_weekday_from_ordinal`] — guard + delegation,
+/// unit-covered without a libpython link.
+fn weekday_from_ordinal_impl(day_ordinal: i64) -> Result<u8, String> {
+    day_ordinal_in_range("day_ordinal", day_ordinal)?;
+    Ok(crate::indicators::metadata::weekday_from_ordinal(
+        day_ordinal,
+    ))
 }
 
 /// Whole minutes from the session open to a bar's IST time-of-day (both seconds
 /// since midnight); a pre-open bar floors NEGATIVE, honest not clamped. Shared
-/// derivation (DEC-NIFTY-ROLL-METADATA-001).
+/// derivation (DEC-NIFTY-ROLL-METADATA-001). Both operands are RANGE-guarded to
+/// the civil `[0, 86_399]` domain at this FFI boundary — a garbage
+/// `(i64::MAX, -1)` pair raises a clean `ValueError` instead of overflowing the
+/// inner `tod - open` → panic → `abort` (SIGABRT) under `panic = "abort"`.
 #[pyfunction]
 #[pyo3(name = "minute_of_session", signature = (tod_seconds, session_open_seconds))]
-fn py_minute_of_session(tod_seconds: i64, session_open_seconds: i64) -> i32 {
-    crate::indicators::metadata::minute_of_session(tod_seconds, session_open_seconds)
+fn py_minute_of_session(tod_seconds: i64, session_open_seconds: i64) -> PyResult<i32> {
+    minute_of_session_impl(tod_seconds, session_open_seconds).map_err(PyValueError::new_err)
+}
+
+/// Pure logic for [`py_minute_of_session`] — guards + delegation,
+/// unit-covered without a libpython link.
+fn minute_of_session_impl(tod_seconds: i64, session_open_seconds: i64) -> Result<i32, String> {
+    civil_seconds_in_range("tod_seconds", tod_seconds)?;
+    civil_seconds_in_range("session_open_seconds", session_open_seconds)?;
+    Ok(crate::indicators::metadata::minute_of_session(
+        tod_seconds,
+        session_open_seconds,
+    ))
 }
 
 /// Seconds since IST midnight for a wall-clock `HH:MM:SS` — the ONE shared
@@ -1125,6 +1244,37 @@ fn py_resolve_near_month(
 /// once per `(instrument, timeframe, contract)` and fed each bar via
 /// [`PyVwapState::update`]. Mirrors the streaming EMA seam, but as a class because
 /// the running sums cannot be a pure step function.
+/// Pure input guard for [`PyVwapState::update`] — `Result<_, String>` (no
+/// `PyErr`) so both branches are unit-covered without a libpython link
+/// (mirrors [`seconds_of_day_impl`]). Enforces:
+///
+/// * `typical_paisa ∈ [0, MAX_BAR_PAISA]` — non-negativity closes the twins'
+///   floor-vs-truncating-division domain hole (Rust i128 `/` truncates toward
+///   zero, Python `//` floors: a negative accumulated `cum_pv` would silently
+///   yield answers one paisa apart), and the ceiling keeps the i128
+///   accumulator provably overflow-free;
+/// * `volume ∈ [-MAX_BAR_PAISA, MAX_BAR_PAISA]` — a non-positive volume is a
+///   VALID skip signal in both twins (never accumulated), so only the
+///   magnitude is bounded.
+fn vwap_update_guard(typical_paisa: i64, volume: i64) -> Result<(), String> {
+    if typical_paisa < 0 {
+        return Err(format!(
+            "typical_paisa ({typical_paisa}) must be non-negative: the \
+             Python/Rust twin identity (truncating vs floor division) holds \
+             only for non-negative typical prices"
+        ));
+    }
+    for (name, value) in [("typical_paisa", typical_paisa), ("volume", volume)] {
+        if !bar_in_range(value) {
+            return Err(format!(
+                "{name} ({value}) out of the overflow-safe range \
+                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[pyclass(name = "VwapState", module = "trading_core")]
 struct PyVwapState {
     inner: CoreVwapState,
@@ -1158,6 +1308,15 @@ impl PyVwapState {
     /// far inside `i128::MAX` (≈ 1.7·10³⁸). Valid futures bars (paisa + lot
     /// volume) sit orders of magnitude below the ceiling, so the golden
     /// VWAP output is byte-unchanged.
+    ///
+    /// `typical_paisa` is additionally required NON-NEGATIVE: the documented
+    /// bit-for-bit twin identity with BruteX's Python `VwapState` holds only
+    /// for non-negative operands (the native i128 `/` truncates toward zero;
+    /// Python's `//` floors — a negative `cum_pv` would silently diverge by
+    /// one paisa). A negative typical is not a real price (HLC3 of positive
+    /// prices), so BOTH twins reject it with `ValueError` instead of silently
+    /// disagreeing — the domain hole is CLOSED at the boundary, mirrored by
+    /// the Python twin's identical guard (`brutex/indicators/vwap.py`).
     #[pyo3(signature = (typical_paisa, volume, is_pre_open, session_key, session_day, tod_seconds))]
     fn update(
         &mut self,
@@ -1168,14 +1327,7 @@ impl PyVwapState {
         session_day: i64,
         tod_seconds: u32,
     ) -> PyResult<Option<i64>> {
-        for (name, value) in [("typical_paisa", typical_paisa), ("volume", volume)] {
-            if !bar_in_range(value) {
-                return Err(PyValueError::new_err(format!(
-                    "{name} ({value}) out of the overflow-safe range \
-                     [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
-                )));
-            }
-        }
+        vwap_update_guard(typical_paisa, volume).map_err(PyValueError::new_err)?;
         Ok(self.inner.update(
             typical_paisa,
             volume,
@@ -2254,6 +2406,121 @@ mod tests {
         assert!(m.contains("minute"), "got: {m}");
         let sec = seconds_of_day_impl(0, 0, 60).unwrap_err();
         assert!(sec.contains("second"), "got: {sec}");
+    }
+
+    // ── metadata FFI-edge guards (the SIGABRT class closed at the boundary) ─
+
+    #[test]
+    fn minute_of_session_impl_rejects_the_exact_abort_repro() {
+        // Pre-guard, `minute_of_session(i64::MAX, -1)` overflowed `tod - open`
+        // → panic → abort (SIGABRT) under panic = "abort". Now a clean Err.
+        let err = minute_of_session_impl(i64::MAX, -1).unwrap_err();
+        assert!(err.contains("tod_seconds"), "got: {err}");
+        let err2 = minute_of_session_impl(0, -1).unwrap_err();
+        assert!(err2.contains("session_open_seconds"), "got: {err2}");
+        assert!(minute_of_session_impl(86_400, 0).is_err());
+        assert!(minute_of_session_impl(0, 86_400).is_err());
+        assert!(minute_of_session_impl(i64::MIN, 0).is_err());
+    }
+
+    #[test]
+    fn minute_of_session_impl_valid_domain_delegates_byte_identically() {
+        // Boundary + in-domain values equal the pure core (no behavior change).
+        for (tod, open) in [(0i64, 0i64), (86_399, 0), (0, 86_399), (33_300, 33_300)] {
+            assert_eq!(
+                minute_of_session_impl(tod, open).unwrap(),
+                crate::indicators::metadata::minute_of_session(tod, open)
+            );
+        }
+        // The honest pre-open NEGATIVE minute survives the guard (09:00 vs 09:15).
+        assert_eq!(minute_of_session_impl(9 * 3600, 33_300).unwrap(), -15);
+    }
+
+    #[test]
+    fn weekday_from_ordinal_impl_rejects_the_exact_abort_repro() {
+        // Pre-guard, `weekday_from_ordinal(i64::MIN)` overflowed `ordinal - 1`
+        // → panic → abort. Now a clean Err naming the Python date domain.
+        let err = weekday_from_ordinal_impl(i64::MIN).unwrap_err();
+        assert!(err.contains("day_ordinal"), "got: {err}");
+        assert!(err.contains("3652059"), "got: {err}");
+        assert!(weekday_from_ordinal_impl(0).is_err());
+        assert!(weekday_from_ordinal_impl(MAX_DAY_ORDINAL + 1).is_err());
+    }
+
+    #[test]
+    fn weekday_from_ordinal_impl_valid_domain_delegates_byte_identically() {
+        for ordinal in [1i64, 739_797, MAX_DAY_ORDINAL] {
+            assert_eq!(
+                weekday_from_ordinal_impl(ordinal).unwrap(),
+                crate::indicators::metadata::weekday_from_ordinal(ordinal)
+            );
+        }
+        // Ordinal 1 (0001-01-01) is Monday — the Python-parity anchor.
+        assert_eq!(weekday_from_ordinal_impl(1).unwrap(), 0);
+    }
+
+    #[test]
+    fn derive_bar_metadata_impl_rejects_every_garbage_component() {
+        // The exact abort repro: hour = 2_000_000 bypassed py_seconds_of_day's
+        // guard through this entry and overflowed `hour * 3600` (u32).
+        let h = derive_bar_metadata_impl(1, 2_000_000, 0, 0, 0, 1).unwrap_err();
+        assert!(h.contains("hour"), "got: {h}");
+        // Each remaining component is guarded + named.
+        let d = derive_bar_metadata_impl(0, 10, 0, 0, 33_300, 1).unwrap_err();
+        assert!(d.contains("day_ordinal"), "got: {d}");
+        let e = derive_bar_metadata_impl(739_797, 10, 0, 0, 33_300, i64::MIN).unwrap_err();
+        assert!(e.contains("expiry_ordinal"), "got: {e}");
+        let s = derive_bar_metadata_impl(739_797, 10, 0, 0, -1, 739_797).unwrap_err();
+        assert!(s.contains("session_open_seconds"), "got: {s}");
+    }
+
+    #[test]
+    fn derive_bar_metadata_impl_valid_domain_delegates_byte_identically() {
+        // 2026-06-30 (Tue) 09:20:30 IST, regular open, expiry 3 days out —
+        // equal to the pure core field-for-field (no behavior change).
+        let got = derive_bar_metadata_impl(739_797, 9, 20, 30, 33_300, 739_800).unwrap();
+        let want =
+            crate::indicators::metadata::derive_bar_metadata(739_797, 9, 20, 30, 33_300, 739_800);
+        assert_eq!(
+            got,
+            (
+                want.tod_seconds,
+                want.weekday,
+                want.minute_of_session,
+                want.is_expiry_day
+            )
+        );
+        // Expiry-day flag survives the guard at the domain boundary.
+        let (_, _, _, is_expiry) =
+            derive_bar_metadata_impl(MAX_DAY_ORDINAL, 23, 59, 59, 86_399, MAX_DAY_ORDINAL).unwrap();
+        assert!(is_expiry);
+    }
+
+    // ── vwap_update_guard (the twins' non-negative-typical boundary) ───────
+
+    #[test]
+    fn vwap_update_guard_rejects_negative_typical() {
+        // The floor-vs-trunc domain hole: (-7, 1) then (0, 1) gave Rust -3 vs
+        // Python -4 pre-guard. Negative typical is now rejected OUTRIGHT.
+        let err = vwap_update_guard(-7, 1).unwrap_err();
+        assert!(err.contains("non-negative"), "got: {err}");
+        assert!(vwap_update_guard(-1, 1).is_err());
+        assert!(vwap_update_guard(i64::MIN, 1).is_err());
+    }
+
+    #[test]
+    fn vwap_update_guard_magnitude_ceiling_and_valid_domain() {
+        // Ceiling still enforced on both operands (the i128-overflow guard).
+        let t = vwap_update_guard(MAX_BAR_PAISA + 1, 1).unwrap_err();
+        assert!(t.contains("typical_paisa"), "got: {t}");
+        let v = vwap_update_guard(0, MAX_BAR_PAISA + 1).unwrap_err();
+        assert!(v.contains("volume"), "got: {v}");
+        assert!(vwap_update_guard(0, -(MAX_BAR_PAISA + 1)).is_err());
+        // Valid domain: zero typical, negative volume (a skip signal), ceiling.
+        assert!(vwap_update_guard(0, 0).is_ok());
+        assert!(vwap_update_guard(0, -5).is_ok());
+        assert!(vwap_update_guard(MAX_BAR_PAISA, MAX_BAR_PAISA).is_ok());
+        assert!(vwap_update_guard(24_000_00, 100).is_ok());
     }
 
     // ── property layer ─────────────────────────────────────────────────────

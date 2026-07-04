@@ -141,13 +141,16 @@ def is_pull_halt(exc: BaseException) -> bool:
     """True iff *exc* is a pull-wide global-stop (halts every window), not a per-symbol failure.
 
     Mirrors the ingest spines' ``_GLOBAL_STOP_ERRORS`` set (DEC-LAKE-WRITE-HALT-001 /
-    quota / the TERMINAL Groww auth failure — a dead credential / an exhausted re-mint
-    budget, DEC-GROWW-AUTH-HALT-001, consulted via
-    :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` so the RETRYABLE
-    auth-family subclasses NEVER read as a halt). The error classes are imported INSIDE
-    the call — not at module top — so :mod:`brutex.dashboard.pull_jobs` stays wheel-free
-    at import (``quota_tracker`` is part of the heavy PyO3 chain), and this check only
-    runs on the rare worker-exception path.
+    quota / DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 / the TERMINAL Groww auth failure — a
+    dead credential / an exhausted re-mint budget, DEC-GROWW-AUTH-HALT-001, consulted
+    via :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` so the RETRYABLE
+    auth-family subclasses NEVER read as a halt / DEC-VENDOR-DOWN-BREAKER-001 — the
+    vendor-down error-storm + dead-credential stops, ``GrowwCredentialDeadError`` being
+    the TERMINAL auth escalation the predicate also matches). The error classes are
+    imported INSIDE the call — not at module top — so
+    :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
+    part of the heavy PyO3 chain), and this check only runs on the rare
+    worker-exception path.
 
     PUBLIC — the ONE COMMON global-stop predicate for the dashboard job layer
     (CLAUDE.md §11, no second hardcoded tuple):
@@ -158,12 +161,20 @@ def is_pull_halt(exc: BaseException) -> bool:
     benign "built 0" outcome.
     """
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+    from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import is_terminal_auth_failure
     from brutex.data.errors import LakeWriteHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     return isinstance(
-        exc, (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError, MassEmptySettleHalt)
+        exc,
+        (
+            LakeWriteHalt,
+            DailyQuotaExceeded,
+            QuotaInvariantError,
+            MassEmptySettleHalt,
+            VendorDownError,
+        ),
     ) or is_terminal_auth_failure(exc)
 
 
@@ -213,12 +224,14 @@ class BackgroundPullJob:
         Optional factory building the per-run stall watchdog (DEC-PULL-STALL-DETECTION-001).
         Given the ``on_hung`` edge callback it returns a
         :class:`~brutex.dashboard.pull_stall.PullWatchdog`; the default builds the live one
-        (a daemon timer + the audited timeout). A HUNG worker — which never reaches the
-        worker's ``finally`` to clear ``_running`` — is then detected: the hung edge fires a
-        CRITICAL pull-halt alert AND transitions the job to its error state + clears
-        ``_running`` so future pulls are not silently refused (the single-flight guard's
-        forever-stuck failure mode). Injected, never a global (CLAUDE.md §4); tests inject
-        a synchronous / capturing factory for determinism.
+        (a daemon timer + the audited timeout). A silent worker is then detected: the hung
+        edge fires a CRITICAL pull-halt alert AND marks the job STALLED-SUSPECT — an honest
+        DEGRADED observation (DEC-PIPELINE-STALL-HEARTBEAT-001) that deliberately does NOT
+        fail the run or release the single-flight while the worker thread is still alive
+        (the forensically-proven false-kill + double-run race of the prior release-on-hung
+        design). A later heartbeat fires the recovery edge and clears the marker. Injected,
+        never a global (CLAUDE.md §4); tests inject a synchronous / capturing factory for
+        determinism.
     lake_root_resolver
         Optional resolver for the account-wide single-flight lock's lake root
         (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001). The default delegates to the COMMON
@@ -273,6 +286,14 @@ class BackgroundPullJob:
         #: When True the per-pair hook does NOT advance the bar — an authoritative
         #: per-WINDOW ledger sync drives the counters instead (DEC-SPOT-WINDOW-PROGRESS-001).
         self._ledger_synced = False
+        #: Phase-scoped override of :attr:`_ledger_synced` (DEC-PIPELINE-STALL-HEARTBEAT-001,
+        #: the frozen-counter fix): when True the per-pair hook DOES advance the counters
+        #: (open-ended — the total grows with the completed count) even on a
+        #: ``ledger_synced`` run, because the CURRENT phase has NO ledger-sync driver.
+        #: The pipeline's F&O historical phase sets it via
+        #: ``set_phase("historical", pair_progress=True)`` so the units + bars tallies
+        #: keep moving instead of freezing at the metadata phase's counts.
+        self._pair_progress = False
         #: The CURRENT run's stall watchdog (built per :meth:`start`, stopped in ``finally``).
         #: ``None`` between runs. Serves two jobs under :attr:`_lock`: (a) the worker thread's
         #: heartbeat (:meth:`beat`), and (b) per-RUN IDENTITY — both :meth:`_on_hung` and the
@@ -328,10 +349,12 @@ class BackgroundPullJob:
         swallowed so it can never crash the worker thread.
         """
         # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):
-        # the worker beats it on real progress (per window), and its daemon timer declares
-        # the worker HUNG if no beat lands for the audited timeout — so a wedged worker (which
-        # never reaches the finally below to clear ``_running``) is still detected + alerted
-        # and the single-flight flag is released. Building it here is side-effect-free
+        # the worker beats it on real progress (per window / per post-fetch unit via the
+        # emit_progress_beat seams), and its daemon timer declares the worker HUNG if no
+        # beat lands for the audited timeout — so a wedged worker is still detected +
+        # alerted and the job is marked STALLED-SUSPECT (the single-flight stays HELD
+        # while the thread is alive — DEC-PIPELINE-STALL-HEARTBEAT-001). Building it here
+        # is side-effect-free
         # (``.start()`` is NOT called on the ``return False`` path → no leaked timer); each run
         # gets a fresh heartbeat / timer with no cross-run state. The watchdog object IS this
         # run's identity token: both _on_hung and _run's finally gate their ``_running`` clear
@@ -366,7 +389,13 @@ class BackgroundPullJob:
                 self._running = False
             return False
         self._ledger_synced = ledger_synced
+        self._pair_progress = False  # per-run reset; a phase opts in via set_phase
         self._progress.start(total=total, detail=detail)
+        # Wire the HUNG→HEALTHY recovery edge so a heartbeat landing after a HUNG
+        # declaration clears the stalled-suspect marker (DEC-PIPELINE-STALL-HEARTBEAT-001).
+        # Set post-construction so the injected factory signature stays (on_hung) —
+        # back-compat with every existing factory.
+        watchdog.on_recovery = lambda event: self._on_recovered(event, watchdog)
         watchdog.start()
         self._spawn(lambda: self._run(work, watchdog, on_success))
         return True
@@ -420,49 +449,84 @@ class BackgroundPullJob:
             _LOG.exception("pull_job.singleflight_release failed; the pull is unaffected")
 
     def _on_hung(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
-        """Watchdog HEALTHY→HUNG edge for *watchdog*'s run: alert + release the stuck pull.
+        """Watchdog HEALTHY→HUNG edge for *watchdog*'s run: alert + mark STALLED-SUSPECT.
 
-        The pull worker has not beaten the heartbeat for the audited timeout — it is wedged
-        (e.g. on the no-timeout partition flock, a deadlocked socket). Unlike a per-symbol
-        failure this leaves the worker thread blocked forever, so it can never reach
-        :meth:`_run`'s ``finally`` to clear ``_running`` — the single-flight guard would
-        then SILENTLY refuse every future pull. On the timer thread we (1) stop *watchdog*'s
-        own poll loop so its daemon thread cannot keep firing forever (the timer leaks on the
-        one path it exists for otherwise), (2) fire a best-effort CRITICAL pull-halt alert so
-        the operator learns IN REAL TIME, (3) mark the progress failed so the dashboard
-        reflects the stall, and (4) clear ``_running`` — but ONLY if THIS run is still the
-        current one (``self._watchdog is watchdog`` under the lock), so a late-fired timer for
-        a run already superseded by a newer pull can never clobber the newer run.
+        DEC-PIPELINE-STALL-HEARTBEAT-001 (supersedes the release-on-hung arm of
+        DEC-PULL-STALL-DETECTION-001). The pull worker has not beaten the heartbeat for
+        the audited timeout. FORENSICALLY PROVEN: with the heartbeat wired only to the
+        fetch phases, a healthy post-fetch stage (Greeks enrichment / timeframe prebuild /
+        movers warm) was silent for > timeout, the old edge handler FAILED the progress
+        AND cleared ``_running`` + released the account single-flight — while the worker
+        thread kept running and SUCCEEDED. Two harms: a false FAILED headline on a
+        succeeding run, and the released single-flight admitting a SECOND pull concurrent
+        with the still-running zombie worker (a double-run race on the same lake).
 
-        The whole body is wrapped in its own ``try/except`` (best-effort): a ``progress.fail``
-        or alert that raises is logged + swallowed so it can never kill the daemon timer or
-        leave a half-applied state — independent of the underlying watchdog's narrower catch.
+        The honest edge now: (1) fire the best-effort CRITICAL pull-halt alert so the
+        operator learns IN REAL TIME, (2) mark the progress STALLED-SUSPECT (an honest
+        DEGRADED marker naming the silent phase — the state stays ``running``), and
+        (3) deliberately do NOT clear ``_running`` / release the single-flight: the worker
+        thread is (or may be) still alive and still owns the lake — releasing here is
+        exactly the double-run race. The single-flight is released ONLY by :meth:`_run`'s
+        ``finally`` when the thread actually exits; a wedge that never exits keeps the
+        flag held (honest — the zombie still owns the lake; a process restart releases the
+        ``flock`` on fd close, and the CRITICAL alert + marker make the wedge LOUD, never
+        silent). The timer keeps polling so a later heartbeat (the greeks/prebuild/movers
+        seams now beat — the false-positive class is closed) fires the recovery edge and
+        :meth:`_on_recovered` clears the marker. Identity-gated: a late edge for a
+        superseded run never marks a newer run.
+
+        The whole body is wrapped in its own ``try/except`` (best-effort): an alert or
+        progress call that raises is logged + swallowed so it can never kill the daemon
+        timer — independent of the underlying watchdog's narrower catch.
         """
         try:
-            watchdog.stop()  # MAJOR-2: stop this run's timer so its daemon does not leak
+            phase = self._progress.snapshot().phase or "unknown"
+            with self._lock:
+                # Identity gate: mark ONLY when THIS run is still current — held across
+                # the mark so a stale timer edge can never race a newer run's tracker.
+                # (The progress lock nests inside the job lock; the reverse order never
+                # occurs, so no deadlock.) A superseded run is silently dropped.
+                if self._watchdog is not watchdog:
+                    return
+                self._progress.mark_stalled(
+                    f"stalled-suspect — no heartbeat for {event.last_beat_seconds_ago:.0f}s "
+                    f"(timeout {event.timeout_seconds:.0f}s) during phase '{phase}'; "
+                    "worker still running (single-flight held)"
+                )
             emit_pull_halt_alert(
                 TimeoutError(
-                    f"dashboard pull stalled: no progress for {event.last_beat_seconds_ago:.0f}s "
-                    f"(timeout {event.timeout_seconds:.0f}s)"
+                    f"dashboard pull stalled-suspect: no heartbeat for "
+                    f"{event.last_beat_seconds_ago:.0f}s (timeout {event.timeout_seconds:.0f}s) "
+                    f"during phase '{phase}'; worker still running — NOT killed"
                 )
             )
-            self._progress.fail(
-                f"pull stalled — no progress for {event.last_beat_seconds_ago:.0f}s "
-                f"(timeout {event.timeout_seconds:.0f}s)"
+            _LOG.warning(
+                "pull_stall.stalled_suspect",
+                phase=phase,
+                last_beat_seconds_ago=round(event.last_beat_seconds_ago, 1),
+                timeout_seconds=event.timeout_seconds,
             )
-            with self._lock:
-                # Identity gate: clear ``_running`` ONLY when THIS run is still current. A
-                # newer pull may already own the flag (this timer fired late) — never touch it.
-                if self._watchdog is watchdog:
-                    self._running = False
-                    # Release this hung run's account-wide single-flight lock too
-                    # (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so clearing ``_running`` actually
-                    # admits a future pull — leaving the ``flock`` held would block the next
-                    # pull in this process despite the flag being clear. (The wedged worker
-                    # thread never reaches _run's finally, so this is the only release path.)
-                    self._release_singleflight()
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_hung failed; the pull / timer is unaffected")
+
+    def _on_recovered(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
+        """Watchdog HUNG→HEALTHY edge: clear the stalled-suspect marker (identity-gated).
+
+        DEC-PIPELINE-STALL-HEARTBEAT-001: a heartbeat landed again after a HUNG
+        declaration (e.g. the prebuild seam resumed beating), so the honest DEGRADED
+        marker is lifted. Best-effort — a raising progress call is swallowed + logged.
+        """
+        try:
+            with self._lock:
+                if self._watchdog is not watchdog:
+                    return
+                self._progress.clear_stalled()
+            _LOG.info(
+                "pull_stall.stalled_recovered",
+                last_beat_seconds_ago=round(event.last_beat_seconds_ago, 1),
+            )
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
+            _LOG.exception("pull_stall.on_recovered failed; the pull / timer is unaffected")
 
     def _run(
         self, work: PullWork, watchdog: PullWatchdog, on_success: SuccessHook | None = None
@@ -521,19 +585,20 @@ class BackgroundPullJob:
             # never blocks. Idempotent with _on_hung's stop() (both target the SAME watchdog).
             watchdog.stop()
             with self._lock:
-                # Identity gate (the BLOCKER fix): clear ``_running`` ONLY when THIS run is
-                # still the current one. If the watchdog already declared this run hung it has
-                # cleared ``_running`` and a NEWER pull may now be in flight owning the flag —
-                # ``self._watchdog is watchdog`` is False then, so a stale (later-unwedged)
-                # worker can never clobber the newer run. When this IS the current run the
-                # worker owns the flag and clears it normally.
+                # Identity gate (defence in depth): clear ``_running`` ONLY when THIS run
+                # is still the current one. Under DEC-PIPELINE-STALL-HEARTBEAT-001 the
+                # watchdog no longer clears the flag (a hung-declared run keeps it until
+                # this finally actually executes), so this finally is the ONE release
+                # path and the gate is normally always true — kept as a cheap invariant
+                # guard so a future re-introduction of an out-of-band clear can never
+                # let a stale worker clobber a newer run.
                 if self._watchdog is watchdog:
                     self._running = False
                     # Release the account-wide cross-process single-flight lock under the
                     # SAME identity gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so a peer
-                    # process can start the next pull — but ONLY when this is still the
-                    # current run (a superseded / hung run's lock was already released by
-                    # _on_hung, and a newer run owns its OWN guard we must not touch).
+                    # process can start the next pull — released HERE and only here, when
+                    # the worker thread actually exits (never by the watchdog while the
+                    # thread may still be writing — the double-run race).
                     self._release_singleflight()
 
     def _on_progress(self, label: str, bars: int, failed: bool, gap: bool = False) -> None:
@@ -555,9 +620,18 @@ class BackgroundPullJob:
         # authoritative per-window ledger via sync_from_ledger (so the bar advances per
         # WINDOW, not per finished symbol — DEC-SPOT-WINDOW-PROGRESS-001); here the
         # per-pair hook only refreshes the "current" label. Every other caller keeps the
-        # per-pair advance (byte-unchanged).
-        if self._ledger_synced:
+        # per-pair advance (byte-unchanged). A phase with NO ledger-sync driver (the
+        # pipeline's F&O historical fill) opts back into per-pair counting via
+        # ``set_phase(..., pair_progress=True)`` — OPEN-ENDED (the total grows with the
+        # completed count, since the pair total is unknown at this layer) so the units +
+        # bars tallies keep moving instead of freezing at the metadata phase's counts
+        # (DEC-PIPELINE-STALL-HEARTBEAT-001, the frozen-counter fix). O(1) per event.
+        if self._ledger_synced and not self._pair_progress:
             self._progress.set_current(label)
+        elif self._ledger_synced:
+            self._progress.advance(
+                current=label, bars=bars, failed=failed, gap=gap, grow_total=True
+            )
         else:
             self._progress.advance(current=label, bars=bars, failed=failed, gap=gap)
         self._counters.add(label, bars)
@@ -569,7 +643,7 @@ class BackgroundPullJob:
         self._beat()
 
     def sync_from_ledger(
-        self, *, completed: int, total: int, bars: int, failed: int = 0, current: str = ""
+        self, *, completed: int, total: int, bars: int | None, failed: int = 0, current: str = ""
     ) -> None:
         """Drive the live bar from an authoritative WindowLedger snapshot — O(1), idempotent.
 
@@ -581,6 +655,10 @@ class BackgroundPullJob:
         summary cache dirty so the coverage poll refreshes mid-pull even while a long
         backfill is in flight (the per-pair tick that used to do that can stall for
         minutes).
+
+        ``bars=None`` preserves the cumulative bar tally (DEC-PIPELINE-STALL-HEARTBEAT-001):
+        a sync source with no bar concept — the metadata pull — no longer wipes the bars an
+        earlier phase already streamed.
         """
         self._progress.sync(
             completed=completed, total=total, bars=bars, failed=failed, current=current
@@ -608,7 +686,7 @@ class BackgroundPullJob:
         """The incremental coverage counters fed by the write funnel — O(1)."""
         return self._counters
 
-    def set_phase(self, phase: str) -> None:
+    def set_phase(self, phase: str, *, pair_progress: bool = False) -> None:
         """Set the COARSE pipeline phase currently in flight — O(1) passthrough.
 
         DEC-UNIVERSE-PER-PHASE-PROGRESS-001. The one-click pipeline's ``_work`` calls
@@ -616,7 +694,14 @@ class BackgroundPullJob:
         running phase; it delegates straight to
         :meth:`~brutex.dashboard.pull_progress.PullProgress.set_phase` (a label only, no
         counter is keyed by it).
+
+        *pair_progress* (DEC-PIPELINE-STALL-HEARTBEAT-001, the frozen-counter fix):
+        ``True`` declares the ENTERING phase has NO ledger-sync driver, so the per-pair
+        hook advances the counters open-endedly even on a ``ledger_synced`` run (the
+        pipeline's F&O historical phase). Default ``False`` keeps every other phase /
+        caller byte-identical (the ledger sync stays authoritative).
         """
+        self._pair_progress = pair_progress
         self._progress.set_phase(phase)
 
     def snapshot(self) -> ProgressSnapshot:

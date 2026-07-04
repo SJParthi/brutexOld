@@ -42,6 +42,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: stress-${{ github.ref }}
@@ -137,3 +138,29 @@ jobs:
             /tmp/pytest-*
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Open issue on failure
+        # A silent nightly stress failure hides an audit-chain/hot-path
+        # regression. Mirror safety.yml's proven alert step (COMMON, Golden
+        # Rule #11): dedup-by-title (per-sha) then open a labelled issue.
+        # `failure()` fires on ANY earlier step failing (incl. the stress gate);
+        # scheduled runs only (an operator-watched dispatch/push needs no issue).
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = `stress-nightly: failure on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,stress',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `Stress nightly failed on ${context.sha}. See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`,
+              labels: ['bug', 'stress', 'critical'],
+            });

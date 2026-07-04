@@ -31,6 +31,57 @@ def _isolate_groww_token_cache(
     monkeypatch.setenv(GROWW_TOKEN_CACHE_PATH_ENV, str(cache))
 
 
+@pytest.fixture(autouse=True)
+def _testclient_loopback_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point every ``TestClient`` at ``base_url="http://localhost"`` by default (R2-DS-F1).
+
+    The dashboard's production ``Host`` allowlist is loopback-ONLY: the
+    ``testserver`` convenience name was removed from
+    ``brutex.dashboard.app.DEFAULT_ALLOWED_HOSTS`` because an attacker who can
+    make that single-label name resolve to the operator machine (malicious
+    DHCP search-domain / intranet DNS — the rebinding class the guard closes)
+    would bypass it. Starlette's ``TestClient`` still defaults to
+    ``http://testserver``, so this fixture re-points the DEFAULT at the
+    allowlisted ``http://localhost`` for the whole suite — the test-side home
+    of the old convenience. A test that passes its own ``base_url``
+    (positional or keyword) is left untouched, and tests may still inject
+    ``allowed_hosts`` into ``build_app`` explicitly. No-op when starlette is
+    not installed (suites that never touch the dashboard).
+
+    WebSocket twin: ``TestClient.websocket_connect`` HARDCODES
+    ``urljoin("ws://testserver", url)`` (starlette ``testclient.py``, ignoring
+    ``base_url`` entirely), so the WS handshake's ``Host`` header reads
+    ``testserver`` and the loopback-only ``TrustedHostMiddleware`` would 400
+    every suite WS connect. The same patch discipline applies: default the
+    handshake ``host`` header to ``localhost`` unless the test supplies its
+    own (a test probing the guard itself passes an explicit ``host``).
+    """
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        return
+    original_init = TestClient.__init__
+
+    def _loopback_init(self: TestClient, *args: Any, **kwargs: Any) -> None:
+        # args[0] is the ASGI app; a positional base_url would be args[1].
+        if len(args) < 2 and "base_url" not in kwargs:
+            kwargs["base_url"] = "http://localhost"
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(TestClient, "__init__", _loopback_init)
+
+    original_ws_connect = TestClient.websocket_connect
+
+    def _loopback_ws_connect(self: TestClient, url: str, *args: Any, **kwargs: Any) -> Any:
+        headers = dict(kwargs.get("headers") or {})
+        if not any(key.lower() == "host" for key in headers):
+            headers["host"] = "localhost"
+        kwargs["headers"] = headers
+        return original_ws_connect(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(TestClient, "websocket_connect", _loopback_ws_connect)
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Raw-row fixtures mimicking the shape of a broker's pandas DataFrame
 # rows. These are dicts (same shape returned by `df.to_dict('records')[i]`).

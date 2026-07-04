@@ -430,13 +430,19 @@ jobs:
           # — explicitly engineered for 100% line + branch coverage.
           # This is step 1 of the multi-PR ratchet path to lift the
           # global floor from 90% → 100% (per Golden Rule #12 #1+#2).
+          # DEC-RUST-HARDENING-R2-001 (MIGRATION.md #1166) added the
+          # `check_wheel_freshness` stage whose dedicated suite lives in
+          # `test_doctor_wheel_freshness.py` — the module's covering set
+          # is BOTH files (test_doctor.py alone reads 92% since that
+          # stage landed), so the gate runs them together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_doctor.py
+              tests/unit/test_doctor.py \
+              tests/unit/test_doctor_wheel_freshness.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
@@ -767,8 +773,11 @@ jobs:
           # exercise the urllib transport's success+error paths, worker
           # start/stop lifecycle, queue.Full + queue.Empty branches, and
           # drain's edge cases. Module: 210 stmts, 38 branches, 34 tests.
+          # DEC-DASHBOARD-SECURITY-HYGIENE-001: the notifier lifecycle/dedupe +
+          # config-hygiene code is covered by the two sibling suites added to
+          # the invocation (test_telegram_lifecycle_dedupe + test_telegram_config_hygiene).
           if compgen -G "tests/unit/test_notifications_telegram.py" > /dev/null; then
-            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py
+            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py tests/unit/test_telegram_lifecycle_dedupe.py tests/unit/test_telegram_config_hygiene.py
           else
             echo "(brutex.notifications.telegram test file not present yet — gate inactive)"
           fi
@@ -1020,9 +1029,12 @@ jobs:
           else
             echo "(brutex.vocabulary.describe test file not present yet — gate inactive)"
           fi
-          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests)
+          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests) — since
+          # DEC-RUST-HARDENING-R2-001 (#1166) the module's covering set is
+          # test_doctor.py + test_doctor_wheel_freshness.py (mirrors the
+          # DEC-COV-001 block above; test_doctor.py alone reads 92%).
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
-            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py
+            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
@@ -1661,8 +1673,13 @@ jobs:
           # DEC-CATALOG-RECONCILE-WIRE-001: the lake→catalog reconciler ships at
           # 100% line+branch from the start (read-side fix that makes an
           # already-pulled lake sweep-able with no re-pull).
+          # DEC-LAKE-HEAL-001: the free L1 invariant piggyback (`check_invariants`
+          # branches + the findings/drift paths) is covered by the dedicated
+          # tests/unit/test_catalog_reconcile_invariants.py suite, so this gate
+          # runs BOTH files (same pattern as the pull_controller gate above) —
+          # the base file alone reads 89.47% on the module.
           if compgen -G "tests/unit/test_catalog_reconcile.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py
+            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py tests/unit/test_catalog_reconcile_invariants.py
           else
             echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
           fi
@@ -1875,7 +1892,7 @@ jobs:
           # (_default_opener) is `# pragma: no cover` (NSE bot-blocks + this
           # build env network-blocks nseindia.com, so it is UNVERIFIABLE in CI).
           if compgen -G "tests/unit/test_nse_constituents.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py
+            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py tests/unit/test_nse_constituents_opener_guard.py
           else
             echo "(brutex.dashboard.nse_constituents test file not present yet — gate inactive)"
           fi
@@ -2858,7 +2875,21 @@ jobs:
             --reporters console
 
   # ─────────────────────────────────────────────────────────────────
-  # Python mutation testing (mutmut) — per-push on critical modules
+  # Python mutation testing (mutmut) — per-PR on critical modules
+  #
+  # HONEST ENVELOPE (Golden Rule #10, R2-CI-3c): this per-PR gate covers
+  # EXACTLY TWO modules — brutex/orchestrator/state.py (FSM, ≥98% floor,
+  # 300 s budget) and brutex/money.py (2dp money display, ≥99% floor,
+  # 240 s budget). It is deliberately NOT the whole-package mutation pass:
+  # state.py 300 s + money.py 240 s + the two Rust-wheel builds (fno-math +
+  # trading-core) + `.[dev]` install already sit close to the 20-minute job
+  # budget, so the per-PR set is kept to these two safety-critical math
+  # modules to avoid a timeout (a timeout would REGRESS this gate to red-on-
+  # infra, not a real mutation failure). The BROAD per-module mutation pass
+  # (Python state.py + Rust fno-math + Rust trading-core, ≥85% each) lives in
+  # .github/workflows/mutation.yml and runs on schedule / workflow_dispatch /
+  # push-to-main with issue-alert-on-failure. Do NOT add modules here without
+  # first proving the additional mutmut run fits inside timeout-minutes.
   # ─────────────────────────────────────────────────────────────────
   mutation-py:
     name: Python mutation (mutmut on critical modules)
@@ -3322,7 +3353,23 @@ jobs:
   # Branch protection should require this job for merge.
   # ─────────────────────────────────────────────────────────────────
   ci-ok:
-    name: CI OK (aggregate gate)
+    # DEC-CI-OK-PR-ONLY-NAME-001 (R2-CI-4): the branch-protection REQUIRED
+    # context is the exact string "CI OK (aggregate gate)". Because the
+    # check-run name equals this job's `name:` verbatim on EVERY event
+    # (push-to-main / pull_request / workflow_dispatch), a non-PR run used to
+    # mint the SAME required context — and since several sub-gates
+    # (conv-commits, zplus-pr-guard, definition-of-ready, dec-id-validator,
+    # bugfix-regression-scan, no-hallucination-scan) SKIP on non-PR events and
+    # skipped==pass here, a green non-PR "CI OK (aggregate gate)" could SHADOW
+    # a red pull_request one on the manual-merge path. Fix: name the required
+    # context ONLY on pull_request events; non-PR runs report as
+    # "CI OK (non-PR aggregate)" — deliberately NOT a branch-protection
+    # required context, so it can never satisfy or shadow the real gate. On
+    # pull_request the name is byte-identical to branch-protection-drift.yml's
+    # expected snapshot (line 133), so no existing green requirement breaks.
+    # This NARROWS which event can produce the required context (adds
+    # enforcement); it removes no gate.
+    name: ${{ github.event_name == 'pull_request' && 'CI OK (aggregate gate)' || 'CI OK (non-PR aggregate)' }}
     runs-on: ubuntu-24.04
     needs:
       - lint
@@ -3348,6 +3395,13 @@ jobs:
       # trading_core + #480 numpy crashes) can never recur silently.
       - run-smoke
       - banned
+      # DEC-CI-OK-NODHAN-GATE-001 (R2-CI-1): the zero-dhan enforcement guard.
+      # It has NO event `if:` (runs on push / pull_request / dispatch alike),
+      # so it never legitimately skips — a RED no-dhan-guard is a HARD fail
+      # here (never skipped==pass). It is enforced via this required `CI OK`
+      # aggregate, NOT as a direct branch-protection required context, so the
+      # branch-protection-drift.yml expected snapshot is untouched.
+      - no-dhan-guard
       # DEC-CICD-GATE-HONESTY-001: the ledger-numbering validator,
       # de-conflated from the banned-pattern scan into its own job. It is
       # NOT a branch-protection required context (so the drift detector is
@@ -3430,6 +3484,7 @@ jobs:
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
+          echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
           echo "  ledger-numbering:${{ needs.ledger-numbering.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
@@ -3462,6 +3517,7 @@ jobs:
             "${{ needs.rust-trading-core.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
+            "${{ needs.no-dhan-guard.result }}" \
             "${{ needs.ledger-numbering.result }}" \
             "${{ needs.secrets.result }}" \
             "${{ needs.codeql.result }}" \

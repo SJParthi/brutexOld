@@ -46,6 +46,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -109,6 +110,7 @@ from brutex.dashboard.fno_underlying import (
     resolve_fno_index_aliases,
 )
 from brutex.dashboard.historical_pull import pull_contract_candles
+from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_revision import lake_revision
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -168,13 +170,14 @@ from brutex.dashboard.pull_controller import (
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.rate_sampler import RatePanelSampler
+from brutex.dashboard.registry_strikes import make_registry_chain_loader
 from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.spot_cascade import (
     SpotCascadeIndex,
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.sweep_results_view import (
     DEFAULT_TOP_N as SWEEP_LEADERBOARD_DEFAULT_TOP_N,
 )
@@ -197,6 +200,11 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
+from brutex.data.lake_invariants import (
+    build_lake_census,
+    census_to_dict,
+    scan_lake_invariants,
+)
 from brutex.data.mapping_integrity import (
     EligibleSpot,
     MappingIntegrityReport,
@@ -899,6 +907,127 @@ def _registry_unreadable_payload(columns: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
+# ── Host / cross-origin hardening (R2-DS-F1) ────────────────────────────────
+# The dashboard carries no auth/CSRF tokens, so a browser on the operator's
+# machine can be induced to fire state-changing POSTs at this localhost
+# service (CSRF fire-and-forget) or reach it under an attacker-controlled
+# Host via DNS rebinding. Two thin guards close that: a Host-header allowlist
+# (Starlette ``TrustedHostMiddleware``) + a same-origin check on
+# state-changing methods. The pure decision logic lives in the module-level
+# helpers below so it is directly unit-testable at 100% line+branch; the
+# async middleware registered in :func:`build_app` is the thin glue.
+
+# The loopback-only DEFAULT_ALLOWED_HOSTS constant lives in the LEAF module
+# :mod:`brutex.dashboard.host_allowlist` (re-exported here via ``__all__``) so
+# the CLI launcher can read it without importing this module — see that
+# module's docstring for the cyclic-import rationale.
+
+#: State-changing methods the cross-origin guard enforces on. GET / HEAD /
+#: OPTIONS are never checked — they must stay side-effect-free reads.
+_ORIGIN_GUARDED_METHODS: Final[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: 403 detail returned for a browser-initiated cross-site state change.
+_CROSS_ORIGIN_DETAIL: Final = "cross-origin request blocked"
+
+
+def _trusted_host_patterns(allowed_hosts: Sequence[str] | None) -> list[str]:
+    """Normalize an allowed-host list into Starlette ``TrustedHostMiddleware`` patterns.
+
+    Starlette compares the request's ``Host`` header with any ``:port`` suffix
+    STRIPPED, and asserts that a pattern contains no ``*`` beyond a leading
+    ``*.`` domain wildcard — so the operator-facing ``host:*`` (any-port)
+    spelling is normalized to its bare host here, deduplicated
+    order-preserving, and empty entries are dropped.
+
+    Parameters
+    ----------
+    allowed_hosts
+        Operator-supplied allowlist, or ``None`` for the loopback-only
+        default (:data:`DEFAULT_ALLOWED_HOSTS`).
+
+    Returns
+    -------
+    list[str]
+        Deduplicated bare-host patterns safe to hand to Starlette.
+    """
+    entries = DEFAULT_ALLOWED_HOSTS if allowed_hosts is None else tuple(allowed_hosts)
+    patterns: list[str] = []
+    for entry in entries:
+        host = entry[:-2] if entry.endswith(":*") else entry
+        if host and host not in patterns:
+            patterns.append(host)
+    return patterns
+
+
+def _origin_header_host(value: str) -> str | None:
+    """Extract the lowercased ``host[:port]`` from an ``Origin``/``Referer`` value.
+
+    Parameters
+    ----------
+    value
+        The raw header value, e.g. ``"http://localhost:8000"`` or
+        ``"http://localhost:8000/universe"``.
+
+    Returns
+    -------
+    str | None
+        The lowercased network location, or ``None`` when none can be parsed
+        (the opaque ``Origin: null`` a sandboxed cross-site frame sends, a
+        malformed URL raising ``ValueError``, or a bare path) — the caller
+        treats an unparsable PRESENT header as cross-origin, never as a pass.
+    """
+    try:
+        netloc = urlsplit(value).netloc
+    except ValueError:
+        return None
+    return netloc.lower() or None
+
+
+def _cross_origin_reason(
+    method: str,
+    request_host: str | None,
+    origin: str | None,
+    referer: str | None,
+) -> str | None:
+    """Decide whether a request is a browser cross-origin state change.
+
+    Rules (R2-DS-F1): only methods in :data:`_ORIGIN_GUARDED_METHODS` are
+    checked; a request with NEITHER ``Origin`` NOR ``Referer`` is always
+    allowed (CLI / curl / non-browser clients send neither); when an
+    ``Origin`` is present it is authoritative (``Referer`` is consulted only
+    when ``Origin`` is absent); the header's ``host[:port]`` must equal the
+    request's own ``Host`` header (case-insensitive) or the request is
+    refused — an unparsable header or a missing ``Host`` refuses too (fail
+    closed, never a pass on a malformed value).
+
+    Parameters
+    ----------
+    method
+        The HTTP request method.
+    request_host
+        The request's own ``Host`` header, or ``None`` when absent.
+    origin
+        The ``Origin`` header, or ``None`` when absent.
+    referer
+        The ``Referer`` header, or ``None`` when absent.
+
+    Returns
+    -------
+    str | None
+        ``None`` to allow the request, else the 403 detail string.
+    """
+    if method.upper() not in _ORIGIN_GUARDED_METHODS:
+        return None
+    source = origin if origin is not None else referer
+    if source is None:
+        return None
+    source_host = _origin_header_host(source)
+    own_host = (request_host or "").strip().lower()
+    if source_host is not None and own_host and source_host == own_host:
+        return None
+    return _CROSS_ORIGIN_DETAIL
+
+
 def build_app(
     state: DashboardState,
     *,
@@ -910,6 +1039,7 @@ def build_app(
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
+    allowed_hosts: Sequence[str] | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -995,6 +1125,16 @@ def build_app(
         as before; ``build_app`` itself never STARTS a preflight (the
         launcher seam in ``cli.cmd_dashboard`` does), so constructing an app
         stays side-effect-free.
+    allowed_hosts
+        Optional ``Host``-header allowlist for the DNS-rebinding guard
+        (R2-DS-F1). Entries may carry an any-port ``:*`` suffix (normalized
+        via :func:`_trusted_host_patterns` — Starlette strips the port before
+        matching). ``None`` (the default) allows ONLY the loopback names
+        (``127.0.0.1`` / ``localhost``, any port) — ``testserver`` is NOT in
+        the production default (tests re-point ``TestClient`` at
+        ``http://localhost`` via the root conftest fixture, or inject this
+        parameter). The CLI launcher passes the actual bound host when
+        serving beyond loopback (``cli._dashboard_allowed_hosts``).
 
     Returns
     -------
@@ -1019,6 +1159,7 @@ def build_app(
             Response,
         )
         from fastapi.staticfiles import StaticFiles
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
     except ImportError as exc:
         raise RuntimeError(
             "FastAPI is not installed. Install with `pip install "
@@ -1042,6 +1183,35 @@ def build_app(
         StaticFiles(directory=Path(__file__).resolve().parent / "static"),
         name="static",
     )
+
+    # ── Host / cross-origin hardening (R2-DS-F1) ─────────────────────────────
+    # Registration ORDER matters: Starlette wraps middlewares so the LAST one
+    # added is OUTERMOST. The origin guard is added FIRST (innermost of the
+    # three), then TrustedHost, then the request logger below — so a request
+    # flows logger → TrustedHost (400 on an unknown Host: DNS-rebinding guard)
+    # → origin guard (403 on a browser cross-site state change: CSRF guard)
+    # → routes, and every refusal is still request-logged. The guard's pure
+    # decision logic lives in the module-level `_cross_origin_reason` (100%
+    # line+branch unit-tested); this async wrapper is the thin glue.
+    @app.middleware("http")
+    async def _origin_guard(request: Any, call_next: Any) -> Any:
+        """Refuse browser cross-origin state-changing requests with a 403.
+
+        Enforced only for POST/PUT/PATCH/DELETE; a request with neither
+        ``Origin`` nor ``Referer`` (CLI / curl) always passes. See
+        :func:`_cross_origin_reason` for the full rule set.
+        """
+        reason = _cross_origin_reason(
+            request.method,
+            request.headers.get("host"),
+            request.headers.get("origin"),
+            request.headers.get("referer"),
+        )
+        if reason is not None:
+            return JSONResponse({"detail": reason}, status_code=403)
+        return await call_next(request)
+
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_host_patterns(allowed_hosts))
 
     @app.middleware("http")
     async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue
@@ -1176,6 +1346,19 @@ def build_app(
     # (a metadata pull bumps it → re-read; otherwise an options poll is an O(1) handoff),
     # keyed per exchange. REUSES the COMMON `MoversSnapshotCache` (one calendar key).
     _options_calendar_cache = MoversSnapshotCache()
+    # The Options-tab AUTHORITATIVE strike-chain cache (DEC-MONEYNESS-REGISTRY-STEP-001):
+    # the ATM±N strike-grid step derives from the FULL vendor strike chain of each
+    # tier-target (underlying, expiry) in `registry.duckdb` — otherwise the sparse
+    # lake-observed ladder can OVERESTIMATE the step on a sparsely-pulled expiry. Read
+    # LAZILY per key via `make_registry_chain_loader` (ONE narrowed DuckDB read per
+    # (exchange, underlying, expiry) — never the whole monotonically-growing contracts
+    # table; Golden Rule #5 bounded reads, DEC-FNO-HONESTY-PACK-001). Each chain is
+    # invariant between metadata pulls, so it is memoised behind the SAME write
+    # generation as the calendar cache above (a metadata pull bumps it → re-read;
+    # otherwise an options poll is an O(1) handoff), keyed per (exchange, underlying,
+    # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
+    # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
+    _options_strikes_cache = MoversSnapshotCache()
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
     # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
     # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
@@ -1191,6 +1374,15 @@ def build_app(
     _coverage_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache()
     _mapping_integrity_cache = MoversSnapshotCache()
+    # The /universe lake-uniqueness census (DEC-LAKE-HEAL-001) deliberately does
+    # NOT get a `MoversSnapshotCache` here: it is a full bounded lake scan —
+    # O(files), one key-column read per file — and `pull_jobs` bumps the write
+    # generation on EVERY per-pair write tick, so a generation-keyed memo would
+    # re-run the whole-lake scan on every 15 s chip poll during a pull (the #920
+    # regression class). It rides `_summary_cache.get_or_refresh(LAKE_UNIQUENESS,
+    # …)` instead — the COMMON adaptive-TTL-floor path /coverage/spot uses — so
+    # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
+    # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001): the
     # `<lake>/sweeps` discovery + per-tuple Parquet read is O(stores × rows); the
     # ranked leaderboard for a given (instrument, tf, direction, rank_by, top_n) is a
@@ -2812,7 +3004,12 @@ def build_app(
                 # segment tag is threaded through the F&O spine. The operator's from/to
                 # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
                 # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
-                _pull_job.set_phase("historical")
+                # pair_progress=True (DEC-PIPELINE-STALL-HEARTBEAT-001): the F&O
+                # historical phase has NO ledger-sync driver at this layer, so the
+                # per-pair hook advances the units + cumulative bars open-endedly —
+                # the counters keep moving instead of freezing at the metadata
+                # phase's "45/45 units, 0 bars" while millions of bars stream in.
+                _pull_job.set_phase("historical", pair_progress=True)
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -2839,6 +3036,9 @@ def build_app(
                 (never 'today' — the pull fills only to the previous trading day, so a
                 today-warm would cache empties); ``None`` when the lake has no spot day yet.
                 """
+                # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
+                # observed during the movers warm is named "movers".
+                _pull_job.set_phase("movers")
                 try:
                     warm_date = latest_movers_date(lake_root)
                 except Exception as exc:  # pylint: disable=broad-except - best-effort warm
@@ -2956,6 +3156,17 @@ def build_app(
                         generation=gen,
                         compute=lambda: load_registry_expiries(registry_path, exchange=exch),
                     )
+                    # The warm mirrors the live route's AUTHORITATIVE strike chains
+                    # (DEC-MONEYNESS-REGISTRY-STEP-001) via the SAME lazy bounded
+                    # per-(underlying, expiry) loader + cache (Golden Rule #5 /
+                    # DEC-FNO-HONESTY-PACK-001) so the warmed candidate set is
+                    # byte-identical to what the options poll would compute.
+                    registry_chain_for = make_registry_chain_loader(
+                        registry_path,
+                        exchange=exch,
+                        cache=_options_strikes_cache,
+                        generation=gen,
+                    )
 
                     def _opt_job() -> int:
                         cands = _movers_cache.get_or_compute(
@@ -2978,6 +3189,7 @@ def build_app(
                                 expiry_track=trk,
                                 exchange=exch,
                                 calendar_expiries=calendar_expiries,
+                                registry_chain_for=registry_chain_for,
                             ),
                         )
                         return len(cands.movers)
@@ -3020,6 +3232,10 @@ def build_app(
                 ``run_full_pipeline``) and the ``finally`` below still releases
                 the movers gate with ``prebuild_ok=False``.
                 """
+
+                # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
+                # observed here is named "prebuild", never blamed on "historical".
+                _pull_job.set_phase("prebuild")
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
@@ -3814,6 +4030,82 @@ def build_app(
             },
         )
 
+    def _build_lake_census_payload() -> dict[str, Any]:
+        """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
+
+        The ONE builder behind the cached ``/api/v1/universe/lake-uniqueness`` route:
+        runs the bounded invariant scanner (READ-ONLY / observe — the ROUTE never
+        heals; healing belongs to the L2 pull seams + the L3 startup sweep), folds
+        :func:`~brutex.data.lake_invariants.build_lake_census`, and stamps the heal
+        mode + the ``.lake_heal`` stats/sentinel reads into the SAME dict shape
+        ``brutex lake audit-unique --json`` prints. ``{"present": False}`` when no
+        lake root can be resolved (mirrors the sibling panel routes' honest gate).
+        """
+        from brutex.data.lake_heal import (
+            load_heal_stats,
+            load_last_sweep,
+            resolve_lake_heal_mode,
+        )
+
+        lake_db = getattr(_require_store(), "path", None)
+        if not isinstance(lake_db, Path):
+            return {"present": False}
+        lake = lake_db.parent
+        census = build_lake_census(scan_lake_invariants(lake))
+        return census_to_dict(
+            census,
+            mode=resolve_lake_heal_mode(),
+            stats=load_heal_stats(lake),
+            last_sweep=load_last_sweep(lake),
+        )
+
+    def _build_lake_census_payload_cached() -> dict[str, Any]:
+        """Memoise the lake census behind the ``SummaryCache`` adaptive TTL floor.
+
+        DEC-LAKE-HEAL-001 (hostile-review MAJOR fold): the census rides the SAME
+        ``_summary_cache.get_or_refresh`` path ``/coverage/spot`` uses — NOT a
+        generation-KEYED memo. ``pull_jobs`` bumps the write generation on every
+        per-pair write tick, so a generation-keyed cache re-ran this whole-lake
+        O(files) scan on every 15 s chip poll during a pull (the #920 regression
+        class); the ``SummaryCache`` instead serves the dirty entry until the
+        ADAPTIVE floor — ``max(2 s, the last scan's own duration)`` capped 120 s
+        (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001) — elapses, so an expensive scan
+        self-throttles to a ≤50% duty cycle while an idle lake keeps the snappy
+        2 s floor. Freshness: a pull, a materialize, OR a heal (the L3 sweeper's
+        ``on_healed=summary_cache.mark_dirty``) dirties the entry → one fresh
+        scan once past the floor; staleness is bounded by that floor, never
+        indefinite (Golden Rule #1, stated honestly per Golden Rule #10). The
+        payload dict is byte-identical to the uncached build — only the refresh
+        SCHEDULING changed. (The single-payload dict rides the ``SummaryPayload``
+        list shape as a one-element list.)
+        """
+        rows = _summary_cache.get_or_refresh(
+            LAKE_UNIQUENESS, recompute=lambda: [_build_lake_census_payload()]
+        )
+        return rows[0]
+
+    @app.get("/api/v1/universe/lake-uniqueness")
+    async def api_universe_lake_uniqueness() -> JSONResponse:
+        """GET /api/v1/universe/lake-uniqueness — the lake duplicate-census verdict.
+
+        DEC-LAKE-HEAL-001: per-segment (INDEX/CASH/FNO/OPTIONS) clean vs
+        dup/foreign/overlap/drift file counts + the ENGINE-index
+        (NIFTY/BANKNIFTY/SENSEX) ``engine_clean`` verdict + the heal mode and
+        ``.lake_heal`` stats/sentinel — the ``/universe`` chip's data source.
+        READ-ONLY (never heals). Served through the ``SummaryCache`` adaptive
+        TTL floor (the #920 machinery): a repeat poll is an O(1) handoff
+        within the TTL window, and a scan's own cost sets its refresh floor
+        (``max(2 s, scan duration)`` capped 120 s) — so a pull's write-tick
+        generation storm can never amplify the 15 s poll into back-to-back
+        whole-lake scans. HONEST: the refresh itself stays O(files); a dirty
+        census may be served up to one floor window stale — bounded, never
+        indefinite. No store wired → 503; no resolvable lake root →
+        ``{"present": false}``.
+        """
+        _require_store()
+        payload = await run_in_threadpool(_build_lake_census_payload_cached)
+        return JSONResponse(payload)
+
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
         market: str | None = Query(default=None),
@@ -4127,6 +4419,22 @@ def build_app(
                             registry_path_for(store_path), exchange=exch
                         ),
                     )
+                    # The AUTHORITATIVE strike chains (DEC-MONEYNESS-REGISTRY-STEP-001):
+                    # the ATM±N grid step per (underlying, expiry) reads the FULL vendor
+                    # chain from registry.duckdb (not the sparse lake ladder) via a LAZY
+                    # per-(underlying, expiry) loader — one NARROWED DuckDB read per
+                    # tier-target key, memoised per key + write generation, NEVER the
+                    # whole monotonically-growing contracts table held resident
+                    # (Golden Rule #5 bounded reads — DEC-FNO-HONESTY-PACK-001; the
+                    # /db `_registry_strike_chain` shape). A per-key `None` (absent /
+                    # empty registry) → the lake-ladder fallback with its honest
+                    # low-confidence label.
+                    registry_chain_for = make_registry_chain_loader(
+                        registry_path_for(store_path),
+                        exchange=exch,
+                        cache=_options_strikes_cache,
+                        generation=generation,
+                    )
                     key = candidate_key(
                         asset="options",
                         exchange=exch,
@@ -4149,6 +4457,7 @@ def build_app(
                             exchange=exch,
                             datasets=movers_datasets,
                             calendar_expiries=calendar_expiries,
+                            registry_chain_for=registry_chain_for,
                         ),
                     )
                     return build_options_payload(
@@ -5155,10 +5464,12 @@ def build_app(
         column / date raises ``ValueError`` there → HTTP 400 here.
         """
         store = _require_store()
-        lake_root = getattr(store, "path", None)
-        if not isinstance(lake_root, Path):
+        # NOTE: `store.path` is the instruments.duckdb FILE path (the lean master);
+        # the lake root is its parent dir — named accordingly (readability, not a bug).
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
             raise HTTPException(status_code=400, detail="no lake root wired for candle reads")
-        lake = lake_root.parent
+        lake = store_path.parent
         columns = tuple(column) if column else None
         try:
             payload = await run_in_threadpool(
@@ -5177,6 +5488,11 @@ def build_app(
                     offset=offset,
                     count_cache=_candle_count_cache,
                     generation=_summary_cache.generation,
+                    # The AUTHORITATIVE registry strike chain for the F&O ATM±N grid
+                    # (DEC-MONEYNESS-REGISTRY-STEP-001) — memoised behind the SAME
+                    # count cache + generation; absent registry ⇒ the lake-observed
+                    # step with its honest "observed" low-confidence label.
+                    registry_path=registry_path_for(store_path),
                 )
             )
         except ValueError as exc:
@@ -5451,13 +5767,15 @@ def _metadata_progress_sync(
     """Map the metadata pull's absolute ``(completed, total, current)`` progress onto the
     job's ``sync_from_ledger`` resync (DEC-METADATA-LIVE-PROGRESS-001).
 
-    ``bars=0`` / ``failed=0``: the metadata pull persists only the chain SHAPE, never
-    candles (DEC-INSTRUMENT-UNIVERSE-FAST-001) — there are no bars. Lifted OUT of the
+    ``bars=None`` / ``failed=0``: the metadata pull persists only the chain SHAPE, never
+    candles (DEC-INSTRUMENT-UNIVERSE-FAST-001) — there are no bars, so the sync PRESERVES
+    the cumulative bar tally an earlier phase already streamed instead of wiping it to 0
+    (DEC-PIPELINE-STALL-HEARTBEAT-001, the frozen-counter fix). Lifted OUT of the
     ``# pragma: no cover`` job-thread closure so the ``(completed, total, current)`` →
     ``sync_from_ledger`` mapping is unit-tested (a swapped arg / wrong ``bars`` would now
     fail a test, not pass CI green) instead of being pragma-hidden.
     """
-    job.sync_from_ledger(completed=completed, total=total, bars=0, failed=0, current=current)
+    job.sync_from_ledger(completed=completed, total=total, bars=None, failed=0, current=current)
 
 
 def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | None] | None:
@@ -6557,6 +6875,7 @@ connect();
 
 
 __all__ = [
+    "DEFAULT_ALLOWED_HOSTS",
     "DashboardState",
     "PhaseSnapshot",
     "RateLimitPanel",

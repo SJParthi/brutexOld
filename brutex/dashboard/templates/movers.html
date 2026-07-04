@@ -332,10 +332,15 @@ function renderRows() {
     }
     /* Moneyness chip (DEC-FNO-MONEYNESS-001): the cell reads "ITM -1" / "OTM +10" /
        "ATM" / "?" — tint by the leading bucket (ITM green, OTM red, else muted).
-       Purely a display tint; the text is unchanged. */
+       Purely a display tint. HONESTY MARKER (DEC-MONEYNESS-REGISTRY-STEP-001): when
+       the row's strike grid came from the sparse lake-observed ladder only
+       (strike_step_confidence === "observed" — no vendor registry chain), a trailing
+       " ~" flags the possibly-overestimated ATM±N step; a registry-confident row
+       shows no marker. Appended AFTER the tint check (startsWith is unaffected). */
     if (field==="moneyness" && typeof v === "string") {
       if (v.startsWith("ITM")) cls = "pos"; else if (v.startsWith("OTM")) cls = "neg";
       else if (v==="?"||v==="—") cls = "muted";
+      if (row.strike_step_confidence === "observed" && v!=="?" && v!=="—") v += " ~";
     }
     return `<td class="${cls}">${esc(v)}</td>`;
   }).join("") + "</tr>").join("");

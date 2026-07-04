@@ -29,13 +29,28 @@ use rayon::prelude::*;
 /// Add two unsigned 64-bit integers. Sanity-check the PyO3 wheel
 /// build round-trips correctly.
 ///
-/// Equivalent to Python's `a + b` for non-negative ints up to
-/// `2 ** 64 - 1`. Overflow panics in debug builds and saturates in
-/// release builds (per the crate's `overflow-checks = true` flag, this
-/// also panics in release).
+/// Equivalent to Python's `a + b` for non-negative ints whose SUM fits
+/// `2 ** 64 - 1`. Overflow-guarded at the FFI edge (R2-RC-F1): a sum
+/// exceeding `u64::MAX` raises a clean Python `ValueError` instead of
+/// tripping the crate's `overflow-checks = true` + `panic = "abort"`
+/// release profile — which would SIGABRT the WHOLE host interpreter
+/// (exit 134, uncatchable from Python). Mirrors the sibling
+/// trading-core boundary-validation idiom (`MAX_ANCHOR_PAISA` /
+/// `check_prev_day_hl` in `rust/trading-core/src/python.rs`).
 #[pyfunction]
-pub fn add_u64(a: u64, b: u64) -> u64 {
-    a + b
+pub fn add_u64(a: u64, b: u64) -> PyResult<u64> {
+    add_u64_checked(a, b).map_err(PyValueError::new_err)
+}
+
+/// Pure-Rust core of [`add_u64`] — `checked_add` returning a plain
+/// `Result<_, String>` (NO `PyErr`), so the `#[cfg(test)]` suite can exercise
+/// the overflow branch WITHOUT referencing Python C-API symbols under the
+/// no-libpython `extension-module` `cargo test` link (the same split as
+/// [`count_supermasks_scoped`]). The `#[pyfunction]` wrapper maps the error
+/// to a `ValueError`.
+fn add_u64_checked(a: u64, b: u64) -> Result<u64, String> {
+    a.checked_add(b)
+        .ok_or_else(|| format!("add_u64: {a} + {b} overflows u64 (max {})", u64::MAX))
 }
 
 /// Return the total number of set bits across a slice of `u64` values.
@@ -462,9 +477,41 @@ pub fn popcount_bytes(data: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        PARALLEL_WORK_THRESHOLD, ResidentBars, count_one, count_supermask_u64s,
+        PARALLEL_WORK_THRESHOLD, ResidentBars, add_u64_checked, count_one, count_supermask_u64s,
         count_supermasks_dispatch, count_supermasks_scoped,
     };
+
+    // ── add_u64_checked (R2-RC-F1 overflow guard at the FFI edge) ──
+
+    #[test]
+    fn add_u64_overflowing_operands_return_err_not_abort() {
+        // The EXACT old-abort reproduction: two ~2^63 operands. Before the
+        // guard, `a + b` under `overflow-checks = true` + `panic = "abort"`
+        // SIGABRT'd the host process (exit 134); now it is a clean Err the
+        // `#[pyfunction]` wrapper maps to ValueError.
+        let err = add_u64_checked(1u64 << 63, 1u64 << 63).unwrap_err();
+        assert!(
+            err.contains("overflows u64"),
+            "message names the overflow: {err}"
+        );
+        // Minimal off-by-one overflow.
+        assert!(add_u64_checked(u64::MAX, 1).is_err());
+        assert!(add_u64_checked(1, u64::MAX).is_err());
+        assert!(add_u64_checked(u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn add_u64_valid_inputs_compute_identically() {
+        // Golden/regression: the values the Python bridge test pins, plus the
+        // exact-fit boundary — all byte-identical to the pre-guard `a + b`.
+        assert_eq!(add_u64_checked(2, 3), Ok(5));
+        assert_eq!(add_u64_checked(0, 42), Ok(42));
+        assert_eq!(add_u64_checked(42, 0), Ok(42));
+        assert_eq!(add_u64_checked(1u64 << 32, 1u64 << 32), Ok(1u64 << 33));
+        // Largest representable sum — fits exactly, must NOT be rejected.
+        assert_eq!(add_u64_checked(u64::MAX, 0), Ok(u64::MAX));
+        assert_eq!(add_u64_checked(u64::MAX - 1, 1), Ok(u64::MAX));
+    }
 
     // ── count_supermask_u64s (single mask) ──
 

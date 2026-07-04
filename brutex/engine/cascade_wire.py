@@ -67,8 +67,21 @@ and the :class:`~brutex.metrics.cascade.CandidateInput` is filled as:
   and the SPA/RW/PBO matrix);
 * ``lockbox_returns`` / ``lockbox_days`` — the same per-bar series plus each
   bar's IST trading-day ordinal (so the held-out window slices by day);
-  ``training_sharpe`` / ``training_max_drawdown`` are the in-sample per-bar
-  Sharpe + drawdown (return units) — self-consistent with ``lockbox_returns``;
+  ``lockbox_trade_days`` — the TRUE per-trade exit-day IST ordinals
+  (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F2), so filter #8's 500-trade floor +
+  adaptive window extension count real trades, never bars;
+  ``training_sharpe`` / ``training_max_drawdown`` are the per-bar Sharpe +
+  drawdown (return units) over the TRAIN COMPLEMENT — the bars strictly
+  BEFORE the lockbox window start resolved by the SHARED
+  :func:`brutex.metrics.lockbox.resolve_lockbox_window` (R2-SR-F1: before
+  this fix the FULL series — holdout tail included — was fed as the training
+  reference, so filter #8's degradation floor compared the tail against a
+  reference containing the tail, anti-conservative). Honest envelope: when
+  the complement's Sharpe is undefined (< 2 bars OR zero variance — e.g.
+  every trade exits inside the lockbox window) the reference falls back to
+  the legacy FULL-series pair as ONE unit, logged loudly
+  (``cascade_wire.training_ref_fallback``) — decontamination does NOT hold
+  for fallback candidates;
 * ``mc_evaluate`` — the injected exit logic for filter #9: relocate the entry
   signals to the given bar positions, re-run the SAME trade-sim, return the
   per-trade Sharpe (comparable to the observed per-trade ``sharpe_ratio``);
@@ -89,6 +102,11 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 import structlog
 
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
+from brutex.metrics.lockbox import (
+    LOCKBOX_DEFAULT_MIN_TRADES,
+    LOCKBOX_DEFAULT_WINDOW_DAYS,
+    resolve_lockbox_window,
+)
 from brutex.models import BruteXError
 from brutex.strategies.types import FibAnchorKind
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
@@ -450,6 +468,18 @@ class CascadeWireReport:
         """Every surviving candidate id, in pool order then composite-rank order."""
         return tuple(sid for _, _, report in self.groups for sid in report.survivor_ids)
 
+    @property
+    def n_provisional(self) -> int:
+        """Total PROVISIONAL passes across every pool (R2-SR-F4).
+
+        Survivors whose DSR filter #2 deflated against the legacy pool-N
+        fallback (``dsr_n_source == "pool"``) — sums only the pool-sourced
+        groups' survivors in a mixed report (the per-group ``_trial_stats_for``
+        resolution can differ per slice). A pool-sourced pass must never
+        silently read as proven (DEC-STATS-GATE-INTEGRITY-001).
+        """
+        return sum(len(report.provisional_pass_ids) for _, _, report in self.groups)
+
 
 # ── Cascade config (deterministic seed from the sweep id) ─────────────────────
 
@@ -614,13 +644,16 @@ def build_candidate_input(
     sl_paisa: int | None,
     tp_paisa: int | None,
     start_equity_paisa: int,
+    lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
+    lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
 ) -> CandidateInput:
     """Re-simulate one winning *mask* over *bars* into a cascade :class:`CandidateInput`.
 
     Projects the mask onto the pre-built ``bar_bits``, simulates the trades with
     the tuple's exact knobs (so the result reproduces the persisted finalist), and
     fills every field the nine filters need (see the module docstring for the
-    per-field conventions).
+    per-field conventions — including the R2-SR-F1 train-complement training
+    references and the R2-SR-F2 per-trade lockbox evidence).
 
     Parameters
     ----------
@@ -634,6 +667,13 @@ def build_candidate_input(
         ``"bull"`` / ``"bear"``.
     tf_minutes, sl_paisa, tp_paisa, start_equity_paisa
         The tuple's trade-sim knobs (must match what produced the finalist).
+    lockbox_default_window_days, lockbox_min_trades
+        The lockbox window params the training-reference complement is
+        resolved with — MUST equal the :class:`CascadeConfig` values filter #8
+        will gate with (``run_cascade_over_specs`` threads them from the ONE
+        config, so both sides share the same window; a hard-coded default
+        here would re-introduce a train/holdout mismatch for any non-default
+        config). Defaults are the lockbox module's own public constants.
 
     Returns
     -------
@@ -668,6 +708,48 @@ def build_candidate_input(
     day_ordinals = tuple(bar.timestamp.astimezone(IST).date().toordinal() for bar in bars)
     n_entries = sum(1 for signal in entry_signals if signal)
 
+    # TRUE per-trade lockbox evidence (R2-SR-F2): each trade's exit-day IST
+    # ordinal, sorted — the count source for filter #8's 500-trade floor.
+    trade_days = tuple(sorted(t.exit_ts.astimezone(IST).date().toordinal() for t in trades))
+    # Train/holdout split via the ONE shared resolver (R2-SR-F1): the training
+    # references are measured over the bars strictly BEFORE the lockbox window
+    # start — the same window filter #8 will gate with (same params, same
+    # evidence), so the degradation floor no longer compares the holdout tail
+    # against a reference that contains the tail.
+    window = resolve_lockbox_window(
+        day_ordinals,
+        evidence_days=trade_days,
+        default_window_days=lockbox_default_window_days,
+        min_trades=lockbox_min_trades,
+    )
+    train_returns = tuple(
+        r for r, day in zip(per_bar, day_ordinals, strict=True) if day < window.window_start
+    )
+    # ``sharpe_of_returns`` raises on an EMPTY series (and returns ``None`` on
+    # < 2 samples / zero variance) — an empty complement is the same
+    # degenerate-fallback case, never an error.
+    train_sharpe = sharpe_of_returns(train_returns) if train_returns else None
+    if train_sharpe is None:
+        # Degenerate complement (< 2 bars OR zero variance — e.g. every trade
+        # exits inside the lockbox window, leaving a flat pre-window equity):
+        # fall back to the legacy FULL-series pair as ONE unit (never a mixed
+        # complement-Sharpe/full-MDD reference — a flat complement's MDD of
+        # 0.0 would turn the drawdown ceiling into an auto-FAIL). HONEST
+        # (Golden Rule #10): decontamination does NOT hold for these
+        # candidates — logged loudly so a fallback can never pass silently.
+        training_sharpe = _finite(sharpe_of_returns(per_bar))
+        training_max_drawdown = _max_drawdown_return_units(per_bar)
+        _LOG.warning(
+            "cascade_wire.training_ref_fallback",
+            run_id=run_id,
+            n_train_bars=len(train_returns),
+            window_start_day=window.window_start,
+            reason="train-complement Sharpe undefined (< 2 bars or zero variance)",
+        )
+    else:
+        training_sharpe = train_sharpe
+        training_max_drawdown = _max_drawdown_return_units(train_returns)
+
     return CandidateInput(
         candidate_id=run_id,
         sharpe_ratio=_finite(metrics.sharpe_ratio),
@@ -680,8 +762,8 @@ def build_candidate_input(
         max_drawdown_pct=metrics.max_drawdown_pct,
         max_consecutive_losses=metrics.max_consecutive_losses,
         total_trades=metrics.total_trades,
-        training_sharpe=_finite(sharpe_of_returns(per_bar)),
-        training_max_drawdown=_max_drawdown_return_units(per_bar),
+        training_sharpe=training_sharpe,
+        training_max_drawdown=training_max_drawdown,
         skew=_finite(metrics.skewness),
         # CandidateInput.kurtosis is the NON-EXCESS (Pearson) kurtosis the DSR
         # PSR radicand expects (Gaussian == 3.0); compute_metrics stores EXCESS
@@ -694,6 +776,7 @@ def build_candidate_input(
         returns=per_bar,
         lockbox_returns=per_bar,
         lockbox_days=day_ordinals,
+        lockbox_trade_days=trade_days,
         mc_n_bars=len(bars),
         mc_n_entries=n_entries,
         mc_evaluate=_make_mc_evaluate(
@@ -707,11 +790,19 @@ def build_candidate_input(
     )
 
 
-def candidates_for_spec(spec: CascadeTupleSpec, bars: Sequence[CandleBar]) -> list[CandidateInput]:
+def candidates_for_spec(
+    spec: CascadeTupleSpec,
+    bars: Sequence[CandleBar],
+    *,
+    lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
+    lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+) -> list[CandidateInput]:
     """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
 
     Builds the Stage-1A ``bar_bits`` once (the tuple's proximity + prior_n), then
-    projects each winning mask through :func:`build_candidate_input`.
+    projects each winning mask through :func:`build_candidate_input`. The lockbox
+    window params are threaded through unchanged (see
+    :func:`build_candidate_input` — they MUST match the cascade config's).
     """
     from brutex.engine.stage1a import build_bar_bits
     from brutex.vocabulary import ProximityParams
@@ -739,6 +830,8 @@ def candidates_for_spec(spec: CascadeTupleSpec, bars: Sequence[CandleBar]) -> li
             sl_paisa=spec.sl_paisa,
             tp_paisa=spec.tp_paisa,
             start_equity_paisa=spec.start_equity_paisa,
+            lockbox_default_window_days=lockbox_default_window_days,
+            lockbox_min_trades=lockbox_min_trades,
         )
         for run_id, mask in spec.winners
     ]
@@ -827,7 +920,18 @@ def run_cascade_over_specs(
             continue
         candidates: list[CandidateInput] = []
         for spec in grouped[(instrument, tf_label)]:
-            candidates.extend(candidates_for_spec(spec, bars))
+            candidates.extend(
+                candidates_for_spec(
+                    spec,
+                    bars,
+                    # The ONE config drives BOTH sides of the train/holdout
+                    # split (R2-SR-F1 review A1): the wire's training-reference
+                    # complement AND filter #8's gate window — a non-default
+                    # config would otherwise silently mismatch them.
+                    lockbox_default_window_days=config.lockbox_default_window_days,
+                    lockbox_min_trades=config.lockbox_min_trades,
+                )
+            )
         if not candidates:
             continue
         report = run_stage4_cascade(
@@ -841,6 +945,9 @@ def run_cascade_over_specs(
         pools=len(groups),
         n_input=sum(report.n_input for _, _, report in groups),
         n_survived=sum(report.n_survived for _, _, report in groups),
+        # R2-SR-F4: pool-N-deflated passes are surfaced on the summary log so
+        # a provisional pass can never silently read as proven.
+        n_provisional=sum(len(report.provisional_pass_ids) for _, _, report in groups),
     )
     return CascadeWireReport(sweep_id=sweep_id, groups=tuple(groups))
 
@@ -854,6 +961,9 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     ``pool_pbo`` (DEC-PBO-SIDECAR-001) is the slice's measured CSCV pool PBO —
     the RAW float (round-trippable ``repr``, never rounded) or ``null`` when
     filter #5 was skipped (see :class:`~brutex.metrics.cascade.CascadeReport`).
+    The per-verdict ``provisional`` key (R2-SR-F4) is ADDITIVE at
+    ``REPORT_VERSION`` 1 — the same precedent as ``pool_pbo``; a pre-change
+    report simply lacks the key.
     """
     return {
         "n_input": report.n_input,
@@ -871,6 +981,7 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
                 "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
                 "detail": verdict.detail,
                 "composite_score": verdict.composite_score,
+                "provisional": verdict.provisional,
             }
             for verdict in report.verdicts
         ],
@@ -1627,7 +1738,15 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     (reconciling the catalog from on-disk Parquet first, mirroring
     ``brutex sweep-all``), keyed by the manifest's :class:`BarsContext` window.
     Marked ``no cover``: it opens DuckDB + reads the real lake (the pure cascade
-    core + the manifest round-trip are fully tested with injected bars).
+    core + the manifest round-trip are fully tested with injected bars; the L1
+    heal wiring below is exercised end-to-end by
+    ``tests/integration/test_cascade_reconcile_heal.py``).
+
+    DEC-LAKE-HEAL-001 (L1): the reconcile's free invariant piggyback returns
+    any poisoned-partition findings on ``ReconcileResult.findings``; ONE
+    :func:`~brutex.data.lake_heal.heal_after_reconcile` call heals them BEFORE
+    the feed consumes the slice (auto mode; ``BRUTEX_LAKE_HEAL=observe`` logs
+    only). ``LakeWriteHalt`` propagates to the CLI top-level halt handling.
 
     Parameters
     ----------
@@ -1647,8 +1766,10 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
 
     from brutex.data.catalog import Catalog
     from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    from brutex.data.lake_heal import heal_after_reconcile, lake_heal_audit
     from brutex.data.lake_read import dedup_bars
     from brutex.feed.replay import ReplayFeed
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
 
     def _parse(value: str) -> datetime:
         parsed = datetime.fromisoformat(value)
@@ -1660,7 +1781,7 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     slices: dict[tuple[str, str], list[CandleBar]] = {}
     with Catalog.open(catalog) as cat:
         for instrument, tf_label in coords:
-            reconcile_catalog_from_lake(
+            result = reconcile_catalog_from_lake(
                 lake_root=lake_root,
                 catalog=cat,
                 exchange=ctx.exchange,
@@ -1668,6 +1789,18 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
                 symbol=instrument,
                 interval=tf_label,
             )
+            if result.findings:
+                # DEC-LAKE-HEAL-001 L1: heal what the reconcile detected for
+                # free, so the sweep/replay reads clean bars. The audit sink is
+                # opened lazily (findings-gated — a clean lake writes nothing).
+                with lake_heal_audit(lake_root) as audit:
+                    heal_after_reconcile(
+                        result,
+                        lake_root=lake_root,
+                        catalog=cat,
+                        audit=audit,
+                        on_report=lambda r: emit_lake_heal_alert(r, scope="reconcile"),
+                    )
             feed = ReplayFeed(
                 catalog=cat,
                 lake_root=lake_root,

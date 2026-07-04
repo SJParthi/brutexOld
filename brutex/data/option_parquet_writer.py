@@ -130,6 +130,33 @@ def _safe_segment(partition_key: str) -> str:
     return partition_key.replace(_UNSAFE, _SAFE)
 
 
+@dataclass(frozen=True, slots=True)
+class OptionHealResult:
+    """Outcome of one :meth:`OptionParquetWriter.heal_partition` call (DEC-LAKE-HEAL-001).
+
+    Attributes
+    ----------
+    path
+        The options-tree partition file the heal targeted.
+    changed
+        ``False`` when the file was left byte-untouched (already unique —
+        the idempotence oracle).
+    kept
+        Rows remaining after the keep-first ``(side, timestamp)`` collapse.
+    dropped_duplicates
+        Physically-duplicated stored rows dropped.
+    quarantined_original
+        Where the ORIGINAL bytes were copied before the rewrite, or ``None``
+        for an unchanged file.
+    """
+
+    path: Path
+    changed: bool
+    kept: int
+    dropped_duplicates: int
+    quarantined_original: Path | None
+
+
 class OptionParquetWriter:
     """Writes :class:`OptionBar` rows to the partitioned expired-options table.
 
@@ -246,6 +273,85 @@ class OptionParquetWriter:
                 _atomic_write_parquet(dest, combined)
             return added
 
+    def heal_partition(self, dest: Path, *, quarantine_to: Path | None = None) -> OptionHealResult:
+        """Heal ONE options-tree partition: keep-FIRST ``(side, timestamp)`` dedup (DEC-LAKE-HEAL-001).
+
+        The options twin of :meth:`brutex.data.parquet_writer.ParquetWriter.heal_partition`,
+        under this writer's OWN established lock stack + ``lake_write_guard``
+        (the :meth:`_merge_partition` discipline): read the stored frame,
+        collapse to unique ``(side, timestamp)`` keys keeping the FIRST physical
+        row (``polars.unique(keep="first", maintain_order=True)`` — the writer's
+        own merge key), and — only when rows were dropped — quarantine-copy the
+        ORIGINAL bytes then atomically rewrite. No P9 tripwire: options files
+        sort by ``(side, timestamp)``, not strictly-increasing timestamps.
+        STRICTLY row-removing — kept rows keep their stored values.
+
+        Parameters
+        ----------
+        dest
+            The ``options/<series>/<YYYY>-<MM>.parquet`` file to heal.
+        quarantine_to
+            Where the ORIGINAL bytes are copied before the rewrite. Required
+            whenever the heal would change the file
+            (:class:`OptionWriterError` otherwise).
+
+        Returns
+        -------
+        OptionHealResult
+            The heal outcome (``changed=False`` = byte-untouched).
+
+        Raises
+        ------
+        OptionWriterError
+            Vanished/corrupt file, or a changing heal with no *quarantine_to*.
+        LakeWriteHalt
+            Disk-full / OOM during the quarantine copy or the rewrite.
+        PartitionLockTimeout
+            The cross-process lock could not be acquired in time.
+        """
+        import io
+
+        import polars as pl
+
+        with (
+            _PARTITION_LOCKS.acquire(dest),
+            partition_write_lock(self._lake_root, dest),
+            lake_write_guard(),
+        ):
+            try:
+                existing_bytes = dest.read_bytes()
+                existing = pl.read_parquet(io.BytesIO(existing_bytes))
+            except parquet_read_skip_errors() as exc:
+                raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
+            physical = int(existing.height)
+            deduped = existing.unique(
+                subset=["side", "timestamp"], keep="first", maintain_order=True
+            ).sort(["side", "timestamp"])
+            kept = int(deduped.height)
+            if kept == physical:
+                return OptionHealResult(
+                    path=dest,
+                    changed=False,
+                    kept=kept,
+                    dropped_duplicates=0,
+                    quarantined_original=None,
+                )
+            if quarantine_to is None:
+                raise OptionWriterError(
+                    f"heal of {dest} requires a quarantine destination — "
+                    f"refusing to rewrite without the safety copy"
+                )
+            quarantine_to.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_via(quarantine_to, lambda tmp: tmp.write_bytes(existing_bytes))
+            _atomic_write_parquet(dest, deduped)
+            return OptionHealResult(
+                path=dest,
+                changed=True,
+                kept=kept,
+                dropped_duplicates=physical - kept,
+                quarantined_original=quarantine_to,
+            )
+
 
 def _money(value: Decimal) -> float:
     """Round a money :class:`~decimal.Decimal` to 2dp (DEC-MONEY-2DP-001) → float."""
@@ -329,6 +435,7 @@ def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
 
 
 __all__ = [
+    "OptionHealResult",
     "OptionParquetWriter",
     "OptionSeriesCoordinate",
     "OptionWriterError",

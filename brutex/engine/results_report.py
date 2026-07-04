@@ -372,6 +372,30 @@ def render_leaderboard(rows: Sequence[ResultRow], *, origins: dict[str, str] | N
     return "\n".join(lines)
 
 
+def _provisional_note(report: dict[str, object]) -> str:
+    """The counted provisional-pass label for one group, or ``""``.
+
+    Reads the group's verdict list for the additive per-verdict
+    ``provisional`` key (R2-SR-F4). Returns ``""`` when the verdicts are not
+    a list, no verdict carries the key (a pre-change report — the flag was
+    never recorded), or no PASS is flagged (a leaderboard-sourced group).
+    Lenient by design: an additive key on a best-effort render surface never
+    hard-fails a pre-change sidecar.
+    """
+    verdicts = report.get("verdicts")
+    if not isinstance(verdicts, list):
+        return ""
+    stamped = [v for v in verdicts if isinstance(v, dict) and "provisional" in v]
+    if not stamped:
+        return ""
+    n_provisional = sum(
+        1 for v in stamped if v.get("provisional") is True and v.get("passed") is True
+    )
+    if n_provisional == 0:
+        return ""
+    return f"  provisional={n_provisional} (pool-N DSR pass — not proven at leaderboard N)"
+
+
 def _render_sidecar_group(entry: object) -> str:
     """Render one cascade-sidecar group line, or raise ``ValueError`` on a bad shape.
 
@@ -392,6 +416,14 @@ def _render_sidecar_group(entry: object) -> str:
     under-count, shown so it can never masquerade as the corrected figure).
     The N is echoed verbatim — distinct from the leaderboard rows' per-tuple
     ``dsr@tupleN`` label above it.
+
+    PROVISIONAL passes (DEC-STATS-GATE-INTEGRITY-001, R2-SR-F4): when the
+    group's verdicts carry the additive per-verdict ``provisional`` key and
+    any pass is flagged (a pool-N-deflated survivor), the line appends a
+    counted ``provisional=N`` label so a pool-sourced pass can never silently
+    read as proven. A pre-change report LACKING the key renders unchanged
+    (the same absent-key convention as ``pool_pbo``), as does a
+    leaderboard-sourced group (zero flagged passes).
     """
     if not isinstance(entry, dict):
         raise ValueError("group entry is not an object")
@@ -404,6 +436,7 @@ def _render_sidecar_group(entry: object) -> str:
         dsr = "dsr N not stamped (pre-ADR-0008 report)"
     else:
         dsr = f"dsr N={report.get('dsr_n_trials', '?')} source={report['dsr_n_source']}"
+    dsr += _provisional_note(report)
     if "pool_pbo" not in report:
         return f"  {label}  pool PBO not recorded (pre-sidecar report)  {counts}  {dsr}"
     pbo = report["pool_pbo"]
