@@ -3778,10 +3778,21 @@ def cmd_sweep(
     """
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.scope_guard import EngineScopeError, ensure_engine_scope
     from brutex.engine.sweep_report import sweep_report
     from brutex.feed.replay import ReplayFeed
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
+
+    # Engine scope gate (DEC-CORP-ACTION-GATE-001 / ADR-0016): refuse an
+    # out-of-scope symbol BEFORE any lake I/O — no corporate-action adjustment
+    # layer exists, so a single-stock sweep would silently corrupt across a
+    # split/bonus boundary. Clean user error, never a raw traceback.
+    try:
+        (symbol,) = ensure_engine_scope([symbol])
+    except EngineScopeError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -3908,6 +3919,35 @@ def _parse_paisa_list(raw: str) -> list[int | None]:
     return out
 
 
+def _gate_sweep_symbols(symbols: str) -> list[str]:
+    """Parse a ``--symbols`` CSV and admit it through the engine scope gate.
+
+    The COMMON parse+gate half of the DEC-CORP-ACTION-GATE-001 / ADR-0016
+    chokepoints — shared by :func:`cmd_sweep_all` (the grid launch, which
+    ``sweep-daemon`` + the dashboard 🚀 Run Sweep reuse) and the
+    ``sweep-verify --recount`` Tier-3 shadow re-sweep (which EXECUTES the real
+    engine). Hoisted OUT of those functions' ``# pragma: no cover``
+    orchestration shims so the gate itself sits inside the coverage/mutation
+    envelope (the callers keep only the print-and-exit mapping).
+
+    Returns
+    -------
+    list[str]
+        The normalized (stripped, upper-cased) symbols, input order.
+
+    Raises
+    ------
+    brutex.engine.scope_guard.EngineScopeError
+        If any parsed symbol is outside the engine scope, or the CSV parses
+        to no symbols (no corporate-action adjustment layer exists — an
+        out-of-scope single-stock sweep would silently corrupt across a
+        split/bonus boundary).
+    """
+    from brutex.engine.scope_guard import ensure_engine_scope
+
+    return list(ensure_engine_scope(s.strip() for s in symbols.split(",") if s.strip()))
+
+
 def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-tested engine
     *,
     lake_root: Path | None,
@@ -3990,7 +4030,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     out_root = results_root if results_root is not None else resolved_lake / "sweeps"
 
-    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    # Engine scope gate (DEC-CORP-ACTION-GATE-001 / ADR-0016): the ONE
+    # chokepoint where --symbols becomes SweepGridConfig.instruments — covers
+    # sweep-all, sweep-daemon (which reuses this function verbatim) AND the
+    # dashboard 🚀 Run Sweep button (brutex.dashboard.sweep_runner maps onto
+    # this exact kwargs contract). No corporate-action adjustment layer
+    # exists, so an out-of-scope symbol is refused BEFORE any lake I/O.
+    # Parse+gate live in the coverage-measured _gate_sweep_symbols helper.
+    from brutex.engine.scope_guard import EngineScopeError
+
+    try:
+        symbol_list = _gate_sweep_symbols(symbols)
+    except EngineScopeError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
     for interval in interval_list:
         if interval not in INTERVAL_SECONDS:
@@ -4904,7 +4957,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     (``--recount``) shadow re-sweeps the grid into a scratch root with the
     SAME 100%-tested ``run_sweep_grid`` and byte-diffs — verdict-grade ONLY
     under a fully matched recorded context (the hostile review's validity
-    gate). REPORT-ONLY: this command never modifies the verified tree.
+    gate). REPORT-ONLY toward the verified tree: this command never modifies
+    it — but Tier 3 EXECUTES the real engine into ``--scratch-root``, so the
+    recount tier is scope-GATED (DEC-CORP-ACTION-GATE-001 / ADR-0016; Tier 1/2
+    run no engine and stay unguarded).
     """
     from brutex.engine.sweep_verify import (
         SweepVerifyError,
@@ -4949,6 +5005,22 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     from brutex.strategies.types import FibAnchorKind, Side
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if recount:
+        # Engine scope gate (DEC-CORP-ACTION-GATE-001 / ADR-0016): the Tier-3
+        # --recount shadow re-sweep EXECUTES the real engine (run_sweep_grid
+        # over lake bars, persisting per-tuple stores into --scratch-root) —
+        # a production sweep entry, NOT a report-only read — so it is gated
+        # exactly like sweep/sweep-all. --allow-context-mismatch overrides the
+        # recount CONTEXT gate only, never scope. Tier 1/2 (structural +
+        # identity) stay unguarded: they read an existing tree and launch no
+        # engine, and a legacy out-of-scope tree stays report-verifiable.
+        from brutex.engine.scope_guard import EngineScopeError
+
+        try:
+            symbol_list = _gate_sweep_symbols(symbols)
+        except EngineScopeError as exc:
+            print(f"[brutex] sweep-verify --recount: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
     interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
     for interval in interval_list:
         if interval not in INTERVAL_SECONDS:

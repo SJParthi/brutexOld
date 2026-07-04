@@ -167,6 +167,24 @@ def test_end_before_start_400(client: TestClient, monkeypatch: pytest.MonkeyPatc
     assert "must not precede start" in resp.json()["detail"]
 
 
+def test_out_of_scope_symbol_400_names_the_offender(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine scope gate (DEC-CORP-ACTION-GATE-001) fires EAGERLY as a 400.
+
+    Before this gate rode ``resolve_sweep_request``, an out-of-scope symbol
+    started the background job, the job finished "successfully", and the
+    refusal text landed only on server stderr — invisible to the operator.
+    """
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run", params={"symbols": "NIFTY,RELIANCE"})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "corporate-action adjustment layer missing" in detail
+    assert "'RELIANCE'" in detail
+    assert "DEC-CORP-ACTION-GATE-001" in detail
+
+
 # ── single-flight + no-lake guards ────────────────────────────────────────────
 
 

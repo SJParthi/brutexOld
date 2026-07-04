@@ -150,9 +150,8 @@ pub const TOTAL_CONDITIONS: u32 = 60;
 pub const MASK_WIDTH: u32 = 128;
 
 /// Bitmask of the conditions whose evaluator computes a real boolean.
-/// LAYOUT-ONLY bits (`implemented=false`, e.g. the new VWAP/R5S5/BOS/CHoCH
-/// bits) are 0 here and the evaluator emits 0 for them until a later PR
-/// supplies the math.
+/// LAYOUT-ONLY bits (`implemented=false` in the manifest) are 0 here and
+/// the evaluator emits 0 for them until a PR supplies the math.
 pub const IMPLEMENTED_MASK: u128 = 1152921504606846975;
 
 #[cfg(test)]

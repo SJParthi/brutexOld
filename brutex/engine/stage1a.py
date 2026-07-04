@@ -1,15 +1,16 @@
 """Stage-1A bitset-matrix builder — the adapter that drives ``evaluate_atoms``.
 
 Per ``docs/TRACK1_BACKTEST_SPEC.md`` the brute-force funnel's first stage
-precomputes, for one ``(instrument, interval)``, the 52 atomic conditions on
+precomputes, for one ``(instrument, interval)``, the 60 atomic conditions on
 **every** bar so the downstream supermask kernel
 (:func:`brutex.engine.combo_mask.count_supermasks`) can count mask hits over a
-resident ``u64[N]`` bitset. This module is **that producer**: it walks an
+resident ``u64[N]`` bitset (u64-limb: bits 0..59 fit u64 today; the u128 mask
+law + fallback live in ``combo_mask.py``). This module is **that producer**: it walks an
 iterable of :class:`~brutex.data.models.CandleBar` in chronological order,
 constructs one :class:`~brutex.vocabulary.evaluator.IndicatorSnapshot` per bar,
 and calls the **existing**, unit-tested
 :func:`~brutex.vocabulary.evaluator.evaluate_atoms` (it does **not** reimplement
-the 52 conditions — DEC-ENGINE-DRIVER-001 / ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``).
+the 60 conditions — DEC-ENGINE-DRIVER-001 / ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``).
 
 What this module owns is the **adapter layer** between the lake's bar
 representation and the evaluator's snapshot contract:

@@ -7,6 +7,20 @@ construction: the empty-bars + invalid-window refusals of
 deliberately leaky hand-built schedule (proving the guard bites, not just decorates),
 and the defensive ``LookAheadError`` re-raise in the two sweep-driver entry points.
 These close the strict 100% line+branch ``brutex.engine`` gate for the new code.
+
+Named ``test_engine_sweep_driver_walk_forward.py`` (was
+``test_engine_walk_forward.py``) so the auto-discovery coverage gate
+(``scripts/ci/coverage_gate_discovery.py``) stem-maps it to
+``brutex/engine/sweep_driver.py`` — the module hosting the walk-forward entry
+points this file covers (``evaluate_combo_walk_forward`` / ``walk_forward_sweep``
+/ ``verify_walk_forward_no_lookahead`` / ``_assert_trades_confined`` /
+``_aggregate_folds``). Without the stem match the discovery gate saw only
+``test_engine_sweep_driver*.py``'s other files and read sweep_driver.py at ~83%
+standalone, failing every sweep_driver-touching PR (DEC-CORP-ACTION-GATE-001
+CI fix). The stage1a schedule helpers it also exercises stay covered via the
+static engine gate (all ``tests/unit/test_engine_*.py`` at 100%) + the
+whole-package floor — stage1a.py remains on ``COVERAGE_DISCOVERY_EXCLUDE``
+(DEC-COVERAGE-DISCOVERY-STAGE1A-001).
 """
 
 from __future__ import annotations

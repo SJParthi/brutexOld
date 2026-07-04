@@ -32,6 +32,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.vocabulary.bits import TOTAL_CONDITIONS
+
 #: Default LAKE-partition index symbols (bare trading symbols, NOT the
 #: ``EXCH-SYMBOL`` groww keys) — mirrors the CLI ``--symbols`` default in
 #: ``brutex.cli._add_sweep_grid_args``. SENSEX is BSE-listed, so it is run
@@ -59,8 +61,10 @@ DEFAULT_START: Final[str] = "2021-01-01"
 #: Accepted direction tokens (upper-cased before the check).
 _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
 #: Max conditions-per-combo K — the engine bounds ``k`` by the unique condition
-#: count, which is the full 52-vocabulary by default (SweepGridConfig docstring).
-_MAX_K: Final[int] = 52
+#: count, which is the full 60-condition vocabulary by default (SweepGridConfig
+#: docstring; ``TOTAL_CONDITIONS`` is the one source of truth, so a future
+#: vocab growth moves this bound automatically — DEC-VOCAB-U128-CODEGEN-001).
+_MAX_K: Final[int] = TOTAL_CONDITIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,8 +130,19 @@ def _clean_csv(value: str | None, default: str) -> list[str]:
 
 
 def _normalise_symbols(value: str | None) -> str:
-    """Normalise the symbols axis (non-empty tokens, original case preserved)."""
-    return ",".join(_clean_csv(value, DEFAULT_SYMBOLS))
+    """Normalise + scope-gate the symbols axis (DEC-CORP-ACTION-GATE-001).
+
+    Every token is admitted through the engine scope gate
+    (:func:`brutex.engine.scope_guard.ensure_engine_scope` — strip + upper-case
+    normalization), so an out-of-scope symbol raises the gate's
+    :class:`~brutex.engine.scope_guard.EngineScopeError` (a :class:`ValueError`
+    subclass) HERE, eagerly, and the route turns it into a clear 400 naming
+    every offender — never a background job that "succeeds" while the refusal
+    lands only on server stderr.
+    """
+    from brutex.engine.scope_guard import ensure_engine_scope
+
+    return ",".join(ensure_engine_scope(_clean_csv(value, DEFAULT_SYMBOLS)))
 
 
 def _normalise_intervals(value: str | None) -> str:
@@ -151,7 +166,7 @@ def _normalise_directions(value: str | None) -> str:
 
 
 def _normalise_k(value: str | None) -> str:
-    """Validate every K parses to an int in ``[1, 52]``; return the normalised CSV."""
+    """Validate every K parses to an int in ``[1, TOTAL_CONDITIONS]``; return the CSV."""
     tokens = _clean_csv(value, DEFAULT_K)
     out: list[str] = []
     for token in tokens:
@@ -252,8 +267,11 @@ def resolve_sweep_request(
     ------
     ValueError
         On any unknown interval, non-BUY/SELL direction, out-of-range / non-integer
-        K, malformed SL/TP leg, non-positive ``top``, unparseable date, or
-        ``end < start``.
+        K, malformed SL/TP leg, non-positive ``top``, unparseable date,
+        ``end < start``, or an out-of-engine-scope symbol
+        (:class:`~brutex.engine.scope_guard.EngineScopeError`, a ``ValueError``
+        subclass — DEC-CORP-ACTION-GATE-001, so the route's existing
+        ``ValueError`` → 400 mapping surfaces the refusal eagerly).
     """
     resolved_top = DEFAULT_TOP if top is None else top
     if resolved_top < 1:
@@ -308,7 +326,8 @@ def build_sweep_kwargs(
     """Map a validated *request* onto the ``cmd_sweep_all`` keyword contract.
 
     A pure 1:1 mapping (the request is already validated). The non-swept knobs are
-    pinned to the safe dashboard defaults: ``conditions=None`` (all 52),
+    pinned to the safe dashboard defaults: ``conditions=None`` (the full
+    60-condition vocabulary — ``default_condition_bits()``),
     ``options_sim=False`` (signal-only research — no option lake required),
     ``allow_missing_slices=True`` (a one-click sweep runs on WHATEVER is in the
     lake, skipping empty ``(symbol, interval)`` slices honestly rather than hard
