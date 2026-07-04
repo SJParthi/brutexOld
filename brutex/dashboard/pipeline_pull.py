@@ -79,6 +79,7 @@ import structlog
 
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.fno_symbol import parse_fno_symbol
@@ -339,6 +340,7 @@ class PipelinePullReport:
     note: str
     movers_warmed: int | None = None
     segment_movers_warmed: dict[str, int] = field(default_factory=dict)
+    segment_movers_failed: dict[str, int] = field(default_factory=dict)
     prebuild_built: int | None = None
     prebuild_total_bars: int | None = None
     prebuild_failed: tuple[str, ...] = ()
@@ -372,6 +374,7 @@ class PipelinePullReport:
             "note": self.note,
             "movers_warmed": self.movers_warmed,
             "segment_movers_warmed": dict(self.segment_movers_warmed),
+            "segment_movers_failed": dict(self.segment_movers_failed),
             "prebuild_built": self.prebuild_built,
             "prebuild_total_bars": self.prebuild_total_bars,
             "prebuild_failed": list(self.prebuild_failed),
@@ -402,7 +405,10 @@ def _metadata_stop_note(report: MetadataPullReport) -> str:
     )
 
 
-def _movers_note_clause(segment_movers_warmed: Mapping[str, int]) -> str:
+def _movers_note_clause(
+    segment_movers_warmed: Mapping[str, int],
+    segment_movers_failed: Mapping[str, int] | None = None,
+) -> str:
     """Build the ``, movers …`` note clause from the per-segment warmed-count map.
 
     Empty when no segment warmed (no clause). Otherwise lists each warmed segment
@@ -410,6 +416,10 @@ def _movers_note_clause(segment_movers_warmed: Mapping[str, int]) -> str:
     order (e.g. ``", movers spot 3 + futures 1 snapshot(s) warmed"``), so the note
     honestly distinguishes WHICH segments warmed — a segment whose warm gate failed
     (or whose warmer was not injected) is absent from the map and from the clause.
+    When any warm JOB failed (DEC-MOVERS-WARM-PROGRESS-001 — the per-coordinate
+    tally :class:`~brutex.dashboard.movers_warm.MoversWarmResult` now carries it),
+    the clause appends an honest ``" (N warm job(s) FAILED)"`` so a swallowed
+    best-effort failure is never hidden behind the warmed counts (Golden Rule #1).
     """
     ordered = [
         (segment, segment_movers_warmed[segment])
@@ -419,7 +429,9 @@ def _movers_note_clause(segment_movers_warmed: Mapping[str, int]) -> str:
     if not ordered:
         return ""
     parts = " + ".join(f"{segment} {count}" for segment, count in ordered)
-    return f", movers {parts} snapshot(s) warmed"
+    failed_total = sum((segment_movers_failed or {}).values())
+    failed_clause = f" ({failed_total} warm job(s) FAILED)" if failed_total else ""
+    return f", movers {parts} snapshot(s) warmed{failed_clause}"
 
 
 #: How many failure NAMES the prebuild note clause shows before "(+K more)".
@@ -448,6 +460,10 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         f", timeframes pre-built for {prebuild.symbols_built} symbol(s) "
         f"({prebuild.total_bars} bars)"
     )
+    if prebuild.unchanged_skips:
+        # DEC-PREBUILD-INCREMENTAL-001: name the incremental saving honestly —
+        # these symbols were verified UNCHANGED and skipped, not built-with-0.
+        clause += f", {prebuild.unchanged_skips} unchanged symbol(s) skipped (incremental)"
     if prebuild.failed:
         shown = ", ".join(prebuild.failed[:_NOTE_FAILURE_NAMES])
         more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))
@@ -483,6 +499,7 @@ def _complete_note(
     prebuild: PrebuildOutcome | None = None,
     quarantined: tuple[str, ...] = (),
     quarantined_count: int = 0,
+    segment_movers_failed: Mapping[str, int] | None = None,
 ) -> str:
     """Build the honest summary note for a fully-run pipeline.
 
@@ -527,7 +544,7 @@ def _complete_note(
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
         f"contracts, historical {bars} bars over {contracts} contract(s)"
         f"{scope_clause}{skipped_clause}{_prebuild_note_clause(prebuild)}"
-        f"{_movers_note_clause(segment_movers_warmed)}"
+        f"{_movers_note_clause(segment_movers_warmed, segment_movers_failed)}"
     )
 
 
@@ -548,9 +565,9 @@ def run_full_pipeline(
     run_spot: Callable[[], BulkSpotReport],
     run_metadata: Callable[[], MetadataPullReport],
     run_historical: Callable[[], CompositePullReport],
-    warm_spot_movers: Callable[[], int] | None = None,
-    warm_futures_movers: Callable[[], int] | None = None,
-    warm_options_movers: Callable[[], int] | None = None,
+    warm_spot_movers: Callable[[], MoversWarmResult] | None = None,
+    warm_futures_movers: Callable[[], MoversWarmResult] | None = None,
+    warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[], PrebuildOutcome] | None = None,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
@@ -611,9 +628,10 @@ def run_full_pipeline(
         :class:`~brutex.dashboard.composite_pull.CompositePullReport` (phase 3).
     warm_spot_movers
         OPTIONAL zero-arg callable that warms the SPOT movers snapshots and
-        returns how many were warmed; fired ONLY after a clean fetch AND a
-        SUCCESSFUL prebuild (``PrebuildOutcome.ok``). ``None`` skips the spot
-        warm.
+        returns its :class:`~brutex.dashboard.movers_warm.MoversWarmResult`
+        (warmed + failed + total — DEC-MOVERS-WARM-PROGRESS-001); fired ONLY
+        after a clean fetch AND a SUCCESSFUL prebuild (``PrebuildOutcome.ok``).
+        ``None`` skips the spot warm.
     warm_futures_movers
         OPTIONAL zero-arg callable warming the FUTURES movers snapshots; same
         gate. ``None`` skips the futures warm.
@@ -675,8 +693,9 @@ def run_full_pipeline(
     #    gate: a failed/partial prebuild leaves stale/absent derived
     #    partitions, so warming over them would cache a wrong snapshot).
     segment_movers_warmed: dict[str, int] = {}
+    segment_movers_failed: dict[str, int] = {}
     if fetch_clean and prebuild is not None and prebuild.ok:
-        warmers: tuple[tuple[str, Callable[[], int] | None], ...] = (
+        warmers: tuple[tuple[str, Callable[[], MoversWarmResult] | None], ...] = (
             (SEGMENT_SPOT, warm_spot_movers),
             (SEGMENT_FUTURES, warm_futures_movers),
             (SEGMENT_OPTIONS, warm_options_movers),
@@ -686,8 +705,18 @@ def run_full_pipeline(
             _LOG.info("pipeline.movers_warm.started", segments=injected)
             for segment, warm in warmers:
                 if warm is not None:
-                    segment_movers_warmed[segment] = warm()
-            _LOG.info("pipeline.movers_warm.done", warmed=dict(segment_movers_warmed))
+                    result = warm()
+                    segment_movers_warmed[segment] = result.warmed
+                    # A best-effort warm job that raised was swallowed + logged
+                    # inside warm_movers_snapshots; carry the count so the note
+                    # can NAME it (DEC-MOVERS-WARM-PROGRESS-001, Golden Rule #1).
+                    if result.failed:
+                        segment_movers_failed[segment] = result.failed
+            _LOG.info(
+                "pipeline.movers_warm.done",
+                warmed=dict(segment_movers_warmed),
+                failed=dict(segment_movers_failed),
+            )
     # Headline honesty (chunk 3): a per-symbol quarantine passes the phase gates
     # (they check pull-wide signals), so it must be NAMED in the complete note —
     # never hidden behind a bare "pipeline complete".
@@ -705,9 +734,11 @@ def run_full_pipeline(
             prebuild,
             quarantined,
             quarantined_count,
+            segment_movers_failed,
         ),
         movers_warmed=_total_warmed(segment_movers_warmed),
         segment_movers_warmed=segment_movers_warmed,
+        segment_movers_failed=segment_movers_failed,
         prebuild_built=prebuild.symbols_built if prebuild is not None else None,
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),

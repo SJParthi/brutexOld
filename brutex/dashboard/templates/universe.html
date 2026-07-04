@@ -976,6 +976,22 @@ function spotSeg(label, dim) {
   return '<span class="seg"><span class="k">' + label + '</span> <span class="' + cls + '">'
     + span + " " + flag + "</span></span>";
 }
+/* Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
+   "open subst N/M" — N of the symbol's M stored 1-minute sessions have their FIRST
+   present minute after the 09:15 IST canonical open, so those sessions' DERIVED
+   1-day open is the earliest-present-minute substitute, not the canonical open
+   price. INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
+   Both operands are coerced via Number() BEFORE interpolation so the fragment can
+   only ever carry digits/NaN, never markup (XSS guard). */
+function openSubSeg(dim) {
+  const n = Number((dim && dim.open_substituted_days) || 0);
+  const m = Number((dim && dim.session_days) || 0);
+  if (!(n > 0)) {
+    return '<span class="seg"><span class="k">open subst</span> <span class="dim">—</span></span>';
+  }
+  return '<span class="seg"><span class="k">open subst</span> <span class="warn">'
+    + n + "/" + m + "</span></span>";
+}
 function optSeg(opt) {
   if (!opt || opt.status === "none") {
     return '<span class="seg"><span class="k">opt</span> <span class="dim">—</span></span>';
@@ -992,9 +1008,10 @@ function covStrip(i) {
   if (!c) return '<div class="cov"><span class="dim">completeness: not pulled yet</span></div>';
   const s = c.spot || {};
   // 1-minute is the SINGLE fetched granularity (1-day is DERIVED from it,
-  // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — only the 1-minute segment is shown.
+  // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — only the 1-minute segment is shown,
+  // plus its daily-open substitution tally (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
   return '<div class="cov">'
-    + spotSeg("1m", s["1minute"]) + optSeg(c.options)
+    + spotSeg("1m", s["1minute"]) + openSubSeg(s["1minute"]) + optSeg(c.options)
     + "</div>";
 }
 

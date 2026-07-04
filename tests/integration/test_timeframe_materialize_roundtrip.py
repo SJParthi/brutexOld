@@ -137,9 +137,32 @@ def test_materialize_is_idempotent(tmp_path: Path) -> None:
     files = sorted(part_dir.rglob("*.parquet"))
     first_bytes = {p: p.read_bytes() for p in files}
 
-    # Re-run: same 1m source → same derived 5m → ZERO net-new rows, byte-identical.
-    again = _materialize_5m(tmp_path)
-    assert again == 24  # the writer still reports the rows it merged
+    # Re-run: same 1m source → the INCREMENTAL stamp skips the whole derive
+    # (DEC-PREBUILD-INCREMENTAL-001; the lake state is byte-identical below).
+    again = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+    )
+    assert again.unchanged is True
+    assert again.written == {}
+
+    # A FORCED full re-run (incremental=False) is still idempotent: the writer
+    # merges the same 24 rows and the files stay byte-identical.
+    forced = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        incremental=False,
+    )
+    assert forced.unchanged is False
+    assert forced.written["5m"] == 24  # the writer still reports the rows it merged
 
     files_after = sorted(part_dir.rglob("*.parquet"))
     assert files_after == files, "idempotent re-run must not add partition files"

@@ -786,10 +786,11 @@ def test_pull_pipeline_gates_movers_during_prebuild_only(
             body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
             assert body["gated"] is True
             assert body["phase"] == "prebuild"
-            assert isinstance(body["started_at"], float)
+            assert isinstance(body["started_at_epoch"], float)
             assert isinstance(body["gated_for_s"], float)
             assert body["gated_for_s"] >= 0.0
-            assert "prebuild in progress" in body["note"]
+            assert "pull pipeline running" in body["note"]
+            assert "(current stage: prebuild)" in body["note"]
             assert compute_calls == []  # ZERO lake-reading computation while gated
         finally:
             proceed.set()
