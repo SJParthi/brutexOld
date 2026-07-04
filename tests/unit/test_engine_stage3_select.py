@@ -278,6 +278,33 @@ class TestHeapEntryOrdering:
     # the dataclass __eq__ (the sweep_parallel._Outcome discipline). The
     # total-order identities (a<=b ≡ not b<a; a>b ≡ b<a) hold ONLY because
     # unique seq makes the order strict + total — pinned per key tier below.
+    #
+    # Discipline: every operator is OBSERVED into a plain bool by
+    # _relations() and the whole truth-table asserted at once. Chaining
+    # operator ASSERTS on one pair (assert a == b; assert a <= b; …) is
+    # statically provable under standard total-order semantics — CodeQL
+    # py/redundant-comparison — yet EARNING those semantics at runtime is
+    # the very property under test, so the table must be observed as data,
+    # never implied by an earlier assert on the same operands.
+
+    # _relations() truth-tables — (==, !=, <, <=, >, >=) for (left, right).
+    _EQUAL = (True, False, False, True, False, True)
+    _WORSE = (False, True, True, True, False, False)  # left strictly worse
+    _BETTER = (False, True, False, False, True, True)  # left strictly better
+
+    @staticmethod
+    def _relations(
+        left: _HeapEntry, right: _HeapEntry
+    ) -> tuple[bool, bool, bool, bool, bool, bool]:
+        """Observe all six rich comparisons of ``(left, right)`` as data."""
+        return (
+            left == right,
+            left != right,
+            left < right,
+            left <= right,
+            left > right,
+            left >= right,
+        )
 
     def _ordered_pairs(self) -> list[tuple[_HeapEntry, _HeapEntry]]:
         """(worse, better) pairs exercising EVERY tie-break tier of the key."""
@@ -289,44 +316,37 @@ class TestHeapEntryOrdering:
 
     def test_reflexivity_on_field_equal_twins(self) -> None:
         # Distinct objects, identical fields: == is dataclass field equality,
-        # so the derived operators must read equal-not-ordered.
+        # so every operator must read equal-not-ordered — in BOTH operand
+        # orders (reflexivity of ==/<=/>=, irreflexivity of </>).
         a = self._entry(1.0, _rid(1), 3)
         twin = self._entry(1.0, _rid(1), 3)
-        assert a == twin
-        assert a <= twin
-        assert twin <= a
-        assert a >= twin
-        assert twin >= a
-        assert not a < twin and not twin < a
-        assert not a > twin and not twin > a
+        assert self._relations(a, twin) == self._EQUAL
+        assert self._relations(twin, a) == self._EQUAL
 
     def test_derived_operators_agree_with_lt_on_every_tier(self) -> None:
         # For each strictly-ordered pair, EVERY derived operator must agree
         # with the total-order identities: a>b ≡ b<a, a<=b ≡ not b<a,
-        # a>=b ≡ not a<b — and antisymmetry must hold.
+        # a>=b ≡ not a<b. The two observed rows jointly pin antisymmetry
+        # (< holds in exactly ONE direction) and strict-pair inequality.
         for worse, better in self._ordered_pairs():
-            assert worse < better
-            assert not better < worse  # antisymmetry of the strict order
-            assert better > worse and not worse > better  # a>b ≡ b<a
-            assert worse <= better and not better <= worse  # a<=b ≡ not b<a
-            assert better >= worse and not worse >= better  # a>=b ≡ not a<b
-            assert worse != better  # a strict pair is never equal
+            assert self._relations(worse, better) == self._WORSE
+            assert self._relations(better, worse) == self._BETTER
 
     def test_incomparability_coincides_with_equality_via_unique_seq(self) -> None:
         # not(a<b) and not(b<a) ⇒ a == b — true on the production domain
         # ONLY because seq is unique per input row: any two distinct entries
         # differ somewhere in the (sharpe, run_id, seq) key, so the sole
-        # incomparable case is the field-equal twin.
+        # incomparable case is the field-equal twin. Observed as one vector
+        # so equality is ASSERTED alongside the two strict directions, never
+        # statically implied by them.
         a = self._entry(1.0, _rid(1), 3)
         twin = self._entry(1.0, _rid(1), 3)
-        assert not a < twin and not twin < a
-        assert a == twin
+        assert (a < twin, twin < a, a == twin) == (False, False, True)
         # Differing ONLY in seq (a full (sharpe, run_id) tie): totality —
-        # exactly one strict direction holds, and the pair is never equal.
+        # exactly one strict direction holds (the LATER insertion is worse,
+        # the stable-sort tie rule) and the pair is never equal.
         b = self._entry(1.0, _rid(1), 4)
-        assert (a < b) != (b < a)
-        assert a != b
-        assert b < a  # later insertion is worse (the stable-sort tie rule)
+        assert (a < b, b < a, a == b, a != b) == (False, True, False, True)
 
 
 class TestGoldenEqualityVsReference:
