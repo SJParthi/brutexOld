@@ -190,12 +190,12 @@ class TestSubmitWedgeGate:
         keepalive = _keepalive(tmp_path)
         keepalive._mark_wedged(OSError("spun down"))
         pipeline = FetchPipeline(workers=1, keepalive=keepalive)
-        raised: list[BaseException] = []
+        raised: list[LakeWriteHalt] = []
 
         def _submit() -> None:
             try:
                 pipeline.submit(_result("NSE|NIFTY|1minute", lambda _t: None))
-            except BaseException as exc:
+            except LakeWriteHalt as exc:
                 raised.append(exc)
 
         try:

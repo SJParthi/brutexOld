@@ -421,7 +421,9 @@ class VolumeKeepalive:
 
     def _default_probe(self) -> None:
         """The real probe: open, write 1 byte, ``fsync``, close (all on the lake volume)."""
-        fd = os.open(self._probe_path, os.O_CREAT | os.O_WRONLY, 0o644)
+        # 0o600 — owner-only: the probe file is a private liveness sidecar, never
+        # world-readable (matches the partition-lock / singleflight sidecar mode).
+        fd = os.open(self._probe_path, os.O_CREAT | os.O_WRONLY, 0o600)
         try:
             os.write(fd, b"k")
             os.fsync(fd)

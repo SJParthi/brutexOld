@@ -13,6 +13,7 @@ probe), the wedge edge-latch (ONE ``wedged`` WARNING per episode + the
 
 from __future__ import annotations
 
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -182,6 +183,9 @@ class TestProbeAndLatch:
         assert not keepalive.wedged.is_set()
         assert keepalive.wedged_seconds() == 0.0
         assert (tmp_path / PROBE_FILENAME).read_bytes() == b"k"
+        # Owner-only mode pin (CodeQL: never group/world-readable) — 0o600 create.
+        mode = stat.S_IMODE((tmp_path / PROBE_FILENAME).stat().st_mode)
+        assert mode & 0o077 == 0, f"probe file leaks group/world bits: {oct(mode)}"
 
     def test_raising_probe_marks_wedged_once_per_episode(self, tmp_path: Path) -> None:
         """An OSError probe wedges; the WARNING is edge-latched to ONE per episode."""
