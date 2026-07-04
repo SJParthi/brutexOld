@@ -177,49 +177,78 @@ const liveTxt = document.getElementById("livetxt");
 
 function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 
+/* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): each of the 4
+   endpoints keeps the RAW response text it last rendered; an identical body
+   skips that block's JSON.parse + DOM writes (per-endpoint, because the 4
+   payloads change independently). Client-side compare only — the payloads
+   carry no generation/etag field (backend frozen). A fetch error or a non-ok
+   response resets that endpoint's memo so the next good body always renders.
+   The liveTxt heartbeat below still updates every tick. */
+const lastPayload = { opt: null, spot: null, win: null, cmp: null };
+/* No-op-preserving write guard: only touch the DOM when the text actually
+   changed (belt-and-braces for the mixed case where one endpoint changed
+   and another did not). */
+function setText(el, s) { s = String(s); if (el.textContent !== s) el.textContent = s; }
+
 async function poll() {
   let ok = 0;
   try {
     const r = await fetch("/api/v1/coverage/options");
     if (r.ok) {
-      const h = (await r.json()).headline || {};
-      ulEl.textContent = h.underlyings ?? "—";
-      serEl.textContent = num(h.series);
-      cOpt.textContent = num(h.underlyings) + " underlyings · " + num(h.total_bars) + " bars";
+      const txt = await r.text();
+      if (txt !== lastPayload.opt) {
+        lastPayload.opt = txt;
+        const h = JSON.parse(txt).headline || {};
+        setText(ulEl, h.underlyings ?? "—");
+        setText(serEl, num(h.series));
+        setText(cOpt, num(h.underlyings) + " underlyings · " + num(h.total_bars) + " bars");
+      }
       ok++;
-    }
-  } catch (e) { cOpt.textContent = "offline"; }
+    } else { lastPayload.opt = null; }
+  } catch (e) { lastPayload.opt = null; cOpt.textContent = "offline"; }
   try {
     const r = await fetch("/api/v1/coverage/spot");
     if (r.ok) {
-      const h = (await r.json()).headline || {};
-      spotdsEl.textContent = num(h.datasets);
-      cSpot.textContent = num(h.datasets) + " datasets · " + num(h.total_bars) + " bars";
+      const txt = await r.text();
+      if (txt !== lastPayload.spot) {
+        lastPayload.spot = txt;
+        const h = JSON.parse(txt).headline || {};
+        setText(spotdsEl, num(h.datasets));
+        setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars");
+      }
       ok++;
-    }
-  } catch (e) { cSpot.textContent = "offline"; }
+    } else { lastPayload.spot = null; }
+  } catch (e) { lastPayload.spot = null; cSpot.textContent = "offline"; }
   try {
     const r = await fetch("/api/v1/coverage/windows");
     if (r.ok) {
-      const b = await r.json();
-      wincEl.textContent = num(b.count);
-      cWin.textContent = num(b.count) + " windows recorded";
+      const txt = await r.text();
+      if (txt !== lastPayload.win) {
+        lastPayload.win = txt;
+        const b = JSON.parse(txt);
+        setText(wincEl, num(b.count));
+        setText(cWin, num(b.count) + " windows recorded");
+      }
       ok++;
-    }
-  } catch (e) { cWin.textContent = "offline"; }
+    } else { lastPayload.win = null; }
+  } catch (e) { lastPayload.win = null; cWin.textContent = "offline"; }
   try {
     const r = await fetch("/api/v1/completeness/scoreboard");
     if (r.ok) {
-      const b = await r.json();
-      const idx = (b.spot && b.spot.by_category && b.spot.by_category.index) || {};
-      const eq = (b.spot && b.spot.by_category && b.spot.by_category.equity) || {};
-      // 1-minute is the SINGLE fetched granularity (1-day is DERIVED from it,
-      // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — "full" = full 1-minute.
-      cCmp.textContent = num(idx.full_1minute) + "/" + num(idx.total) + " indices · "
-        + num(eq.full_1minute) + "/" + num(eq.total) + " equities full";
+      const txt = await r.text();
+      if (txt !== lastPayload.cmp) {
+        lastPayload.cmp = txt;
+        const b = JSON.parse(txt);
+        const idx = (b.spot && b.spot.by_category && b.spot.by_category.index) || {};
+        const eq = (b.spot && b.spot.by_category && b.spot.by_category.equity) || {};
+        // 1-minute is the SINGLE fetched granularity (1-day is DERIVED from it,
+        // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — "full" = full 1-minute.
+        setText(cCmp, num(idx.full_1minute) + "/" + num(idx.total) + " indices · "
+          + num(eq.full_1minute) + "/" + num(eq.total) + " equities full");
+      }
       ok++;
-    }
-  } catch (e) { cCmp.textContent = "offline"; }
+    } else { lastPayload.cmp = null; }
+  } catch (e) { lastPayload.cmp = null; cCmp.textContent = "offline"; }
   liveTxt.textContent = ok === 4 ? "live · 4 surfaces" : "partial · " + ok + "/4";
 }
 

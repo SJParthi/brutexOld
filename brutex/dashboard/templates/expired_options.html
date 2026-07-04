@@ -179,16 +179,34 @@ function renderRows(rows) {
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 
+/* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the coverage
+   payload's raw text last rendered — an identical body skips the 3 KPI writes
+   + renderRows (client-side compare only; the payload carries no
+   generation/etag field, backend frozen). The pull-progress fetch + the
+   liveTxt heartbeat stay OUTSIDE the gate (they encode live pull state, not
+   the coverage payload); the last headline/row-count are kept so the skipped
+   tick's liveTxt line stays honest. null after any error so the next good
+   body always renders. */
+let lastCoverageTxt = null;
+let lastHeadline = {};
+let lastRowCount = 0;
+
 async function poll() {
   try {
     const r = await fetch("/api/v1/coverage/options");
-    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
-    const body = await r.json();
-    const h = body.headline || {};
-    ulEl.textContent = h.underlyings ?? "—";
-    serEl.textContent = num(h.series);
-    barzEl.textContent = num(h.total_bars);
-    renderRows(body.rows || []);
+    if (!r.ok) { lastCoverageTxt = null; liveTxt.textContent = "error " + r.status; return; }
+    const txt = await r.text();
+    if (txt !== lastCoverageTxt) {
+      lastCoverageTxt = txt;
+      const body = JSON.parse(txt);
+      lastHeadline = body.headline || {};
+      lastRowCount = (body.rows || []).length;
+      ulEl.textContent = lastHeadline.underlyings ?? "—";
+      serEl.textContent = num(lastHeadline.series);
+      barzEl.textContent = num(lastHeadline.total_bars);
+      renderRows(body.rows || []);
+    }
+    const h = lastHeadline;
     let running = false;
     try {
       const pr = await fetch('/api/v1/universe/pull-progress');
@@ -196,8 +214,9 @@ async function poll() {
     } catch (e) { running = false; }
     liveTxt.textContent = running
       ? "pulling · " + num(h.series) + " series · " + num(h.total_bars) + " bars"
-      : "live · " + (body.rows || []).length + " underlyings";
+      : "live · " + lastRowCount + " underlyings";
   } catch (e) {
+    lastCoverageTxt = null;
     liveTxt.textContent = "offline";
   }
 }
