@@ -3281,6 +3281,9 @@ def build_app(
                         ),
                         materialize=_materialize,
                         source="pipeline",
+                        # Allocation probe at the tiny-file writer's start
+                        # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
+                        lake_root=lake_root,
                     )
                 finally:
                     # New derived partitions may be on disk (even a partial run —
