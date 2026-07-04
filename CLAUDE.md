@@ -266,7 +266,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/stoic-hawking-9g6622` (**DEC-GREEKS-CORRECTNESS-AUDIT-001, MIGRATION.md #1187** —
+- **Active branch:** `claude/stoic-hawking-9g6622` (**DEC-GREEKS-CORRECTNESS-AUDIT-001, MIGRATION.md #1188** —
   the 7-lens adversarial correctness audit of the Greeks enrichment value chain
   (`brutex/data/greeks_enrich.py` + `brutex/options/risk_free.py`) + its fix round. AUDITED CLEAN: the
   near-expiry `T_FLOOR` boundary · kernel failure-band recovery · provenance pack/unpack losslessness
