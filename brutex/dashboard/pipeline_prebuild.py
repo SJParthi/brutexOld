@@ -117,6 +117,14 @@ class PrebuildOutcome:
         "ran, built 0" and "CRASHED before building anything" are honestly
         distinguishable in the pipeline note (Golden Rule #1). A pull-wide
         global-stop never sets this — it RE-RAISES out of the guard instead.
+    unchanged_skips
+        How many symbols the incremental derive SKIPPED because their 1-minute
+        source was unchanged since the last stamped derive
+        (DEC-PREBUILD-INCREMENTAL-001 — ``MaterializeResult.unchanged``). A
+        skipped symbol still counts in ``symbols_built`` (its derived data is
+        present + current); this tally makes the saved work visible in the
+        done-log + the pipeline note instead of masquerading as "built with 0
+        bars".
     fs_note
         The one-line COARSE-allocation warning from the lake-root probe
         (DEC-LAKE-FS-PROBE-001 — the prebuild writes ~0.5-1M tiny Parquet
@@ -133,6 +141,7 @@ class PrebuildOutcome:
     ok: bool
     crashed: str | None = None
     fs_note: str | None = None
+    unchanged_skips: int = 0
 
 
 def run_pipeline_prebuild(
@@ -211,8 +220,24 @@ def run_pipeline_prebuild(
         fs_allocation=fs_note if fs_note is not None else "ok",
     )
 
+    unchanged_skips = 0
+
+    def _tracked(target: PrebuildTarget) -> MaterializeResult:
+        """Run the injected materialiser, tallying incremental unchanged-skips.
+
+        DEC-PREBUILD-INCREMENTAL-001: an ``unchanged=True`` result read+wrote
+        nothing (the symbol's 1-minute source was byte-identical to its stamp)
+        — count it so the done-log + pipeline note can report the saved work
+        honestly (never a fake "built 0 bars").
+        """
+        nonlocal unchanged_skips
+        result = materialize(target)
+        if result.unchanged:
+            unchanged_skips += 1
+        return result
+
     def _materialize_spot(inst: Instrument) -> MaterializeResult:
-        return materialize(
+        return _tracked(
             PrebuildTarget(
                 exchange=inst.exch_id.value,
                 segment=inst.segment.value,
@@ -222,7 +247,7 @@ def run_pipeline_prebuild(
         )
 
     def _materialize_contract(symbol: str, kind: PrebuildKind) -> MaterializeResult:
-        return materialize(
+        return _tracked(
             PrebuildTarget(
                 exchange=contract_exchange[symbol],
                 segment=fno_segment,
@@ -261,12 +286,14 @@ def run_pipeline_prebuild(
         failed_count=len(failed_names),
         ok=report.ok,
         fs_note=fs_note,
+        unchanged_skips=unchanged_skips,
     )
     _LOG.info(
         "pipeline.prebuild.done",
         symbols_built=outcome.symbols_built,
         total_bars=outcome.total_bars,
         failed_count=outcome.failed_count,
+        unchanged_skips=outcome.unchanged_skips,
         duration_s=round(time.monotonic() - started, 3),
     )
     return outcome
