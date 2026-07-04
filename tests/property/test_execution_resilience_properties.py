@@ -40,6 +40,13 @@ from brutex.strategies.types import Side
 from hypothesis import given
 from hypothesis import strategies as st
 
+# The dormant IndianCostModel is deprecated (R2-OC-8): constructing it (directly
+# or via ExecutionSimulator's default cost model) emits a DeprecationWarning.
+# This legacy suite exercises the FROZEN dormant stack, so the warning is
+# expected here — ignore it (message-scoped) instead of failing under the
+# repo-wide ``filterwarnings = error`` gate.
+pytestmark = pytest.mark.filterwarnings("ignore:IndianCostModel:DeprecationWarning")
+
 _SYMBOL = "NSE-NIFTY"
 _EPOCH = datetime(2024, 1, 1, 9, 15, 0, tzinfo=UTC)
 

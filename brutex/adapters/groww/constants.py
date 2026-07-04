@@ -258,6 +258,72 @@ GROWW_HTTP_READ_TIMEOUT_S: Final[float] = 30.0
 #: (env ``BRUTEX_GROWW_WRITE_DEADLINE_S``).
 GROWW_WRITE_DEADLINE_S: Final[float] = 90.0
 
+# ── Vendor-down error-storm breaker + dead-credential escalation ──────────────
+# DEC-VENDOR-DOWN-BREAKER-001 (:mod:`brutex.adapters.error_storm_breaker`). Every
+# threshold below is an OPERATOR-TUNABLE HEURISTIC over response shapes — NOT a
+# vendor-documented limit (Golden Rule #1/#10: Groww documents no outage/credential
+# semantics; ``docs/groww/api-reference/01-introduction.md`` covers only rate
+# limits). They calibrate "how much sustained, success-free transport failure
+# reads as a vendor outage / dead credential", nothing about Groww itself.
+
+#: Minimum DISTINCT symbols the current zero-success transport-failure storm must
+#: span before the vendor-down breaker may trip. ONE symbol failing every window
+#: (a delisted / mis-addressed name) is a per-symbol problem — the quarantine
+#: handles it; a real vendor outage fails EVERY in-flight symbol alike, so 3 keeps
+#: a single-symbol blip from ever halting a pull. The F&O spine feeds the
+#: contract's UNDERLYING symbol (not the per-strike contract symbol), so one
+#: underlying's whole multi-contract chain failing alone can never satisfy this
+#: floor either — the guarantee is per underlying on both spines. Heuristic;
+#: env-overridable (:data:`GROWW_STORM_MIN_SYMBOLS_ENV`).
+GROWW_STORM_MIN_DISTINCT_SYMBOLS: Final[int] = 3
+
+#: Minimum DISTINCT ladder-exhausted, zero-success transport-failure windows
+#: before the vendor-down breaker may trip. Each counted window means one window's
+#: WHOLE bounded retry ladder was spent (the client's 6-attempt fast-retry — every
+#: attempt failing), and each window counts at most ONCE per pull (dedupe on the
+#: ledger window identity — a retry pass / until-clean round / resume stream
+#: re-observing the SAME failed window never re-counts it, so a few sticky
+#: windows can never fake a storm), so 25 distinct all-failed windows with zero
+#: successes ≈ 150+ failed vendor calls — far past any blip the AIMD ladder
+#: absorbs. TIMING honesty (Golden Rule #10): reached within seconds under a
+#: FAST-FAIL outage shape (connection refused / instant 5xx) at the production
+#: ceiling; a read-timeout-shaped outage burns the full client timeout ladder per
+#: window, so the trip can take tens of minutes there. ANY success resets the
+#: count, so a mixed pull can never trip. Heuristic; env-overridable
+#: (:data:`GROWW_STORM_MIN_FAILURES_ENV`).
+GROWW_STORM_MIN_FAILED_WINDOWS: Final[int] = 25
+
+#: Minimum CONSECUTIVE :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError`
+#: ladder-exhausted outcomes (zero adopted-token successes in between) before the
+#: dead-credential escalation may trip. A healthy 06:00-IST rotation surfaces a
+#: handful of StillStale deferrals until the Lambda's ~06:05 mint lands; 8
+#: consecutive with no adopted-token success is past that shape. Heuristic;
+#: env-overridable (:data:`GROWW_CREDENTIAL_DEAD_STREAK_ENV`).
+GROWW_CREDENTIAL_DEAD_STREAK: Final[int] = 8
+
+#: Minimum MINUTES the StillStale streak must span (first → latest observation,
+#: measured on an injected monotonic clock) before the dead-credential escalation
+#: may trip — the time gate that separates "the Lambda mints a few minutes late"
+#: (self-heals) from "the broker/credential is DEAD" (operator action). 10 min is
+#: ~2× the observed healthy 06:00→~06:05 mint lag. Heuristic; env-overridable
+#: (:data:`GROWW_CREDENTIAL_DEAD_MINUTES_ENV`).
+GROWW_CREDENTIAL_DEAD_MIN_MINUTES: Final[float] = 10.0
+
+#: Env override for :data:`GROWW_STORM_MIN_DISTINCT_SYMBOLS` (int; ``<= 0`` → any).
+GROWW_STORM_MIN_SYMBOLS_ENV: Final[str] = "BRUTEX_STORM_BREAKER_MIN_SYMBOLS"
+#: Env override for :data:`GROWW_STORM_MIN_FAILED_WINDOWS` (int; ``<= 0`` disables
+#: the vendor-down rule).
+GROWW_STORM_MIN_FAILURES_ENV: Final[str] = "BRUTEX_STORM_BREAKER_MIN_FAILURES"
+#: Env override for :data:`GROWW_CREDENTIAL_DEAD_STREAK` (int; ``<= 0`` disables
+#: the dead-credential rule).
+GROWW_CREDENTIAL_DEAD_STREAK_ENV: Final[str] = "BRUTEX_CREDENTIAL_DEAD_STREAK"
+#: Env override for :data:`GROWW_CREDENTIAL_DEAD_MIN_MINUTES` (float minutes;
+#: ``0`` removes the time gate — pure streak; negative/invalid falls back).
+GROWW_CREDENTIAL_DEAD_MINUTES_ENV: Final[str] = "BRUTEX_CREDENTIAL_DEAD_MINUTES"
+#: Kill switch: ``BRUTEX_ERROR_STORM_BREAKER=off|0|false|no`` disables BOTH
+#: mechanisms entirely (observations no-op, never trips). Default ON.
+GROWW_ERROR_STORM_ENABLED_ENV: Final[str] = "BRUTEX_ERROR_STORM_BREAKER"
+
 #: Default number of INDEPENDENT Groww SDK connections the live spot pull fans its worker
 #: threads across (DEC-GROWW-CLIENT-POOL-001 — the multi-connection
 #: :class:`~brutex.adapters.groww.pool.ClientPool`). 1 = today's exact single-connection
@@ -335,6 +401,45 @@ GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS: Final[int] = 3
 GROWW_TOKEN_ISSUANCE_RETRY_BASE_S: Final[float] = 1.0
 #: Per-attempt cap (seconds) for the cold-start issuance back-off sleep.
 GROWW_TOKEN_ISSUANCE_RETRY_CAP_S: Final[float] = 4.0
+
+# ── Token-stale fetch-lane PAUSE (DEC-TOKEN-STALE-PAUSE-001) ──────────────────
+#: Wall-clock bound (seconds) the fetch lane WAITS for the read-only token broker
+#: to hold a fresh token before a :class:`~brutex.adapters.groww.errors.\
+#: GrowwTokenStillStaleError` is allowed to propagate. Forensically calibrated:
+#: the operator's real 2026-07-04 overnight run measured the 06:00-IST reset →
+#: external-Lambda mint lag at 5 m 31 s (331 s) — during which the F&O window
+#: ladder burned all its attempts on 111 windows (339 failed calls) that the
+#: until-clean rounds then had to rescue. 420 s (7 min) covers that observed
+#: worst case with margin while staying WELL under the 600 s pull watchdog; the
+#: wait additionally beats the progress-beat seam so the watchdog can never
+#: false-fire during it. A dead broker still fails LOUDLY: once the (shared,
+#: per-generation) deadline expires the error propagates exactly as before —
+#: the window defers FAILED and the dead-credential escalation
+#: (DEC-VENDOR-DOWN-BREAKER-001) still applies. HONEST trade (Golden Rule
+#: #10): because the whole pool spends AT MOST ONE such pause per stale
+#: generation, a GENUINELY dead broker's ``GrowwCredentialDeadError``
+#: escalation is DELAYED by at most one :data:`GROWW_TOKEN_STALE_WAIT_S`
+#: (~420 s — the worst-case time-to-halt moves from the breaker's ~600 s
+#: streak-span floor to ~1020 s wall-clock) — deliberate, bounded, and
+#: disclosed, bought so a HEALTHY 06:00 rotation never burns window
+#: attempts. Cosmetic side-effect: a worker sleeping in the pause still
+#: holds its in-flight call-meter slot (``meter.start`` fired before the
+#: auth error surfaced), so the ``in_flight`` gauge reads elevated during a
+#: pause; the achieved-rps completed-rate is NOT inflated (a paused attempt
+#: never records ``completed``). NOT a vendor limit — an operator-tunable
+#: pause bound (env :data:`GROWW_TOKEN_STALE_WAIT_ENV`).
+GROWW_TOKEN_STALE_WAIT_S: Final[float] = 420.0
+#: Env override for :data:`GROWW_TOKEN_STALE_WAIT_S` (float seconds; ``0``
+#: explicitly DISABLES the pause — byte-identical to the pre-gate behaviour;
+#: blank / non-numeric / non-finite / negative falls back to the default).
+GROWW_TOKEN_STALE_WAIT_ENV: Final[str] = "BRUTEX_GROWW_TOKEN_STALE_WAIT_S"  # noqa: S105  # env var name, not a secret
+#: Poll cadence (seconds) between fresh-token checks during the stale-wait.
+#: ONE waiter per pool (the leader) does ONE broker re-read per tick — never a
+#: per-thread SSM stampede; the others only poll the in-process generation.
+GROWW_TOKEN_STALE_POLL_S: Final[float] = 5.0
+#: Bounded structlog cadence (seconds) for the ``groww.token.stale_wait`` event
+#: — ONE event per pool per interval, however many threads are waiting.
+GROWW_TOKEN_STALE_LOG_EVERY_S: Final[float] = 30.0
 
 # ── Shared token broker (DEC-TOKEN-BROKER-AWS-001 / DEC-AWS-ONLY-CREDS-001) ───
 # The operator's FINAL design: the Groww api_key, TOTP secret AND the daily minted
@@ -458,8 +563,13 @@ __all__ = [
     "EXPECTED_FNO_STOCK_COUNT",
     "GROWW_CLIENT_POOL_MAX",
     "GROWW_CLIENT_POOL_SIZE",
+    "GROWW_CREDENTIAL_DEAD_MINUTES_ENV",
+    "GROWW_CREDENTIAL_DEAD_MIN_MINUTES",
+    "GROWW_CREDENTIAL_DEAD_STREAK",
+    "GROWW_CREDENTIAL_DEAD_STREAK_ENV",
     "GROWW_CSV_ALLOWED_HOST",
     "GROWW_DAILY_QUOTA_UNVERIFIED",
+    "GROWW_ERROR_STORM_ENABLED_ENV",
     "GROWW_EXCHANGES",
     "GROWW_FUTURE_COVERAGE_MARKET",
     "GROWW_HTTP_CONNECT_TIMEOUT_S",
@@ -475,6 +585,10 @@ __all__ = [
     "GROWW_RATE_LIMIT_RPS_UNVERIFIED",
     "GROWW_SEGMENTS",
     "GROWW_SMOOTH_PACING_ENV",
+    "GROWW_STORM_MIN_DISTINCT_SYMBOLS",
+    "GROWW_STORM_MIN_FAILED_WINDOWS",
+    "GROWW_STORM_MIN_FAILURES_ENV",
+    "GROWW_STORM_MIN_SYMBOLS_ENV",
     "GROWW_TOKEN_AWS_REGION_DEFAULT",
     "GROWW_TOKEN_AWS_REGION_ENV",
     "GROWW_TOKEN_CACHE_FILENAME",
@@ -491,6 +605,10 @@ __all__ = [
     "GROWW_TOKEN_PARAM_TOTP_SECRET_ENV",
     "GROWW_TOKEN_RESET_HOUR_ENV",
     "GROWW_TOKEN_RESET_HOUR_IST",
+    "GROWW_TOKEN_STALE_LOG_EVERY_S",
+    "GROWW_TOKEN_STALE_POLL_S",
+    "GROWW_TOKEN_STALE_WAIT_ENV",
+    "GROWW_TOKEN_STALE_WAIT_S",
     "GROWW_WRITE_DEADLINE_S",
     "INDIA_VIX_SYMBOL",
     "INSTRUMENT_CSV_COLUMNS",

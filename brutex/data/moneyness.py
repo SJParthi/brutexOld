@@ -103,7 +103,11 @@ def classify(
     return Moneyness.ITM if diff < 0 else Moneyness.OTM
 
 
-def derive_strike_step(strikes: Iterable[Decimal | None]) -> Decimal | None:
+def derive_strike_step(
+    strikes: Iterable[Decimal | None],
+    *,
+    authoritative_strikes: Iterable[Decimal | None] | None = None,
+) -> Decimal | None:
     """Derive the strike-grid step from a ladder of strikes — the smallest positive gap.
 
     DYNAMIC per ``(underlying, expiry)`` (Golden Rule #1 — never a hardcoded NSE rule):
@@ -113,15 +117,122 @@ def derive_strike_step(strikes: Iterable[Decimal | None]) -> Decimal | None:
     fewer than two distinct strikes exist (a single-strike contract set has no inferable
     grid — the caller then reports ``atm_offset = None`` but still classifies ITM/OTM).
 
+    HONESTY CAVEAT (DEC-MONEYNESS-REGISTRY-STEP-001): the "a wider gap is just a
+    missing strike" reading holds only when *strikes* is the FULL chain. Fed a SPARSE
+    lake-observed subset (e.g. only every 2nd strike's candles were pulled), the min
+    OBSERVED gap itself is an integer multiple of the true base step — an
+    OVERESTIMATE. When the AUTHORITATIVE vendor chain is available (the metadata-pull
+    registry), pass it as *authoritative_strikes*: a chain that yields a step wins,
+    refined over the UNION with the observed ladder (see :func:`resolve_strike_step`);
+    otherwise the observed ladder is the graceful fallback. Callers that must LABEL
+    which source produced the step use :func:`resolve_strike_step` (this function is
+    the back-compat ``step``-only facade over it).
+
     O(K log K) once per ``(underlying, expiry)`` (the sort); the per-bar / per-row
     ``atm_offset`` that consumes the step is O(1).
     """
+    if authoritative_strikes is not None:
+        return resolve_strike_step(strikes, authoritative_strikes=authoritative_strikes).step
     unique = sorted({s for s in strikes if _is_positive_finite(s)})
     if len(unique) < _MIN_DISTINCT_STRIKES:
         return None
     # A distinct, ascending ladder ⇒ every consecutive gap is strictly positive, so the
     # minimum gap IS the base grid step (a wider gap is just a missing strike).
     return min(unique[i + 1] - unique[i] for i in range(len(unique) - 1))
+
+
+class StepConfidence(StrEnum):
+    """How trustworthy the derived strike-grid step is — which ladder produced it.
+
+    A :class:`~enum.StrEnum` so it JSON-serialises to its value (``"registry"``) with
+    no adapter, mirroring :class:`Moneyness`. DEC-MONEYNESS-REGISTRY-STEP-001.
+    """
+
+    #: The step came from the AUTHORITATIVE vendor strike chain (the metadata-pull
+    #: registry) — the full ladder, immune to lake sparsity. NOTE (Golden Rule #1):
+    #: "authoritative" means *vendor-listed as of the last metadata pull*; whether the
+    #: live vendor chain itself is complete is vendor behaviour — UNVERIFIED here.
+    REGISTRY = "registry"
+    #: The step came from the SPARSE lake-observed ladder only (no registry chain
+    #: available) — on a sparsely-pulled expiry it may OVERESTIMATE the true base
+    #: step by an integer factor, so surfaces carry an honest low-confidence marker.
+    OBSERVED = "observed"
+
+
+@dataclass(frozen=True, slots=True)
+class StrikeStepResult:
+    """A derived strike-grid step + the honesty label of the ladder that produced it.
+
+    Attributes
+    ----------
+    step
+        The derived grid step (rupees), or ``None`` when neither ladder had two
+        distinct positive strikes (no grid → no ATM±N offset, bucket still resolves).
+    confidence
+        :attr:`StepConfidence.REGISTRY` when the authoritative chain produced *step*,
+        :attr:`StepConfidence.OBSERVED` when the lake-observed ladder did, and
+        ``None`` when *step* is ``None`` (no step presented → nothing to qualify).
+    """
+
+    step: Decimal | None
+    confidence: StepConfidence | None
+
+
+def resolve_strike_step(
+    observed_strikes: Iterable[Decimal | None],
+    *,
+    authoritative_strikes: Iterable[Decimal | None] | None = None,
+) -> StrikeStepResult:
+    """Resolve the strike-grid step, preferring the AUTHORITATIVE chain, with honesty.
+
+    The ONE confidence-aware step resolver (DEC-MONEYNESS-REGISTRY-STEP-001, CLAUDE.md
+    §11 COMMON — the gap math itself lives only in :func:`derive_strike_step`): when
+    *authoritative_strikes* (the FULL registry chain of the ``(underlying, expiry)``)
+    yields a step, the step derives over the UNION of the chain and the observed
+    ladder (DEC-FNO-HONESTY-PACK-001 — a stale/sparser registry must not overestimate
+    against a vendor-grounded lake strike; see the inline note) and wins with
+    :attr:`StepConfidence.REGISTRY`; otherwise the *observed_strikes* (the sparse
+    lake-observed ladder — today's behaviour, byte-identical step) is the graceful
+    fallback, labelled :attr:`StepConfidence.OBSERVED` so ``/db`` + ``/movers`` never
+    silently present a possibly-overestimated step. No step from either ladder →
+    ``(None, None)``.
+
+    Parameters
+    ----------
+    observed_strikes
+        The lake-observed strike ladder (may be sparse).
+    authoritative_strikes
+        The full vendor-registry strike chain, or ``None`` when no registry is
+        available (a CLI-only-pulled lake / unreadable cache — the caller degrades
+        gracefully, never raising).
+
+    Returns
+    -------
+    StrikeStepResult
+        The step + its :class:`StepConfidence` (``None`` confidence iff no step).
+    """
+    observed = tuple(observed_strikes)
+    if authoritative_strikes is not None:
+        authoritative = tuple(authoritative_strikes)
+        if derive_strike_step(authoritative) is not None:
+            # UNION refinement (DEC-FNO-HONESTY-PACK-001): a lake partition directory
+            # is itself vendor-grounded proof a strike exists (only a real contract
+            # gets candle partitions), so a STALE/SPARSER registry chain (a metadata
+            # pull predating newly-listed strikes) must not OVERESTIMATE the step the
+            # way the sparse-observed direction did. The step derives over the UNION
+            # of both ladders — NOT min(reg_step, obs_step): a cross-ladder gap like
+            # registry {24000, 24100} + observed {24050} only surfaces via the union.
+            # The label stays REGISTRY (both ladders are vendor evidence), and it is
+            # claimed only when the registry chain ITSELF yields a step — a 0/1-strike
+            # chain never launders a purely-observed step into high confidence. The
+            # union is a superset of the chain, so its step here is never None.
+            return StrikeStepResult(
+                derive_strike_step((*authoritative, *observed)), StepConfidence.REGISTRY
+            )
+    observed_step = derive_strike_step(observed)
+    if observed_step is not None:
+        return StrikeStepResult(observed_step, StepConfidence.OBSERVED)
+    return StrikeStepResult(None, None)
 
 
 def atm_offset(strike: Decimal | None, spot: Decimal | None, step: Decimal | None) -> int | None:
@@ -222,8 +333,11 @@ __all__ = [
     "OPTION_PUT",
     "Moneyness",
     "MoneynessView",
+    "StepConfidence",
+    "StrikeStepResult",
     "atm_offset",
     "classify",
     "derive_strike_step",
     "moneyness_view",
+    "resolve_strike_step",
 ]

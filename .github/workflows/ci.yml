@@ -243,7 +243,15 @@ jobs:
     # 25 -> 40 (2026-06-29): the suite re-crossed 25m; the PR-event coverage
     # job was killed at 25:12 mid touched-module gate (reported `cancelled`,
     # tests PASS at 100%). Continues the 2026-06-10 15->25 ratchet.
-    timeout-minutes: 40
+    # 40 -> 60 (2026-07-04, DEC-TOKEN-STALE-PAUSE-001 PR #1107): the merged
+    # tree re-crossed 40m — run 28694858559 job 85102679929 started 04:27:04Z,
+    # cancelled 05:07:17Z (40m13s) MID strict per-module gate (step 10, on
+    # universe_pull) with EVERY executed test green and the whole-package
+    # coverage step already SUCCESS at 100.00%: zero real failures, pure
+    # wall-time growth (the #1102/#1105 sibling merges + this PR's 21 tests).
+    # 60 keeps an honest hang guard with ~45% headroom over the observed
+    # ~40m wall time. Continues the 15->25->40 ratchet.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -430,13 +438,19 @@ jobs:
           # — explicitly engineered for 100% line + branch coverage.
           # This is step 1 of the multi-PR ratchet path to lift the
           # global floor from 90% → 100% (per Golden Rule #12 #1+#2).
+          # DEC-RUST-HARDENING-R2-001 (MIGRATION.md #1166) added the
+          # `check_wheel_freshness` stage whose dedicated suite lives in
+          # `test_doctor_wheel_freshness.py` — the module's covering set
+          # is BOTH files (test_doctor.py alone reads 92% since that
+          # stage landed), so the gate runs them together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_doctor.py
+              tests/unit/test_doctor.py \
+              tests/unit/test_doctor_wheel_freshness.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
@@ -767,8 +781,11 @@ jobs:
           # exercise the urllib transport's success+error paths, worker
           # start/stop lifecycle, queue.Full + queue.Empty branches, and
           # drain's edge cases. Module: 210 stmts, 38 branches, 34 tests.
+          # DEC-DASHBOARD-SECURITY-HYGIENE-001: the notifier lifecycle/dedupe +
+          # config-hygiene code is covered by the two sibling suites added to
+          # the invocation (test_telegram_lifecycle_dedupe + test_telegram_config_hygiene).
           if compgen -G "tests/unit/test_notifications_telegram.py" > /dev/null; then
-            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py
+            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py tests/unit/test_telegram_lifecycle_dedupe.py tests/unit/test_telegram_config_hygiene.py
           else
             echo "(brutex.notifications.telegram test file not present yet — gate inactive)"
           fi
@@ -898,8 +915,14 @@ jobs:
           # quota_tracker two-file compose above). Without it the new
           # recovery code reads 92.76% (lines 421, 661-675 uncovered) under
           # this per-module gate even though the aggregate gate is 100%.
+          # DEC-AUDIT-VERIFY-STREAM-001 (MIGRATION.md #1261): the streaming
+          # verify_chain (public iter_entries + the O(1) torn-tail probe)
+          # ships a dedicated suite, test_orchestrator_audit_stream.py —
+          # composed here so this static pairing carries ALL of audit.py's
+          # covering unit files (the PR #1090/#1096 lesson: a new test file
+          # for a gated module joins that module's static pairing).
           if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
-            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py tests/unit/test_audit_torn_tail.py
+            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py tests/unit/test_audit_torn_tail.py tests/unit/test_orchestrator_audit_stream.py
           else
             echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
           fi
@@ -1020,9 +1043,12 @@ jobs:
           else
             echo "(brutex.vocabulary.describe test file not present yet — gate inactive)"
           fi
-          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests)
+          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests) — since
+          # DEC-RUST-HARDENING-R2-001 (#1166) the module's covering set is
+          # test_doctor.py + test_doctor_wheel_freshness.py (mirrors the
+          # DEC-COV-001 block above; test_doctor.py alone reads 92%).
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
-            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py
+            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
@@ -1032,9 +1058,11 @@ jobs:
           else
             echo "(brutex.costs.types test file not present yet — gate inactive)"
           fi
-          # 19e · brutex.costs.constants (59 stmts, 12 branches; same test)
+          # 19e · brutex.costs.constants (71 stmts, 10 branches; calculator tests
+          #       + the R2-OC-3 regime-table mechanism tests — rate_for_date's
+          #       ValueError guards live in test_costs_regime_table.py)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
-            pytest --cov=brutex.costs.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
+            pytest --cov=brutex.costs.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py tests/unit/test_costs_regime_table.py
           else
             echo "(brutex.costs.constants test file not present yet — gate inactive)"
           fi
@@ -1311,12 +1339,13 @@ jobs:
           else
             echo "(brutex.options.strike_rules test file not present yet — gate inactive)"
           fi
-          # 21e · brutex.options.executor (193 stmts, 50 branches, 38 tests).
+          # 21e · brutex.options.executor (221 stmts, 60 branches).
           #       DEC-OPTIONS-EXECUTOR-001 — the spot-signal → priced-option
-          #       materializer. The unit file alone reaches 100% line+branch;
+          #       materializer. The R2-OC reject-path tests live in
+          #       test_options_executor_rejects.py (both files needed for 100%);
           #       golden + property + integration suites are additional oracles.
           if compgen -G "tests/unit/test_options_executor.py" > /dev/null; then
-            pytest --cov=brutex.options.executor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_executor.py
+            pytest --cov=brutex.options.executor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_executor.py tests/unit/test_options_executor_rejects.py
           else
             echo "(brutex.options.executor test file not present yet — gate inactive)"
           fi
@@ -1661,8 +1690,13 @@ jobs:
           # DEC-CATALOG-RECONCILE-WIRE-001: the lake→catalog reconciler ships at
           # 100% line+branch from the start (read-side fix that makes an
           # already-pulled lake sweep-able with no re-pull).
+          # DEC-LAKE-HEAL-001: the free L1 invariant piggyback (`check_invariants`
+          # branches + the findings/drift paths) is covered by the dedicated
+          # tests/unit/test_catalog_reconcile_invariants.py suite, so this gate
+          # runs BOTH files (same pattern as the pull_controller gate above) —
+          # the base file alone reads 89.47% on the module.
           if compgen -G "tests/unit/test_catalog_reconcile.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py
+            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py tests/unit/test_catalog_reconcile_invariants.py
           else
             echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
           fi
@@ -1748,8 +1782,13 @@ jobs:
           # are covered by tests/unit/test_dashboard_db_ux_pack.py, which MUST
           # join this gate so its coverage of those lines registers (without it
           # the module reads 99.19%).
+          # DEC-COMPLETENESS-FNO-SKIP-001: the FNO-pruned spot verdict scan
+          # (summarize_spot_verdict_datasets + the list_candle_datasets
+          # `intervals` walk filter) is covered by
+          # tests/unit/test_completeness_fno_skip.py, which MUST also join
+          # this gate (without it the module reads 99.74% — lines 935/1241).
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_completeness_fno_skip.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
@@ -1875,7 +1914,7 @@ jobs:
           # (_default_opener) is `# pragma: no cover` (NSE bot-blocks + this
           # build env network-blocks nseindia.com, so it is UNVERIFIABLE in CI).
           if compgen -G "tests/unit/test_nse_constituents.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py
+            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py tests/unit/test_nse_constituents_opener_guard.py
           else
             echo "(brutex.dashboard.nse_constituents test file not present yet — gate inactive)"
           fi

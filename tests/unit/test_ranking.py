@@ -338,6 +338,27 @@ class TestTieBreakDeterminism:
             "tie-break keys on it); duplicate survivor mask(s): [5]"
         )
 
+    def test_duplicate_message_names_only_the_duplicated_mask(self) -> None:
+        # Three survivors: mask 5 twice (the genuine duplicate) plus a UNIQUE
+        # bystander mask 7. The error must list ONLY the duplicated mask —
+        # ``[5]`` — never the unique survivor. Kills the chronic
+        # ``count > 1`` → ``count >= 1`` dupes-filter survivor (mutmut mutant
+        # 190 of the ranking/DSR math pass, DEC-MUTATION-SURVIVOR-KILL-001):
+        # that mutant reports EVERY survivor mask (``[5, 7]``), accusing a
+        # non-duplicated mask — invisible to the existing duplicate test whose
+        # survivors all share one mask (``[5]`` either way).
+        cand = [
+            (5, _m(sharpe_ratio=2.0)),
+            (5, _m(sharpe_ratio=1.0)),
+            (7, _m(sharpe_ratio=1.5)),
+        ]
+        with pytest.raises(ValueError) as exc:
+            rank_combos(cand)
+        assert str(exc.value) == (
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            "tie-break keys on it); duplicate survivor mask(s): [5]"
+        )
+
     def test_duplicate_among_rejected_does_not_raise(self) -> None:
         # The uniqueness check is over the gate SURVIVORS only — a duplicate mask
         # among gate-REJECTED combos never reaches the sort and must NOT raise.
@@ -486,6 +507,20 @@ class TestRankedComboDataclass:
         # sentinel) — pins the default whose line-scoped `pragma: no mutate`
         # (equivalent annotation flip) hides it from mutmut.
         assert self._rc().deflated_sharpe is None
+
+    def test_dsr_n_scope_none_without_deflated_sharpe(self) -> None:
+        # DEC-STATS-GATE-INTEGRITY-001 (R2-SR-F3): no DSR (legacy / abstain /
+        # Stage-3 refined-row construction) ⇒ no scope stamp.
+        assert self._rc().dsr_n_scope is None
+        stage3_style = RankedCombo(mask=1, metrics=_m(), composite_score=0.0, deflated_sharpe=None)
+        assert stage3_style.dsr_n_scope is None
+
+    def test_dsr_n_scope_tuple_with_deflated_sharpe(self) -> None:
+        # A present DSR is ALWAYS the tuple-scoped figure (rank_combos is the
+        # only src site that sets it non-None) — the property derives the
+        # stamp from the value, so the two can never drift.
+        rc = RankedCombo(mask=1, metrics=_m(), composite_score=0.0, deflated_sharpe=0.97)
+        assert rc.dsr_n_scope == "tuple"
 
 
 # ────── risk-efficiency term (DEC-RANKING-RISK-EFFICIENCY-001) ──────
@@ -814,6 +849,19 @@ class TestRankCombosOverfit:
         assert {rc.mask for rc in ranked} == {5, 6, 7}
         # Survivors carry their Deflated Sharpe and it cleared the bar.
         assert all(rc.deflated_sharpe is not None and rc.deflated_sharpe >= 0.95 for rc in ranked)
+
+    def test_dsr_n_scope_tuple_on_every_deflated_survivor(self) -> None:
+        # R2-SR-F3 end-to-end: a deflatable overfit run stamps EVERY ranked
+        # combo "tuple" (deflated_sharpe non-None ⇒ scope tuple); an abstain
+        # run (zero-variance pool) stamps None on every combo.
+        deflated = rank_combos(
+            _sharpe_pool([(1, 0.2), (2, 1.0), (3, 2.0), (4, 2.5), (5, 3.0)]), overfit=self._CFG
+        )
+        assert deflated  # fixture sanity: survivors exist
+        assert all(rc.dsr_n_scope == "tuple" for rc in deflated)
+        abstained = rank_combos(_sharpe_pool([(1, 1.0), (2, 1.0)]), overfit=self._CFG)
+        assert abstained
+        assert all(rc.dsr_n_scope is None for rc in abstained)
 
     def test_all_survivors_rejected_yields_empty(self) -> None:
         # Two low-Sharpe survivors deflated against a high-variance pool (padded by

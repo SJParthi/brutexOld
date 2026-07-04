@@ -20,16 +20,29 @@
 //!
 //! ## Bit-exactness (Golden Rule #4)
 //!
-//! The price→paisa conversion (`_price_to_paisa`, `ROUND_HALF_UP`) and the
-//! timeframe-aware 15:20-IST forced-exit detection (`is_forced_exit_bar`) stay in
-//! Python — the single source of truth (CLAUDE.md §11 COMMON) — and their
-//! pre-computed results (`open/high/low/close` paisa + `is_forced` flags) are
-//! handed to this kernel. The kernel therefore depends on NEITHER the Decimal
-//! rounding rule NOR the IST timezone math (the two functions a port would most
+//! The price→paisa conversion (`_price_to_paisa`, `ROUND_HALF_UP`), the
+//! timeframe-aware 15:20-IST forced-exit detection (`is_forced_exit_bar`) and the
+//! per-bar IST session identity (the bar's IST calendar date — the same key the
+//! session forced-exit resolution uses) stay in Python — the single source of
+//! truth (CLAUDE.md §11 COMMON) — and their pre-computed results
+//! (`open/high/low/close` paisa + `is_forced` flags + `session_idx` day ordinals)
+//! are handed to this kernel. The kernel therefore depends on NEITHER the Decimal
+//! rounding rule NOR the IST timezone math (the functions a port would most
 //! easily get wrong); it reproduces only the Python state machine's branch order,
 //! which it does EXACTLY. For the same `(bars, mask, direction, sl, tp, policy)`
 //! it emits byte-identical trades to `simulate_trades(...)`; a golden cross-check
 //! asserts this field-by-field over hypothesis-generated inputs.
+//!
+//! ## No cross-session pending entry (R2-OC-2)
+//!
+//! A pending entry may only fill on a bar of the SAME session (`session_idx`
+//! equal) it armed on. When the feed steps across a trading-day boundary — the
+//! armed bar was a session's last stored bar — the fill bar's `session_idx`
+//! differs and the pending entry is DROPPED, never filled at the next session's
+//! open (that would be an ~18h-stale fill capturing the overnight gap at zero
+//! slippage). Mirrors the Python walker's `_pending_entry_day` gate exactly.
+//! The session identity of bar `i` derives from bar `i`'s own timestamp, so it
+//! is knowable at bar `i` (P-06: no look-ahead).
 //!
 //! ## Exit precedence (the traps, from the hostile port review)
 //!
@@ -113,6 +126,68 @@ struct OpenPosition {
 /// large Stage-2 batches cross into the rayon-parallel arm.
 const PARALLEL_WORK_THRESHOLD: u64 = 1 << 20;
 
+/// Overflow-safe magnitude ceiling for EVERY paisa value crossing the FFI
+/// boundary into this kernel — the four OHLC price columns (validated at
+/// [`ResidentSweepSim::build`]) AND the SL/TP distances (validated at the
+/// `simulate_masks` / `count_trades` entry) — R2-RC-F1.
+///
+/// Mirrors the sibling trading-core `MAX_ANCHOR_PAISA` idiom
+/// (`rust/trading-core/src/python.rs`): the walker does raw i64 add/sub that,
+/// under the crate's `overflow-checks = true` + `panic = "abort"` release
+/// profile, would `abort()` the WHOLE host interpreter on overflow (SIGABRT,
+/// exit 134 — uncatchable from Python). Constraining every boundary input to
+/// `C = i64::MAX / 8` makes ALL of the hot-loop arithmetic provably
+/// overflow-free, so the loop stays UNGUARDED (no per-bar checked ops) with
+/// the guarantee carried entirely by this boundary validation:
+///
+/// * [`Walker::levels`] — `entry ± d` with `|entry| ≤ C` (a bar open) and
+///   `0 ≤ d ≤ C` → `|level| ≤ 2·C`.
+/// * [`Walker::update_excursion`] — `high − entry` / `entry − low` (or the
+///   `(open, open)` fold) with both operands `|x| ≤ C` → magnitude `≤ 2·C`;
+///   the running-max compares fold no further arithmetic.
+/// * [`Walker::close`] — `pnl = exit − entry` where `exit` is a bar open
+///   (`≤ C`), a bar close (`≤ C`), or an SL/TP level (`≤ 2·C`) →
+///   `|pnl| ≤ 3·C`.
+///
+/// The worst intermediate is therefore `3 · (i64::MAX / 8) < i64::MAX`
+/// (3 operands × max magnitude `C`, with `8·C ≤ i64::MAX`) — provably
+/// panic-free. The ceiling is ≈ 1.15·10¹⁸ paisa = ₹1.15·10¹⁶, astronomically
+/// above any real Indian price in paisa (SENSEX ≈ 8·10⁶), so NO valid input
+/// is ever rejected and every existing golden stays byte-identical.
+const MAX_PRICE_PAISA: i64 = i64::MAX / 8;
+
+/// Validate one boundary price column against [`MAX_PRICE_PAISA`]. Pure
+/// (`Result<_, String>`, NO `PyErr`) so the no-libpython `cargo test` link
+/// exercises every branch; the PyO3 wrappers map the error to `ValueError`.
+fn check_price_column(name: &str, column: &[i64]) -> Result<(), String> {
+    for &v in column {
+        if !(-MAX_PRICE_PAISA..=MAX_PRICE_PAISA).contains(&v) {
+            return Err(format!(
+                "ResidentSweepSim: {name} value {v} out of the overflow-safe range \
+                 [-{MAX_PRICE_PAISA}, {MAX_PRICE_PAISA}] paisa"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an optional SL/TP distance (paisa) at the batch-entry FFI
+/// boundary: non-negative (a negative stop/target DISTANCE is nonsensical —
+/// same stance as trading-core's bps guard) and `≤` [`MAX_PRICE_PAISA`] so
+/// [`Walker::levels`]'s `entry ± d` is bounded per the ceiling's derivation.
+/// `None` (leg disabled) is always valid. Pure — see [`check_price_column`].
+fn check_level_distance(name: &str, distance: Option<i64>) -> Result<(), String> {
+    if let Some(d) = distance {
+        if !(0..=MAX_PRICE_PAISA).contains(&d) {
+            return Err(format!(
+                "ResidentSweepSim: {name} ({d}) out of the overflow-safe range \
+                 [0, {MAX_PRICE_PAISA}] paisa"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Pure-Rust faithful port of `TradeSimWalker` — a forward-only per-bar state
 /// machine. No look-ahead: at bar `i` it reads only `open/high/low/close[i]` and
 /// `is_forced[i]` (plus the entry signal derived from the resident `bar_bits[i]`).
@@ -123,6 +198,11 @@ struct Walker {
     policy: FillPolicy,
     position: Option<OpenPosition>,
     pending_entry: bool,
+    /// The `session_idx` of the bar the pending entry ARMED on — only meaningful
+    /// while `pending_entry` is true. A pending entry may only fill on a bar of
+    /// the SAME session; a differing fill-bar session drops it (R2-OC-2).
+    /// Mirrors the Python walker's `_pending_entry_day`.
+    pending_entry_session: i64,
     /// True iff a next-open exit (SL/TP NEXT_OPEN, or Mode-B signal) is scheduled.
     /// The Python walker stores the reason too, but the emitted trade carries no
     /// reason, so a bool is sufficient + bit-identical.
@@ -138,12 +218,17 @@ impl Walker {
             policy,
             position: None,
             pending_entry: false,
+            pending_entry_session: 0,
             pending_exit: false,
         }
     }
 
     /// (sl_level, tp_level) in paisa for the configured direction — mirrors
     /// `_levels`. BUY: stop below / target above; SELL: stop above / target below.
+    ///
+    /// Deliberately UNGUARDED raw `±` on the hot path: `|entry_price| ≤ C` (a
+    /// boundary-validated bar open) and `0 ≤ d ≤ C`, so `|entry ± d| ≤ 2·C <
+    /// i64::MAX` — see the [`MAX_PRICE_PAISA`] derivation (R2-RC-F1).
     fn levels(&self, entry_price: i64) -> (Option<i64>, Option<i64>) {
         if self.is_buy {
             (
@@ -176,6 +261,11 @@ impl Walker {
 
     /// Fold a `(high, low)` pair into the running MFE/MAE — mirrors
     /// `_update_excursion`. Both stay `>= 0` (max-accumulated from the 0 floor).
+    ///
+    /// Deliberately UNGUARDED raw `−` on the hot path: every operand is a
+    /// boundary-validated bar price (`|x| ≤ C`), so each difference is `≤ 2·C
+    /// < i64::MAX`; the running-max compares do no further arithmetic — see
+    /// the [`MAX_PRICE_PAISA`] derivation (R2-RC-F1).
     fn update_excursion(pos: &mut OpenPosition, is_buy: bool, high_paisa: i64, low_paisa: i64) {
         let (favourable, adverse) = if is_buy {
             (
@@ -234,6 +324,11 @@ impl Walker {
     }
 
     /// Build the trade record + flatten the walker — mirrors `_close`.
+    ///
+    /// Deliberately UNGUARDED raw `−` on the hot path: `|entry| ≤ C` (a
+    /// boundary-validated bar open) and `|exit| ≤ 2·C` (a bar open/close ≤ C,
+    /// or an SL/TP level ≤ 2·C from [`Walker::levels`]), so `|pnl| ≤ 3·C <
+    /// i64::MAX` — see the [`MAX_PRICE_PAISA`] derivation (R2-RC-F1).
     fn close(&mut self, pos: OpenPosition, exit_price_paisa: i64, exit_idx: usize) -> TradeRecord {
         let pnl = if self.is_buy {
             exit_price_paisa - pos.entry_price_paisa
@@ -314,6 +409,7 @@ impl Walker {
     }
 
     /// Advance one bar — mirrors `push`. Returns a trade iff a position closed.
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         open_paisa: i64,
@@ -321,6 +417,7 @@ impl Walker {
         low_paisa: i64,
         idx: usize,
         forced_raw: bool,
+        session: i64,
         entry_signal: bool,
         exit_signal: bool,
     ) -> Option<TradeRecord> {
@@ -329,12 +426,15 @@ impl Walker {
         let need_forced = self.position.is_some() || self.pending_entry;
         let forced = need_forced && forced_raw;
 
-        // (A) Open a pending entry at THIS bar's open (cannot open at/after 15:20;
-        // the pending flag is cleared UNCONDITIONALLY — an entry landing on a
-        // forced bar is dropped).
+        // (A) Open a pending entry at THIS bar's open — only within the SAME
+        // session it armed on (a fill bar on a LATER session is an overnight-gap
+        // fill and is DROPPED, R2-OC-2) and never on a forced bar (cannot open
+        // at/after the session's forced-exit instant). The pending flag is
+        // cleared UNCONDITIONALLY. Mirrors the Python (A) branch exactly.
         if self.position.is_none() && self.pending_entry {
             self.pending_entry = false;
-            if !forced {
+            let same_session = session == self.pending_entry_session;
+            if !forced && same_session {
                 self.open_position(open_paisa, idx);
             }
         }
@@ -354,9 +454,11 @@ impl Walker {
         }
 
         // (C) While flat (and NOT on a bar a trade just closed — the exit bar
-        // consumes the entry signal), arm the next entry.
+        // consumes the entry signal), arm the next entry, recording THIS bar's
+        // session — the fill gate for (A). Knowable at bar `idx` (no look-ahead).
         if self.position.is_none() && closed.is_none() && entry_signal {
             self.pending_entry = true;
+            self.pending_entry_session = session;
         }
 
         closed
@@ -423,6 +525,10 @@ pub struct ResidentSweepSim {
     low: Vec<i64>,
     close: Vec<i64>,
     is_forced: Vec<bool>,
+    /// Per-bar session identity — the bar's IST calendar-date ordinal, computed
+    /// in Python from bar `i`'s own timestamp (P-06: no look-ahead). A pending
+    /// entry only fills on a bar with the SAME value it armed on (R2-OC-2).
+    session_idx: Vec<i64>,
     bar_bits: Vec<u64>,
 }
 
@@ -437,6 +543,7 @@ impl ResidentSweepSim {
         low: Vec<i64>,
         close: Vec<i64>,
         is_forced: Vec<bool>,
+        session_idx: Vec<i64>,
         bar_bits: Vec<u64>,
     ) -> Result<Self, String> {
         let n = open.len();
@@ -444,25 +551,39 @@ impl ResidentSweepSim {
             || low.len() != n
             || close.len() != n
             || is_forced.len() != n
+            || session_idx.len() != n
             || bar_bits.len() != n
         {
             return Err(format!(
                 "ResidentSweepSim: column length mismatch — open={}, high={}, low={}, close={}, \
-                 is_forced={}, bar_bits={} (all must be equal)",
+                 is_forced={}, session_idx={}, bar_bits={} (all must be equal)",
                 n,
                 high.len(),
                 low.len(),
                 close.len(),
                 is_forced.len(),
+                session_idx.len(),
                 bar_bits.len(),
             ));
         }
+        // R2-RC-F1 overflow boundary: every paisa price must sit inside
+        // [-MAX_PRICE_PAISA, MAX_PRICE_PAISA] so the walker's raw i64 add/sub
+        // is provably panic-free (see the ceiling's derivation doc). One-time
+        // O(N_bars) scan at construction — NOT on the hot loop. `is_forced`
+        // (bool), `bar_bits` (u64, only `&`-compared against masks) and
+        // `session_idx` (i64 day ordinal, only `==`-compared for the R2-OC-2
+        // same-session entry gate) do no arithmetic and need no bound.
+        check_price_column("open", &open)?;
+        check_price_column("high", &high)?;
+        check_price_column("low", &low)?;
+        check_price_column("close", &close)?;
         Ok(Self {
             open,
             high,
             low,
             close,
             is_forced,
+            session_idx,
             bar_bits,
         })
     }
@@ -490,6 +611,7 @@ impl ResidentSweepSim {
                 self.low[i],
                 i,
                 self.is_forced[i],
+                self.session_idx[i],
                 entry_signal,
                 false,
             ) {
@@ -501,14 +623,77 @@ impl ResidentSweepSim {
         }
         trades
     }
+
+    /// Pure core of [`Self::simulate_masks`] — validates the SL/TP distances at
+    /// the batch boundary (R2-RC-F1, see [`check_level_distance`] /
+    /// [`MAX_PRICE_PAISA`]) then runs the serial/parallel sweep. `Result<_,
+    /// String>` (NO `PyErr`) so the `#[cfg(test)]` suite exercises both the
+    /// reject and compute branches without pulling Python C-API symbols into
+    /// the no-libpython `cargo test` link. (The flat batch ABI mirrors the
+    /// PyO3 method; `clippy::too_many_arguments` is allowed crate-wide.)
+    fn simulate_masks_impl(
+        &self,
+        masks: &[u64],
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+        sl_next_open: bool,
+        tp_next_open: bool,
+        tp_first: bool,
+    ) -> Result<Vec<Vec<TradeRecord>>, String> {
+        check_level_distance("sl_paisa", sl_paisa)?;
+        check_level_distance("tp_paisa", tp_paisa)?;
+        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
+        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
+        Ok(if work < PARALLEL_WORK_THRESHOLD {
+            masks
+                .iter()
+                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
+                .collect()
+        } else {
+            masks
+                .par_iter()
+                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
+                .collect()
+        })
+    }
+
+    /// Pure core of [`Self::count_trades`] — same boundary validation + sweep
+    /// as [`Self::simulate_masks_impl`], returning only the per-mask counts.
+    fn count_trades_impl(
+        &self,
+        masks: &[u64],
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+        sl_next_open: bool,
+        tp_next_open: bool,
+        tp_first: bool,
+    ) -> Result<Vec<u64>, String> {
+        check_level_distance("sl_paisa", sl_paisa)?;
+        check_level_distance("tp_paisa", tp_paisa)?;
+        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
+        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
+        let run = |m: u64| {
+            self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy)
+                .len() as u64
+        };
+        Ok(if work < PARALLEL_WORK_THRESHOLD {
+            masks.iter().map(|&m| run(m)).collect()
+        } else {
+            masks.par_iter().map(|&m| run(m)).collect()
+        })
+    }
 }
 
 #[pymethods]
 impl ResidentSweepSim {
     /// Build the resident buffer. The ONE-TIME `O(N_bars)` Python→Rust copy of the
-    /// 5 price columns + flags + bar_bits is paid here via the `Vec` extracts.
-    /// Unequal column lengths raise a clean `ValueError` (never a panic that would
-    /// SIGABRT under `panic=abort`).
+    /// price columns + forced flags + per-bar session ordinals + bar_bits is paid
+    /// here via the `Vec` extracts. `session_idx[i]` is bar `i`'s IST calendar-date
+    /// ordinal (the session identity gating pending-entry fills, R2-OC-2). Unequal
+    /// column lengths raise a clean `ValueError` (never a panic that would SIGABRT
+    /// under `panic=abort`).
     #[new]
     fn new(
         open: Vec<i64>,
@@ -516,9 +701,11 @@ impl ResidentSweepSim {
         low: Vec<i64>,
         close: Vec<i64>,
         is_forced: Vec<bool>,
+        session_idx: Vec<i64>,
         bar_bits: Vec<u64>,
     ) -> PyResult<Self> {
-        Self::build(open, high, low, close, is_forced, bar_bits).map_err(PyValueError::new_err)
+        Self::build(open, high, low, close, is_forced, session_idx, bar_bits)
+            .map_err(PyValueError::new_err)
     }
 
     /// Number of resident bars (the only exposed view of the buffer).
@@ -543,6 +730,10 @@ impl ResidentSweepSim {
     /// `par_iter().map().collect()` — `out[j]` always aligns with `masks[j]` and
     /// each per-mask trade list is bit-identical to the serial walk (pure integer
     /// arithmetic; Golden Rule #4). Below the threshold it runs serially.
+    ///
+    /// Overflow boundary (R2-RC-F1): an `sl_paisa` / `tp_paisa` outside
+    /// `[0, MAX_PRICE_PAISA]` raises a clean `ValueError` (never a panic →
+    /// SIGABRT under `panic = "abort"`) — see [`MAX_PRICE_PAISA`].
     #[pyo3(signature = (masks, is_buy, sl_paisa, tp_paisa, sl_next_open=false, tp_next_open=false, tp_first=false))]
     fn simulate_masks(
         &self,
@@ -553,20 +744,17 @@ impl ResidentSweepSim {
         sl_next_open: bool,
         tp_next_open: bool,
         tp_first: bool,
-    ) -> Vec<Vec<TradeRecord>> {
-        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
-        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
-        if work < PARALLEL_WORK_THRESHOLD {
-            masks
-                .iter()
-                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
-                .collect()
-        } else {
-            masks
-                .par_iter()
-                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
-                .collect()
-        }
+    ) -> PyResult<Vec<Vec<TradeRecord>>> {
+        self.simulate_masks_impl(
+            &masks,
+            is_buy,
+            sl_paisa,
+            tp_paisa,
+            sl_next_open,
+            tp_next_open,
+            tp_first,
+        )
+        .map_err(PyValueError::new_err)
     }
 
     /// Per-mask trade COUNT only — the throughput-bench fast path.
@@ -575,6 +763,9 @@ impl ResidentSweepSim {
     /// number of round-trip trades per mask (no per-trade allocation), so a
     /// throughput bench measures the pure mask-eval + trade-walk hot loop without
     /// the `O(Σ trades)` output marshalling. `out[j]` aligns with `masks[j]`.
+    ///
+    /// Overflow boundary (R2-RC-F1): same SL/TP validation as
+    /// [`Self::simulate_masks`] — out-of-range distances raise `ValueError`.
     #[pyo3(signature = (masks, is_buy, sl_paisa, tp_paisa, sl_next_open=false, tp_next_open=false, tp_first=false))]
     fn count_trades(
         &self,
@@ -585,18 +776,17 @@ impl ResidentSweepSim {
         sl_next_open: bool,
         tp_next_open: bool,
         tp_first: bool,
-    ) -> Vec<u64> {
-        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
-        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
-        let run = |m: u64| {
-            self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy)
-                .len() as u64
-        };
-        if work < PARALLEL_WORK_THRESHOLD {
-            masks.iter().map(|&m| run(m)).collect()
-        } else {
-            masks.par_iter().map(|&m| run(m)).collect()
-        }
+    ) -> PyResult<Vec<u64>> {
+        self.count_trades_impl(
+            &masks,
+            is_buy,
+            sl_paisa,
+            tp_paisa,
+            sl_next_open,
+            tp_next_open,
+            tp_first,
+        )
+        .map_err(PyValueError::new_err)
     }
 }
 
@@ -612,7 +802,9 @@ mod tests {
         }
     }
 
-    /// Build a sim with explicit per-column data and no forced bars (test helper).
+    /// Build a sim with explicit per-column data, no forced bars, and every bar
+    /// in ONE session (test helper — the single-session case is byte-identical
+    /// to the pre-session-gate kernel).
     fn sim(
         open: Vec<i64>,
         high: Vec<i64>,
@@ -621,7 +813,7 @@ mod tests {
         bar_bits: Vec<u64>,
     ) -> ResidentSweepSim {
         let n = open.len();
-        ResidentSweepSim::build(open, high, low, close, vec![false; n], bar_bits)
+        ResidentSweepSim::build(open, high, low, close, vec![false; n], vec![0; n], bar_bits)
             .expect("equal-length test data")
     }
 
@@ -734,8 +926,10 @@ mod tests {
         let low: Vec<i64> = open.iter().map(|&o| o - 50).collect();
         let close: Vec<i64> = open.iter().map(|&o| o + 10).collect();
         let is_forced: Vec<bool> = (0..n).map(|i| i % 375 == 374).collect();
+        // A realistic multi-session shape: one synthetic 375-bar day per session.
+        let session_idx: Vec<i64> = (0..n).map(|i| (i / 375) as i64).collect();
         let bar_bits: Vec<u64> = (0..n as u64).map(|i| (i & 0x3) | 0x1).collect();
-        let s = ResidentSweepSim::build(open, high, low, close, is_forced, bar_bits)
+        let s = ResidentSweepSim::build(open, high, low, close, is_forced, session_idx, bar_bits)
             .expect("equal-length stress window");
 
         let policy = policy_default();
@@ -761,6 +955,7 @@ mod tests {
                 vec![1, 2],
                 vec![1, 2],
                 vec![false, false],
+                vec![0, 0],
                 vec![0, 0]
             )
             .is_err()
@@ -774,13 +969,27 @@ mod tests {
         // (under `&&` a single-column mismatch would wrongly pass).
         let ok2 = || vec![0i64; 2];
         let okf = || vec![false; 2];
+        let oks = || vec![0i64; 2];
         let okb = || vec![0u64; 2];
         // open is the reference `n`; mismatching a later column individually.
-        assert!(ResidentSweepSim::build(ok2(), vec![0], ok2(), ok2(), okf(), okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), vec![0], ok2(), okf(), okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), vec![0], okf(), okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), vec![false], okb()).is_err());
-        assert!(ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), okf(), vec![0u64]).is_err());
+        assert!(
+            ResidentSweepSim::build(ok2(), vec![0], ok2(), ok2(), okf(), oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), vec![0], ok2(), okf(), oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), vec![0], okf(), oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), vec![false], oks(), okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), okf(), vec![0i64], okb()).is_err()
+        );
+        assert!(
+            ResidentSweepSim::build(ok2(), ok2(), ok2(), ok2(), okf(), oks(), vec![0u64]).is_err()
+        );
     }
 
     #[test]
@@ -792,6 +1001,7 @@ mod tests {
             vec![2, 3],
             vec![false, false],
             vec![0, 0],
+            vec![0, 0],
         )
         .expect("equal lengths must build");
         assert_eq!(r.n_bars(), 2);
@@ -799,7 +1009,7 @@ mod tests {
 
     #[test]
     fn build_empty_is_ok() {
-        let r = ResidentSweepSim::build(vec![], vec![], vec![], vec![], vec![], vec![])
+        let r = ResidentSweepSim::build(vec![], vec![], vec![], vec![], vec![], vec![], vec![])
             .expect("empty ok");
         assert_eq!(r.n_bars(), 0);
     }
@@ -965,6 +1175,7 @@ mod tests {
             vec![55, 105, 128],
             vec![false, false, true],
             vec![0, 0, 0],
+            vec![0, 0, 0],
         )
         .unwrap();
         let out = s.simulate_one(0, true, Some(50), Some(20), policy_default());
@@ -985,6 +1196,7 @@ mod tests {
             vec![40, 95, 118],
             vec![55, 105, 125],
             vec![false, true, false],
+            vec![0, 0, 0],
             vec![1, 0, 0],
         )
         .unwrap();
@@ -992,6 +1204,75 @@ mod tests {
             s.simulate_one(1, true, None, None, policy_default()),
             Vec::<TradeRecord>::new()
         );
+    }
+
+    // ── cross-session pending-entry drop (R2-OC-2) ──────────────────────────
+
+    #[test]
+    fn cross_session_pending_entry_dropped() {
+        // mask=1 fires ONLY on bar1 — the LAST bar of session 0 (e.g. 15:29 IST).
+        // bar2 is the FIRST bar of session 1 (next day 09:15, an overnight gap):
+        // the pending entry must be DROPPED, never filled at session 1's open.
+        // Pre-fix this produced one trade entering at open[2]=11900.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 11900, 11950],
+            vec![10100, 10100, 12000, 12050],
+            vec![9900, 9900, 11800, 11850],
+            vec![10000, 10000, 11900, 11950],
+            vec![false, false, false, false],
+            vec![0, 0, 1, 1],
+            vec![0, 1, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(
+            s.simulate_one(1, true, None, None, policy_default()),
+            Vec::<TradeRecord>::new()
+        );
+    }
+
+    #[test]
+    fn same_session_pending_entry_still_fills() {
+        // The SAME feed shape but with every bar in one session: the pending
+        // entry armed on bar1 fills at open[2] as before (the gate only drops
+        // CROSS-session fills; kills a `==`→`!=` mutant on the session compare).
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 11900, 11950],
+            vec![10100, 10100, 12000, 12050],
+            vec![9900, 9900, 11800, 11850],
+            vec![10000, 10000, 11900, 11950],
+            vec![false, false, false, false],
+            vec![0, 0, 0, 0],
+            vec![0, 1, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out.len(), 1);
+        let (pnl, _mfe, _mae, holding, entry_idx, exit_idx) = out[0];
+        assert_eq!(entry_idx, 2); // fill at open[2]=11900, same session
+        assert_eq!(exit_idx, 3); // end-of-data close at close[3]=11950
+        assert_eq!(pnl, 50);
+        assert_eq!(holding, 2);
+    }
+
+    #[test]
+    fn cross_session_drop_then_rearm_fills_next_bar() {
+        // Signal fires on bar1 (session 0's last bar → dropped at bar2) AND on
+        // bar2 (session 1's first bar → legitimately fills at bar3's open):
+        // the drop must not eat a genuine next-session signal.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 11900, 11950, 11960],
+            vec![10100, 10100, 12000, 12050, 12060],
+            vec![9900, 9900, 11800, 11850, 11860],
+            vec![10000, 10000, 11900, 11950, 11960],
+            vec![false, false, false, false, false],
+            vec![0, 0, 1, 1, 1],
+            vec![0, 1, 1, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out.len(), 1);
+        let (_pnl, _mfe, _mae, _holding, entry_idx, _exit_idx) = out[0];
+        assert_eq!(entry_idx, 3); // opened at bar3 (session 1), NOT bar2
     }
 
     // ── next-open fills ──
@@ -1023,6 +1304,7 @@ mod tests {
             vec![40, 98, 85, 78],
             vec![55, 100, 90, 81],
             vec![false, false, false, true],
+            vec![0, 0, 0, 0],
             vec![0, 0, 0, 0],
         )
         .unwrap();
@@ -1085,7 +1367,9 @@ mod tests {
             vec![1, 0, 1, 0],
         );
         let masks = vec![0u64, 1u64, 1u64 << 63];
-        let batch = s.simulate_masks(masks.clone(), true, Some(8), Some(5), false, false, false);
+        let batch = s
+            .simulate_masks_impl(&masks, true, Some(8), Some(5), false, false, false)
+            .expect("in-range SL/TP must pass the boundary");
         for (j, &m) in masks.iter().enumerate() {
             assert_eq!(
                 batch[j],
@@ -1104,8 +1388,12 @@ mod tests {
             vec![1, 0, 1, 0],
         );
         let masks = vec![0u64, 1u64, 1u64 << 63];
-        let counts = s.count_trades(masks.clone(), true, Some(8), Some(5), false, false, false);
-        let full = s.simulate_masks(masks, true, Some(8), Some(5), false, false, false);
+        let counts = s
+            .count_trades_impl(&masks, true, Some(8), Some(5), false, false, false)
+            .expect("in-range SL/TP must pass the boundary");
+        let full = s
+            .simulate_masks_impl(&masks, true, Some(8), Some(5), false, false, false)
+            .expect("in-range SL/TP must pass the boundary");
         let expected: Vec<u64> = full.iter().map(|t| t.len() as u64).collect();
         assert_eq!(counts, expected);
     }
@@ -1114,11 +1402,13 @@ mod tests {
     fn empty_masks_batch_is_empty() {
         let s = sim(vec![100], vec![100], vec![100], vec![100], vec![0]);
         assert_eq!(
-            s.simulate_masks(vec![], true, None, None, false, false, false),
+            s.simulate_masks_impl(&[], true, None, None, false, false, false)
+                .expect("empty batch ok"),
             Vec::<Vec<TradeRecord>>::new()
         );
         assert_eq!(
-            s.count_trades(vec![], true, None, None, false, false, false),
+            s.count_trades_impl(&[], true, None, None, false, false, false)
+                .expect("empty batch ok"),
             Vec::<u64>::new()
         );
     }
@@ -1138,7 +1428,9 @@ mod tests {
         let s = sim(open, high, low, close, bar_bits);
         let masks: Vec<u64> = (0..1100u64).map(|i| (i & 0b1) | (1 << (i % 50))).collect();
         assert!((masks.len() as u64) * (n as u64) >= PARALLEL_WORK_THRESHOLD);
-        let batch = s.simulate_masks(masks.clone(), true, Some(3), Some(4), false, false, false);
+        let batch = s
+            .simulate_masks_impl(&masks, true, Some(3), Some(4), false, false, false)
+            .expect("in-range SL/TP must pass the boundary");
         let serial: Vec<Vec<TradeRecord>> = masks
             .iter()
             .map(|&m| s.simulate_one(m, true, Some(3), Some(4), policy_default()))
@@ -1163,5 +1455,160 @@ mod tests {
         // bar1 (130,95): fav=30,adv=5. bar2 (105,70): fav=5,adv=30. bar3 (102,99): fav=2,adv=1.
         assert_eq!(mfe, 30);
         assert_eq!(mae, 30);
+    }
+
+    // ── R2-RC-F1 overflow guards: boundary validation + old-abort regressions ──
+
+    /// Shorthand for the ceiling in the guard tests.
+    const C: i64 = MAX_PRICE_PAISA;
+
+    #[test]
+    fn build_rejects_out_of_range_price_per_column() {
+        // OLD-ABORT REPRODUCTION (build side): a ~2^63 paisa operand
+        // (i64::MAX ≈ 2^63 − 1) in ANY price column previously flowed into the
+        // walker's raw `entry ± d` / `high − entry` arithmetic and SIGABRT'd
+        // (exit 134) under `overflow-checks = true` + `panic = "abort"`. The
+        // boundary now rejects it with a clean Err (→ ValueError at the FFI
+        // edge) before the loop can ever see it. One column at a time, both
+        // extremes, so every clause of the guard is exercised.
+        let ok = || vec![100i64, 100];
+        let okf = || vec![false; 2];
+        let oks = || vec![0i64; 2];
+        let okb = || vec![0u64; 2];
+        for bad in [i64::MAX, i64::MIN, C + 1, -C - 1] {
+            let bad_col = vec![100i64, bad];
+            for col in 0..4usize {
+                let (o, h, l, c) = match col {
+                    0 => (bad_col.clone(), ok(), ok(), ok()),
+                    1 => (ok(), bad_col.clone(), ok(), ok()),
+                    2 => (ok(), ok(), bad_col.clone(), ok()),
+                    _ => (ok(), ok(), ok(), bad_col.clone()),
+                };
+                let err = ResidentSweepSim::build(o, h, l, c, okf(), oks(), okb())
+                    .map(|_| ()) // () is Debug; ResidentSweepSim is not
+                    .expect_err("out-of-range price must be rejected at build");
+                assert!(
+                    err.contains("overflow-safe range"),
+                    "column {col} value {bad}: message must name the guard: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_accepts_exact_ceiling_boundary() {
+        // Exactly ±MAX_PRICE_PAISA is VALID (inclusive range) — kills the
+        // off-by-one `>`/`>=` mutants on the guard, and proves the ceiling
+        // never rejects the extreme in-range input.
+        let r = ResidentSweepSim::build(
+            vec![C, -C],
+            vec![C, -C],
+            vec![C, -C],
+            vec![C, -C],
+            vec![false, false],
+            vec![0, 0],
+            vec![0, 0],
+        )
+        .expect("exact-ceiling prices must build");
+        assert_eq!(r.n_bars(), 2);
+    }
+
+    #[test]
+    fn check_level_distance_boundaries() {
+        // None (leg disabled) always valid; [0, C] valid inclusive; negative
+        // (nonsensical distance) and > C (overflow-prone) rejected.
+        assert!(check_level_distance("sl_paisa", None).is_ok());
+        assert!(check_level_distance("sl_paisa", Some(0)).is_ok());
+        assert!(check_level_distance("sl_paisa", Some(1)).is_ok());
+        assert!(check_level_distance("sl_paisa", Some(C)).is_ok());
+        assert!(check_level_distance("sl_paisa", Some(-1)).is_err());
+        assert!(check_level_distance("sl_paisa", Some(C + 1)).is_err());
+        assert!(check_level_distance("tp_paisa", Some(i64::MAX)).is_err());
+        assert!(check_level_distance("tp_paisa", Some(i64::MIN)).is_err());
+    }
+
+    #[test]
+    fn old_abort_huge_sl_tp_now_clean_err() {
+        // OLD-ABORT REPRODUCTION (batch-entry side): a valid small window with
+        // tp_paisa = i64::MAX (~2^63) previously overflowed `entry + d` in
+        // `Walker::levels` the moment a position opened → SIGABRT. Now BOTH
+        // batch entries reject it up front with a clean Err (→ ValueError).
+        let s = sim(
+            vec![50, 100, 120],
+            vec![60, 110, 130],
+            vec![40, 95, 118],
+            vec![55, 105, 130],
+            vec![1, 0, 0],
+        );
+        for bad in [Some(i64::MAX), Some(i64::MIN), Some(-1), Some(C + 1)] {
+            assert!(
+                s.simulate_masks_impl(&[1], true, bad, None, false, false, false)
+                    .is_err(),
+                "sl_paisa={bad:?} must be rejected"
+            );
+            assert!(
+                s.simulate_masks_impl(&[1], true, None, bad, false, false, false)
+                    .is_err(),
+                "tp_paisa={bad:?} must be rejected"
+            );
+            assert!(
+                s.count_trades_impl(&[1], true, bad, bad, false, false, false)
+                    .is_err(),
+                "count_trades sl/tp={bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_extremes_compute_cleanly_without_panic() {
+        // The derivation's TEETH: with every input at the ceiling, the worst
+        // intermediates actually occur — `entry + d = -C + C = 0` (tp level),
+        // `entry - d = -C - C = -2C` (sl level), excursion `C - (-C) = 2C` —
+        // and none panics. Entry signal on bar0 → entry at open[1] = -C; bar1
+        // spans [-C, C]; TP level 0 is hit at-level → pnl = 0 − (−C) = C.
+        let s = sim(
+            vec![0, -C, 0],
+            vec![0, C, 0],
+            vec![0, -C, 0],
+            vec![0, 0, C],
+            vec![1, 0, 0],
+        );
+        let out = s
+            .simulate_masks_impl(&[1], true, Some(C), Some(C), false, false, false)
+            .expect("exact-ceiling SL/TP must pass the boundary");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 1);
+        let (pnl, mfe, mae, holding, entry_idx, exit_idx) = out[0][0];
+        assert_eq!(pnl, C); // TP fill at level 0, entry −C
+        assert_eq!(mfe, 2 * C); // high C − entry −C = 2·C — the max intermediate
+        assert_eq!(mae, 0);
+        assert_eq!(holding, 1);
+        assert_eq!(entry_idx, 1);
+        assert_eq!(exit_idx, 1);
+    }
+
+    #[test]
+    fn golden_valid_inputs_identical_through_validated_path() {
+        // Regression golden: the exact `long_stop_loss_at_level` scenario run
+        // through the NEW validated batch entry emits byte-identical trades
+        // (the guard must not perturb any in-range computation).
+        let s = sim(
+            vec![50, 100, 95],
+            vec![60, 105, 99],
+            vec![40, 98, 85],
+            vec![55, 100, 95],
+            vec![0, 0, 0],
+        );
+        let out = s
+            .simulate_masks_impl(&[0], true, Some(10), None, false, false, false)
+            .expect("in-range inputs must pass");
+        // Entry open[1]=100; bar1 folds (105,98) → mfe 5 / mae 2; bar2 folds
+        // (99,85) → mfe 5 / mae 15, then low 85 ≤ sl_level 90 → SL at-level
+        // fill: pnl = 90 − 100 = −10; holding 1..=2 inclusive = 2.
+        assert_eq!(out, vec![vec![(-10i64, 5i64, 15i64, 2u64, 1u64, 2u64)]]);
+        let counts = s
+            .count_trades_impl(&[0], true, Some(10), None, false, false, false)
+            .expect("in-range inputs must pass");
+        assert_eq!(counts, vec![1]);
     }
 }

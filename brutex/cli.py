@@ -60,9 +60,9 @@ import sys
 import tempfile
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from brutex import __version__
 from brutex.config.paths import resolve_lake_root
@@ -278,6 +278,18 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--allow-out-of-scope",
+        action="store_true",
+        dest="allow_out_of_scope",
+        help=(
+            "RESEARCH ONLY: proceed even when a requested symbol is outside the "
+            "brute-force engine scope (NIFTY/BANKNIFTY/SENSEX spot + NIFTY futures, "
+            "CLAUDE.md §2 Rule 3 / ADR-0012). Loud WARNING + audit-stamped "
+            "scope_override=True; REFUSED on sweep-daemon (unattended runs never "
+            "override) — DEC-ENGINE-SCOPE-GUARD-001"
+        ),
+    )
+    parser.add_argument(
         "--data-snapshot-hash",
         default=None,
         dest="data_snapshot_hash",
@@ -453,6 +465,57 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+
+    # ── lake (DEC-LAKE-HEAL-001) — data-lake integrity tools ──
+    lake = sub.add_parser("lake", help="Data-lake integrity tools")
+    lake_sub = lake.add_subparsers(dest="lake_command", required=True)
+    lake_audit = lake_sub.add_parser(
+        "audit-unique",
+        help=(
+            "READ-ONLY census: per-segment clean/poisoned partition counts "
+            "+ the engine-index (NIFTY/BANKNIFTY/SENSEX) verdict"
+        ),
+    )
+    lake_audit.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    lake_audit.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help=(
+            "Emit the census as JSON (the SAME dict shape "
+            "GET /api/v1/universe/lake-uniqueness serves)"
+        ),
+    )
+    lake_audit.add_argument(
+        "--exchange",
+        default=None,
+        help="Only this exchange's bars/ tree (e.g. NSE; default: all)",
+    )
+    lake_audit.add_argument(
+        "--segment",
+        default=None,
+        help="Only this bars/ segment (INDEX / CASH / FNO; default: all)",
+    )
+    lake_audit.add_argument(
+        "--symbol",
+        default=None,
+        help="Only this symbol directory (default: all)",
+    )
+    lake_audit.add_argument(
+        "--interval",
+        default=None,
+        help="Only this interval directory (e.g. 1minute; default: all)",
+    )
+    lake_audit.add_argument(
+        "--no-options",
+        action="store_true",
+        help="Skip the expired-options tree (options/<series>/ dup census)",
     )
 
     # ── reopen-skipped (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) — un-cement settles ──
@@ -919,6 +982,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
+    sweep.add_argument(
+        "--allow-out-of-scope",
+        action="store_true",
+        dest="allow_out_of_scope",
+        help=(
+            "RESEARCH ONLY: proceed even when the symbol is outside the brute-force "
+            "engine scope (NIFTY/BANKNIFTY/SENSEX spot + NIFTY futures, CLAUDE.md "
+            "§2 Rule 3 / ADR-0012) — DEC-ENGINE-SCOPE-GUARD-001"
+        ),
+    )
 
     # ── sweep-all (DEC-SWEEP-ORCHESTRATOR-001) — full multi-parameter grid ──
     sweep_all = sub.add_parser(
@@ -954,6 +1027,20 @@ def build_parser() -> argparse.ArgumentParser:
             "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY or the module default; raise it "
             "when a >capacity resume is refused FAIL_CLOSED with "
             "SweepCacheCapacityError)"
+        ),
+    )
+    sweep_all.add_argument(
+        "--acknowledge-sla-overrun",
+        action="store_true",
+        dest="acknowledge_sla_overrun",
+        help=(
+            "Proceed even when the projected wall-clock (tuple_count × an "
+            "UNBENCHMARKED per-tuple estimate, override via "
+            "BRUTEX_SWEEP_PER_TUPLE_SECONDS) exceeds the CLAUDE.md §8 2-4-day "
+            "envelope. Default: REFUSE with the honest projection "
+            "(DEC-SLA-LAUNCH-GUARD-001); acknowledging proceeds with a LOUD "
+            "warning. Manual sweep-all only — the unattended daemon never "
+            "acknowledges an overrun"
         ),
     )
 
@@ -1410,6 +1497,98 @@ def cmd_catalog_reconcile(lake_root: Path | None) -> int:
         f"bars={result.bars_total} skipped={result.skipped} (lake={resolved})"
     )
     return EXIT_OK
+
+
+def cmd_lake_audit_unique(
+    *,
+    lake_root: Path | None,
+    as_json: bool,
+    exchange: str | None,
+    segment: str | None,
+    symbol: str | None,
+    interval: str | None,
+    no_options: bool,
+) -> int:
+    """READ-ONLY lake uniqueness census — ``brutex lake audit-unique`` (DEC-LAKE-HEAL-001).
+
+    Runs the ONE bounded invariant scanner
+    (:func:`brutex.data.lake_invariants.scan_lake_invariants`) over the lake —
+    NEVER heals; the command is read-only by contract — then folds the
+    per-segment census and prints it as a human table or ``--json`` (the SAME
+    dict shape ``GET /api/v1/universe/lake-uniqueness`` serves). Exit codes
+    (the ``cmd_audit_verify`` semantics): :data:`EXIT_OK` (0) clean,
+    :data:`EXIT_USER_ERROR` (1) re-documented here as "poisoned partitions
+    found", :data:`EXIT_INTERNAL_ERROR` (2) the scan itself errored.
+
+    HONEST cost (Golden Rule #10): the scan is O(files-in-scope) with one
+    key-column read per file (NOT O(1)) — bound it with the coordinate
+    filters on a deep lake.
+    """
+    import json
+
+    from brutex.data.lake_heal import (
+        load_heal_stats,
+        load_last_sweep,
+        resolve_lake_heal_mode,
+    )
+    from brutex.data.lake_invariants import (
+        OPTIONS_SEGMENT,
+        build_lake_census,
+        census_to_dict,
+        scan_lake_invariants,
+    )
+
+    resolved = _resolve_lake_root(lake_root)
+    try:
+        report = scan_lake_invariants(
+            resolved,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            include_options=not no_options,
+        )
+        census = build_lake_census(report)
+        payload = census_to_dict(
+            census,
+            mode=resolve_lake_heal_mode(),
+            stats=load_heal_stats(resolved),
+            last_sweep=load_last_sweep(resolved),
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught — exit-code contract
+        print(f"[brutex] lake audit-unique scan errored: {exc}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"lake audit-unique — {resolved}")
+        print(
+            f"{'segment':<9}{'files':>7}{'clean':>7}{'dup':>6}"
+            f"{'foreign':>9}{'overlap':>9}{'drift-dirs':>12}"
+        )
+        for row in census.segments:
+            if row.segment == OPTIONS_SEGMENT:
+                # Foreign/overlap/drift are OUT of the options-tree census scope
+                # (a named DEC-LAKE-HEAL-001 follow-up) — shown as "-", never a fake 0.
+                foreign, overlap, drift = "-", "-", "-"
+            else:
+                foreign = str(row.foreign_files)
+                overlap = str(row.overlap_files)
+                drift = str(row.drift_dirs)
+            print(
+                f"{row.segment:<9}{row.files:>7}{row.clean:>7}{row.dup_files:>6}"
+                f"{foreign:>9}{overlap:>9}{drift:>12}"
+            )
+        label, _, rest = census.engine_detail.partition(": ")
+        verdict = "CLEAN" if census.engine_clean else "POISONED"
+        print(f"engine indexes ({label.replace('/', ' / ')}): {verdict} — {rest}")
+        last_heal = payload["last_heal_utc"] or "never"
+        print(
+            f"mode={payload['mode']}  healed_total={payload['healed_total']}  "
+            f"quarantined_files_total={payload['quarantined_files_total']}  "
+            f"last_heal={last_heal}"
+        )
+    return EXIT_OK if census.findings_total == 0 else EXIT_USER_ERROR
 
 
 def cmd_reopen_skipped(
@@ -2043,6 +2222,32 @@ def _start_auto_resume_on_boot(
     ).start()
 
 
+def _start_lake_heal_sweep(
+    lake_root: Path, summary_cache: Any, log: Any
+) -> None:  # pragma: no cover — daemon-thread launcher over the 100%-tested sweeper
+    """Launch the ONE-TIME lake-heal startup sweep (L3, DEC-LAKE-HEAL-001) off the bind path.
+
+    Binds :class:`brutex.data.lake_heal.StartupSweeper` — the content-token-stamped
+    one-time sweep (sentinel ``.lake_heal/last_sweep.json``; a repeat boot over an
+    unchanged lake is a stat-walk no-op) — to the dashboard boot via the SAME
+    instant-launch daemon-thread seam :func:`_start_instrument_autoload` /
+    :func:`_start_auto_resume_on_boot` use, so the throttled O(files) scan never
+    blocks the uvicorn port bind. ``on_healed=summary_cache.mark_dirty`` bumps the
+    SAME write-generation every dashboard read cache keys on, so a heal is visible
+    on the very next poll (never a stale pre-heal payload — Golden Rule #1). The
+    sweeper's thread body is blanket-guarded inside ``lake_heal``
+    (``lake_heal.sweep_failed``) — boot can never crash on a sweep bug.
+    """
+    from brutex.data.lake_heal import StartupSweeper
+
+    log.info("lake_heal.sweep_launched", lake_root=str(lake_root))
+    StartupSweeper(
+        lake_root,
+        on_healed=summary_cache.mark_dirty,
+        catalog_path=lake_root / "catalog.duckdb",
+    ).start()
+
+
 def _build_liveproof_autorun(lake_root: Path) -> Any:
     """Construct the zero-command live-proof autorun holder for *lake_root*.
 
@@ -2072,12 +2277,70 @@ def _start_liveproof_preflight(liveproof: Any, log: Any) -> None:
     log.info("liveproof.autorun_preflight", started=started)
 
 
+#: Loopback bind addresses — the strict loopback-only default allowlist of
+#: :data:`brutex.dashboard.host_allowlist.DEFAULT_ALLOWED_HOSTS` already admits every
+#: client Host these binds can receive.
+_LOOPBACK_BIND_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1"})
+
+#: Wildcard binds (all interfaces) — the machine address a remote client will
+#: put in ``Host`` cannot be known ahead of time.
+_WILDCARD_BIND_HOSTS: Final[frozenset[str]] = frozenset(
+    {"0.0.0.0", "::"}  # noqa: S104  # nosec B104 — classifying the operator's --host, not binding
+)
+
+
+def _dashboard_allowed_hosts(host: str) -> list[str] | None:
+    """Resolve the dashboard ``Host``-header allowlist for the bound *host* (R2-DS-F1).
+
+    ``build_app``'s DNS-rebinding guard defaults to a loopback-ONLY
+    allowlist, so serving beyond loopback (the advertised ``--host`` flag)
+    would hard-400 every remote client unless the actual bound host is
+    threaded through. Three cases:
+
+    * loopback bind (``127.0.0.1`` / ``localhost`` / ``::1``) → ``None``
+      (keep the strict loopback-only default);
+    * concrete non-loopback bind (e.g. ``192.168.1.50``) → the loopback
+      default PLUS that host on any port, so remote clients addressing the
+      bound name pass while foreign/rebound Hosts still 400;
+    * wildcard bind (``0.0.0.0`` / ``::``) → ``["*"]`` — the guard cannot
+      enumerate which machine address a client will use, so the Host
+      allowlist is DISABLED (the caller warns LOUDLY; the same-origin CSRF
+      guard in ``build_app`` stays fully active).
+
+    Parameters
+    ----------
+    host
+        The ``--host`` bind address as given on the CLI (an IPv6 literal may
+        be bracketed; matching is case-insensitive, surrounding whitespace
+        ignored).
+
+    Returns
+    -------
+    list[str] | None
+        ``None`` to keep ``build_app``'s loopback-only default, else the
+        explicit allowlist to inject.
+    """
+    from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
+
+    bare = host.strip().lower().strip("[]")
+    if not bare or bare in _LOOPBACK_BIND_HOSTS:
+        return None
+    if bare in _WILDCARD_BIND_HOSTS:
+        return ["*"]
+    return [*DEFAULT_ALLOWED_HOSTS, f"{bare}:*"]
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
         import uvicorn
 
-        from brutex.dashboard.app import DashboardState, build_app
+        from brutex.dashboard.app import (
+            DashboardState,
+            _lake_revision_probe_or_none,
+            build_app,
+        )
+        from brutex.dashboard.summary_cache import SummaryCache
     except ImportError as exc:
         print(
             f'[brutex] dashboard requires fastapi+uvicorn — run: pip install -e ".[ui]"  ({exc})',
@@ -2168,22 +2431,33 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # cause of the `'PosixPath' object has no attribute 'load_snapshot'` 500.
     # InstrumentStore.open() runs CREATE TABLE IF NOT EXISTS, so a fresh/empty
     # lake yields a valid empty store (universe shows 0 instruments, no crash).
-    store: Any = None
-    if lake_root is not None:
-        from brutex.data.instrument_store import InstrumentStore
+    # `brutex dashboard` WITHOUT --lake-root resolves the DEFAULT lake
+    # (--lake-root → $BRUTEX_LAKE_ROOT → ~/.brutex/lake) exactly like the
+    # sibling `_resolve_lake_root` call sites in this function (+ cmd_run,
+    # which pre-resolves) — previously a bare `brutex dashboard` silently
+    # opened NO InstrumentStore at all (R2-OCLI-F6 asymmetry fix).
+    from brutex.data.instrument_store import InstrumentStore
 
-        store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    store: Any = InstrumentStore.open(_resolve_lake_root(lake_root) / "instruments.duckdb")
 
-        # The instrument autoload (keyless Groww master + best-effort NTM
-        # constituent enrichment) can block ~90 s when niftyindices.com
-        # bot-blocks / slow-first-bytes a cold start (3 × 30 s retries in
-        # nse_constituents.fetch_constituent_csv). On the bind path that left the
-        # dashboard unreachable (ERR_CONNECTION_REFUSED) for the whole window, so
-        # run it in a background daemon thread — uvicorn binds the port INSTANTLY
-        # and the InstrumentStore read/write split (DEC-STORE-READ-WRITE-SPLIT-001)
-        # keeps concurrent route reads safe against the loader's writes
-        # (DEC-DASHBOARD-INSTANT-LAUNCH-001).
-        _start_instrument_autoload(store, _log)
+    # The instrument autoload (keyless Groww master + best-effort NTM
+    # constituent enrichment) can block ~90 s when niftyindices.com
+    # bot-blocks / slow-first-bytes a cold start (3 × 30 s retries in
+    # nse_constituents.fetch_constituent_csv). On the bind path that left the
+    # dashboard unreachable (ERR_CONNECTION_REFUSED) for the whole window, so
+    # run it in a background daemon thread — uvicorn binds the port INSTANTLY
+    # and the InstrumentStore read/write split (DEC-STORE-READ-WRITE-SPLIT-001)
+    # keeps concurrent route reads safe against the loader's writes
+    # (DEC-DASHBOARD-INSTANT-LAUNCH-001).
+    _start_instrument_autoload(store, _log)
+    # ONE shared write-generation cache for this dashboard session (DEC-LAKE-HEAL-001):
+    # constructed HERE instead of letting build_app default-construct its own internally,
+    # so the L3 lake-heal startup sweep below can bump the SAME generation every dashboard
+    # read cache keys on when it heals a partition (recon-D §7 load-bearing note). The
+    # cross-process lake-revision probe (DEC-HARDENING-LEFTOVERS-001) is wired explicitly
+    # — build_app attaches it only when it default-constructs the cache, so an injected
+    # cache must carry its own probe or a CLI `brutex fetch` write would go undetected.
+    summary_cache = SummaryCache(revision_probe=_lake_revision_probe_or_none(store))
     # ZERO-COMMAND live-proof autorun (DEC-DOCTOR-LIVE-AUTORUN-001): build the
     # holder for THIS lake root so the app can serve /api/v1/liveproof, mirror
     # credential refusals onto the banner, and auto-run the one-time probes on
@@ -2195,7 +2469,27 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         liveproof = _build_liveproof_autorun(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("liveproof.build_failed", error=str(exc))
-    app = build_app(state, instrument_store=store, liveproof=liveproof)
+    # R2-DS-F1: thread the actual bound host through build_app's allowed_hosts
+    # seam so serving beyond loopback (--host 0.0.0.0 / a LAN address) is not
+    # hard-400'd by the TrustedHost DNS-rebinding guard. A loopback bind keeps
+    # the strict loopback-only default; any relaxation is LOUDLY logged — a
+    # wildcard bind disables the Host allowlist entirely (the same-origin CSRF
+    # guard stays active), a concrete bind merely extends it with that host.
+    allowed_hosts = _dashboard_allowed_hosts(host)
+    if allowed_hosts is not None:
+        _log.warning(
+            "dashboard.host_allowlist_relaxed",
+            host=host,
+            allowed_hosts=allowed_hosts,
+            host_guard="disabled" if "*" in allowed_hosts else "extended",
+        )
+    app = build_app(
+        state,
+        instrument_store=store,
+        summary_cache=summary_cache,
+        liveproof=liveproof,
+        allowed_hosts=allowed_hosts,
+    )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
     # ITSELF (the hard operator law). Guarded like the auto-resume launch so
@@ -2220,6 +2514,14 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         _start_auto_resume_on_boot(_resolve_lake_root(lake_root), _log)
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
         _log.warning("auto_resume.launch_failed", error=str(exc))
+    # DEC-LAKE-HEAL-001 L3: the ONE-TIME content-token-stamped lake-heal startup sweep
+    # (a repeat boot over an unchanged lake is a stat-walk no-op; a healed partition
+    # bumps summary_cache's generation via on_healed). Best-effort on the BIND path —
+    # the same "never crashes boot" guard contract as the auto-resume launch above.
+    try:
+        _start_lake_heal_sweep(_resolve_lake_root(lake_root), summary_cache, _log)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
+        _log.warning("lake_heal.launch_failed", error=str(exc))
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     # The /logs WEBPAGE was removed (DEC-DASHBOARD-LOGS-REMOVE-001); point at the
     # rotating file + the kept JSON data endpoint, not the dead page.
@@ -2869,8 +3171,16 @@ def cmd_fetch(
     # `is_terminal_auth_failure` at the except site (they re-raise unchanged, exactly
     # as they propagated before this tuple caught them).
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+    from brutex.adapters.error_storm_breaker import (
+        VendorDownError,
+        resolve_error_storm_breaker,
+    )
     from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
-    from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
+    from brutex.adapters.groww.errors import (
+        GrowwAuthError,
+        GrowwCredentialDeadError,
+        is_terminal_auth_failure,
+    )
     from brutex.adapters.groww.pull_pipeline import (
         build_fetch_pipeline,
         build_write_consumer,
@@ -2901,7 +3211,15 @@ def cmd_fetch(
         DailyQuotaExceeded,
         QuotaInvariantError,
         MassEmptySettleHalt,
+        # DEC-GROWW-AUTH-HALT-001: a TERMINAL GrowwAuthError halts (the RETRYABLE
+        # auth-family subclasses are carved back out at the except site).
         GrowwAuthError,
+        # DEC-VENDOR-DOWN-BREAKER-001: a tripped vendor-down error-storm breaker /
+        # dead-credential escalation halts the pull the same graceful way
+        # (GrowwCredentialDeadError is the TERMINAL auth escalation — a
+        # GrowwAuthError subclass, listed explicitly as the breaker's halt class).
+        VendorDownError,
+        GrowwCredentialDeadError,
     )
 
     resolved = _resolve_lake_root(lake_root)
@@ -3238,6 +3556,13 @@ def cmd_fetch(
         # ledger-recorded first.
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
+        # Vendor-down error-storm breaker + dead-credential StillStale escalation
+        # (DEC-VENDOR-DOWN-BREAKER-001): ONE per-pull breaker shared by every pass /
+        # until-clean round (any success resets it, so a recovering vendor never trips).
+        # Armed ONLY for a REAL live pull — a ``--dry-run`` (synthetic adapter) threads
+        # ``None`` so it can never observe synthetic outcomes (the same gating as
+        # ``detect_completeness_gaps`` below).
+        storm_breaker = None if dry_run else resolve_error_storm_breaker()
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -3265,6 +3590,7 @@ def cmd_fetch(
                     # land on the window's first day) leaves it OFF so it never false-reds
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
+                    storm_breaker=storm_breaker,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
@@ -3281,59 +3607,66 @@ def cmd_fetch(
                 raise
 
         until_outcome = None
-        try:
-            if until_clean:
-                # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
-                # rounds — each a full pass over the SHARED window ledger (re-fetches
-                # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
-                # SAME retry engine via run_until_clean, until clean / token dead / outer
-                # budget spent. Bounded round count (never an O(1)-total claim). The
-                # driver itself is vendor-neutral (pure 4-way decision + an injected
-                # round_runner) and lives in the vendor-neutral ingest_common home.
-                from brutex.adapters.ingest_common import (
-                    DEFAULT_MAX_ROUNDS,
-                    UntilCleanRound,
-                    run_until_clean,
-                )
+        # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
+        # whole fetch (including every until-clean round + the drain/persist
+        # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
+        # Best-effort: non-darwin / missing caffeinate is a logged no-op.
+        from brutex.observability.power_keepawake import keep_awake
 
-                fetch_passes: list[Any] = []
-
-                def _round_runner() -> UntilCleanRound:
-                    """One until-clean round = one full fetch pass; recorded for the summary.
-
-                    Groww's report has no ``auth_cause`` string (no fail-fast latch — the
-                    documented divergence; it derives ``auth_aborted`` from the quarantined
-                    failures), so the round leaves ``auth_cause`` at its ``None`` default.
-                    """
-                    res = _one_fetch_pass(True)
-                    fetch_passes.append(res)
-                    return UntilCleanRound(
-                        still_failed_windows=res.report.still_failed_windows,
-                        auth_aborted=res.report.auth_aborted,
+        with keep_awake("brutex fetch"):
+            try:
+                if until_clean:
+                    # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
+                    # rounds — each a full pass over the SHARED window ledger (re-fetches
+                    # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
+                    # SAME retry engine via run_until_clean, until clean / token dead / outer
+                    # budget spent. Bounded round count (never an O(1)-total claim). The
+                    # driver itself is vendor-neutral (pure 4-way decision + an injected
+                    # round_runner) and lives in the vendor-neutral ingest_common home.
+                    from brutex.adapters.ingest_common import (
+                        DEFAULT_MAX_ROUNDS,
+                        UntilCleanRound,
+                        run_until_clean,
                     )
 
-                rounds_budget = (
-                    until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
-                )
-                until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
-                result = fetch_passes[0]
-            else:
-                result = _one_fetch_pass(do_retry)
-        finally:
-            # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
-            # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
-            # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
-            # `sink.append` which may FEED the write consumer, so the pipeline must be drained
-            # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
-            # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
-            # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
-            # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
-            # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
-            # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
-            # error is swallowed so the ledger persist still runs.
-            drain_fetch_pipeline(fetch_pipeline)
-            drain_write_consumer(write_consumer)
-            end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+                    fetch_passes: list[Any] = []
+
+                    def _round_runner() -> UntilCleanRound:
+                        """One until-clean round = one full fetch pass; recorded for the summary.
+
+                        Groww's report has no ``auth_cause`` string (no fail-fast latch — the
+                        documented divergence; it derives ``auth_aborted`` from the quarantined
+                        failures), so the round leaves ``auth_cause`` at its ``None`` default.
+                        """
+                        res = _one_fetch_pass(True)
+                        fetch_passes.append(res)
+                        return UntilCleanRound(
+                            still_failed_windows=res.report.still_failed_windows,
+                            auth_aborted=res.report.auth_aborted,
+                        )
+
+                    rounds_budget = (
+                        until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
+                    )
+                    until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
+                    result = fetch_passes[0]
+                else:
+                    result = _one_fetch_pass(do_retry)
+            finally:
+                # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
+                # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
+                # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
+                # `sink.append` which may FEED the write consumer, so the pipeline must be drained
+                # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
+                # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
+                # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
+                # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
+                # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
+                # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
+                # error is swallowed so the ledger persist still runs.
+                drain_fetch_pipeline(fetch_pipeline)
+                drain_write_consumer(write_consumer)
+                end_pull_ledger(ledger, resolved, dry_run=_no_persist)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -3474,6 +3807,7 @@ def cmd_sweep(
     sort_by: str,
     validate_oos: bool,
     oos_only: bool,
+    allow_out_of_scope: bool = False,
 ) -> int:
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
@@ -3489,9 +3823,31 @@ def cmd_sweep(
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_report import sweep_report
+
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2):
+    # refuse an out-of-engine-scope launch BEFORE any lake I/O. Report-only
+    # command, but an out-of-scope brute-force IS the violation.
+    from brutex.engine.sweep_scope import check_sweep_scope
     from brutex.feed.replay import ReplayFeed
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
+
+    scope = check_sweep_scope(
+        [symbol], exchange=exchange, segment=segment, allow_out_of_scope=allow_out_of_scope
+    )
+    if not scope.ok:
+        print(f"[brutex] {scope.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if scope.overridden:
+        import structlog
+
+        print(f"[brutex] {scope.override_warning()}")
+        structlog.get_logger("brutex.sweep").warning(
+            "sweep.scope_override",
+            symbols=[verdict.symbol for verdict in scope.refused],
+            exchange=exchange,
+            segment=segment,
+        )
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -3652,6 +4008,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     allow_missing_slices: bool = False,
     sweep_cache_map_mb: int | None = None,
     sweep_cache_bloom_capacity: int | None = None,
+    allow_out_of_scope: bool = False,
+    acknowledge_sla_overrun: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -3701,6 +4059,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     out_root = results_root if results_root is not None else resolved_lake / "sweeps"
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): refuse
+    # an out-of-engine-scope launch BEFORE the catalog reconcile + bar load —
+    # refusal costs ZERO lake I/O and beats the misleading preflight
+    # "ZERO bars" message. The CLI-only --allow-out-of-scope research escape
+    # proceeds LOUDLY (WARNING + structlog + audit stamp, Golden Rule #8).
+    from brutex.engine.sweep_scope import check_sweep_scope
+
+    scope = check_sweep_scope(
+        symbol_list, exchange=exchange, segment=segment, allow_out_of_scope=allow_out_of_scope
+    )
+    if not scope.ok:
+        print(f"[brutex] {scope.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if scope.overridden:
+        import structlog
+
+        print(f"[brutex] {scope.override_warning()}")
+        structlog.get_logger("brutex.sweep").warning(
+            "sweep.scope_override",
+            symbols=[verdict.symbol for verdict in scope.refused],
+            exchange=exchange,
+            segment=segment,
+        )
     interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
     for interval in interval_list:
         if interval not in INTERVAL_SECONDS:
@@ -3853,6 +4234,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         grid_kwargs["max_combos"] = max_combos
     if overfit_gate:
         grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
+    if scope.overridden:
+        # Layer-1 opt-out rides the SAME operator decision as the Layer-2
+        # override (DEC-ENGINE-SCOPE-GUARD-001) — set ONLY when symbols were
+        # actually refused, so an in-scope grid never carries the unsafe flag.
+        grid_kwargs["unsafe_allow_out_of_scope_instruments"] = True
     # Stage-3 knobs (DEC-STAGE3-WIRE-001): None ⇒ keep the SweepGridConfig
     # defaults (the ONE source of the engine defaults). The on-grid SL/TP
     # fail-fast runs inside SweepGridConfig.__post_init__ (review F5).
@@ -3881,6 +4267,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         except Stage3WireError as exc:
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
+
+    # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001): project the grid's
+    # wall-clock as tuple_count × an UNBENCHMARKED per-tuple estimate
+    # (BRUTEX_SWEEP_PER_TUPLE_SECONDS overrides) and REFUSE a launch projected
+    # past the CLAUDE.md §8 2-4-day envelope unless the operator passed
+    # --acknowledge-sla-overrun (then WARN loudly and proceed). Honest per
+    # Golden Rule #10: an estimate-based plausibility screen — it never
+    # certifies the §8 SLA (which remains UNMEASURED) either way.
+    from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla
+
+    try:
+        sla = check_sweep_sla(count_sweep_tuples(grid), acknowledge=acknowledge_sla_overrun)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.REFUSED:
+        print(f"[brutex] {sla.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.ACKNOWLEDGED:
+        print(f"[brutex] WARNING: {sla.acknowledged_warning()}")
 
     # Dead launch Bloom KILLED (R2-SL-F1): this launcher runs the production
     # DIGEST path — ``run_one_tuple`` always passes a non-None
@@ -3957,6 +4363,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 map_size_mb=cache_knobs.map_size_mb,
             ) as cache,
         ):
+            # Audit the scope override on the hash-chained launch log (Golden Rule
+            # #8): a research launch that let out-of-scope symbols through is a
+            # material action and must be traceable in the tree's own audit.
+            if scope.overridden:
+                ingest_audit.append(
+                    action="SWEEP_SCOPE_OVERRIDE",
+                    subject="sweep-all:scope",
+                    payload={
+                        "scope_override": True,
+                        "symbols": [verdict.symbol for verdict in scope.refused],
+                        "exchange": exchange,
+                        "segment": segment,
+                    },
+                )
             dedup = plan_launch_dedup(grid, digest_path=True)
             guards = SweepGuards(
                 audit=sup_audit,
@@ -4387,6 +4807,14 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
         f"[brutex] supervisor starting — child: {' '.join(argv)} — audit: {audit_path}",
     )
 
+    # Crash-loop operator alert (DEC-SUPERVISOR-CRASHLOOP-ALERT-001): every
+    # abnormal-exit relaunch fires one best-effort, deduped Telegram push
+    # (CRITICAL once 3 relaunches land within the rolling window), so a child
+    # OOM-SIGKILL-looping all night can never stay silent. Best-effort + a
+    # silent no-op when Telegram is disabled (the default) — the supervisor's
+    # relaunch behaviour is byte-unchanged.
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
     with SweepAuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
         supervisor = ProcessSupervisor(
             launch=build_subprocess_launcher(argv),
@@ -4399,6 +4827,7 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
                 if shutdown_grace_seconds is not None
                 else DEFAULT_SHUTDOWN_GRACE_SECONDS
             ),
+            alerter=SweepAlerter(),
         )
         result = supervisor.run()
 
@@ -4717,6 +5146,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "indicator_version": indicator,
         "code_commit_sha": code_sha,
         "top_k": top,
+        # DEC-ENGINE-SCOPE-GUARD-001: verifying recorded work, not launching —
+        # a legacy out-of-scope tree must stay verifiable, so the Layer-1
+        # config invariant is opted out at this ONE forensic rebuild site.
+        "unsafe_allow_out_of_scope_instruments": True,
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
@@ -4812,6 +5245,25 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 "[brutex] sweep-verify --recount: recorded context does NOT match the "
                 "current environment:\n  " + "\n  ".join(mismatches)
             )
+            # Legacy-era diagnostic (DEC-SNAPSHOT-HASH-FULL-001): a snapshot
+            # mismatch whose RECORDED hash matches the retired v1 SAMPLED
+            # derivation over the SAME fresh slices is a pre-upgrade tree, not
+            # necessarily changed data — name it so the operator knows the
+            # remedy. O(#slices) extra cost, mismatch branch only; the refusal
+            # ladder below is UNCHANGED (a v1 match was never verdict-grade).
+            if snapshot != fresh_snapshot:
+                from brutex.engine.stage3_wire import _data_snapshot_hash_v1
+
+                legacy_v1 = _data_snapshot_hash_v1(
+                    exchange=exchange, segment=segment, start=start, end=end, slices=slices
+                )
+                if snapshot == legacy_v1:
+                    print(
+                        "[brutex] note: the recorded hash matches the LEGACY sampled "
+                        "derivation (pre-DEC-SNAPSHOT-HASH-FULL-001) over the current "
+                        "lake — findings INCONCLUSIVE by design; re-sweep to mint a "
+                        "v2 identity."
+                    )
         if mismatches and not allow_context_mismatch:
             print(
                 "[brutex] recount REFUSED (a recount under changed inputs is not an "
@@ -5129,22 +5581,141 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
 #
 # These helpers compose the 100%-tested, golden-locked options EXECUTOR
 # (brutex.options.executor) with the spot lake (signal replay via the engine)
-# and the rolling-option lake (the OptionBarSource). They are real-lake +
-# fno_math I/O paths — unrunnable on the Py3.11/no-wheel/no-data sandbox — so
-# they are coverage-omitted (cli.py) + pragma'd and verified by the operator
-# against a real Groww lake; the executor core they call is the tested piece.
+# and the rolling-option lake (the OptionBarSource). The replay/orchestration
+# helpers are real-lake + fno_math I/O paths — unrunnable on the
+# Py3.11/no-wheel/no-data sandbox — so they are pragma'd and verified by the
+# operator against a real Groww lake; the executor core they call is the
+# tested piece. The lake READER (`_LakeOptionBarSource` + the expiry-series
+# resolution) needs only polars + a tmp lake, so it is fully covered by
+# tests/unit/test_cli_options_sim_source.py (R2-OC-1 regression net).
 
 
-class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-verified
+#: The rolling-option lake's series ``expiry_flag`` values, as written by
+#: ``OptionSeriesCoordinate`` (``brutex/data/option_parquet_writer.py``,
+#: DEC-EXPIRED-OPTIONS-TABLE-001): ``"WEEK"`` / ``"MONTH"``.
+_EXPIRY_FLAG_WEEKLY = "WEEK"
+_EXPIRY_FLAG_MONTHLY = "MONTH"
+
+#: The lake's ``expiry_code`` selector vocabulary is Near/Next/Far — 0/1/2
+#: (the request selector stamped per series; see the ``/api/v1/contracts``
+#: route docstring in ``brutex/dashboard/app.py``). A requested expiry beyond
+#: the Far selector is honestly unresolvable against this lake.
+_MAX_EXPIRY_CODE = 2
+
+#: The per-bar PRICING columns of the expired-options table — the inputs that
+#: actually drive a priced trade. Two rows surviving the series filter at ONE
+#: timestamp that agree on ALL of these are the same physical contract stored
+#: under two aliased series (e.g. a monthly expiry that is also that week's
+#: weekly); rows that disagree are a genuine ambiguity. The NULLABLE
+#: annotation columns (``spot`` / ``iv`` / ``open_interest``) are deliberately
+#: EXCLUDED: two aliased series pulled independently can legitimately drift on
+#: them (one captured spot, the other stored None) while pricing identically —
+#: keying ambiguity on annotations over-rejected priceable trades as NO_DATA
+#: (hostile-review MINOR, DEC-OPTIONS-EXEC-COST-AUDIT-R2-001). ``strike`` is
+#: excluded as redundant: ``load_pair`` already filters it to a constant.
+_OPTION_PRICING_COLUMNS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+)
+
+
+def _expiry_series_candidates(
+    instrument: Any,
+    expiry_date: date,
+    *,
+    on_date: date,
+) -> tuple[tuple[str, int], ...]:
+    """Resolve a requested absolute *expiry_date* to rolling-lake series keys.
+
+    The expired-options table stores NO absolute expiry column — each bar
+    carries only the pull-request series selector ``(expiry_flag,
+    expiry_code)`` (``"WEEK"``/``"MONTH"`` × Near/Next/Far;
+    DEC-EXPIRED-OPTIONS-TABLE-001). This maps the executor's absolute
+    *expiry_date*, as seen from *on_date* (the lookup bar's IST trading
+    date), onto that vocabulary using the SAME expiry calendar that generated
+    the request (:mod:`brutex.options.expiry_calendar` — imported, never
+    re-derived, CLAUDE.md §11 COMMON).
+
+    Parameters
+    ----------
+    instrument
+        The :class:`~brutex.options.lot_size_history.OptionsUnderlying`.
+    expiry_date
+        The absolute expiry the trade requested.
+    on_date
+        The IST trading date of the bar being looked up (the reference the
+        rolling Near/Next/Far selectors are relative to).
+
+    Returns
+    -------
+    tuple[tuple[str, int], ...]
+        Every matching ``(expiry_flag, expiry_code)`` pair — a monthly expiry
+        that is also that week's weekly matches BOTH series (the same
+        physical contract). Empty when the expiry is unresolvable: not on the
+        calendar as seen from *on_date*, beyond the Far selector, or
+        *on_date* precedes the recorded calendar history (pre-2021) — the
+        caller then rejects honestly (NO_DATA), never guesses.
+    """
+    from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
+
+    candidates: list[tuple[str, int]] = []
+    try:
+        cursor = on_date
+        for code in range(_MAX_EXPIRY_CODE + 1):
+            weekly = next_weekly_expiry(instrument, cursor)
+            if weekly is None or weekly > expiry_date:
+                break
+            if weekly == expiry_date:
+                candidates.append((_EXPIRY_FLAG_WEEKLY, code))
+                break
+            cursor = weekly + timedelta(days=1)
+        cursor = on_date
+        for code in range(_MAX_EXPIRY_CODE + 1):
+            monthly = next_monthly_expiry(instrument, cursor)
+            if monthly > expiry_date:
+                break
+            if monthly == expiry_date:
+                candidates.append((_EXPIRY_FLAG_MONTHLY, code))
+                break
+            cursor = monthly + timedelta(days=1)
+    except ValueError:
+        # *on_date* precedes the expiry calendar's recorded history (e.g. a
+        # 2020 signal vs the 2021-01-01 table start) — unresolvable; the
+        # caller rejects, never guesses (Golden Rule #1).
+        return ()
+    return tuple(candidates)
+
+
+class _LakeOptionBarSource:
     """An ``OptionBarSource`` backed by the rolling-option Parquet lake.
 
     Reads the self-describing expired-options table (DEC-EXPIRED-OPTIONS-TABLE-001,
     ``brutex/data/option_parquet_writer.py``): one ``(year, month)`` partition per
     series, every bar carrying ``underlying_symbol`` / ``side`` / resolved
-    ``strike`` / UTC ``timestamp`` + OHLC + ``iv`` columns. A leg is located by
-    ``(underlying_symbol, side, strike, timestamp)``; a missing entry/exit bar
-    (band-drift hole / not ingested) returns ``None`` so the trade is rejected,
-    never faked.
+    ``strike`` / UTC ``timestamp`` + the series ``expiry_flag``/``expiry_code``
+    + OHLC + ``iv`` columns. A leg is located by ``(underlying_symbol, side,
+    strike, timestamp)`` **within the series the requested expiry resolves to**
+    (R2-OC-1 — two concurrent series, e.g. a weekly and a monthly at the same
+    strike, can never collide). A missing entry/exit bar (band-drift hole / not
+    ingested), an unresolvable expiry, or a cross-series ambiguity returns
+    ``None`` so the trade is rejected, never faked.
+
+    HONEST ENVELOPE (hostile-review composition MINOR,
+    DEC-OPTIONS-EXEC-COST-AUDIT-R2-001): the per-lookup-date series resolution
+    assumes the lake's ROLLING accretion semantics — a bar at trading date D
+    is stored under the Near/Next/Far rank the contract held AS OF D (each
+    pull stamps the then-current selector, so one contract's life spans codes:
+    the rolling regression test pins entry WEEK/1 → exit WEEK/0 for the SAME
+    absolute expiry). A lake back-filled in ONE shot that stamps a contract's
+    whole multi-week history under a single pull-time code would read honest
+    ``NO_DATA`` for the bars whose stored rank differs from the as-of-date
+    resolution — fail-SAFE (reject + logged), never a mis-priced trade;
+    widening the filter to any code of a matching flag would reintroduce the
+    exact concurrent-series collision R2-OC-1 removed, so it is deliberately
+    NOT done.
     """
 
     def __init__(self, *, lake_root: Path) -> None:
@@ -5160,15 +5731,37 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
         entry_ts: datetime,
         exit_ts: datetime,
     ) -> Any:
-        """Return the leg's entry/exit ``OptionBarPair`` from the lake, or ``None``."""
-        del expiry_date  # the rolling lake is keyed by resolved strike + ts, not expiry
+        """Return the leg's entry/exit ``OptionBarPair`` from the lake, or ``None``.
+
+        The requested *expiry_date* is resolved to the lake's series
+        discriminator per lookup timestamp (:func:`_expiry_series_candidates`);
+        an unresolvable expiry logs ``options_sim.expiry_series_unresolved``
+        and returns ``None`` (→ the executor's NO_DATA reject).
+        """
+        from brutex.calendars.nse import IST
         from brutex.options.executor import OptionBarPair
 
         try:
             import polars as pl
-        except ImportError:
+        except ImportError:  # pragma: no cover — exercised only without the data extra
             return None
         if not self._root.exists():
+            return None
+
+        entry_date_ist = entry_ts.astimezone(IST).date()
+        exit_date_ist = exit_ts.astimezone(IST).date()
+        entry_series = _expiry_series_candidates(instrument, expiry_date, on_date=entry_date_ist)
+        exit_series = _expiry_series_candidates(instrument, expiry_date, on_date=exit_date_ist)
+        if not entry_series or not exit_series:
+            import structlog
+
+            structlog.get_logger("brutex.cli.options_sim").warning(
+                "options_sim.expiry_series_unresolved",
+                instrument=str(getattr(instrument, "value", instrument)),
+                expiry_date=str(expiry_date),
+                entry_date=str(entry_date_ist),
+                exit_date=str(exit_date_ist),
+            )
             return None
 
         entry_utc = entry_ts.astimezone(UTC)
@@ -5188,20 +5781,33 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
             & (pl.col("strike") == float(strike))
         )
 
-        entry_bar = self._row_at(df, entry_utc, option_type)
-        exit_bar = self._row_at(df, exit_utc, option_type)
+        entry_bar = self._row_at(df, entry_utc, option_type, series=entry_series)
+        exit_bar = self._row_at(df, exit_utc, option_type, series=exit_series)
         if entry_bar is None or exit_bar is None:
             return None
         return OptionBarPair(entry_bar=entry_bar, exit_bar=exit_bar)
 
     @staticmethod
-    def _row_at(df: Any, ts_utc: datetime, side: str) -> Any:  # pragma: no cover — lake I/O
-        """Build the ``OptionBar`` whose timestamp matches *ts_utc*, or ``None``.
+    def _row_at(
+        df: Any, ts_utc: datetime, side: str, *, series: tuple[tuple[str, int], ...]
+    ) -> Any:
+        """Build the ``OptionBar`` matching *ts_utc* within *series*, or ``None``.
 
-        A poisoned-era duplicate ``(side, timestamp)`` row keeps the FIRST
-        physical row and is WARNED via the COMMON read gate — previously a
-        SILENT first-wins (DEC-LAKE-READ-UNIQUE-001; the write side dedups on
-        the same composite key, ``option_parquet_writer``).
+        Rows are matched on ``timestamp`` AND the resolved series
+        discriminator (``expiry_flag``/``expiry_code``). Multiple surviving
+        rows that agree on every PRICING column (:data:`_OPTION_PRICING_COLUMNS`
+        — open/high/low/close/volume; the nullable ``spot``/``iv``/
+        ``open_interest`` annotations are excluded so aliased-series annotation
+        drift never over-rejects) are the SAME contract stored under two
+        aliased series (a monthly that is also that week's weekly) — the
+        most-annotated survivor is kept (every survivor prices identically) —
+        and a REPEATED series key among them (a poisoned-era physical
+        duplicate) keeps the first row of that ordering and is WARNED via the
+        COMMON read gate, never silent (DEC-LAKE-READ-UNIQUE-001; the write
+        side dedups on the same composite key, ``option_parquet_writer``).
+        Rows that DISAGREE on any pricing column are a genuine ambiguity: the
+        lookup logs ``options_sim.ambiguous_option_rows`` and returns ``None``
+        (→ NO_DATA), never an arbitrary row (R2-OC-1).
         """
         from decimal import Decimal
 
@@ -5210,17 +5816,50 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
         from brutex.data.lake_read import log_read_duplicates
         from brutex.data.models import OptionBar
 
-        hit = df.filter(pl.col("timestamp") == ts_utc)
+        series_mask = pl.lit(False)
+        for flag, code in series:
+            series_mask = series_mask | (
+                (pl.col("expiry_flag") == flag) & (pl.col("expiry_code") == code)
+            )
+        hit = df.filter((pl.col("timestamp") == ts_utc) & series_mask)
         if hit.height == 0:
             return None
         if hit.height > 1:
-            # Keep-FIRST + one aggregated WARNING, never silent: `row(0)` below
-            # already takes the first physical row; the conflict count is how
-            # many distinct value-rows exist beyond the kept one.
+            if hit.select(list(_OPTION_PRICING_COLUMNS)).unique().height > 1:
+                import structlog
+
+                structlog.get_logger("brutex.cli.options_sim").warning(
+                    "options_sim.ambiguous_option_rows",
+                    timestamp=str(ts_utc),
+                    side=side,
+                    n_rows=int(hit.height),
+                    series=[f"{flag}/{code}" for flag, code in series],
+                )
+                return None
+            # Surviving rows AGREE on every pricing column: distinct series
+            # keys are the SAME physical contract under aliased series (priced
+            # normally + silently, keep-first via `row(0)` below), while a
+            # REPEATED series key is a poisoned-era physical duplicate —
+            # keep-first + the ONE aggregated WARNING, never silent
+            # (DEC-LAKE-READ-UNIQUE-001; no-op when every series key is
+            # distinct). Price-conflicts are 0 by construction here: a
+            # pricing-DISAGREEING survivor took the ambiguity reject above;
+            # annotation drift among agreeing rows is benign (see below).
             log_read_duplicates(
                 source=f"options_sim:{side}@{ts_utc.isoformat()}",
-                dropped=hit.height - 1,
-                conflicts=max(0, hit.unique(maintain_order=True).height - 1),
+                dropped=hit.height - hit.select(["expiry_flag", "expiry_code"]).unique().height,
+                conflicts=0,
+            )
+            # Among the price-agreeing survivors prefer the MOST-ANNOTATED row
+            # (fewest None spot/iv/open_interest — the nullable annotations the
+            # ambiguity key deliberately excludes), so an aliased pair with
+            # annotation drift keeps its annotations instead of arbitrarily
+            # dropping them; the priced result is identical for any survivor.
+            hit = hit.sort(
+                pl.col("spot").is_null().cast(pl.Int8)
+                + pl.col("iv").is_null().cast(pl.Int8)
+                + pl.col("open_interest").is_null().cast(pl.Int8),
+                maintain_order=True,
             )
         r = hit.row(0, named=True)
 
@@ -5532,6 +6171,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.catalog_command != "reconcile":
             parser.error(f"unknown catalog subcommand: {args.catalog_command}")
         return cmd_catalog_reconcile(lake_root=args.lake_root)
+    if args.command == "lake":
+        if args.lake_command != "audit-unique":
+            parser.error(f"unknown lake subcommand: {args.lake_command}")
+        return cmd_lake_audit_unique(
+            lake_root=args.lake_root,
+            as_json=args.as_json,
+            exchange=args.exchange,
+            segment=args.segment,
+            symbol=args.symbol,
+            interval=args.interval,
+            no_options=args.no_options,
+        )
     if args.command == "reopen-skipped":
         return cmd_reopen_skipped(
             lake_root=args.lake_root,
@@ -5619,6 +6270,7 @@ def main(argv: list[str] | None = None) -> int:
             sort_by=args.sort_by,
             validate_oos=args.validate_oos,
             oos_only=args.oos_only,
+            allow_out_of_scope=args.allow_out_of_scope,
         )
     if args.command == "sweep-all":
         return cmd_sweep_all(
@@ -5654,10 +6306,23 @@ def main(argv: list[str] | None = None) -> int:
             allow_missing_slices=args.allow_missing_slices,
             sweep_cache_map_mb=args.sweep_cache_map_mb,
             sweep_cache_bloom_capacity=args.sweep_cache_bloom_capacity,
+            allow_out_of_scope=args.allow_out_of_scope,
+            acknowledge_sla_overrun=args.acknowledge_sla_overrun,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
     if args.command == "sweep-daemon":
+        # DEC-ENGINE-SCOPE-GUARD-001: the research escape hatch is NEVER
+        # available on the unattended daemon — refuse loudly instead of
+        # silently ignoring the flag (Golden Rule #10 honesty).
+        if args.allow_out_of_scope:
+            print(
+                "[brutex] sweep-daemon REFUSED: --allow-out-of-scope is a manual "
+                "research escape hatch and is not available on the unattended "
+                "daemon (DEC-ENGINE-SCOPE-GUARD-001)",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
         return cmd_sweep_daemon(
             schedule=args.schedule,
             once=args.once,

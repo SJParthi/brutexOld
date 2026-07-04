@@ -17,7 +17,40 @@ must consult the docstrings below.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+__all__ = [
+    "ResidentBars",
+    "ResidentSweepSim",
+    "__version__",
+    "add_u64",
+    "bitand_count_u64s",
+    "bitcount_u64s",
+    "blake3_hash",
+    "count_supermask_u64s",
+    "count_supermasks_u64s",
+    "count_supermasks_u64s_nthreads",
+    "popcount_bytes",
+]
+
 __version__: str
+
+__build_crate_version__: str
+"""Crate version of the INSTALLED compiled kernel (build stamp, not API).
+
+Derived at import from the compiled module's ``CARGO_PKG_VERSION``-baked
+``__version__``; read by ``brutex doctor``'s fno_math wheel-freshness stage
+(DEC-FNOMATH-WHEEL-FRESHNESS-001). Deliberately NOT in ``__all__``.
+"""
+
+_EXPECTED_COMPILED_SYMBOLS: tuple[str, ...]
+
+def _assert_compiled_surface(
+    compiled: object,
+    expected: Sequence[str] = ...,
+) -> None:
+    """Raise an actionable ``ImportError`` if ``compiled`` misses an expected symbol."""
+    ...
 
 def add_u64(a: int, b: int) -> int:
     """Add two `u64` values.
@@ -78,6 +111,21 @@ def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
     ...
 
+def sweep_drawdown_stats(
+    n_bars: int,
+    start_equity_paisa: int,
+    exits: list[tuple[int, int]],
+) -> tuple[int, float, int, float]:
+    """Fused per-mask equity fold + drawdown scan (DEC-SWEEP-RUST-METRICS-001).
+
+    `exits` is `(exit_bar_idx, pnl_paisa)` per closed trade. Returns
+    `(max_dd_paisa, max_dd_pct, max_dd_duration_bars, ulcer_index)` exactly as
+    `brutex.metrics.compute._drawdown_stats` returns them (percentages ×100),
+    bit-identical inside the `start + Σ|pnl| ≤ 2**52` exactness envelope the
+    Python wrapper pre-guards. Raises `ValueError` outside the envelope.
+    """
+    ...
+
 class ResidentBars:
     """Resident bar buffer — holds `bar_bits` Rust-side across batch calls.
 
@@ -93,16 +141,20 @@ class ResidentBars:
     def count_supermask(self, mask: int) -> int: ...
 
 class ResidentSweepSim:
-    """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + bar_bits.
+    """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + sessions + bar_bits.
 
     DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). The per-bar SL/TP/forced-exit
     state machine (the Python `TradeSimWalker`) ported to Rust + fused with the
-    per-mask entry projection. The `O(N_bars)` Python→Rust copy of the 5 columns +
-    flags + bar_bits is paid ONCE in `__init__`; subsequent `simulate_masks` /
-    `count_trades` calls marshal only `masks`. Frozen + immutable (only `n_bars`
-    is exposed). All money is int64 paisa; the price→paisa conversion + forced-exit
-    detection are done in Python (the single source of truth) so the trades are
-    bit-identical to `brutex.engine.trade_sim.simulate_trades`.
+    per-mask entry projection. The `O(N_bars)` Python→Rust copy of the columns +
+    flags + session ordinals + bar_bits is paid ONCE in `__init__`; subsequent
+    `simulate_masks` / `count_trades` calls marshal only `masks`. Frozen +
+    immutable (only `n_bars` is exposed). All money is int64 paisa; the
+    price→paisa conversion, the forced-exit detection AND the per-bar session
+    identity (`session_idx[i]` = bar `i`'s IST calendar-date ordinal) are done in
+    Python (the single source of truth) so the trades are bit-identical to
+    `brutex.engine.trade_sim.simulate_trades`. A pending entry only fills on a
+    bar with the SAME `session_idx` it armed on — a cross-session fill (the
+    overnight-gap leak, R2-OC-2) is dropped.
 
     Unequal column lengths raise `ValueError`.
     """
@@ -114,6 +166,7 @@ class ResidentSweepSim:
         low: list[int],
         close: list[int],
         is_forced: list[bool],
+        session_idx: list[int],
         bar_bits: list[int],
     ) -> None: ...
     @property

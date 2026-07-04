@@ -28,6 +28,7 @@ from hypothesis import strategies as st
 pytestmark = pytest.mark.property
 
 _DAY = date(2024, 1, 2)
+_DAY2 = date(2024, 1, 3)  # the next NSE session — two-session feeds (R2-OC-2)
 # Start IST times: 09:15 (no forced bars within ~1h) + 15:16 (windows quickly
 # cross the 15:20 forced exit), so the forced-exit branch is exercised too.
 _START_TIMES = [(9, 15), (15, 16)]
@@ -37,9 +38,16 @@ _START_TIMES = [(9, 15), (15, 16)]
 def _feed_and_params(
     draw: st.DrawFn,
 ) -> tuple[list[CandleBar], list[int], Side, int | None, int | None, FillPolicy]:
-    """Generate (bars, masks, direction, sl_paisa, tp_paisa, policy)."""
+    """Generate (bars, masks, direction, sl_paisa, tp_paisa, policy).
+
+    Bars at index ``>= split`` roll to the NEXT session (day-2, restarting at
+    09:15 IST), so the corpus spans trading-day boundaries and the kernel's
+    cross-session pending-entry drop (R2-OC-2) is parity-checked too;
+    ``split in {0, n}`` degenerates to the original single-session feed.
+    """
     n = draw(st.integers(min_value=1, max_value=30))
     start_h, start_m = draw(st.sampled_from(_START_TIMES))
+    split = draw(st.integers(min_value=0, max_value=n))
     bars: list[CandleBar] = []
     for i in range(n):
         low = draw(st.integers(min_value=9000, max_value=11000))
@@ -47,9 +55,15 @@ def _feed_and_params(
         o = draw(st.integers(min_value=low, max_value=high))
         c = draw(st.integers(min_value=low, max_value=high))
         # IST wall-clock marching by one minute; stored UTC (bars are UTC).
-        minute_total = start_h * 60 + start_m + i
+        # Bars from ``split`` onward step to day-2, restarting at 09:15 IST.
+        if i < split:
+            day = _DAY
+            minute_total = start_h * 60 + start_m + i
+        else:
+            day = _DAY2
+            minute_total = 9 * 60 + 15 + (i - split)
         hh, mm = divmod(minute_total, 60)
-        ts = datetime(_DAY.year, _DAY.month, _DAY.day, hh % 24, mm, tzinfo=IST).astimezone(UTC)
+        ts = datetime(day.year, day.month, day.day, hh % 24, mm, tzinfo=IST).astimezone(UTC)
         bars.append(
             CandleBar(
                 timestamp=ts,

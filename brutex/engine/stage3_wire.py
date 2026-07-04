@@ -184,11 +184,27 @@ def data_snapshot_hash(
     slices through the SAME derivation (ADR-0007 Amendment A1) — so a refined
     row's ``data_snapshot_hash`` honestly encodes the data it was evaluated on.
 
-    Honest (Golden Rule #1/#10): a deterministic digest of the data SCOPE
-    (exchange/segment/window) plus, per ``(symbol, interval)`` slice, the bar
-    count and the first/last bar timestamps + closes — a real content-derived
-    snapshot identity, not a fabricated placeholder. Two different lake states
-    over the same window therefore hash differently.
+    FULL-CONTENT since DEC-SNAPSHOT-HASH-FULL-001 (preimage version
+    ``bxsnap2``): every bar folds ALL SEVEN :class:`~brutex.data.models.CandleBar`
+    fields (timestamp / open / high / low / close / volume / open_interest)
+    into a STREAMED BLAKE3 (O(1) extra memory), so **any single-bar difference
+    in any slice produces a different hash**. The v1 derivation (bar count +
+    first/last timestamp+close per slice — a SAMPLED fingerprint) let an
+    interior-bar re-pull edit alias the identity, so Bloom/LMDB dedup + the
+    tuple cache served STALE results as fresh (Golden Rules #4/#7); it is
+    retained ONLY as the private recount diagnostic
+    :func:`_data_snapshot_hash_v1`, never exported to any identity path. The
+    ``bxsnap2|`` domain tag makes a v1/v2 preimage collision structurally
+    impossible (including the degenerate all-empty-slices grid) and keeps the
+    format provenance auditable.
+
+    Honest complexity envelope (Golden Rule #10): NOT O(1) — O(total loaded
+    bars), paid ONCE per launch / Stage-3 pass / recount over bars already
+    resident in RAM; strictly smaller than the pre-existing unconditional
+    per-launch ``catalog_reconcile`` full-byte rescan. Zero cost in any
+    per-combo hot path (Rule 5 untouched). ``Decimal.__str__`` renders prices
+    exactly (2dp-snapped at the lake-write boundary, DEC-SPOT-PRICE-2DP-001);
+    a ``None`` open_interest renders ``"None"`` deterministically.
 
     Parameters
     ----------
@@ -203,6 +219,39 @@ def data_snapshot_hash(
     str
         The 64-char lowercase BLAKE3 hex digest.
     """
+    hasher = blake3.blake3()
+    hasher.update(f"bxsnap2|{exchange}|{segment}|{start}|{end}".encode())
+    for (symbol, interval), bars in sorted(slices.items()):
+        hasher.update(f"\n{symbol}|{interval}|{len(bars)}".encode())
+        for bar in bars:
+            hasher.update(
+                f"\n{bar.timestamp.isoformat()}|{bar.open}|{bar.high}|{bar.low}|"
+                f"{bar.close}|{bar.volume}|{bar.open_interest}".encode()
+            )
+    # str(...) keeps this typed `str` even where the blake3 wheel (and its
+    # stubs) is absent and the import degrades to Any — e.g. the isolated
+    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
+    return str(hasher.hexdigest())
+
+
+def _data_snapshot_hash_v1(
+    *,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    slices: Mapping[tuple[str, str], Sequence[CandleBar]],
+) -> str:
+    """The RETIRED v1 sampled derivation — recount DIAGNOSTIC only, never identity.
+
+    The pre-DEC-SNAPSHOT-HASH-FULL-001 fingerprint (per slice: bar count +
+    first/last timestamp+close), kept module-private so ``sweep-verify
+    --recount`` can tell the operator "the recorded hash matches the LEGACY
+    sampled derivation — re-sweep to mint a v2 identity" instead of a bare
+    mismatch. MUST NOT be exported to any identity/digest/cache path: the v1
+    identities were unsound (two different lakes could alias — the exact bug
+    v2 kills). O(#slices), mismatch-diagnostic cost only.
+    """
     parts: list[str] = [f"{exchange}|{segment}|{start}|{end}"]
     for (symbol, interval), bars in sorted(slices.items()):
         if bars:
@@ -213,9 +262,7 @@ def data_snapshot_hash(
             )
         else:
             parts.append(f"{symbol}|{interval}|0")
-    # str(...) keeps this typed `str` even where the blake3 wheel (and its
-    # stubs) is absent and the import degrades to Any — e.g. the isolated
-    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
+    # str(...) — the same blake3-stubs-absent mypy-env guard as above (#575).
     return str(blake3.blake3("\n".join(parts).encode("utf-8")).hexdigest())
 
 

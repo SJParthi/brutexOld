@@ -44,11 +44,13 @@ backwards compatibility — ``instrument_type == IDX`` AND
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Final
+from typing import Final, Literal
 
+from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 from brutex.models import Exchange, Instrument, InstrumentType
 
 # ────────────────────────────────────────────────────────────────────────
@@ -283,6 +285,217 @@ def is_reference_only(instrument: Instrument) -> bool:
     return (
         instrument.instrument == InstrumentType.IDX
         and (instrument.exch_id, instrument.symbol_name) in REFERENCE_ONLY_INDEX_UNDERLYINGS
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Engine sweep-entry scope law (DEC-ENGINE-SCOPE-GUARD-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The ONE canonical predicate every sweep-launch surface shares (CLAUDE.md
+# §11 COMMON): the CLI (``cmd_sweep_all`` / ``cmd_sweep``), the dashboard
+# sweep route, and the ``SweepGridConfig.__post_init__`` hard invariant all
+# delegate HERE — never a re-typed copy. Static sets + a regex, ZERO I/O
+# (deliberately NO ``InstrumentStore`` dependency, so there is no "master
+# not loaded" failure mode). Deny-by-default: everything not explicitly
+# allowed is refused.
+
+
+#: The neutral lake SEGMENT partition label the 3 spot indexes live under
+#: (``brutex.adapters.groww.instruments`` maps the vendor ``IDX``/``CASH``
+#: row to this label; CLAUDE.md §6 "Backtesting segments").
+_ENGINE_SWEEP_SPOT_SEGMENT: Final[str] = "INDEX"
+
+#: The exact ``(exchange, segment, symbol)`` lake coordinates the brute-force
+#: ENGINE may sweep as SPOT (CLAUDE.md §2 Rule 3) — DERIVED from
+#: :data:`BRUTE_FORCE_INDEX_UNDERLYINGS` (never a hand-typed copy, so a
+#: universe change propagates automatically).
+ENGINE_SWEEP_SPOT_TRIPLES: Final[frozenset[tuple[str, str, str]]] = frozenset(
+    (exchange.value, _ENGINE_SWEEP_SPOT_SEGMENT, symbol)
+    for exchange, symbol in BRUTE_FORCE_INDEX_UNDERLYINGS
+)
+
+#: The bare spot symbols of the 3 swept indexes (the symbol-only tier of the
+#: law — coordinate correctness is the caller-facing
+#: :func:`classify_engine_sweep_target`'s job).
+_ENGINE_SWEEP_SPOT_SYMBOLS: Final[frozenset[str]] = frozenset(
+    symbol for _, symbol in BRUTE_FORCE_INDEX_UNDERLYINGS
+)
+
+#: The reference-only bare symbols (today: India VIX) — named in refusals so
+#: the operator sees the SPECIFIC "REFERENCE_ONLY" law, not a generic no.
+_REFERENCE_ONLY_SYMBOLS: Final[frozenset[str]] = frozenset(
+    symbol for _, symbol in REFERENCE_ONLY_INDEX_UNDERLYINGS
+)
+
+#: The ``FuturesContract.series_key`` shape (``NIFTY-FUT-YYYY-MM-DD``,
+#: :meth:`brutex.data.futures_roll.FuturesContract.series_key`) for the
+#: operator-authorized NIFTY-futures dynamic-strategy track (ADR-0012 /
+#: DEC-NIFTY-DYNAMIC-STRATEGY-001). NIFTY ONLY — ADR-0012 authorizes NIFTY
+#: futures, NOT BANKNIFTY/SENSEX futures. No ``futures_roll`` import here
+#: (that module pulls the trading_core wheel); a drift-pin test asserts this
+#: regex fullmatches a real ``FuturesContract(...).series_key`` so the two
+#: can never rot apart.
+_NIFTY_FUTURES_SERIES_RE: Final[re.Pattern[str]] = re.compile(r"^NIFTY-FUT-\d{4}-\d{2}-\d{2}$")
+
+#: The NIFTY-futures underlying symbol (the ADR-0012 authorization is
+#: exactly this one underlying).
+_NIFTY_UNDERLYING: Final[str] = "NIFTY"
+
+#: The lake exchange a NIFTY futures contract trades on (NSE — a foreign
+#: exchange token embedded in a parsed contract symbol is refused).
+_NIFTY_FUTURES_EXCHANGE: Final[str] = Exchange.NSE.value
+
+#: The lake SEGMENT partition label F&O contract candles live under
+#: (``bars/<exch>/FNO/…`` — CLAUDE.md §6 "F&O candle lake").
+_ENGINE_SWEEP_FNO_SEGMENT: Final[str] = "FNO"
+
+
+def is_engine_sweep_symbol(symbol: str) -> bool:
+    """Return True iff *symbol* is an engine-sweepable instrument SYMBOL.
+
+    The symbol-only tier of the DEC-ENGINE-SCOPE-GUARD-001 law (consumed by
+    the ``SweepGridConfig.__post_init__`` hard invariant, which sees only
+    bare symbols — coordinate correctness is
+    :func:`classify_engine_sweep_target`'s job). Accepted, deny-by-default:
+
+    * a bare spot symbol of the 3 brute-forced indexes (``NIFTY`` /
+      ``BANKNIFTY`` / ``SENSEX`` — CLAUDE.md §2 Rule 3), OR
+    * a NIFTY futures shape (ADR-0012 / DEC-NIFTY-DYNAMIC-STRATEGY-001),
+      in EITHER of the two addressing forms in the repo today —
+      the ``FuturesContract.series_key`` form (``NIFTY-FUT-YYYY-MM-DD``) or
+      a parseable lake contract ``groww_symbol``
+      (``NSE-NIFTY-<DDMmmYY>-FUT``). The futures-track launch PR MUST pin
+      its final addressing shape here (dual acceptance is the honest
+      pre-launch envelope, not a solved contract).
+
+    Everything else — India VIX, the ~212 F&O stocks, NTM constituents,
+    BANKNIFTY/SENSEX futures, every option — is False. Exact-case (lake
+    keys are case-exact). O(1): two frozenset probes + at most one regex +
+    one :func:`~brutex.data.fno_symbol.parse_fno_symbol`.
+    """
+    if symbol in _ENGINE_SWEEP_SPOT_SYMBOLS:
+        return True
+    if _NIFTY_FUTURES_SERIES_RE.fullmatch(symbol) is not None:
+        return True
+    parts = parse_fno_symbol(symbol)
+    return (
+        parts is not None
+        and parts.exchange == _NIFTY_FUTURES_EXCHANGE
+        and parts.underlying == _NIFTY_UNDERLYING
+        and parts.instrument_type == FUTURE_TYPE
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EngineSweepVerdict:
+    """One symbol's classification under the engine sweep-entry scope law.
+
+    Attributes
+    ----------
+    allowed
+        Whether the ``(exchange, segment, symbol)`` coordinate may launch.
+    tier
+        ``"spot_index"`` (one of the 3 §2 Rule 3 triples), ``"nifty_future"``
+        (the ADR-0012 track), or ``"refused"``.
+    reason
+        The human-readable law citation (allowed) or refusal ground.
+    """
+
+    allowed: bool
+    tier: Literal["spot_index", "nifty_future", "refused"]
+    reason: str
+
+
+def _expected_spot_coordinates(symbol: str) -> str:
+    """Render the expected ``exchange/segment`` for an in-scope spot *symbol*."""
+    coords = sorted(
+        f"{exchange}/{segment}"
+        for exchange, segment, spot_symbol in ENGINE_SWEEP_SPOT_TRIPLES
+        if spot_symbol == symbol
+    )
+    return ", ".join(coords)
+
+
+def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) -> EngineSweepVerdict:
+    """Classify one sweep-launch ``(exchange, segment, symbol)`` coordinate.
+
+    The coordinate tier of the DEC-ENGINE-SCOPE-GUARD-001 law (Layer 2 —
+    consumed by :func:`brutex.engine.sweep_scope.check_sweep_scope`). Pure +
+    zero-I/O: static sets derived from :data:`BRUTE_FORCE_INDEX_UNDERLYINGS`,
+    never an ``InstrumentStore`` read. Exact-case comparison (lake partition
+    keys are case-exact); a lower-cased in-scope symbol gets a
+    "did you mean" hint instead of a silent generic refusal.
+    """
+    if (exchange, segment, symbol) in ENGINE_SWEEP_SPOT_TRIPLES:
+        return EngineSweepVerdict(
+            allowed=True,
+            tier="spot_index",
+            reason=(
+                f"{exchange}/{segment}/{symbol} is one of the 3 brute-force spot "
+                "index triples (CLAUDE.md §2 Rule 3)"
+            ),
+        )
+    if is_engine_sweep_symbol(symbol) and symbol not in _ENGINE_SWEEP_SPOT_SYMBOLS:
+        # A NIFTY-futures shape: allowed ONLY under the NSE/FNO lake coordinates.
+        if exchange == _NIFTY_FUTURES_EXCHANGE and segment == _ENGINE_SWEEP_FNO_SEGMENT:
+            return EngineSweepVerdict(
+                allowed=True,
+                tier="nifty_future",
+                reason=(
+                    f"{symbol} is a NIFTY futures shape — the operator-authorized "
+                    "dynamic-strategy track (ADR-0012 / DEC-NIFTY-DYNAMIC-STRATEGY-001)"
+                ),
+            )
+        return EngineSweepVerdict(
+            allowed=False,
+            tier="refused",
+            reason=(
+                f"{symbol} is a NIFTY futures shape but "
+                f"{exchange}/{segment} is not its lake coordinate — expected "
+                f"{_NIFTY_FUTURES_EXCHANGE}/{_ENGINE_SWEEP_FNO_SEGMENT} (ADR-0012)"
+            ),
+        )
+    if symbol in _ENGINE_SWEEP_SPOT_SYMBOLS:
+        return EngineSweepVerdict(
+            allowed=False,
+            tier="refused",
+            reason=(
+                f"{symbol} is an engine index but {exchange}/{segment} is not its "
+                f"lake coordinate — expected {_expected_spot_coordinates(symbol)} "
+                "(CLAUDE.md §2 Rule 3)"
+            ),
+        )
+    if symbol in _REFERENCE_ONLY_SYMBOLS:
+        return EngineSweepVerdict(
+            allowed=False,
+            tier="refused",
+            reason=(
+                f"{symbol} is REFERENCE_ONLY (CLAUDE.md §2 Rule 3) — fetched + "
+                "stamped on trades, NEVER brute-forced"
+            ),
+        )
+    upper = symbol.upper()
+    if upper != symbol and (
+        upper in _ENGINE_SWEEP_SPOT_SYMBOLS or upper in _REFERENCE_ONLY_SYMBOLS
+    ):
+        return EngineSweepVerdict(
+            allowed=False,
+            tier="refused",
+            reason=(
+                f"{symbol!r} is not an engine instrument — lake symbols are "
+                f"case-exact; did you mean {upper!r}?"
+            ),
+        )
+    return EngineSweepVerdict(
+        allowed=False,
+        tier="refused",
+        reason=(
+            f"{symbol} is outside the brute-force engine scope — the engine sweeps "
+            "only NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) plus NIFTY "
+            "futures (ADR-0012); F&O stocks, NTM constituents and options are "
+            "lake/REFERENCE_ONLY"
+        ),
     )
 
 
@@ -819,19 +1032,23 @@ __all__ = [
     "ALLOWED_UNDERLYINGS",
     "BRUTE_FORCE_INDEX_UNDERLYINGS",
     "BRUTE_FORCE_INDICES",
+    "ENGINE_SWEEP_SPOT_TRIPLES",
     "INDEX_UNDERLYINGS",
     "REFERENCE_ONLY_INDICES",
     "V1_INDICES",
     "V1_UNDERLYINGS",
+    "EngineSweepVerdict",
     "OptionUnderlyingGap",
     "UnderlyingEconomics",
     "UnderlyingSpec",
     "build_fno_eligible_underlyings",
     "build_options_eligible_underlyings",
     "build_underlying_economics",
+    "classify_engine_sweep_target",
     "classify_underlying_kind",
     "derive_lake_underlyings",
     "diagnose_unmatched_option_underlyings",
+    "is_engine_sweep_symbol",
     "is_in_brute_force_scope",
     "is_in_fetch_scope",
     "is_in_scope",

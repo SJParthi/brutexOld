@@ -417,3 +417,112 @@ class TestCrossProcessPartitionLock:
         # And released afterwards (a fresh acquire succeeds) — no leaked lock.
         (only,) = (tmp_path / "options").rglob("*.parquet")
         assert _partition_lock_is_held(partition_lock_path(tmp_path, only)) is False
+
+
+class TestHealPartition:
+    """The public options-tree dup heal (DEC-LAKE-HEAL-001).
+
+    The #1139 machinery never protected ``options/`` — this is the healer's
+    ``(side, timestamp)`` keep-first entry, its OWN lock stack + guard.
+    """
+
+    def _poison(self, tmp_path: Path) -> Path:
+        """Plant a differing LATER duplicate ``(side, timestamp)`` row.
+
+        The writer's unique-merge refuses duplicates, so poison is planted by
+        re-rendering the stored frame with a value-drifted copy of row 0
+        appended (the #1067 raw-plant convention, polars flavoured).
+        """
+        w = _writer(tmp_path)
+        w.write(
+            partition_key=_PK,
+            coordinate=_COORD,
+            bars=[_bar(side="CE", minute=0), _bar(side="PE", minute=0)],
+        )
+        (dest,) = (tmp_path / "options").rglob("*.parquet")
+        df = pl.read_parquet(dest)
+        drifted = df[0:1].with_columns((pl.col("close") + 999.0).alias("close"))
+        pl.concat([df, drifted]).write_parquet(dest)
+        return dest
+
+    def test_heal_partition_dedups_keep_first(self, tmp_path: Path) -> None:
+        """FAILS on unfixed main: no options-tree heal entry exists — a
+        poisoned ``(side, timestamp)`` file persisted forever."""
+        dest = self._poison(tmp_path)
+        original_bytes = dest.read_bytes()
+        quarantine_to = tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        result = _writer(tmp_path).heal_partition(dest, quarantine_to=quarantine_to)
+        assert result.changed is True
+        assert result.kept == 2
+        assert result.dropped_duplicates == 1
+        assert result.quarantined_original == quarantine_to
+        assert quarantine_to.read_bytes() == original_bytes  # restorable original
+        healed = pl.read_parquet(dest)
+        assert healed.height == 2
+        ce = healed.filter(pl.col("side") == "CE")
+        assert ce["close"].to_list() == [105.0]  # the FIRST physical row won
+
+    def test_heal_noop_is_byte_identical(self, tmp_path: Path) -> None:
+        """A clean file (incl. the same ts across CE/PE sides — NOT a dup) is
+        left byte-untouched; no quarantine copy is made (idempotence oracle)."""
+        w = _writer(tmp_path)
+        w.write(
+            partition_key=_PK,
+            coordinate=_COORD,
+            bars=[_bar(side="CE", minute=0), _bar(side="PE", minute=0)],
+        )
+        (dest,) = (tmp_path / "options").rglob("*.parquet")
+        before = dest.read_bytes()
+        quarantine_to = tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        result = w.heal_partition(dest, quarantine_to=quarantine_to)
+        assert result.changed is False
+        assert result.kept == 2
+        assert result.dropped_duplicates == 0
+        assert result.quarantined_original is None
+        assert dest.read_bytes() == before
+        assert not quarantine_to.exists()
+
+    def test_heal_missing_quarantine_dest_refused(self, tmp_path: Path) -> None:
+        """A changing heal with no quarantine destination is REFUSED, file untouched."""
+        dest = self._poison(tmp_path)
+        poisoned = dest.read_bytes()
+        with pytest.raises(OptionWriterError, match="quarantine destination"):
+            _writer(tmp_path).heal_partition(dest)
+        assert dest.read_bytes() == poisoned
+
+    def test_heal_corrupt_file_raises_quarantinable_error(self, tmp_path: Path) -> None:
+        """A garbage/vanished file raises the quarantinable OptionWriterError
+        (the healer's per-finding isolation counts it; batch continues)."""
+        dest = self._poison(tmp_path)
+        dest.write_bytes(b"not a parquet file at all")
+        with pytest.raises(OptionWriterError, match="corrupt existing partition"):
+            _writer(tmp_path).heal_partition(
+                dest, quarantine_to=tmp_path / ".quarantine" / "x.parquet"
+            )
+        with pytest.raises(OptionWriterError, match="corrupt existing partition"):
+            _writer(tmp_path).heal_partition(
+                tmp_path / "options" / "missing" / "2021-01.parquet",
+                quarantine_to=tmp_path / ".quarantine" / "y.parquet",
+            )
+
+    def test_heal_holds_partition_flock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cross-process flock is held while the heal reads the partition."""
+        dest = self._poison(tmp_path)
+        observed: dict[str, bool] = {}
+        original_read = pl.read_parquet
+
+        def _spy_read(source: object, *args: object, **kwargs: object) -> pl.DataFrame:
+            observed["held_during_read"] = _partition_lock_is_held(
+                partition_lock_path(tmp_path, dest)
+            )
+            return original_read(source, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pl, "read_parquet", _spy_read)
+        result = _writer(tmp_path).heal_partition(
+            dest, quarantine_to=tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        )
+        assert result.changed is True
+        assert observed["held_during_read"] is True
+        assert _partition_lock_is_held(partition_lock_path(tmp_path, dest)) is False

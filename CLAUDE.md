@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-03 (DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1165 —
+_Last updated: 2026-07-03 (DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1263 —
 the ingest data-integrity pack, four boundary gaps as ONE change set: (a) the
 ingest-boundary session filter is now CALENDAR-AWARE (`brutex/data/session.py`
 `filter_to_trading_session` via `calendars/nse.get_session`, wired at BOTH ingest
@@ -290,7 +290,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sharp-hypatia-5hhycf` (**DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1165** — the
+- **Active branch:** `claude/sharp-hypatia-5hhycf` (**DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1263** — the
   ingest data-integrity pack, four boundary gaps as ONE change set: **(a)** the ingest-boundary session filter is
   CALENDAR-AWARE (NEW `brutex/data/session.py::filter_to_trading_session` judging each bar against its OWN IST date's
   real NSE session via `calendars/nse.get_session`, wired at BOTH spine tails) — non-trading-date bars (weekend/holiday
@@ -310,6 +310,52 @@ hostile-review pass._
   0; deferred/failed writes carry a KNOWN 0; `/db` window-ledger grid gains the column). ENGINE UNCHANGED
   (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change; every touched module 100% line+branch;
   ruff/ruff-format clean, mypy/pyright at the pre-change baseline (0 new diagnostics).
+  Prior merged: **DEC-CI-FORK-PR-HARDEN-001,
+  MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
+  redteam-test + docs ONLY, ZERO `brutex/` code touched: (1) `auto-merge.yml`'s trust gate
+  no longer trusts the SPOOFABLE `claude/*` head-branch NAME (a stranger's fork named
+  `claude/anything` would have been auto-squash-merged to main on green CI) — trust is now
+  the explicit author allowlist (SJParthi, dependabot[bot], renovate[bot]) OR a LIVE-API
+  `author_association` ∈ {OWNER, MEMBER, COLLABORATOR}, decision logged; every other
+  auto-merge gate byte-for-byte unchanged. (2) `pre-merge-gate.yml` (a `workflow_run` job
+  with `pull-requests: write`) no longer checks out the PR head SHA and executes
+  `scripts/ci/pre-merge-check.sh` FROM THE PR TREE (arbitrary code with the job token) —
+  checkout pinned to base `main` + `persist-credentials: false`, the PR number passed as
+  DATA only (verified: the script reads only the gh API, never the working tree);
+  `auto-merge.yml` gains the same base-pinned checkout for its rollup-gate script, also
+  fixing the latent no-checkout defect that left the DEC-MERGE-LIVE-ROLLUP-001 rollup gate
+  fail-closed INERT (every auto-merge since #944 refused with gated=false on the missing
+  script). Sweep: pre-merge-gate.yml was the ONLY privileged-trigger job checking out a
+  PR-controlled ref; a directory-wide redteam pin keeps it that way (NEW
+  `tests/redteam/test_redteam_fork_pr_harden.py`, 10 tests incl. FUNCTIONAL execution of
+  the real trust-check script with a stubbed `gh`: claude/*-named fork from a
+  non-member → trusted=false, allowlist/OWNER/MEMBER/COLLABORATOR → trusted=true). HONEST
+  (Golden Rule #10): server-side branch protection (require PR + `CI OK (aggregate gate)`
+  + up-to-date branch + restricted merge; Actions → "Require approval for all outside
+  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1176,
+  NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
+  lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
+  UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
+  + a fully AUTOMATIC keep-FIRST healer (`brutex/data/lake_heal.py`, default AUTO-ON, escape
+  hatch `BRUTEX_LAKE_HEAL=observe`): quarantine-COPY to `<lake>/.quarantine/<ts>/` → rewrite
+  THROUGH the normal write path (NEW public `ParquetWriter.heal_partition` — locks/P9/overlay/
+  raw_hash rotation all reused) → hash-chained audit JSONL + one Telegram alert per batch;
+  detection at L1 (free reconcile piggyback on `ReconcileResult.findings`, healed at the
+  `cascade_wire` reconcile chokepoint), L2 (post-pull, pulled-symbols × span-months, wired
+  at the post-drain seam in `pull_controller` + `historical_pull` — BEFORE the Greeks enrichment
+  + the pipeline's final prebuild derivations (the mid-pull daily derive was removed by
+  DEC-PIPELINE-AUTOPREBUILD-001 #1145, so the heal now guards those readers); `LakeWriteHalt` re-raises
+  into the pull-halt handling), L3 (one-time content-token-stamped startup sweep, throttled
+  daemon, boot can never crash); derived recall = 1day re-derive (latest-wins) + intraday-TF
+  DELETE-and-rebuild (keep-first would keep poison); census surfaces: `brutex lake
+  audit-unique` (exit 0/1/2), a bounded doctor check, a `/universe` chip — each answering
+  whether the ENGINE's index data (NIFTY/BANKNIFTY/SENSEX) carries dupes. HONEST: scan is
+  O(files) NOT O(1) (bench-pinned); options tree = census + `(side,ts)` dup heal only
+  (foreign/overlap heal a named follow-up); STRICTLY row-removing/row-reassigning, never
+  value-editing; the CLI `brutex fetch` path has no L2 seam (covered by L1/L3/census, a named
+  follow-up). All new modules + every touched module 100% line+branch; the #1067 pin suites
+  pass unmodified. ENGINE UNCHANGED, F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
   Prior merged: **DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
   MIGRATION.md #1145–#1146** — the pipeline pack. **#1145:** ONE automatic timeframe PREBUILD phase — the 19 derived
   intraday TFs + the derived `1day`, over SPOT + FUTURES + OPTIONS — is now the pull pipeline's FINAL data stage, run
@@ -537,7 +583,12 @@ hostile-review pass._
   strike is never reduced; "if uncertain, fetch" (`< 1` clamps UP to 1). RE-PULL NET: a reduced-budget empty makes
   `fetch_count == 1 < CONFIRMED_EMPTY_MIN_FETCHES(2)` so the OLD-gap fast-settle does NOT fire — the window stays
   re-fetchable on a later idempotent pull (keep-first sink + durable ledger), so even a vendor-bug 200-empty is
-  recoverable; the #919 all-empty + #974 partial-window detectors stay ACTIVE. THE GUARANTEE = a MEASURED CI BENCH GATE
+  recoverable [SETTLE-RECONCILE — DEC-DEAD-STRIKE-LEDGER-SETTLE-001, MIGRATION.md #1172 (pack #1171): SUPERSEDED for an OLD window —
+  the old-gap settle is now BUDGET-AWARE, accumulating clean-EMPTY confirmations ACROSS pulls (`prior.empty_streak +
+  in_pull_fetches` vs the SAME 2-confirmation bar), so TWO independent pulls' clean empties settle a reduced-budget old
+  window SKIPPED; a repeated vendor-bug 200-empty on an OLD window is thereafter recoverable via `brutex
+  reopen-skipped`, not an automatic re-pull; RECENT windows keep the conservative streak, SUCCESS resets, a
+  suppressed/transient empty never counts]; the #919 all-empty + #974 partial-window detectors stay ACTIVE. THE GUARANTEE = a MEASURED CI BENCH GATE
   (`tests/bench/test_fetch_per_window_guarantee.py`): replays a representative NIFTY chain end-to-end through the REAL
   spine against a fetch-COUNTING SDK and ASSERTS fetches-per-window ≤ 1.2 AND `86,400/fpw` ≥ the chain's windows (a
   regression FAILS CI), plus a teeth test that the SAME chain WITHOUT bounding is ABOVE the ceiling and stores the SAME
@@ -799,8 +850,12 @@ hostile-review pass._
   via `_is_clean_fetch` = `windows≥1 ∧ skipped==0 ∧ still_failed==0`, flags `attempted≥3 ∧ stored_bars==0`) + immutable
   `UnderlyingEmptyReport`/`AllEmptyScan` + a guarded `_log_underlying_all_empty` (capped 20, `repr()`-named) + ONE
   best-effort `try/except` wiring line in `run_groww_option_ingest`. HONEST: pure DETECT+WARN — no return/ledger/engine
-  change, no auto-recovery; false-positive-guarded (skip/transient/empty-clamp excluded so a re-pull or a 1-2-leg
-  illiquid name never flags); ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). `option_ingest.py` 100% line+branch (247/68,
+  change, no auto-recovery; false-positive-guarded (skip/transient/empty-clamp excluded so a re-pull never flags)
+  [LOWLEG-RECONCILE — DEC-SILENT-VANISH-LOWLEG-001, MIGRATION.md #1167 (pack #1171): the original "a 1-2-leg illiquid name never
+  flags" clause is SUPERSEDED — a 1-2-clean-fetch underlying whose EVERY pair was a clean empty, with ZERO non-clean
+  AND ZERO terminally-quarantined siblings, NOW flags marked `low_leg=True`; every other #919 false-positive guard
+  (skip/transient/empty-clamp/quarantined sibling → disqualified) is regression-pinned; observe-only WARN unchanged];
+  ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). `option_ingest.py` 100% line+branch (247/68,
   0 missing); NEW `TestSuspiciousEmptyFlag` (14 tests); 75 option-ingest tests green; ruff/`mypy --strict`/`pyright`
   clean. Prior merged: DEC-SCOREBOARD-REFRESH-002, MIGRATION.md #918 — the customer-facing Product Scoreboard
   (`docs/PRODUCT_SCOREBOARD.md` + the shareable self-contained `docs/product_scoreboard.html` one-pager) REFRESHED
@@ -1391,7 +1446,11 @@ hostile-review pass._
 4. **Reproducibility first.** Every run is identified by `blake3(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
-   computation without that hash recorded. (Was `sha256(...)` pre-DEC-CALIBRATE-001;
+   computation without that hash recorded. `data_snapshot_hash` is the
+   FULL-CONTENT streamed `bxsnap2` digest of every loaded bar's 7 fields
+   (`stage3_wire.data_snapshot_hash`, DEC-SNAPSHOT-HASH-FULL-001 — any
+   single-bar difference re-keys the identity; supersedes the sampled
+   count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
    `TRACK1_BACKTEST_SPEC.md:743` after spec growth moved it from :654
    (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
@@ -1600,7 +1659,23 @@ hostile-review pass._
   the same site, and NOT a perf path; the accessor is O(1) per bar access (NOT
   an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
-  DEC-DOC-DRIFT-RECONCILE-001).
+  DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
+  runner/driver guards above never covered) now has its own three-layer
+  defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1181): structural
+  causality (audit-verified — Stage-1A updates prior-bar history AFTER
+  evaluation; the trade sim enters at the next bar's open) + PERMANENT
+  suffix-independence property gates
+  (`tests/property/test_sweep_suffix_independence.py`: Stage-1A bar_bits, the
+  resample path, and full-spine trades over bars `0..N` are bit-identical
+  whether bars `N+1..` are absent, mutated, or extreme — the layer that
+  catches a leak through DERIVED state) + an OPT-IN instrumented barrier
+  (`brutex.engine.sweep_lookahead`, env `BRUTEX_SWEEP_LOOKAHEAD_GUARD=1`,
+  default OFF) wrapping the sweep's bar window in an index-guarded sequence
+  that REUSES `LookAheadBarrier` — honest envelope: it catches an indexed /
+  sliced / reversed read AHEAD of the forward consumption front (strongest on
+  the first sequential pass), NOT derived-state leaks; OFF returns the
+  identical bars object, so the hot path is byte-identical + cost-unchanged
+  (identity contract + A/B bench + the existing sweep O(1) gates).
 - **Money display = 2 decimals, money-only** (DEC-MONEY-2DP-001) — every
   paisa→rupee display goes through `brutex.money` (`format_inr` /
   `round_money` / `paisa_to_rupees`). NEVER round statistical metrics (Sharpe,

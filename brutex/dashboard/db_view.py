@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -51,6 +51,7 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
+from brutex.dashboard.registry_strikes import load_registry_strike_chain
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
@@ -63,7 +64,12 @@ from brutex.data.lake_read import (
     distinct_count_sql,
 )
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
-from brutex.data.moneyness import derive_strike_step, moneyness_view
+from brutex.data.moneyness import (
+    StepConfidence,
+    StrikeStepResult,
+    moneyness_view,
+    resolve_strike_step,
+)
 from brutex.data.partition import (
     SPOT_PROBE_SEGMENTS,
     VALID_EXCHANGES,
@@ -73,7 +79,7 @@ from brutex.data.partition import (
 from brutex.data.session import format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
-from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
+from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, is_expired_window_settle_reason
 from brutex.money import round_money
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
@@ -876,7 +882,12 @@ def _validate_candle_coords(exchange: str, segment: str, symbol: str, interval: 
         raise ValueError(f"illegal candle symbol {symbol!r}")
 
 
-def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
+def list_candle_datasets(
+    lake_root: Path,
+    *,
+    exclude_segments: frozenset[str] = frozenset(),
+    intervals: Collection[str] | None = None,
+) -> list[dict[str, str]]:
     """Discover which ``(exchange, segment, symbol, interval)`` candle sets exist.
 
     Walks ``<lake_root>/bars/<exchange>/<segment>/<symbol>/<interval>/`` and
@@ -889,6 +900,16 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
     ----------
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    exclude_segments
+        Segment directory names to PRUNE at the walk level — an excluded
+        segment's tree is never even descended (DEC-COMPLETENESS-FNO-SKIP-001:
+        skipping ``FNO`` here avoids walking the ~10⁵-10⁶ per-contract
+        partition dirs a fully-materialised options lake holds). Empty (the
+        default) is byte-identical to the unfiltered walk.
+    intervals
+        When given, only these interval directories are listed (e.g. the spot
+        verdict pair ``("1minute", "1day")``); ``None`` (the default) lists
+        every valid interval.
 
     Returns
     -------
@@ -904,11 +925,13 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
         if exch_dir.name not in VALID_EXCHANGES:
             continue
         for seg_dir in sorted(p for p in exch_dir.iterdir() if p.is_dir()):
-            if seg_dir.name not in VALID_SEGMENTS:
+            if seg_dir.name not in VALID_SEGMENTS or seg_dir.name in exclude_segments:
                 continue
             for sym_dir in sorted(p for p in seg_dir.iterdir() if p.is_dir()):
                 for tf_dir in sorted(p for p in sym_dir.iterdir() if p.is_dir()):
                     if tf_dir.name not in VALID_INTERVALS:
+                        continue
+                    if intervals is not None and tf_dir.name not in intervals:
                         continue
                     if any(tf_dir.rglob("*.parquet")):
                         found.append(
@@ -1186,7 +1209,50 @@ def _execute_candle_page_resilient(
     return out_columns, list(cursor.fetchall())
 
 
-def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+#: The intervals the SPOT coverage/completeness VERDICTS actually read — the
+#: single FETCHED granularity (``1minute``, DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
+#: plus the derived ``1day`` daily anchor. The 19 derived intraday TFs the
+#: prebuild materialises are display-only derivatives of the same 1-minute
+#: base, so scanning them adds nothing to any verdict
+#: (DEC-COMPLETENESS-FNO-SKIP-001, refuter-amended register #12).
+SPOT_VERDICT_INTERVALS: Final[tuple[str, str]] = ("1minute", "1day")
+
+
+def summarize_spot_verdict_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+    """The FNO-pruned, verdict-interval-bounded spot summary scan — the dashboard's scan.
+
+    DEC-COMPLETENESS-FNO-SKIP-001 (mechanization-sweep register #12,
+    refuter-amended): after the pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001
+    #1145) a fully-materialised lake holds ~10⁵-10⁶ F&O contract × interval
+    datasets, and the UNFILTERED :func:`summarize_spot_datasets` walked + read a
+    Parquet-footer DISTINCT-timestamp aggregate for EVERY one of them — the
+    first ``/completeness`` open blocked for tens of minutes. The SPOT verdicts
+    only ever read the ``INDEX``/``CASH`` segments at the fetched ``1minute``
+    (+ the derived ``1day`` anchor), so this ONE wrapper (CLAUDE.md §11 COMMON —
+    both ``/coverage/spot`` and the completeness inputs call it) prunes the
+    ``FNO`` segment at the WALK level (never descended) and bounds the spot
+    intervals to :data:`SPOT_VERDICT_INTERVALS`. The spot rows it returns are
+    byte-identical to the unfiltered scan's spot ``1minute``/``1day`` rows
+    (regression-pinned), so every verdict is unchanged. The ``/coverage`` F&O
+    tabs keep their own scans; :func:`summarize_spot_datasets` itself stays
+    UNFILTERED by default — the F&O ledger⇄lake cold-start reconcile
+    (``load_lake_spans``) depends on the full walk.
+    """
+    return summarize_spot_datasets(
+        conn,
+        lake_root,
+        exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+        intervals=SPOT_VERDICT_INTERVALS,
+    )
+
+
+def summarize_spot_datasets(
+    conn: Any,
+    lake_root: Path,
+    *,
+    exclude_segments: frozenset[str] = frozenset(),
+    intervals: Collection[str] | None = None,
+) -> list[dict[str, Any]]:
     """Summarise every spot candle dataset in the lake for the coverage page.
 
     Discovers each ``(exchange, segment, symbol, interval)`` partition set via
@@ -1210,6 +1276,13 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         A DuckDB connection (see :func:`table_summary`).
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    exclude_segments, intervals
+        Optional walk-level pruning, threaded verbatim into
+        :func:`list_candle_datasets` (DEC-COMPLETENESS-FNO-SKIP-001 — the
+        dashboard verdict scans call the pruned
+        :func:`summarize_spot_verdict_datasets`). The defaults are
+        byte-identical to the unfiltered scan, which the F&O ledger⇄lake
+        reconcile (``load_lake_spans``) still requires.
 
     Returns
     -------
@@ -1221,7 +1294,9 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
              "last_date": <YYYY-MM-DD|None>}
     """
     rows: list[dict[str, Any]] = []
-    for dataset in list_candle_datasets(lake_root):
+    for dataset in list_candle_datasets(
+        lake_root, exclude_segments=exclude_segments, intervals=intervals
+    ):
         exchange = dataset["exchange"]
         segment = dataset["segment"]
         symbol = dataset["symbol"]
@@ -1591,6 +1666,7 @@ def query_candles(
     offset: int = 0,
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
+    registry_path: Path | None = None,
 ) -> dict[str, Any]:
     """Read one page of OHLCV candles for a partition set (DEC-DB-QUERY-001).
 
@@ -1634,12 +1710,22 @@ def query_candles(
         so the applied-range chip (DEC-DB-UX-PACK-001 Feature 2) never re-runs its
         MIN/MAX scan on a paging click. ``None`` (the default) keeps the function
         pure — the COUNT and the span run inline, behaviour-identical to before.
+    registry_path
+        Optional ``registry.duckdb`` path (DEC-MONEYNESS-REGISTRY-STEP-001): an F&O
+        option page then derives its ATM±N strike-grid step from the AUTHORITATIVE
+        vendor chain (memoised behind the SAME *count_cache* + *generation* under
+        :func:`fno_strike_chain_key`) instead of the sparse lake-observed sibling
+        ladder; an absent/empty/unreadable registry — or the ``None`` default —
+        degrades gracefully to the observed ladder, honestly labelled via the
+        ``strike_step_confidence`` payload field.
 
     Returns
     -------
     dict[str, Any]
         ``{"symbol", "interval", "columns", "rows", "total", "limit",
-        "offset"}`` with every cell JSON-safe.
+        "offset"}`` with every cell JSON-safe. An F&O page additionally carries
+        ``"strike_step_confidence"`` (``"registry"`` / ``"observed"`` / ``None``) —
+        the honesty label of the ATM±N strike-grid step source.
 
     Raises
     ------
@@ -1676,7 +1762,13 @@ def query_candles(
     base = lake_root / "bars" / exchange / segment / symbol / interval
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         empty_cols = list(columns) if columns is not None else list(CANDLE_COLUMNS)
+        # An F&O page ALWAYS carries the strike-step honesty field so the frontend's
+        # key set is stable across an empty vs populated partition; an empty page
+        # presents no step, so the label is an honest None
+        # (DEC-MONEYNESS-REGISTRY-STEP-001).
+        empty_step_confidence = {"strike_step_confidence": None} if is_fno else {}
         return {
+            **empty_step_confidence,
             "symbol": symbol,
             "interval": interval,
             # The two derived %-change columns (DEC-DB-CANDLE-DERIVED-001) are
@@ -1809,8 +1901,9 @@ def query_candles(
     # F&O option pages also carry per-bar moneyness (ITM/ATM/OTM + ATM±N) classified
     # against the underlying spot at each bar (DEC-FNO-MONEYNESS-001); spot pages do not.
     extra_columns: list[str] = [*SPOT_DERIVED_COLUMNS, *_fno_derived_columns(segment)]
+    step_confidence: StepConfidence | None = None
     if segment == FNO_CANDLE_LAKE_SEGMENT:
-        fno_cells = _fno_derived_rows(
+        fno_cells, step_confidence = _fno_derived_rows(
             conn,
             lake_root,
             exchange=exchange,
@@ -1818,6 +1911,9 @@ def query_candles(
             interval=interval,
             raw_rows=raw_rows,
             out_columns=out_columns,
+            registry_path=registry_path,
+            count_cache=count_cache,
+            generation=generation,
         )
         extra_cells: list[tuple[Any, ...]] = [
             (*spot_pair, *fno) for spot_pair, fno in zip(derived, fno_cells, strict=True)
@@ -1863,7 +1959,7 @@ def query_candles(
         stored_end_ist=stored_end_ist,
         today_ist=_today_ist_iso(),
     )
-    return {
+    payload: dict[str, Any] = {
         "symbol": symbol,
         "interval": interval,
         "columns": [*out_columns, *extra_columns],
@@ -1873,6 +1969,15 @@ def query_candles(
         "offset": safe_offset,
         "applied_range": applied_range,
     }
+    if is_fno:
+        # The strike-step honesty label (DEC-MONEYNESS-REGISTRY-STEP-001): "registry"
+        # = the AUTHORITATIVE vendor chain sized the ATM±N grid; "observed" = only the
+        # sparse lake ladder did (the frontend shows a low-confidence marker so an
+        # overestimated step is never presented silently); None = no step at all.
+        payload["strike_step_confidence"] = (
+            step_confidence.value if step_confidence is not None else None
+        )
+    return payload
 
 
 def _date_bounds(
@@ -2437,32 +2542,98 @@ def _underlying_spot_close_by_ts(
     return {}
 
 
-def _fno_strike_step(lake_root: Path, *, exchange: str, symbol: str) -> Decimal | None:
+def _fno_strike_step(
+    lake_root: Path,
+    *,
+    exchange: str,
+    symbol: str,
+    registry_strikes: Sequence[Decimal] | None = None,
+) -> StrikeStepResult:
     """Derive the DYNAMIC strike-grid step for an option contract's ``(underlying, expiry)``.
 
     Globs the SIBLING option partitions sharing this contract's
     ``<exch>-<underlying>-<expiry>`` prefix (``symbol`` minus its trailing
     ``-<strike>-<CE|PE>``), decodes each strike via
-    :func:`~brutex.data.fno_symbol.parse_fno_symbol`, and takes the smallest positive
-    gap (:func:`~brutex.data.moneyness.derive_strike_step`). DYNAMIC per contract set so
-    it works for EVERY F&O underlying — all ~212 stocks + the indices — never a hardcoded
-    NSE grid (Golden Rule #1). ``None`` when fewer than two sibling strikes exist (the
-    moneyness bucket still resolves; only the ATM±N offset is then ``None``).
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol`, and resolves the smallest
+    positive gap (:func:`~brutex.data.moneyness.resolve_strike_step`) — preferring
+    *registry_strikes*, the AUTHORITATIVE vendor chain for this ``(underlying,
+    expiry)`` (DEC-MONEYNESS-REGISTRY-STEP-001), because the on-disk sibling set is
+    SPARSE (only pulled strikes) and can overestimate the step. DYNAMIC per contract
+    set so it works for EVERY F&O underlying — all ~212 stocks + the indices — never
+    a hardcoded NSE grid (Golden Rule #1). ``step=None`` when neither ladder has two
+    distinct strikes (the moneyness bucket still resolves; only the ATM±N offset is
+    then ``None``); the ``confidence`` labels which ladder produced the step so the
+    page never silently presents a possibly-overestimated grid.
 
     O(siblings) once per query (a directory glob scoped to ONE expiry's strike ladder,
     not the whole F&O tree); the per-bar offset that consumes the step is O(1).
     """
     base = lake_root / "bars" / exchange / FNO_CANDLE_LAKE_SEGMENT
-    if not base.is_dir():
-        return None
     prefix = symbol.rsplit("-", 2)[0]  # strip "-<strike>-<CE|PE>" → the (underlying,expiry) key
-    strikes = [
-        parts.strike
-        for sibling in base.glob(prefix + "-*")
-        if sibling.is_dir() and (parts := parse_fno_symbol(sibling.name)) is not None
-        if parts.option_type is not None  # options only (a FUT sibling has no strike)
-    ]
-    return derive_strike_step(strikes)
+    observed = (
+        [
+            parts.strike
+            for sibling in base.glob(prefix + "-*")
+            if sibling.is_dir() and (parts := parse_fno_symbol(sibling.name)) is not None
+            if parts.option_type is not None  # options only (a FUT sibling has no strike)
+        ]
+        if base.is_dir()
+        else []
+    )
+    return resolve_strike_step(observed, authoritative_strikes=registry_strikes)
+
+
+def fno_strike_chain_key(exchange: str, underlying: str, expiry: date) -> str:
+    """Build the stable cache key for one registry strike chain (display step source).
+
+    The AUTHORITATIVE chain (DEC-MONEYNESS-REGISTRY-STEP-001) is a property of the
+    ``(exchange, underlying, expiry)`` alone — invariant to paging / sort / column
+    subsetting / date bounds — so every page of the same contract (and every sibling
+    strike's page) shares ONE cached chain per write-generation; a metadata pull bumps
+    the generation → re-read, never stale (Golden Rule #1). The ``strikechain|``
+    prefix namespaces the key away from every other key sharing the injected cache
+    instance: a spot count key opens with a validated exchange token (``NSE`` /
+    ``BSE``), an option count key with ``opt|``, the spans with ``span|`` /
+    ``optspan|`` — collision-free by construction (see :func:`candle_span_key`).
+    """
+    return f"strikechain|{exchange}|{underlying}|{expiry.isoformat()}"
+
+
+def _registry_strike_chain(
+    registry_path: Path | None,
+    *,
+    exchange: str,
+    underlying: str,
+    expiry: date | None,
+    count_cache: CandleCountCache | None,
+    generation: int,
+) -> tuple[Decimal, ...] | None:
+    """The AUTHORITATIVE registry strike chain for ONE ``(underlying, expiry)``, or ``None``.
+
+    Thin memoised read over :func:`~brutex.dashboard.registry_strikes.
+    load_registry_strike_chain` — exactly one chain (the ``/db`` page needs
+    only its own contract's ladder — O(one chain), never the whole registry). ``None``
+    — the graceful observed-ladder fallback — when no *registry_path* is wired (the
+    pure-function default), the *expiry* did not decode, or the registry is
+    absent/empty/unreadable. Memoised behind the SAME generation-stamped cache the
+    page total uses (:func:`fno_strike_chain_key`) so a prev/next paging click never
+    re-opens the registry; no injected cache runs the read inline.
+    """
+    if registry_path is None or expiry is None:
+        return None
+
+    def _load() -> tuple[Decimal, ...] | None:
+        return load_registry_strike_chain(
+            registry_path, exchange=exchange, underlying=underlying, expiry=expiry
+        )
+
+    if count_cache is None:
+        return _load()
+    return count_cache.get_or_compute(
+        fno_strike_chain_key(exchange, underlying, expiry),
+        generation=generation,
+        compute=_load,
+    )
 
 
 def _option_intrinsic(option_type: str, strike: Decimal, spot: Decimal) -> Decimal:
@@ -2486,7 +2657,10 @@ def _fno_derived_rows(
     interval: str,
     raw_rows: list[tuple[Any, ...]],
     out_columns: list[str],
-) -> list[tuple[str, str | None, str | None, str | None, int | None]]:
+    registry_path: Path | None = None,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
+) -> tuple[list[tuple[str, str | None, str | None, str | None, int | None]], StepConfidence | None]:
     """Compute the per-bar F&O derived cells: ``(moneyness, spot, intrinsic, time_value, days_to_expiry)``.
 
     Matches :data:`FNO_DERIVED_COLUMNS`. The combined ``moneyness`` label (bucket + signed
@@ -2510,6 +2684,16 @@ def _fno_derived_rows(
     The per-bar spot join keys on the bar ``timestamp``; a deliberately ``timestamp``-less
     column projection therefore reads ``UNKNOWN``/``None`` on every bar (honest — the join key
     is absent — never a fabricated value), not a crash.
+
+    Returns ``(rows, step_confidence)`` — the second element labels which ladder
+    produced the ATM±N strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001):
+    :attr:`~brutex.data.moneyness.StepConfidence.REGISTRY` when the AUTHORITATIVE
+    vendor chain (read from *registry_path* via the generation-memoised
+    :func:`_registry_strike_chain`) supplied it,
+    :attr:`~brutex.data.moneyness.StepConfidence.OBSERVED` when only the sparse
+    lake-observed sibling ladder did (the page then carries an honest low-confidence
+    marker — the observed min gap can overestimate the true base step), and ``None``
+    when no step was derivable at all (or the page is a future/undecodable contract).
     """
     parts = parse_fno_symbol(symbol)
     option_type = parts.option_type if parts is not None else None
@@ -2535,12 +2719,27 @@ def _fno_derived_rows(
         return [
             (na_label, None, None, None, _dte(row[ts_idx] if ts_idx >= 0 else None))
             for row in raw_rows
-        ]
+        ], None
 
     ts_values = [
         row[ts_idx] for row in raw_rows if ts_idx >= 0 and isinstance(row[ts_idx], datetime)
     ]
-    step = _fno_strike_step(lake_root, exchange=exchange, symbol=symbol)
+    # The AUTHORITATIVE registry chain for this (underlying, expiry), when a registry
+    # is wired + readable — else None ⇒ the lake-observed sibling ladder resolves the
+    # step with an honest OBSERVED (low-confidence) label
+    # (DEC-MONEYNESS-REGISTRY-STEP-001; graceful, never raises, never fabricates).
+    registry_strikes = _registry_strike_chain(
+        registry_path,
+        exchange=exchange,
+        underlying=underlying,
+        expiry=expiry,
+        count_cache=count_cache,
+        generation=generation,
+    )
+    resolved_step = _fno_strike_step(
+        lake_root, exchange=exchange, symbol=symbol, registry_strikes=registry_strikes
+    )
+    step = resolved_step.step
     spot_by_ts = _underlying_spot_close_by_ts(
         conn,
         lake_root,
@@ -2569,7 +2768,7 @@ def _fno_derived_rows(
                 _dte(ts),
             )
         )
-    return rows
+    return rows, resolved_step.confidence
 
 
 def option_candle_count_key(series: str, start: str | None, end: str | None) -> str:
@@ -2862,7 +3061,7 @@ def _decode_option_window(
     return (f"{label} · {segment}", f"{flag}#{code} {strike} {opt_type} · 1m")
 
 
-def window_status_label(status: str, empty_streak: int) -> str:
+def window_status_label(status: str, empty_streak: int, last_error: str | None = None) -> str:
     """The honest, spelled-out meaning of a window's bare *status* — pure, O(1).
 
     DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (empty-vs-failed honesty on
@@ -2873,12 +3072,19 @@ def window_status_label(status: str, empty_streak: int) -> str:
     payload paths (the DuckDB fast path and the legacy pyarrow path) share via
     :func:`_window_row` (CLAUDE.md §11 COMMON — the two can never drift):
 
+    * ``SKIPPED`` carrying an EXPIRED-WINDOW settle stamp
+      (DEC-OLD-EMPTY-SINGLE-CONFIRM-001 — the old-empty single-confirm settle
+      stamps :func:`~brutex.data.window_ledger.expired_window_settle_reason`
+      as ``last_error``) → that stamp verbatim, suffixed ``— settled``: the
+      streak-derived count would LIE (the settle forces the streak to the
+      threshold), so the honest ``"vendor confirmed no trades (1 clean
+      attempt, expired window) — settled"`` comes from the stamp.
     * ``EMPTY`` → ``"vendor confirmed no trades (N clean attempt(s))"`` — N is
       the row's genuine clean-empty streak, floored at 1 (a legacy record with
       no streak column still had at least the one clean attempt that classified
       it EMPTY).
-    * ``SKIPPED`` (terminally-settled empty) → the same, suffixed ``— settled``
-      (the ledger promoted it; no further re-pull).
+    * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
+      ``— settled`` (the ledger promoted it; no further re-pull).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
       no-data; the window stays re-pullable.
     * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
@@ -2887,6 +3093,8 @@ def window_status_label(status: str, empty_streak: int) -> str:
     if status == "EMPTY":
         return f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s))"
     if status == "SKIPPED":
+        if is_expired_window_settle_reason(last_error):
+            return f"{last_error} — settled"
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
@@ -2928,7 +3136,11 @@ def _window_row(
         # DuckDB fast + legacy pyarrow — since both project through this row
         # builder): EMPTY/SKIPPED read "vendor confirmed no trades (N clean
         # attempt(s)[ — settled])", FAILED reads "FAILED (will re-pull)".
-        "status_label": window_status_label(str(record.status), getattr(record, "empty_streak", 0)),
+        "status_label": window_status_label(
+            str(record.status),
+            getattr(record, "empty_streak", 0),
+            getattr(record, "last_error", None),
+        ),
         "bars": record.bars,
         "attempts": record.attempts,
         # The genuine-EMPTY count (window_ledger R1) — surfaces WHY an EMPTY row
@@ -3869,6 +4081,7 @@ __all__ = [
     "REGISTRY_DB_NAME",
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
+    "SPOT_VERDICT_INTERVALS",
     "WINDOW_PHASES",
     "build_phase_progress",
     "build_window_payload",
@@ -3895,6 +4108,7 @@ __all__ = [
     "spot_window_rollup",
     "summarize_option_datasets",
     "summarize_spot_datasets",
+    "summarize_spot_verdict_datasets",
     "table_summary",
     "window_status_label",
 ]
