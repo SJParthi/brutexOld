@@ -239,19 +239,45 @@ def pack_greeks_provenance(
 ) -> int:
     """Pack the provenance fields into the stored Int32 stamp.
 
-    Every field is masked into its documented bit band; the result always fits
-    a non-negative signed Int32 (27 used bits), so the
+    Every field is validated LOUDLY against its documented bit band BEFORE
+    packing (DEC-GREEKS-CORRECTNESS-AUDIT-001 PROV-2): the old silent
+    ``&``-mask made an out-of-band value (e.g. a future
+    ``RISK_FREE_SOURCE_VERSION = 17``) collide bit-identically with an
+    in-band stamp — the wrong failure mode for a STALENESS key, whose one job
+    is to never alias two different input sets. An in-band call packs the
+    byte-identical integer it always did (27 used bits < 2^31, so the
     :class:`~brutex.data.models.FnoGreeksBar` range validation can never fire
-    for a stamp built here.
+    for a stamp built here).
+
+    Raises
+    ------
+    ValueError
+        When any field lies outside its bit band (negative, or above the
+        band's mask) — naming the field, the value, and the band width.
     """
+    for name, value, mask in (
+        ("formula_version", formula_version, _FORMULA_MASK),
+        ("rate_source_id", rate_source_id, _RATE_SOURCE_MASK),
+        ("rate_version", rate_version, _RATE_VERSION_MASK),
+        ("q_bias_id", q_bias_id, _Q_BIAS_MASK),
+        ("tte_convention_id", tte_convention_id, _TTE_MASK),
+        ("style_flag", style_flag, _STYLE_MASK),
+        ("status", status, _STATUS_MASK),
+    ):
+        if not 0 <= value <= mask:
+            msg = (
+                f"greeks provenance {name}={value} outside its "
+                f"{mask.bit_length()}-bit band [0, {mask}]"
+            )
+            raise ValueError(msg)
     return (
-        ((formula_version & _FORMULA_MASK) << _FORMULA_SHIFT)
-        | ((rate_source_id & _RATE_SOURCE_MASK) << _RATE_SOURCE_SHIFT)
-        | ((rate_version & _RATE_VERSION_MASK) << _RATE_VERSION_SHIFT)
-        | ((q_bias_id & _Q_BIAS_MASK) << _Q_BIAS_SHIFT)
-        | ((tte_convention_id & _TTE_MASK) << _TTE_SHIFT)
-        | ((style_flag & _STYLE_MASK) << _STYLE_SHIFT)
-        | ((status & _STATUS_MASK) << _STATUS_SHIFT)
+        (formula_version << _FORMULA_SHIFT)
+        | (rate_source_id << _RATE_SOURCE_SHIFT)
+        | (rate_version << _RATE_VERSION_SHIFT)
+        | (q_bias_id << _Q_BIAS_SHIFT)
+        | (tte_convention_id << _TTE_SHIFT)
+        | (style_flag << _STYLE_SHIFT)
+        | (status << _STATUS_SHIFT)
     )
 
 
