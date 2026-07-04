@@ -8,10 +8,27 @@ trim + the spec-default constant (10,000 — coded nowhere before this slice),
 the ``top_k < 1`` guards on BOTH entry points, the deterministic leaderboard
 iteration order, and the real-Parquet disk round-trip through
 ``load_results_tree`` (missing root raises; empty tree yields {}).
+
+DEC-SWEEP-STREAMING-RANK-002 (#1294) replaced the accumulate-then-two-pass-sort
+core with a bounded per-key top-K heap; ``_group_survivors_reference`` below is
+a VERBATIM copy of the pre-#1294 implementation and the golden-equality suite
+(:class:`TestGoldenEqualityVsReference`) pins byte-identical output (``repr``
+string equality — key order AND per-board row order AND every row field) over
+adversarial fixtures: equal-Sharpe tie clusters larger than K, duplicate
+run_ids (full ties AND differing Sharpe), fewer-than-K / exactly-K / K+1,
+multiple leaderboards, extreme-finite Sharpe, and seeded random permutations.
+``NaN`` Sharpe is OUT of the domain — ``ResultRow`` rejects non-finite metrics
+at construction (pinned here), so neither implementation ever sees one.
+
+Per-file convention: the private ``_HeapEntry`` comparator is unit-tested
+directly, so the file silences ``reportPrivateUsage`` at the top.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
+import random
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,6 +37,7 @@ from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreErr
 from brutex.engine.stage3_select import (
     DEFAULT_STAGE3_TOP_K,
     LeaderboardKey,
+    _HeapEntry,
     group_survivors,
     select_stage3_survivors,
 )
@@ -184,3 +202,248 @@ class TestSelectStage3Survivors:
         # proving the guard precedes the (potentially large) disk load.
         with pytest.raises(ResultsStoreError, match="must be >= 1"):
             select_stage3_survivors(tmp_path / "absent", top_k=0)
+
+
+def _group_survivors_reference(
+    rows: list[ResultRow], *, top_k: int = DEFAULT_STAGE3_TOP_K
+) -> dict[LeaderboardKey, tuple[ResultRow, ...]]:
+    """VERBATIM pre-#1294 implementation — the golden oracle for byte-identity.
+
+    Copied unchanged from ``group_survivors`` as merged by DEC-STAGE3-TOPK-001
+    (the O(candidates)-RAM accumulate-then-two-pass-sort the bounded heap of
+    DEC-SWEEP-STREAMING-RANK-002 replaces). Kept in the TEST only.
+    """
+    if top_k < 1:
+        raise ResultsStoreError(f"stage3 top_k must be >= 1, got {top_k}")
+    grouped: dict[LeaderboardKey, list[ResultRow]] = {}
+    for row in rows:
+        key = LeaderboardKey(instrument=row.instrument, tf=row.tf, mode=row.mode)
+        grouped.setdefault(key, []).append(row)
+    selected: dict[LeaderboardKey, tuple[ResultRow, ...]] = {}
+    for key in sorted(grouped, key=lambda k: (k.instrument, k.tf, k.mode)):
+        # Stable two-pass sort: run_id asc first (the tie-break), then Sharpe
+        # desc — Python's stable sort preserves run_id order inside ties
+        # (mirrors ResultsStore.top_k, CLAUDE.md §11 COMMON).
+        board = sorted(grouped[key], key=lambda r: r.run_id)
+        board.sort(key=lambda r: r.sharpe_ratio, reverse=True)
+        selected[key] = tuple(board[:top_k])
+    return selected
+
+
+def _assert_byte_identical(
+    new: dict[LeaderboardKey, tuple[ResultRow, ...]],
+    ref: dict[LeaderboardKey, tuple[ResultRow, ...]],
+) -> None:
+    """Assert *new* is byte-identical to *ref* when serialized.
+
+    ``repr`` of the dict serializes key ITERATION order, per-board ROW order,
+    and every field of every frozen dataclass row — so string equality is a
+    byte-level pin, strictly stronger than ``==`` (which ignores dict order).
+    """
+    assert list(new) == list(ref)  # key iteration order
+    assert new == ref  # structural equality (field-for-field rows)
+    assert repr(new) == repr(ref)  # the serialized byte pin
+
+
+class TestHeapEntryOrdering:
+    """The bounded-heap comparator: ``<`` means "ranks strictly worse than"."""
+
+    @staticmethod
+    def _entry(sharpe: float, run_id: str, seq: int) -> _HeapEntry:
+        return _HeapEntry(sharpe=sharpe, run_id=run_id, seq=seq, row=_row())
+
+    def test_smaller_sharpe_is_worse(self) -> None:
+        assert self._entry(1.0, _rid(1), 0) < self._entry(2.0, _rid(1), 0)
+        assert not self._entry(2.0, _rid(1), 0) < self._entry(1.0, _rid(1), 0)
+
+    def test_equal_sharpe_larger_run_id_is_worse(self) -> None:
+        # run_id ASC is preferred, so among equal-lowest-Sharpe entries the
+        # LARGEST run_id sits at the min-heap root and is evicted first.
+        assert self._entry(1.0, _rid(9), 0) < self._entry(1.0, _rid(1), 0)
+        assert not self._entry(1.0, _rid(1), 0) < self._entry(1.0, _rid(9), 0)
+
+    def test_full_tie_later_insertion_is_worse(self) -> None:
+        # Duplicate (sharpe, run_id): the old stable sort kept EARLIER
+        # insertions first — so the LATER seq must rank worse (evicted first).
+        assert self._entry(1.0, _rid(1), 5) < self._entry(1.0, _rid(1), 2)
+        assert not self._entry(1.0, _rid(1), 2) < self._entry(1.0, _rid(1), 5)
+
+    def test_signed_zero_sharpe_compares_equal(self) -> None:
+        # -0.0 != 0.0 is False, so the comparator falls through to run_id —
+        # exactly like sorted(), which also treats them as equal keys.
+        assert self._entry(-0.0, _rid(9), 0) < self._entry(0.0, _rid(1), 0)
+
+    # ── Ordering-protocol completeness (CodeQL py/incomplete-ordering) ──
+    # functools.total_ordering derives __le__/__gt__/__ge__ from __lt__ +
+    # the dataclass __eq__ (the sweep_parallel._Outcome discipline). The
+    # total-order identities (a<=b ≡ not b<a; a>b ≡ b<a) hold ONLY because
+    # unique seq makes the order strict + total — pinned per key tier below.
+    #
+    # Discipline: every operator is OBSERVED into a plain bool by
+    # _relations() and the whole truth-table asserted at once. Chaining
+    # operator ASSERTS on one pair (assert a == b; assert a <= b; …) is
+    # statically provable under standard total-order semantics — CodeQL
+    # py/redundant-comparison — yet EARNING those semantics at runtime is
+    # the very property under test, so the table must be observed as data,
+    # never implied by an earlier assert on the same operands.
+
+    # _relations() truth-tables — (==, !=, <, <=, >, >=) for (left, right).
+    _EQUAL = (True, False, False, True, False, True)
+    _WORSE = (False, True, True, True, False, False)  # left strictly worse
+    _BETTER = (False, True, False, False, True, True)  # left strictly better
+
+    @staticmethod
+    def _relations(
+        left: _HeapEntry, right: _HeapEntry
+    ) -> tuple[bool, bool, bool, bool, bool, bool]:
+        """Observe all six rich comparisons of ``(left, right)`` as data."""
+        return (
+            left == right,
+            left != right,
+            left < right,
+            left <= right,
+            left > right,
+            left >= right,
+        )
+
+    def _ordered_pairs(self) -> list[tuple[_HeapEntry, _HeapEntry]]:
+        """(worse, better) pairs exercising EVERY tie-break tier of the key."""
+        return [
+            (self._entry(1.0, _rid(1), 0), self._entry(2.0, _rid(1), 0)),  # sharpe
+            (self._entry(1.0, _rid(9), 0), self._entry(1.0, _rid(1), 0)),  # run_id
+            (self._entry(1.0, _rid(1), 5), self._entry(1.0, _rid(1), 2)),  # seq
+        ]
+
+    def test_reflexivity_on_field_equal_twins(self) -> None:
+        # Distinct objects, identical fields: == is dataclass field equality,
+        # so every operator must read equal-not-ordered — in BOTH operand
+        # orders (reflexivity of ==/<=/>=, irreflexivity of </>).
+        a = self._entry(1.0, _rid(1), 3)
+        twin = self._entry(1.0, _rid(1), 3)
+        assert self._relations(a, twin) == self._EQUAL
+        assert self._relations(twin, a) == self._EQUAL
+
+    def test_derived_operators_agree_with_lt_on_every_tier(self) -> None:
+        # For each strictly-ordered pair, EVERY derived operator must agree
+        # with the total-order identities: a>b ≡ b<a, a<=b ≡ not b<a,
+        # a>=b ≡ not a<b. The two observed rows jointly pin antisymmetry
+        # (< holds in exactly ONE direction) and strict-pair inequality.
+        for worse, better in self._ordered_pairs():
+            assert self._relations(worse, better) == self._WORSE
+            assert self._relations(better, worse) == self._BETTER
+
+    def test_incomparability_coincides_with_equality_via_unique_seq(self) -> None:
+        # not(a<b) and not(b<a) ⇒ a == b — true on the production domain
+        # ONLY because seq is unique per input row: any two distinct entries
+        # differ somewhere in the (sharpe, run_id, seq) key, so the sole
+        # incomparable case is the field-equal twin. Observed as one vector
+        # so equality is ASSERTED alongside the two strict directions, never
+        # statically implied by them.
+        a = self._entry(1.0, _rid(1), 3)
+        twin = self._entry(1.0, _rid(1), 3)
+        assert (a < twin, twin < a, a == twin) == (False, False, True)
+        # Differing ONLY in seq (a full (sharpe, run_id) tie): totality —
+        # exactly one strict direction holds (the LATER insertion is worse,
+        # the stable-sort tie rule) and the pair is never equal.
+        b = self._entry(1.0, _rid(1), 4)
+        assert (a < b, b < a, a == b, a != b) == (False, True, False, True)
+
+
+class TestGoldenEqualityVsReference:
+    """New bounded-heap output is byte-identical to the pre-#1294 reference."""
+
+    K = 3
+
+    def _check(self, rows: list[ResultRow], *, top_k: int) -> None:
+        _assert_byte_identical(
+            group_survivors(rows, top_k=top_k),
+            _group_survivors_reference(rows, top_k=top_k),
+        )
+
+    def test_equal_sharpe_tie_cluster_larger_than_k(self) -> None:
+        # 7 rows, ONE Sharpe value, K=3: only the run_id tie-break decides.
+        # Shuffled insertion order so heap eviction order is exercised.
+        rows = [_row(run_id=_rid(i), sharpe_ratio=1.5) for i in (5, 2, 7, 1, 6, 4, 3)]
+        self._check(rows, top_k=self.K)
+        boards = group_survivors(rows, top_k=self.K)
+        (board,) = boards.values()
+        assert [r.run_id for r in board] == [_rid(1), _rid(2), _rid(3)]
+
+    def test_duplicate_run_ids_full_tie_insertion_order_decides(self) -> None:
+        # Same (sharpe, run_id) repeated >K with DISTINGUISHABLE payloads:
+        # the old stable sort kept the EARLIEST insertions — pin that exactly.
+        rows = [_row(run_id=_rid(1), sharpe_ratio=1.0, net_pnl_paisa=100 + i) for i in range(5)]
+        self._check(rows, top_k=self.K)
+        boards = group_survivors(rows, top_k=self.K)
+        (board,) = boards.values()
+        assert [r.net_pnl_paisa for r in board] == [100, 101, 102]
+
+    def test_duplicate_run_ids_differing_sharpe(self) -> None:
+        rows = [
+            _row(run_id=_rid(1), sharpe_ratio=2.0, net_pnl_paisa=1),
+            _row(run_id=_rid(1), sharpe_ratio=1.0, net_pnl_paisa=2),
+            _row(run_id=_rid(2), sharpe_ratio=2.0, net_pnl_paisa=3),
+            _row(run_id=_rid(1), sharpe_ratio=3.0, net_pnl_paisa=4),
+        ]
+        self._check(rows, top_k=self.K)
+        self._check(rows, top_k=1)
+
+    @pytest.mark.parametrize("n", [K - 1, K, K + 1])
+    def test_boundary_counts_fewer_exact_and_k_plus_one(self, n: int) -> None:
+        rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, n + 1)]
+        self._check(rows, top_k=self.K)
+
+    def test_multiple_leaderboards_interleaved(self) -> None:
+        rows: list[ResultRow] = []
+        for i in range(12):
+            rows.append(
+                _row(
+                    run_id=_rid(100 + i),
+                    instrument=("NIFTY", "BANKNIFTY")[i % 2],
+                    tf=("5m", "15m")[(i // 2) % 2],
+                    mode=("A", "B")[(i // 4) % 2],
+                    sharpe_ratio=float(i % 3),  # forced cross-board ties
+                )
+            )
+        self._check(rows, top_k=2)
+        self._check(rows, top_k=1)
+
+    def test_extreme_finite_sharpe_values(self) -> None:
+        # NaN/inf are rejected by ResultRow (see the domain pin below); the
+        # extreme FINITE domain — huge magnitudes, subnormals, signed zero —
+        # must order identically. -0.0 is canonicalised to +0.0 by ResultRow.
+        extremes = [1e308, -1e308, 5e-324, -5e-324, 0.0, -0.0, 1e308, 0.0]
+        rows = [_row(run_id=_rid(i), sharpe_ratio=s) for i, s in enumerate(extremes, start=1)]
+        self._check(rows, top_k=self.K)
+        self._check(rows, top_k=len(rows))
+
+    def test_nan_sharpe_is_out_of_domain(self) -> None:
+        # WHY the heap comparator need not handle NaN: ResultRow rejects
+        # non-finite metrics at construction, so NEITHER implementation can
+        # ever receive one (the old two-pass sort's NaN behaviour is moot).
+        with pytest.raises(ResultsStoreError, match="finite"):
+            _row(sharpe_ratio=float("nan"))
+
+    def test_seeded_random_permutations_match_reference(self) -> None:
+        # Adversarial soak: 3 leaderboards, heavy Sharpe ties (5 distinct
+        # values over 90 rows), duplicate run_ids — every permutation must
+        # match the reference BYTE-for-byte on the SAME permuted input.
+        rng = random.Random(1234)
+        rows = [
+            _row(
+                run_id=_rid(rng.randrange(1, 40)),  # forced duplicates
+                instrument=rng.choice(("NIFTY", "BANKNIFTY", "SENSEX")),
+                sharpe_ratio=float(rng.randrange(5)),
+                net_pnl_paisa=i,  # distinguishes full-tie duplicates
+            )
+            for i in range(90)
+        ]
+        for _ in range(5):
+            rng.shuffle(rows)
+            self._check(rows, top_k=4)
+
+    def test_lazy_iterable_consumed_in_one_pass(self) -> None:
+        # The streaming contract: a one-shot generator is sufficient input.
+        rows = [_row(run_id=_rid(i), sharpe_ratio=float(i)) for i in range(1, 6)]
+        boards = group_survivors(iter(rows), top_k=2)
+        _assert_byte_identical(boards, _group_survivors_reference(rows, top_k=2))
