@@ -45,6 +45,10 @@ def _grid(n_instruments: int) -> SweepGridConfig:
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
         max_tuples=2_000_000,
+        # Synthetic SYM{i} names by test intent (an O(1) bench needs a wide
+        # instrument axis) — opt out of the Layer-1 engine-scope invariant
+        # (DEC-ENGINE-SCOPE-GUARD-001).
+        unsafe_allow_out_of_scope_instruments=True,
     )
 
 

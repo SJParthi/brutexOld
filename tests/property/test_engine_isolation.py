@@ -103,3 +103,61 @@ def test_swept_set_is_subset_of_the_three_indexes(instruments: list[Instrument])
     assert all(i.instrument is InstrumentType.IDX for i in swept)
     # ...and the swept symbol set never exceeds the 3 named indexes.
     assert {i.symbol_name for i in swept} <= set(_INDEX_SYMBOLS)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Engine sweep-entry scope law (DEC-ENGINE-SCOPE-GUARD-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The launch-time twin of the instrument-tier invariant above: for ANY
+# (exchange, segment, symbol) coordinate the classifier may allow ONLY the 3
+# spot triples or a NIFTY-futures shape under NSE/FNO — and a REFERENCE_ONLY
+# symbol (India VIX) is NEVER allowed.
+
+_SCOPE_EXCHANGES = st.sampled_from(["NSE", "BSE", "MCX", "nse", ""])
+_SCOPE_SEGMENTS = st.sampled_from(["INDEX", "FNO", "CASH", "index", ""])
+_SCOPE_SYMBOLS = st.sampled_from(
+    [
+        *_ADVERSARIAL_SYMBOLS,
+        "NIFTY-FUT-2026-07-30",
+        "BANKNIFTY-FUT-2026-07-30",
+        "NSE-NIFTY-30Jul26-FUT",
+        "NSE-NIFTY-30Jul26-24000-CE",
+        "NSE-RELIANCE-30Jul26-FUT",
+    ]
+) | st.text(max_size=16)
+
+
+@given(_SCOPE_EXCHANGES, _SCOPE_SEGMENTS, _SCOPE_SYMBOLS)
+def test_engine_sweep_allowed_is_subset_of_the_law(
+    exchange: str, segment: str, symbol: str
+) -> None:
+    from brutex.universe import (
+        ENGINE_SWEEP_SPOT_TRIPLES,
+        classify_engine_sweep_target,
+        is_engine_sweep_symbol,
+    )
+
+    verdict = classify_engine_sweep_target(exchange=exchange, segment=segment, symbol=symbol)
+    if verdict.allowed:
+        spot = (exchange, segment, symbol) in ENGINE_SWEEP_SPOT_TRIPLES
+        nifty_future = (
+            is_engine_sweep_symbol(symbol)
+            and symbol not in _INDEX_SYMBOLS
+            and exchange == "NSE"
+            and segment == "FNO"
+        )
+        assert spot or nifty_future
+        assert verdict.tier in {"spot_index", "nifty_future"}
+    else:
+        assert verdict.tier == "refused"
+        assert verdict.reason
+
+
+@given(_SCOPE_EXCHANGES, _SCOPE_SEGMENTS)
+def test_reference_only_vix_never_allowed(exchange: str, segment: str) -> None:
+    from brutex.universe import REFERENCE_ONLY_INDEX_UNDERLYINGS, classify_engine_sweep_target
+
+    for _exch, symbol in REFERENCE_ONLY_INDEX_UNDERLYINGS:
+        verdict = classify_engine_sweep_target(exchange=exchange, segment=segment, symbol=symbol)
+        assert verdict.allowed is False

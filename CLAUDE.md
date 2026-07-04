@@ -1378,7 +1378,11 @@ hostile-review pass._
 4. **Reproducibility first.** Every run is identified by `blake3(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
-   computation without that hash recorded. (Was `sha256(...)` pre-DEC-CALIBRATE-001;
+   computation without that hash recorded. `data_snapshot_hash` is the
+   FULL-CONTENT streamed `bxsnap2` digest of every loaded bar's 7 fields
+   (`stage3_wire.data_snapshot_hash`, DEC-SNAPSHOT-HASH-FULL-001 — any
+   single-bar difference re-keys the identity; supersedes the sampled
+   count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
    `TRACK1_BACKTEST_SPEC.md:743` after spec growth moved it from :654
    (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
