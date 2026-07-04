@@ -266,7 +266,35 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/ci-fork-pr-harden-s7v3xq` (**DEC-CI-FORK-PR-HARDEN-001,
+- **Active branch:** `claude/stoic-hawking-9g6622` (**DEC-GREEKS-CORRECTNESS-AUDIT-001, MIGRATION.md #1188** —
+  the 7-lens adversarial correctness audit of the Greeks enrichment value chain
+  (`brutex/data/greeks_enrich.py` + `brutex/options/risk_free.py`) + its fix round. AUDITED CLEAN: the
+  near-expiry `T_FLOOR` boundary · kernel failure-band recovery · provenance pack/unpack losslessness
+  (300k-tuple sweep) · counter honesty · the 6.5% ASSUMPTION labelling · an INDEPENDENT stdlib Black-76
+  cross-check (3,822 price + 3,321 solve points) — **zero wrong stored numbers**. CONFIRMED defects FIXED:
+  (1) the reuse fast path was blind to input VALUES not in the stamp — FIVE lenses converged
+  (RF-1/PROV-1/CTR-1/B76-1/G-RACE-2 rate value · SPOTJOIN-1 spot value · PROV-3 style) — the gate now
+  value-checks stored `rate_used`/`spot_at_bar`/style and recomputes on any mismatch (a coverage-shrunk
+  CSV / vanished spot honestly DEMOTES to NO_RATE/NO_SPOT; RF-5's dead `setdefault` memo killed);
+  (2) IVX-1 — NEW `DEGENERATE_TIME_VALUE_REL=1e-9` (kernel `VERIFY_REL_TOL` mirror, preflight-validated
+  CE+PE over 292,500 combos): `close ≤ floor + 1e-9·close` stamps BELOW_INTRINSIC instead of an ARBITRARY
+  solved IV from a [0.001, 0.29] indeterminacy band (subsumes IVX-4); (3) G-RACE-1 — `read_option_rows`
+  month-bounds each file to its OWN UTC month, so a foreign-month poisoned dup can never overwrite
+  canonical OHLCV via the latest-wins write; (4) SPOTJOIN-2 — a spot-key drift-recovery ladder in the
+  default reader (index aliases BOTH directions + env `BRUTEX_FNO_INDEX_ALIASES` parsed locally · the
+  `<EXCH>-<underlying>` #911 form · `lake_keys.spot_key_candidates`; ONE `spot_key_recovered` log; stock
+  drift pairs NOT invented — named follow-up); (5) CTR-2 — `LakeWriteHalt` re-raises past the per-target
+  quarantine (the fenced wrapper still never fails the pull); (6) IVX-2/IVX-3 — NaN-row per-bar skip
+  (`bars_skipped`), invalid-spot → NO_SPOT, non-positive close → BAD_INPUT before the floor screen; plus
+  PROV-2 loud pack band validation, RF-2/RF-3 `CsvRateSource` construction validation +
+  UnicodeDecodeError→RiskFreeError, CTR-6 `null_reasons` per-status telemetry on `target_enriched`,
+  SPOTJOIN-3 2dp `round_money` spot snap (spot only, never a Greek), and `GREEKS_FORMULA_VERSION` 1→2
+  (enrich golden regenerated — the diff is EXACTLY the formula bit, zero value drift). HONEST envelope:
+  the v2 re-enrich reaches ONLY contracts inside a live pull window (expired contracts keep v1 stamps —
+  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up); rust/** kernel out of
+  scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
+  clean; ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
+  Prior merged: **DEC-CI-FORK-PR-HARDEN-001,
   MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
   redteam-test + docs ONLY, ZERO `brutex/` code touched: (1) `auto-merge.yml`'s trust gate
   no longer trusts the SPOOFABLE `claude/*` head-branch NAME (a stranger's fork named
@@ -1557,7 +1585,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/ci-fork-pr-harden-s7v3xq`
+- **Active feature branch:** `claude/stoic-hawking-9g6622`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
