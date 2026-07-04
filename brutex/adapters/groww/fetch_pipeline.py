@@ -498,9 +498,13 @@ class FetchPipeline:
         # Per-shard OVERFLOW deque of SPILLED windows (DEC-FETCH-NONBLOCKING-HANDOFF-001). When a
         # shard's bounded queue is FULL the producer spills the window's bars to disk + appends the
         # TINY handle here (a Path + int), so the fetch lane returns immediately instead of blocking
-        # on a slow write. The deque is unbounded in COUNT but bounded in MEMORY: the real bytes
-        # live on disk, gated by the spill area's byte cap (a full cap re-applies the bounded
-        # back-pressure — no OOM). The consumer drains its queue FIRST, then this overflow (FIFO).
+        # on a slow write. The deque is bounded in BOTH count AND memory
+        # (DEC-FETCH-SPILL-COUNT-CAP-001): the bulk bytes live on disk gated by the spill area's
+        # BYTE cap, and each resident handle graph (frozen tail + closures) counts against the
+        # spill area's WINDOW-COUNT cap — the byte cap alone could not bound a tiny/empty-window
+        # flood (a 2-byte "[]" payload per empty window). Hitting EITHER cap re-applies the
+        # bounded, stop/drain-aware back-pressure (no OOM, no dropped window). The consumer drains
+        # its queue FIRST, then this overflow (FIFO).
         self._overflow: list[collections.deque[RawFetchResult]] = [
             collections.deque() for _ in range(workers)
         ]
