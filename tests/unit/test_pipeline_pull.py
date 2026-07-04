@@ -39,6 +39,7 @@ def _outcome(
     failed_count: int | None = None,
     ok: bool | None = None,
     crashed: str | None = None,
+    fs_note: str | None = None,
 ) -> PrebuildOutcome:
     """Build a :class:`PrebuildOutcome` (the run_prebuild contract's REAL dataclass)."""
     count = len(failed) if failed_count is None else failed_count
@@ -49,6 +50,7 @@ def _outcome(
         failed_count=count,
         ok=(count == 0) if ok is None else ok,
         crashed=crashed,
+        fs_note=fs_note,
     )
 
 
@@ -1152,3 +1154,35 @@ def test_pipeline_movers_warm_logs_started_and_done() -> None:
     assert started[0]["segments"] == ["spot", "futures"]
     assert len(done) == 1
     assert done[0]["warmed"] == {"spot": 3, "futures": 1}
+
+
+# ── coarse-allocation note (DEC-LAKE-FS-PROBE-001) ───────────────────────────
+
+
+def test_pipeline_report_carries_fs_allocation_note_and_names_it() -> None:
+    """A COARSE prebuild fs_note rides the report + the ⚠-prefixed note clause."""
+    spot, meta, hist = _clean_phases()
+    note = "COARSE filesystem allocation at /lake: one tiny file consumes 128 KiB"
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=lambda: _outcome(fs_note=note),
+    )
+    assert report.fs_allocation_note == note
+    assert f", ⚠ {note}" in report.note
+    assert report.to_dict()["fs_allocation_note"] == note
+
+
+def test_pipeline_report_fs_note_absent_when_fine_grained() -> None:
+    """DEFAULT-PRESERVATION: no fs_note ⇒ None field, no ⚠ clause, key present."""
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=_outcome,
+    )
+    assert report.fs_allocation_note is None
+    assert "⚠ COARSE" not in report.note
+    assert report.to_dict()["fs_allocation_note"] is None
