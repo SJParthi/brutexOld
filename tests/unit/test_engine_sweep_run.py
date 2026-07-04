@@ -17,17 +17,20 @@ OHLC (Golden Rule #1 — real-shaped data, no fabrication).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
+from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import metrics_for_mask
+from brutex.engine.sweep_kernel import ResidentSweepKernel
 from brutex.engine.sweep_run import (
     ComboDedup,
     SweepComboError,
@@ -45,6 +48,7 @@ from brutex.strategies.errors import StrategyError
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 from brutex.vocabulary.bits import BIT_BAR_BEARISH, BIT_BAR_BULLISH
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -112,6 +116,91 @@ def _make_config(**overrides: object) -> SweepRunConfig:
 
 def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+
+
+# ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 test seams ──────
+#
+# The wired sweep batch-simulates via `sweep_run.ResidentTradeSim`; failure
+# injection therefore targets (a) the batch call (a subclass whose
+# `simulate_masks` raises — the chunk-failure seam), (b) the construction
+# (`__init__` raises), and (c) the per-mask metrics tail
+# (`sweep_run.metrics_from_trades`). The per-mask ORACLE seam
+# (`sweep_run.metrics_for_mask`) is now exercised by the chunk-failure
+# RE-ATTRIBUTION path.
+
+
+class _ForcedFallbackSim(ResidentTradeSim):
+    """A ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
+
+    Patched over ``sweep_run.ResidentTradeSim`` to force the WHOLE sweep onto the
+    bit-identical Python oracle (the wired-vs-unwired forcing seam — the same
+    ``_rust = None`` mechanism the rust_trade_sim fallback tests use).
+    """
+
+    def __init__(
+        self, bars: Sequence[CandleBar], bar_bits: Sequence[int], *, tf_minutes: int
+    ) -> None:
+        super().__init__(bars, bar_bits, tf_minutes=tf_minutes)
+        self._rust = None
+
+
+def _chunk_raising_sim(exc_factory: Callable[[], BaseException]) -> type[ResidentTradeSim]:
+    """A ResidentTradeSim subclass whose BATCH call raises — chunk-failure injection."""
+
+    class _RaisingSim(ResidentTradeSim):
+        def simulate_masks(self, *args: object, **kwargs: object) -> NoReturn:
+            raise exc_factory()
+
+    return _RaisingSim
+
+
+def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[ResidentTradeSim]:
+    """A ResidentTradeSim subclass whose CONSTRUCTION raises — ctor-failure injection."""
+
+    class _CtorRaisesSim(ResidentTradeSim):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise exc_factory()
+
+    return _CtorRaisesSim
+
+
+def _run_sweep(
+    tmp_path: Path,
+    tag: str,
+    bars: Sequence[CandleBar],
+    cfg: SweepRunConfig,
+    *,
+    kernel: ResidentSweepKernel | None = None,
+    digest: str | None = None,
+) -> SweepRunSummary:
+    """One persisted sweep into ``<tag>.parquet`` / ``<tag>.jsonl`` under *tmp_path*."""
+    store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+    with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+        return run_persisted_sweep(
+            bars,
+            cfg,
+            store=store,
+            dedup=_dedup(),
+            audit=audit,
+            kernel=kernel,
+            trial_stats_digest=digest,
+        )
+
+
+def _crafted_kernel(bars: Sequence[CandleBar]) -> ResidentSweepKernel:
+    """A real kernel whose ``bar_bits`` are HAND-CRAFTED so bits 0–4 fire on
+    pairwise-DIFFERENT bar subsets (periods 2..6) — every mask's trade stream,
+    and therefore its metrics, differ, so a chunk-boundary mask↔metrics swap
+    CANNOT hide behind identical rows (the chunk-alignment tests' teeth).
+
+    The resident Stage-1B count buffer still holds the ORIGINAL bits, so tests
+    using this kernel MUST disable the pre-filter (``min_hits=0``).
+    """
+    kernel = ResidentSweepKernel(bars)
+    kernel.bar_bits[:] = [
+        sum(1 << b for b in range(5) if i % (b + 2) == 0) for i in range(len(bars))
+    ]
+    return kernel
 
 
 # ────── direction_label (public re-export for the parallel driver) ──────
@@ -1276,11 +1365,24 @@ class TestSweepComboError:
     def test_raises_naming_the_offending_combo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Chunk failure → per-mask ORACLE re-run → the culprit is fingerprinted.
+
+        The wired loop batch-simulates, so per-mask attribution happens in the
+        re-attribution pass: the batch call raises, then the chunk re-runs one
+        mask at a time through `metrics_for_mask` (the oracle) and the FIRST
+        re-raising mask gets the standard fingerprint, chained from ITS error.
+        """
         from brutex.engine.sweep_driver import metrics_for_mask as real_metrics
 
         bars = _trending_bars()
         cfg = _make_config()  # k=1, condition_bits=[0,1,2,3,4] → masks 1,2,4,8,16
         boom_mask = 0b100  # 1 << 2
+
+        # The batch call fails (losing per-mask attribution) ...
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: RuntimeError("batched kernel failure")),
+        )
 
         def _raising_metrics(*args: object, **kwargs: object) -> object:
             mask = args[2]  # (bars, bar_bits, mask, ...)
@@ -1288,8 +1390,8 @@ class TestSweepComboError:
                 raise ValueError("corrupt bar window")
             return real_metrics(*args, **kwargs)  # type: ignore[arg-type]
 
-        # Patch the name as resolved inside run_persisted_sweep (the sweep_run
-        # module namespace) — the string target avoids the re-export attr check.
+        # ... and the oracle re-run identifies the culprit. Patch the names as
+        # resolved inside run_persisted_sweep (the sweep_run module namespace).
         monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _raising_metrics)
 
         store = ResultsStore(path=tmp_path / "r.parquet")
@@ -1323,6 +1425,13 @@ class TestSweepComboError:
 
         bars = _trending_bars()
         cfg = _make_config()
+
+        # The batch call fails AND every oracle re-run fails → the FIRST mask is
+        # fingerprinted; nothing must have been flushed / marked / sentineled.
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: RuntimeError("kernel exploded")),
+        )
 
         def _always_raise(*_args: object, **_kwargs: object) -> object:
             raise RuntimeError("kernel exploded")
@@ -1375,9 +1484,12 @@ class TestSweepComboError:
         """A MemoryError is a GLOBAL abort, NOT a per-tuple SweepComboError skip.
 
         OOM is treated as a global stop everywhere in the codebase
-        (DEC-LAKE-WRITE-HALT-001), so the combo loop must re-raise it BARE instead
-        of wrapping it into a SweepComboError that the grid drivers would downgrade
-        to a single-tuple skip. The store / sidecar / sentinel stay unwritten.
+        (DEC-LAKE-WRITE-HALT-001), so a MemoryError from the BATCHED trade-sim
+        call — the PyO3 Vec<Vec<TradeRecord>> marshal is a plausible real OOM
+        site — must re-raise BARE, BEFORE any per-mask oracle re-attribution
+        (which would repeat the allocation pressure under memory pressure) and
+        never be downgraded into a SweepComboError tuple-skip. The store /
+        sidecar / sentinel stay unwritten.
         """
         from brutex.engine.trial_stats import trial_stats_sidecar_path
         from brutex.engine.tuple_complete import completion_sentinel_path
@@ -1385,10 +1497,15 @@ class TestSweepComboError:
         bars = _trending_bars()
         cfg = _make_config()
 
-        def _oom(*_args: object, **_kwargs: object) -> object:
-            raise MemoryError("out of memory")
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: MemoryError("out of memory")),
+        )
 
-        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _oom)
+        def _oracle_must_not_run(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("re-attribution must NOT run on a MemoryError")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _oracle_must_not_run)
 
         store = ResultsStore(path=tmp_path / "r.parquet")
         with (
@@ -1418,12 +1535,13 @@ class TestSweepComboError:
         """A KeyboardInterrupt ESCAPES the per-tuple SweepComboError catch BARE.
 
         An operator Ctrl-C is a ``BaseException`` (NOT an ``Exception``), so the
-        combo loop's ``except Exception`` MUST NOT catch it — it propagates
-        unchanged so the whole (33B-trial) sweep aborts instead of being silently
-        downgraded to a single-tuple skip + continue (DEC-ENGINE-DEDUP-NAN-CANON-001
-        / the audit H1 guard, the BaseException twin of the MemoryError test). The
-        store / sidecar / sentinel stay unwritten + ``tuples_failed`` is irrelevant
-        (the single-tuple runner does not even reach the grid driver's count).
+        chunked loop's ``except Exception`` MUST NOT catch it — it propagates
+        unchanged (no oracle re-attribution) so the whole (33B-trial) sweep
+        aborts instead of being silently downgraded to a single-tuple skip +
+        continue (DEC-ENGINE-DEDUP-NAN-CANON-001 / the audit H1 guard, the
+        BaseException twin of the MemoryError test). The store / sidecar /
+        sentinel stay unwritten + ``tuples_failed`` is irrelevant (the
+        single-tuple runner does not even reach the grid driver's count).
         """
         from brutex.engine.trial_stats import trial_stats_sidecar_path
         from brutex.engine.tuple_complete import completion_sentinel_path
@@ -1431,10 +1549,10 @@ class TestSweepComboError:
         bars = _trending_bars()
         cfg = _make_config()
 
-        def _interrupt(*_args: object, **_kwargs: object) -> object:
-            raise KeyboardInterrupt("operator ctrl-c")
-
-        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _interrupt)
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: KeyboardInterrupt("operator ctrl-c")),
+        )
 
         store = ResultsStore(path=tmp_path / "r.parquet")
         with (
@@ -1467,12 +1585,13 @@ class TestSweepComboError:
     ) -> None:
         """A generic BaseException subclass ESCAPES the ``except Exception`` catch.
 
-        The combo loop catches only ``Exception`` (and re-raises ``MemoryError``
+        The chunked loop catches only ``Exception`` (and re-raises ``MemoryError``
         bare BEFORE it). Anything deriving from ``BaseException`` but NOT
         ``Exception`` — Ctrl-C, ``SystemExit``, or any custom ``BaseException``
-        subclass — must propagate UNWRAPPED, pinning that a future refactor
-        widening the catch to ``except BaseException`` (which would silently
-        downgrade a fatal signal into a tuple skip) is caught (audit H1).
+        subclass — must propagate UNWRAPPED (no oracle re-attribution), pinning
+        that a future refactor widening the catch to ``except BaseException``
+        (which would silently downgrade a fatal signal into a tuple skip) is
+        caught (audit H1).
         """
         from brutex.engine.trial_stats import trial_stats_sidecar_path
         from brutex.engine.tuple_complete import completion_sentinel_path
@@ -1483,10 +1602,10 @@ class TestSweepComboError:
         bars = _trending_bars()
         cfg = _make_config()
 
-        def _fatal(*_args: object, **_kwargs: object) -> object:
-            raise _FatalSignal("not an Exception")
-
-        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _fatal)
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: _FatalSignal("not an Exception")),
+        )
 
         store = ResultsStore(path=tmp_path / "r.parquet")
         with (
@@ -1851,3 +1970,531 @@ class TestResidentKernelBarMismatch:
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
             )
+
+
+# ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 — the wired resident Rust trade-sim ──────
+
+
+class TestTradeSimPathObservability:
+    """The engine choice (Rust kernel vs Python oracle) is observable, never silent.
+
+    A silently Python-degraded sweep would be a ~40× fake-performance illusion
+    (Golden Rule #10) AND would make every wired-vs-unwired CI arm degenerate to
+    Python==Python — so the wired path ASSERTS the kernel actually engaged.
+    """
+
+    def test_wired_sweep_engages_rust_and_logs_path(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
+        cfg = _make_config()
+        with capture_logs() as logs:
+            summary = _run_sweep(tmp_path, "w", bars, cfg)
+        events = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert len(events) == 1  # once per tuple, never per mask/chunk
+        # The wheel is built in CI — the production-wired sweep MUST take the
+        # Rust path (the golden gate is vacuous if this silently reads False).
+        assert events[0]["rust_active"] is True
+        assert events[0]["n_bars"] == len(bars)
+        assert events[0]["instrument"] == "NIFTY"
+        assert summary.persisted > 0
+
+    def test_forced_fallback_logs_python_path_and_identical_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _trending_bars()
+        cfg = _make_config()
+        wired = _run_sweep(tmp_path, "w", bars, cfg)
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+        with capture_logs() as logs:
+            fallback = _run_sweep(tmp_path, "f", bars, cfg)
+        events = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert len(events) == 1
+        assert events[0]["rust_active"] is False
+        # Bit-identity: the Python arm produces the SAME store, byte for byte.
+        assert fallback.store_content_hash == wired.store_content_hash
+        assert (tmp_path / "f.parquet").read_bytes() == (tmp_path / "w.parquet").read_bytes()
+
+    def test_no_survivors_builds_no_sim(self, tmp_path: Path) -> None:
+        """An all-pruned tuple never constructs the trade-sim (no wasted ctor)."""
+        bars = _trending_bars()
+        cfg = _make_config(min_hits=10_000_000)  # Stage-1B drops every survivor
+        with capture_logs() as logs:
+            summary = _run_sweep(tmp_path, "e", bars, cfg)
+        assert summary.persisted == 0
+        assert not any(e["event"] == "sweep_run.trade_sim_path" for e in logs)
+
+
+class TestTradeSimChunkSize:
+    """`_trade_sim_chunk_masks` — the count cap × cell budget × ≥1 floor."""
+
+    def test_small_window_uses_mask_cap(self) -> None:
+        from brutex.engine.sweep_run import _TRADE_SIM_CHUNK_MASKS, _trade_sim_chunk_masks
+
+        # 1800-bar unit fixture: cells budget allows far more than the cap.
+        assert _trade_sim_chunk_masks(1_800) == _TRADE_SIM_CHUNK_MASKS
+
+    def test_deep_window_bounded_by_cells(self) -> None:
+        from brutex.engine.sweep_run import _TRADE_SIM_CHUNK_CELLS, _trade_sim_chunk_masks
+
+        # A production multi-year 1-minute window (~500k bars) chunks by cells.
+        assert _trade_sim_chunk_masks(500_000) == _TRADE_SIM_CHUNK_CELLS // 500_000
+        assert _trade_sim_chunk_masks(500_000) < 256
+
+    def test_floor_is_one_beyond_the_cell_budget(self) -> None:
+        from brutex.engine.sweep_run import (
+            _TRADE_SIM_CHUNK_CELLS,
+            _TRADE_SIM_CHUNK_MASKS,
+            _trade_sim_chunk_masks,
+        )
+
+        assert _trade_sim_chunk_masks(_TRADE_SIM_CHUNK_CELLS * 2) == 1
+        # Degenerate div-by-zero guard (max(1, n_bars)) yields the plain cap;
+        # unreachable in production — run_persisted_sweep validates bars non-empty.
+        assert _trade_sim_chunk_masks(0) == _TRADE_SIM_CHUNK_MASKS
+
+    def test_cap_boundary_is_exact(self) -> None:
+        from brutex.engine.sweep_run import (
+            _TRADE_SIM_CHUNK_CELLS,
+            _TRADE_SIM_CHUNK_MASKS,
+            _trade_sim_chunk_masks,
+        )
+
+        boundary = _TRADE_SIM_CHUNK_CELLS // _TRADE_SIM_CHUNK_MASKS
+        assert _trade_sim_chunk_masks(boundary) == _TRADE_SIM_CHUNK_MASKS
+        assert _trade_sim_chunk_masks(boundary + 1) == _TRADE_SIM_CHUNK_MASKS - 1
+
+
+class TestTradeSimChunkInvariance:
+    """Chunking is a pure batching choice — results are chunk-size-INVARIANT.
+
+    The chunking of `kept` is the only new algorithmic code the wiring adds; an
+    off-by-one at a chunk boundary (overlap / skip / reorder) would mis-align
+    mask → trades → metrics → run_id and poison the store. These tests use the
+    CRAFTED fixture whose five masks have pairwise-distinct metrics, so any
+    misalignment flips the store bytes.
+    """
+
+    def _distinct_expected(
+        self, bars: list[CandleBar], kernel: ResidentSweepKernel, cfg: SweepRunConfig
+    ) -> dict[int, object]:
+        """Per-mask oracle metrics; asserts the fixture's pairwise-distinct teeth."""
+        expected = {
+            1 << b: metrics_for_mask(
+                bars,
+                kernel.bar_bits,
+                1 << b,
+                direction=cfg.direction,
+                tf_minutes=cfg.tf_minutes,
+                stop_loss_paisa=cfg.sl_paisa,
+                take_profit_paisa=cfg.tp_paisa,
+                start_equity_paisa=cfg.start_equity_paisa,
+            )
+            for b in range(5)
+        }
+        fingerprints = {
+            (m.net_pnl_paisa, m.total_trades, m.sharpe_ratio) for m in expected.values()
+        }
+        assert len(fingerprints) == 5, "fixture lost its teeth: masks must differ pairwise"
+        return dict(expected)
+
+    @pytest.mark.parametrize("chunk", [1, 2, 3, 5, 7])
+    def test_chunk_sizes_produce_byte_identical_stores(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chunk: int
+    ) -> None:
+        """{1, prime, ==len, >len} chunks — incl. len%chunk != 0 — same bytes."""
+        bars = _trending_bars()
+        kernel = _crafted_kernel(bars)
+        cfg = _make_config(min_hits=0)
+        baseline = _run_sweep(tmp_path, "base", bars, cfg, kernel=kernel)
+        assert baseline.persisted > 0  # the invariance claim is non-vacuous
+        monkeypatch.setattr("brutex.engine.sweep_run._trade_sim_chunk_masks", lambda n_bars: chunk)
+        run = _run_sweep(tmp_path, f"c{chunk}", bars, cfg, kernel=kernel)
+        assert run.store_content_hash == baseline.store_content_hash
+        assert (tmp_path / f"c{chunk}.parquet").read_bytes() == (
+            tmp_path / "base.parquet"
+        ).read_bytes()
+
+    def test_chunked_masks_align_with_per_mask_oracle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each persisted row's metrics == the ORACLE metrics for ITS mask.
+
+        Chunk size 2 over 5 masks (a ragged final chunk) — every stored row is
+        joined back to its mask via the persisted u128 limbs and compared
+        field-by-field against a direct `metrics_for_mask` call, so a
+        boundary swap cannot hide.
+        """
+        import polars as pl
+
+        bars = _trending_bars()
+        kernel = _crafted_kernel(bars)
+        cfg = _make_config(min_hits=0)
+        expected = self._distinct_expected(bars, kernel, cfg)
+        monkeypatch.setattr("brutex.engine.sweep_run._trade_sim_chunk_masks", lambda n_bars: 2)
+        summary = _run_sweep(tmp_path, "a", bars, cfg, kernel=kernel)
+        assert summary.persisted > 0
+        rows = pl.read_parquet(tmp_path / "a.parquet")
+        assert rows.height == summary.persisted
+        for row in rows.iter_rows(named=True):
+            # The u128 mask persists as two OFFSET-encoded signed-Int64 limbs
+            # (`limb - 2**63`, results_store._encode_limb) — invert the offset.
+            mask = ((row["mask_bits_hi"] + (1 << 63)) << 64) | (row["mask_bits_lo"] + (1 << 63))
+            metrics = expected[mask]
+            assert row["net_pnl_paisa"] == metrics.net_pnl_paisa  # type: ignore[attr-defined]
+            assert row["total_trades"] == metrics.total_trades  # type: ignore[attr-defined]
+            assert row["sharpe_ratio"] == metrics.sharpe_ratio  # type: ignore[attr-defined]
+
+
+class TestTradeSimConstructionFailure:
+    """A trade-sim ctor failure lands as the #904 tuple-skip, never a grid abort.
+
+    The construction seam sits OUTSIDE the per-mask try/except; the grid drivers
+    catch ONLY SweepComboError — so the ctor wrap must map an Exception to the
+    tuple-skip contract (and re-raise MemoryError bare: OOM is a GLOBAL stop).
+    """
+
+    def test_ctor_exception_maps_to_sweep_combo_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _ctor_raising_sim(lambda: ValueError("corrupt price column")),
+        )
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        msg = str(excinfo.value)
+        assert "trade-sim construction" in msg
+        assert f"{len(bars)} bars" in msg
+        assert "NIFTY/1m/bull" in msg
+        assert "k=1" in msg
+        assert "corrupt price column" in msg
+        assert isinstance(excinfo.value.__cause__, ValueError)
+        # Tuple-skip semantics: nothing written → deterministic redo next run.
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_ctor_memory_error_propagates_bare(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _trending_bars()
+        cfg = _make_config()
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _ctor_raising_sim(lambda: MemoryError("ctor OOM")),
+        )
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(MemoryError, match="ctor OOM") as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        assert not isinstance(excinfo.value, SweepComboError)
+        assert excinfo.value.__cause__ is None
+        assert not store.path.exists()
+
+
+class TestChunkFailureReattribution:
+    """The chunk-failure → per-mask-oracle re-attribution contract."""
+
+    @pytest.mark.parametrize("culprit_bit", [0, 2, 4])  # first / middle / last of the chunk
+    def test_culprit_position_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, culprit_bit: int
+    ) -> None:
+        from brutex.engine.sweep_driver import metrics_for_mask as real_metrics
+
+        bars = _trending_bars()
+        cfg = _make_config()  # kept = masks 1,2,4,8,16 in ONE default chunk
+        boom_mask = 1 << culprit_bit
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: RuntimeError("batch boom")),
+        )
+
+        def _raising(*args: object, **kwargs: object) -> object:
+            if args[2] == boom_mask:
+                raise ValueError("culprit mask")
+            return real_metrics(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _raising)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        assert f"0x{boom_mask:032x}" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
+    def test_multiple_culprits_names_the_first_in_kept_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_driver import metrics_for_mask as real_metrics
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        culprits = {1 << 1, 1 << 3}
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: RuntimeError("batch boom")),
+        )
+
+        def _raising(*args: object, **kwargs: object) -> object:
+            if args[2] in culprits:
+                raise ValueError("culprit mask")
+            return real_metrics(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _raising)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        # Deterministic: the FIRST culprit in kept order (mask 2), never mask 8.
+        assert f"0x{1 << 1:032x}" in str(excinfo.value)
+        assert f"0x{1 << 3:032x}" not in str(excinfo.value)
+
+    def test_no_culprit_fails_loud_never_adopts_oracle_results(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Rust-only batch failure (every mask passes the oracle) fails LOUD.
+
+        Silently adopting the oracle's per-mask results would mask a
+        kernel-divergence signal and make engine provenance non-deterministic
+        across runs — the error must name the CHUNK, chain the ORIGINAL batch
+        exception, and leave every artifact unwritten.
+        """
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: RuntimeError("pyo3 marshal failure")),
+        )
+        # metrics_for_mask is NOT patched — the real oracle passes every mask.
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            capture_logs() as logs,
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+            )
+        msg = str(excinfo.value)
+        assert "trade-sim chunk of 5 masks" in msg
+        assert f"0x{1:032x}..0x{16:032x}" in msg
+        assert "pyo3 marshal failure" in msg
+        assert "NOT" in msg and "adopted" in msg
+        assert "NIFTY/1m/bull" in msg
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        # The chunk failure was WARNed before re-attribution began.
+        warn = [e for e in logs if e["event"] == "sweep_run.trade_sim_chunk_failed"]
+        assert len(warn) == 1
+        assert warn[0]["error_type"] == "RuntimeError"
+        assert warn[0]["n_masks"] == 5
+        # Results NOT adopted: no store / sidecar / sentinel — the tuple redoes.
+        assert not store.path.exists()
+        assert not trial_stats_sidecar_path(store.path).exists()
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_memory_error_during_reattribution_propagates_bare(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OOM inside the oracle re-run is STILL a global stop, never a tuple skip."""
+        bars = _trending_bars()
+        cfg = _make_config()
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: RuntimeError("batch boom")),
+        )
+
+        def _oom(*_args: object, **_kwargs: object) -> object:
+            raise MemoryError("oracle OOM")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _oom)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(MemoryError, match="oracle OOM") as excinfo,
+        ):
+            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        assert not isinstance(excinfo.value, SweepComboError)
+        assert excinfo.value.__cause__ is None  # bare re-raise, no wrap
+        assert not store.path.exists()
+
+
+class TestMetricsTailFailure:
+    """The per-mask metrics tail keeps the fail-loud fingerprint + OOM carve-out."""
+
+    def test_tail_error_names_the_offending_mask(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_driver import metrics_from_trades as real_tail
+
+        bars = _trending_bars()
+        cfg = _make_config()  # kept order: masks 1, 2, 4, 8, 16
+        calls = {"n": 0}
+
+        def _tail(*args: object, **kwargs: object) -> object:
+            calls["n"] += 1
+            if calls["n"] == 3:  # the 3rd kept mask = 0b100
+                raise ValueError("tail boom")
+            return real_tail(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _tail)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        msg = str(excinfo.value)
+        assert f"0x{0b100:032x}" in msg
+        assert "run_id=" in msg
+        assert "tail boom" in msg
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
+    def test_tail_memory_error_propagates_bare(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _trending_bars()
+        cfg = _make_config()
+
+        def _oom(*_args: object, **_kwargs: object) -> object:
+            raise MemoryError("tail OOM")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _oom)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(MemoryError, match="tail OOM") as excinfo,
+        ):
+            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        assert not isinstance(excinfo.value, SweepComboError)
+        assert excinfo.value.__cause__ is None
+        assert not store.path.exists()
+
+
+class TestU128EnvelopeThroughSweep:
+    """A bit ≥ 64 anywhere routes to the Python oracle — byte-equal, never OverflowError.
+
+    `iter_masks_k_of_bits` accepts bits up to 127 (MAX_VOCAB_BITS = 128) and the
+    kernel is u64-native, so BOTH FFI seams (ctor bar_bits + per-call masks) must
+    guard — mirroring `combo_mask.count_supermasks`'s dual check.
+    """
+
+    def test_u128_mask_sweep_equals_forced_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[64, 65], k=1, min_hits=0)
+        with capture_logs() as logs:
+            wired = _run_sweep(tmp_path, "w", bars, cfg)
+        # The per-CALL guard routed the batch to the oracle, loudly.
+        fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
+        assert len(fallbacks) == 1
+        assert fallbacks[0]["reason"] == "mask_u128"
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+        fallback = _run_sweep(tmp_path, "f", bars, cfg)
+        assert wired.store_content_hash == fallback.store_content_hash
+        assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
+
+    def test_u128_bar_bits_fall_back_at_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _trending_bars()
+        kernel = ResidentSweepKernel(bars)
+        kernel.bar_bits[0] |= 1 << 100  # the documented u128 headroom, in-place
+        cfg = _make_config(min_hits=0)
+        with capture_logs() as logs:
+            wired = _run_sweep(tmp_path, "w", bars, cfg, kernel=kernel)
+        # The CONSTRUCTION guard tripped (whole-object fallback), loudly …
+        fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.fallback"]
+        assert len(fallbacks) == 1
+        assert fallbacks[0]["reason"] == "bar_bits_u128"
+        # … and the sweep-level path signal reads Python.
+        paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert paths[0]["rust_active"] is False
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+        fallback = _run_sweep(tmp_path, "f", bars, cfg, kernel=kernel)
+        assert wired.store_content_hash == fallback.store_content_hash
+        assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
+
+
+class TestMixedEraCheckpointResume:
+    """A tuple completed under the PYTHON engine resumes cleanly under the WIRED build.
+
+    The exact production upgrade scenario this PR creates: the sentinel/digest
+    machinery hashes results, never the engine — safe ONLY because of
+    bit-identity, so both directions are pinned here.
+    """
+
+    def test_python_era_sentinel_resumes_and_redoes_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        digest = "ab12cd34ef56ab12"
+        store_path = tmp_path / "t.parquet"
+
+        def _resume_run(tag: str) -> SweepRunSummary:
+            # Same STORE path (the tuple's artifact), fresh audit chain per era.
+            store = ResultsStore(path=store_path)
+            with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+                return run_persisted_sweep(
+                    bars, cfg, store=store, dedup=_dedup(), audit=audit, trial_stats_digest=digest
+                )
+
+        # Era 1: the tuple completes on the PYTHON engine (pre-wiring build).
+        with monkeypatch.context() as m:
+            m.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+            first = _run_sweep(tmp_path, "t", bars, cfg, digest=digest)
+        assert first.sentinel_written
+        python_era_bytes = store_path.read_bytes()
+        # Era 2a: the WIRED build resumes — the sentinel short-circuits, nothing
+        # is touched, and the recorded hash still pairs with the Python-era store.
+        resumed = _resume_run("t2a")
+        assert resumed.resumed_complete
+        assert resumed.store_content_hash == first.store_content_hash
+        assert store_path.read_bytes() == python_era_bytes
+        # Era 2b: force a FULL wired redo (sentinel gone) — the Rust engine
+        # rewrites the Python-era artifacts byte-identically (Golden Rule #7).
+        completion_sentinel_path(store_path).unlink()
+        redone = _resume_run("t2b")
+        assert not redone.resumed_complete
+        assert redone.sentinel_written
+        assert redone.store_content_hash == first.store_content_hash
+        assert store_path.read_bytes() == python_era_bytes

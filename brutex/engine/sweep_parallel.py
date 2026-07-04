@@ -5,13 +5,16 @@ sweep, behind a DEFAULT-OFF worker-count flag so production is byte-unchanged.
 
 ## Why processes, not threads (the GIL, honestly)
 
-The dominant per-tuple cost is **CPU-bound pure Python** — ``build_bar_bits`` (a
-Python bar walk) and per-mask ``simulate_trades`` (a per-bar Python walk). A
-``ThreadPoolExecutor`` would serialise on the GIL → **~1×** on compute. So
-parallelism here is a :class:`concurrent.futures.ProcessPoolExecutor` of
-``workers - 1`` EVAL workers (each in its own address space, own kernel LRU, and
-— when it drops into the Rust ``trading_core`` / ``count_supermasks`` kernels —
-releasing the GIL further). Threads are USELESS here; processes are MANDATORY.
+The dominant per-tuple cost is **CPU-bound and GIL-holding** — ``build_bar_bits``
+(a Python bar walk), the per-mask metrics tail (pure Python:
+``metrics_from_trades`` = equity fold + ``compute_metrics``), and — since
+DEC-SWEEP-RUST-TRADESIM-WIRE-001 — the resident Rust trade-walk
+(:class:`~brutex.engine.rust_trade_sim.ResidentTradeSim`), whose PyO3 batch call
+runs WITHOUT releasing the GIL. A ``ThreadPoolExecutor`` would serialise on the
+GIL → **~1×** on compute. So parallelism here is a
+:class:`concurrent.futures.ProcessPoolExecutor` of ``workers - 1`` EVAL workers
+(each in its own address space, own kernel LRU, own per-tuple resident
+trade-sim). Threads are USELESS here; processes are MANDATORY.
 
 ## Honest speedup envelope (Golden Rule #10)
 
@@ -20,9 +23,15 @@ On the CLAUDE.md §8 reference hardware — **Apple M4 Pro, 14-core (10P+4E),
 10×: the single serialising writer-actor's per-tuple ``fsync``, the reorder
 overhead, and inter-process result marshalling eat ~20–40%. A grid with fewer
 tuples than cores, or one dominated by a single huge-``N_bars`` instrument, sees
-far less — **no number of cores speeds up ONE tuple's latency** (its
-``simulate_trades`` is a pure-Python per-bar walk). Parallelism is strictly
-ACROSS independent tuples. No "millions in minutes."
+far less — **no number of cores speeds up ONE tuple's latency**: its trade walk
+is the resident Rust kernel, but ``_worker_env`` below pins
+``RAYON_NUM_THREADS=1`` in every worker (bit-for-bit determinism + no
+``workers × num_cpus`` thread oversubscription), so the kernel's rayon
+parallel arm applies ONLY to single-process runs — under this pool the per-tuple
+speedup is the SERIAL-kernel ratio, and the per-mask metrics tail stays pure
+Python either way (the Phase-A honest envelope: ~2.2–2.8× end-to-end per tuple,
+Amdahl-capped by that tail). Parallelism is strictly ACROSS independent tuples.
+No "millions in minutes."
 
 ## The shape (a mirror of ``adapters/groww/fetch_pipeline.py``)
 
@@ -38,8 +47,10 @@ ACROSS independent tuples. No "millions in minutes."
                            – SweepCache.record + progress.advance
    ProcessPoolExecutor of `workers-1` EVAL WORKERS (own address space):
      run_one_tuple(...) → run_persisted_sweep body (UNCHANGED) →
-       build_bar_bits → simulate_trades → rank_combos → per-tuple Parquet +
-       completion sentinel; audit lines collected as PLAIN DATA (BufferedAuditCollector)
+       build_bar_bits → ResidentTradeSim.simulate_masks (chunked; serial kernel
+       under the RAYON_NUM_THREADS=1 pin) → metrics_from_trades → rank_combos →
+       per-tuple Parquet + completion sentinel; audit lines collected as PLAIN
+       DATA (BufferedAuditCollector)
 ```
 
 ## Bounded memory under head-of-line blocking (Golden Rule #5)
@@ -331,10 +342,14 @@ def _worker_init(ctx: _WorkerContext) -> None:
     threads would BOTH oversubscribe AND risk an order-DEPENDENT float reduction
     (a reduction whose order changes with the thread count breaks bit-for-bit
     determinism). So every worker forces ``OMP_NUM_THREADS`` /
-    ``RAYON_NUM_THREADS`` / ``POLARS_MAX_THREADS`` to ``1``. Bit-for-bit
-    seq-vs-parallel equivalence empirically holds for this pure-Python +
-    integer-reduction hot path (the golden test proves the end-to-end equivalence,
-    not that these specific env pins are the sole cause).
+    ``RAYON_NUM_THREADS`` / ``POLARS_MAX_THREADS`` to ``1``. The RAYON pin now
+    also serialises the wired resident trade-sim kernel's rayon arm
+    (DEC-SWEEP-RUST-TRADESIM-WIRE-001) — its order-preserving integer
+    ``par_iter`` is bit-identical serial-vs-parallel anyway, so the pin costs
+    no correctness and prevents ``workers × num_cpus`` thread oversubscription.
+    Bit-for-bit seq-vs-parallel equivalence empirically holds for this hot path
+    (the golden test proves the end-to-end equivalence, not that these specific
+    env pins are the sole cause).
     """
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["RAYON_NUM_THREADS"] = "1"

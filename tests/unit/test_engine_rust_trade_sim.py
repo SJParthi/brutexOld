@@ -30,6 +30,8 @@ from brutex.engine.trade_sim import (
     simulate_trades,
 )
 from brutex.strategies.types import Side
+from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 _DAY = date(2024, 1, 2)  # a regular NSE trading Tuesday
 
@@ -483,3 +485,239 @@ class TestCrossSessionPendingEntryParity:
         assert got == expected
         assert len(got[0]) == 1
         assert got[0][0].entry_ts == bars[2].timestamp  # 09:16 day-2, NOT 09:15
+
+
+# ── kernel-envelope guards (DEC-SWEEP-RUST-TRADESIM-WIRE-001) ─────────────────
+#
+# The compiled kernel is u64-native (bar_bits / masks) and #1090-validates every
+# paisa input against MAX_PRICE_PAISA = i64::MAX / 8. An out-of-envelope input
+# must route to the bit-exact Python oracle — LOUDLY (one structlog WARNING) —
+# never surface as a PyO3 OverflowError / kernel ValueError the pure-Python
+# engine would not have raised (wheel state must never change behaviour).
+
+
+def _fallback_events(logs: list[EventDict]) -> list[EventDict]:
+    return [e for e in logs if e["event"] == "rust_trade_sim.fallback"]
+
+
+def _call_fallback_events(logs: list[EventDict]) -> list[EventDict]:
+    return [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
+
+
+class TestRustActiveProperty:
+    def test_true_when_the_wheel_serves_the_window(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.rust_active is True  # the wheel is built in CI
+
+    def test_false_on_the_forced_fallback(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        sim._rust = None
+        assert sim.rust_active is False
+
+
+class TestConstructionEnvelopeGuards:
+    def test_wheel_missing_warns_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = ModuleType("fno_math")
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        bars = _feed()
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.rust_active is False
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "wheel_missing"
+        assert events[0]["n_bars"] == len(bars)
+
+    def test_bar_bits_u128_falls_back_and_matches_oracle(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] |= 1 << 100  # the documented u128 headroom (MAX_VOCAB_BITS = 128)
+        masks = [0, 1]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is False
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "bar_bits_u128"
+        got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+
+    @pytest.mark.parametrize("rupees", ["200000000000000000", "-200000000000000000"])
+    def test_price_out_of_envelope_falls_back_and_matches_oracle(self, rupees: str) -> None:
+        """A price beyond ±(i64::MAX/8) paisa never crosses the FFI boundary.
+
+        2·10¹⁷ rupees = 2·10¹⁹ paisa > the #1090 ceiling (≈1.15·10¹⁸) — the
+        kernel ctor would raise ValueError; the wrapper routes to the oracle
+        (which simulates arbitrary-precision ints) instead, both signs.
+        Hand-crafted bar_bits: Stage-1A's own kernels cannot digest such a
+        price either (its VWAP paisa crosses an i64 FFI edge upstream), so in
+        production the corruption fails EARLIER — this pins the COMMON seam's
+        contract for direct callers of the wrapper.
+        """
+        big = Decimal(rupees)
+        bars = [*_feed()]
+        bars[1] = CandleBar(
+            timestamp=bars[1].timestamp,
+            open=big,
+            high=big + 1,
+            low=big - 1,
+            close=big,
+            volume=0,
+            open_interest=None,
+        )
+        bits = [1 if i % 2 == 0 else 0 for i in range(len(bars))]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is False
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "price_out_of_envelope"
+        got = sim.simulate_masks([0], direction=Side.BUY)
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                0,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+
+
+class TestPerCallEnvelopeGuards:
+    def test_mask_u128_falls_back_for_that_call_only(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)  # u64-clean (bits 0-59)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        masks = [(1 << 64) | 1, 1]  # a u128 mask + a real firing mask
+        with capture_logs() as logs:
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "mask_u128"
+        assert events[0]["n_masks"] == 2
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+        # Per-CALL, not sticky: the kernel stays active and a clean follow-up
+        # call crosses the FFI boundary again (no new fallback warning).
+        assert sim.rust_active is True
+        with capture_logs() as logs2:
+            again = sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=300)
+        assert _call_fallback_events(logs2) == []
+        assert again == [expected[1]]
+
+    @pytest.mark.parametrize(
+        ("leg", "reason"),
+        [
+            ("stop_loss_paisa", "stop_loss_out_of_envelope"),
+            ("take_profit_paisa", "take_profit_out_of_envelope"),
+        ],
+    )
+    def test_oversized_distance_falls_back_and_matches_oracle(self, leg: str, reason: str) -> None:
+        from brutex.engine.rust_trade_sim import _MAX_KERNEL_PRICE_PAISA
+
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        distance = _MAX_KERNEL_PRICE_PAISA + 1  # kernel would ValueError; oracle simulates
+        sl = distance if leg == "stop_loss_paisa" else None
+        tp = distance if leg == "take_profit_paisa" else None
+        with capture_logs() as logs:
+            got = sim.simulate_masks(
+                [1], direction=Side.BUY, stop_loss_paisa=sl, take_profit_paisa=tp
+            )
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == reason
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=distance if leg == "stop_loss_paisa" else None,
+                take_profit_paisa=distance if leg == "take_profit_paisa" else None,
+                policy=FillPolicy(),
+            )
+        ]
+
+    def test_boundary_distance_stays_on_the_rust_path(self) -> None:
+        """EXACTLY the ceiling is kernel-valid (the guard is strict-greater)."""
+        from brutex.engine.rust_trade_sim import _MAX_KERNEL_PRICE_PAISA
+
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        with capture_logs() as logs:
+            got = sim.simulate_masks(
+                [1],
+                direction=Side.BUY,
+                stop_loss_paisa=_MAX_KERNEL_PRICE_PAISA,
+                take_profit_paisa=_MAX_KERNEL_PRICE_PAISA,
+            )
+        assert _call_fallback_events(logs) == []  # the kernel served it
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=_MAX_KERNEL_PRICE_PAISA,
+                take_profit_paisa=_MAX_KERNEL_PRICE_PAISA,
+                policy=FillPolicy(),
+            )
+        ]
+
+    @pytest.mark.parametrize("forced_fallback", [False, True])
+    @pytest.mark.parametrize("leg", ["stop_loss_paisa", "take_profit_paisa"])
+    @pytest.mark.parametrize("value", [0, -5])
+    def test_nonpositive_distance_rejected_identically_on_both_arms(
+        self, forced_fallback: bool, leg: str, value: int
+    ) -> None:
+        """d <= 0 raises the SAME ValueError whether the kernel serves or not.
+
+        The kernel accepts a 0 distance where the Python walker raises — the
+        wrapper normalises the domain BEFORE arm dispatch, so wheel state can
+        never change the error behaviour (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
+        """
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        if forced_fallback:
+            sim._rust = None
+        sl = value if leg == "stop_loss_paisa" else None
+        tp = value if leg == "take_profit_paisa" else None
+        with pytest.raises(ValueError, match=f"{leg} must be > 0 or None"):
+            sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=sl, take_profit_paisa=tp)

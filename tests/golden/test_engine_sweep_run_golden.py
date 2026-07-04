@@ -24,6 +24,8 @@ regression.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -32,6 +34,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
+from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.sweep_run import (
     ComboDedup,
     SweepRunConfig,
@@ -41,6 +44,7 @@ from brutex.engine.sweep_run import (
 )
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -189,3 +193,92 @@ def test_golden_content_hash_literal(tmp_path: Path) -> None:
     pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     summary = _run(tmp_path, "a")
     assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
+
+
+# ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 — wired-vs-unwired bit-identity ──────
+#
+# `_GOLDEN_CONTENT_HASH` above was generated on the PURE-PYTHON per-mask loop
+# (pre-wiring). The wiring PR deliberately leaves BOTH literals UNCHANGED — the
+# wired (Rust-kernel) run reproducing the Python-era hash IS the
+# wired-vs-unwired proof at the strongest (byte) level. These tests make the
+# two arms explicit: the wired arm ASSERTS the kernel actually engaged (so the
+# gate can never silently degenerate to Python==Python), and the forced-Python
+# arm asserts the same bytes.
+
+
+class _ForcedFallbackSim(ResidentTradeSim):
+    """ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
+
+    The same ``_rust = None`` forcing seam the rust_trade_sim fallback tests
+    use, applied over ``sweep_run.ResidentTradeSim`` so the WHOLE persisted
+    sweep runs the oracle.
+    """
+
+    def __init__(
+        self, bars: Sequence[CandleBar], bar_bits: Sequence[int], *, tf_minutes: int
+    ) -> None:
+        super().__init__(bars, bar_bits, tf_minutes=tf_minutes)
+        self._rust = None
+
+
+def test_golden_wired_arm_engages_rust_and_reproduces_the_python_era_hash(
+    tmp_path: Path,
+) -> None:
+    """The WIRED sweep takes the Rust path AND lands on the pre-wiring hash.
+
+    Without the rust_active assertion a stale/broken wheel would silently
+    revert the sweep to the Python walker — bit-identical results, so every
+    golden stays green while proving nothing about the kernel (the vacuous-gate
+    trap; Golden Rule #10).
+    """
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    with capture_logs() as logs:
+        summary = _run(tmp_path, "a")
+    events = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+    assert len(events) == 1
+    assert events[0]["rust_active"] is True  # the wheel is built in CI — Rust MUST engage
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
+
+
+def test_golden_forced_python_fallback_is_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forced-Python arm reproduces the SAME pinned hash + store bytes."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    wired = _run(tmp_path, "a")
+    monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+    fallback = _run(tmp_path, "b")
+    assert wired.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert fallback.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
+
+
+def test_golden_sell_direction_wired_equals_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SELL-direction arm: wired vs forced-Python byte equality.
+
+    The pinned fixture above is BUY-only while production sweeps bull AND bear
+    — direction feeds the kernel's ``is_buy`` flag, so the bear arm gets its
+    own wired-vs-unwired equality gate (no pinned literal needed: equality
+    between the arms IS the contract).
+    """
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    cfg = replace(_config(), direction=Side.SELL)
+
+    def _run_sell(tag: str) -> SweepRunSummary:
+        store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+        dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+        with AuditWriter(path=tmp_path / f"{tag}.jsonl") as audit:
+            return run_persisted_sweep(_bars(), cfg, store=store, dedup=dedup, audit=audit)
+
+    with capture_logs() as logs:
+        wired = _run_sell("sell_wired")
+    events = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+    assert events[0]["rust_active"] is True
+    monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
+    fallback = _run_sell("sell_fallback")
+    assert wired.store_content_hash == fallback.store_content_hash
+    assert (tmp_path / "sell_wired.parquet").read_bytes() == (
+        tmp_path / "sell_fallback.parquet"
+    ).read_bytes()
