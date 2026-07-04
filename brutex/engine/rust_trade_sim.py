@@ -49,16 +49,36 @@ routes to the bit-exact Python oracle instead, LOUDLY (one structlog WARNING,
 never silent):
 
 * at CONSTRUCTION (whole-object fallback, ``rust_active`` False): a ``bar_bits``
-  value above :data:`~brutex.engine.combo_mask.U64_MASK` (the u128 headroom —
-  ``MAX_VOCAB_BITS = 128``), or any price column value outside
+  value outside ``[0, U64_MASK]`` (:data:`~brutex.engine.combo_mask.U64_MASK`;
+  above = the u128 headroom — ``MAX_VOCAB_BITS = 128``; below zero = API misuse
+  only, the production emitter :func:`~brutex.engine.stage1a.build_bar_bits` is
+  non-negative by construction, but a negative int would raise the SAME PyO3
+  ``OverflowError`` at the ``Vec<u64>`` edge so both directions route to the
+  oracle), or any price column value outside
   ``[-MAX_PRICE_PAISA, MAX_PRICE_PAISA]`` paisa;
-* per :meth:`ResidentTradeSim.simulate_masks` CALL (that call only): a mask above
-  ``U64_MASK``, or an SL/TP distance above ``MAX_PRICE_PAISA``.
+* per :meth:`ResidentTradeSim.simulate_masks` CALL (that call only): a mask
+  outside ``[0, U64_MASK]`` (same both-directions rationale), or an SL/TP
+  distance above ``MAX_PRICE_PAISA``. The per-call WARNING is emitted ONCE per
+  ``(instance, reason)`` — the production sweep calls ``simulate_masks`` once
+  per bounded chunk (up to thousands of chunks per tuple), so a u128-era sweep
+  warning on EVERY chunk would flood the logs; the first occurrence is loud,
+  repeats of the same already-warned reason fall back silently (the path is
+  still observable per tuple via ``sweep_run.trade_sim_path``).
 
 A non-positive SL/TP distance is rejected with ``ValueError`` IDENTICALLY on both
 arms (the kernel would silently accept ``0`` where the Python walker raises — the
 wrapper normalises the domain so wheel state can never change the error
 behaviour).
+
+## Observability delta vs the Python walker (STATED per Golden Rule #10)
+
+The Python walker (:func:`brutex.engine.trade_sim.simulate_trades`) emits
+per-trade ``trade_sim.entry`` / ``trade_sim.exit`` DEBUG structlog events; the
+compiled kernel emits NONE — deliberately (that per-trade logging is part of the
+interpreter tax the wiring removes; filtering it alone moved a measured run
+92.8 → 122.3 combos/s). So under DEBUG-level structlog, per-trade telemetry
+appears ONLY on tuples served by the Python fallback arm. The per-TUPLE signals
+(``sweep_run.trade_sim_path``, the fallback WARNINGs) are engine-independent.
 """
 
 from __future__ import annotations
@@ -126,15 +146,18 @@ def _construction_fallback_reason(
     """Return why the compiled kernel CANNOT hold this window resident, or ``None``.
 
     The construction-time half of the kernel-envelope guard (module docstring):
-    a ``bar_bits`` value above :data:`~brutex.engine.combo_mask.U64_MASK` would
-    truncate in the kernel's ``Vec<u64>`` (PyO3 raises ``OverflowError`` at the
-    FFI edge — mirroring :func:`~brutex.engine.combo_mask.count_supermasks`'s
-    guard), and a paisa price outside ``[-MAX_PRICE_PAISA, MAX_PRICE_PAISA]``
-    would raise the kernel's #1090 boundary ``ValueError``. Either routes the
-    WHOLE object to the pure-Python oracle (bit-identical either way). One
-    ``O(N_bars)`` scan, paid once at the already-``O(N_bars)`` construction.
+    a ``bar_bits`` value outside ``[0, U64_MASK]`` would fail the kernel's
+    ``Vec<u64>`` edge (PyO3 raises ``OverflowError`` for BOTH a >64-bit value
+    AND a negative one — mirroring
+    :func:`~brutex.engine.combo_mask.count_supermasks`'s guard; the negative
+    direction is API misuse only, kept so wheel state can never change
+    behaviour), and a paisa price outside ``[-MAX_PRICE_PAISA,
+    MAX_PRICE_PAISA]`` would raise the kernel's #1090 boundary ``ValueError``.
+    Either routes the WHOLE object to the pure-Python oracle (bit-identical
+    either way). One ``O(N_bars)`` scan, paid once at the already-``O(N_bars)``
+    construction.
     """
-    if any(b > U64_MASK for b in bar_bits):
+    if any(not 0 <= b <= U64_MASK for b in bar_bits):
         return "bar_bits_u128"
     for column in (open_p, high_p, low_p, close_p):
         if any(not -_MAX_KERNEL_PRICE_PAISA <= p <= _MAX_KERNEL_PRICE_PAISA for p in column):
@@ -149,13 +172,16 @@ def _call_fallback_reason(
 ) -> str | None:
     """Return why THIS batch cannot cross the kernel FFI boundary, or ``None``.
 
-    The per-call half of the kernel-envelope guard: a mask above ``U64_MASK``
-    would truncate in ``Vec<u64>`` (PyO3 ``OverflowError``), an SL/TP distance
+    The per-call half of the kernel-envelope guard: a mask outside
+    ``[0, U64_MASK]`` would fail ``Vec<u64>`` (PyO3 ``OverflowError`` both for
+    a u128 mask and a negative one — the latter API misuse only,
+    :func:`~brutex.engine.combo_mask.iter_masks_k_of_bits` emits non-negative
+    ints; guarded so wheel state can never change behaviour), an SL/TP distance
     above the #1090 ceiling would raise the kernel's batch-entry ``ValueError``
     where the Python walker simulates. ``O(N_masks)`` per call — negligible next
     to the ``O(N_masks · N_bars)`` sweep.
     """
-    if any(m > U64_MASK for m in masks):
+    if any(not 0 <= m <= U64_MASK for m in masks):
         return "mask_u128"
     if stop_loss_paisa is not None and stop_loss_paisa > _MAX_KERNEL_PRICE_PAISA:
         return "stop_loss_out_of_envelope"
@@ -203,7 +229,7 @@ class ResidentTradeSim:
         ``tf_minutes < 1``.
     """
 
-    __slots__ = ("_bar_bits", "_bars", "_rust", "_tf_minutes")
+    __slots__ = ("_bar_bits", "_bars", "_call_fallback_warned", "_rust", "_tf_minutes")
 
     def __init__(
         self,
@@ -223,6 +249,11 @@ class ResidentTradeSim:
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
+        # Per-(instance, reason) warn-once memo for the per-call fallback (module
+        # docstring): the sweep chunks a tuple into up to thousands of
+        # `simulate_masks` calls, so a per-CALL warning on a sticky reason (e.g.
+        # a u128-era vocabulary) would flood production logs.
+        self._call_fallback_warned: set[str] = set()
 
         # Derive the resident kernel inputs ONCE, via the canonical Python seams.
         # The forced-exit flags are SESSION-AWARE — byte-identical to
@@ -365,10 +396,17 @@ class ResidentTradeSim:
         if rust is not None:
             # Per-call kernel-envelope guard (module docstring): a u128 mask or
             # an SL/TP distance beyond the kernel's #1090 ceiling routes THIS
-            # call to the bit-exact Python oracle — loudly, never silently.
+            # call to the bit-exact Python oracle — loudly on the FIRST
+            # occurrence per (instance, reason); repeats fall back without
+            # re-warning (the chunked sweep would otherwise emit one WARNING
+            # per chunk — a log flood on a u128-era vocabulary).
             call_reason = _call_fallback_reason(masks, stop_loss_paisa, take_profit_paisa)
             if call_reason is not None:
-                _LOG.warning("rust_trade_sim.call_fallback", reason=call_reason, n_masks=len(masks))
+                if call_reason not in self._call_fallback_warned:
+                    self._call_fallback_warned.add(call_reason)
+                    _LOG.warning(
+                        "rust_trade_sim.call_fallback", reason=call_reason, n_masks=len(masks)
+                    )
                 rust = None
         if rust is None:
             # Pure-Python fallback: the exact oracle, one mask at a time.

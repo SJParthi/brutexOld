@@ -1237,6 +1237,21 @@ def run_persisted_sweep(
                     stop_loss_paisa=cfg.sl_paisa,
                     take_profit_paisa=cfg.tp_paisa,
                 )
+                # Batch-contract guard: `simulate_masks` must RETURN exactly one
+                # trade list per mask (both arms do, by construction). A
+                # wrong-length return (a PyO3 marshalling bug, a kernel bug)
+                # raises HERE — inside the chunk try — so it rides the SAME
+                # re-attribution → SweepComboError tuple-skip ladder as a chunk
+                # that RAISES (the oracle passes every mask, so it fails LOUD
+                # naming the chunk), instead of escaping run_persisted_sweep as
+                # a bare error the grid drivers (#904) would turn into a
+                # grid-wide abort. The `strict=True` zip below is then a
+                # structurally-unreachable second belt.
+                if len(chunk_trades) != len(chunk):
+                    raise ValueError(
+                        f"simulate_masks returned {len(chunk_trades)} trade lists "
+                        f"for a chunk of {len(chunk)} masks — batch-contract violation"
+                    )
             except MemoryError:
                 raise
             except Exception as exc:

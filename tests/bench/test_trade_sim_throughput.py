@@ -188,9 +188,14 @@ def test_trade_sim_absolute_combos_per_sec_printed() -> None:
 # (re-marshalling, per-trade object bloat) fails loudly while shared-runner
 # jitter cannot (a ratio of two same-process measurements; DEC-P0-020 honest
 # envelope: absolutes are printed, never asserted off the M4 Pro).
-# Sandbox-measured ~40× (blueprint spike: 40.5–45.2×); the floor is a loose 5×.
+# Measured: ~257-266× on this sparse fixture in-sandbox; the blueprint spike
+# read 40.5-45.2× at ~81 trades/mask (density-dependent). The floor is 15× —
+# far under both measurements (jitter-safe as a same-process ratio) yet high
+# enough that a real wiring regression costing an order of magnitude
+# (re-marshalling, per-trade object bloat) fails, not merely a near-total
+# loss of the kernel (the review's 5×-floor looseness finding).
 
-_WIRED_SPEEDUP_FLOOR: Final[float] = 5.0
+_WIRED_SPEEDUP_FLOOR: Final[float] = 15.0
 
 
 def _make_candle_window(n_bars: int) -> tuple[list, list[int]]:
@@ -242,17 +247,30 @@ def _best_of(n: int, fn) -> float:  # type: ignore[no-untyped-def]
 @pytest.mark.bench
 def test_resident_trade_sim_wired_vs_fallback_speedup() -> None:
     """The wired surface (`simulate_masks`, ClosedTrade included) beats its own
-    Python-oracle arm ≥ 5× — the production Phase-A lever, measured not assumed."""
+    Python-oracle arm ≥ 15× — the production Phase-A lever, measured not assumed."""
+    from collections.abc import Sequence
+
+    from brutex.data.models import CandleBar
     from brutex.engine.rust_trade_sim import ResidentTradeSim
     from brutex.strategies.types import Side
+
+    class _ForcedFallbackTradeSim(ResidentTradeSim):
+        """Kernel-disabled twin — the same subclass seam the unit/golden
+        `_ForcedFallbackSim` uses (protected access is subclass-legal)."""
+
+        def __init__(
+            self, bars: Sequence[CandleBar], bits: Sequence[int], *, tf_minutes: int
+        ) -> None:
+            super().__init__(bars, bits, tf_minutes=tf_minutes)
+            self._rust = None
 
     bars, bits = _make_candle_window(6_000)
     masks = _make_masks(24)
     sl, tp = 8_000, 12_000
     sim = ResidentTradeSim(bars, bits, tf_minutes=1)
     assert sim.rust_active, "wheel is built in CI — the wired arm must engage the kernel"
-    fallback = ResidentTradeSim(bars, bits, tf_minutes=1)
-    fallback._rust = None  # the forcing seam the fallback tests use
+    fallback = _ForcedFallbackTradeSim(bars, bits, tf_minutes=1)
+    assert not fallback.rust_active
 
     def _rust_arm() -> None:
         sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=sl, take_profit_paisa=tp)

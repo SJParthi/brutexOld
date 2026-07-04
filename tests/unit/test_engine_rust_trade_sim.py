@@ -20,8 +20,17 @@ from types import ModuleType
 import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
-from brutex.engine.combo_mask import mask_to_entry_signals
-from brutex.engine.rust_trade_sim import ResidentTradeSim
+from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
+
+# Whitebox friend access (DEC-P0-017 per-site convention): the guard seam is
+# module-private; each COLUMN of its envelope check is pinned directly here
+# because a single-column corrupt bar is unrepresentable through CandleBar's
+# OHLC invariant (see TestEnvelopeGuardSeamPerColumn).
+from brutex.engine.rust_trade_sim import (
+    _MAX_KERNEL_PRICE_PAISA,  # pyright: ignore[reportPrivateUsage]
+    ResidentTradeSim,
+    _construction_fallback_reason,  # pyright: ignore[reportPrivateUsage]
+)
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import (
     FillPolicy,
@@ -601,6 +610,155 @@ class TestConstructionEnvelopeGuards:
             )
         ]
 
+    @pytest.mark.parametrize("column", ["high", "low"])
+    def test_single_column_corruption_falls_back_and_matches_oracle(self, column: str) -> None:
+        """A bar corrupt in ONLY one price column still trips the guard.
+
+        The two SINGLE-column corruptions representable under CandleBar's OHLC
+        invariant (``low <= open, close <= high``): a huge positive ``high``
+        (everything else in envelope) and a huge negative ``low``. A corrupt
+        ``open``/``close`` cannot exist alone through the public ctor — it
+        drags ``high``/``low`` out with it — so those columns' mutation teeth
+        live in :class:`TestEnvelopeGuardSeamPerColumn` at the guard seam.
+        """
+        big = Decimal("200000000000000000")  # 2·10¹⁹ paisa > the #1090 ceiling
+        bars = [*_feed()]
+        base = bars[1]
+        bars[1] = CandleBar(
+            timestamp=base.timestamp,
+            open=base.open,
+            high=big if column == "high" else base.high,
+            low=-big if column == "low" else base.low,
+            close=base.close,
+            volume=0,
+            open_interest=None,
+        )
+        bits = [1 if i % 2 == 0 else 0 for i in range(len(bars))]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is False
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "price_out_of_envelope"
+        got = sim.simulate_masks([1], direction=Side.BUY)
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+
+    def test_negative_bar_bits_falls_back_and_matches_oracle(self) -> None:
+        """A NEGATIVE bar_bits value (API misuse only) routes to the oracle too.
+
+        `build_bar_bits` emits only non-negative ints, but a hand-rolled
+        negative int would raise PyO3 ``OverflowError`` at the ``Vec<u64>``
+        edge where the wheel-absent Python arm happily simulates (Python's
+        infinite-precision ``&``) — the exact wheel-present-vs-absent
+        asymmetry class the guard closes, in BOTH directions.
+        """
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] = -1
+        masks = [0, 1]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is False
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "bar_bits_u128"
+        got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+
+
+class TestEnvelopeGuardSeamPerColumn:
+    """Per-COLUMN teeth for `_construction_fallback_reason` (mutation-kill).
+
+    The integration fixtures cannot corrupt ``open``/``close`` alone (CandleBar
+    enforces ``low <= open, close <= high``, so a huge open/close drags a
+    sibling column out of envelope with it) — a mutant dropping ONE column from
+    the guard's ``(open_p, high_p, low_p, close_p)`` tuple would survive any
+    CandleBar-built fixture for those columns. The guard takes RAW int columns,
+    so each column is pinned here one at a time, both signs, plus the exact
+    ceiling boundary (in-envelope) and the bar_bits range.
+    """
+
+    _N = 4
+
+    def _clean_columns(self) -> dict[str, list[int]]:
+        return {
+            "bar_bits": [1, 0, 1, 0],
+            "open_p": [10_000] * self._N,
+            "high_p": [10_150] * self._N,
+            "low_p": [9_850] * self._N,
+            "close_p": [10_020] * self._N,
+        }
+
+    def _reason(self, columns: dict[str, list[int]]) -> str | None:
+        return _construction_fallback_reason(
+            columns["bar_bits"],
+            columns["open_p"],
+            columns["high_p"],
+            columns["low_p"],
+            columns["close_p"],
+        )
+
+    def test_clean_window_has_no_reason(self) -> None:
+        assert self._reason(self._clean_columns()) is None
+
+    def test_exact_ceiling_boundary_is_in_envelope_every_column(self) -> None:
+        """±MAX_PRICE_PAISA exactly is kernel-valid on EVERY column (strict >)."""
+        columns = self._clean_columns()
+        for name in ("open_p", "high_p", "low_p", "close_p"):
+            columns[name][2] = _MAX_KERNEL_PRICE_PAISA
+            columns[name][3] = -_MAX_KERNEL_PRICE_PAISA
+        assert self._reason(columns) is None
+
+    @pytest.mark.parametrize("column", ["open_p", "high_p", "low_p", "close_p"])
+    @pytest.mark.parametrize("sign", [1, -1])
+    def test_single_out_of_envelope_column_is_detected(self, column: str, sign: int) -> None:
+        columns = self._clean_columns()
+        columns[column][1] = sign * (_MAX_KERNEL_PRICE_PAISA + 1)
+        assert self._reason(columns) == "price_out_of_envelope"
+
+    @pytest.mark.parametrize("bad", [U64_MASK + 1, 1 << 100, -1])
+    def test_bar_bits_outside_u64_range_is_detected(self, bad: int) -> None:
+        columns = self._clean_columns()
+        columns["bar_bits"][3] = bad
+        assert self._reason(columns) == "bar_bits_u128"
+
+    def test_bar_bits_u64_boundary_is_in_envelope(self) -> None:
+        """0 and U64_MASK exactly are kernel-valid (inclusive range)."""
+        columns = self._clean_columns()
+        columns["bar_bits"][0] = 0
+        columns["bar_bits"][1] = U64_MASK
+        assert self._reason(columns) is None
+
+    def test_bar_bits_checked_before_prices(self) -> None:
+        """Both out of range → the bar_bits reason wins (documented scan order)."""
+        columns = self._clean_columns()
+        columns["bar_bits"][0] = -1
+        columns["open_p"][0] = _MAX_KERNEL_PRICE_PAISA + 1
+        assert self._reason(columns) == "bar_bits_u128"
+
 
 class TestPerCallEnvelopeGuards:
     def test_mask_u128_falls_back_for_that_call_only(self) -> None:
@@ -637,6 +795,89 @@ class TestPerCallEnvelopeGuards:
         assert _call_fallback_events(logs2) == []
         assert again == [expected[1]]
 
+    def test_negative_mask_falls_back_for_that_call_only(self) -> None:
+        """A NEGATIVE mask (API misuse only) routes to the oracle, not PyO3.
+
+        `iter_masks_k_of_bits` emits only non-negative ints; a hand-rolled
+        negative mask would raise PyO3 ``OverflowError`` at the ``Vec<u64>``
+        edge where the wheel-absent arm simulates (Python's infinite-precision
+        ``&``) — guarded in BOTH directions so wheel state never changes
+        behaviour.
+        """
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        masks = [-1, 1]
+        with capture_logs() as logs:
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "mask_u128"
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        # The kernel stays active for clean follow-up calls.
+        assert sim.rust_active is True
+
+    def test_call_fallback_warns_once_per_reason_per_instance(self) -> None:
+        """A repeated same-reason fallback does NOT re-warn (log-flood guard).
+
+        The production sweep chunks kept masks into up to thousands of
+        `simulate_masks` calls per tuple; once the vocabulary crosses 64 bits
+        EVERY chunk would trip the guard, so a per-CALL warning would flood a
+        u128-era sweep with millions of WARNING lines. The fallback itself
+        stays per-call and bit-exact — only the WARNING is memoised.
+        """
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        u128_masks = [(1 << 64) | 1]
+        with capture_logs() as logs1:
+            first = sim.simulate_masks(u128_masks, direction=Side.BUY, stop_loss_paisa=300)
+        assert len(_call_fallback_events(logs1)) == 1
+        with capture_logs() as logs2:
+            second = sim.simulate_masks(u128_masks, direction=Side.BUY, stop_loss_paisa=300)
+        assert _call_fallback_events(logs2) == []  # memoised — no re-warn
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                (1 << 64) | 1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+        assert first == expected  # the fallback STILL served both calls,
+        assert second == expected  # bit-exactly — only the warning is deduped
+
+    def test_call_fallback_new_reason_warns_again(self) -> None:
+        """The warn-once memo is per REASON — a different cause is still loud."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        with capture_logs() as logs1:
+            sim.simulate_masks([(1 << 64) | 1], direction=Side.BUY)
+        events1 = _call_fallback_events(logs1)
+        assert [e["reason"] for e in events1] == ["mask_u128"]
+        with capture_logs() as logs2:
+            sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=_MAX_KERNEL_PRICE_PAISA + 1)
+        events2 = _call_fallback_events(logs2)
+        assert [e["reason"] for e in events2] == ["stop_loss_out_of_envelope"]
+
     @pytest.mark.parametrize(
         ("leg", "reason"),
         [
@@ -645,8 +886,6 @@ class TestPerCallEnvelopeGuards:
         ],
     )
     def test_oversized_distance_falls_back_and_matches_oracle(self, leg: str, reason: str) -> None:
-        from brutex.engine.rust_trade_sim import _MAX_KERNEL_PRICE_PAISA
-
         bars = _feed()
         bits = build_bar_bits(bars)
         sim = ResidentTradeSim(bars, bits, tf_minutes=1)
@@ -675,8 +914,6 @@ class TestPerCallEnvelopeGuards:
 
     def test_boundary_distance_stays_on_the_rust_path(self) -> None:
         """EXACTLY the ceiling is kernel-valid (the guard is strict-greater)."""
-        from brutex.engine.rust_trade_sim import _MAX_KERNEL_PRICE_PAISA
-
         bars = _feed()
         bits = build_bar_bits(bars)
         sim = ResidentTradeSim(bars, bits, tf_minutes=1)

@@ -24,7 +24,7 @@ On the CLAUDE.md §8 reference hardware — **Apple M4 Pro, 14-core (10P+4E),
 overhead, and inter-process result marshalling eat ~20–40%. A grid with fewer
 tuples than cores, or one dominated by a single huge-``N_bars`` instrument, sees
 far less — **no number of cores speeds up ONE tuple's latency**: its trade walk
-is the resident Rust kernel, but ``_worker_env`` below pins
+is the resident Rust kernel, but ``_worker_init`` below pins
 ``RAYON_NUM_THREADS=1`` in every worker (bit-for-bit determinism + no
 ``workers × num_cpus`` thread oversubscription), so the kernel's rayon
 parallel arm applies ONLY to single-process runs — under this pool the per-tuple

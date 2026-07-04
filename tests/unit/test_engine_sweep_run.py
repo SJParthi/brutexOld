@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
 from brutex.data.models import CandleBar
@@ -49,6 +49,9 @@ from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 from brutex.vocabulary.bits import BIT_BAR_BEARISH, BIT_BAR_BULLISH
 from structlog.testing import capture_logs
+
+if TYPE_CHECKING:  # pragma: no cover - typing only (lazy numpy, see rust_trade_sim)
+    from brutex.metrics.types import ClosedTrade
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -152,6 +155,21 @@ def _chunk_raising_sim(exc_factory: Callable[[], BaseException]) -> type[Residen
             raise exc_factory()
 
     return _RaisingSim
+
+
+class _ShortChunkSim(ResidentTradeSim):
+    """A sim that RETURNS one fewer trade list than masks — batch-contract violation.
+
+    The kernel-misbehaviour shape that RETURNS wrong instead of RAISING (a PyO3
+    marshalling bug, a kernel bug): unreachable from the real kernel (Rust
+    returns exactly one Vec per mask by construction), injected here to pin
+    that the sweep's length guard maps it onto the SAME re-attribution →
+    ``SweepComboError`` tuple-skip ladder as a chunk that raises — never a bare
+    ``ValueError`` escaping ``run_persisted_sweep`` as a grid-wide abort.
+    """
+
+    def simulate_masks(self, masks: Sequence[int], **kwargs: Any) -> list[list[ClosedTrade]]:
+        return super().simulate_masks(masks, **kwargs)[:-1]
 
 
 def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[ResidentTradeSim]:
@@ -2354,6 +2372,46 @@ class TestChunkFailureReattribution:
         assert not store.path.exists()
 
 
+class TestChunkLengthContract:
+    """A wrong-LENGTH batch return rides the tuple-skip ladder, never a grid abort.
+
+    Before the guard, `zip(chunk, chunk_trades, strict=True)` sat OUTSIDE the
+    chunk try — a count-mismatched return escaped as a bare `ValueError` past
+    the grid drivers' `except SweepComboError` (#904), aborting the WHOLE grid
+    with no TUPLE_FAILED line. The guard raises INSIDE the chunk try, so the
+    mismatch is re-attributed (every mask passes the oracle — batch-level) and
+    fails LOUD as a chunk-naming `SweepComboError` chained from the length
+    `ValueError` — the documented tuple-skip contract, uniformly.
+    """
+
+    def test_short_return_maps_to_chunk_sweep_combo_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _trending_bars()
+        cfg = _make_config()  # kept masks: 1, 2, 4, 8, 16 — one chunk of 5
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ShortChunkSim)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            capture_logs() as logs,
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(SweepComboError) as excinfo,
+        ):
+            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        msg = str(excinfo.value)
+        # The SweepComboError names the CHUNK + carries the length ValueError.
+        assert "trade-sim chunk of 5 masks" in msg
+        assert "returned 4 trade lists for a chunk of 5 masks" in msg
+        assert "batch-contract violation" in msg
+        assert "every mask passed the per-mask Python-oracle re-run" in msg
+        assert isinstance(excinfo.value.__cause__, ValueError)
+        # The chunk failure was logged before re-attribution, and nothing was
+        # persisted (the tuple is left un-flushed for a deterministic redo).
+        events = [e for e in logs if e["event"] == "sweep_run.trade_sim_chunk_failed"]
+        assert len(events) == 1
+        assert events[0]["error_type"] == "ValueError"
+        assert not store.path.exists()
+
+
 class TestMetricsTailFailure:
     """The per-mask metrics tail keeps the fail-loud fingerprint + OOM carve-out."""
 
@@ -2417,16 +2475,40 @@ class TestU128EnvelopeThroughSweep:
     def test_u128_mask_sweep_equals_forced_fallback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Bit 0 FIRES on `_trending_bars` (the default-config masks produce real
+        # trades), bits 64/65 never do — so ONE u128 mask in the batch routes
+        # the WHOLE chunk (incl. the firing mask 0b1) to the oracle, and the
+        # byte-equality below compares stores with REAL trade rows, never two
+        # degenerate zero-trade stores (the vacuous-equality trap).
         bars = _trending_bars()
-        cfg = _make_config(condition_bits=[64, 65], k=1, min_hits=0)
+        cfg = _make_config(condition_bits=[0, 64, 65], k=1, min_hits=0)
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
         # The per-CALL guard routed the batch to the oracle, loudly.
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
         assert len(fallbacks) == 1
         assert fallbacks[0]["reason"] == "mask_u128"
+        # Non-vacuous: the ranking gate drops the two zero-trade u128-bit
+        # masks, so EXACTLY the firing mask 0b1 persists — the byte-equality
+        # below compares stores carrying a real trade-bearing row, never two
+        # empty/degenerate stores. Its trades are pinned via the independent
+        # metrics oracle.
+        assert wired.evaluated == 3
+        assert wired.persisted == 1
+        direct = metrics_for_mask(
+            bars,
+            build_bar_bits(bars),
+            1,
+            direction=cfg.direction,
+            tf_minutes=cfg.tf_minutes,
+            stop_loss_paisa=cfg.sl_paisa,
+            take_profit_paisa=cfg.tp_paisa,
+            start_equity_paisa=cfg.start_equity_paisa,
+        )
+        assert direct.total_trades > 0
         monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _ForcedFallbackSim)
         fallback = _run_sweep(tmp_path, "f", bars, cfg)
+        assert wired.persisted == fallback.persisted == 1
         assert wired.store_content_hash == fallback.store_content_hash
         assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
 
