@@ -145,9 +145,12 @@ def list_ledger_deltas(lake_root: Path) -> list[Path]:
 
     Delta filenames embed a zero-padded ``time_ns`` prefix (see
     :func:`append_ledger_delta`), so lexicographic filename order IS chronological
-    append order — the fold order :func:`load_window_ledger` replays. Appends are
-    serialised under the ledger's cross-process ``partition_write_lock``, so the
-    creation order is real, not a clock guess. O(deltas) directory listing.
+    append order — the fold order :func:`load_window_ledger` replays. The prefix
+    is minted INSIDE the ledger's cross-process ``partition_write_lock`` AND
+    bumped strictly past every delta already on disk
+    (:func:`_next_delta_path`, DEC-LEDGER-DELTA-LOCKED-TS-001), so the creation
+    order is real by construction — not a clock guess, immune to lock-contention
+    reordering and to a wall-clock step-back. O(deltas) directory listing.
     """
     return sorted(deltas_dir(lake_root).glob("*.parquet"))
 
@@ -469,6 +472,41 @@ def _rows_to_table(rows: Sequence[LedgerRow]) -> Any:
     return pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
 
 
+def _next_delta_path(directory: Path) -> Path:
+    """Mint the next delta filename — call ONLY while holding the ledger flock.
+
+    P2-1 fix (DEC-LEDGER-DELTA-LOCKED-TS-001): the ``time_ns`` prefix used to be
+    sampled BEFORE :func:`~brutex.data.partition_lock.partition_write_lock` was
+    acquired, so under cross-process contention (``flock`` has no FIFO fairness
+    — the exact CLI+dashboard shared-lake scenario of
+    DEC-LAKE-PARTITION-FLOCK-001) the later-locking writer could carry the
+    EARLIER filename, inverting the fold order relative to the real serialised
+    append order — breaking the "filename order == append order" invariant the
+    newer-file-wins fold in :func:`load_window_ledger` relies on. Minting the
+    prefix UNDER the same flock that serialises the append — and bumping it
+    STRICTLY past every delta already on disk — makes filename order equal to
+    append order by construction, immune even to a wall-clock step-back (the
+    on-disk maximum is the floor, not the clock). A foreign ``*.parquet`` file
+    with a non-numeric prefix is ignored (it never participated in the ordering
+    contract). O(deltas) per append — bounded, because the pull-end full save
+    prunes the directory (delta subsumption, DEC-LEDGER-DELTA-FLUSH-001).
+    """
+    import os
+    import time
+
+    ts = time.time_ns()
+    latest = 0
+    for existing in directory.glob("*.parquet"):
+        prefix = existing.name.split("-", 1)[0]
+        try:
+            latest = max(latest, int(prefix))
+        except ValueError:  # a foreign file — never blocks the append
+            continue
+    if ts <= latest:
+        ts = latest + 1
+    return directory / f"{ts:020d}-{os.getpid()}.parquet"
+
+
 def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
     """Append ONLY *ledger*'s dirtied rows as one new delta Parquet — the O(dirty) flush.
 
@@ -482,7 +520,9 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
     :func:`~brutex.data.partition_lock.partition_write_lock` (keyed on the ledger
     path) the full save holds — so appends serialise against each other AND
     against a concurrent full save. The filename embeds a zero-padded ``time_ns``
-    + pid, so filename order == append order (the fold order).
+    + pid, minted INSIDE the lock and bumped strictly past every delta already
+    on disk (:func:`_next_delta_path`, DEC-LEDGER-DELTA-LOCKED-TS-001), so
+    filename order == append order (the fold order) by construction.
 
     Contracts preserved:
 
@@ -498,9 +538,6 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
 
     Returns the number of rows appended (0 for a no-op / a skipped flush).
     """
-    import os
-    import time
-
     import pyarrow.parquet as pq
 
     rows = ledger.dirty_rows()
@@ -508,9 +545,13 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
         return 0
     directory = deltas_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{time.time_ns():020d}-{os.getpid()}.parquet"
     try:
         with partition_write_lock(lake_root, ledger_path(lake_root)):
+            # The filename timestamp is minted UNDER the flock (P2-1,
+            # DEC-LEDGER-DELTA-LOCKED-TS-001) — sampling it before the acquire
+            # let a later-locking writer carry an earlier filename under
+            # contention, inverting the newer-file-wins fold order.
+            path = _next_delta_path(directory)
             table = _rows_to_table(rows)
 
             def _write_parquet(tmp: Path) -> None:
@@ -520,7 +561,7 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
     except PartitionLockTimeout as exc:
         _LOG.warning(
             "window_ledger.delta_lock_timeout",
-            path=str(path),
+            path=str(directory),
             error=str(exc),
         )
         return 0
@@ -1321,6 +1362,16 @@ def run_skipped_audit(
     is saved best-effort. Logs ONE ``pull.skipped_audit`` naming the count +
     cursor. Budget honesty lives on
     :data:`~brutex.data.window_ledger.SKIPPED_AUDIT_PER_PULL`.
+
+    **Crash-window honesty (P2-3, Golden Rule #10):** the advanced cursor is
+    persisted here — BEFORE the pull-end :func:`save_window_ledger` persists
+    the in-memory demotions. A pull that crashes between the two therefore
+    advances the rotation while its ≤ *cap* demotions are LOST: those windows
+    stay ``SKIPPED`` and wait one full rotation cycle for their next re-audit.
+    Best-effort by design and DATA-SAFE (nothing was fetched or stored on
+    their behalf; a later rotation pass reaches them again) — deliberately NOT
+    inverted, since the cursor save must not ride the pull-end save's
+    lock/halt paths.
     """
     prior = load_skipped_audit_cursor(lake_root)
     if prior is not None and prior[0] == pull_id:

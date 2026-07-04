@@ -1699,6 +1699,106 @@ class TestLedgerDeltaFlush:
         assert ledger_path(tmp_path).is_file()  # the full save itself landed
 
 
+class TestDeltaLockedTimestamp:
+    """DEC-LEDGER-DELTA-LOCKED-TS-001 (P2-1) — filename order == append order.
+
+    The delta filename timestamp is minted INSIDE the ledger flock and bumped
+    strictly past every delta already on disk, so a later-locking writer can
+    NEVER carry an earlier filename (the pre-fix inversion under cross-process
+    lock contention — flock has no FIFO fairness — or a wall-clock step-back)
+    and the newer-file-wins fold always replays the real serialised chronology.
+    """
+
+    def test_same_key_later_append_wins_even_on_clock_step_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The same-key contention regression the P2-1 review demanded: writer 1
+        # demotes the settled row (reopen: SKIPPED→FAILED) and appends; writer 2
+        # then re-settles the SAME key strictly AFTER writer 1 — but with a wall
+        # clock reading FAR EARLIER (the inversion shape: a filename minted
+        # before the lock acquire, or a stepped-back clock). The later append
+        # must still carry the LATER filename, so the fold keeps the re-settle.
+        import time as _time
+
+        seeded = WindowLedger()
+        seeded.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+        )
+        save_window_ledger(seeded, tmp_path)
+        writer1 = load_window_ledger(tmp_path)
+        assert writer1.reopen_skipped() == 1  # deliberate demotion: SKIPPED→FAILED
+        assert append_ledger_delta(writer1, tmp_path) == 1
+        writer2 = load_window_ledger(tmp_path)
+        writer2.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            settle_empty=True,
+        )
+        monkeypatch.setattr(_time, "time_ns", lambda: 1)  # stepped-back clock
+        assert append_ledger_delta(writer2, tmp_path) == 1
+        first, second = list_ledger_deltas(tmp_path)
+        # The LATER append carries the LATER filename despite the older clock…
+        assert second.name > first.name
+        # …so the newer-file-wins fold replays the REAL chronology: the
+        # re-settle wins; the stale demotion does NOT re-surface.
+        folded = load_window_ledger(tmp_path)
+        assert folded.records()[0].status == SKIPPED
+
+    def test_delta_filename_is_minted_under_the_flock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Probe from a SEPARATE fd inside the mint (the #887 held-lock test
+        # pattern): a non-blocking flock must FAIL, proving the timestamp is
+        # sampled while the append lock is already held.
+        import brutex.data.window_ledger_store as store_module
+
+        real_mint = (
+            store_module._next_delta_path  # pyright: ignore[reportPrivateUsage] — friend seam
+        )
+        held: list[bool] = []
+
+        def _probing_mint(directory: Path) -> Path:
+            lock_file = partition_lock_path(tmp_path, ledger_path(tmp_path))
+            fd = os.open(lock_file, os.O_RDWR)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    held.append(True)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    held.append(False)
+            finally:
+                os.close(fd)
+            return real_mint(directory)
+
+        monkeypatch.setattr(store_module, "_next_delta_path", _probing_mint)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        assert held == [True]
+
+    def test_foreign_delta_filename_never_blocks_the_mint(self, tmp_path: Path) -> None:
+        # A foreign *.parquet with a non-numeric prefix never participated in
+        # the ordering contract — the mint ignores it instead of raising.
+        deltas_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        (deltas_dir(tmp_path) / "not-a-timestamp.parquet").write_bytes(b"junk")
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        minted = [p for p in list_ledger_deltas(tmp_path) if p.name != "not-a-timestamp.parquet"]
+        assert len(minted) == 1
+        assert int(minted[0].name.split("-", 1)[0]) > 0  # a real time_ns prefix
+
+
 class TestSkippedAuditStore:
     """DEC-SKIPPED-AUDIT-ROUNDROBIN-001 — the sidecar cursor + the once-per-pull driver."""
 
