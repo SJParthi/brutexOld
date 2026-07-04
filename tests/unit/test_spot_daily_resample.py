@@ -604,7 +604,9 @@ class TestResampleVectorizedParity:
     DEC-PREBUILD-GIL-VECTORIZE-001 replaced the per-row ``iter_rows`` →
     ``astimezone(_IST)`` → ``CandleBar(Decimal(str(...)) × 4)`` loop with a
     columnar filter/re-stamp + the batched
-    :func:`brutex.data.timeframe_materialize.frame_to_candle_bars`. The oracle
+    :func:`brutex.data.spot_daily_resample.frame_to_candle_bars` (which lives
+    here — the import-graph leaf — and is re-exported from
+    ``timeframe_materialize``). The oracle
     below is the pre-change implementation copied byte-for-byte; every bar —
     instant, prices, volume, OI — must match over the edge shapes (IST date
     roll past 18:30 UTC, month/year boundary, forming-session cutoff,
