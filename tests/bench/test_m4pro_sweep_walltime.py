@@ -175,9 +175,13 @@ def _make_sim(n_bars: int) -> ResidentSweepSim:
     close_p: list[int] = []
     bar_bits: list[int] = []
     is_forced: list[bool] = []
+    session_idx: list[int] = []
     # The synthetic window is 1-minute bars walking forward from 09:15 IST and
     # wrapping at the 375-minute session, so the per-bar forced-exit flag matches
-    # the real 15:20 cutoff for a 1-minute timeframe.
+    # the real 15:20 cutoff for a 1-minute timeframe. Each 375-minute wrap is a
+    # NEW session (`session_idx = i // 375`), mirroring the production per-bar
+    # IST-date ordinals so the kernel's cross-session pending-entry gate
+    # (R2-OC-2) is exercised at its real per-day cadence.
     for i in range(n_bars):
         wobble = ((seed * (i + 1)) >> 13) % 200 - 100
         o = base + wobble
@@ -190,11 +194,12 @@ def _make_sim(n_bars: int) -> ResidentSweepSim:
         total_minutes = 9 * 60 + 15 + minute_of_session  # 09:15 IST + offset
         bar_time = dt_time(hour=total_minutes // 60, minute=total_minutes % 60)
         is_forced.append(is_forced_exit_bar(bar_time, 1))
+        session_idx.append(i // _SESSION_MINUTES)
     # `fno_math` is the importorskip runtime variable, so the constructor's return
     # is `Any` to mypy; capture it in a precisely-typed local before returning
     # (the no-`# type: ignore` pattern of DEC-M4PRO-BENCH-SURFACE-001 #979).
     sim: ResidentSweepSim = fno_math.ResidentSweepSim(
-        open_p, high_p, low_p, close_p, is_forced, bar_bits
+        open_p, high_p, low_p, close_p, is_forced, session_idx, bar_bits
     )
     return sim
 
