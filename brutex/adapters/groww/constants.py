@@ -402,6 +402,34 @@ GROWW_TOKEN_ISSUANCE_RETRY_BASE_S: Final[float] = 1.0
 #: Per-attempt cap (seconds) for the cold-start issuance back-off sleep.
 GROWW_TOKEN_ISSUANCE_RETRY_CAP_S: Final[float] = 4.0
 
+# ── Token-stale fetch-lane PAUSE (DEC-TOKEN-STALE-PAUSE-001) ──────────────────
+#: Wall-clock bound (seconds) the fetch lane WAITS for the read-only token broker
+#: to hold a fresh token before a :class:`~brutex.adapters.groww.errors.\
+#: GrowwTokenStillStaleError` is allowed to propagate. Forensically calibrated:
+#: the operator's real 2026-07-04 overnight run measured the 06:00-IST reset →
+#: external-Lambda mint lag at 5 m 31 s (331 s) — during which the F&O window
+#: ladder burned all its attempts on 111 windows (339 failed calls) that the
+#: until-clean rounds then had to rescue. 420 s (7 min) covers that observed
+#: worst case with margin while staying WELL under the 600 s pull watchdog; the
+#: wait additionally beats the progress-beat seam so the watchdog can never
+#: false-fire during it. A dead broker still fails LOUDLY: once the (shared,
+#: per-generation) deadline expires the error propagates exactly as before —
+#: the window defers FAILED and the dead-credential escalation
+#: (DEC-VENDOR-DOWN-BREAKER-001) still applies. NOT a vendor limit — an
+#: operator-tunable pause bound (env :data:`GROWW_TOKEN_STALE_WAIT_ENV`).
+GROWW_TOKEN_STALE_WAIT_S: Final[float] = 420.0
+#: Env override for :data:`GROWW_TOKEN_STALE_WAIT_S` (float seconds; ``0``
+#: explicitly DISABLES the pause — byte-identical to the pre-gate behaviour;
+#: blank / non-numeric / non-finite / negative falls back to the default).
+GROWW_TOKEN_STALE_WAIT_ENV: Final[str] = "BRUTEX_GROWW_TOKEN_STALE_WAIT_S"  # noqa: S105  # env var name, not a secret
+#: Poll cadence (seconds) between fresh-token checks during the stale-wait.
+#: ONE waiter per pool (the leader) does ONE broker re-read per tick — never a
+#: per-thread SSM stampede; the others only poll the in-process generation.
+GROWW_TOKEN_STALE_POLL_S: Final[float] = 5.0
+#: Bounded structlog cadence (seconds) for the ``groww.token.stale_wait`` event
+#: — ONE event per pool per interval, however many threads are waiting.
+GROWW_TOKEN_STALE_LOG_EVERY_S: Final[float] = 30.0
+
 # ── Shared token broker (DEC-TOKEN-BROKER-AWS-001 / DEC-AWS-ONLY-CREDS-001) ───
 # The operator's FINAL design: the Groww api_key, TOTP secret AND the daily minted
 # access token ALL live in ONE shared place — AWS Systems Manager Parameter Store
@@ -566,6 +594,10 @@ __all__ = [
     "GROWW_TOKEN_PARAM_TOTP_SECRET_ENV",
     "GROWW_TOKEN_RESET_HOUR_ENV",
     "GROWW_TOKEN_RESET_HOUR_IST",
+    "GROWW_TOKEN_STALE_LOG_EVERY_S",
+    "GROWW_TOKEN_STALE_POLL_S",
+    "GROWW_TOKEN_STALE_WAIT_ENV",
+    "GROWW_TOKEN_STALE_WAIT_S",
     "GROWW_WRITE_DEADLINE_S",
     "INDIA_VIX_SYMBOL",
     "INSTRUMENT_CSV_COLUMNS",
