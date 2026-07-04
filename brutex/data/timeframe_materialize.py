@@ -92,6 +92,38 @@ MATERIALIZABLE_TFS: Final[tuple[str, ...]] = tuple(INTRADAY_TF_INTERVALS)
 DAILY_TF_LABEL: Final[str] = "1day"
 
 
+def month_partition_files(base: Path, months: Iterable[tuple[int, int]]) -> list[str]:
+    """The EXISTING ``<base>/<yyyy>/<mm>.parquet`` files for explicit *months* — pure.
+
+    DEC-TF-REBUILD-MONTH-BOUND-001: the month-bounded read core for
+    :func:`make_lake_read_1m` (the explicit-month twin of
+    :func:`~brutex.data.spot_daily_resample.ist_span_partition_files`, which is
+    span-derived — this one takes the caller's exact ``(year, month)`` set, e.g.
+    the lake healer's touched-months set). Only months that EXIST on disk are
+    returned (an absent month is skipped cleanly), as ascending POSIX path
+    strings ready for :func:`polars.scan_parquet`. De-duplicated + sorted, so a
+    repeated month is read once and the order is deterministic (Golden Rule #7).
+
+    CORRECTNESS BASIS (the invariant this bounding rests on, pinned by
+    ``tests/unit/test_nse_session_utc_month_invariant.py``): every NSE trading
+    session — regular, special-weekend Budget Saturday/Sunday, and the Diwali
+    Muhurat evening — opens AND closes on the SAME UTC calendar date as its IST
+    session date (09:15–15:30 IST = 03:45–10:00 UTC; even a Muhurat close at
+    ~19:15 IST is 13:45 UTC), so an intraday session NEVER straddles a UTC
+    month boundary and a month's derived intraday-TF bars are fully computable
+    from that month's own 1-minute partition. The derived ``1day`` does NOT
+    share the invariant (midnight-IST stamping lands an IST date-D bar in the
+    UTC month of D−1), which is why ``months`` + ``include_daily`` is refused
+    in :func:`materialize_lake_timeframes`.
+    """
+    files: list[str] = []
+    for year, month in sorted(set(months)):
+        candidate = base / f"{year:04d}" / f"{month:02d}.parquet"
+        if candidate.is_file():
+            files.append(candidate.as_posix())
+    return files
+
+
 class PrebuildKind(Enum):
     """How an instrument's derived timeframes are pre-built (DEC-PREBUILD-SELECT-001).
 
@@ -311,6 +343,7 @@ def materialize_lake_timeframes(
     tfs: Iterable[str] = MATERIALIZABLE_TFS,
     include_daily: bool = False,
     daily_before: date | None = None,
+    months: Iterable[tuple[int, int]] | None = None,
 ) -> MaterializeResult:
     """SEGMENT-AWARE materialise of ONE lake partition's derived TFs (DEC-PREBUILD-SELECT-001).
 
@@ -357,17 +390,37 @@ def materialize_lake_timeframes(
     UTC month of D−1 (a Jan-1 bar lives in the December partition) — shifted,
     never missing.
 
-    Cost: one O(bars) partition read + one O(bars) resample per timeframe —
-    NOT an O(1)-total claim (Golden Rule #10). Returns the per-TF written
-    counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
-    integration-tested by the round-trip tests.
+    *months* (DEC-TF-REBUILD-MONTH-BOUND-001): an optional explicit
+    ``(year, month)`` bound on the 1-minute READ — ``None`` (the default; the
+    pipeline prebuild + doctor call sites) is the byte-identical whole-tree
+    read, a set makes a targeted INTRADAY-TF rebuild O(affected-months) instead
+    of O(symbol-history) (the lake healer's recall). Sound for the intraday TFs
+    because an NSE session never crosses a UTC month boundary (the pinned
+    invariant on :func:`month_partition_files`). ``months`` +
+    ``include_daily=True`` RAISES :class:`ValueError`: the derived ``1day`` is
+    midnight-IST-stamped, so an IST date-D daily bar lives in the UTC month of
+    D−1 — a month-bounded daily derive needs the ±1-day straddle pad the daily
+    recall path already has (``make_lake_read_1m_window``); month-bounding the
+    daily arm here is the NAMED follow-up, not silently mis-derived.
+
+    Cost: one O(bars) partition read (month-bounded when *months* is given) +
+    one O(bars) resample per timeframe — NOT an O(1)-total claim (Golden Rule
+    #10). Returns the per-TF written counts. Raw lake I/O is composed from the
+    ``# pragma: no cover`` builders; integration-tested by the round-trip tests.
     """
+    if months is not None and include_daily:
+        raise ValueError(
+            "months= cannot be combined with include_daily=True — the midnight-IST "
+            "derived 1day straddles UTC months (use the daily recall path's "
+            "±1-day-padded window read instead; DEC-TF-REBUILD-MONTH-BOUND-001)"
+        )
     read_1m = make_lake_read_1m(
         lake_root=lake_root,
         exchange=exchange,
         segment=segment,
         symbol=symbol,
         with_open_interest=kind is not PrebuildKind.SPOT,
+        months=months,
     )
     write_tf = make_lake_write_tf(
         lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
@@ -416,6 +469,7 @@ __all__ = [
     "make_lake_write_tf",
     "materialize_lake_timeframes",
     "materialize_timeframes",
+    "month_partition_files",
     "prebuild_kind_for",
 ]
 
@@ -427,6 +481,7 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     segment: str,
     symbol: str,
     with_open_interest: bool = False,
+    months: Iterable[tuple[int, int]] | None = None,
 ) -> Callable[[], pl.DataFrame]:
     """Build the injected 1-minute reader for :func:`materialize_timeframes`.
 
@@ -439,6 +494,15 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     Moved here from the dashboard route glue (DEC-TF-MATERIALIZE-002) so the
     manual route AND the pull-settle auto-derive share ONE builder
     (CLAUDE.md §11 COMMON).
+
+    *months* (DEC-TF-REBUILD-MONTH-BOUND-001): an optional explicit
+    ``(year, month)`` set. ``None`` (the default — every existing caller) is
+    the byte-identical whole-tree ``/**/*.parquet`` read; a set bounds the read
+    to ONLY those existing month partitions (via the pure
+    :func:`month_partition_files`), so a targeted rebuild is
+    O(affected-months), not O(symbol-history). The "no stored 1minute bars"
+    :class:`ValueError` contract is kept in BOTH modes (a months set matching
+    nothing on disk raises, mirroring the empty-tree raise).
     """
     import polars as pl
 
@@ -448,7 +512,19 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        if months is not None:
+            # Month-bounded read (DEC-TF-REBUILD-MONTH-BOUND-001): the explicit
+            # existing-file list replaces the whole-tree glob. Sound because an
+            # NSE session never crosses a UTC month (see month_partition_files).
+            source: str | list[str] = month_partition_files(base, months)
+            if not source:
+                raise ValueError(
+                    f"no stored 1minute bars for {exchange}/{segment}/{symbol} in the "
+                    "requested months — pull the 1-minute first, then derive timeframes"
+                )
+        elif base.is_dir() and any(base.rglob("*.parquet")):
+            source = base.as_posix() + "/**/*.parquet"
+        else:
             raise ValueError(
                 f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
                 "pull the 1-minute spot first, then derive timeframes"
@@ -459,7 +535,7 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         # OHLCV(+OI) columns are selected below, which every shape carries —
         # byte-identical for a uniform tree.
         df = pl.scan_parquet(
-            base.as_posix() + "/**/*.parquet",
+            source,
             missing_columns="insert",
             extra_columns="ignore",
         ).collect()
