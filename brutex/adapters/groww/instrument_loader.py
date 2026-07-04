@@ -18,7 +18,13 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 from brutex.adapters.groww.constants import GROWW_CSV_ALLOWED_HOST, GROWW_INSTRUMENT_CSV_URL
-from brutex.adapters.groww.instruments import InstrumentIndex, load_index_from_csv
+from brutex.adapters.groww.instruments import (
+    InstrumentIndex,
+    ParseSkipReport,
+    build_index,
+    load_index_from_csv,
+    parse_instrument_csv_with_report,
+)
 from brutex.models import BruteXError
 
 #: A CSV fetcher: ``url → decoded CSV text``.
@@ -62,9 +68,25 @@ def load_index(http_get: HttpGet, *, url: str = GROWW_INSTRUMENT_CSV_URL) -> Ins
     return load_index_from_csv(http_get(url))
 
 
+def load_index_with_report(
+    http_get: HttpGet, *, url: str = GROWW_INSTRUMENT_CSV_URL
+) -> tuple[InstrumentIndex, ParseSkipReport]:
+    """Download + index the master AND return the bounded parse-skip report.
+
+    DEC-PARSE-SKIP-REPORT-001 — the report-carrying twin of :func:`load_index`
+    (same SSRF check, same parse, same index build) for callers that surface
+    skip honesty (the dashboard master load persists the report to
+    ``schema_meta`` for the ``/universe`` panel).
+    """
+    _check_url(url)
+    parsed, report = parse_instrument_csv_with_report(http_get(url))
+    return build_index(parsed), report
+
+
 __all__ = [
     "GrowwInstrumentFetchError",
     "HttpGet",
     "load_index",
+    "load_index_with_report",
     "urllib_http_get",
 ]
