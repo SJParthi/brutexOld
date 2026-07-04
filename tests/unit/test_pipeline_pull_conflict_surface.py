@@ -19,6 +19,7 @@ import pytest
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
     run_full_pipeline,
@@ -211,11 +212,16 @@ class TestDiskGuardHeadline:
 
     def test_note_names_the_skip_and_movers_do_not_warm(self) -> None:
         warmed: list[str] = []
+
+        def _warm_spot() -> MoversWarmResult:
+            warmed.append("spot")
+            return MoversWarmResult(warmed=1, failed=0, total=1)
+
         report = run_full_pipeline(
             run_spot=_spot,
             run_metadata=_metadata,
             run_historical=lambda: _composite(_hist()),
-            warm_spot_movers=lambda: warmed.append("spot") or 1,
+            warm_spot_movers=_warm_spot,
             run_prebuild=self._guarded_outcome,
         )
         assert "prebuild SKIPPED — disk guard: est. need ~12.0 GiB" in report.note
