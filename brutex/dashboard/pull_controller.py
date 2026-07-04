@@ -101,6 +101,8 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
+from brutex.dashboard.coverage_reconcile import load_lake_spans
+from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -108,6 +110,7 @@ from brutex.data.window_ledger_store import (
     end_pull_ledger,
     make_live_ledger_flush,
     plan_windows,
+    reconcile_ledger_windows,
     reconcile_ledger_with_lake,
 )
 from brutex.models import Instrument
@@ -1898,6 +1901,12 @@ def pull_all_spot(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=auth_failures)
             )
 
+        # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
+        # captured at the minute phase's reconcile below — the SAME already-loaded
+        # spans + the just-reconciled ledger rows, a pre-pull-CONSISTENT pair —
+        # and emitted ONCE post-drain. Empty when that phase never runs.
+        spot_census_spans: list[dict[str, Any]] = []
+        spot_census_rows: list[tuple[Any, ...]] = []
         # Success-path latch for the post-drain L2 lake heal below (DEC-LAKE-HEAL-001):
         # set as the try body's LAST statement, so a phase error leaves it False and
         # the ``finally`` skips the heal (the drains + ledger persist still run).
@@ -1946,9 +1955,16 @@ def pull_all_spot(
                         # never in this phase. Guarded on a non-None ledger (the live
                         # pull; ``begin_pull_ledger`` returns None for a dry-run, which
                         # simply skips the ledger reconcile + plan, mirroring Phase 1).
-                        reconcile_ledger_with_lake(
+                        # The span read is hoisted out of ``reconcile_ledger_with_lake``
+                        # so the SAME loaded spans also feed the written-vs-settled
+                        # census snapshot below (DEC-WRITTEN-SETTLED-CENSUS-001 —
+                        # "reuse the already-loaded spans", zero extra I/O); the
+                        # reconcile itself is byte-identical (`reconcile_ledger_windows`
+                        # is the pure core that wrapper composed).
+                        spot_census_spans = load_lake_spans(lake_root)
+                        reconcile_ledger_windows(
                             ledger,
-                            lake_root,
+                            spot_census_spans,
                             instruments=instruments,
                             intervals=minute_intervals,
                             start=start.date(),
@@ -1956,6 +1972,9 @@ def pull_all_spot(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                         )
+                        # Pre-plan ledger snapshot — pairs with the pre-pull spans
+                        # above so this pull's own settles can never false-flag.
+                        spot_census_rows = ledger.to_rows()
                         plan_windows(
                             ledger,
                             instruments=instruments,
@@ -2042,6 +2061,18 @@ def pull_all_spot(
         # 0``. The pipeline is already DRAINED in the finally above, so its totals are final. A
         # no-op (synchronous path) when ``_fetch_pipeline`` is ``None``.
         merged_pairs = _reconcile_pairs_with_pipeline(merged_pairs, _fetch_pipeline)
+        # Observe-only written-vs-settled census (DEC-WRITTEN-SETTLED-CENSUS-001):
+        # one guarded post-drain emit over the pre-plan snapshot captured at the
+        # minute phase's reconcile — DETECT+WARN only (the #1014 wiring pattern),
+        # can never break the pull. A dry-run / skipped minute phase emits over
+        # empty inputs → a silent clean census.
+        emit_written_settled_census(
+            spot_census_rows,
+            spot_census_spans,
+            intervals=minute_intervals,
+            symbols=frozenset(inst.symbol_name for inst in instruments),
+            source="spot",
+        )
         _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
         # Groww has NO no-data marker — unlike the previous vendor's no-data 400
         # marker, which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we

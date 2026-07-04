@@ -2686,3 +2686,67 @@ class TestMassEmptyCircuitBreaker:
         assert report.verdict.kind == "clean"
         assert report.settled_skipped == 0
         assert report.verdict.action == "No action needed."
+
+
+class TestWrittenSettledCensusWired:
+    """DEC-WRITTEN-SETTLED-CENSUS-001 (spot spine): the observe-only census is
+    LIVE in ``pull_all_spot`` — a pre-pull ledger↔lake disagreement surfaces as
+    exactly one ``pull.written_settled_mismatch`` WARNING; the pull itself is
+    untouched (DETECT+WARN only)."""
+
+    def test_spot_pull_emits_mismatch_warning(self, tmp_path: Path) -> None:
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+        from structlog.testing import capture_logs
+
+        # The durable ledger claims symbol 13's 1-minute series settled SUCCESS
+        # while the lake holds NO bars for it (the lost-partition shape).
+        seeded = WindowLedger()
+        seeded.record(
+            WindowKey(
+                market="groww",
+                security_id="13",
+                interval="1minute",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 31),
+            ),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_BULK_NOW,
+        )
+        save_window_ledger(seeded, tmp_path)
+
+        with capture_logs() as logs:
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2024-01-01",
+                to_date="2024-01-31",
+                intervals=("1minute",),
+                adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
+            )
+        warnings = [log for log in logs if log["event"] == "pull.written_settled_mismatch"]
+        assert len(warnings) == 1
+        assert warnings[0]["source"] == "spot"
+        assert warnings[0]["settled_unwritten"] == 1
+        assert warnings[0]["samples"] == ["settled-unwritten: '13' '1minute'"]
+
+    def test_agreeing_pull_stays_silent(self, tmp_path: Path) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2024-01-01",
+                to_date="2024-01-31",
+                intervals=("1minute",),
+                adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
+            )
+        assert not [log for log in logs if log["event"] == "pull.written_settled_mismatch"]
