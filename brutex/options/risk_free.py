@@ -36,9 +36,9 @@ from __future__ import annotations
 import csv
 import math
 from bisect import bisect_right
-from itertools import pairwise
 from dataclasses import dataclass
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 

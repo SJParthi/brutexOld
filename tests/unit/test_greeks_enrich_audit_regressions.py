@@ -210,9 +210,7 @@ class TestSpotKeyRecoveryLadder:
     def _enrich_target(self, lake: Path, symbol: str) -> object:
         return enrich_greeks_for_targets(
             targets=[
-                GreeksEnrichTarget(
-                    exchange="NSE", symbol=symbol, start=_WINDOW[0], end=_WINDOW[1]
-                )
+                GreeksEnrichTarget(exchange="NSE", symbol=symbol, start=_WINDOW[0], end=_WINDOW[1])
             ],
             lake_root=lake,
             rate_source=_RATE,
@@ -322,7 +320,7 @@ class TestSpotKeyRecoveryLadder:
         with capture_logs() as logs:
             report = self._enrich_target(lake, _CE_SYMBOL)
         assert report.enriched == 1 and report.bars_null == 1  # type: ignore[attr-defined]
-        status, style, iv = self._stored_status_style(lake, _CE_SYMBOL)
+        status, _style, iv = self._stored_status_style(lake, _CE_SYMBOL)
         assert status == STATUS_NO_SPOT and iv is None
         assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
 
@@ -450,9 +448,7 @@ class TestLakeWriteHaltReRaise:
         with pytest.raises(LakeWriteHalt):
             enrich_greeks_for_targets(
                 targets=[
-                    GreeksEnrichTarget(
-                        exchange="NSE", symbol=s, start=_WINDOW[0], end=_WINDOW[1]
-                    )
+                    GreeksEnrichTarget(exchange="NSE", symbol=s, start=_WINDOW[0], end=_WINDOW[1])
                     for s in symbols
                 ],
                 lake_root=tmp_path,
@@ -465,9 +461,7 @@ class TestLakeWriteHaltReRaise:
         # errored == 3. Post-fix: targets 2-3 are never even read.
         assert reads == [_CE_SYMBOL]
 
-    def test_per_target_quarantine_still_holds_for_ordinary_errors(
-        self, tmp_path: Path
-    ) -> None:
+    def test_per_target_quarantine_still_holds_for_ordinary_errors(self, tmp_path: Path) -> None:
         def _read(t: GreeksEnrichTarget) -> list[dict[str, object]]:
             if t.symbol == _CE_SYMBOL:
                 raise OSError("corrupt partition")
@@ -507,9 +501,7 @@ class TestSpotRecoveryCandidates:
         # A drifted-SHAPED underlying walks the lake_keys ladder back down.
         assert "M&M" in _spot_recovery_candidates("NSE-M&M", "NSE")
 
-    def test_env_override_malformed_shapes_ignored(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_override_malformed_shapes_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from brutex.data.greeks_enrich import _spot_recovery_candidates
 
         for raw in ("not json", "[1, 2]", '{"A": 3, "": "X", "B": "  ", "OK": "NIFTY"}'):
@@ -624,9 +616,7 @@ class TestDegenerateInputHandling:
         good_ts = _BAR_TS + timedelta(minutes=1)
         rows = [_row(close=math.nan), _row(good_ts, close=200.0)]
         with capture_logs() as logs:
-            bars, stats = _enrich_rows(
-                rows, spot_by_ts={_BAR_TS: _SPOT, good_ts: _SPOT}
-            )
+            bars, stats = _enrich_rows(rows, spot_by_ts={_BAR_TS: _SPOT, good_ts: _SPOT})
         assert len(bars) == 1  # the NaN row builds NO bar (stored raw row untouched)
         assert stats.skipped == 1
         assert stats.solved == 1
