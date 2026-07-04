@@ -45,9 +45,21 @@ fetch), month-file-bounded via
 O(lake-depth)); the per-bar IV solve is the kernel's bounded O(1)-per-call
 (NOT an O(1)-total claim). Reads afterwards are plain O(1)-per-bar column
 projections. Re-runs are idempotent: a bar whose stored provenance stamp
-matches the current inputs AND solved cleanly is REUSED without recompute, an
-identical restate is detected pre-write (no partition rewrite at all), and the
-``latest-wins`` merge corrects any stale overlay (Golden Rule #7).
+matches the current inputs AND solved cleanly AND whose stored
+``rate_used`` / ``spot_at_bar`` / style equal this pass's values is REUSED
+without recompute (the value-hardened gate of
+DEC-GREEKS-CORRECTNESS-AUDIT-001 — the stamp alone cannot see a rate/spot
+VALUE change), an identical restate is detected pre-write (no partition
+rewrite at all), and the ``latest-wins`` merge corrects any stale overlay
+(Golden Rule #7).
+
+Concurrency (honest envelope, DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3):
+the pass is WRITE-serialised via the per-partition flock and safe against a
+concurrent KEEP-FIRST vendor pull (raw OHLCV identity untouched either way),
+but two concurrent ENRICH passes are LAST-WRITER-WINS — never torn, the
+stamp always agrees with its values, yet the slower pass's inputs restate.
+The intended execution model is single-enricher-per-lake (the pass runs once
+per pull, post-drain).
 """
 
 from __future__ import annotations
@@ -375,6 +387,15 @@ def expiry_instant_utc(expiry: date) -> datetime:
 def t_years_act365(bar_ts: datetime, expiry_at: datetime) -> float:
     """Time to expiry in Act/365 calendar years — the locked ``T`` convention.
 
+    ``T`` anchors on the bar-LABEL instant (the minute OPEN) while the solved
+    premium is the minute CLOSE — up to 60 s later
+    (DEC-GREEKS-CORRECTNESS-AUDIT-001 B76-3, a standard convention stated
+    honestly): the measured IV bias envelope of the 60 s skew is up to
+    ~−4.7% relative on the LAST tradable expiry-day minutes, ~−0.8% at 1 h
+    to expiry, and < 0.15% beyond ~6 h — negligible at ≥ 1 day. Changing the
+    anchor would be a formula revision (a ``GREEKS_FORMULA_VERSION`` / TTE
+    bump + bulk re-enrich), deliberately NOT done in the audit round.
+
     Negative when the bar sits at/after the expiry instant (the caller stamps
     :data:`STATUS_AT_EXPIRY`; such bars should not exist upstream —
     ``drop_bars_after`` already drops post-expiry-date bars — but the guard is
@@ -414,8 +435,13 @@ class EnrichStats:
         :data:`STATUS_OK` — restated verbatim, no recompute (the O(1)
         stamp-compare skip of plan §15.4).
     changed
-        Bars whose overlay DIFFERS from what is stored — ``0`` means the whole
-        target is already current and no write is needed at all.
+        Bars whose overlay DIFFERS from what is stored — ``0`` means the
+        whole target is already OVERLAY-current and the pass issues no write.
+        Honest scope note (CTR-4): "no write needed" is an overlay claim, not
+        a disk-hygiene one — repair of a physically-duplicated (poisoned)
+        partition is owned by the dedicated lake healer
+        (:mod:`brutex.data.lake_heal`, DEC-LAKE-HEAL-001), never manufactured
+        by the enricher skipping/forcing writes.
     skipped
         Rows dropped by the non-finite price screen (a NaN / inf OHLC field,
         DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-2) — NO bar is built for them, so
@@ -1121,6 +1147,12 @@ def write_option_greeks(
     restate is a byte-identical no-op, and the RAW OHLCV keep-first identity
     of the vendor spine is untouched (the writer's ``_bar_values_equal`` stays
     OHLCV+OI-only).
+
+    Concurrency (DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3): the flock
+    serialises each write's read-modify-write, so this is safe against a
+    concurrent keep-first VENDOR writer; two concurrent ENRICH passes are
+    last-writer-wins (single-enricher-per-lake execution model — the pass
+    runs once per pull).
     """
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
