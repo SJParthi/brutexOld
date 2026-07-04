@@ -1044,9 +1044,11 @@ jobs:
           else
             echo "(brutex.costs.types test file not present yet — gate inactive)"
           fi
-          # 19e · brutex.costs.constants (59 stmts, 12 branches; same test)
+          # 19e · brutex.costs.constants (71 stmts, 10 branches; calculator tests
+          #       + the R2-OC-3 regime-table mechanism tests — rate_for_date's
+          #       ValueError guards live in test_costs_regime_table.py)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
-            pytest --cov=brutex.costs.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
+            pytest --cov=brutex.costs.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py tests/unit/test_costs_regime_table.py
           else
             echo "(brutex.costs.constants test file not present yet — gate inactive)"
           fi
@@ -1313,12 +1315,13 @@ jobs:
           else
             echo "(brutex.options.strike_rules test file not present yet — gate inactive)"
           fi
-          # 21e · brutex.options.executor (193 stmts, 50 branches, 38 tests).
+          # 21e · brutex.options.executor (221 stmts, 60 branches).
           #       DEC-OPTIONS-EXECUTOR-001 — the spot-signal → priced-option
-          #       materializer. The unit file alone reaches 100% line+branch;
+          #       materializer. The R2-OC reject-path tests live in
+          #       test_options_executor_rejects.py (both files needed for 100%);
           #       golden + property + integration suites are additional oracles.
           if compgen -G "tests/unit/test_options_executor.py" > /dev/null; then
-            pytest --cov=brutex.options.executor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_executor.py
+            pytest --cov=brutex.options.executor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_executor.py tests/unit/test_options_executor_rejects.py
           else
             echo "(brutex.options.executor test file not present yet — gate inactive)"
           fi
