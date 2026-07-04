@@ -104,11 +104,13 @@ _CORE_COLUMNS: tuple[str, ...] = (
 
 #: The full on-disk column order — fixed so the Parquet schema is stable + the row
 #: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` then
-#: ``in_pull_fetches`` were each appended LAST (DEC-WINDOW-LEDGER-001 R1 /
-#: DEC-WINDOW-INPULL-FETCHES-001), so a legacy file written before either column
-#: existed loads cleanly: the core columns are read and each optional column is
-#: derived per-row (see :func:`_rows_to_records`). Backward-compatible, never a re-pull.
-_COLUMNS: tuple[str, ...] = (*_CORE_COLUMNS, "empty_streak", "in_pull_fetches")
+#: ``in_pull_fetches`` then ``bars_net_new`` were each appended LAST
+#: (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
+#: DEC-INGEST-BOUNDARY-INTEGRITY-001), so a legacy file written before any of the
+#: optional columns existed loads cleanly: the core columns are read and each
+#: optional column is filled per-row (see :func:`_rows_to_records`; an absent
+#: ``bars_net_new`` is an honest ``None``). Backward-compatible, never a re-pull.
+_COLUMNS: tuple[str, ...] = (*_CORE_COLUMNS, "empty_streak", "in_pull_fetches", "bars_net_new")
 
 
 def ledger_dir(lake_root: Path) -> Path:
@@ -151,16 +153,37 @@ def _derive_in_pull_fetches(status: str) -> int:
     return 0 if status == PLANNED else 1
 
 
+def _derive_bars_net_new() -> int | None:
+    """Honest ``bars_net_new`` for a LEGACY row that predates the column: ``None``.
+
+    DEC-INGEST-BOUNDARY-INTEGRITY-001, mirroring the :func:`_derive_empty_streak`
+    / :func:`_derive_in_pull_fetches` optional-column template — but unlike those
+    (whose safe floors ARE derivable from the row's terminal state) a legacy
+    pull's keep-first-deduped net-new count is genuinely UNRECORDED: any number
+    would be a fabrication (Golden Rule #1), and ``0`` in particular would
+    falsely claim "that pull added nothing new". The absent column therefore
+    ALWAYS loads as ``None`` (honest unknown — the ``int`` side of the annotation
+    is the field's domain, deliberately never produced here); the next pull's
+    :meth:`WindowLedger.record` stamps the exact count. The helper exists so the
+    optional-column template stays uniform and the honest-unknown rule has ONE
+    documented home.
+    """
+    return None
+
+
 def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    """Coerce raw rows to the exact 13-field tuple :meth:`WindowLedger.from_rows` expects.
+    """Coerce raw rows to the exact 14-field tuple :meth:`WindowLedger.from_rows` expects.
 
     Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1)
-    plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001). A ``None`` optional column
-    (a legacy file written before that column) is derived: ``empty_streak`` from
+    plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) plus ``bars_net_new``
+    (DEC-INGEST-BOUNDARY-INTEGRITY-001). A ``None`` optional column (a legacy file
+    written before that column) is derived: ``empty_streak`` from
     ``(status, attempts)`` via :func:`_derive_empty_streak`; ``in_pull_fetches`` from
-    ``status`` via :func:`_derive_in_pull_fetches`. A wrong arity / non-coercible element
-    raises here (``ValueError`` / ``TypeError``) and is caught by the caller, degrading
-    to an empty ledger.
+    ``status`` via :func:`_derive_in_pull_fetches`; ``bars_net_new`` stays an honest
+    ``None`` via :func:`_derive_bars_net_new` (a NULL cell in a NEW file — e.g. a
+    lake cold-start seed — reads ``None`` the same way). A wrong arity /
+    non-coercible element raises here (``ValueError`` / ``TypeError``) and is
+    caught by the caller, degrading to an empty ledger.
     """
     coerced: list[tuple[Any, ...]] = []
     for (
@@ -177,6 +200,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         last_attempt_at,
         empty_streak,
         in_pull_fetches,
+        bars_net_new,
     ) in rows:
         status_s = str(status)
         attempts_i = int(attempts)
@@ -188,6 +212,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         fetches = (
             _derive_in_pull_fetches(status_s) if in_pull_fetches is None else int(in_pull_fetches)
         )
+        net_new = _derive_bars_net_new() if bars_net_new is None else int(bars_net_new)
         coerced.append(
             (
                 str(market),
@@ -203,6 +228,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
                 (None if last_attempt_at is None else str(last_attempt_at)),
                 streak,
                 fetches,
+                net_new,
             )
         )
     return coerced
@@ -227,8 +253,9 @@ def load_window_ledger(
         present = set(table.schema.names)
         # The core 11 columns are REQUIRED — a missing one raises KeyError below and
         # degrades to empty (the wrong-shape guard). ``empty_streak`` + ``in_pull_fetches``
-        # are OPTIONAL: a legacy file lacks one (or both), so fill ``None`` for the missing
-        # column(s) and let `_rows_to_records` derive each per-row.
+        # + ``bars_net_new`` are OPTIONAL: a legacy file lacks one (or more), so fill
+        # ``None`` for the missing column(s) and let `_rows_to_records` derive each
+        # per-row (an absent ``bars_net_new`` stays an honest ``None``).
         columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
         n = len(columns[_CORE_COLUMNS[0]])
         streaks = (
@@ -239,7 +266,12 @@ def load_window_ledger(
             if "in_pull_fetches" in present
             else [None] * n
         )
-        rows = zip(*(columns[name] for name in _CORE_COLUMNS), streaks, fetches, strict=True)
+        net_new = (
+            table.column("bars_net_new").to_pylist() if "bars_net_new" in present else [None] * n
+        )
+        rows = zip(
+            *(columns[name] for name in _CORE_COLUMNS), streaks, fetches, net_new, strict=True
+        )
         return WindowLedger.from_rows(_rows_to_records(rows), threshold=threshold)
     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
         _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
@@ -253,10 +285,13 @@ def load_window_ledger(
         return degraded
 
 
-#: One serialised ledger row — EXACTLY the 13-field tuple :meth:`WindowLedger.to_rows`
+#: One serialised ledger row — EXACTLY the 14-field tuple :meth:`WindowLedger.to_rows`
 #: emits (and :meth:`WindowLedger.from_rows` restores). The merge-on-save operates on
-#: this shape directly so the conflict rule below is pure + unit-testable.
-LedgerRow = tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]
+#: this shape directly so the conflict rule below is pure + unit-testable. The trailing
+#: ``bars_net_new`` is ``int | None`` (``None`` = honest unknown for a legacy row).
+LedgerRow = tuple[
+    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
+]
 
 #: The window identity — the leading 5 fields of a :data:`LedgerRow` (the same 5-tuple
 #: :meth:`WindowLedger._key` derives from a :class:`WindowKey`).
@@ -451,6 +486,9 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
                     ("last_attempt_at", pa.string()),
                     ("empty_streak", pa.int64()),
                     ("in_pull_fetches", pa.int64()),
+                    # Nullable by design: a legacy/seeded row's net-new is an honest
+                    # unknown ``None`` (DEC-INGEST-BOUNDARY-INTEGRITY-001).
+                    ("bars_net_new", pa.int64()),
                 ]
             )
             table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
@@ -521,6 +559,9 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # The legacy status log has no in-pull fetch count either; derive the
                 # honest floor from the (settled) status (DEC-WINDOW-INPULL-FETCHES-001).
                 in_pull_fetches=_derive_in_pull_fetches(status),
+                # The legacy status log never recorded a deduped net-new count —
+                # honest unknown (DEC-INGEST-BOUNDARY-INTEGRITY-001).
+                bars_net_new=_derive_bars_net_new(),
             )
         )
 
@@ -540,6 +581,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 r.last_attempt_at,
                 r.empty_streak,
                 r.in_pull_fetches,
+                r.bars_net_new,
             )
             for r in by_window.values()
         ),
