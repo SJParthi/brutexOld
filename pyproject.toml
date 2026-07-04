@@ -252,6 +252,15 @@ ignore = [
 "deploy/aws_token_minter/**" = ["N803", "S105"]
 # The minter's tests mirror the same boto3 PascalCase fake-client kwargs (N803).
 "tests/deploy/**" = ["N803"]
+# Rust-kernel type stubs (rust/fno-math/python/fno_math/__init__.pyi): the stub
+# parameter names deliberately MIRROR the Rust struct field names (`open`/`high`/
+# `low`/`close` — an OHLC column set), so `open` shadowing the builtin (A002) is a
+# forced, intentional mirror, not a violation. CI's lint job scopes `ruff check
+# brutex tests` and never reaches this path today; the ignore is PREEMPTIVE so a
+# future scope widening or a newer local ruff (0.15.20 flags stub params) can
+# never turn the inherited stub name into a surprise red (DEC-TOKEN-STALE-PAUSE-001
+# review follow-up).
+"**/*.pyi" = ["A002"]
 
 [tool.ruff.format]
 quote-style = "double"
