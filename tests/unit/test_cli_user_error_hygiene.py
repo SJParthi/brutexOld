@@ -316,11 +316,8 @@ def test_catalog_open_require_exists_opens_existing(tmp_path: Path) -> None:
 
     path = tmp_path / "catalog.duckdb"
     Catalog.open(path).close()
-    cat = Catalog.open(path, require_exists=True)
-    try:
+    with Catalog.open(path, require_exists=True) as cat:
         assert cat.count() == 0
-    finally:
-        cat.close()
 
 
 def test_catalog_open_default_still_creates(tmp_path: Path) -> None:
@@ -329,12 +326,9 @@ def test_catalog_open_default_still_creates(tmp_path: Path) -> None:
     from brutex.data.catalog import Catalog
 
     path = tmp_path / "nested" / "deeper" / "catalog.duckdb"
-    cat = Catalog.open(path)
-    try:
+    with Catalog.open(path):
         assert path.exists()
         assert path.parent.is_dir()
-    finally:
-        cat.close()
 
 
 def test_require_catalog_exists_ok_and_missing(tmp_path: Path) -> None:
