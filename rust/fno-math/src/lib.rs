@@ -75,6 +75,16 @@ pub mod metrics;
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
+/// baked at build time by `build.rs` under the shared FRAMING v1 of
+/// `rust/source_digest_core.rs` (DEC-RUST-SOURCE-DIGEST-TWIN-001,
+/// `docs/MIGRATION.md` #1258). The PyO3 module exports it as
+/// `__source_digest__`; `brutex doctor`'s `wheel_source_digest_fno_math`
+/// stage compares it against the Python twin's (`brutex/wheel_digest.py`)
+/// fresh recompute over the repo checkout, catching a LOCAL wheel built from
+/// older source at the same crate version (same-version behavioural drift).
+pub const SOURCE_DIGEST: &str = env!("BRUTEX_SOURCE_DIGEST");
+
 // ────────────────────────────────────────────────────────────────────────
 // PyO3 module entry point (DEC-P0-050 / PR-K; DEC-P0-055 / PR-N+2)
 // ────────────────────────────────────────────────────────────────────────
@@ -91,6 +101,11 @@ use pyo3::prelude::*;
 #[pymodule]
 fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", VERSION)?;
+    // Dunder-named deliberately: the doctor's wheel-freshness symbol-set
+    // check (and EXPECTED_BUILD.json) covers only non-underscore names, so
+    // this build stamp can never trip the symbol-surface comparison
+    // (DEC-RUST-SOURCE-DIGEST-TWIN-001).
+    m.add("__source_digest__", SOURCE_DIGEST)?;
     m.add_function(wrap_pyfunction!(python::add_u64, m)?)?;
     m.add_function(wrap_pyfunction!(python::bitand_count_u64s, m)?)?;
     m.add_function(wrap_pyfunction!(python::bitcount_u64s, m)?)?;

@@ -61,9 +61,16 @@ covers only the drift classes that still import (see ``brutex/doctor.py``).
 HONEST residual gap (Golden Rule #10): the version + symbol-set handshake
 catches a stale wheel that dropped/added a symbol or changed crate version. It
 does NOT catch same-version, symbol-compatible BEHAVIORAL drift (Rust source
-changed while version + symbol surface stayed identical). Closing that needs a
-``build.rs`` source-content digest baked into the wheel — the named follow-up,
-deliberately outside this change's scope.
+changed while version + symbol surface stayed identical). The formerly-named
+"``build.rs`` source-content digest" follow-up is now CLOSED
+(DEC-RUST-SOURCE-DIGEST-TWIN-001, MIGRATION.md #1258): ``build.rs`` bakes the
+crate-source BLAKE3 digest into the compiled module as ``__source_digest__``
+and ``brutex doctor``'s ``wheel_source_digest`` stage compares it (WARN,
+non-fatal) against the Python-twin recompute over the repo checkout —
+LOCAL-machine scope only (CI always builds wheels from source, so it can
+never see a stale wheel); this import-time handshake deliberately does NOT
+gate on the digest (an older wheel must keep importing so the doctor can
+warn).
 """
 
 from __future__ import annotations
