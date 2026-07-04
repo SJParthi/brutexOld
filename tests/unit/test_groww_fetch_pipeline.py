@@ -63,6 +63,27 @@ def _result(shard_key: str, process) -> RawFetchResult:  # type: ignore[no-untyp
     return RawFetchResult(tail=_tail(shard_key, process))
 
 
+def _spillable_result(
+    shard_key: str, bars: list[CandleBar], seen: list[list[CandleBar]]
+) -> RawFetchResult:
+    """A result whose tail reads its bars from a mutable cell + records what ``process`` saw.
+
+    The ONE spillable-tail fixture shared by every spill-path test class (COMMON — it was
+    previously copy-pasted per class): ``raw_bars`` is the live cell the producer drops via
+    ``rehydrate(())`` on spill, and the consumer restores via ``rehydrate(loaded_bars)``.
+    """
+    cell = list(bars)
+
+    def _process(_tail: FetchTail) -> None:
+        seen.append(list(cell))  # snapshot the (possibly rehydrated) bars at process time
+
+    def _rehydrate(new_bars: Sequence[CandleBar]) -> None:
+        cell[:] = new_bars
+
+    tail = FetchTail(shard_key=shard_key, process=_process, raw_bars=cell, rehydrate=_rehydrate)
+    return RawFetchResult(tail=tail)
+
+
 # ─────────────────────────── resolve_fetch_pipeline_size ────────────────────────────
 
 
@@ -903,19 +924,6 @@ class TestSpillOverflow:
     def _spill_area(self, tmp_path: Path, *, max_bytes: int = 1 << 30) -> FetchSpillArea:
         return FetchSpillArea(spill_dir=tmp_path / "spill", max_bytes=max_bytes)
 
-    def _spillable_result(self, shard_key: str, bars: list[CandleBar], seen: list[list[CandleBar]]):  # type: ignore[no-untyped-def]
-        """A result whose tail reads its bars from a mutable cell + records what ``process`` saw."""
-        cell = list(bars)
-
-        def _process(_tail: FetchTail) -> None:
-            seen.append(list(cell))  # snapshot the (possibly rehydrated) bars at process time
-
-        def _rehydrate(new_bars: Sequence[CandleBar]) -> None:
-            cell[:] = new_bars
-
-        tail = FetchTail(shard_key=shard_key, process=_process, raw_bars=cell, rehydrate=_rehydrate)
-        return RawFetchResult(tail=tail)
-
     def test_full_queue_spills_to_overflow_and_consumer_rehydrates(self, tmp_path: Path) -> None:
         """A wedged-then-released consumer: the over-queue window SPILLS + later processes durably."""
         area = self._spill_area(tmp_path)
@@ -939,7 +947,7 @@ class TestSpillOverflow:
             spill_done = threading.Event()
 
             def _submit_third() -> None:
-                pipeline.submit(self._spillable_result("s", bars, seen))
+                pipeline.submit(_spillable_result("s", bars, seen))
                 spill_done.set()
 
             t = threading.Thread(target=_submit_third, daemon=True)
@@ -976,7 +984,7 @@ class TestSpillOverflow:
             done = threading.Event()
 
             def _submit_third() -> None:
-                pipeline.submit(self._spillable_result("s", bars, seen))
+                pipeline.submit(_spillable_result("s", bars, seen))
                 done.set()
 
             t = threading.Thread(target=_submit_third, daemon=True)
@@ -1060,7 +1068,7 @@ class TestSpillOverflow:
         """A pool hard-stop drops a spilled overflow window fail-fast but DISCARDS its spill file."""
         area = self._spill_area(tmp_path)
         seen: list[list[CandleBar]] = []
-        spillable = self._spillable_result("s", [_BAR], seen)
+        spillable = _spillable_result("s", [_BAR], seen)
         # Spill the window directly (as the producer would on a full queue) + drop the in-memory.
         handle = area.try_spill(spillable.tail.raw_bars)
         assert handle is not None
@@ -1088,6 +1096,158 @@ class TestSpillOverflow:
         pipeline = FetchPipeline(workers=1, queue_maxsize=4, spill_area=area)
         pipeline.drain()
         assert not straggler.path.exists()
+        assert area.reserved_bytes == 0
+
+
+# ─────────────── spill window-COUNT cap (DEC-FETCH-SPILL-COUNT-CAP-001) ───────────────
+
+
+class TestSpillWindowCountCap:
+    """The overflow deque is bounded in HANDLE COUNT, not just on-disk bytes.
+
+    THE BUG (fail-before): ``try_spill`` gated ONLY on the byte cap, so a slow consumer fed a
+    flood of TINY/EMPTY windows (a 2-byte ``"[]"`` payload each — the deep-OTM options chain is
+    mostly empty) parked an unbounded number of resident handle graphs (frozen tail + closures)
+    in the per-shard overflow deque long before the 256 MiB byte cap tripped → OOM. Now the
+    spill area also reserves ONE window slot per live spill; past ``max_windows`` the producer
+    falls back to the SAME bounded, stop/drain-aware back-pressure — a slowdown, never a drop,
+    never a deadlock.
+    """
+
+    _MAX_WINDOWS = 3
+
+    def _bar(self, close: str) -> CandleBar:
+        """A distinct-close bar so each window's processed bars are identifiable."""
+        return CandleBar(
+            timestamp=datetime(2021, 1, 4, 4, 5, tzinfo=UTC),
+            open=Decimal("100.00"),
+            high=Decimal("110.00"),
+            low=Decimal("90.00"),
+            close=Decimal(close),
+            volume=3,
+            open_interest=None,
+        )
+
+    def _wedge_and_fill_to_count_cap(
+        self,
+        pipeline: FetchPipeline,
+        area: FetchSpillArea,
+        seen: list[list[CandleBar]],
+        release: threading.Event,
+    ) -> None:
+        """Wedge the single consumer, fill the 1-deep queue, then spill up to the count cap."""
+        first_in = threading.Event()
+
+        def _slow(_tail: FetchTail) -> None:
+            first_in.set()
+            release.wait(timeout=10.0)
+
+        pipeline.submit(_result("s", _slow))
+        assert first_in.wait(timeout=2.0)
+        pipeline.submit(_result("s", lambda _t: None))  # fills the queue (maxsize=1)
+        # The queue is FULL: each subsequent submit SPILLS — up to the window-count cap.
+        for i in range(self._MAX_WINDOWS):
+            pipeline.submit(_spillable_result("s", [self._bar(f"10{i}.00")], seen))
+        assert area.reserved_windows == self._MAX_WINDOWS
+        assert sum(len(dq) for dq in pipeline._overflow) == self._MAX_WINDOWS
+
+    def test_count_cap_bounds_overflow_then_back_pressures_no_data_loss(
+        self, tmp_path: Path
+    ) -> None:
+        """FAIL-BEFORE/PASS-AFTER: past the count cap the producer back-pressures, never spills.
+
+        Before DEC-FETCH-SPILL-COUNT-CAP-001 every over-cap tiny window still spilled (the
+        byte cap had enormous headroom) and the overflow deque held ALL of them — the
+        ``not blocked_done.wait`` teeth fail against the unfixed code. With the fix the deque
+        never exceeds ``max_windows``; the blocked producer is RELEASED by the consumer
+        draining (no deadlock) and every window — spilled AND back-pressured — is processed
+        with its real bars (no data loss).
+        """
+        area = FetchSpillArea(
+            spill_dir=tmp_path / "spill", max_bytes=1 << 30, max_windows=self._MAX_WINDOWS
+        )
+        release = threading.Event()
+        seen: list[list[CandleBar]] = []
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, spill_area=area)
+        try:
+            self._wedge_and_fill_to_count_cap(pipeline, area, seen, release)
+            # PAST the cap: the next submit must NOT spill — it falls back to the bounded
+            # back-pressure (the fail-before teeth: pre-fix this spilled + returned fast).
+            blocked_done = threading.Event()
+
+            def _submit_past_cap() -> None:
+                pipeline.submit(_spillable_result("s", [self._bar("109.00")], seen))
+                blocked_done.set()
+
+            t = threading.Thread(target=_submit_past_cap, daemon=True)
+            t.start()
+            assert not blocked_done.wait(timeout=0.4), (
+                "past-cap submit should back-pressure, not spill (count cap has no teeth)"
+            )
+            assert area.reserved_windows == self._MAX_WINDOWS  # the cap is never exceeded
+            assert sum(len(dq) for dq in pipeline._overflow) == self._MAX_WINDOWS
+            assert area.reserved_bytes < (1 << 30)  # byte headroom proves the COUNT cap bound
+            # NO DEADLOCK: releasing the wedged consumer drains the queue → the blocked
+            # producer's bounded back-pressure put succeeds.
+            release.set()
+            assert blocked_done.wait(timeout=5.0), "count-cap back-pressure never released"
+            t.join(timeout=2.0)
+        finally:
+            pipeline.drain()
+        # NO DATA LOSS: all four distinct-close windows processed with their REAL bars.
+        closes = sorted(bars[0].close for bars in seen)
+        assert closes == [
+            Decimal("100.00"),
+            Decimal("101.00"),
+            Decimal("102.00"),
+            Decimal("109.00"),
+        ]
+        # Both budgets fully released after the drain (every spill discarded).
+        assert area.reserved_windows == 0
+        assert area.reserved_bytes == 0
+
+    def test_producer_blocked_on_count_cap_observes_drain(self, tmp_path: Path) -> None:
+        """STOP/DRAIN-AWARENESS: a producer back-pressured by the COUNT cap is released by drain.
+
+        The graceful-liveness pin for the count-cap path: the past-cap producer rides the SAME
+        ``_back_pressure_put`` escape hatches as a byte-cap miss, so a pull-end ``drain()``
+        (``_draining``) releases it — the window is dropped fail-fast + re-fetched next pull
+        (idempotent keep-first), never a wedged fetch lane.
+        """
+        area = FetchSpillArea(
+            spill_dir=tmp_path / "spill", max_bytes=1 << 30, max_windows=self._MAX_WINDOWS
+        )
+        release = threading.Event()
+        seen: list[list[CandleBar]] = []
+        pipeline = FetchPipeline(workers=1, queue_maxsize=1, spill_area=area)
+        try:
+            self._wedge_and_fill_to_count_cap(pipeline, area, seen, release)
+            blocked_done = threading.Event()
+
+            def _submit_past_cap() -> None:
+                pipeline.submit(_spillable_result("s", [self._bar("109.00")], seen))
+                blocked_done.set()
+
+            t = threading.Thread(target=_submit_past_cap, daemon=True)
+            t.start()
+            assert not blocked_done.wait(timeout=0.4)  # blocked on the count-cap back-pressure
+            with capture_logs() as logs:
+                # Signal drain WITHOUT releasing the wedged consumer: the blocked producer's
+                # full-queue retry sees ``_draining`` and DROPS the window fail-fast (re-fetched
+                # next pull) — the count cap can never wedge the fetch lane at pull end.
+                pipeline._draining.set()
+                assert blocked_done.wait(timeout=5.0), (
+                    "count-cap-blocked producer did not observe drain (deadlock)"
+                )
+                t.join(timeout=2.0)
+            assert any(e["event"] == "fetch_pipeline.submit_dropped_draining" for e in logs)
+            release.set()  # un-wedge the consumer so the real drain below completes clean
+        finally:
+            pipeline.drain()
+        # The dropped window was never processed (it re-fetches next pull); the spilled three
+        # drained normally and released both budgets.
+        assert [self._bar("109.00")] not in seen
+        assert area.reserved_windows == 0
         assert area.reserved_bytes == 0
 
 
@@ -1128,7 +1288,7 @@ class TestSpillLoadIsolation:
         spill_done = threading.Event()
 
         def _submit_third() -> None:
-            pipeline.submit(self._spillable("s", [_BAR], seen))
+            pipeline.submit(_spillable_result("s", [_BAR], seen))
             spill_done.set()
 
         t = threading.Thread(target=_submit_third, daemon=True)
@@ -1136,20 +1296,6 @@ class TestSpillLoadIsolation:
         assert spill_done.wait(timeout=2.0), "producer blocked — the window did not spill"
         t.join(timeout=2.0)
         assert area.reserved_bytes > 0  # the window's bars live on disk
-
-    def _spillable(
-        self, shard_key: str, bars: list[CandleBar], seen: list[list[CandleBar]]
-    ) -> RawFetchResult:
-        cell = list(bars)
-
-        def _process(_tail: FetchTail) -> None:
-            seen.append(list(cell))
-
-        def _rehydrate(new_bars: Sequence[CandleBar]) -> None:
-            cell[:] = new_bars
-
-        tail = FetchTail(shard_key=shard_key, process=_process, raw_bars=cell, rehydrate=_rehydrate)
-        return RawFetchResult(tail=tail)
 
     @pytest.mark.parametrize("failure", ["deleted", "corrupt"])
     def test_spill_load_failure_defers_window_consumer_survives(
