@@ -27,6 +27,26 @@ cross-check (``tests/golden``) asserts it field-by-field, and the
 :func:`~brutex.engine.trade_sim.simulate_trades` (so an environment without the
 compiled wheel produces the exact same trades, never a silent divergence).
 
+## u64 width guard (DEC-SWEEP-RUST-WIRE-001 part 1 — latent-bug fix)
+
+The compiled kernel is **u64-native** (``Vec<u64>`` bar_bits + masks,
+``rust/fno-math/src/trade_sim.rs`` ``ResidentSweepSim``) while the condition
+vocabulary is **u128 by design** (60 bits implemented today, headroom above —
+see :mod:`brutex.engine.combo_mask`). Today's 60-bit vocab therefore FITS u64
+(bits 0..59 < 64) and takes the Rust fast path byte-identically; but before
+this guard, any word carrying a bit ≥ 64 handed to the kernel landed as a
+contextless PyO3 ``OverflowError`` (verified — never a silent truncation, but
+a crash with no attribution and no correct answer). The guard mirrors
+``combo_mask.ResidentBarBuffer``'s precedent: a ``> U64_MASK`` **bar word** at
+construction disables the Rust kernel for this buffer (one structlog WARNING
+naming the offending value + bit); a ``> U64_MASK`` **mask** at call time
+routes that one call to the pure-Python oracle (WARNING likewise). Either way
+the answer comes from :func:`~brutex.engine.trade_sim.simulate_trades` — the
+bit-exact oracle — NEVER a truncation, NEVER a bare FFI crash. Serving a
+> u64 word NATIVELY requires widening the kernel to two-limb u128 — the
+dual-arm work of the DEC-SWEEP-RUST-WIRE-001 wiring series (a named follow-up,
+NOT this change).
+
 ## Honest envelope (Golden Rule #10) — NOT O(1) total
 
 * Construction is ``O(N_bars)`` — the one-time paisa/forced/bar_bits derivation +
@@ -35,6 +55,8 @@ compiled wheel produces the exact same trades, never a silent divergence).
   mask walks the whole window once) + ``O(Σ trades)`` output. The per-bar work is
   O(1); the whole sweep is inherently O(N_masks · N_bars). Claiming O(1) total is
   a physical impossibility and is FORBIDDEN.
+* The width guard adds one ``O(N_bars)`` scan at construction and one
+  ``O(N_masks)`` scan per call — both dominated by the work they gate.
 """
 
 from __future__ import annotations
@@ -43,13 +65,15 @@ from collections.abc import Sequence
 from datetime import date
 from typing import TYPE_CHECKING
 
+import structlog
+
 from brutex.calendars.nse import (
     IST,
     forced_exit_seconds_for_session,
     get_session,
     is_forced_exit_bar,
 )
-from brutex.engine.combo_mask import mask_to_entry_signals
+from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
 
 # Intentional friend access (DEC-P0-017 per-site convention): ``_price_to_paisa``
 # is the canonical Decimal-rupees → int64-paisa seam — the SAME one
@@ -66,6 +90,8 @@ from brutex.engine.trade_sim import (
 from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    import fno_math
+
     from brutex.data.models import CandleBar
 
     # ``ClosedTrade`` is imported lazily at its construction site (see the note in
@@ -75,6 +101,39 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.metrics.types import ClosedTrade
 
 __all__ = ["ResidentTradeSim"]
+
+_LOG = structlog.get_logger(__name__)
+
+
+def _first_over_u64(values: Sequence[int]) -> int | None:
+    """First value in ``values`` that does not fit u64, or ``None`` if all fit.
+
+    The ONE width predicate for both guard sites (construction bar words +
+    per-call masks), against the COMMON :data:`brutex.engine.combo_mask.U64_MASK`
+    — so the two sites can never drift.
+    """
+    return next((v for v in values if v > U64_MASK), None)
+
+
+def _warn_u64_fallback(*, site: str, offending: int, count: int) -> None:
+    """Emit the LOUD width-guard WARNING naming the offending value + bit.
+
+    One event vocabulary (``rust_trade_sim.u64_width_fallback``) for both guard
+    sites; ``site`` distinguishes them. Never silent: the operator sees exactly
+    which word overflowed u64 and at which bit, and that the pure-Python oracle
+    (bit-exact) served the answer instead.
+    """
+    _LOG.warning(
+        "rust_trade_sim.u64_width_fallback",
+        site=site,
+        offending_value=hex(offending),
+        offending_bit=offending.bit_length() - 1,
+        values=count,
+        detail=(
+            "value exceeds u64; the Rust kernel is u64-native — routing to the "
+            "pure-Python simulate_trades oracle (bit-exact, never truncated)"
+        ),
+    )
 
 
 class ResidentTradeSim:
@@ -90,6 +149,12 @@ class ResidentTradeSim:
     falls back to the pure-Python :func:`brutex.engine.trade_sim.simulate_trades`
     per mask — the SAME oracle the Rust kernel is verified against — so the trades
     are identical, never a silent divergence.
+
+    The same oracle serves any input the u64-native kernel cannot: a bar word
+    with a bit ≥ 64 disables the kernel at construction, and a mask with a bit
+    ≥ 64 routes that call to the oracle — each with one LOUD structlog WARNING
+    (``rust_trade_sim.u64_width_fallback``) naming the offending value + bit
+    (see the module docstring; DEC-SWEEP-RUST-WIRE-001 part 1).
 
     Parameters
     ----------
@@ -130,6 +195,27 @@ class ResidentTradeSim:
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
+
+        # ── u64 WIDTH GUARD (DEC-SWEEP-RUST-WIRE-001 part 1) ─────────────────
+        # The compiled kernel is u64-native (`Vec<u64>` bar_bits + masks) while
+        # the vocabulary is u128 by design; a bar word with a bit ≥ 64 cannot
+        # cross the FFI — pre-guard it landed as a contextless PyO3
+        # ``OverflowError`` here. Mirror `combo_mask.ResidentBarBuffer`: refuse
+        # the Rust kernel for this buffer up-front (LOUD structlog WARNING
+        # naming the offending value + bit) and serve every call from the
+        # pure-Python `simulate_trades` oracle — bit-exact, NEVER a truncation.
+        # Today's 60-bit vocab fits u64, so real windows take the Rust fast
+        # path byte-identically; the guard also skips the (Rust-only)
+        # paisa/forced derivation below — the fallback recomputes its own.
+        self._rust: fno_math.ResidentSweepSim | None = None
+        oversize_bar = _first_over_u64(self._bar_bits)
+        if oversize_bar is not None:
+            _warn_u64_fallback(
+                site="construction_bar_bits",
+                offending=oversize_bar,
+                count=len(self._bar_bits),
+            )
+            return
 
         # Derive the resident kernel inputs ONCE, via the canonical Python seams.
         # The forced-exit flags are SESSION-AWARE — byte-identical to
@@ -174,7 +260,7 @@ class ResidentTradeSim:
         try:
             import fno_math
 
-            self._rust: fno_math.ResidentSweepSim | None = fno_math.ResidentSweepSim(
+            self._rust = fno_math.ResidentSweepSim(
                 open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
             )
         except (ImportError, AttributeError):
@@ -200,12 +286,15 @@ class ResidentTradeSim:
         next-bar-open entry, SL/TP, 15:20 forced exit). Bit-identical to
         ``[simulate_trades(bars, mask_to_entry_signals(bar_bits, m), ...) for m in
         masks]`` — the Rust path and the fallback both honour the same fill policy
-        and direction. Empty ``masks`` → ``[]``.
+        and direction. Empty ``masks`` → ``[]``. A batch containing a mask with a
+        bit ≥ 64 is served by the pure-Python oracle (the u64 width guard — one
+        WARNING, identical trades, never a truncated mask).
 
         Parameters
         ----------
         masks
-            The u64 strategy masks to simulate.
+            The u128 strategy masks to simulate (a mask fitting u64 — today's
+            entire 60-bit vocabulary — takes the Rust fast path).
         direction
             :data:`~brutex.strategies.types.Side.BUY` (long) or ``Side.SELL``
             (short); ``HOLD`` is rejected.
@@ -233,6 +322,23 @@ class ResidentTradeSim:
             return []
 
         rust = self._rust
+        if rust is not None:
+            # ── u64 WIDTH GUARD (DEC-SWEEP-RUST-WIRE-001 part 1) ─────────────
+            # The kernel takes `Vec<u64>` masks; a mask with a bit ≥ 64 cannot
+            # cross the FFI (pre-guard: contextless PyO3 ``OverflowError``).
+            # Route THIS call to the pure-Python oracle instead — LOUD WARNING
+            # naming the offending mask + bit, bit-exact answer, never a
+            # truncation. Mirrors `combo_mask.ResidentBarBuffer
+            # .count_supermasks`; ≤ u64 batches (today's 60-bit vocab) are
+            # untouched.
+            oversize_mask = _first_over_u64(masks)
+            if oversize_mask is not None:
+                _warn_u64_fallback(
+                    site="simulate_masks",
+                    offending=oversize_mask,
+                    count=len(masks),
+                )
+                rust = None
         if rust is None:
             # Pure-Python fallback: the exact oracle, one mask at a time.
             return [

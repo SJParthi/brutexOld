@@ -20,7 +20,7 @@ from types import ModuleType
 import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
-from brutex.engine.combo_mask import mask_to_entry_signals
+from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import (
@@ -30,6 +30,7 @@ from brutex.engine.trade_sim import (
     simulate_trades,
 )
 from brutex.strategies.types import Side
+from structlog.testing import capture_logs
 
 _DAY = date(2024, 1, 2)  # a regular NSE trading Tuesday
 
@@ -381,6 +382,157 @@ class TestSessionAwareForcedExitParity:
             for m in masks
         ]
         assert got == expected
+
+
+# ── u64 width guard (DEC-SWEEP-RUST-WIRE-001 part 1, MIGRATION.md #1182) ──────
+#
+# The compiled kernel is u64-native (`Vec<u64>` bar_bits + masks,
+# rust/fno-math/src/trade_sim.rs `ResidentSweepSim`) while the vocabulary is
+# u128 by design. PRE-GUARD (verified on the built wheel): a bar word OR mask
+# with a bit ≥ 64 handed to the kernel raised a contextless PyO3
+# ``OverflowError: int too big to convert`` — a crash with no attribution and
+# no answer. These tests pin the fix: such inputs route LOUDLY to the
+# pure-Python oracle (bit-exact u128 semantics), ≤ u64 inputs keep the Rust
+# fast path untouched (spy-proven), and the WARNING names the offending
+# value + bit. Bit 64 is the FIRST width that cannot fit u64 (bits 0..63 —
+# the whole 60-bit vocab — fit), so it is the exact boundary probed here.
+
+_OVER_U64 = 1 << 64  # the smallest int that does NOT fit u64
+
+
+class _SpyKernel:
+    """Wrap the real resident Rust kernel, counting ``simulate_masks`` calls."""
+
+    def __init__(self, inner: object) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    def simulate_masks(self, *args: object) -> object:
+        self.calls += 1
+        return self.inner.simulate_masks(*args)  # type: ignore[attr-defined]
+
+
+class TestU64WidthGuard:
+    def test_over_u64_bar_bits_disable_rust_and_warn_naming_value_and_bit(self) -> None:
+        # Construction with a bar word carrying bit 64 must NOT crash (pre-fix:
+        # PyO3 OverflowError), must refuse the u64 kernel, and must WARN once
+        # naming the offending value + bit.
+        bars = _feed()
+        bar_bits = [_OVER_U64 | 1, 1, 1, _OVER_U64, 1]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        assert sim._rust is None
+        events = [e for e in logs if e["event"] == "rust_trade_sim.u64_width_fallback"]
+        assert len(events) == 1
+        assert events[0]["log_level"] == "warning"
+        assert events[0]["site"] == "construction_bar_bits"
+        assert events[0]["offending_value"] == hex(_OVER_U64 | 1)  # the FIRST offender
+        assert events[0]["offending_bit"] == 64
+        assert events[0]["values"] == len(bar_bits)
+
+    def test_over_u64_bar_bits_answers_come_from_the_exact_u128_oracle(self) -> None:
+        # Anti-vacuity: a u128 mask requiring bit 64 AND bit 0 actually FIRES on
+        # the bars carrying both — the guard serves the CORRECT u128 answer
+        # (pre-fix there was no answer at all, only the FFI crash).
+        bars = _feed()
+        bar_bits = [_OVER_U64 | 1, _OVER_U64 | 1, 1, 1, 1]
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        mask = _OVER_U64 | 1
+        got = sim.simulate_masks([mask, 0], direction=Side.BUY)
+        expected = [
+            _oracle(
+                bars,
+                bar_bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in (mask, 0)
+        ]
+        assert got == expected
+        assert len(got[0]) >= 1  # the u128 mask genuinely traded — not vacuous
+
+    def test_over_u64_mask_routes_call_to_oracle_and_never_reaches_rust(self) -> None:
+        # u64-fitting bar_bits keep the Rust kernel; a >u64 MASK at call time
+        # must route the WHOLE call to the oracle (spy: kernel never invoked),
+        # WARN naming the offender, and return the exact oracle trades in
+        # positional alignment (pre-fix: PyO3 OverflowError mid-call).
+        bars = _feed()
+        bar_bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        assert sim._rust is not None  # the wheel is built in CI — a real kernel
+        spy = _SpyKernel(sim._rust)
+        sim._rust = spy  # type: ignore[assignment]
+        masks = [0, _OVER_U64 | 1]
+        with capture_logs() as logs:
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        assert spy.calls == 0  # the u64 kernel was never asked to overflow
+        events = [e for e in logs if e["event"] == "rust_trade_sim.u64_width_fallback"]
+        assert len(events) == 1
+        assert events[0]["site"] == "simulate_masks"
+        assert events[0]["offending_value"] == hex(_OVER_U64 | 1)
+        assert events[0]["offending_bit"] == 64
+        assert events[0]["values"] == len(masks)
+        expected = [
+            _oracle(
+                bars,
+                bar_bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+
+    def test_u64_fitting_inputs_keep_the_rust_fast_path_with_no_warning(self) -> None:
+        # The guard must be a no-op for today's vocabulary: every ≤ u64 mask
+        # (incl. the exact U64_MASK boundary) goes through the Rust kernel
+        # (spy-proven, exactly one batch call) with ZERO width-guard events.
+        bars = _feed()
+        bar_bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+        assert sim._rust is not None
+        spy = _SpyKernel(sim._rust)
+        sim._rust = spy  # type: ignore[assignment]
+        with capture_logs() as logs:
+            got = sim.simulate_masks([0, 1, U64_MASK], direction=Side.BUY)
+        assert spy.calls == 1
+        assert [e for e in logs if e["event"] == "rust_trade_sim.u64_width_fallback"] == []
+        assert len(got) == 3
+
+    def test_over_u64_mask_on_fallback_buffer_takes_oracle_arm_without_kernel_warning(
+        self,
+    ) -> None:
+        # A buffer already on the pure-Python arm (no kernel) serves a >u64
+        # mask directly — no width-guard event fires (there is no kernel to
+        # protect), and the u128 answer is the oracle's.
+        bars = _feed()
+        bar_bits = [_OVER_U64 | 1] + [1] * (len(bars) - 1)
+        with capture_logs():
+            sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)  # WARNs at construction
+        assert sim._rust is None
+        with capture_logs() as logs:
+            got = sim.simulate_masks([_OVER_U64 | 1], direction=Side.BUY)
+        assert [e for e in logs if e["event"] == "rust_trade_sim.u64_width_fallback"] == []
+        assert got == [
+            _oracle(
+                bars,
+                bar_bits,
+                _OVER_U64 | 1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
 
 
 # ── cross-session pending-entry drop parity (R2-OC-2) ─────────────────────────
