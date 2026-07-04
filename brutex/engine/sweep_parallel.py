@@ -1,7 +1,13 @@
 """Multi-core grid-sweep driver — Phase 1 (DEC-MULTICORE-SWEEP-PHASE1-001).
 
 The FIRST safe, tested slice of multi-core parallelism for the brute-force grid
-sweep, behind a DEFAULT-OFF worker-count flag so production is byte-unchanged.
+sweep. Originally shipped behind a DEFAULT-OFF worker-count flag; since
+ADR-0016 (DEC-MULTICORE-SWEEP-AUTODEFAULT-001 — the deferred default-raise of
+MIGRATION.md #1080) an unset ``BRUTEX_SWEEP_WORKERS`` resolves to an AUTO
+worker count (``max(1, min(cpu_count - 2, 8))``, small grids stay sequential;
+``BRUTEX_SWEEP_WORKERS=1`` is the explicit sequential opt-out) — see
+:func:`resolve_sweep_workers`. The per-tuple engine path is UNCHANGED; the
+sequential==parallel byte-identity goldens remain the correctness net.
 
 ## Why processes, not threads (the GIL, honestly)
 
@@ -86,8 +92,11 @@ the flag, not a real production limitation.
   future work. This slice dispatches per-tuple (correct, just not locality-tuned).
 * **Resident-kernel reuse across the pool / a persistent worker kernel** — a
   follow-up.
-* **Raising the default worker count above 1** — an operator decision behind an
-  ADR (this slice ships default 1 = byte-identical sequential).
+* ~~Raising the default worker count above 1~~ — DONE per ADR-0016
+  (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): an unset ``BRUTEX_SWEEP_WORKERS`` now
+  resolves to the AUTO count ``max(1, min(cpu_count - 2, 8))`` with a
+  small-grid sequential fallback; ``BRUTEX_SWEEP_WORKERS=1`` stays the explicit
+  sequential opt-out. See :func:`resolve_sweep_workers`.
 * **The stall watchdog RAISES rather than warns** — a wedged worker's future never
   completes, so unlike ``fetch_pipeline`` (which only WARNs) this driver surfaces
   a :class:`SweepStallError` so a sweep can never hang forever.
@@ -149,16 +158,117 @@ if TYPE_CHECKING:
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
 
 # ────────────────────────────────────────────────────────────────────────
-# Config flag — DEFAULT-OFF (Golden Rule #3)
+# Config flag — AUTO-default (ADR-0016, DEC-MULTICORE-SWEEP-AUTODEFAULT-001)
 # ────────────────────────────────────────────────────────────────────────
 
 #: Environment variable naming the sweep worker count.
 SWEEP_WORKERS_ENV: Final[str] = "BRUTEX_SWEEP_WORKERS"
 
-#: The DEFAULT worker count. ``1`` = the EXISTING sequential path, byte-for-byte
-#: (``run_supervised_grid`` is called unchanged; this driver is never entered).
-#: Raising it is an operator decision behind an ADR (DEC-MULTICORE-SWEEP-PHASE1-001).
-DEFAULT_SWEEP_WORKERS: Final[int] = 1
+#: The SEQUENTIAL worker count — the explicit ``BRUTEX_SWEEP_WORKERS=1``
+#: opt-out AND the small-grid fallback. ``1`` = the EXISTING sequential path,
+#: byte-for-byte (``run_supervised_grid`` is called unchanged; this driver is
+#: never entered). This is no longer the unconditional DEFAULT: since ADR-0016
+#: (DEC-MULTICORE-SWEEP-AUTODEFAULT-001 — the deferred-raise of
+#: DEC-MULTICORE-SWEEP-PHASE1-001, MIGRATION.md #1080) an UNSET env resolves
+#: to the AUTO count (:func:`auto_sweep_workers`).
+SEQUENTIAL_SWEEP_WORKERS: Final[int] = 1
+
+#: The AUTO worker-count CAP. 8 total workers = 1 writer-actor + 7 EVAL
+#: processes — inside the CLAUDE.md §8 "10 cores used by sweep, 2 reserved"
+#: envelope on the M4 Pro reference machine, and below the point where the
+#: single writer-actor's per-tuple ``fsync`` is projected to dominate (the
+#: module-docstring Amdahl note). 8-worker THROUGHPUT is NOT benched — the
+#: cap is a conservative operator-authorized ceiling, not a measured optimum
+#: (ADR-0016 §5).
+AUTO_SWEEP_WORKERS_CAP: Final[int] = 8
+
+#: CPUs the AUTO count RESERVES for the rest of the machine (the CLAUDE.md §8
+#: "2 reserved" cores — daily apps run concurrently on the reference M4 Pro).
+AUTO_SWEEP_WORKERS_RESERVED_CPUS: Final[int] = 2
+
+#: Small-grid factor DEFAULT: a sweep with ``tuple_count < factor × auto``
+#: resolves to 1 (sequential) on the AUTO path — pool spawn + result
+#: marshalling overhead is not worth paying when there are fewer than ~2
+#: tuples per prospective worker (an explicit env override is never demoted).
+#: HONEST caveat (ADR-0016 §5): the demotion keys on tuple COUNT, not per-tuple
+#: WORK — a few-but-huge-tuple grid is demoted too, so the factor is
+#: env-tunable via :data:`SMALL_GRID_FACTOR_ENV` (``0`` disables the demotion).
+SMALL_GRID_FACTOR: Final[int] = 2
+
+#: Environment variable overriding :data:`SMALL_GRID_FACTOR` (the operator
+#: lever for a compute-heavy SMALL grid — e.g. 15 multi-year tuples on a
+#: 14-core box — which the count-keyed heuristic would otherwise demote to one
+#: core). ``0`` disables the small-grid demotion entirely; unset/blank keeps
+#: the default; an invalid value (non-integer / negative) falls back to the
+#: default and is logged LOUDLY at WARNING.
+SMALL_GRID_FACTOR_ENV: Final[str] = "BRUTEX_SWEEP_SMALL_GRID_FACTOR"
+
+
+def small_grid_factor(env: dict[str, str] | None = None) -> int:
+    """Resolve the small-grid demotion factor — env-tunable (ADR-0016 §5).
+
+    Reads :data:`SMALL_GRID_FACTOR_ENV` from *env* (default
+    :data:`os.environ`): unset/blank → :data:`SMALL_GRID_FACTOR`; a valid
+    integer ``>= 0`` → that value verbatim (``0`` DISABLES the small-grid
+    demotion — ``tuple_count < 0`` is never true); an INVALID value
+    (non-integer / negative) → the default, logged at WARNING on the
+    ``sweep.small_grid_factor.invalid`` event naming the value via ``repr``
+    (mirrors the :func:`resolve_sweep_workers` invalid-env loudness). O(1).
+
+    Parameters
+    ----------
+    env
+        Environment mapping (defaults to :data:`os.environ`) — injectable for
+        tests.
+
+    Returns
+    -------
+    int
+        The demotion factor (``>= 0``).
+    """
+    source = os.environ if env is None else env
+    raw = source.get(SMALL_GRID_FACTOR_ENV)
+    if raw is None or not raw.strip():
+        return SMALL_GRID_FACTOR
+    try:
+        parsed = int(raw)
+    except ValueError:
+        parsed = -1  # sentinel: falls through to the invalid branch below.
+    if parsed < 0:
+        _LOG.warning(
+            "sweep.small_grid_factor.invalid",
+            requested_env=repr(raw),
+            fallback=SMALL_GRID_FACTOR,
+        )
+        return SMALL_GRID_FACTOR
+    return parsed
+
+
+def auto_sweep_workers(cpu_count: int | None) -> int:
+    """The AUTO sweep worker count for *cpu_count* CPUs — pure + injectable.
+
+    ``max(1, min(cpu_count - 2, 8))`` per ADR-0016
+    (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): reserve
+    :data:`AUTO_SWEEP_WORKERS_RESERVED_CPUS` cores for the rest of the machine,
+    cap at :data:`AUTO_SWEEP_WORKERS_CAP`, and never go below the sequential
+    floor of 1. A ``None`` *cpu_count* (``os.cpu_count()`` may return ``None``
+    on exotic platforms) is treated as 1 → auto = 1 (sequential — never guess
+    parallelism on an undetectable machine). O(1).
+
+    Parameters
+    ----------
+    cpu_count
+        The detected CPU count, or ``None`` when undetectable.
+
+    Returns
+    -------
+    int
+        The auto worker count (``>= 1``).
+    """
+    if cpu_count is None:
+        cpu_count = 1
+    return max(1, min(cpu_count - AUTO_SWEEP_WORKERS_RESERVED_CPUS, AUTO_SWEEP_WORKERS_CAP))
+
 
 #: The bounded in-flight submission window, as a multiple of the pool size — caps
 #: outstanding FUTURES (``pending``) so the fan-out never over-submits (mirrors the
@@ -191,19 +301,60 @@ DEFAULT_STALL_SECONDS: Final[float] = 300.0
 _MIN_PARALLEL_WORKERS: Final[int] = 2
 
 
-def resolve_sweep_workers(env: dict[str, str] | None = None) -> int:
-    """Resolve the sweep worker count from ``BRUTEX_SWEEP_WORKERS`` — default 1.
+def resolve_sweep_workers(
+    env: dict[str, str] | None = None,
+    *,
+    tuple_count: int | None = None,
+    cpu_count_fn: Callable[[], int | None] | None = None,
+) -> int:
+    """Resolve the sweep worker count — AUTO-default multicore (ADR-0016).
 
-    Reads :data:`SWEEP_WORKERS_ENV`. Falls back to :data:`DEFAULT_SWEEP_WORKERS`
-    (``1`` = the sequential path, byte-for-byte) when unset, blank, non-integer,
-    or ``< 1`` — a bad value can never silently switch on parallelism nor request
-    a nonsensical zero/negative pool. O(1).
+    DEC-MULTICORE-SWEEP-AUTODEFAULT-001 (the deferred default-raise of
+    DEC-MULTICORE-SWEEP-PHASE1-001, MIGRATION.md #1080). Reads
+    :data:`SWEEP_WORKERS_ENV` and resolves:
+
+    * **unset / blank** → the AUTO count :func:`auto_sweep_workers`
+      (``max(1, min(cpu_count - 2, 8))``; ``os.cpu_count() is None`` → 1).
+    * **explicit valid env ``>= 1``** → that value verbatim (an env override
+      beats auto; ``=1`` stays the sequential opt-out, never demoted, never
+      promoted).
+    * **INVALID env (non-integer / ``< 1``)** → the AUTO count. NOTE: this
+      consciously REVERSES the prior documented invariant "a bad value can
+      never silently switch on parallelism" (a bad value used to fall back to
+      the sequential 1). The flip is owned by ADR-0016 §4 (operator-authorized:
+      once auto IS the default, degrading a typo to sequential would silently
+      throw away the machine — the opposite illusion); it is NOT silent — the
+      invalid value is logged LOUDLY at WARNING level on the
+      ``sweep.workers.resolved`` event.
+    * **small grid** — on the AUTO path only, when *tuple_count* is known and
+      ``tuple_count < factor × auto`` (and ``auto > 1``), resolve to 1
+      (sequential): pool spawn + marshalling overhead is not worth fewer than
+      ~2 tuples per worker. The factor is :func:`small_grid_factor` — the
+      :data:`SMALL_GRID_FACTOR` default (2), env-tunable via
+      :data:`SMALL_GRID_FACTOR_ENV` (``0`` disables the demotion — the
+      operator lever for a few-but-huge-tuple grid, ADR-0016 §5).
+
+    Emits ONE ``sweep.workers.resolved`` structlog event per call
+    (WARNING when the env value was invalid, else INFO) carrying
+    ``requested_env`` (repr) / ``env_invalid`` (bool — filterable even when
+    the small-grid fallback takes the ``reason`` slot) / ``cpu_count`` /
+    ``auto`` / ``tuple_count`` / ``resolved`` / ``reason`` — ``reason`` is one
+    of ``env_explicit`` / ``env_invalid_auto`` / ``auto`` /
+    ``small_grid_sequential`` / ``cpu_count_none``. O(1).
 
     Parameters
     ----------
     env
         Environment mapping (defaults to :data:`os.environ`) — injectable for
         tests.
+    tuple_count
+        The sweep's total tuple count when the caller knows it (the CLI
+        launcher passes ``count_sweep_tuples(grid)``); ``None`` = unknown →
+        the small-grid fallback is skipped.
+    cpu_count_fn
+        CPU-count probe (defaults to :func:`os.cpu_count`, resolved at CALL
+        time so a test monkeypatch of ``os.cpu_count`` is honored) —
+        injectable for tests.
 
     Returns
     -------
@@ -212,15 +363,53 @@ def resolve_sweep_workers(env: dict[str, str] | None = None) -> int:
     """
     source = os.environ if env is None else env
     raw = source.get(SWEEP_WORKERS_ENV)
-    if raw is None or not raw.strip():
-        return DEFAULT_SWEEP_WORKERS
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_SWEEP_WORKERS
-    if value < 1:
-        return DEFAULT_SWEEP_WORKERS
-    return value
+    probe = os.cpu_count if cpu_count_fn is None else cpu_count_fn
+    cpu = probe()
+    auto = auto_sweep_workers(cpu)
+
+    explicit: int | None = None
+    invalid = False
+    if raw is not None and raw.strip():
+        try:
+            parsed = int(raw)
+        except ValueError:
+            invalid = True
+        else:
+            if parsed < 1:
+                invalid = True
+            else:
+                explicit = parsed
+
+    factor = small_grid_factor(env)  # None → os.environ, same as `source`.
+    if explicit is not None:
+        resolved = explicit
+        reason = "env_explicit"
+    elif auto > 1 and tuple_count is not None and tuple_count < factor * auto:
+        resolved = SEQUENTIAL_SWEEP_WORKERS
+        reason = "small_grid_sequential"
+    elif invalid:
+        # The ADR-0016 §4 conscious reversal — see the docstring note above.
+        resolved = auto
+        reason = "env_invalid_auto"
+    elif cpu is None:
+        resolved = auto  # auto_sweep_workers(None) == 1 — sequential.
+        reason = "cpu_count_none"
+    else:
+        resolved = auto
+        reason = "auto"
+
+    log = _LOG.warning if invalid else _LOG.info
+    log(
+        "sweep.workers.resolved",
+        requested_env=repr(raw),
+        env_invalid=invalid,
+        cpu_count=cpu,
+        auto=auto,
+        tuple_count=tuple_count,
+        resolved=resolved,
+        reason=reason,
+    )
+    return resolved
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1085,14 +1274,18 @@ def run_parallel_grid(
 
 
 __all__ = [
+    "AUTO_SWEEP_WORKERS_CAP",
+    "AUTO_SWEEP_WORKERS_RESERVED_CPUS",
     "DEFAULT_STALL_SECONDS",
-    "DEFAULT_SWEEP_WORKERS",
+    "SEQUENTIAL_SWEEP_WORKERS",
+    "SMALL_GRID_FACTOR",
     "SWEEP_WORKERS_ENV",
     "AuditWriterLike",
     "ParallelGridDriver",
     "SweepParallelUsageError",
     "SweepStallError",
     "TupleWorkResult",
+    "auto_sweep_workers",
     "refuse_parallel_on_legacy_path",
     "resolve_sweep_workers",
     "run_parallel_grid",

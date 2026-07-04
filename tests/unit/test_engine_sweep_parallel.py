@@ -75,6 +75,7 @@ from brutex.orchestrator.audit import (
 from brutex.orchestrator.audit import read_entries as read_ingest_entries
 from brutex.orchestrator.audit import verify_chain as verify_ingest_chain
 from brutex.strategies.types import Side
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -215,45 +216,250 @@ def _run_parallel(tmp: Path, grid: SweepGridConfig, workers: int = 4) -> tuple[P
 
 
 # ────────────────────────── flag resolution ──────────────────────────
+# ADR-0016 (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): unset env → AUTO =
+# max(1, min(cpu_count - 2, 8)); explicit env beats auto (=1 stays the
+# sequential opt-out); INVALID env → auto (the conscious ADR-owned reversal,
+# logged LOUDLY); a small grid (tuple_count < 2 × auto) stays sequential.
+
+
+class TestAutoSweepWorkers:
+    @pytest.mark.parametrize(
+        ("cpu", "expected"),
+        [(1, 1), (2, 1), (4, 2), (10, 8), (14, 8), (None, 1)],
+    )
+    def test_auto_formula(self, cpu: int | None, expected: int) -> None:
+        # max(1, min(cpu - 2, 8)); None (os.cpu_count may return None) → 1.
+        assert mod.auto_sweep_workers(cpu) == expected
+
+
+class TestSmallGridFactor:
+    """The env-tunable small-grid demotion factor (ADR-0016 §5, review MINOR-1)."""
+
+    def test_unset_is_the_default(self) -> None:
+        assert mod.small_grid_factor({}) == mod.SMALL_GRID_FACTOR == 2
+
+    def test_blank_is_the_default(self) -> None:
+        assert mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: "   "}) == 2
+
+    def test_valid_override_is_verbatim(self) -> None:
+        assert mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: "5"}) == 5
+
+    def test_zero_is_valid_and_disables(self) -> None:
+        assert mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: "0"}) == 0
+
+    @pytest.mark.parametrize("raw", ["two", "-1", "2.5"])
+    def test_invalid_falls_back_to_default_and_warns(self, raw: str) -> None:
+        with capture_logs() as logs:
+            factor = mod.small_grid_factor({mod.SMALL_GRID_FACTOR_ENV: raw})
+        assert factor == mod.SMALL_GRID_FACTOR
+        (event,) = logs
+        assert event["event"] == "sweep.small_grid_factor.invalid"
+        assert event["log_level"] == "warning"
+        assert event["requested_env"] == repr(raw)
+        assert event["fallback"] == mod.SMALL_GRID_FACTOR
+
+    def test_reads_from_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(mod.SMALL_GRID_FACTOR_ENV, "3")
+        assert mod.small_grid_factor() == 3
 
 
 class TestResolveSweepWorkers:
-    def test_default_when_unset(self) -> None:
-        assert mod.resolve_sweep_workers({}) == mod.DEFAULT_SWEEP_WORKERS == 1
+    @pytest.mark.parametrize(
+        ("cpu", "expected"),
+        [(1, 1), (2, 1), (4, 2), (10, 8), (14, 8), (None, 1)],
+    )
+    def test_unset_env_resolves_to_auto(self, cpu: int | None, expected: int) -> None:
+        assert mod.resolve_sweep_workers({}, cpu_count_fn=lambda: cpu) == expected
 
-    def test_default_when_blank(self) -> None:
-        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "   "}) == 1
+    def test_unset_env_reason_is_auto(self) -> None:
+        with capture_logs() as logs:
+            mod.resolve_sweep_workers({}, cpu_count_fn=lambda: 14)
+        (event,) = logs
+        assert event["event"] == "sweep.workers.resolved"
+        assert event["log_level"] == "info"
+        assert event["reason"] == "auto"
+        assert event["requested_env"] == repr(None)
+        assert event["env_invalid"] is False
+        assert event["cpu_count"] == 14
+        assert event["auto"] == 8
+        assert event["tuple_count"] is None
+        assert event["resolved"] == 8
 
-    def test_default_when_non_integer(self) -> None:
-        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "four"}) == 1
+    def test_blank_env_is_unset_not_invalid(self) -> None:
+        # A blank value is treated as UNSET (auto, INFO) — not an invalid value.
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SWEEP_WORKERS_ENV: "   "}, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 8
+        (event,) = logs
+        assert event["log_level"] == "info"
+        assert event["reason"] == "auto"
 
-    def test_default_when_below_one(self) -> None:
-        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "0"}) == 1
-        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "-3"}) == 1
+    def test_cpu_count_none_resolves_sequential_with_reason(self) -> None:
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers({}, cpu_count_fn=lambda: None)
+        assert resolved == 1
+        (event,) = logs
+        assert event["reason"] == "cpu_count_none"
+        assert event["cpu_count"] is None
+        assert event["auto"] == 1
 
-    def test_reads_valid_value(self) -> None:
-        assert mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "6"}) == 6
+    def test_explicit_env_beats_auto(self) -> None:
+        # env=6 on a 14-core box (auto=8) → 6, verbatim.
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SWEEP_WORKERS_ENV: "6"}, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 6
+        (event,) = logs
+        assert event["reason"] == "env_explicit"
+        assert event["requested_env"] == repr("6")
+
+    def test_explicit_env_above_auto_is_honored(self) -> None:
+        # The override is verbatim even ABOVE the auto cap (operator's call).
+        assert (
+            mod.resolve_sweep_workers({mod.SWEEP_WORKERS_ENV: "12"}, cpu_count_fn=lambda: 4) == 12
+        )
+
+    def test_explicit_one_is_the_sequential_opt_out(self) -> None:
+        # =1 stays 1 regardless of cores or grid size — the opt-out survives.
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SWEEP_WORKERS_ENV: "1"}, tuple_count=1_000_000, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 1
+        (event,) = logs
+        assert event["reason"] == "env_explicit"
+
+    @pytest.mark.parametrize("raw", ["four", "0", "-3", "2.5"])
+    def test_invalid_env_resolves_to_auto_and_logs_loudly(self, raw: str) -> None:
+        # The ADR-0016 §4 CONSCIOUS REVERSAL of "a bad value can never silently
+        # enable parallelism": invalid → AUTO, pinned LOUD (WARNING, value named).
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SWEEP_WORKERS_ENV: raw}, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 8
+        (event,) = logs
+        assert event["event"] == "sweep.workers.resolved"
+        assert event["log_level"] == "warning"
+        assert event["reason"] == "env_invalid_auto"
+        assert event["requested_env"] == repr(raw)
+        assert event["env_invalid"] is True
+        assert event["resolved"] == 8
+
+    def test_small_grid_boundary_below_resolves_sequential(self) -> None:
+        # cpu=14 → auto=8; tuple_count == 2*auto - 1 == 15 → 1 (sequential).
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers({}, tuple_count=15, cpu_count_fn=lambda: 14)
+        assert resolved == 1
+        (event,) = logs
+        assert event["reason"] == "small_grid_sequential"
+        assert event["tuple_count"] == 15
+
+    def test_small_grid_boundary_at_resolves_auto(self) -> None:
+        # tuple_count == 2*auto == 16 → auto (the boundary is strict `<`).
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers({}, tuple_count=16, cpu_count_fn=lambda: 14)
+        assert resolved == 8
+        (event,) = logs
+        assert event["reason"] == "auto"
+
+    def test_factor_env_moves_the_small_grid_boundary(self) -> None:
+        # BRUTEX_SWEEP_SMALL_GRID_FACTOR=1 on cpu=14 (auto=8): the strict
+        # boundary moves to `< 1*auto` — 7 → sequential, 8 → auto.
+        env = {mod.SMALL_GRID_FACTOR_ENV: "1"}
+        assert mod.resolve_sweep_workers(env, tuple_count=7, cpu_count_fn=lambda: 14) == 1
+        assert mod.resolve_sweep_workers(env, tuple_count=8, cpu_count_fn=lambda: 14) == 8
+
+    def test_factor_env_zero_disables_the_demotion(self) -> None:
+        # factor=0 → `tuple_count < 0` never true — even a 1-tuple grid goes auto
+        # (the operator lever for a few-but-huge-tuple grid, ADR-0016 §5).
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SMALL_GRID_FACTOR_ENV: "0"}, tuple_count=1, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 8
+        (event,) = logs
+        assert event["reason"] == "auto"
+
+    def test_invalid_factor_env_keeps_default_and_warns(self) -> None:
+        # An invalid factor value falls back to the default 2× rule (tiny grid
+        # still demoted) and emits its OWN warning alongside the resolved event.
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SMALL_GRID_FACTOR_ENV: "huge"}, tuple_count=3, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 1
+        factor_event, resolved_event = logs
+        assert factor_event["event"] == "sweep.small_grid_factor.invalid"
+        assert factor_event["log_level"] == "warning"
+        assert resolved_event["event"] == "sweep.workers.resolved"
+        assert resolved_event["reason"] == "small_grid_sequential"
+
+    def test_small_grid_never_tagged_when_auto_is_one(self) -> None:
+        # auto==1 already IS sequential — the small-grid demotion is a no-op and
+        # must not masquerade as the reason (cpu=2 → auto=1; tuple_count=1 < 2).
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers({}, tuple_count=1, cpu_count_fn=lambda: 2)
+        assert resolved == 1
+        (event,) = logs
+        assert event["reason"] == "auto"
+
+    def test_small_grid_never_demotes_explicit_env(self) -> None:
+        # An explicit override beats the small-grid fallback (operator's call).
+        assert (
+            mod.resolve_sweep_workers(
+                {mod.SWEEP_WORKERS_ENV: "4"}, tuple_count=1, cpu_count_fn=lambda: 14
+            )
+            == 4
+        )
+
+    def test_invalid_env_with_small_grid_stays_sequential_and_loud(self) -> None:
+        # Invalid env lands on the AUTO path → the small-grid fallback still
+        # applies; the invalid value stays LOUD (WARNING) even so.
+        with capture_logs() as logs:
+            resolved = mod.resolve_sweep_workers(
+                {mod.SWEEP_WORKERS_ENV: "banana"}, tuple_count=3, cpu_count_fn=lambda: 14
+            )
+        assert resolved == 1
+        (event,) = logs
+        assert event["log_level"] == "warning"
+        assert event["reason"] == "small_grid_sequential"
+        assert event["requested_env"] == repr("banana")
+        # NIT-1: the invalid-env cause stays FILTERABLE even when the
+        # small-grid fallback takes the `reason` slot.
+        assert event["env_invalid"] is True
 
     def test_reads_from_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(mod.SWEEP_WORKERS_ENV, "5")
-        assert mod.resolve_sweep_workers() == 5
+        assert mod.resolve_sweep_workers(cpu_count_fn=lambda: 14) == 5
+
+    def test_default_probe_is_os_cpu_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # cpu_count_fn=None → os.cpu_count, resolved at CALL time (a monkeypatch
+        # of os.cpu_count is honored — the injectable seam's default contract).
         monkeypatch.delenv(mod.SWEEP_WORKERS_ENV, raising=False)
-        assert mod.resolve_sweep_workers() == 1
+        monkeypatch.setattr("os.cpu_count", lambda: 10)
+        assert mod.resolve_sweep_workers() == mod.auto_sweep_workers(10) == 8
 
 
-class TestDefaultOffProof:
-    """The DEFAULT-OFF invariant: unset flag → workers=1 → the sequential path.
+class TestAutoDefaultProof:
+    """The ADR-0016 auto-default + the preserved sequential reference.
 
-    Together with :class:`TestSequentialEqualsParallelGolden` (which proves
-    workers=1 sequential == workers=4 parallel byte-for-byte), this establishes
-    that the default (no ``BRUTEX_SWEEP_WORKERS`` set) is a ZERO-behavior-change
-    reuse of the EXISTING ``run_supervised_grid`` sequential path.
+    :class:`TestSequentialEqualsParallelGolden` (below, UNMODIFIED by the
+    auto-default flip) proves workers=1 sequential == workers=4 parallel
+    byte-for-byte — the correctness net the auto-default rests on: whichever
+    count the resolver picks, the result tree is the same bytes.
     """
 
-    def test_default_resolves_to_one(self) -> None:
-        # An empty env → 1 → the caller dispatches ``run_supervised_grid`` (never
-        # this driver), so production is byte-for-byte unchanged.
-        assert mod.resolve_sweep_workers({}) == 1
+    def test_unset_env_is_multicore_on_a_big_box(self) -> None:
+        # The #1080 deferred default-raise, now live: unset env on a 14-core
+        # box with a big grid → 8 workers (was 1 before ADR-0016).
+        assert mod.resolve_sweep_workers({}, tuple_count=100, cpu_count_fn=lambda: 14) == 8
+
+    def test_sequential_opt_out_constant(self) -> None:
+        assert mod.SEQUENTIAL_SWEEP_WORKERS == 1
 
     def test_sequential_result_is_the_reference(self, tmp_path: Path) -> None:
         # A workers=1 run IS the sequential path; the golden test proves the
