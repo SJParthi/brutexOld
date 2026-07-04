@@ -166,7 +166,7 @@ class TestStageSeamsBeat:
         beats, beat = _counting_beat()
         register_progress_beat(beat)
         warmed = warm_movers_snapshots([lambda: 1, lambda: 0, lambda: 2])
-        assert warmed == 2
+        assert warmed.warmed == 2
         assert len(beats) == 3  # ONE beat per warm job, raising or not
 
 
