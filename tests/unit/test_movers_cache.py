@@ -357,6 +357,45 @@ class TestAdaptiveFloorOptIn:
         cache.get_or_compute("b", generation=1, compute=lambda: recomputed.append("b") or "B2")  # type: ignore[func-returns-value]
         assert recomputed == ["b"]  # "b" was the evictee — "a" survived its stale serve
 
+    def test_stale_serve_survives_concurrent_eviction(self) -> None:
+        """The stale-serve MRU touch tolerates a CONCURRENT eviction.
+
+        The pull-active probe runs OUTSIDE the cache lock (it takes the pull
+        job's own lock), so another thread can evict the stale entry between
+        the stale decision and the MRU re-touch. The read must still serve the
+        snapshot it captured under the first lock — never a ``KeyError`` on the
+        vanished key, never a recompute (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001).
+        Deterministically driven: the probe itself plays the concurrent writer,
+        inserting a second key into a capacity-1 cache so ``"a"`` is evicted
+        before the stale-serve re-acquires the lock.
+        """
+        clock = _TickClock()
+        holder: dict[str, MoversSnapshotCache] = {}
+        fired: list[bool] = []
+
+        def _evicting_probe() -> bool:
+            if not fired:  # fire exactly once — on the stale-decision probe.
+                fired.append(True)
+                holder["cache"].get_or_compute("b", generation=5, compute=lambda: "B")
+            return True
+
+        cache = MoversSnapshotCache(
+            capacity=1, pull_active_probe=_evicting_probe, adaptive_floor=True, clock=clock
+        )
+        holder["cache"] = cache
+        cache.get_or_compute("a", generation=1, compute=lambda: _slow_compute(clock, 30.0, "A"))
+        clock.advance(1.0)  # deep inside the 30 s floor
+
+        def _must_not_run() -> str:
+            raise AssertionError("stale-under-pull within floor must not recompute")
+
+        with capture_logs() as logs:
+            assert cache.get_or_compute("a", generation=2, compute=_must_not_run) == "A"
+        assert [e["key"] for e in logs if e["event"] == "movers_cache.stale_served"] == ["a"]
+        # The concurrent insert won: "b" is the sole resident entry ("a" gone).
+        assert cache.size() == 1
+        assert cache.get_or_compute("b", generation=5, compute=_must_not_run) == "B"
+
 
 class TestConcurrentMissIsIdempotent:
     """Two concurrent cold misses both succeed with the same value (idempotent)."""
