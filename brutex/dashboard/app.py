@@ -4648,28 +4648,42 @@ def build_app(
         ``1day`` partition for ``basis=day`` (default), else the ``1minute``
         partition for ``basis=minute``. The picker for the pre-open report panel.
         READ-ONLY; empty when no lake.
+
+        DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
+        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
+        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        store reads run on a threadpool worker, NEVER the event loop.
+        Forensically proven (2026-07-04 run): this route ran the walk
+        SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
+        froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
+        requests burst-flushed on release). The store connection is built +
+        used inside the worker so its RLock stays on one thread
+        (DEC-DASHBOARD-FASTREAD-001).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
-        triples = resolve_report_datasets(lake_root.parent, basis=report_basis)
-        # Tag each report symbol with option-pullability so /reports can badge
-        # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
-        # the SAME store calls + single-source predicate the /universe explorer
-        # uses (no duplication). A symbol absent from the underlying universe
-        # (a spot-only dataset) defaults to NOT pullable.
-        pullable = {
-            (row["exchange"], row["symbol"]): row["option_pullable"]
-            for row in list_underlyings(
-                store.list_index_equity_instruments(),
-                fno_eligible=store.fno_eligible_underlyings(),
-                reference_only_ids=store.reference_only_security_ids(),
-            )
-        }
-        return JSONResponse(
-            {
+        lake = lake_root.parent
+
+        def _resolve() -> dict[str, Any]:
+            """Walk the lake + tag pullability off the event loop (threadpool)."""
+            triples = resolve_report_datasets(lake, basis=report_basis)
+            # Tag each report symbol with option-pullability so /reports can badge
+            # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
+            # the SAME store calls + single-source predicate the /universe explorer
+            # uses (no duplication). A symbol absent from the underlying universe
+            # (a spot-only dataset) defaults to NOT pullable.
+            pullable = {
+                (row["exchange"], row["symbol"]): row["option_pullable"]
+                for row in list_underlyings(
+                    store.list_index_equity_instruments(),
+                    fno_eligible=store.fno_eligible_underlyings(),
+                    reference_only_ids=store.reference_only_security_ids(),
+                )
+            }
+            return {
                 "symbols": [
                     {
                         "exchange": e,
@@ -4681,7 +4695,8 @@ def build_app(
                 ],
                 "basis": report_basis,
             }
-        )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
 
     @app.get("/api/v1/reports/preopen.xlsx")
     async def api_preopen_xlsx(
@@ -4740,8 +4755,10 @@ def build_app(
             symbols=wanted,
         )
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
+        # The workbook serialisation is CPU-bound over every report row — off the
+        # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
         return Response(
-            content=render_xlsx(rows, title=title),
+            content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
@@ -4808,7 +4825,11 @@ def build_app(
             if isinstance(lake_root, Path)
             else []
         )
-        blob = render_report_zip(rows, mode=report_mode, min_pct=Decimal(str(min_pct)))
+        # One xlsx per year + zip packing is CPU-bound over every report row —
+        # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        blob = await run_in_threadpool(
+            render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
+        )
         # Self-describing download name (DEC-REPORT-FILENAME-001): mode (+ the
         # top-mover threshold where it applies) + basis + the selected symbols +
         # the range — replaces the selection-blind static "preopen_report.zip".
@@ -5110,7 +5131,11 @@ def build_app(
         from brutex.observability.logging import resolve_log_file
 
         path = resolve_log_file()
-        records = tail_records(path, max_lines=lines)
+        # A bounded read, but still DISK I/O — on a stalled/contended volume a
+        # synchronous tail would wedge the event loop with every other request
+        # behind it, so it rides the same threadpool offload as the lake reads
+        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
     # ── Database viewer (DEC-DB-VIEWER-001) ─────────────────────────
