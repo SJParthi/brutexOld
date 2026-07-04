@@ -2262,7 +2262,11 @@ def _spawn_auto_resume_pull(
 
 
 def _start_auto_resume_on_boot(
-    lake_root: Path, log: Any
+    lake_root: Path,
+    log: Any,
+    *,
+    intent_store: Any = None,
+    resume_pipeline: Callable[[], None] | None = None,
 ) -> None:  # pragma: no cover — daemon thread + live ledger read / subprocess spawn
     """Run the opt-in boot-time auto-resume for *lake_root* in a background daemon thread.
 
@@ -2278,16 +2282,36 @@ def _start_auto_resume_on_boot(
     (default OFF — DEC-AUTO-RESUME-ON-BOOT-001), so a dev / CI boot is never
     surprised by a spontaneous pull. ``maybe_resume_on_boot`` never raises, so a
     failed resume trigger only logs — the boot is unaffected (Golden Rule #10).
+
+    DEC-PULL-INTENT-RESUME-001 (the ONE decision point): when *intent_store* (a
+    :class:`~brutex.dashboard.pull_intent.PullIntentStore`) and *resume_pipeline*
+    (the app's ``app.state.brutex_resume_pipeline`` seam) are BOTH wired and a
+    durable ``.pull_intent.json`` is present (escape hatch
+    ``BRUTEX_PULL_INTENT_RESUME`` not OFF), the dashboard PIPELINE resume runs
+    EXCLUSIVELY — the legacy spot-only CLI child is NOT spawned this boot, so
+    the two resumes can never race the account-wide single-flight ``flock``.
+    With no intent (or either seam unwired) the legacy path is byte-identical.
     """
     import threading
 
     from brutex.data.window_ledger_store import load_window_ledger
     from brutex.orchestrator.auto_resume import maybe_resume_on_boot
 
+    intent_present: Callable[[], bool] | None = None
+    if intent_store is not None and resume_pipeline is not None:
+        from brutex.dashboard.pull_intent import pull_intent_resume_active
+
+        def _intent_present() -> bool:
+            return pull_intent_resume_active(intent_store)
+
+        intent_present = _intent_present
+
     def _run() -> None:
         verdict = maybe_resume_on_boot(
             load_ledger=lambda: load_window_ledger(lake_root),
             resume=lambda incomplete: _spawn_auto_resume_pull(incomplete, lake_root, log),
+            intent_present=intent_present,
+            resume_intent=resume_pipeline,
         )
         log.info("auto_resume.verdict", verdict=verdict.value, lake_root=str(lake_root))
 
@@ -2559,12 +2583,26 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             allowed_hosts=allowed_hosts,
             host_guard="disabled" if "*" in allowed_hosts else "extended",
         )
+    # Durable pull-intent sidecar (DEC-PULL-INTENT-RESUME-001): built for THIS
+    # lake root so a real /pull-pipeline launch persists its re-fire payload,
+    # the job clears it on worker exit, and the extended auto-resume seam below
+    # can re-fire a pull that died mid-flight. Best-effort on the BIND path
+    # (Golden Rule #10): a construction failure logs and the dashboard still
+    # starts (the resume then simply stays unwired for this session).
+    pull_intent_store: Any = None
+    try:
+        from brutex.dashboard.pull_intent import PullIntentStore
+
+        pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+        _log.warning("pull_intent.build_failed", error=str(exc))
     app = build_app(
         state,
         instrument_store=store,
         summary_cache=summary_cache,
         liveproof=liveproof,
         allowed_hosts=allowed_hosts,
+        pull_intent_store=pull_intent_store,
     )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
@@ -2586,8 +2624,16 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # spawns a daemon thread (the resume DECISION never raises), but wrapping the launch
     # in a guard so even a thread-spawn failure logs + the dashboard still binds honours
     # the "never crashes boot" contract (Golden Rule #10).
+    # DEC-PULL-INTENT-RESUME-001 extends this seam: with a durable pull intent
+    # present, the PIPELINE resume (app.state.brutex_resume_pipeline) runs
+    # EXCLUSIVELY and the legacy spot-only CLI child is not spawned this boot.
     try:
-        _start_auto_resume_on_boot(_resolve_lake_root(lake_root), _log)
+        _start_auto_resume_on_boot(
+            _resolve_lake_root(lake_root),
+            _log,
+            intent_store=pull_intent_store,
+            resume_pipeline=getattr(app.state, "brutex_resume_pipeline", None),
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
         _log.warning("auto_resume.launch_failed", error=str(exc))
     # DEC-LAKE-HEAL-001 L3: the ONE-TIME content-token-stamped lake-heal startup sweep
