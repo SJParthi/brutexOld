@@ -16,6 +16,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1696,3 +1697,145 @@ class TestLedgerDeltaFlush:
             save_window_ledger(ledger, tmp_path)  # never raises
         assert any(log["event"] == "window_ledger.delta_prune_failed" for log in logs)
         assert ledger_path(tmp_path).is_file()  # the full save itself landed
+
+
+class TestSkippedAuditStore:
+    """DEC-SKIPPED-AUDIT-ROUNDROBIN-001 — the sidecar cursor + the once-per-pull driver."""
+
+    @staticmethod
+    def _skipped_ledger(symbols: list[str]) -> WindowLedger:
+        ledger = WindowLedger()
+        for symbol in symbols:
+            ledger.record(
+                _key(symbol),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                settle_empty=True,
+            )
+        return ledger
+
+    def test_cursor_round_trips(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import (
+            load_skipped_audit_cursor,
+            save_skipped_audit_cursor,
+        )
+
+        key = ("groww", "NIFTY", "1minute", "2021-01-01", "2021-02-01")
+        save_skipped_audit_cursor(tmp_path, pull_id="p1", cursor_key=key)
+        assert load_skipped_audit_cursor(tmp_path) == ("p1", key)
+        save_skipped_audit_cursor(tmp_path, pull_id="p2", cursor_key=None)
+        assert load_skipped_audit_cursor(tmp_path) == ("p2", None)
+
+    def test_missing_cursor_reads_none_silently(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import load_skipped_audit_cursor
+
+        with capture_logs() as logs:
+            assert load_skipped_audit_cursor(tmp_path) is None
+        assert logs == []  # a missing sidecar is the normal first-run state
+
+    def test_corrupt_cursor_is_tolerated_loudly(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import (
+            load_skipped_audit_cursor,
+            skipped_audit_cursor_path,
+        )
+
+        path = skipped_audit_cursor_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for body in ("not json", '["a list"]', '{"last_audit_pull_id": 7}'):
+            path.write_text(body, encoding="utf-8")
+            with capture_logs() as logs:
+                assert load_skipped_audit_cursor(tmp_path) is None
+            assert [log["event"] for log in logs] == [
+                "window_ledger.skipped_audit_cursor_invalid"
+            ]
+
+    def test_wrong_key_shape_is_tolerated_loudly(self, tmp_path: Path) -> None:
+        import json
+
+        from brutex.data.window_ledger_store import (
+            load_skipped_audit_cursor,
+            skipped_audit_cursor_path,
+        )
+
+        path = skipped_audit_cursor_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"last_audit_pull_id": "p1", "cursor_key": ["only", "two"]}),
+            encoding="utf-8",
+        )
+        with capture_logs() as logs:
+            assert load_skipped_audit_cursor(tmp_path) is None
+        assert [log["event"] for log in logs] == ["window_ledger.skipped_audit_cursor_invalid"]
+
+    def test_run_is_once_per_pull_id(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import run_skipped_audit
+
+        ledger = self._skipped_ledger(["A", "B", "C"])
+        assert run_skipped_audit(ledger, tmp_path, pull_id="p1", cap=2) == 2
+        # Idempotent re-entry (Golden Rule #7): the SAME pull_id audits nothing.
+        again = self._skipped_ledger(["A", "B", "C"])
+        assert run_skipped_audit(again, tmp_path, pull_id="p1", cap=2) == 0
+        assert all(r.status == SKIPPED for r in again.records())
+
+    def test_rotation_persists_across_pulls(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import run_skipped_audit
+
+        first = self._skipped_ledger(["A", "B", "C"])
+        assert run_skipped_audit(first, tmp_path, pull_id="p1", cap=2) == 2
+        assert {r.security_id for r in first.records() if r.status == FAILED} == {"A", "B"}
+        second = self._skipped_ledger(["A", "B", "C"])
+        assert run_skipped_audit(second, tmp_path, pull_id="p2", cap=2) == 2
+        # C (after the persisted cursor) then WRAP to A — round-robin coverage.
+        assert {r.security_id for r in second.records() if r.status == FAILED} == {"A", "C"}
+
+    def test_empty_selection_keeps_the_prior_cursor(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import (
+            load_skipped_audit_cursor,
+            run_skipped_audit,
+        )
+
+        seeded = self._skipped_ledger(["A"])
+        assert run_skipped_audit(seeded, tmp_path, pull_id="p1", cap=1) == 1
+        prior = load_skipped_audit_cursor(tmp_path)
+        assert prior is not None and prior[1] is not None
+        # A pull with NO skipped rows: 0 re-opened, cursor position preserved.
+        assert run_skipped_audit(WindowLedger(), tmp_path, pull_id="p2", cap=1) == 0
+        after = load_skipped_audit_cursor(tmp_path)
+        assert after == ("p2", prior[1])
+
+    def test_guarded_wrapper_none_ledger_and_error_swallow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data import window_ledger_store as store_module
+        from brutex.data.window_ledger_store import run_skipped_audit_guarded
+
+        assert run_skipped_audit_guarded(None, tmp_path, pull_id="p1") == 0  # dry-run
+
+        def _boom(*_a: Any, **_kw: Any) -> int:
+            raise ValueError("synthetic audit fault")
+
+        monkeypatch.setattr(store_module, "run_skipped_audit", _boom)
+        with capture_logs() as logs:
+            assert run_skipped_audit_guarded(WindowLedger(), tmp_path, pull_id="p1") == 0
+        assert [log["event"] for log in logs] == ["pull.skipped_audit_error"]
+
+    def test_cursor_save_failure_is_loud_never_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data import window_ledger_store as store_module
+        from brutex.data.window_ledger_store import save_skipped_audit_cursor
+
+        def _enospc(*_a: Any, **_kw: Any) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(
+            "brutex.data.atomic_io.atomic_write_simple", _enospc
+        )
+        with capture_logs() as logs:
+            save_skipped_audit_cursor(tmp_path, pull_id="p1", cursor_key=None)  # never raises
+        assert [log["event"] for log in logs] == [
+            "window_ledger.skipped_audit_cursor_save_failed"
+        ]
+        assert store_module.load_skipped_audit_cursor(tmp_path) is None

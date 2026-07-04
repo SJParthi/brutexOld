@@ -112,6 +112,7 @@ from brutex.data.window_ledger_store import (
     plan_windows,
     reconcile_ledger_windows,
     reconcile_ledger_with_lake,
+    run_skipped_audit_guarded,
 )
 from brutex.models import Instrument
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
@@ -1975,6 +1976,18 @@ def pull_all_spot(
                         # Pre-plan ledger snapshot — pairs with the pre-pull spans
                         # above so this pull's own settles can never false-flag.
                         spot_census_rows = ledger.to_rows()
+                        # Mechanized round-robin skipped-window audit
+                        # (DEC-SKIPPED-AUDIT-ROUNDROBIN-001): re-open ≤ 25
+                        # terminally-SKIPPED windows per pull (cursor-rotated,
+                        # once per pull_id, ≈0.03% of the worst-case 8h @ 3 r/s
+                        # call budget) on the pull's OWN ledger — BEFORE plan,
+                        # so the reopened FAILED rows are simply re-fetched by
+                        # this pull's normal spine (breaker-exempt via the
+                        # REOPENED marker; DATA-SAFE by construction). Runs
+                        # AFTER the census snapshot above so the audit's own
+                        # demotions never enter the pre-pull census pair.
+                        # Best-effort: any error is a 0 no-op, never a block.
+                        run_skipped_audit_guarded(ledger, lake_root, pull_id=pid)
                         plan_windows(
                             ledger,
                             instruments=instruments,

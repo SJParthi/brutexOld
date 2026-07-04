@@ -50,6 +50,7 @@ __all__ = [
     "REOPENED_MARKER",
     "SETTLED_STATUSES",
     "SKIPPED",
+    "SKIPPED_AUDIT_PER_PULL",
     "SUCCESS",
     "LedgerProgress",
     "WindowLedger",
@@ -109,6 +110,18 @@ CONFIRMED_EMPTY_MIN_FETCHES: int = 2
 #: never re-trip the breaker endlessly on the very windows the operator chose to
 #: re-verify.
 REOPENED_MARKER: str = "REOPENED"
+
+#: Cap on terminally-``SKIPPED`` windows the MECHANIZED per-pull audit re-opens
+#: (DEC-SKIPPED-AUDIT-ROUNDROBIN-001). HONEST BUDGET ARITHMETIC (Golden Rule
+#: #10): at the worst-case AIMD soft floor of 3 r/s an 8-hour pull has
+#: ``3 × 3600 × 8 = 86,400`` fetches, so 25 re-opened windows are
+#: ``25/86,400 ≈ 0.03%`` of that call budget — and since each re-opened window
+#: regains the FULL fresh confirmation budget (up to ~2-3 fetches under the
+#: empty-retry law before it re-settles), the honest per-pull ceiling is
+#: ~50-75 extra fetches ≈ 0.06-0.09%, still negligible. The audit is
+#: round-robin via a persisted cursor (:func:`~brutex.data.window_ledger_store.
+#: run_skipped_audit`), so EVERY skipped window is eventually re-verified.
+SKIPPED_AUDIT_PER_PULL: int = 25
 
 #: The two settled statuses — a window in either is skipped on the next pull.
 _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
@@ -738,26 +751,94 @@ class WindowLedger:
                 if limit is not None and len(doomed) >= limit:
                     break
                 doomed.append(wk)
-            for wk in doomed:
-                row = self._by_window[wk]
-                self._by_window[wk] = WindowLedgerRecord(
-                    market=row.market,
-                    security_id=row.security_id,
-                    interval=row.interval,
-                    window_start=row.window_start,
-                    window_end=row.window_end,
-                    status=FAILED,
-                    bars=row.bars,
-                    attempts=row.attempts,
-                    last_error=reason,
-                    first_seen_at=row.first_seen_at,
-                    last_attempt_at=row.last_attempt_at,
-                    empty_streak=0,
-                    in_pull_fetches=row.in_pull_fetches,
-                )
-            self._reopened.update(doomed)
-            self._dirty.update(doomed)
+            self._demote_skipped_locked(doomed, reason=reason)
         return len(doomed)
+
+    def _demote_skipped_locked(
+        self, doomed: list[tuple[str, str, str, str, str]], *, reason: str
+    ) -> None:
+        """Demote each *doomed* ``SKIPPED`` row to a retryable ``FAILED`` — caller holds the lock.
+
+        The ONE demotion body (CLAUDE.md §11 COMMON) shared by the operator
+        :meth:`reopen_skipped` and the mechanized :meth:`audit_reopen_skipped`:
+        status → ``FAILED``, ``empty_streak`` RESET to 0 (the full fresh
+        confirmation budget), *reason* stamped as ``last_error``, tombstoned in
+        ``_reopened`` (the merge-on-save must not resurrect the on-disk
+        ``SKIPPED`` copy) and stamped dirty (DEC-LEDGER-DELTA-FLUSH-001).
+        """
+        for wk in doomed:
+            row = self._by_window[wk]
+            self._by_window[wk] = WindowLedgerRecord(
+                market=row.market,
+                security_id=row.security_id,
+                interval=row.interval,
+                window_start=row.window_start,
+                window_end=row.window_end,
+                status=FAILED,
+                bars=row.bars,
+                attempts=row.attempts,
+                last_error=reason,
+                first_seen_at=row.first_seen_at,
+                last_attempt_at=row.last_attempt_at,
+                empty_streak=0,
+                in_pull_fetches=row.in_pull_fetches,
+            )
+        self._reopened.update(doomed)
+        self._dirty.update(doomed)
+
+    def audit_reopen_skipped(
+        self,
+        *,
+        start_after: tuple[str, str, str, str, str] | None = None,
+        cap: int = SKIPPED_AUDIT_PER_PULL,
+    ) -> tuple[int, tuple[str, str, str, str, str] | None]:
+        """Round-robin re-open of ≤ *cap* terminally-``SKIPPED`` windows — the mechanized audit.
+
+        DEC-SKIPPED-AUDIT-ROUNDROBIN-001 — the mechanized twin of the manual
+        ``brutex reopen-skipped`` (:meth:`reopen_skipped`, which always
+        re-audited the SAME head-of-sort rows under ``--limit``, making
+        round-robin coverage impossible). The selection walks the deterministic
+        ``(market, symbol, interval, start, end)`` sort order STRICTLY AFTER
+        *start_after* (the persisted cursor), WRAPPING to the head when the
+        tail holds fewer than *cap* rows — so successive pulls sweep the whole
+        ``SKIPPED`` population instead of hammering one prefix. Each selected
+        row is demoted through the SAME body as the operator re-open
+        (:meth:`_demote_skipped_locked` — :data:`REOPENED_MARKER` stamped, so
+        the re-verification is breaker-exempt via
+        :meth:`is_expected_empty_recheck`, and the demotion is DATA-SAFE: the
+        stored lake bars are untouched, the idempotent keep-first sink absorbs
+        the re-fetch). See :data:`SKIPPED_AUDIT_PER_PULL` for the honest
+        ≈0.03%-of-call-budget arithmetic (~0.06-0.09% counting the full fresh
+        confirmation budget each re-opened window regains).
+
+        Returns
+        -------
+        tuple[int, tuple | None]
+            ``(reopened_count, new_cursor)`` — *new_cursor* is the LAST key
+            selected in rotation order (the next pull resumes after it), or
+            ``None`` when nothing was selected (no ``SKIPPED`` rows / a
+            non-positive *cap*). O(rows log rows) once per pull start — the
+            :meth:`reopen_skipped` selection envelope, never the per-window
+            hot path.
+        """
+        if cap <= 0:
+            return 0, None
+        with self._lock:
+            skipped_keys = sorted(
+                wk for wk, row in self._by_window.items() if row.status == SKIPPED
+            )
+            if not skipped_keys:
+                return 0, None
+            if start_after is None:
+                selection = skipped_keys[:cap]
+            else:
+                tail = [wk for wk in skipped_keys if wk > start_after]
+                selection = tail[:cap]
+                if len(selection) < cap:
+                    head = [wk for wk in skipped_keys if wk <= start_after]
+                    selection.extend(head[: cap - len(selection)])
+            self._demote_skipped_locked(selection, reason=REOPENED_MARKER)
+            return len(selection), selection[-1]
 
     def reopened_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
         """The keys :meth:`reopen_skipped` demoted this process — thread-safe snapshot.

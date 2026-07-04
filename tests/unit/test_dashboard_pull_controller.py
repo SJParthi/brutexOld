@@ -2750,3 +2750,89 @@ class TestWrittenSettledCensusWired:
                 adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
             )
         assert not [log for log in logs if log["event"] == "pull.written_settled_mismatch"]
+
+
+class TestSkippedAuditWired:
+    """DEC-SKIPPED-AUDIT-ROUNDROBIN-001: the mechanized ≤25-window round-robin
+    re-audit of terminally-SKIPPED windows is LIVE in ``pull_all_spot`` — once
+    per pull_id, cursor-persisted, best-effort."""
+
+    @staticmethod
+    def _seed_skipped_option_row(tmp_path: Path) -> None:
+        """A terminally-SKIPPED OPTION-market row: audited by the spot pull's
+        seam but never re-fetched by the spot spine — so the demotion is
+        directly observable in the persisted ledger after the pull."""
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        seeded = WindowLedger()
+        seeded.record(
+            WindowKey(
+                market="groww-option",
+                security_id="NSE-NIFTY-25Jan24-21000-CE",
+                interval="1minute",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 26),
+            ),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_BULK_NOW,
+            settle_empty=True,
+        )
+        save_window_ledger(seeded, tmp_path)
+
+    def _pull(self, tmp_path: Path) -> None:
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2024-01-01",
+            to_date="2024-01-31",
+            intervals=("1minute",),
+            adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+
+    def test_pull_reopens_a_skipped_window_and_persists_the_cursor(
+        self, tmp_path: Path
+    ) -> None:
+        from brutex.data.window_ledger import REOPENED_MARKER
+        from brutex.data.window_ledger_store import (
+            load_skipped_audit_cursor,
+            load_window_ledger,
+        )
+        from structlog.testing import capture_logs
+
+        self._seed_skipped_option_row(tmp_path)
+        with capture_logs() as logs:
+            self._pull(tmp_path)
+        audits = [log for log in logs if log["event"] == "pull.skipped_audit"]
+        assert len(audits) == 1 and audits[0]["reopened"] == 1
+        persisted = load_window_ledger(tmp_path)
+        row = next(
+            r for r in persisted.records() if r.security_id == "NSE-NIFTY-25Jan24-21000-CE"
+        )
+        # Demoted FAILED + REOPENED (breaker-exempt) and NOT resurrected by the
+        # pull-end merge-on-save (the reopened tombstone) — re-fetchable by the
+        # NEXT F&O phase. Stored bars untouched by construction (DATA-SAFE).
+        assert row.status == "FAILED"
+        assert row.last_error == REOPENED_MARKER
+        cursor = load_skipped_audit_cursor(tmp_path)
+        assert cursor is not None and cursor[1] is not None
+        assert cursor[1][1] == "NSE-NIFTY-25Jan24-21000-CE"
+
+    def test_second_pull_re_audits_under_its_own_pull_id(self, tmp_path: Path) -> None:
+        """Each pull mints its OWN pull_id, so a NEW pull re-runs the audit —
+        and having demoted the only SKIPPED row on pull 1, pull 2 honestly
+        re-opens 0 (the audit converges; the once-per-pull_id short-circuit
+        itself is unit-pinned in TestSkippedAuditStore)."""
+        from structlog.testing import capture_logs
+
+        self._seed_skipped_option_row(tmp_path)
+        with capture_logs() as logs:
+            self._pull(tmp_path)
+            self._pull(tmp_path)  # a NEW pull_id → audits again, nothing left
+        audits = [log for log in logs if log["event"] == "pull.skipped_audit"]
+        assert [a["reopened"] for a in audits] == [1, 0]

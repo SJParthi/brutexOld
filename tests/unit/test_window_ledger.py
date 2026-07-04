@@ -1412,3 +1412,74 @@ class TestDirtyTracking:
         ledger.clear_dirty([self._wk(_key("A"))])
         assert [row[1] for row in ledger.dirty_rows()] == ["B"]
         assert ledger.dirty_keys() == frozenset({self._wk(_key("B"))})
+
+
+class TestAuditReopenSkipped:
+    """DEC-SKIPPED-AUDIT-ROUNDROBIN-001 — the mechanized ≤cap round-robin re-open."""
+
+    @staticmethod
+    def _skipped_ledger(symbols: list[str]) -> WindowLedger:
+        ledger = WindowLedger()
+        for symbol in symbols:
+            ledger.record(
+                _key(symbol),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                settle_empty=True,
+            )
+        return ledger
+
+    def test_default_cap_is_the_documented_25(self) -> None:
+        from brutex.data.window_ledger import SKIPPED_AUDIT_PER_PULL
+
+        assert SKIPPED_AUDIT_PER_PULL == 25
+
+    def test_head_selection_without_a_cursor(self) -> None:
+        ledger = self._skipped_ledger(["A", "B", "C", "D"])
+        count, cursor = ledger.audit_reopen_skipped(start_after=None, cap=2)
+        assert count == 2
+        assert cursor is not None and cursor[1] == "B"  # last selected in sort order
+        statuses = {r.security_id: r.status for r in ledger.records()}
+        assert statuses == {"A": FAILED, "B": FAILED, "C": SKIPPED, "D": SKIPPED}
+        # The demotion is the SAME body as the operator re-open: marker stamped,
+        # streak reset, merge tombstones + dirty stamps recorded.
+        demoted = [r for r in ledger.records() if r.status == FAILED]
+        assert all(r.last_error == REOPENED_MARKER and r.empty_streak == 0 for r in demoted)
+        assert len(ledger.reopened_keys()) == 2
+
+    def test_round_robin_advances_then_wraps(self) -> None:
+        ledger = self._skipped_ledger(["A", "B", "C"])
+        _count, cursor = ledger.audit_reopen_skipped(start_after=None, cap=2)  # A, B
+        # Model the NEXT pull: a fresh ledger with the same skipped population.
+        nxt = self._skipped_ledger(["A", "B", "C"])
+        count, cursor2 = nxt.audit_reopen_skipped(start_after=cursor, cap=2)
+        assert count == 2
+        statuses = {r.security_id: r.status for r in nxt.records()}
+        # C (after the cursor) then WRAP to A — never the same head prefix twice.
+        assert statuses == {"A": FAILED, "B": SKIPPED, "C": FAILED}
+        assert cursor2 is not None and cursor2[1] == "A"  # last in rotation order
+
+    def test_cursor_past_the_tail_wraps_to_head(self) -> None:
+        ledger = self._skipped_ledger(["A", "B"])
+        _c, tail_cursor = ledger.audit_reopen_skipped(start_after=None, cap=2)
+        assert tail_cursor is not None and tail_cursor[1] == "B"
+        nxt = self._skipped_ledger(["A", "B"])
+        count, cursor = nxt.audit_reopen_skipped(start_after=tail_cursor, cap=1)
+        assert count == 1
+        assert {r.security_id for r in nxt.records() if r.status == FAILED} == {"A"}
+        assert cursor is not None and cursor[1] == "A"
+
+    def test_no_skipped_rows_or_nonpositive_cap_is_a_noop(self) -> None:
+        empty = WindowLedger()
+        assert empty.audit_reopen_skipped(start_after=None, cap=5) == (0, None)
+        ledger = self._skipped_ledger(["A"])
+        assert ledger.audit_reopen_skipped(start_after=None, cap=0) == (0, None)
+        assert ledger.records()[0].status == SKIPPED  # untouched
+
+    def test_reopened_rows_are_breaker_exempt_rechecks(self) -> None:
+        ledger = self._skipped_ledger(["A"])
+        ledger.audit_reopen_skipped(start_after=None, cap=1)
+        assert ledger.is_expected_empty_recheck(_key("A")) is True  # REOPENED marker
+        assert ledger.is_skippable(_key("A")) is False  # the next pull re-fetches

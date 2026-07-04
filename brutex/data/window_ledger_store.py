@@ -74,6 +74,7 @@ from brutex.data.window_ledger import (
     FAILED,
     PLANNED,
     SKIPPED,
+    SKIPPED_AUDIT_PER_PULL,
     SUCCESS,
     WindowLedger,
     WindowLedgerRecord,
@@ -1209,6 +1210,164 @@ def make_locked_flush(flush: Callable[[], None]) -> Callable[[], None]:
     return _locked
 
 
+#: The round-robin skipped-audit cursor sidecar (DEC-SKIPPED-AUDIT-ROUNDROBIN-001)
+#: — a tiny JSON next to the ledger, NOT a new ledger Parquet column (the fixed
+#: 13-col ``_COLUMNS`` schema + the cross-process merge rank stay byte-untouched).
+SKIPPED_AUDIT_CURSOR_FILENAME: str = "skipped_audit_cursor.json"
+
+#: The 5-field window identity arity the cursor key must carry.
+_CURSOR_KEY_ARITY: int = 5
+
+
+def skipped_audit_cursor_path(lake_root: Path) -> Path:
+    """The audit-cursor sidecar path (``<lake_root>/window_ledger/skipped_audit_cursor.json``)."""
+    return ledger_dir(lake_root) / SKIPPED_AUDIT_CURSOR_FILENAME
+
+
+def load_skipped_audit_cursor(
+    lake_root: Path,
+) -> tuple[str, tuple[str, str, str, str, str] | None] | None:
+    """Read the persisted audit cursor — ``(last_audit_pull_id, cursor_key)`` or ``None``.
+
+    TOLERANT by contract (the audit is best-effort — a cursor problem must never
+    block a pull): a missing / unreadable / malformed / wrong-shaped sidecar
+    logs ``window_ledger.skipped_audit_cursor_invalid`` (missing is silent) and
+    reads as ``None`` — the next audit simply restarts the rotation from the
+    head, which is safe (re-opening is always DATA-SAFE).
+    """
+    import json
+
+    path = skipped_audit_cursor_path(lake_root)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        _LOG.warning(
+            "window_ledger.skipped_audit_cursor_invalid", path=str(path), error=str(exc)
+        )
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("last_audit_pull_id"), str):
+        _LOG.warning(
+            "window_ledger.skipped_audit_cursor_invalid", path=str(path), error="wrong shape"
+        )
+        return None
+    raw_key = payload.get("cursor_key")
+    if raw_key is None:
+        return str(payload["last_audit_pull_id"]), None
+    if (
+        isinstance(raw_key, list)
+        and len(raw_key) == _CURSOR_KEY_ARITY
+        and all(isinstance(part, str) for part in raw_key)
+    ):
+        key = (str(raw_key[0]), str(raw_key[1]), str(raw_key[2]), str(raw_key[3]), str(raw_key[4]))
+        return str(payload["last_audit_pull_id"]), key
+    _LOG.warning(
+        "window_ledger.skipped_audit_cursor_invalid", path=str(path), error="wrong key shape"
+    )
+    return None
+
+
+def save_skipped_audit_cursor(
+    lake_root: Path,
+    *,
+    pull_id: str,
+    cursor_key: tuple[str, str, str, str, str] | None,
+) -> None:
+    """Persist the audit cursor — best-effort, atomic, NEVER raises.
+
+    Uses the guard-free :func:`~brutex.data.atomic_io.atomic_write_simple`
+    (DELIBERATELY not the lake-guarded path: a cursor write failure — even a
+    disk-full — must never :class:`~brutex.data.errors.LakeWriteHalt` a pull;
+    the cursor is a convenience, the audit restarts from the head without it).
+    An :class:`OSError` logs ``window_ledger.skipped_audit_cursor_save_failed``.
+    """
+    import json
+
+    from brutex.data.atomic_io import atomic_write_simple
+
+    path = skipped_audit_cursor_path(lake_root)
+    body = json.dumps(
+        {
+            "last_audit_pull_id": pull_id,
+            "cursor_key": list(cursor_key) if cursor_key is not None else None,
+        },
+        sort_keys=True,
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(path, lambda tmp: tmp.write_text(body, encoding="utf-8"))
+    except OSError as exc:
+        _LOG.warning(
+            "window_ledger.skipped_audit_cursor_save_failed", path=str(path), error=str(exc)
+        )
+
+
+def run_skipped_audit(
+    ledger: WindowLedger,
+    lake_root: Path,
+    *,
+    pull_id: str,
+    cap: int = SKIPPED_AUDIT_PER_PULL,
+) -> int:
+    """Mechanized round-robin re-audit of ≤ *cap* terminally-``SKIPPED`` windows — once per pull.
+
+    DEC-SKIPPED-AUDIT-ROUNDROBIN-001. Loads the sidecar cursor; a matching
+    ``last_audit_pull_id`` short-circuits to 0 (idempotent re-entry — the audit
+    fires AT MOST ONCE per pull, Golden Rule #7); otherwise
+    :meth:`~brutex.data.window_ledger.WindowLedger.audit_reopen_skipped` demotes
+    the next *cap* rows in rotation order (wrapping at the tail) on the pull's
+    OWN in-memory ledger — so the ``reopened_keys`` tombstones flow into the
+    pull-end :func:`save_window_ledger` merge and the demotions persist. The new
+    cursor (the last key selected; the PRIOR cursor when nothing was selected)
+    is saved best-effort. Logs ONE ``pull.skipped_audit`` naming the count +
+    cursor. Budget honesty lives on
+    :data:`~brutex.data.window_ledger.SKIPPED_AUDIT_PER_PULL`.
+    """
+    prior = load_skipped_audit_cursor(lake_root)
+    if prior is not None and prior[0] == pull_id:
+        _LOG.debug("pull.skipped_audit_already_ran", pull_id=pull_id)
+        return 0
+    start_after = prior[1] if prior is not None else None
+    reopened, last_key = ledger.audit_reopen_skipped(start_after=start_after, cap=cap)
+    save_skipped_audit_cursor(
+        lake_root,
+        pull_id=pull_id,
+        cursor_key=last_key if last_key is not None else start_after,
+    )
+    _LOG.info(
+        "pull.skipped_audit",
+        pull_id=pull_id,
+        reopened=reopened,
+        cap=cap,
+        cursor=list(last_key) if last_key is not None else None,
+    )
+    return reopened
+
+
+def run_skipped_audit_guarded(
+    ledger: WindowLedger | None,
+    lake_root: Path,
+    *,
+    pull_id: str,
+    cap: int = SKIPPED_AUDIT_PER_PULL,
+) -> int:
+    """Best-effort :func:`run_skipped_audit` — a ``None`` ledger / any error is a 0 no-op.
+
+    The pull-seam wrapper (the #935/#1014 guarded-wiring precedent): a dry-run
+    threads ``ledger=None`` (no audit — nothing persists on a dry-run) and ANY
+    internal error logs ``pull.skipped_audit_error`` and returns 0, so the
+    mechanized audit can never block, slow, or crash a pull.
+    """
+    if ledger is None:
+        return 0
+    try:
+        return run_skipped_audit(ledger, lake_root, pull_id=pull_id, cap=cap)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort seam
+        _LOG.warning("pull.skipped_audit_error", pull_id=pull_id, error=str(exc))
+        return 0
+
+
 def begin_pull_ledger(
     lake_root: Path, *, dry_run: bool, now: datetime | None = None
 ) -> WindowLedger | None:
@@ -1235,6 +1394,7 @@ __all__ = [
     "LEDGER_DIRNAME",
     "LEDGER_FILENAME",
     "LIVE_FLUSH_MIN_INTERVAL_S",
+    "SKIPPED_AUDIT_CURSOR_FILENAME",
     "LedgerRow",
     "append_ledger_delta",
     "begin_pull_ledger",
@@ -1245,12 +1405,17 @@ __all__ = [
     "ledger_path",
     "list_ledger_deltas",
     "load_or_migrate_window_ledger",
+    "load_skipped_audit_cursor",
     "load_window_ledger",
     "make_live_ledger_flush",
     "merge_ledger_rows",
     "plan_windows",
     "reconcile_ledger_windows",
     "reconcile_ledger_with_lake",
+    "run_skipped_audit",
+    "run_skipped_audit_guarded",
+    "save_skipped_audit_cursor",
     "save_window_ledger",
     "seed_enclosed_windows",
+    "skipped_audit_cursor_path",
 ]
