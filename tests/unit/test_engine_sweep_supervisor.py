@@ -468,7 +468,13 @@ class TestRunSupervisedGrid:
         publish for the whole prefix, and the hash chain — with the summary as
         an ordinary entry — still verifies end-to-end.
         """
-        grid = _grid(instruments=["I0", "I1", "I2", "I3"])
+        # Synthetic instrument names by test intent (resume prefix needs 4
+        # distinct tuples) — opt out of the Layer-1 engine-scope invariant
+        # (DEC-ENGINE-SCOPE-GUARD-001).
+        grid = _grid(
+            instruments=["I0", "I1", "I2", "I3"],
+            unsafe_allow_out_of_scope_instruments=True,
+        )
         snaps: list[SweepProgressSnapshot] = []
         with (
             _open_guards(tmp_path, grid) as guards,
@@ -520,7 +526,13 @@ class TestRunSupervisedGrid:
         resumed prefix — one summary line, zero per-tuple emission, and the
         shared audit file still verifies across both runs.
         """
-        grid = _grid(instruments=["I0", "I1", "I2"])
+        # Synthetic instrument names by test intent (full-resume edge needs 3
+        # distinct tuples) — opt out of the Layer-1 engine-scope invariant
+        # (DEC-ENGINE-SCOPE-GUARD-001).
+        grid = _grid(
+            instruments=["I0", "I1", "I2"],
+            unsafe_allow_out_of_scope_instruments=True,
+        )
         with (
             _open_guards(tmp_path, grid) as guards,
             AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
