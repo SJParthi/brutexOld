@@ -45,6 +45,17 @@ never imports the pull spine and stays a thin, fully-testable decision layer
 * **ENGINE UNCHANGED.** Pure orchestration — the brute-force engine stays
   NIFTY / BANKNIFTY / SENSEX and the F&O lake stays REFERENCE_ONLY (CLAUDE.md
   §3). Nothing here touches the vocabulary, the rate caps, or the lake schema.
+* **ONE decision point with the intent-backed pipeline resume**
+  (DEC-PULL-INTENT-RESUME-001, superseding the CLI-child-ONLY arm of this
+  module's original decision for intent-backed boots): when the caller wires
+  the OPTIONAL ``intent_present`` / ``resume_intent`` pair into
+  :func:`maybe_resume_on_boot` and a durable ``.pull_intent.json`` is present,
+  the dashboard PIPELINE resume runs EXCLUSIVELY — the legacy spot-only CLI
+  child (``brutex fetch --until-clean``) is NOT spawned that boot. Without
+  that exclusivity the two resumes race the account-wide single-flight
+  ``flock``: whichever loses marks a fresh job FAILED at boot / logs a false
+  ``auto_resume.error``, and a healthy system can burn a restart token. With
+  no intent (or the pair unwired) the legacy path below is byte-identical.
 
 Every read is O(1) beyond the one O(N)
 :meth:`~brutex.data.window_ledger.WindowLedger.progress_counts` fold the ledger
@@ -171,6 +182,10 @@ class ResumeVerdict(Enum):
     NOTHING_TO_RESUME = "nothing_to_resume"
     #: The flag was ON, unfinished work was found, and the resume action FIRED.
     RESUMED = "resumed"
+    #: A durable pull intent was present, so the intent-backed PIPELINE resume
+    #: ran EXCLUSIVELY — the legacy CLI child was NOT spawned this boot
+    #: (DEC-PULL-INTENT-RESUME-001; independent of the legacy env flag).
+    INTENT_RESUMED = "intent_resumed"
     #: The flag was ON but a load / resume error was caught + logged — boot is
     #: unaffected (best-effort). The next boot re-tries.
     ERROR = "error"
@@ -250,12 +265,28 @@ def maybe_resume_on_boot(
     load_ledger: Callable[[], LedgerLike],
     resume: Callable[[IncompletePull], None],
     enabled: bool | None = None,
+    intent_present: Callable[[], bool] | None = None,
+    resume_intent: Callable[[], None] | None = None,
 ) -> ResumeVerdict:
     """Resume an in-progress pull at boot iff the flag is ON + work is outstanding — **never raises**.
 
     The one boot-time entry point (wired into the dashboard / CLI startup behind
     the flag). The sequence, returning exactly one :class:`ResumeVerdict`:
 
+    0. **Intent exclusivity** (DEC-PULL-INTENT-RESUME-001 — the ONE decision
+       point with the intent-backed pipeline resume). When BOTH
+       *intent_present* AND *resume_intent* are wired and *intent_present()*
+       reads ``True`` (a durable ``.pull_intent.json`` exists and the
+       ``BRUTEX_PULL_INTENT_RESUME`` escape hatch is not OFF), fire
+       *resume_intent* EXCLUSIVELY ⇒ :attr:`ResumeVerdict.INTENT_RESUMED` —
+       the legacy CLI child below is NOT spawned this boot (the both-firing
+       ``flock`` race is impossible), and this branch deliberately IGNORES the
+       legacy default-OFF env flag (the intent file is operator-click
+       evidence). A raising *resume_intent* ⇒ :attr:`ResumeVerdict.ERROR`
+       (still no legacy child — exclusivity holds even on failure); a raising
+       *intent_present* probe is logged and falls through to the legacy path.
+       With no intent (or the pair unwired — every pre-existing caller) the
+       steps below are byte-identical.
     1. **Gate.** *enabled* (default ``None`` ⇒ read
        :func:`resolve_auto_resume_on_boot`) OFF ⇒ :attr:`ResumeVerdict.DISABLED`
        — nothing is loaded, nothing fires. This is the byte-identical
@@ -277,6 +308,29 @@ def maybe_resume_on_boot(
     idempotence (re-pulling a settled window is a no-op; only unsettled windows
     re-pull), so this helper is purely the DECISION.
     """
+    if intent_present is not None and resume_intent is not None:
+        try:
+            has_intent = intent_present()
+        except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never crash boot
+            # An unreadable intent probe must not kill the LEGACY resume too —
+            # fall through to the byte-identical legacy path below.
+            _LOG.warning(
+                "auto_resume.intent_check_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            has_intent = False
+        if has_intent:
+            _LOG.info("auto_resume.intent_exclusive")
+            try:
+                resume_intent()
+            except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never crash boot
+                # Exclusivity holds even on failure: the legacy CLI child is
+                # NOT spawned this boot (it would race the pipeline resume's
+                # flock on the next attempt); the next boot re-tries.
+                _LOG.warning("auto_resume.error", error=str(exc), error_type=type(exc).__name__)
+                return ResumeVerdict.ERROR
+            return ResumeVerdict.INTENT_RESUMED
     active = resolve_auto_resume_on_boot() if enabled is None else enabled
     if not active:
         _LOG.info("auto_resume.disabled", env=AUTO_RESUME_ON_BOOT_ENV)

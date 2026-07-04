@@ -221,3 +221,111 @@ def test_maybe_resume_enabled_none_reads_env(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert verdict_off is ResumeVerdict.DISABLED
     assert len(resumed) == 1  # unchanged — DISABLED never fires the action
+
+
+# ── the ONE intent decision point (DEC-PULL-INTENT-RESUME-001) ────────────────
+
+
+def test_intent_present_runs_pipeline_resume_exclusively() -> None:
+    """Intent present ⇒ the pipeline resume fires EXCLUSIVELY: the legacy ledger
+    is never even loaded and the legacy CLI-child action never spawns — the
+    correction-(a) both-firing flock-race regression."""
+    loaded: list[bool] = []
+    legacy: list[IncompletePull] = []
+    pipeline: list[str] = []
+
+    def _load() -> LedgerLike:
+        loaded.append(True)
+        return _FakeLedger(_Counts(total=1, planned=1, failed=0, settled=0))
+
+    verdict = maybe_resume_on_boot(
+        load_ledger=_load,
+        resume=legacy.append,
+        enabled=True,  # legacy flag ON — the intent path must STILL win
+        intent_present=lambda: True,
+        resume_intent=lambda: pipeline.append("fired"),
+    )
+    assert verdict is ResumeVerdict.INTENT_RESUMED
+    assert pipeline == ["fired"]
+    assert legacy == [], "the legacy CLI child must NOT be spawned on an intent boot"
+    assert loaded == [], "the legacy ledger read is skipped entirely"
+
+
+def test_intent_path_ignores_legacy_disabled_flag() -> None:
+    """The intent resume is independent of the legacy default-OFF env flag —
+    the intent file is operator-click evidence (default ON with its own hatch)."""
+    pipeline: list[str] = []
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=1, planned=1, failed=0, settled=0)),
+        resume=lambda _i: None,
+        enabled=False,  # legacy OFF — irrelevant to the intent branch
+        intent_present=lambda: True,
+        resume_intent=lambda: pipeline.append("fired"),
+    )
+    assert verdict is ResumeVerdict.INTENT_RESUMED
+    assert pipeline == ["fired"]
+
+
+def test_no_intent_keeps_legacy_path_byte_identical() -> None:
+    """intent_present() False ⇒ the legacy decision proceeds exactly as before."""
+    legacy: list[IncompletePull] = []
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=8, planned=2, failed=1, settled=5)),
+        resume=legacy.append,
+        enabled=True,
+        intent_present=lambda: False,
+        resume_intent=lambda: pytest.fail("must not fire without an intent"),
+    )
+    assert verdict is ResumeVerdict.RESUMED
+    assert len(legacy) == 1
+
+
+def test_unwired_intent_pair_is_byte_identical() -> None:
+    """Either seam missing (every pre-existing caller) ⇒ the legacy path runs."""
+    legacy: list[IncompletePull] = []
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=3, planned=3, failed=0, settled=0)),
+        resume=legacy.append,
+        enabled=True,
+        intent_present=lambda: True,  # present, but no resume_intent wired
+        resume_intent=None,
+    )
+    assert verdict is ResumeVerdict.RESUMED
+    assert len(legacy) == 1
+
+
+def test_raising_intent_probe_falls_through_to_legacy() -> None:
+    """A raising intent_present probe is logged and the LEGACY resume still runs."""
+    legacy: list[IncompletePull] = []
+
+    def _boom_probe() -> bool:
+        raise OSError("intent probe exploded")
+
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=2, planned=1, failed=0, settled=1)),
+        resume=legacy.append,
+        enabled=True,
+        intent_present=_boom_probe,
+        resume_intent=lambda: pytest.fail("must not fire when the probe errored"),
+    )
+    assert verdict is ResumeVerdict.RESUMED
+    assert len(legacy) == 1
+
+
+def test_raising_resume_intent_is_error_and_legacy_still_not_spawned() -> None:
+    """Exclusivity holds even on failure: a raising pipeline resume returns ERROR
+    and the legacy CLI child is still NOT spawned this boot."""
+    legacy: list[IncompletePull] = []
+
+    def _boom() -> None:
+        raise RuntimeError("pipeline resume exploded")
+
+    verdict = maybe_resume_on_boot(
+        load_ledger=lambda: _FakeLedger(_Counts(total=1, planned=1, failed=0, settled=0)),
+        resume=legacy.append,
+        enabled=True,
+        intent_present=lambda: True,
+        resume_intent=_boom,
+    )
+    assert verdict is ResumeVerdict.ERROR
+    assert legacy == []
