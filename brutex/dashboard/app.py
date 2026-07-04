@@ -94,7 +94,7 @@ from brutex.dashboard.db_view import (
     sample_rows,
     spot_window_rollup,
     summarize_option_datasets,
-    summarize_spot_datasets,
+    summarize_spot_verdict_datasets,
     table_summary,
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
@@ -3682,8 +3682,12 @@ def build_app(
             # The O(files) full-lake aggregate — runs ONLY on a cache miss / a
             # dirty read past the 2 s TTL floor, on a threadpool worker, and
             # builds + uses store.connection here so the store RLock stays on one
-            # thread (DEC-DASHBOARD-FASTREAD-001).
-            return summarize_spot_datasets(store.connection, lake)
+            # thread (DEC-DASHBOARD-FASTREAD-001). FNO-pruned + bounded to the
+            # verdict intervals (DEC-COMPLETENESS-FNO-SKIP-001): a materialised
+            # options lake holds ~10⁵-10⁶ contract datasets the spot verdicts
+            # never read — the unfiltered scan blocked the first open for tens
+            # of minutes.
+            return summarize_spot_verdict_datasets(store.connection, lake)
 
         def _rows_and_rollup() -> dict[str, Any]:
             """Lake rows via SummaryCache + the ledger rollup PER REQUEST.
@@ -3754,7 +3758,7 @@ def build_app(
         )
         spot_rows = build_spot_coverage_payload(
             _summary_cache.get_or_refresh(
-                SPOT, recompute=lambda: summarize_spot_datasets(store.connection, lake)
+                SPOT, recompute=lambda: summarize_spot_verdict_datasets(store.connection, lake)
             ),
             spot_window_rollup(lake),
         )["rows"]

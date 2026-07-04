@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -882,7 +882,12 @@ def _validate_candle_coords(exchange: str, segment: str, symbol: str, interval: 
         raise ValueError(f"illegal candle symbol {symbol!r}")
 
 
-def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
+def list_candle_datasets(
+    lake_root: Path,
+    *,
+    exclude_segments: frozenset[str] = frozenset(),
+    intervals: Collection[str] | None = None,
+) -> list[dict[str, str]]:
     """Discover which ``(exchange, segment, symbol, interval)`` candle sets exist.
 
     Walks ``<lake_root>/bars/<exchange>/<segment>/<symbol>/<interval>/`` and
@@ -895,6 +900,16 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
     ----------
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    exclude_segments
+        Segment directory names to PRUNE at the walk level — an excluded
+        segment's tree is never even descended (DEC-COMPLETENESS-FNO-SKIP-001:
+        skipping ``FNO`` here avoids walking the ~10⁵-10⁶ per-contract
+        partition dirs a fully-materialised options lake holds). Empty (the
+        default) is byte-identical to the unfiltered walk.
+    intervals
+        When given, only these interval directories are listed (e.g. the spot
+        verdict pair ``("1minute", "1day")``); ``None`` (the default) lists
+        every valid interval.
 
     Returns
     -------
@@ -910,11 +925,13 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
         if exch_dir.name not in VALID_EXCHANGES:
             continue
         for seg_dir in sorted(p for p in exch_dir.iterdir() if p.is_dir()):
-            if seg_dir.name not in VALID_SEGMENTS:
+            if seg_dir.name not in VALID_SEGMENTS or seg_dir.name in exclude_segments:
                 continue
             for sym_dir in sorted(p for p in seg_dir.iterdir() if p.is_dir()):
                 for tf_dir in sorted(p for p in sym_dir.iterdir() if p.is_dir()):
                     if tf_dir.name not in VALID_INTERVALS:
+                        continue
+                    if intervals is not None and tf_dir.name not in intervals:
                         continue
                     if any(tf_dir.rglob("*.parquet")):
                         found.append(
@@ -1192,7 +1209,50 @@ def _execute_candle_page_resilient(
     return out_columns, list(cursor.fetchall())
 
 
-def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+#: The intervals the SPOT coverage/completeness VERDICTS actually read — the
+#: single FETCHED granularity (``1minute``, DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
+#: plus the derived ``1day`` daily anchor. The 19 derived intraday TFs the
+#: prebuild materialises are display-only derivatives of the same 1-minute
+#: base, so scanning them adds nothing to any verdict
+#: (DEC-COMPLETENESS-FNO-SKIP-001, refuter-amended register #12).
+SPOT_VERDICT_INTERVALS: Final[tuple[str, str]] = ("1minute", "1day")
+
+
+def summarize_spot_verdict_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+    """The FNO-pruned, verdict-interval-bounded spot summary scan — the dashboard's scan.
+
+    DEC-COMPLETENESS-FNO-SKIP-001 (mechanization-sweep register #12,
+    refuter-amended): after the pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001
+    #1145) a fully-materialised lake holds ~10⁵-10⁶ F&O contract × interval
+    datasets, and the UNFILTERED :func:`summarize_spot_datasets` walked + read a
+    Parquet-footer DISTINCT-timestamp aggregate for EVERY one of them — the
+    first ``/completeness`` open blocked for tens of minutes. The SPOT verdicts
+    only ever read the ``INDEX``/``CASH`` segments at the fetched ``1minute``
+    (+ the derived ``1day`` anchor), so this ONE wrapper (CLAUDE.md §11 COMMON —
+    both ``/coverage/spot`` and the completeness inputs call it) prunes the
+    ``FNO`` segment at the WALK level (never descended) and bounds the spot
+    intervals to :data:`SPOT_VERDICT_INTERVALS`. The spot rows it returns are
+    byte-identical to the unfiltered scan's spot ``1minute``/``1day`` rows
+    (regression-pinned), so every verdict is unchanged. The ``/coverage`` F&O
+    tabs keep their own scans; :func:`summarize_spot_datasets` itself stays
+    UNFILTERED by default — the F&O ledger⇄lake cold-start reconcile
+    (``load_lake_spans``) depends on the full walk.
+    """
+    return summarize_spot_datasets(
+        conn,
+        lake_root,
+        exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+        intervals=SPOT_VERDICT_INTERVALS,
+    )
+
+
+def summarize_spot_datasets(
+    conn: Any,
+    lake_root: Path,
+    *,
+    exclude_segments: frozenset[str] = frozenset(),
+    intervals: Collection[str] | None = None,
+) -> list[dict[str, Any]]:
     """Summarise every spot candle dataset in the lake for the coverage page.
 
     Discovers each ``(exchange, segment, symbol, interval)`` partition set via
@@ -1216,6 +1276,13 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         A DuckDB connection (see :func:`table_summary`).
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    exclude_segments, intervals
+        Optional walk-level pruning, threaded verbatim into
+        :func:`list_candle_datasets` (DEC-COMPLETENESS-FNO-SKIP-001 — the
+        dashboard verdict scans call the pruned
+        :func:`summarize_spot_verdict_datasets`). The defaults are
+        byte-identical to the unfiltered scan, which the F&O ledger⇄lake
+        reconcile (``load_lake_spans``) still requires.
 
     Returns
     -------
@@ -1227,7 +1294,9 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
              "last_date": <YYYY-MM-DD|None>}
     """
     rows: list[dict[str, Any]] = []
-    for dataset in list_candle_datasets(lake_root):
+    for dataset in list_candle_datasets(
+        lake_root, exclude_segments=exclude_segments, intervals=intervals
+    ):
         exchange = dataset["exchange"]
         segment = dataset["segment"]
         symbol = dataset["symbol"]
@@ -3999,6 +4068,7 @@ __all__ = [
     "REGISTRY_DB_NAME",
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
+    "SPOT_VERDICT_INTERVALS",
     "WINDOW_PHASES",
     "build_phase_progress",
     "build_window_payload",
@@ -4025,6 +4095,7 @@ __all__ = [
     "spot_window_rollup",
     "summarize_option_datasets",
     "summarize_spot_datasets",
+    "summarize_spot_verdict_datasets",
     "table_summary",
     "window_status_label",
 ]
