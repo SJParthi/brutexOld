@@ -310,6 +310,87 @@ def test_cmd_sweep_all_clean_run_fires_no_halt_alert(
     assert len(completed) == 1
 
 
+def test_cmd_sweep_all_small_grid_auto_resolves_sequential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0016 small-grid fallback END-TO-END: a real tiny sweep runs 1 worker.
+
+    With ``BRUTEX_SWEEP_WORKERS`` UNSET on a (simulated) 14-core box — where the
+    AUTO count alone would be 8 — the launcher threads the grid's real
+    ``count_sweep_tuples`` into ``resolve_sweep_workers``, the tiny grid
+    (``tuple_count < 2 × auto``) resolves to 1, and the SEQUENTIAL
+    ``run_supervised_grid`` path runs; the parallel driver is never dispatched.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.delenv("BRUTEX_SWEEP_WORKERS", raising=False)
+    monkeypatch.delenv("BRUTEX_SWEEP_SMALL_GRID_FACTOR", raising=False)
+    # resolve_sweep_workers defaults its probe to os.cpu_count AT CALL TIME, so
+    # this patch is honored — a 14-core box, auto = 8 (the fallback's teeth:
+    # without the small-grid rule this run WOULD dispatch the parallel driver).
+    monkeypatch.setattr("os.cpu_count", lambda: 14)
+
+    sequential_runs: list[bool] = []
+    real = sweep_supervisor.run_supervised_grid
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        sequential_runs.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sweep_supervisor, "run_supervised_grid", _spy)
+
+    def _never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a small grid must never dispatch the parallel driver")
+
+    monkeypatch.setattr(sweep_parallel, "run_parallel_grid", _never)
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps")
+
+    assert rc == 0
+    assert sequential_runs == [True]  # exactly one sequential grid run
+    out = capsys.readouterr().out
+    assert "parallel mode" not in out  # the parallel banner never printed
+    assert "sweep-all done" in out
+
+
+def test_cmd_sweep_all_big_grid_auto_dispatches_parallel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0016 AUTO path END-TO-END: a big-enough grid actually goes parallel.
+
+    The exact inverse of the small-grid test above (review MINOR-2): with
+    ``BRUTEX_SWEEP_WORKERS`` UNSET on a (simulated) 4-core box (auto = 2,
+    small-grid threshold = 2 × 2 = 4), a REAL 4-tuple grid (2 directions ×
+    2 k-values — exactly AT the strict boundary, so NOT small) dispatches the
+    PARALLEL driver through ``cmd_sweep_all`` for real; the sequential
+    ``run_supervised_grid`` is poisoned to fail the test if entered. A future
+    regression at the composition point (e.g. the resolver called before the
+    grid exists → a wrong ``tuple_count`` demoting everything to sequential)
+    trips the poison.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.delenv("BRUTEX_SWEEP_WORKERS", raising=False)
+    monkeypatch.delenv("BRUTEX_SWEEP_SMALL_GRID_FACTOR", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 4)  # auto = 2 → threshold 4
+
+    def _never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a big grid on the AUTO path must dispatch the parallel driver")
+
+    monkeypatch.setattr(sweep_supervisor, "run_supervised_grid", _never)
+
+    rc = _sweep_all(
+        lake_root,
+        catalog_path,
+        tmp_path / "sweeps",
+        directions="BUY,SELL",
+        k="2,3",  # 2 × 2 = 4 tuples == 2·auto → NOT small (strict `<` boundary)
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "parallel mode — 2 workers" in out  # the AUTO count, not an env override
+    assert "sweep-all done" in out
+
+
 def test_cmd_sweep_all_keyboard_interrupt_never_alerts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
