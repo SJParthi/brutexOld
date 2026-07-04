@@ -197,12 +197,19 @@ class TestCoverageApi:
         # row without the raw code comments (the operator-reported confusion).
         assert "How to read a row" in win.text
         assert "in-pull" in win.text
-        # DEC-FETCHES-COL-HONESTY-001: the column is RELABELLED "EMPTY-retries" and the
-        # legend states it is NOT the total vendor calls — the deeper timeout/429 in-call
-        # retry ladder a FAILED window burns is not counted, so the operator cannot read
-        # the column as "barely retried".
-        assert "EMPTY-retries" in win.text
+        # DEC-FETCHES-COL-RENAME-001: the column is RELABELLED "In-pull retries" (the
+        # #924 "EMPTY-retries" name was itself a mislabel — the in_pull_fetches counter
+        # ALSO counts transient 429/timeout re-attempts, option_ingest.py's inner retry
+        # loop bumps it on every GrowwError retry) and the legend still states it is NOT
+        # the total vendor calls — the deeper timeout/429 in-call retry ladder a FAILED
+        # window burns is not counted, so the operator cannot read the column as
+        # "barely retried".
+        assert "In-pull retries" in win.text
+        assert "EMPTY-retries" not in win.text
         assert "NOT the total vendor calls" in win.text
+        # Context-aware honesty: the legend explains a FAILED row's depth is the
+        # transient-retry depth, an EMPTY row's the empty-retry depth.
+        assert "transient" in win.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
