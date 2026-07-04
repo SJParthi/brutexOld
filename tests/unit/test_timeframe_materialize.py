@@ -15,6 +15,7 @@ injected I/O makes the whole control flow offline-testable.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -247,3 +248,32 @@ def test_last_ist_date_naive_timestamp_treated_as_utc() -> None:
 
     frame = pl.DataFrame({"ts_utc": [datetime(2021, 1, 4, 3, 45)]})
     assert _last_ist_date(frame) == "2021-01-04"
+
+
+# ── _derived_dirs_present (the incremental skip's existence guard) ───────────
+
+
+def test_derived_dirs_present_ignores_non_storable_labels(tmp_path: Path) -> None:
+    from brutex.data.timeframe_materialize import _derived_dirs_present
+
+    (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "5minute").mkdir(parents=True)
+    # "bogus" has no storable interval — a full run reports it `skipped`, so it
+    # needs no partition dir to exist; "5m" maps to the present 5minute dir.
+    assert _derived_dirs_present(tmp_path, "NSE", "INDEX", "NIFTY", ("5m", "bogus"), False) is True
+
+
+def test_derived_dirs_present_false_on_missing_tf_dir(tmp_path: Path) -> None:
+    from brutex.data.timeframe_materialize import _derived_dirs_present
+
+    (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "5minute").mkdir(parents=True)
+    assert _derived_dirs_present(tmp_path, "NSE", "INDEX", "NIFTY", ("5m", "15m"), False) is False
+
+
+def test_derived_dirs_present_requires_1day_dir_when_daily(tmp_path: Path) -> None:
+    from brutex.data.timeframe_materialize import _derived_dirs_present
+
+    base = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+    (base / "5minute").mkdir(parents=True)
+    assert _derived_dirs_present(tmp_path, "NSE", "INDEX", "NIFTY", ("5m",), True) is False
+    (base / "1day").mkdir()
+    assert _derived_dirs_present(tmp_path, "NSE", "INDEX", "NIFTY", ("5m",), True) is True
