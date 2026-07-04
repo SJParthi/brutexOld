@@ -1046,25 +1046,22 @@ def read_spot_join_with_recovery(
     returns the original empty join — the honest NO_SPOT, never a fabricated
     spot.
     """
-    join = spot_close_by_ts_window(
-        lake_root,
-        exchange=target.exchange,
-        underlying=parts.underlying,
-        interval=_MINUTE_INTERVAL,
-        start=target.start,
-        end=target.end,
-    )
-    if join.close_by_ts:
-        return join
-    for candidate in _spot_recovery_candidates(parts.underlying, target.exchange):
-        recovered = spot_close_by_ts_window(
+
+    def _probe(underlying: str) -> SpotJoin:
+        return spot_close_by_ts_window(
             lake_root,
             exchange=target.exchange,
-            underlying=candidate,
+            underlying=underlying,
             interval=_MINUTE_INTERVAL,
             start=target.start,
             end=target.end,
         )
+
+    join = _probe(parts.underlying)
+    if join.close_by_ts:
+        return join
+    for candidate in _spot_recovery_candidates(parts.underlying, target.exchange):
+        recovered = _probe(candidate)
         if recovered.close_by_ts:
             _LOG.info(
                 "greeks_enrich.spot_key_recovered",
