@@ -17,17 +17,26 @@ regardless of the selection algorithm (``select_stage3_survivors``'s
 ``load_results_tree`` upstream is such a caller and is out of this PR's
 scope, named in the ledger). Byte-identity of the selection is the UNIT
 suite's golden-equality job, not this bench's.
+
+The gate's TEETH are executable, per the repo precedent
+(DEC-FETCH-PER-WINDOW-GUARANTEE-001, MIGRATION.md #1026):
+``test_gate_has_teeth_accumulate_all_exceeds_ceiling`` runs the pre-#1263
+accumulate-all shape through the SAME harness and asserts it BLOWS the
+ceiling — so the bound can never silently go vacuous.
 """
 
 from __future__ import annotations
 
 import gc
 import tracemalloc
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 
 from brutex.engine.results_store import ResultRow
-from brutex.engine.stage3_select import group_survivors
+from brutex.engine.stage3_select import LeaderboardKey, group_survivors
+
+_Boards = dict[LeaderboardKey, tuple[ResultRow, ...]]
+_SelectFn = Callable[[Iterator[ResultRow]], _Boards]
 
 _SMALL = 10_000
 _LARGE = 100_000
@@ -36,7 +45,8 @@ _TOP_K = 64
 #: Flat-peak ceiling: a 10× candidate growth may not even double the traced
 #: peak (measured ratio ≈ 1.0 — the heap holds the SAME 64 entries either
 #: way; per-row allocations are transient). The pre-#1263 accumulate-all
-#: implementation measures ≈ 10× here, so the bound has real teeth while
+#: implementation measures ≈ 10× here — PINNED executably by the teeth test
+#: below, not just this comment — so the bound has real teeth while
 #: carrying generous headroom against allocator/CI noise.
 _PEAK_RATIO_CEILING = 2.0
 
@@ -75,12 +85,38 @@ def _candidates(n: int) -> Iterator[ResultRow]:
         )
 
 
-def _peak_bytes(n: int) -> int:
+def _select_bounded(rows: Iterator[ResultRow]) -> _Boards:
+    """The SHIPPED bounded-heap selection under measurement."""
+    return group_survivors(rows, top_k=_TOP_K)
+
+
+def _select_accumulate_all(rows: Iterator[ResultRow]) -> _Boards:
+    """TEETH oracle — the pre-#1263 accumulate-ALL-then-two-pass-sort shape.
+
+    Mirrors the unit suite's ``_group_survivors_reference`` (the verbatim
+    old implementation) but consumes the SAME streamed iterator as the
+    shipped path, so the two arms differ ONLY in retention strategy. Kept
+    in the TEST only — it exists to prove the flat-peak gate is not
+    vacuous (a revert to accumulate-all must blow the ceiling).
+    """
+    grouped: dict[LeaderboardKey, list[ResultRow]] = {}
+    for row in rows:
+        key = LeaderboardKey(instrument=row.instrument, tf=row.tf, mode=row.mode)
+        grouped.setdefault(key, []).append(row)
+    selected: _Boards = {}
+    for key in sorted(grouped, key=lambda k: (k.instrument, k.tf, k.mode)):
+        board = sorted(grouped[key], key=lambda r: r.run_id)
+        board.sort(key=lambda r: r.sharpe_ratio, reverse=True)
+        selected[key] = tuple(board[:_TOP_K])
+    return selected
+
+
+def _peak_bytes(n: int, select: _SelectFn = _select_bounded) -> int:
     """Traced allocation peak of one streamed selection over *n* candidates."""
     gc.collect()
     tracemalloc.start()
     try:
-        boards = group_survivors(_candidates(n), top_k=_TOP_K)
+        boards = select(_candidates(n))
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
@@ -101,4 +137,24 @@ class TestGroupSurvivorsPeakRamIsBoundedInCandidates:
             f"{small} B @ {_SMALL} rows -> {large} B @ {_LARGE} rows "
             f"(ratio {ratio:.2f} > {_PEAK_RATIO_CEILING}) — the top-K heap "
             f"bound (DEC-SWEEP-STREAMING-RANK-002) has regressed"
+        )
+
+    def test_gate_has_teeth_accumulate_all_exceeds_ceiling(self) -> None:
+        """The pre-#1263 accumulate-all shape BLOWS the same ceiling (~10×).
+
+        Runs the old retention strategy through the IDENTICAL harness
+        (same generator, same K, same ratio law) and asserts it FAILS the
+        bound — proof the flat-peak gate is not vacuous and a silent
+        revert to accumulate-all cannot pass it. Repo precedent for
+        executable teeth: DEC-FETCH-PER-WINDOW-GUARANTEE-001 (#1026).
+        """
+        _peak_bytes(_SMALL, _select_accumulate_all)  # warm-up, same as above
+        small = _peak_bytes(_SMALL, _select_accumulate_all)
+        large = _peak_bytes(_LARGE, _select_accumulate_all)
+        ratio = large / small
+        assert ratio > _PEAK_RATIO_CEILING, (
+            f"teeth lost: the accumulate-all reference peaked {small} B @ "
+            f"{_SMALL} rows -> {large} B @ {_LARGE} rows (ratio {ratio:.2f} "
+            f"<= {_PEAK_RATIO_CEILING}) — the harness no longer distinguishes "
+            f"O(candidates) retention, so the flat-peak gate is vacuous"
         )
