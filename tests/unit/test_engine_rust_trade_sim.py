@@ -958,3 +958,89 @@ class TestPerCallEnvelopeGuards:
         tp = value if leg == "take_profit_paisa" else None
         with pytest.raises(ValueError, match=f"{leg} must be > 0 or None"):
             sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=sl, take_profit_paisa=tp)
+
+
+# ── width-fallback WARNINGs NAME the offending word (DEC-SWEEP-RUST-WIRE-001 p1) ─
+#
+# The engine-scale spec's PR-1 gate: the u64 width-guard WARNING must name the
+# offending value + bit, not just a reason string, so the operator sees exactly
+# which word could not cross the `Vec<u64>` FFI edge. These tests pin the
+# `offending_value` (hex) / `offending_bit` fields on BOTH width reasons
+# (`bar_bits_u128` at construction, `mask_u128` at call time), the None-bit for
+# the negative API-misuse direction, first-offender determinism, and that
+# NON-width reasons carry NO offender fields.
+
+
+class TestWidthOffenderNamedInWarning:
+    def test_construction_oversize_bar_word_names_value_and_bit(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[1] |= 1 << 100  # first offender positionally
+        bits[3] |= 1 << 64  # a second offender — must NOT be the one named
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, bits, tf_minutes=1)
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "bar_bits_u128"
+        assert events[0]["offending_value"] == hex(bits[1])  # the FIRST offender
+        assert events[0]["offending_bit"] == 100
+
+    def test_construction_negative_bar_word_names_value_with_none_bit(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] = -1
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, bits, tf_minutes=1)
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["offending_value"] == "-0x1"
+        assert events[0]["offending_bit"] is None  # a "bit" has no meaning here
+
+    def test_construction_non_width_reason_carries_no_offender_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = ModuleType("fno_math")
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        bars = _feed()
+        with capture_logs() as logs:
+            ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "wheel_missing"
+        assert "offending_value" not in events[0]
+        assert "offending_bit" not in events[0]
+
+    def test_call_oversize_mask_names_value_and_bit(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.rust_active is True
+        with capture_logs() as logs:
+            sim.simulate_masks([1, (1 << 64) | 1], direction=Side.BUY)
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "mask_u128"
+        assert events[0]["offending_value"] == hex((1 << 64) | 1)
+        assert events[0]["offending_bit"] == 64  # the FIRST width u64 cannot hold
+
+    def test_call_negative_mask_names_value_with_none_bit(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.rust_active is True
+        with capture_logs() as logs:
+            sim.simulate_masks([-7, 1], direction=Side.BUY)
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["offending_value"] == "-0x7"
+        assert events[0]["offending_bit"] is None
+
+    def test_call_non_width_reason_carries_no_offender_fields(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.rust_active is True
+        with capture_logs() as logs:
+            sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=(2**63 - 1) // 8 + 1)
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "stop_loss_out_of_envelope"
+        assert "offending_value" not in events[0]
+        assert "offending_bit" not in events[0]
