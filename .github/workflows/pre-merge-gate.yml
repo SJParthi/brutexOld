@@ -35,10 +35,21 @@ jobs:
     # Only run for PR events (not push to main, scheduled, etc.)
     if: ${{ github.event.workflow_run.event == 'pull_request' }}
     steps:
-      - name: Checkout the head ref of the triggering PR
+      - name: Checkout the BASE repo's trusted tree (never PR code)
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          # DEC-CI-FORK-PR-HARDEN-001: this job previously checked out the
+          # triggering PR's HEAD SHA (`github.event.workflow_run.head_sha`)
+          # and executed scripts/ci/pre-merge-check.sh FROM THAT TREE.
+          # Under `workflow_run` the job runs with a BASE-repo token and
+          # `pull-requests: write`, so a fork PR could rewrite the script
+          # and run arbitrary code with the job token. The script needs
+          # ONLY the PR number (it queries the gh API — it never reads the
+          # PR working tree), so pin the checkout to the base repo's
+          # default branch and run the TRUSTED copy, passing the PR number
+          # as data.
+          ref: main
+          persist-credentials: false
 
       - name: Determine PR number from workflow_run
         id: pr
