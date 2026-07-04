@@ -226,6 +226,28 @@ jobs:
             mv .mutmut-cache ".mutmut-cache-$name"
           done
           echo "✅ No surviving mutants (all passes)"
+      - name: Report surviving mutants (names + diffs)
+        # DEC-MUTATION-SURVIVOR-KILL-001: the run step above executes under
+        # `set -e`, and mutmut 2.x's `mutmut run` exits NON-ZERO the moment a
+        # pass has surviving mutants (exit-code bit 2) — so the step dies
+        # BEFORE its own `mutmut results | tee` line ever executes, and the
+        # log (and the auto-filed alert issue pointing at it) never names the
+        # survivors (observed on issues #242/#500/#848/#960/#1094/#1099/#1101:
+        # every log ends at the aborted `mutmut run`). This step re-reads
+        # whichever `.mutmut-cache` the aborted pass left in the workspace
+        # (completed passes archive theirs via `mv`, so on failure the live
+        # cache is exactly the failed pass's) and prints the survivor IDs +
+        # unified diffs so a future failure is diagnosable from the log alone.
+        if: always()
+        run: |
+          if [ -f .mutmut-cache ]; then
+            echo "── mutmut results (in-flight cache of the failed pass) ──"
+            mutmut results || true
+            echo "── mutmut show all (survivor diffs, capped) ──"
+            mutmut show all 2>&1 | head -400 || true
+          else
+            echo "No in-flight .mutmut-cache — every pass completed and archived its cache."
+          fi
       - name: Upload mutmut cache
         if: always()
         uses: actions/upload-artifact@v7
