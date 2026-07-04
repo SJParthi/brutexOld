@@ -25,6 +25,7 @@ from ._fno_math import (
     count_supermasks_u64s,
     count_supermasks_u64s_nthreads,
     popcount_bytes,
+    sweep_drawdown_stats,
 )
 
 __all__ = [
@@ -39,4 +40,5 @@ __all__ = [
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
+    "sweep_drawdown_stats",
 ]
