@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
+from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
@@ -1579,6 +1580,13 @@ def pull_all_spot(
         # synchronous path byte-identical; drained in the ``finally`` before the ledger is
         # saved (so every queued window is processed + ledger-recorded first).
         _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
+        # Vendor-down error-storm breaker + dead-credential StillStale escalation
+        # (DEC-VENDOR-DOWN-BREAKER-001): ONE per-pull breaker shared by every phase /
+        # pass / until-clean round (any success resets it, so a recovering vendor never
+        # trips). Armed ONLY for a REAL live pull — a dry-run (synthetic adapter)
+        # threads ``None`` so it can never observe synthetic outcomes (the same gating
+        # as ``detect_completeness_gaps``).
+        _storm_breaker = None if dry_run else resolve_error_storm_breaker()
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -1699,6 +1707,7 @@ def pull_all_spot(
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
+                    storm_breaker=_storm_breaker,
                 )
                 passes.append(res)
                 return res
@@ -2295,6 +2304,11 @@ def pull_candles(
         # stays entirely producer-side, UNTOUCHED. ``None`` (default / dry-run) keeps the
         # synchronous path byte-identical; drained in the ``finally`` before the ledger save.
         _fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
+        # Vendor-down error-storm breaker + dead-credential StillStale escalation
+        # (DEC-VENDOR-DOWN-BREAKER-001): one per-pull breaker, armed ONLY for a REAL
+        # live pull (a dry-run threads ``None`` — the ``detect_completeness_gaps``
+        # gating below).
+        _storm_breaker = None if dry_run else resolve_error_storm_breaker()
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2359,6 +2373,7 @@ def pull_candles(
                     # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
                     # false-red on the synthetic adapter's first-day-only bars.
                     detect_completeness_gaps=True,
+                    storm_breaker=_storm_breaker,
                 )
             except GrowwAuthError as exc:
                 # A TERMINAL dead-credential auth failure HALTED the spine mid-phase

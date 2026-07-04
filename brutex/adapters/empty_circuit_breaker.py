@@ -111,9 +111,11 @@ __all__ = [
     "EMPTY_BREAKER_MIN_OBSERVATIONS_ENV",
     "EMPTY_BREAKER_MIN_SERIES",
     "EMPTY_BREAKER_MIN_SERIES_ENV",
+    "OFF_ENV_VALUES",
     "EmptySettleBreaker",
     "MassEmptySettleHalt",
     "resolve_empty_breaker",
+    "resolve_int_env",
 ]
 
 #: Default CONSECUTIVE counted-empty-run trip threshold. Heuristic, NOT a vendor
@@ -191,8 +193,11 @@ EMPTY_BREAKER_FRACTION_MIN_SERIES_ENV: Final[str] = "BRUTEX_EMPTY_BREAKER_FRACTI
 #: kill-switchable pull levers.
 EMPTY_BREAKER_ENABLED_ENV: Final[str] = "BRUTEX_EMPTY_BREAKER"
 
-#: Truthy-off spellings for :data:`EMPTY_BREAKER_ENABLED_ENV` (case-insensitive).
-_OFF_VALUES: Final[frozenset[str]] = frozenset({"off", "0", "false", "no"})
+#: Truthy-off spellings for the breaker kill switches (case-insensitive) — PUBLIC
+#: (CLAUDE.md §11 COMMON): the error-storm breaker
+#: (:mod:`brutex.adapters.error_storm_breaker`, DEC-VENDOR-DOWN-BREAKER-001) shares
+#: the SAME off-spellings for its own kill switch instead of copying the set.
+OFF_ENV_VALUES: Final[frozenset[str]] = frozenset({"off", "0", "false", "no"})
 
 
 class MassEmptySettleHalt(BruteXError):
@@ -453,8 +458,13 @@ class EmptySettleBreaker:
         return ""
 
 
-def _resolve_int(env_name: str, default: int) -> int:
-    """Read an int env override; unset / blank / non-int fall back to *default* — **O(1)**."""
+def resolve_int_env(env_name: str, default: int) -> int:
+    """Read an int env override; unset / blank / non-int fall back to *default* — **O(1)**.
+
+    PUBLIC (CLAUDE.md §11 COMMON): shared with the error-storm breaker's resolver
+    (:func:`brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`) so the
+    fail-safe env parsing has ONE source of truth.
+    """
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
         return default
@@ -494,17 +504,17 @@ def resolve_empty_breaker(
     confirmed-deep far-OTM strike set). **O(1)**.
     """
     raw_enabled = os.environ.get(EMPTY_BREAKER_ENABLED_ENV)
-    enabled = raw_enabled is None or raw_enabled.strip().lower() not in _OFF_VALUES
+    enabled = raw_enabled is None or raw_enabled.strip().lower() not in OFF_ENV_VALUES
     return EmptySettleBreaker(
-        consecutive_limit=_resolve_int(
+        consecutive_limit=resolve_int_env(
             EMPTY_BREAKER_CONSECUTIVE_ENV, EMPTY_BREAKER_CONSECUTIVE_LIMIT
         ),
         fraction_limit=_resolve_fraction(EMPTY_BREAKER_FRACTION_ENV, EMPTY_BREAKER_FRACTION_LIMIT),
-        min_observations=_resolve_int(
+        min_observations=resolve_int_env(
             EMPTY_BREAKER_MIN_OBSERVATIONS_ENV, EMPTY_BREAKER_MIN_OBSERVATIONS
         ),
-        min_series=_resolve_int(EMPTY_BREAKER_MIN_SERIES_ENV, EMPTY_BREAKER_MIN_SERIES),
-        fraction_min_series=_resolve_int(
+        min_series=resolve_int_env(EMPTY_BREAKER_MIN_SERIES_ENV, EMPTY_BREAKER_MIN_SERIES),
+        fraction_min_series=resolve_int_env(
             EMPTY_BREAKER_FRACTION_MIN_SERIES_ENV, EMPTY_BREAKER_FRACTION_MIN_SERIES
         ),
         enabled=enabled,

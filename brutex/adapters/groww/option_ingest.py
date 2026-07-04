@@ -70,6 +70,12 @@ from brutex.adapters.empty_circuit_breaker import (
     MassEmptySettleHalt,
     resolve_empty_breaker,
 )
+from brutex.adapters.error_storm_breaker import (
+    ErrorStormBreaker,
+    VendorDownError,
+    observe_window_failure,
+    observe_window_success,
+)
 from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClientProtocol, client_self_paces
 from brutex.adapters.groww.constants import (
@@ -85,6 +91,7 @@ from brutex.adapters.groww.contracts import (
 )
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
+    GrowwCredentialDeadError,
     GrowwError,
     is_auth_failure,
     is_rate_limit,
@@ -183,12 +190,22 @@ _MAX_BACKOFF_S: float = 8.0
 #: :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` — a transient
 #: auth-family shape stays a per-contract quarantine, and the mid-pull re-mint
 #: self-heal (DEC-GROWW-TOKEN-REAUTH-001) never raises out of ``client._call`` at all.
+#: ``VendorDownError`` + ``GrowwCredentialDeadError`` join it
+#: (DEC-VENDOR-DOWN-BREAKER-001): a tripped vendor-down error-storm breaker means the
+#: VENDOR (or the network path to it) is down — every remaining contract would burn
+#: its whole retry ladder identically; a dead-credential escalation means every
+#: remaining fetch is auth-stalled against the SAME dead token. Both halt
+#: (``GrowwCredentialDeadError`` is a TERMINAL ``GrowwAuthError`` subclass, so it also
+#: satisfies the ``is_terminal_auth_failure`` carve-out — listed explicitly as the
+#: DEC-VENDOR-DOWN-BREAKER-001 escalation member).
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
     MassEmptySettleHalt,
     GrowwAuthError,
+    VendorDownError,
+    GrowwCredentialDeadError,
 )
 
 #: One unit of OUTER-loop work for the parallel fan-out: a derivative
@@ -361,6 +378,7 @@ def ingest_option_contract(
     on_raw_payload: RawPayloadHook | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -502,6 +520,26 @@ def ingest_option_contract(
                     **fields,
                 )
                 if attempt >= max_attempts:
+                    # Vendor-down error-storm breaker + dead-credential StillStale
+                    # escalation (DEC-VENDOR-DOWN-BREAKER-001): this window's bounded
+                    # transient-retry ladder is EXHAUSTED — feed the per-pull breaker
+                    # AFTER the ledger record above (the window stays re-pullable). The
+                    # storm's distinct-symbol unit is the UNDERLYING symbol — one
+                    # underlying's whole multi-contract chain failing alone can never
+                    # satisfy the >=3-distinct-symbols floor (the constants.py
+                    # guarantee) — while the window identity stays the CONTRACT-level
+                    # ledger `key`, so each contract window counts once per pull. A
+                    # sustained zero-success storm across distinct underlyings RAISES
+                    # VendorDownError; K consecutive StillStale outcomes over T minutes
+                    # RAISE GrowwCredentialDeadError — both _GLOBAL_STOP_ERRORS members,
+                    # so the driver halts the pull instead of quarantining per contract.
+                    # None (dry-run / synthetic / tests) observes nothing.
+                    observe_window_failure(
+                        storm_breaker,
+                        symbol=contract.underlying_symbol,
+                        window_key=key,
+                        exc=exc,
+                    )
                     # Budget spent — leave the window UNMARKED-as-success (deferred).
                     return IngestReport(
                         windows=1,
@@ -538,6 +576,12 @@ def ingest_option_contract(
     # re-confirming empty is EXPECTED, not throttle evidence — observed but never counted
     # (`is_expected_empty_recheck`). Observed BEFORE the fast-settle math so a poisoned
     # window can never settle on the tripping call.
+    # Vendor-down error-storm breaker (DEC-VENDOR-DOWN-BREAKER-001): a clean fetch —
+    # bars OR a vendor-confirmed empty 200 — is a transport SUCCESS (the vendor answered:
+    # it is ALIVE), so it resets BOTH the vendor-down storm and the StillStale streak.
+    # Observed before the mass-EMPTY breaker feed (a separate, content-level verdict).
+    # The UNDERLYING symbol mirrors the failure seam (the storm's per-underlying unit).
+    observe_window_success(storm_breaker, symbol=contract.underlying_symbol)
     if empty_breaker is not None:
         series = f"{contract.symbol}:{interval}"
         if raw_bars:
@@ -1501,6 +1545,7 @@ def run_groww_option_ingest(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1623,6 +1668,17 @@ def run_groww_option_ingest(
     Rule #10: the residual false-positive budget on genuinely-illiquid in-band
     chains rides on the env-tunable thresholds, not a silent exclusion).
 
+    *storm_breaker* (DEC-VENDOR-DOWN-BREAKER-001): the vendor-down error-storm
+    breaker + dead-credential StillStale escalator, threaded verbatim into every
+    contract's window fetches. Its trip
+    (:class:`~brutex.adapters.error_storm_breaker.VendorDownError` /
+    :class:`~brutex.adapters.groww.errors.GrowwCredentialDeadError`) is a
+    :data:`_GLOBAL_STOP_ERRORS` member — the pull halts loudly. ``None`` (the
+    default — dry-run / synthetic / unit-test callers) never arms it; ONLY the
+    real-vendor production sites construct one via
+    :func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`
+    (the ``capture_hook_factory`` / ``detect_completeness_gaps`` gating pattern).
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -1732,6 +1788,7 @@ def run_groww_option_ingest(
                 on_raw_payload=contract_hook,
                 fetch_pipeline=fetch_pipeline,
                 empty_breaker=breaker,
+                storm_breaker=storm_breaker,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
