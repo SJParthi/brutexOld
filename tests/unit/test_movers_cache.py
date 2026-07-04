@@ -226,7 +226,12 @@ class TestAdaptiveFloorOptIn:
             pull_active_probe=lambda: True, adaptive_floor=True, clock=clock
         )
         # Seed: a 30 s walk at generation 1 → floor = max(2, 30) = 30 s.
-        assert cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1")) == "v1"
+        assert (
+            cache.get_or_compute(
+                "k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1")
+            )
+            == "v1"
+        )
         clock.advance(10.0)  # 10 s < the 30 s floor
 
         def _must_not_run() -> str:

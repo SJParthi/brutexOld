@@ -176,11 +176,12 @@ class TestWarmSeedsAllMemos:
         caches = _caches()
         caches["db_datasets_cache"] = floored
         assert _warm(lake, caches, generation=2) == 5
-        fresh = floored.get_or_compute(
-            MOVERS_DATASETS_KEY, generation=2, compute=lambda: ["never"]
-        )
-        assert fresh != ["stale"]  # the seed replaced the stale entry
-        assert {d["segment"] for d in fresh} == {"INDEX", "FNO"}
+
+        def _must_not_run() -> list[dict[str, str]]:
+            raise AssertionError("the warm seed must be the clean hit at generation 2")
+
+        fresh = floored.get_or_compute(MOVERS_DATASETS_KEY, generation=2, compute=_must_not_run)
+        assert {d["segment"] for d in fresh} == {"INDEX", "FNO"}  # the fresh seed, not "stale"
 
 
 class TestWarmBestEffort:
