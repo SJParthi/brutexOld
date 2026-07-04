@@ -158,6 +158,218 @@ class TestPackBandValidation:
         assert pid == 1380609
 
 
+def _seed_lake_pair(
+    lake: Path,
+    *,
+    spot_symbol: str,
+    spot_segment: str,
+    option_symbol: str,
+    spot_close: str,
+    option_close: str,
+) -> None:
+    """Seed one spot bar + one option bar at ``_BAR_TS`` through the real sink."""
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+
+    def _bar(close: str, *, oi: int | None) -> CandleBar:
+        d = Decimal(close)
+        return CandleBar(
+            timestamp=_BAR_TS, open=d, high=d, low=d, close=d, volume=10, open_interest=oi
+        )
+
+    sink.append(
+        exchange="NSE",
+        segment=spot_segment,
+        symbol=spot_symbol,
+        interval="1minute",
+        bars=[_bar(spot_close, oi=None)],
+    )
+    sink.append(
+        exchange="NSE",
+        segment="FNO",
+        symbol=option_symbol,
+        interval="1minute",
+        bars=[_bar(option_close, oi=100)],
+    )
+
+
+class TestSpotKeyRecoveryLadder:
+    """SPOTJOIN-2 (FIX-7): underlying-key drift no longer NO_SPOTs a whole chain.
+
+    The default spot reader probed EXACTLY ``bars/<exch>/<seg>/<underlying>``,
+    but spot partitions are keyed by the instrument ``trading_symbol``
+    (``MIDCPNIFTY`` options vs a ``NIFTYMIDSELECT`` spot dir; the #911
+    ``NSE-M&M`` drifted-dir class) — every chain bar stamped NO_SPOT +
+    STYLE_UNKNOWN forever while real spot sat in the lake. The reader now
+    walks a verified drift-recovery ladder on an empty primary join.
+    """
+
+    def _enrich_target(self, lake: Path, symbol: str) -> object:
+        return enrich_greeks_for_targets(
+            targets=[
+                GreeksEnrichTarget(
+                    exchange="NSE", symbol=symbol, start=_WINDOW[0], end=_WINDOW[1]
+                )
+            ],
+            lake_root=lake,
+            rate_source=_RATE,
+        )
+
+    def _stored_status_style(self, lake: Path, symbol: str) -> tuple[int, int, object]:
+        import polars as pl
+
+        part = lake / "bars" / "NSE" / "FNO" / symbol / "1minute" / "2024" / "01.parquet"
+        frame = pl.read_parquet(part)
+        pid = frame["greeks_provenance_id"].to_list()[0]
+        fields = unpack_greeks_provenance(int(pid))
+        return fields.status, fields.style_flag, frame["iv"].to_list()[0]
+
+    def test_index_alias_reverse_recovers_whole_chain(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        symbol = "NSE-MIDCPNIFTY-25Jan24-10000-CE"
+        _seed_lake_pair(
+            lake,
+            spot_symbol="NIFTYMIDSELECT",  # the Groww spot trading_symbol
+            spot_segment="INDEX",
+            option_symbol=symbol,  # the vendor F&O underlying spelling
+            spot_close="10000",
+            option_close="100",
+        )
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, symbol)
+        assert report.enriched == 1 and report.bars_solved == 1  # type: ignore[attr-defined]
+        status, style, iv = self._stored_status_style(lake, symbol)
+        # Pre-fix: STATUS_NO_SPOT + STYLE_UNKNOWN, iv None, permanently.
+        assert status == STATUS_OK and iv is not None
+        assert style == STYLE_EUROPEAN_EXACT  # style from the WINNING probe's segment
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["underlying"] == "MIDCPNIFTY"
+        assert recovered[0]["recovered_key"] == "NIFTYMIDSELECT"
+
+    def test_911_drifted_dir_form_recovers_cash_chain(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        symbol = "NSE-M&M-25Jan24-1500-CE"
+        _seed_lake_pair(
+            lake,
+            spot_symbol="NSE-M&M",  # the #911 exchange-prefixed drifted dir
+            spot_segment="CASH",
+            option_symbol=symbol,
+            spot_close="1500",
+            option_close="40",
+        )
+        report = self._enrich_target(lake, symbol)
+        assert report.enriched == 1 and report.bars_solved == 1  # type: ignore[attr-defined]
+        status, style, iv = self._stored_status_style(lake, symbol)
+        assert status == STATUS_OK and iv is not None
+        assert style == STYLE_AMERICAN_APPROX  # CASH segment won the probe
+
+    def test_env_alias_extends_the_ladder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("polars")
+        monkeypatch.setenv("BRUTEX_FNO_INDEX_ALIASES", '{"BARSPOT": "NIFTY"}')
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _seed_lake_pair(
+            lake,
+            spot_symbol="BARSPOT",
+            spot_segment="INDEX",
+            option_symbol=_CE_SYMBOL,
+            spot_close="21500",
+            option_close="200",
+        )
+        report = self._enrich_target(lake, _CE_SYMBOL)
+        assert report.enriched == 1 and report.bars_solved == 1  # type: ignore[attr-defined]
+
+    def test_primary_hit_emits_no_recovery_log(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _seed_lake_pair(
+            lake,
+            spot_symbol="NIFTY",
+            spot_segment="INDEX",
+            option_symbol=_CE_SYMBOL,
+            spot_close="21500",
+            option_close="200",
+        )
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, _CE_SYMBOL)
+        assert report.enriched == 1  # type: ignore[attr-defined]
+        assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+
+    def test_exhausted_ladder_stays_honest_no_spot(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        # Spot under an unrelated key the ladder can NEVER derive — no invention.
+        _seed_lake_pair(
+            lake,
+            spot_symbol="UNRELATED",
+            spot_segment="INDEX",
+            option_symbol=_CE_SYMBOL,
+            spot_close="21500",
+            option_close="200",
+        )
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, _CE_SYMBOL)
+        assert report.enriched == 1 and report.bars_null == 1  # type: ignore[attr-defined]
+        status, style, iv = self._stored_status_style(lake, _CE_SYMBOL)
+        assert status == STATUS_NO_SPOT and iv is None
+        assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+
+
+class TestSpotRecoveryCandidates:
+    """The pure candidate builder behind the FIX-7 ladder (env parsed locally)."""
+
+    def test_sourced_reverse_and_forward_directions(self) -> None:
+        from brutex.data.greeks_enrich import _spot_recovery_candidates
+
+        # Reverse: the chain names the F&O symbol, the spot dir the trading one.
+        assert "NIFTYMIDSELECT" in _spot_recovery_candidates("MIDCPNIFTY", "NSE")
+        assert "NIFTYJR" in _spot_recovery_candidates("NIFTYNXT50", "NSE")
+        # Forward: the chain names the spot spelling, the dir the F&O one.
+        assert "NIFTYNXT50" in _spot_recovery_candidates("NIFTYJR", "NSE")
+
+    def test_911_form_and_lake_keys_arm(self) -> None:
+        from brutex.data.greeks_enrich import _spot_recovery_candidates
+
+        candidates = _spot_recovery_candidates("M&M", "NSE")
+        assert "NSE-M&M" in candidates
+        # A drifted-SHAPED underlying walks the lake_keys ladder back down.
+        assert "M&M" in _spot_recovery_candidates("NSE-M&M", "NSE")
+
+    def test_env_override_malformed_shapes_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.greeks_enrich import _spot_recovery_candidates
+
+        for raw in ("not json", "[1, 2]", '{"A": 3, "": "X", "B": "  ", "OK": "NIFTY"}'):
+            monkeypatch.setenv("BRUTEX_FNO_INDEX_ALIASES", raw)
+            candidates = _spot_recovery_candidates("NIFTY", "NSE")
+            if raw.startswith("{"):
+                assert "OK" in candidates  # the one well-formed pair survives
+            assert "A" not in candidates and "B" not in candidates
+
+    def test_dedup_and_identity_exclusion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data.greeks_enrich import _spot_recovery_candidates
+
+        # Reverse candidate collides with the #911 form → appears exactly once.
+        monkeypatch.setenv("BRUTEX_FNO_INDEX_ALIASES", '{"NSE-FOO": "FOO", "BAZ": "BAZ"}')
+        candidates = _spot_recovery_candidates("FOO", "NSE")
+        assert candidates.count("NSE-FOO") == 1
+        # A self-alias never yields the identity as a candidate.
+        assert "BAZ" not in _spot_recovery_candidates("BAZ", "NSE")
+
+
 class TestForeignMonthPoisonBounded:
     """G-RACE-1 (FIX-5): a foreign-month duplicate can never mutate canonical OHLCV.
 

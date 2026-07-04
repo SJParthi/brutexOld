@@ -52,6 +52,7 @@ identical restate is detected pre-write (no partition rewrite at all), and the
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -63,6 +64,7 @@ import structlog
 
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.lake_keys import spot_key_candidates
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
 from brutex.data.spot_daily_resample import ist_span_partition_files
@@ -116,6 +118,7 @@ __all__ = [
     "expiry_instant_utc",
     "pack_greeks_provenance",
     "rate_source_id_for",
+    "read_spot_join_with_recovery",
     "resolve_risk_free_source",
     "t_years_act365",
     "unpack_greeks_provenance",
@@ -867,6 +870,135 @@ def _compute_bar(
     )
 
 
+#: Sourced spot-``trading_symbol`` ↔ F&O ``underlying_symbol`` equivalences for
+#: the two NSE index derivatives whose Groww spot ``trading_symbol`` differs
+#: from the symbol the vendor stamps on the option legs (CLAUDE.md §6 / the
+#: DEC-FNO-INDEX-ALIAS-001 sourced pairs). This deliberately MIRRORS
+#: ``brutex/dashboard/instrument_loader._SOURCED_FNO_INDEX_ALIASES`` — the map
+#: cannot be imported because ``brutex/data`` must never import
+#: ``brutex/dashboard`` (the locked import direction); the env override below
+#: keeps the two surfaces operator-extensible from the SAME single lever.
+_SOURCED_INDEX_SPOT_ALIASES: Final[dict[str, str]] = {
+    "NIFTYJR": "NIFTYNXT50",
+    "NIFTYMIDSELECT": "MIDCPNIFTY",
+}
+
+#: The operator JSON override env (``{spot_trading_symbol: fno_underlying}``)
+#: shared with the dashboard's ``resolve_fno_index_aliases`` — parsed LOCALLY
+#: and defensively here (absent / malformed → sourced defaults only).
+_FNO_INDEX_ALIASES_ENV: Final[str] = "BRUTEX_FNO_INDEX_ALIASES"
+
+
+def _index_alias_pairs() -> tuple[tuple[str, str], ...]:
+    """The ``(spot trading_symbol, F&O underlying)`` pairs — sourced + env override.
+
+    Reads :data:`_FNO_INDEX_ALIASES_ENV` defensively (the exact contract of
+    the dashboard's ``resolve_fno_index_aliases``): a missing / non-JSON /
+    non-object payload or a non-``str→non-blank-str`` entry is IGNORED, never
+    a crash — a lost override costs only the extra recovery rungs.
+    """
+    aliases = dict(_SOURCED_INDEX_SPOT_ALIASES)
+    raw = os.environ.get(_FNO_INDEX_ALIASES_ENV)
+    if raw:
+        try:
+            parsed: object = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key, value in parsed.items():
+                if (
+                    isinstance(key, str)
+                    and isinstance(value, str)
+                    and key.strip()
+                    and value.strip()
+                ):
+                    aliases[key.strip().upper()] = value.strip()
+    return tuple(aliases.items())
+
+
+def _spot_recovery_candidates(underlying: str, exchange: str) -> tuple[str, ...]:
+    """Ordered spot-key drift candidates for *underlying* — identity excluded.
+
+    The FIX-7 ladder rungs, every one traceable to a repo-verified drift
+    class (Golden Rule #1 — nothing invented): (1) the index-alias map in
+    BOTH directions (reverse — the chain names the F&O ``underlying_symbol``,
+    the spot dir its ``trading_symbol``; forward — the mirror case), (2) the
+    ``"<exchange>-<underlying>"`` #911 drifted-directory form, (3) the
+    :func:`~brutex.data.lake_keys.spot_key_candidates` #911 ladder applied to
+    *underlying* itself (a drifted-SHAPED underlying walks back down to its
+    canonical key). STOCK drift pairs (``BAJAJ-AUTO`` vs ``BAJAJAUTO``) are
+    deliberately ABSENT: the normalisation that produced them is not
+    reversible without an instrument master, so the stock arm stays an honest
+    NO_SPOT + a named follow-up (the operator env lever above covers a known
+    pair today via the reverse rung).
+    """
+    candidates: list[str] = []
+
+    def _add(key: str) -> None:
+        if key != underlying and key not in candidates:
+            candidates.append(key)
+
+    upper = underlying.strip().upper()
+    for spot_key, fno_key in _index_alias_pairs():
+        if fno_key.upper() == upper:
+            _add(spot_key)
+        if spot_key == upper:
+            _add(fno_key)
+    _add(f"{exchange}-{underlying}")
+    for drifted in spot_key_candidates(underlying, exchange):
+        _add(drifted)
+    return tuple(candidates)
+
+
+def read_spot_join_with_recovery(
+    lake_root: Path, target: GreeksEnrichTarget, parts: FnoSymbolParts
+) -> SpotJoin:
+    """The DEFAULT spot reader: exact key first, then the drift-recovery ladder.
+
+    Probes ``parts.underlying`` exactly (zero extra I/O and NO log on the hot
+    path); ONLY when that join comes back EMPTY does it try the
+    :func:`_spot_recovery_candidates` rungs in order, returning the FIRST
+    candidate with any joined spot minute and emitting ONE
+    ``greeks_enrich.spot_key_recovered`` info naming both keys
+    (DEC-GREEKS-CORRECTNESS-AUDIT-001 SPOTJOIN-2 — pre-fix, a
+    ``MIDCPNIFTY`` chain over a ``NIFTYMIDSELECT``-keyed spot dir stamped the
+    WHOLE chain NO_SPOT + STYLE_UNKNOWN forever). The exercise style is
+    stamped from the WINNING probe's segment (the returned
+    :class:`~brutex.data.spot_join.SpotJoin` carries it). Ladder exhaustion
+    returns the original empty join — the honest NO_SPOT, never a fabricated
+    spot.
+    """
+    join = spot_close_by_ts_window(
+        lake_root,
+        exchange=target.exchange,
+        underlying=parts.underlying,
+        interval=_MINUTE_INTERVAL,
+        start=target.start,
+        end=target.end,
+    )
+    if join.close_by_ts:
+        return join
+    for candidate in _spot_recovery_candidates(parts.underlying, target.exchange):
+        recovered = spot_close_by_ts_window(
+            lake_root,
+            exchange=target.exchange,
+            underlying=candidate,
+            interval=_MINUTE_INTERVAL,
+            start=target.start,
+            end=target.end,
+        )
+        if recovered.close_by_ts:
+            _LOG.info(
+                "greeks_enrich.spot_key_recovered",
+                symbol=target.symbol,
+                underlying=parts.underlying,
+                recovered_key=candidate,
+                segment=recovered.segment,
+            )
+            return recovered
+    return join
+
+
 def _style_for_segment(segment: str | None) -> int:
     """Map the spot-join probe segment to the packed exercise-style flag."""
     if segment == "INDEX":
@@ -996,16 +1128,7 @@ def enrich_greeks_for_targets(
     spot_reader = (
         read_spot
         if read_spot is not None
-        else (
-            lambda t, parts: spot_close_by_ts_window(
-                lake_root,
-                exchange=t.exchange,
-                underlying=parts.underlying,
-                interval=_MINUTE_INTERVAL,
-                start=t.start,
-                end=t.end,
-            )
-        )
+        else (lambda t, parts: read_spot_join_with_recovery(lake_root, t, parts))
     )
     writer = (
         write_bars
