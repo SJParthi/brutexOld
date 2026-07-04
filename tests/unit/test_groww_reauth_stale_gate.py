@@ -128,7 +128,7 @@ def _readonly_refresher(
     """A READ-ONLY-broker refresher: cold-starts on the (stale) cached token, never mints."""
     return SdkRefresher(
         _CREDS,
-        sdk_factory=lambda token: _TokenSDK(token),
+        sdk_factory=_TokenSDK,
         token_cache_load=lambda _creds, now_utc: CachedToken(
             access_token=_STALE, issued_for_session=_SESSION
         ),
@@ -513,7 +513,7 @@ def test_terminal_auth_stays_terminal_no_pause() -> None:
         _CREDS,
         token_factory=token_factory,
         totp_minter=lambda _secret: "123456",
-        sdk_factory=lambda token: _TokenSDK(token),
+        sdk_factory=_TokenSDK,
         token_cache_load=lambda *_a, **_k: None,
         token_cache_store=lambda *_a, **_k: True,
         call_timeout_seconds=5.0,
@@ -546,7 +546,7 @@ def test_local_mint_mode_never_double_waits() -> None:
         _CREDS,
         token_factory=token_factory,
         totp_minter=lambda _secret: "123456",
-        sdk_factory=lambda token: _TokenSDK(token),
+        sdk_factory=_TokenSDK,
         token_cache_load=lambda *_a, **_k: None,
         token_cache_store=lambda *_a, **_k: True,
         call_timeout_seconds=5.0,
