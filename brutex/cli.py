@@ -1029,6 +1029,20 @@ def build_parser() -> argparse.ArgumentParser:
             "SweepCacheCapacityError)"
         ),
     )
+    sweep_all.add_argument(
+        "--acknowledge-sla-overrun",
+        action="store_true",
+        dest="acknowledge_sla_overrun",
+        help=(
+            "Proceed even when the projected wall-clock (tuple_count × an "
+            "UNBENCHMARKED per-tuple estimate, override via "
+            "BRUTEX_SWEEP_PER_TUPLE_SECONDS) exceeds the CLAUDE.md §8 2-4-day "
+            "envelope. Default: REFUSE with the honest projection "
+            "(DEC-SLA-LAUNCH-GUARD-001); acknowledging proceeds with a LOUD "
+            "warning. Manual sweep-all only — the unattended daemon never "
+            "acknowledges an overrun"
+        ),
+    )
 
     # ── sweep-daemon (DEC-SWEEP-SCHEDULER-001) — scheduled/daemon sweep runner ──
     # The AUTOMATIC twin of `sweep-all` (CLAUDE.md §11 manual⇄automatic duality):
@@ -3995,6 +4009,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     sweep_cache_map_mb: int | None = None,
     sweep_cache_bloom_capacity: int | None = None,
     allow_out_of_scope: bool = False,
+    acknowledge_sla_overrun: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -4252,6 +4267,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         except Stage3WireError as exc:
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
+
+    # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001): project the grid's
+    # wall-clock as tuple_count × an UNBENCHMARKED per-tuple estimate
+    # (BRUTEX_SWEEP_PER_TUPLE_SECONDS overrides) and REFUSE a launch projected
+    # past the CLAUDE.md §8 2-4-day envelope unless the operator passed
+    # --acknowledge-sla-overrun (then WARN loudly and proceed). Honest per
+    # Golden Rule #10: an estimate-based plausibility screen — it never
+    # certifies the §8 SLA (which remains UNMEASURED) either way.
+    from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla
+
+    try:
+        sla = check_sweep_sla(count_sweep_tuples(grid), acknowledge=acknowledge_sla_overrun)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.REFUSED:
+        print(f"[brutex] {sla.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.ACKNOWLEDGED:
+        print(f"[brutex] WARNING: {sla.acknowledged_warning()}")
 
     # Dead launch Bloom KILLED (R2-SL-F1): this launcher runs the production
     # DIGEST path — ``run_one_tuple`` always passes a non-None
@@ -4772,6 +4807,14 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
         f"[brutex] supervisor starting — child: {' '.join(argv)} — audit: {audit_path}",
     )
 
+    # Crash-loop operator alert (DEC-SUPERVISOR-CRASHLOOP-ALERT-001): every
+    # abnormal-exit relaunch fires one best-effort, deduped Telegram push
+    # (CRITICAL once 3 relaunches land within the rolling window), so a child
+    # OOM-SIGKILL-looping all night can never stay silent. Best-effort + a
+    # silent no-op when Telegram is disabled (the default) — the supervisor's
+    # relaunch behaviour is byte-unchanged.
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
     with SweepAuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
         supervisor = ProcessSupervisor(
             launch=build_subprocess_launcher(argv),
@@ -4784,6 +4827,7 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
                 if shutdown_grace_seconds is not None
                 else DEFAULT_SHUTDOWN_GRACE_SECONDS
             ),
+            alerter=SweepAlerter(),
         )
         result = supervisor.run()
 
@@ -6263,6 +6307,7 @@ def main(argv: list[str] | None = None) -> int:
             sweep_cache_map_mb=args.sweep_cache_map_mb,
             sweep_cache_bloom_capacity=args.sweep_cache_bloom_capacity,
             allow_out_of_scope=args.allow_out_of_scope,
+            acknowledge_sla_overrun=args.acknowledge_sla_overrun,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
