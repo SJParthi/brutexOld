@@ -21,6 +21,8 @@ from brutex.adapters.groww.errors import (
     GrowwBadRequestError,
     GrowwRateLimitError,
     GrowwTimeoutError,
+    GrowwTokenIssuanceThrottled,
+    GrowwTokenStillStaleError,
 )
 from brutex.adapters.groww.ingest import (
     IngestReport,
@@ -1130,6 +1132,122 @@ class TestIngestSpotRateFeedback:
             max_retry_passes=0,
         )
         assert report.transient_failures == 1
+
+
+class _BreakerFeed:
+    """Recording ``ErrorStormBreaker`` stand-in — captures the spine's feeds verbatim.
+
+    Records the exact ``observe_transport_failure`` arguments (symbol, error_type,
+    window_key, still_stale) so the auth-ladder-exclusion tests can pin the breaker
+    feed BYTE-IDENTICAL to the pre-guard behaviour (DEC-AUTH-LADDER-EXCLUDE-001 —
+    the guard withholds only the ``on_timeout`` step, never the containment chain).
+    """
+
+    def __init__(self) -> None:
+        self.fed: list[tuple[str, str, object, bool]] = []
+        self.successes: list[str] = []
+
+    def observe_transport_failure(
+        self, symbol: str, *, error_type: str, window_key: object, still_stale: bool = False
+    ) -> None:
+        self.fed.append((symbol, error_type, window_key, still_stale))
+
+    def observe_success(self, symbol: str) -> None:
+        self.successes.append(symbol)
+
+
+class TestAuthLadderExclusion:
+    """DEC-AUTH-LADDER-EXCLUDE-001 — retryable auth-family failures feed NEITHER rate hook.
+
+    The AIMD timeout ladder is a CANDLE-endpoint server-stress signal; a token-stale /
+    mint-throttle failure is credential state, so it must not step the pull rate down
+    toward the 1 r/s deep floor — while the FAILED ledger record + the storm-breaker
+    feed (the dead-credential escalation's evidence stream) stay byte-identical.
+    """
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            GrowwTokenStillStaleError("same dead token"),
+            GrowwTokenIssuanceThrottled("mint throttled"),
+        ],
+    )
+    def test_retryable_auth_family_feeds_neither_hook(self, error: GrowwAuthError) -> None:
+        from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        hits: list[int] = []
+        timeouts: list[int] = []
+        ledger = WindowLedger()
+        breaker = _BreakerFeed()
+        report = ingest_spot(
+            _Adapter(error=error),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            on_rate_limit=lambda: hits.append(1),
+            on_timeout=lambda: timeouts.append(1),
+            ledger=ledger,
+            storm_breaker=breaker,  # type: ignore[arg-type]
+            max_retry_passes=0,
+        )
+        # NEITHER controller hook fires — no ladder step, no rate step (the regression:
+        # before the guard, `on_timeout()` fired here and pinned the pull at 1 r/s).
+        assert timeouts == []
+        assert hits == []
+        # Containment is BYTE-IDENTICAL: still counted transient (deferred, re-pullable)…
+        assert report.transient_failures == 1
+        # …the ledger row is FAILED with the honest error type + in-pull fetch count…
+        [row] = ledger.records()
+        assert row.status == FAILED
+        assert row.last_error == type(error).__name__
+        assert row.in_pull_fetches == 1
+        # …and the storm breaker was fed EXACTLY once with the same key/exc shape
+        # (the still_stale flag keeps routing the dead-credential streak).
+        expected_key = WindowKey(
+            market=GROWW_COVERAGE_MARKET,
+            security_id="NIFTY",
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+        )
+        expected_stale = isinstance(error, GrowwTokenStillStaleError)
+        assert breaker.fed == [("NIFTY", type(error).__name__, expected_key, expected_stale)]
+        assert breaker.successes == []
+
+    def test_genuine_timeout_still_steps_ladder_with_identical_feed(self) -> None:
+        """MUTATION-KILL: a real ``GrowwTimeoutError`` STILL steps the timeout ladder down.
+
+        An inverted (``not steps_timeout_ladder``) or weakened (always-``False``)
+        predicate fails HERE (``timeouts == []``); a dropped guard fails the
+        auth-family test above. The ledger + breaker feeds on the stepping path
+        are pinned identical too.
+        """
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        timeouts: list[int] = []
+        ledger = WindowLedger()
+        breaker = _BreakerFeed()
+        ingest_spot(
+            _Adapter(error=GrowwTimeoutError("stall")),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            on_timeout=lambda: timeouts.append(1),
+            ledger=ledger,
+            storm_breaker=breaker,  # type: ignore[arg-type]
+            max_retry_passes=0,
+        )
+        assert timeouts == [1]  # the ladder step still fires for genuine server stress
+        [row] = ledger.records()
+        assert row.status == FAILED
+        assert row.last_error == "GrowwTimeoutError"
+        assert breaker.fed[0][1] == "GrowwTimeoutError" and breaker.fed[0][3] is False
 
 
 class TestIngestSpotLogging:

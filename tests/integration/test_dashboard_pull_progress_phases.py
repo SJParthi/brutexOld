@@ -174,3 +174,22 @@ class TestPullProgressPhases:
         body = client.get("/api/v1/universe/pull-progress").json()
         assert [p["phase"] for p in body["phases"]] == ["spot", "futures", "options"]
         assert all(p["total"] == 0 and p["done"] == 0 for p in body["phases"])
+
+    def test_garbage_ledger_parquet_degrades_never_500(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-WINDOW-TORN-READ-RETRY-001 regression: a torn/corrupt ledger Parquet drove
+        # a REAL duckdb.Error through the previously-UNGUARDED counts read and 500'd the
+        # 4 s poll. End-to-end (no monkeypatch — the real duckdb exception class): the
+        # route now retries once, then serves the honest empty-phases degrade at 200
+        # with every flat snapshot key intact.
+        from brutex.data.window_ledger_store import ledger_dir, ledger_path
+
+        ledger_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        ledger_path(tmp_path).write_bytes(b"definitely not a parquet file")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/universe/pull-progress")
+        assert resp.status_code == 200  # was a 500 before the guard
+        body = resp.json()
+        assert body["phases"] == []  # the same honest shape the no-ledger contract serves
+        assert set(body) >= _FLAT_KEYS

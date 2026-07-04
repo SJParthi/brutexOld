@@ -26,10 +26,12 @@ Every rule reads a closure over the monitor's LAST-observed snapshot pair, so th
 detector stays decoupled from the snapshot source (the sla.py contract):
 
 * ``pull.achieved_below_allowed`` — ``effective_rps / current_rps < RATIO`` (default
-  ``0.6``): our pipeline is leaving the vendor budget on the table (a write-latency /
-  pool-width problem, NOT the vendor) — WARN.
-* ``pull.pool_idle_high`` — ``1 − in_flight / pool_size > FRACTION`` (default ``0.5``):
-  more than half the connection pool sits idle — WARN.
+  ``0.6``) for K consecutive samples (default ``5``): our pipeline is leaving the
+  vendor budget on the table (a write-latency / pool-width problem, NOT the vendor)
+  — WARN, dwell-gated (DEC-PULL-HEALTH-WARN-DWELL-001).
+* ``pull.pool_idle_high`` — ``1 − in_flight / pool_size > FRACTION`` (default ``0.5``)
+  for K consecutive samples (default ``5``): more than half the connection pool sits
+  idle — WARN, dwell-gated (DEC-PULL-HEALTH-WARN-DWELL-001).
 * ``pull.write_latency_spike`` — ``latency_ms_p95 > BUDGET_MS`` (default ``1500``):
   the per-call p95 latency blew its budget — WARN.
 * ``pull.rate_storm`` — ``recent_hits > N`` (default ``20``): a vendor-429 burst —
@@ -37,11 +39,21 @@ detector stays decoupled from the snapshot source (the sla.py contract):
 * ``pull.stalled`` — ``effective_rps < FLOOR`` (default ``0.5``) for K consecutive
   samples (default ``5``) — the pull is effectively dead — CRITICAL.
 
-The ``pull.stalled`` rule uses a :class:`DwellProvider`: a value-provider wrapper that
-returns the observed value ONLY after its predicate has held for K consecutive samples,
-and returns ``None`` otherwise. ``None`` is exactly the "value not available yet" signal
-:class:`SLADetector` already skips — so the dwell requirement is layered on TOP of the
-detector with ZERO change to it (the sla.py None-skip contract does the work).
+``pull.stalled`` AND the two cold-start-prone WARN rules
+(``pull.achieved_below_allowed`` + ``pull.pool_idle_high``) use a
+:class:`DwellProvider`: a value-provider wrapper that returns the observed value ONLY
+after its predicate has held for K consecutive samples, and returns ``None`` otherwise.
+``None`` is exactly the "value not available yet" signal :class:`SLADetector` already
+skips — so the dwell requirement is layered on TOP of the detector with ZERO change to
+it (the sla.py None-skip contract does the work). The two WARN rules are dwell-gated
+(:data:`WARN_DWELL_SAMPLES`, DEC-PULL-HEALTH-WARN-DWELL-001) because a ~1s-old pool
+breaches BOTH on its first observe tick — the :class:`~brutex.adapters.call_meter.\
+CallMeter` ``effective_rps`` divides by a FIXED 10 s window (so it ramps from 0 over
+the first seconds — fully deterministic) and the connection pool has not yet fanned out
+(``in_flight`` 0–1 → idle ≥ 0.75 — near-deterministic, strictly needs ``in_flight <
+2``). Those are startup artifacts, not degradations; without the dwell, every real pull
+opened with two scary Telegram WARNs. The ``/metrics`` gauges are NOT dwelled — they
+mirror the raw instantaneous values from tick 1; only the ALERT edge is dwell-gated.
 
 ## Honest envelope (Golden Rule #10)
 
@@ -99,6 +111,14 @@ STALLED_RPS_FLOOR: Final[float] = 0.5
 
 #: Consecutive samples ``pull.stalled`` must hold before it fires (dwell).
 STALLED_DWELL_SAMPLES: Final[int] = 5
+
+#: Consecutive breaching samples the two cold-start-prone WARN rules
+#: (``pull.achieved_below_allowed`` + ``pull.pool_idle_high``) must dwell before firing
+#: (DEC-PULL-HEALTH-WARN-DWELL-001). A ~1s-old pool breaches BOTH on its FIRST tick —
+#: the CallMeter ``effective_rps`` fixed-10s-divisor ramp makes the achieved ratio
+#: deterministically < 0.6 for the first seconds, and the not-yet-fanned-out pool reads
+#: near-deterministically idle — a startup artifact, not a degradation.
+WARN_DWELL_SAMPLES: Final[int] = 5
 
 #: Prometheus metric names mirrored from each observed snapshot pair.
 _GAUGE_ACHIEVED_RPS: Final[str] = "brutex_pull_achieved_rps"
@@ -232,6 +252,13 @@ SweepAlerter` Telegram alert) + structlog.
     achieved_ratio, pool_idle_fraction, latency_budget_ms, rate_storm_hits,
     stalled_floor, stalled_dwell
         Threshold overrides (default to the module constants).
+    warn_dwell
+        Consecutive breaching samples ``pull.achieved_below_allowed`` and
+        ``pull.pool_idle_high`` must dwell before firing (default
+        :data:`WARN_DWELL_SAMPLES`). A ~1s-old pool breaches both on its first
+        observe tick (the CallMeter fixed-divisor ``effective_rps`` ramp + a
+        not-yet-fanned-out pool), so an undwelled first tick paged the operator at
+        every pull start (DEC-PULL-HEALTH-WARN-DWELL-001). Recovery has no dwell.
     """
 
     __slots__ = (
@@ -256,6 +283,7 @@ SweepAlerter` Telegram alert) + structlog.
         rate_storm_hits: int = RATE_STORM_HITS,
         stalled_floor: float = STALLED_RPS_FLOOR,
         stalled_dwell: int = STALLED_DWELL_SAMPLES,
+        warn_dwell: int = WARN_DWELL_SAMPLES,
     ) -> None:
         self._registry = registry
         self._on_degraded = on_degraded
@@ -278,6 +306,7 @@ SweepAlerter` Telegram alert) + structlog.
                 rate_storm_hits=rate_storm_hits,
                 stalled_floor=stalled_floor,
                 stalled_dwell=stalled_dwell,
+                warn_dwell=warn_dwell,
             ),
             on_breach=self._on_breach,
             on_recovery=self._on_recovery,
@@ -303,12 +332,24 @@ SweepAlerter` Telegram alert) + structlog.
         rate_storm_hits: int,
         stalled_floor: float,
         stalled_dwell: int,
+        warn_dwell: int,
     ) -> tuple[SLARule, ...]:
-        """Construct the five pull-health rules over the last-snapshot closures."""
+        """Construct the five pull-health rules over the last-snapshot closures.
+
+        The two cold-start-prone WARN rules are wrapped in a :class:`DwellProvider`
+        (``samples=warn_dwell``) exactly like ``pull.stalled`` — a ~1s-old pool
+        breaches both on its first tick, so the alert edge must dwell while the raw
+        instantaneous values stay live on the ``/metrics`` gauges
+        (DEC-PULL-HEALTH-WARN-DWELL-001).
+        """
         return (
             SLARule(
                 name="pull.achieved_below_allowed",
-                value_provider=self._achieved_ratio_provider,
+                value_provider=DwellProvider(
+                    value_provider=self._achieved_ratio_provider,
+                    predicate=lambda ratio: ratio < achieved_ratio,
+                    samples=warn_dwell,
+                ),
                 predicate=SLAPredicate.LESS_THAN,
                 threshold=achieved_ratio,
                 severity=SLASeverity.WARN,
@@ -316,7 +357,11 @@ SweepAlerter` Telegram alert) + structlog.
             ),
             SLARule(
                 name="pull.pool_idle_high",
-                value_provider=self._pool_idle_provider,
+                value_provider=DwellProvider(
+                    value_provider=self._pool_idle_provider,
+                    predicate=lambda idle: idle > pool_idle_fraction,
+                    samples=warn_dwell,
+                ),
                 predicate=SLAPredicate.GREATER_THAN,
                 threshold=pool_idle_fraction,
                 severity=SLASeverity.WARN,
@@ -520,6 +565,7 @@ __all__ = [
     "RATE_STORM_HITS",
     "STALLED_DWELL_SAMPLES",
     "STALLED_RPS_FLOOR",
+    "WARN_DWELL_SAMPLES",
     "WRITE_LATENCY_BUDGET_MS",
     "DwellProvider",
     "PullHealthMonitor",

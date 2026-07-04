@@ -2167,6 +2167,11 @@ class TestGreeksEnrichWiring:
         assert len(done) == 1
         assert done[0]["futures_skipped"] == 1
         assert done[0]["enriched"] >= 1
+        # DEC-GREEKS-SPOT-MEMO-001: the CE + PE share ONE (underlying, window)
+        # spot coordinate → exactly one performed read, one memo hit, measured
+        # in the done event (the FUT is skipped before the spot read).
+        assert done[0]["spot_reads"] == 1
+        assert done[0]["spot_hits"] == 1
         assert [r for r in logs if r["event"] == "fno.greeks_enrich.error"] == []
         # The CE premium (105 vs spot 21000, strike 21000) SOLVES and is STORED.
         ce = pl.read_parquet(
@@ -2255,6 +2260,8 @@ class TestGreeksEnrichWiring:
                 bars_solved=0,
                 bars_null=0,
                 bars_reused=0,
+                spot_reads=0,
+                spot_hits=0,
             )
 
         monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)

@@ -140,6 +140,48 @@ class TestBreachFiresPullDegraded:
         assert len(degraded) == 1
         assert "write latency" in degraded[0].message
 
+    def test_cold_start_first_tick_fires_no_alert_through_observe_rate(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """The production cold-start symptom, pinned at the production seam.
+
+        DEC-PULL-HEALTH-WARN-DWELL-001: ~1s into a real pull the fresh controller
+        paces AT the ceiling while the CallMeter's fixed-10s-divisor ``effective_rps``
+        has barely ramped (ratio ≤ 0.1 < 0.6) and the pool has not fanned out
+        (``in_flight`` 1 → idle 0.75 > 0.5). Before the warn dwell, that FIRST
+        ``_observe_rate`` tick fired two scary ``pull_degraded`` Telegram WARNs at
+        every pull start. Now: ZERO alerts on the first tick — while the ``/metrics``
+        gauges still mirror the raw instantaneous values (only the ALERT is dwelled).
+        """
+        notifier = _FakeNotifier()
+        real_alerter = SweepAlerter(notifier=notifier)
+        monkeypatch.setattr(
+            "brutex.notifications.sweep_alerts.SweepAlerter",
+            lambda: real_alerter,
+        )
+
+        reset_global_registry()
+        try:
+            controller = _live_controller()
+            monitor = _build_pull_health_monitor(controller)
+            assert isinstance(monitor, PullHealthMonitor)
+
+            # The ~1s-old-pool meter shape (near-zero ramp, one in-flight call).
+            adapter = _FakeAdapter({"effective_rps": 0.1, "latency_ms_p95": 50.0, "in_flight": 1})
+            _observe_rate(None, controller, adapter, monitor)  # type: ignore[arg-type]
+
+            # ZERO pull_degraded pushes on the first tick (fails-before: two WARNs).
+            degraded = [e for e in notifier.events if "Pull health degraded" in e.message]
+            assert degraded == []
+            # Raw-gauge honesty pin: the instantaneous values ARE mirrored from tick 1.
+            assert get_registry().gauge_value("brutex_pull_achieved_rps") == 0.1
+            assert get_registry().gauge_value("brutex_pull_allowed_rps") == float(
+                GROWW_RATE_LIMIT_RPS_CEILING
+            )
+        finally:
+            reset_global_registry()
+
     def test_observe_without_monitor_fires_nothing(self) -> None:
         """A pull with no monitor wired (None) never observes — the no-op guard."""
         registry = MetricRegistry()

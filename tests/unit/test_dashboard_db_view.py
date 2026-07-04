@@ -1027,16 +1027,20 @@ class TestBuildWindowPayloadDuckDB:
         # A corrupt / wrong-shape ledger Parquet (missing the `status` core column) makes
         # the DuckDB GROUP BY raise — it must NOT 500, but fall through to the legacy path
         # which guards core columns and degrades to an empty ledger (route "never a 500").
+        # The probe's ValueError is DETERMINISTIC, so the torn-read retry sleeper must
+        # NEVER fire on this path (DEC-WINDOW-TORN-READ-RETRY-001: duckdb.Error ONLY).
         import pyarrow as pa
         import pyarrow.parquet as pq
         from brutex.data.window_ledger_store import ledger_dir, ledger_path
 
         ledger_dir(tmp_path).mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.table({"market": ["groww"], "security_id": ["X"]}), ledger_path(tmp_path))
-        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        sleeps: list[float] = []
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), retry_sleep=sleeps.append)
         assert payload["source"] == "ledger"
         assert payload["count"] == 0
         assert payload["windows"] == []
+        assert sleeps == []  # real ValueError shape error → immediate fallback, no retry
 
 
 # ── Live per-phase pull progress (DEC-UNIVERSE-PER-PHASE-PROGRESS-001) ────────
