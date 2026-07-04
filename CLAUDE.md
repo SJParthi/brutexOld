@@ -267,7 +267,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/ci-fork-pr-harden-s7v3xq` (**DEC-CI-FORK-PR-HARDEN-001,
-  MIGRATION.md #1176** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
+  MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
   redteam-test + docs ONLY, ZERO `brutex/` code touched: (1) `auto-merge.yml`'s trust gate
   no longer trusts the SPOOFABLE `claude/*` head-branch NAME (a stranger's fork named
   `claude/anything` would have been auto-squash-merged to main on green CI) — trust is now
