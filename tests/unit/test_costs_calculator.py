@@ -589,15 +589,18 @@ def test_stt_exercise_rate_post_apr_2026() -> None:
 
 
 def test_exchange_charge_nifty_nse() -> None:
-    assert constants.exchange_charge_bps_x100("NIFTY") == constants.NSE_ETC_OPTIONS_BPS_X100
+    got = constants.exchange_charge_bps_x100("NIFTY", date(2026, 5, 15))
+    assert got == constants.NSE_ETC_OPTIONS_BPS_X100
 
 
 def test_exchange_charge_banknifty_nse() -> None:
-    assert constants.exchange_charge_bps_x100("BANKNIFTY") == constants.NSE_ETC_OPTIONS_BPS_X100
+    got = constants.exchange_charge_bps_x100("BANKNIFTY", date(2026, 5, 15))
+    assert got == constants.NSE_ETC_OPTIONS_BPS_X100
 
 
 def test_exchange_charge_sensex_bse() -> None:
-    assert constants.exchange_charge_bps_x100("SENSEX") == constants.BSE_ETC_OPTIONS_BPS_X100
+    got = constants.exchange_charge_bps_x100("SENSEX", date(2026, 5, 15))
+    assert got == constants.BSE_ETC_OPTIONS_BPS_X100
 
 
 def test_ipft_nifty_nse() -> None:
