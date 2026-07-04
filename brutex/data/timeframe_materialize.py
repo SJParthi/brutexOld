@@ -49,6 +49,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Final
 
+import structlog
+
 # Re-export: `frame_to_candle_bars` LIVES in `spot_daily_resample` — the
 # import-graph LEAF of the pair (this module already imports its daily-derive
 # seam) — so the shared batched converter (DEC-PREBUILD-GIL-VECTORIZE-001) is
@@ -73,6 +75,8 @@ if TYPE_CHECKING:
 
     from brutex.data.models import CandleBar
     from brutex.models import Instrument
+
+_LOG = structlog.get_logger(__name__)
 
 #: Canonical TF-label → lake partition interval map for ALL 19 derived
 #: intraday timeframes (DEC-TF-VOCAB-21-001 — derived from the canonical
@@ -219,10 +223,18 @@ class MaterializeResult:
         The requested timeframe labels that were NOT written because the
         derivation produced no frame for them (an unknown / non-derived /
         non-storable label), in request (de-duplicated) order.
+    unchanged
+        ``True`` iff the whole derive was SKIPPED because the symbol's
+        1-minute source was byte-for-byte unchanged since its last stamped
+        derive (DEC-PREBUILD-INCREMENTAL-001 — ``written`` is then empty and
+        the lake state is provably identical to a full re-derive, which the
+        keep-first/latest-wins writers would have no-opped anyway). ``False``
+        for every run that actually read + resampled.
     """
 
     written: dict[str, int]
     skipped: tuple[str, ...]
+    unchanged: bool = False
 
     @property
     def total_bars(self) -> int:
@@ -308,6 +320,35 @@ def materialize_timeframes(
     return MaterializeResult(written=written, skipped=tuple(skipped))
 
 
+def _derived_dirs_present(
+    lake_root: Path,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    tfs: tuple[str, ...],
+    include_daily: bool,
+) -> bool:
+    """``True`` iff every requested derived interval dir exists for the symbol.
+
+    The cheap O(#TFs ≤ 20) existence guard behind the incremental skip
+    (DEC-PREBUILD-INCREMENTAL-001): a stamp can only skip when the derived
+    tree it vouches for is actually on disk — an out-of-band deletion (or a
+    heal rebuild that failed after its quarantine-move) falls through to a
+    full re-derive instead of silently leaving the partitions missing.
+    Dir-granular (honest envelope: individual month FILES inside a present
+    interval dir are not re-verified — the token + heal stamp-removal cover
+    the paths that mutate them).
+    """
+    symbol_dir = lake_root / "bars" / exchange / segment / symbol
+    for tf in tfs:
+        interval = INTRADAY_TF_INTERVALS.get(tf)
+        # A label with no storable interval is reported `skipped` by a full
+        # run too, so it needs no partition to exist.
+        if interval is not None and not (symbol_dir / interval).is_dir():
+            return False
+    return not include_daily or (symbol_dir / DAILY_TF_LABEL).is_dir()
+
+
 def materialize_lake_timeframes(
     *,
     lake_root: Path,
@@ -318,6 +359,7 @@ def materialize_lake_timeframes(
     tfs: Iterable[str] = MATERIALIZABLE_TFS,
     include_daily: bool = False,
     daily_before: date | None = None,
+    incremental: bool | None = None,
 ) -> MaterializeResult:
     """SEGMENT-AWARE materialise of ONE lake partition's derived TFs (DEC-PREBUILD-SELECT-001).
 
@@ -368,7 +410,73 @@ def materialize_lake_timeframes(
     NOT an O(1)-total claim (Golden Rule #10). Returns the per-TF written
     counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
     integration-tested by the round-trip tests.
+
+    **Incremental skip (DEC-PREBUILD-INCREMENTAL-001, per-SYMBOL granularity —
+    the bounded first step; a per-TF stamp is explicitly future work):** with
+    *incremental* enabled (``None`` → the ``BRUTEX_PREBUILD_INCREMENTAL`` env
+    default ON), the symbol's 1-minute source-file token is compared against
+    its sidecar stamp (:mod:`brutex.data.derive_stamp`) BEFORE any bar is
+    read; an unchanged source + identical request (+ the daily-cutoff rule +
+    the derived-dirs-present guard) returns ``unchanged=True`` with ZERO
+    read/resample — provably byte-identical lake state, because the full
+    re-derive's keep-first/latest-wins writes are no-ops on unchanged data
+    (golden-pinned). A successful FULL derive writes a fresh stamp
+    (best-effort). ``incremental=False`` (the lake-heal rebuild path — heal
+    must always rebuild what it just quarantined) never skips and never
+    stamps.
     """
+    from datetime import UTC, datetime
+
+    from brutex.calendars.nse import IST
+    from brutex.data.derive_stamp import (
+        DeriveStamp,
+        derive_stamp_path,
+        incremental_prebuild_enabled,
+        load_derive_stamp,
+        save_derive_stamp,
+        should_skip_derive,
+        source_1m_token,
+    )
+
+    requested = tuple(dict.fromkeys(tfs))
+    # Resolve the daily forming-session cutoff up-front — the skip rule must
+    # see the SAME value the derive would use (resolved unconditionally so the
+    # daily branch below needs no Optional narrowing; a non-daily run simply
+    # never uses it and its stamp records daily_before=None).
+    before: date = (
+        daily_before if daily_before is not None else datetime.now(UTC).astimezone(IST).date()
+    )
+    before_iso = before.isoformat() if include_daily else None
+
+    inc = incremental_prebuild_enabled() if incremental is None else incremental
+    token: str | None = None
+    stamp_file = derive_stamp_path(lake_root, exchange, segment, symbol)
+    if inc:
+        # Token BEFORE the read (conservative: a write landing between the
+        # token and the read makes the NEXT run re-derive, never a stale skip).
+        token = source_1m_token(lake_root, exchange, segment, symbol)
+        if (
+            token is not None
+            and should_skip_derive(
+                load_derive_stamp(stamp_file),
+                token=token,
+                tfs=requested,
+                include_daily=include_daily,
+                daily_before=before_iso,
+            )
+            and _derived_dirs_present(
+                lake_root, exchange, segment, symbol, requested, include_daily
+            )
+        ):
+            _LOG.info(
+                "prebuild.derive.unchanged_skip",
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                include_daily=include_daily,
+            )
+            return MaterializeResult(written={}, skipped=(), unchanged=True)
+
     read_1m = make_lake_read_1m(
         lake_root=lake_root,
         exchange=exchange,
@@ -380,23 +488,38 @@ def materialize_lake_timeframes(
         lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
     )
     resampler = intraday_resampler_for(kind)
-    if not include_daily:
-        return materialize_timeframes(
-            tfs=tfs, read_1m=read_1m, write_tf=write_tf, resampler=resampler
+
+    def _stamp(last_1m_ist_date: str | None) -> None:
+        """Record the successful full derive (best-effort — never raises)."""
+        if not inc or token is None:
+            return
+        save_derive_stamp(
+            stamp_file,
+            DeriveStamp(
+                token=token,
+                tfs=tuple(sorted(set(requested))),
+                include_daily=include_daily,
+                daily_before=before_iso,
+                last_1m_ist_date=last_1m_ist_date,
+                written_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            ),
         )
 
-    from datetime import UTC, datetime
+    if not include_daily:
+        result = materialize_timeframes(
+            tfs=requested, read_1m=read_1m, write_tf=write_tf, resampler=resampler
+        )
+        _stamp(last_1m_ist_date=None)
+        return result
 
-    from brutex.calendars.nse import IST
     from brutex.data.spot_daily_resample import fill_daily_from_minute, make_lake_write_1day
 
     # Read the 1-minute base ONCE and share the frame between the intraday
     # derivation and the daily derivation (halves the partition I/O).
     df_1m = read_1m()
     intraday = materialize_timeframes(
-        tfs=tfs, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
+        tfs=requested, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
     )
-    before = daily_before if daily_before is not None else datetime.now(UTC).astimezone(IST).date()
     daily = fill_daily_from_minute(
         read_1m=lambda: df_1m,
         write_1day=make_lake_write_1day(
@@ -405,10 +528,34 @@ def materialize_lake_timeframes(
         before=before,
         resample_fn=daily_resample_fn_for(kind),
     )
+    _stamp(last_1m_ist_date=_last_ist_date(df_1m))
     return MaterializeResult(
         written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
         skipped=intraday.skipped,
     )
+
+
+def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
+    """The frame's last bar's IST calendar date (ISO), or ``None`` when empty.
+
+    Feeds the stamp's daily-cutoff rule (DEC-PREBUILD-INCREMENTAL-001): a
+    stamped run whose cutoff already lay strictly AFTER this date finalised
+    every session in the data, so a later cutoff derives identically from the
+    unchanged 1-minute source. A naive (tz-less) timestamp is treated as UTC —
+    the lake's storage convention.
+    """
+    from datetime import UTC, datetime
+
+    from brutex.calendars.nse import IST
+
+    if df_1m.height == 0:
+        return None
+    ts = df_1m.get_column("ts_utc").max()
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(IST).date().isoformat()
 
 
 __all__ = [
