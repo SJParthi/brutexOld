@@ -357,3 +357,11 @@ class TestDataWinsWalkBack:
         # 05-11 candle anchors it SILENTLY (overlay-reconciled path).
         assert result[date(2026, 5, 13)].prev_day == date(2026, 5, 11)
         assert _stale_warns(logs) == []
+
+    def test_series_skips_day_with_no_anchor_at_all(self) -> None:
+        # A `today` whose ENTIRE 14-day lookback has no candle stays absent from
+        # the series output (the surviving skip-None contract).
+        with capture_logs() as logs:
+            result = lookup_prev_day_ohlc_series([date(2026, 5, 11)], {})
+        assert result == {}
+        assert [e for e in logs if e["event"] == PREV_DAY_NO_ANCHOR_EVENT]

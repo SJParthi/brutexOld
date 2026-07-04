@@ -643,3 +643,40 @@ class TestAnchorsRecoverEndToEnd:
         assert reconciled is not None
         assert reconciled.prev_day == date(2026, 5, 11)
         assert _events(logs, "prev_day_ohlc.stale_anchor") == []
+
+
+class TestReadSidecarEntries:
+    """The tolerant merge-side reader (private; drives the diff-based write)."""
+
+    def test_wrong_version_reads_empty(self, tmp_path: Path) -> None:
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": 99, "entries": []}), encoding="utf-8")
+        assert obs._read_sidecar_entries(path) == []
+
+    def test_entries_not_list_reads_empty(self, tmp_path: Path) -> None:
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": OBSERVED_OVERLAY_VERSION, "entries": {"a": 1}}),
+            encoding="utf-8",
+        )
+        assert obs._read_sidecar_entries(path) == []
+
+    def test_missing_file_reads_empty(self, tmp_path: Path) -> None:
+        assert obs._read_sidecar_entries(overlay_path(tmp_path)) == []
+
+    def test_invalid_entries_filtered(self, tmp_path: Path) -> None:
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        good = {
+            "date": "2026-05-12",
+            "detected_at": _NOW.isoformat(),
+            "month": "2026-05",
+            "label": OBSERVED_LABEL,
+        }
+        path.write_text(
+            json.dumps({"version": OBSERVED_OVERLAY_VERSION, "entries": [good, {"bad": 1}]}),
+            encoding="utf-8",
+        )
+        assert obs._read_sidecar_entries(path) == [good]
