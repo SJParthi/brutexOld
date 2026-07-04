@@ -115,6 +115,35 @@ def _bar_series(draw: st.DrawFn, *, min_size: int = 2, max_size: int = 45) -> li
     return _series_from_pairs(pairs)
 
 
+def _tf_frame(series: list[CandleBar]):  # type: ignore[no-untyped-def]
+    """Build the naive-UTC 1m polars frame ``resample_1m_to_tf`` consumes.
+
+    Module-level (not per-test) so every tf-resampler gate feeds the deriver
+    through ONE identical frame construction. Imports polars lazily so the
+    ``.[dev]``-only job (no ``[data]`` extra) can still collect this module.
+    """
+    import polars as pl
+
+    return pl.DataFrame(
+        {
+            "ts_utc": [b.timestamp.replace(tzinfo=None) for b in series],
+            "open": [float(b.open) for b in series],
+            "high": [float(b.high) for b in series],
+            "low": [float(b.low) for b in series],
+            "close": [float(b.close) for b in series],
+            "volume": [b.volume for b in series],
+        },
+        schema={
+            "ts_utc": pl.Datetime,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+    )
+
+
 def _mutate_suffix(bars: list[CandleBar], start: int, data: st.DataObject) -> list[CandleBar]:
     """Replace every bar at index >= *start* with fresh (extreme-capable) prices.
 
@@ -244,29 +273,66 @@ def test_tf_resampler_prior_day_buckets_immune_to_suffix_day_mutation(
         (anchor_ist + bucket_index * timedelta(minutes=5)).astimezone(UTC).replace(tzinfo=None)
     )
 
-    def _frame(series: list[CandleBar]):  # type: ignore[no-untyped-def]
-        return pl.DataFrame(
-            {
-                "ts_utc": [b.timestamp.replace(tzinfo=None) for b in series],
-                "open": [float(b.open) for b in series],
-                "high": [float(b.high) for b in series],
-                "low": [float(b.low) for b in series],
-                "close": [float(b.close) for b in series],
-                "volume": [b.volume for b in series],
-            },
-            schema={
-                "ts_utc": pl.Datetime,
-                "open": pl.Float64,
-                "high": pl.Float64,
-                "low": pl.Float64,
-                "close": pl.Float64,
-                "volume": pl.Int64,
-            },
-        )
-
-    base_out = resample_1m_to_tf(_frame(bars), 5).filter(pl.col("ts_utc") < boundary)
-    mutated_out = resample_1m_to_tf(_frame(mutated), 5).filter(pl.col("ts_utc") < boundary)
+    base_out = resample_1m_to_tf(_tf_frame(bars), 5).filter(pl.col("ts_utc") < boundary)
+    mutated_out = resample_1m_to_tf(_tf_frame(mutated), 5).filter(pl.col("ts_utc") < boundary)
     assert base_out.equals(mutated_out)
+
+
+@given(bars=_bar_series(min_size=8, max_size=3 * _BARS_PER_DAY), data=st.data())
+@settings(suppress_health_check=[HealthCheck.too_slow], deadline=None)
+def test_tf_resampler_closed_buckets_immune_to_mid_session_suffix_mutation(
+    bars: list[CandleBar], data: st.DataObject
+) -> None:
+    """WITHIN-session teeth: a mid-session suffix mutation never changes a CLOSED bucket.
+
+    Teeth-verification round (DEC-SWEEP-LOOKAHEAD-GUARD-001): an adversarial
+    reviewer PLANTED a within-session cross-bucket look-ahead in
+    ``resample_1m_to_tf`` (bucket label off-by-one — every closed bucket
+    incorporated the NEXT bucket's first bar) and the original suffix-DAY
+    gate above PASSED, because session anchoring confines buckets to their
+    own IST date so a within-day leak never crossed that gate's comparison
+    boundary. THIS gate closes the hole: mutate everything strictly after an
+    arbitrary (typically mid-session) cut and require every bucket whose
+    window ENDS at/before the first mutated bar to be bit-identical — a
+    cross-bucket leak inside one session now crosses the comparison line.
+    Verified to FAIL against the exact planted off-by-one before commit.
+    """
+    pl = pytest.importorskip("polars")  # the [data] extra; skips the .[dev]-only job
+    from brutex.data.tf_resampler import resample_1m_to_tf
+
+    k = data.draw(st.integers(min_value=0, max_value=len(bars) - 2))
+    mutated = _mutate_suffix(bars, k + 1, data)
+    # A 5m bucket labeled s covers [s, s+5): it is CLOSED at the mutation
+    # point iff s + 5min <= ts(first mutated bar) ⟺ s <= boundary − 5min.
+    boundary = bars[k + 1].timestamp.replace(tzinfo=None)
+    closed_horizon = boundary - timedelta(minutes=5)
+    base_out = resample_1m_to_tf(_tf_frame(bars), 5).filter(pl.col("ts_utc") <= closed_horizon)
+    mutated_out = resample_1m_to_tf(_tf_frame(mutated), 5).filter(
+        pl.col("ts_utc") <= closed_horizon
+    )
+    assert base_out.equals(mutated_out)
+
+
+@given(bars=_bar_series(min_size=6), data=st.data())
+@settings(suppress_health_check=[HealthCheck.too_slow], deadline=None)
+def test_tf_resampler_closed_buckets_immune_to_appended_suffix(
+    bars: list[CandleBar], data: st.DataObject
+) -> None:
+    """The tf-resampler twin of the feed-resampler appended-suffix gate.
+
+    ``resample_1m_to_tf(prefix)`` and ``resample_1m_to_tf(full)`` may differ
+    only in the prefix's LAST bucket (which appended bars can legitimately
+    extend) — every earlier bucket is already closed and must be
+    bit-identical whether the later bars exist or not.
+    """
+    pytest.importorskip("polars")  # the [data] extra; skips the .[dev]-only job
+    from brutex.data.tf_resampler import resample_1m_to_tf
+
+    m = data.draw(st.integers(min_value=1, max_value=len(bars) - 1))
+    prefix_out = resample_1m_to_tf(_tf_frame(bars[:m]), 5)
+    full_out = resample_1m_to_tf(_tf_frame(bars), 5)
+    closed = prefix_out.height - 1
+    assert prefix_out.head(closed).equals(full_out.head(closed))
 
 
 # ────────────────────────────────────────────────────────────────────────
