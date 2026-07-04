@@ -406,3 +406,105 @@ class TestSessionAwareForcedExitParity:
             for m in masks
         ]
         assert got == expected
+
+
+# ── cross-session pending-entry drop parity (R2-OC-2) ─────────────────────────
+
+_NEXT_DAY = date(2024, 1, 3)  # the next NSE session (Wednesday)
+
+
+def _next_day_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str) -> CandleBar:
+    """A day-2 (next-session) 1-minute bar at IST ``hh:mm``."""
+    ts = datetime(_NEXT_DAY.year, _NEXT_DAY.month, _NEXT_DAY.day, hh, mm, tzinfo=IST).astimezone(
+        UTC
+    )
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(o),
+        high=Decimal(h),
+        low=Decimal(lo),
+        close=Decimal(c),
+        volume=0,
+        open_interest=None,
+    )
+
+
+class TestCrossSessionPendingEntryParity:
+    """R2-OC-2: the kernel drops a cross-session pending entry like the oracle."""
+
+    def _two_session_feed(self) -> tuple[list[CandleBar], list[int]]:
+        """Two-session feed + bar_bits whose bit0 fires ONLY on day-1's last bar."""
+        bars = [
+            _bar(15, 28, "100", "101", "99", "100"),
+            _bar(15, 29, "100", "101", "99", "100"),  # signal (bit0) — session's last bar
+            _next_day_bar(9, 15, "119", "120", "118", "119"),  # +19 overnight gap
+            _next_day_bar(9, 16, "119.50", "120.50", "119", "119.50"),
+        ]
+        signals = [False, True, False, False]
+        raw = build_bar_bits(bars)
+        bits = [(b | 1) if sig else (b & ~1) for b, sig in zip(raw, signals, strict=True)]
+        return bars, bits
+
+    def test_rust_kernel_drops_cross_session_entry_and_matches_oracle(self) -> None:
+        # Parity AND the absolute verdict: BOTH sides produce ZERO trades for a
+        # last-bar signal followed by the next session's open (pre-fix both
+        # produced one trade entering at 119.00 = the overnight gap at zero
+        # slippage — the absolute pin catches a lock-step regression).
+        bars, bits = self._two_session_feed()
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        got = sim.simulate_masks([1], direction=Side.BUY)
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+        assert got == expected
+        assert got == [[]]  # absolute: no overnight trade on EITHER side
+
+    def test_rust_and_fallback_agree_on_cross_session_drop(self) -> None:
+        # The forced pure-Python fallback path takes the same drop decision.
+        bars, bits = self._two_session_feed()
+        rust = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert rust._rust is not None  # the wheel is built in CI — a real Rust run
+        fallback = ResidentTradeSim(bars, bits, tf_minutes=1)
+        fallback._rust = None
+        assert rust.simulate_masks([1], direction=Side.BUY) == fallback.simulate_masks(
+            [1], direction=Side.BUY
+        )
+
+    def test_rust_kernel_next_session_signal_still_fills(self) -> None:
+        # A genuine day-2 signal still fills within day-2 (the drop must not eat
+        # it): signal on day-1 15:29 AND day-2 09:15 → ONE trade entering 09:16.
+        bars = [
+            _bar(15, 29, "100", "101", "99", "100"),
+            _next_day_bar(9, 15, "119", "120", "118", "119"),
+            _next_day_bar(9, 16, "119.50", "120.50", "119", "119.60"),
+            _next_day_bar(9, 17, "119.80", "120.80", "119.30", "120"),
+        ]
+        signals = [True, True, False, False]
+        raw = build_bar_bits(bars)
+        bits = [(b | 1) if sig else (b & ~1) for b, sig in zip(raw, signals, strict=True)]
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        got = sim.simulate_masks([1], direction=Side.BUY)
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+        assert got == expected
+        assert len(got[0]) == 1
+        assert got[0][0].entry_ts == bars[2].timestamp  # 09:16 day-2, NOT 09:15

@@ -6,7 +6,9 @@ trade-sim analogue of :class:`brutex.engine.combo_mask.ResidentBarBuffer`: the
 expensive per-(instrument, tf) inputs — the OHLC→paisa conversion
 (:func:`brutex.engine.stage1a._price_to_paisa`), the SESSION-AWARE forced-exit
 flags (:func:`brutex.calendars.nse.is_forced_exit_bar` against each bar session's
-close − 10min; DEC-SESSION-FORCED-EXIT-001), and the Stage-1A ``bar_bits``
+close − 10min; DEC-SESSION-FORCED-EXIT-001), the per-bar IST session identity
+(each bar's IST calendar-date ordinal — the gate that DROPS a pending entry whose
+fill bar falls on a later session, R2-OC-2), and the Stage-1A ``bar_bits``
 truth-vectors — are computed ONCE in Python (the single source of truth,
 CLAUDE.md §11 COMMON) and handed to a resident Rust buffer. Thereafter a whole
 batch of strategy masks is simulated into round-trip
@@ -151,7 +153,17 @@ class ResidentTradeSim:
         # 1-slot cache, O(1) per bar) — a chronological feed re-resolves once
         # per new day, exactly as the streaming walker does, so the precomputed
         # Rust-kernel flags and the Python-fallback exits never diverge.
+        #
+        # ``session_days`` is the per-bar SESSION identity — the bar's own IST
+        # calendar-date ordinal, the SAME date key the forced-exit resolution
+        # uses — threaded to the kernel so a pending entry armed on a session's
+        # last stored bar is DROPPED at the next session's open instead of
+        # filling ~18h stale across the overnight gap (R2-OC-2; mirrors the
+        # walker's ``_pending_entry_day`` gate bit-for-bit). Bar ``i``'s session
+        # derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
+        # no look-ahead).
         forced: list[bool] = []
+        session_days: list[int] = []
         cache_date: date | None = None
         cache_seconds: int | None = None
         for bar in self._bars:
@@ -164,6 +176,7 @@ class ResidentTradeSim:
                     None if session is None else forced_exit_seconds_for_session(session)
                 )
             forced.append(is_forced_exit_bar(ts_ist.time(), tf_minutes, cache_seconds))
+            session_days.append(bar_day.toordinal())
         open_p = [_price_to_paisa(bar.open) for bar in self._bars]
         high_p = [_price_to_paisa(bar.high) for bar in self._bars]
         low_p = [_price_to_paisa(bar.low) for bar in self._bars]
@@ -172,7 +185,7 @@ class ResidentTradeSim:
             import fno_math
 
             self._rust: fno_math.ResidentSweepSim | None = fno_math.ResidentSweepSim(
-                open_p, high_p, low_p, close_p, forced, self._bar_bits
+                open_p, high_p, low_p, close_p, forced, session_days, self._bar_bits
             )
         except (ImportError, AttributeError):
             self._rust = None
