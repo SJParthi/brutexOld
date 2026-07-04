@@ -85,7 +85,7 @@ _OVERFIT = st.one_of(
 )
 
 
-@settings(max_examples=120, deadline=None)
+@settings(max_examples=200, deadline=None)
 @given(pool=_candidate_pool(), overfit=_OVERFIT, top_k=st.integers(1, 15))
 def test_bounded_rank_is_bit_identical_to_batch_rank(
     pool: list[tuple[int, ResultMetrics]],

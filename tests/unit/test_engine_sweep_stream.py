@@ -18,6 +18,7 @@ Covers :mod:`brutex.engine.sweep_stream` at 100% line+branch:
 from __future__ import annotations
 
 import math
+import struct
 from typing import Any
 
 import pytest
@@ -281,6 +282,110 @@ class TestRankSurvivorColumnsGuards:
             rank_combos(entries)
         assert str(bounded_exc.value) == str(batch_exc.value)
         assert "duplicate survivor mask(s): [5]" in str(bounded_exc.value)
+
+
+class TestDeterministicUlpTripwire:
+    """Deterministic bit-level drift tripwire (hostile-review teeth follow-up).
+
+    The hypothesis centrepiece samples the input space, so a genuine ULP-level
+    summation-reorder drift in the bounded arm can survive one bounded-example
+    run by luck. This fixture is DENSE in exact score ties (large clusters of
+    IDENTICAL metrics under distinct masks) and mixes magnitudes across ~14
+    orders — the shapes where a reassociated float sum diverges first — and
+    asserts the composite (and DSR) of EVERY finalist is BIT-equal between the
+    arms via ``struct.pack('<d', …)``, on every CI run, no sampling.
+    """
+
+    @staticmethod
+    def _double_bits(value: float) -> str:
+        return struct.pack("<d", value).hex()
+
+    def _dense_tie_pool(self) -> list[tuple[int, ResultMetrics]]:
+        # Three tie CLUSTERS (shared metrics objects → exactly equal term
+        # columns within a cluster) at wildly mixed magnitudes, plus unique
+        # rows spanning tiny/huge values and a gate-failing row.
+        tiny = make_result_metrics(
+            sharpe_ratio=1e-12,
+            sortino_ratio=2e-12,
+            calmar_ratio=-3e-12,
+            profit_factor=1.2000000000001,
+            recovery_factor=5e-13,
+            win_rate=0.26,
+            win_loss_ratio=2.0000000000002,
+            avg_mfe_paisa=1,
+            avg_mae_paisa=10**9,
+            total_trades=31,
+            skewness=1e-9,
+            kurtosis=-1e-9,
+        )
+        huge = make_result_metrics(
+            sharpe_ratio=1.0e12,
+            sortino_ratio=-2.0e12,
+            calmar_ratio=3.0e11,
+            profit_factor=9.5,
+            recovery_factor=7.0e12,
+            win_rate=0.99,
+            win_loss_ratio=8.75,
+            avg_mfe_paisa=10**12,
+            avg_mae_paisa=1,
+            total_trades=77,
+            skewness=3.5,
+            kurtosis=11.25,
+        )
+        mid = make_result_metrics(
+            sharpe_ratio=0.1 + 0.2,  # a classic non-representable sum (0.30000000000000004)
+            sortino_ratio=1.0 / 3.0,
+            calmar_ratio=2.0 / 3.0,
+            profit_factor=1.0 + 1.0 / 3.0,
+            recovery_factor=1e-3,
+            win_rate=0.6,
+            win_loss_ratio=1.5,
+            avg_mfe_paisa=333,
+            avg_mae_paisa=97,
+            total_trades=45,
+            skewness=-0.75,
+            kurtosis=0.5,
+        )
+        gate_fail = make_result_metrics(total_trades=3)
+        pool: list[tuple[int, ResultMetrics]] = []
+        mask = 1
+        for cluster, size in ((tiny, 6), (huge, 5), (mid, 7)):
+            for _ in range(size):
+                pool.append((mask, cluster))
+                mask += 3  # non-contiguous masks so ties break on value, not order
+        pool.append((mask, gate_fail))
+        return pool
+
+    @pytest.mark.parametrize(
+        "overfit", [None, OverfitGateConfig(dsr_min=0.0)], ids=["plain", "overfit"]
+    )
+    def test_dense_tie_mixed_magnitude_composites_are_bit_equal(
+        self, overfit: OverfitGateConfig | None
+    ) -> None:
+        pool = self._dense_tie_pool()
+        for top_k in (1, 4, len(pool)):
+            ranked = rank_combos(pool, overfit=overfit)
+            result = rank_survivor_columns(
+                _columns(pool, with_overfit=overfit is not None), overfit=overfit, top_k=top_k
+            )
+            expected = ranked[:top_k]
+            assert [f.mask for f in result.finalists] == [rc.mask for rc in expected]
+            for bounded, batch in zip(result.finalists, expected, strict=True):
+                # BIT equality — an ULP-level reassociation drift changes the
+                # low mantissa bits and fails here deterministically.
+                assert self._double_bits(bounded.composite_score) == self._double_bits(
+                    batch.composite_score
+                )
+                if batch.deflated_sharpe is None:
+                    assert bounded.deflated_sharpe is None
+                else:
+                    assert bounded.deflated_sharpe is not None
+                    assert self._double_bits(bounded.deflated_sharpe) == self._double_bits(
+                        batch.deflated_sharpe
+                    )
+            # The fixture must genuinely exercise dense ties: every cluster
+            # ranks (only the gate_fail row drops), so n_ranked == 18.
+            assert result.n_ranked == 18
 
 
 class TestBoundedFinalistShape:

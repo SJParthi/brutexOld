@@ -199,6 +199,13 @@ class TestWatermarkMessage:
         assert "2048 bytes" in message
         assert "17 kept masks" in message
         assert f"{MEM_BUDGET_ENV}=1024" in message
-        assert BOUNDED_RANK_MODE_ENV in message
         assert "remedies" in message
         assert "deterministic redo" in message
+
+    def test_omits_the_engage_bounded_remedy(self) -> None:
+        # HONESTY: the watermark fires only when the bounded rank is ALREADY
+        # engaged, so "set BRUTEX_SWEEP_BOUNDED_RANK=auto/on" would be an
+        # inapplicable remedy — the mode clause must be absent here (it stays
+        # present in every PRE-FLIGHT refusal, pinned above).
+        message = watermark_message(owned_bytes=2048, budget_bytes=1024, n_kept=17)
+        assert BOUNDED_RANK_MODE_ENV not in message

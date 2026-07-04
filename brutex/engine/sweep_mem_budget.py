@@ -202,13 +202,22 @@ class RankMemoryPlan:
         return self.bounded_top_k
 
 
-def _remedies(*, include_top_k: bool, include_digest: bool) -> str:
-    """Render the remedy tail every refusal message carries (knobs by NAME)."""
+def _remedies(*, include_top_k: bool, include_digest: bool, include_mode: bool = True) -> str:
+    """Render the remedy tail every refusal message carries (knobs by NAME).
+
+    ``include_mode=False`` drops the "engage the bounded rank" clause for the
+    MID-FLIGHT watermark message — the watermark only ever fires when the
+    bounded rank is ALREADY engaged, so advising the operator to engage it
+    would be a dishonest remedy (Golden Rule #10).
+    """
     parts = [
         f"raise {MEM_BUDGET_ENV} (current budget applies per tuple)",
-        f"set {BOUNDED_RANK_MODE_ENV}=auto or =on to engage the bounded columnar rank",
         "raise min_hits / lower k to shrink the kept population",
     ]
+    if include_mode:
+        parts.insert(
+            1, f"set {BOUNDED_RANK_MODE_ENV}=auto or =on to engage the bounded columnar rank"
+        )
     if include_top_k:
         parts.insert(
             1, "set a finite top_k (the bounded rank cannot retain an unbounded leaderboard)"
@@ -232,7 +241,7 @@ def watermark_message(*, owned_bytes: int, budget_bytes: int, n_kept: int) -> st
         f"bounded-rank memory watermark breached mid-flight: the survivor columns own "
         f"{owned_bytes} bytes after {n_kept} kept masks, exceeding "
         f"{MEM_BUDGET_ENV}={budget_bytes}; the tuple is skipped for a deterministic redo. "
-        + _remedies(include_top_k=False, include_digest=False)
+        + _remedies(include_top_k=False, include_digest=False, include_mode=False)
     )
 
 
