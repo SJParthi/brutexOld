@@ -10,12 +10,25 @@ honest-envelope clause the :class:`~brutex.data.errors.WriteDeadlineExceeded` do
 carried ("defers the same window every pull until the volume recovers").
 
 This breaker adds the CROSS-WINDOW health accounting: ONE instance per pull observes every
-write defer keyed by its lake partition. Two CONSECUTIVE defers on the same partition open
-that partition's breaker; once :data:`WRITE_BREAKER_DISTINCT_OPEN_LIMIT` (3) DISTINCT
-partitions are open the volume itself is judged wedged and the breaker raises
+write defer keyed by a per-partition HEALTH key. Two CONSECUTIVE defers on the same health
+key open that key's breaker; once :data:`WRITE_BREAKER_DISTINCT_OPEN_LIMIT` (3) DISTINCT
+keys are open the volume itself is judged wedged and the breaker raises
 ``LakeWriteHalt("volume_wedged")`` — which rides the EXISTING #885 global-stop machinery
 (both spines' ``_GLOBAL_STOP_ERRORS``, the async pipeline's non-isolatable pool stop) and
 the EXISTING #888/#889 CRITICAL Telegram pull-halt alert, with ZERO new alert wiring.
+
+How each spine REACHES the consecutive limit at the SHIPPED defaults (review MAJOR P3-1):
+
+* SPOT keys per series+month partition. One symbol's windows span DIFFERENT months, so a
+  single key sees a second defer only via the spine's bounded IN-RUN retry passes
+  (``ingest_spot`` ``max_retry_passes`` = 2): pass 0 defers it (streak 1), the retry pass
+  defers it again (streak 2) → the key opens.
+* F&O keys per UNDERLYING (+ interval + window-start month), NOT per contract: each F&O
+  ``(contract, interval)`` pair has exactly ONE clamped ledger window per pass and NO
+  in-pass tail retry (the defer goes to the NEXT pull, which builds a FRESH breaker), so a
+  per-contract key could never reach streak 2 and the breaker was structurally INERT on
+  that spine. Grouped by underlying, a wedged volume's defers on sibling contracts of one
+  chain accumulate into a real streak; a durable write on any sibling resets it.
 
 Honest envelope (Golden Rule #10)
 ---------------------------------
@@ -26,8 +39,11 @@ mitigation (contention concentrates on shared hot partitions; a wedged volume fa
 EVERYWHERE), and the env kill switch (``BRUTEX_WRITE_BREAKER=off``) disarms it entirely.
 The breaker is PER-PULL and IN-PROCESS: wedge history does not persist across pulls, an
 open partition never half-open re-probes mid-pull, and the window-ledger store's own lock
-path is NOT observed — all named follow-ups. No data is lost either way: every deferred
-window's ledger row is FAILED and re-pulled (idempotent keep-first sink).
+path is NOT observed — all named follow-ups. A pull whose deferring windows span FEWER
+than 3 distinct health keys (e.g. a narrow single-underlying, single-month F&O pull)
+still defers per-window without a halt — the honest floor of the distinct gate. No data
+is lost either way: every deferred window's ledger row is FAILED and re-pulled
+(idempotent keep-first sink).
 """
 
 from __future__ import annotations
@@ -71,15 +87,21 @@ def partition_health_key(
 ) -> str:
     """Return the stable per-partition health key the spines observe defers under.
 
-    A series + month string (``NSE/INDEX/NIFTY/1minute/2026-07``) — the same coordinates
-    that name a lake month partition, derived from what the window tail already has. A
-    window spanning a month boundary keys on its START month: this is a HEALTH grouping
-    key, not a storage key, so window-granularity is sufficient.
+    A series + month string (``NSE/INDEX/NIFTY/1minute/2026-07``) derived from what the
+    window tail already has. This is a HEALTH grouping key, NOT a storage key: the SPOT
+    spine passes the sink series symbol (the key names a lake month partition), while the
+    F&O spine passes the contract's UNDERLYING symbol (grouping the whole chain's sibling
+    contracts — a per-contract key could never reach the shipped consecutive limit, see
+    the module docstring). A window spanning a month boundary keys on its START month:
+    window-granularity is sufficient for health grouping.
 
     Parameters
     ----------
-    exchange, segment, symbol, interval
+    exchange, segment, interval
         The series coordinates exactly as passed to the sink append.
+    symbol
+        The health-group symbol: the sink series symbol (spot) or the contract's
+        underlying symbol (F&O).
     month
         The window-start month as ``YYYY-MM``.
 

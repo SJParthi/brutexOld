@@ -125,11 +125,15 @@ class WriteDeadlineExceeded(DataLakeError):
     so a C-level wedged ``fsync`` thread CANNOT be killed — it dies with the process. The
     guarantee is "the fetch lane is never blocked" (the producer is released + the window is
     deferred), NOT "the zombie write thread is terminated". A persistently-wedged volume no
-    longer burns the whole pull deferring window after window: the per-partition write-health
-    breaker (:class:`~brutex.data.write_breaker.WriteHealthBreaker`,
-    DEC-WRITE-HEALTH-BREAKER-001) accumulates these defers and escalates a multi-partition
-    wedge to ``LakeWriteHalt("volume_wedged")`` — a graceful pull-wide halt with the
-    CRITICAL Telegram alert (the operator's signal to act, now pushed not just logged).
+    longer burns the whole pull deferring window after window: the write-health breaker
+    (:class:`~brutex.data.write_breaker.WriteHealthBreaker`, DEC-WRITE-HEALTH-BREAKER-001)
+    accumulates these defers per health key — the spot series+month partition; the F&O
+    UNDERLYING (a per-contract key could never reach the shipped consecutive limit, so the
+    F&O key groups the chain's sibling contracts) — and escalates a multi-key wedge to
+    ``LakeWriteHalt("volume_wedged")`` — a graceful pull-wide halt with the CRITICAL
+    Telegram alert (the operator's signal to act, now pushed not just logged). Honest
+    floor: a pull whose defers span fewer than 3 distinct health keys still defers
+    per-window without a halt.
 
     ``deadline_seconds`` is the deadline that was exhausted (non-secret) for the log.
     """

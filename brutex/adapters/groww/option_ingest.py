@@ -778,12 +778,21 @@ def _process_option_window_tail(
     # bar ON the boundary is KEPT, so this only ever removes an out-of-window / clock-skew
     # phantom, never a legitimate in-range bar (existing behaviour byte-unchanged).
     bars = drop_bars_after(bars, key.end)
-    # The per-partition write-health key (DEC-WRITE-HEALTH-BREAKER-001) — series + the
-    # window-start month, from what this tail already has (no extra lookup).
+    # The write-health GROUP key (DEC-WRITE-HEALTH-BREAKER-001) — grouped by the
+    # UNDERLYING, not the contract: each F&O ``(contract, interval)`` pair has exactly
+    # ONE clamped ledger window per pass (``_clamped_window_key``) and the tail has NO
+    # in-pass retry (a write defer folds to ``tail_transients`` → the NEXT pull, which
+    # builds a FRESH breaker), so a per-CONTRACT key could never reach the shipped
+    # ``WRITE_BREAKER_CONSECUTIVE_LIMIT`` of 2 — the breaker was structurally INERT on
+    # this spine (review MAJOR P3-1). Grouping by underlying lets a wedged volume's
+    # defers on SIBLING contracts of one chain accumulate into a real streak, while a
+    # durable write on ANY sibling still resets it. Built from what this tail already
+    # has (no extra lookup); a blank underlying falls back to the contract symbol so
+    # the key is never empty.
     health_key = partition_health_key(
         exchange=exchange,
         segment=OPTION_SEGMENT,
-        symbol=contract.symbol,
+        symbol=contract.underlying_symbol or contract.symbol,
         interval=interval,
         month=key.start.strftime("%Y-%m"),
     )

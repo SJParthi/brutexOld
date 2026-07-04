@@ -2094,6 +2094,39 @@ class TestWriteHealthBreakerSpotSpine:
         assert {r.status for r in recorded} == {FAILED}
         assert len(breaker.open_partitions) >= 3
 
+    def test_shipped_default_limits_escalate_via_retry_passes(self) -> None:
+        """SHIPPED-DEFAULTS regression (review MAJOR P3-1): spot trips at 2 consecutive / 3 distinct.
+
+        No injected limits — ``WriteHealthBreaker()`` carries the shipped defaults and
+        ``max_retry_passes`` stays at its default (2). A spot month key reaches the
+        consecutive limit via the bounded IN-RUN retry pass: pass 0 defers every window
+        (streak 1 per month key), the retry pass defers them again (streak 2 → open), and
+        the third opened key raises ``LakeWriteHalt("volume_wedged")``.
+        """
+        from brutex.data.errors import LakeWriteHalt
+        from brutex.data.window_ledger import FAILED, WindowLedger
+        from brutex.data.write_breaker import WriteHealthBreaker
+
+        breaker = WriteHealthBreaker()  # shipped default limits — nothing injected
+        led = WindowLedger()
+        with pytest.raises(LakeWriteHalt) as excinfo:
+            ingest_spot(
+                _Adapter(),  # type: ignore[arg-type]
+                _LockTimeoutSink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),  # 8 windows -> 8 distinct month keys
+                ledger=led,
+                retry_backoff=lambda _i: None,  # no real sleep between passes
+                write_breaker=breaker,
+            )
+        assert excinfo.value.reason == "volume_wedged"
+        recorded = list(led.records())
+        assert recorded
+        assert {r.status for r in recorded} == {FAILED}
+        assert len(breaker.open_partitions) >= 3
+
     def test_below_distinct_limit_keeps_todays_defer_behaviour(self) -> None:
         """Defers on FEWER distinct partitions than the limit never halt (deferred only)."""
         from brutex.data.window_ledger import FAILED, WindowLedger
