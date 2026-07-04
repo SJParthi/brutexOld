@@ -415,8 +415,19 @@ GROWW_TOKEN_ISSUANCE_RETRY_CAP_S: Final[float] = 4.0
 #: false-fire during it. A dead broker still fails LOUDLY: once the (shared,
 #: per-generation) deadline expires the error propagates exactly as before —
 #: the window defers FAILED and the dead-credential escalation
-#: (DEC-VENDOR-DOWN-BREAKER-001) still applies. NOT a vendor limit — an
-#: operator-tunable pause bound (env :data:`GROWW_TOKEN_STALE_WAIT_ENV`).
+#: (DEC-VENDOR-DOWN-BREAKER-001) still applies. HONEST trade (Golden Rule
+#: #10): because the whole pool spends AT MOST ONE such pause per stale
+#: generation, a GENUINELY dead broker's ``GrowwCredentialDeadError``
+#: escalation is DELAYED by at most one :data:`GROWW_TOKEN_STALE_WAIT_S`
+#: (~420 s — the worst-case time-to-halt moves from the breaker's ~600 s
+#: streak-span floor to ~1020 s wall-clock) — deliberate, bounded, and
+#: disclosed, bought so a HEALTHY 06:00 rotation never burns window
+#: attempts. Cosmetic side-effect: a worker sleeping in the pause still
+#: holds its in-flight call-meter slot (``meter.start`` fired before the
+#: auth error surfaced), so the ``in_flight`` gauge reads elevated during a
+#: pause; the achieved-rps completed-rate is NOT inflated (a paused attempt
+#: never records ``completed``). NOT a vendor limit — an operator-tunable
+#: pause bound (env :data:`GROWW_TOKEN_STALE_WAIT_ENV`).
 GROWW_TOKEN_STALE_WAIT_S: Final[float] = 420.0
 #: Env override for :data:`GROWW_TOKEN_STALE_WAIT_S` (float seconds; ``0``
 #: explicitly DISABLES the pause — byte-identical to the pre-gate behaviour;
