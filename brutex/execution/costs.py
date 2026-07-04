@@ -1,40 +1,47 @@
-"""Indian transaction cost model \u2014 ``FR-EXEC-002`` (P4 kickoff scope).
+"""DEPRECATED, DORMANT Indian transaction cost model \u2014 do NOT use for new work.
 
-Applies to **every** fill the simulator produces. The P4 kickoff
-implementation covers the dominant charge categories for intraday
-equity and F&O trading:
+.. deprecated:: 2026-07-03
+    This module is **dead production code with STALE, WRONG rates**. The
+    authoritative Track-2 cost model is
+    :func:`brutex.costs.calculator.compute_trade_cost` (per DEC-COST-001
+    and ``docs/track2/COSTS_VERIFIED.md`` \u2014 the citation-grounded spec).
+    Constructing :class:`IndianCostModel` emits a ``DeprecationWarning``.
 
-* **Brokerage** \u2014 flat per-order fee (configurable, default \u20b920).
-* **STT** \u2014 sell-side only for intraday equity / FUT / OPT. Rates
-  per ``docs/REQUIREMENTS.md \u00a712.2``:
-  - intraday equity: 0.025% on sell notional
-  - FUT: 0.0125% on sell notional
-  - OPT: 0.05% on sell **premium** (= notional for options)
-* **Exchange turnover charge** \u2014 per segment: equity 0.00297%,
-  FUT 0.00173%, OPT 0.03503%. All applied to notional.
-* **SEBI turnover fee** \u2014 \u20b910 per crore of notional (0.0001%).
-* **GST** \u2014 18% on the sum of ``brokerage + exchange_fee +
-  sebi_fee``.
+Why it is stale (vs the shipped ``brutex/costs/`` calculator):
 
-Not yet modelled (lands in follow-up commits alongside the bits
-of state they depend on):
+* **STT 0.05% on options** \u2014 not ANY shipped regime. The real,
+  date-regime STT is 0.0625% (pre-Oct-2024) / 0.10% (Oct-2024 \u2192
+  Mar-2026) / 0.15% (Apr-2026 \u2192) per ``brutex.costs.constants``.
+* **Zero stamp duty** \u2014 the real model charges 0.003% buy-side.
+* **No IPFT** \u2014 the real model charges NSE 0.0005% both sides (and
+  includes it in the GST base).
+* **Banker's rounding** (``ROUND_HALF_EVEN``) \u2014 the money law
+  (CLAUDE.md \u00a74, DEC-MONEY-2DP-001) is ``ROUND_HALF_UP``.
 
-* **Stamp duty** \u2014 buy-side only, per-segment rate, needs
-  day-1-vs-delivery distinction.
-* **DP charges** \u2014 \u20b913.5 + GST per ISIN per day on delivery
-  sells, requires EOD ISIN accounting.
-* **STT delivery equity** \u2014 0.1% on buy+sell, needs settlement
-  tracking.
-* **STT option exercise** \u2014 0.125% on intrinsic, needs
-  option-exercise state.
+It survives ONLY because the equally-dormant
+``brutex/execution/{simulator,driver}.py`` stack still imports and
+self-tests it \u2014 nothing in the live sweep constructs any of the trio
+(``engine/trade_sim.py`` is the live signal-only path). Its numeric
+behaviour is deliberately FROZEN (dormant = frozen; the stale rates are
+documented, not fixed). Deleting the dead
+``execution/{costs,simulator,driver}`` trio as a unit is the flagged
+follow-up (``execution/types.py`` + ``errors.py`` must stay \u2014 the lean
+instrument store imports ``InstrumentMeta``).
 
-A golden test against the Zerodha / Groww calculator pinning
-computed costs to \u00b1\u20b90.01 lives under
-``tests/golden/test_indian_costs.py`` in a follow-up.
+Historical scope notes (rates as originally shipped, P4 kickoff):
+brokerage flat \u20b920/order; STT sell-side only (intraday equity 0.025%,
+FUT 0.0125%, OPT 0.05% on premium); exchange turnover per segment
+(equity 0.00297%, FUT 0.00173%, OPT 0.03503%); SEBI \u20b910/crore
+(0.0001%); GST 18% on (brokerage + exchange + SEBI). Stamp duty, DP
+charges, STT delivery equity and STT option exercise were never
+modelled here \u2014 see ``docs/track2/COSTS_VERIFIED.md`` (the retired
+``docs/REQUIREMENTS.md \u00a712.2`` this module once cited is a stub per
+CLAUDE.md Golden Rule #2).
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Final
@@ -109,7 +116,17 @@ def _quantise(amount: Decimal) -> Decimal:
 
 @dataclass(frozen=True, slots=True)
 class IndianCostModel:
-    """Compute :class:`FillCosts` for a single fill.
+    """DEPRECATED \u2014 compute :class:`FillCosts` for a single fill (STALE rates).
+
+    .. deprecated:: 2026-07-03
+        Dormant dead-production-code cost model with stale rates (see the
+        module docstring). Use
+        :func:`brutex.costs.calculator.compute_trade_cost` \u2014 the
+        authoritative model per DEC-COST-001 /
+        ``docs/track2/COSTS_VERIFIED.md``. Construction emits a
+        ``DeprecationWarning`` (at construction, NOT import, so a plain
+        ``import brutex.execution`` \u2014 which re-exports this class \u2014 stays
+        silent). Numeric behaviour is frozen.
 
     Stateless \u2014 every call is a pure function of
     ``(side, qty, fill_price, segment, instrument_type)`` plus the
@@ -124,6 +141,17 @@ class IndianCostModel:
     """
 
     brokerage_per_order: Decimal = DEFAULT_BROKERAGE
+
+    def __post_init__(self) -> None:
+        warnings.warn(
+            "IndianCostModel (brutex.execution.costs) is DEPRECATED and dormant: "
+            "its rates are STALE (STT 0.05% vs the shipped 0.0625/0.10/0.15% "
+            "regimes; zero stamp duty; no IPFT). Use "
+            "brutex.costs.calculator.compute_trade_cost \u2014 the authoritative "
+            "model per DEC-COST-001 / docs/track2/COSTS_VERIFIED.md.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def compute(
         self,

@@ -60,7 +60,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -5491,22 +5491,141 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
 #
 # These helpers compose the 100%-tested, golden-locked options EXECUTOR
 # (brutex.options.executor) with the spot lake (signal replay via the engine)
-# and the rolling-option lake (the OptionBarSource). They are real-lake +
-# fno_math I/O paths — unrunnable on the Py3.11/no-wheel/no-data sandbox — so
-# they are coverage-omitted (cli.py) + pragma'd and verified by the operator
-# against a real Groww lake; the executor core they call is the tested piece.
+# and the rolling-option lake (the OptionBarSource). The replay/orchestration
+# helpers are real-lake + fno_math I/O paths — unrunnable on the
+# Py3.11/no-wheel/no-data sandbox — so they are pragma'd and verified by the
+# operator against a real Groww lake; the executor core they call is the
+# tested piece. The lake READER (`_LakeOptionBarSource` + the expiry-series
+# resolution) needs only polars + a tmp lake, so it is fully covered by
+# tests/unit/test_cli_options_sim_source.py (R2-OC-1 regression net).
 
 
-class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-verified
+#: The rolling-option lake's series ``expiry_flag`` values, as written by
+#: ``OptionSeriesCoordinate`` (``brutex/data/option_parquet_writer.py``,
+#: DEC-EXPIRED-OPTIONS-TABLE-001): ``"WEEK"`` / ``"MONTH"``.
+_EXPIRY_FLAG_WEEKLY = "WEEK"
+_EXPIRY_FLAG_MONTHLY = "MONTH"
+
+#: The lake's ``expiry_code`` selector vocabulary is Near/Next/Far — 0/1/2
+#: (the request selector stamped per series; see the ``/api/v1/contracts``
+#: route docstring in ``brutex/dashboard/app.py``). A requested expiry beyond
+#: the Far selector is honestly unresolvable against this lake.
+_MAX_EXPIRY_CODE = 2
+
+#: The per-bar PRICING columns of the expired-options table — the inputs that
+#: actually drive a priced trade. Two rows surviving the series filter at ONE
+#: timestamp that agree on ALL of these are the same physical contract stored
+#: under two aliased series (e.g. a monthly expiry that is also that week's
+#: weekly); rows that disagree are a genuine ambiguity. The NULLABLE
+#: annotation columns (``spot`` / ``iv`` / ``open_interest``) are deliberately
+#: EXCLUDED: two aliased series pulled independently can legitimately drift on
+#: them (one captured spot, the other stored None) while pricing identically —
+#: keying ambiguity on annotations over-rejected priceable trades as NO_DATA
+#: (hostile-review MINOR, DEC-OPTIONS-EXEC-COST-AUDIT-R2-001). ``strike`` is
+#: excluded as redundant: ``load_pair`` already filters it to a constant.
+_OPTION_PRICING_COLUMNS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+)
+
+
+def _expiry_series_candidates(
+    instrument: Any,
+    expiry_date: date,
+    *,
+    on_date: date,
+) -> tuple[tuple[str, int], ...]:
+    """Resolve a requested absolute *expiry_date* to rolling-lake series keys.
+
+    The expired-options table stores NO absolute expiry column — each bar
+    carries only the pull-request series selector ``(expiry_flag,
+    expiry_code)`` (``"WEEK"``/``"MONTH"`` × Near/Next/Far;
+    DEC-EXPIRED-OPTIONS-TABLE-001). This maps the executor's absolute
+    *expiry_date*, as seen from *on_date* (the lookup bar's IST trading
+    date), onto that vocabulary using the SAME expiry calendar that generated
+    the request (:mod:`brutex.options.expiry_calendar` — imported, never
+    re-derived, CLAUDE.md §11 COMMON).
+
+    Parameters
+    ----------
+    instrument
+        The :class:`~brutex.options.lot_size_history.OptionsUnderlying`.
+    expiry_date
+        The absolute expiry the trade requested.
+    on_date
+        The IST trading date of the bar being looked up (the reference the
+        rolling Near/Next/Far selectors are relative to).
+
+    Returns
+    -------
+    tuple[tuple[str, int], ...]
+        Every matching ``(expiry_flag, expiry_code)`` pair — a monthly expiry
+        that is also that week's weekly matches BOTH series (the same
+        physical contract). Empty when the expiry is unresolvable: not on the
+        calendar as seen from *on_date*, beyond the Far selector, or
+        *on_date* precedes the recorded calendar history (pre-2021) — the
+        caller then rejects honestly (NO_DATA), never guesses.
+    """
+    from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
+
+    candidates: list[tuple[str, int]] = []
+    try:
+        cursor = on_date
+        for code in range(_MAX_EXPIRY_CODE + 1):
+            weekly = next_weekly_expiry(instrument, cursor)
+            if weekly is None or weekly > expiry_date:
+                break
+            if weekly == expiry_date:
+                candidates.append((_EXPIRY_FLAG_WEEKLY, code))
+                break
+            cursor = weekly + timedelta(days=1)
+        cursor = on_date
+        for code in range(_MAX_EXPIRY_CODE + 1):
+            monthly = next_monthly_expiry(instrument, cursor)
+            if monthly > expiry_date:
+                break
+            if monthly == expiry_date:
+                candidates.append((_EXPIRY_FLAG_MONTHLY, code))
+                break
+            cursor = monthly + timedelta(days=1)
+    except ValueError:
+        # *on_date* precedes the expiry calendar's recorded history (e.g. a
+        # 2020 signal vs the 2021-01-01 table start) — unresolvable; the
+        # caller rejects, never guesses (Golden Rule #1).
+        return ()
+    return tuple(candidates)
+
+
+class _LakeOptionBarSource:
     """An ``OptionBarSource`` backed by the rolling-option Parquet lake.
 
     Reads the self-describing expired-options table (DEC-EXPIRED-OPTIONS-TABLE-001,
     ``brutex/data/option_parquet_writer.py``): one ``(year, month)`` partition per
     series, every bar carrying ``underlying_symbol`` / ``side`` / resolved
-    ``strike`` / UTC ``timestamp`` + OHLC + ``iv`` columns. A leg is located by
-    ``(underlying_symbol, side, strike, timestamp)``; a missing entry/exit bar
-    (band-drift hole / not ingested) returns ``None`` so the trade is rejected,
-    never faked.
+    ``strike`` / UTC ``timestamp`` + the series ``expiry_flag``/``expiry_code``
+    + OHLC + ``iv`` columns. A leg is located by ``(underlying_symbol, side,
+    strike, timestamp)`` **within the series the requested expiry resolves to**
+    (R2-OC-1 — two concurrent series, e.g. a weekly and a monthly at the same
+    strike, can never collide). A missing entry/exit bar (band-drift hole / not
+    ingested), an unresolvable expiry, or a cross-series ambiguity returns
+    ``None`` so the trade is rejected, never faked.
+
+    HONEST ENVELOPE (hostile-review composition MINOR,
+    DEC-OPTIONS-EXEC-COST-AUDIT-R2-001): the per-lookup-date series resolution
+    assumes the lake's ROLLING accretion semantics — a bar at trading date D
+    is stored under the Near/Next/Far rank the contract held AS OF D (each
+    pull stamps the then-current selector, so one contract's life spans codes:
+    the rolling regression test pins entry WEEK/1 → exit WEEK/0 for the SAME
+    absolute expiry). A lake back-filled in ONE shot that stamps a contract's
+    whole multi-week history under a single pull-time code would read honest
+    ``NO_DATA`` for the bars whose stored rank differs from the as-of-date
+    resolution — fail-SAFE (reject + logged), never a mis-priced trade;
+    widening the filter to any code of a matching flag would reintroduce the
+    exact concurrent-series collision R2-OC-1 removed, so it is deliberately
+    NOT done.
     """
 
     def __init__(self, *, lake_root: Path) -> None:
@@ -5522,15 +5641,37 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
         entry_ts: datetime,
         exit_ts: datetime,
     ) -> Any:
-        """Return the leg's entry/exit ``OptionBarPair`` from the lake, or ``None``."""
-        del expiry_date  # the rolling lake is keyed by resolved strike + ts, not expiry
+        """Return the leg's entry/exit ``OptionBarPair`` from the lake, or ``None``.
+
+        The requested *expiry_date* is resolved to the lake's series
+        discriminator per lookup timestamp (:func:`_expiry_series_candidates`);
+        an unresolvable expiry logs ``options_sim.expiry_series_unresolved``
+        and returns ``None`` (→ the executor's NO_DATA reject).
+        """
+        from brutex.calendars.nse import IST
         from brutex.options.executor import OptionBarPair
 
         try:
             import polars as pl
-        except ImportError:
+        except ImportError:  # pragma: no cover — exercised only without the data extra
             return None
         if not self._root.exists():
+            return None
+
+        entry_date_ist = entry_ts.astimezone(IST).date()
+        exit_date_ist = exit_ts.astimezone(IST).date()
+        entry_series = _expiry_series_candidates(instrument, expiry_date, on_date=entry_date_ist)
+        exit_series = _expiry_series_candidates(instrument, expiry_date, on_date=exit_date_ist)
+        if not entry_series or not exit_series:
+            import structlog
+
+            structlog.get_logger("brutex.cli.options_sim").warning(
+                "options_sim.expiry_series_unresolved",
+                instrument=str(getattr(instrument, "value", instrument)),
+                expiry_date=str(expiry_date),
+                entry_date=str(entry_date_ist),
+                exit_date=str(exit_date_ist),
+            )
             return None
 
         entry_utc = entry_ts.astimezone(UTC)
@@ -5550,20 +5691,33 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
             & (pl.col("strike") == float(strike))
         )
 
-        entry_bar = self._row_at(df, entry_utc, option_type)
-        exit_bar = self._row_at(df, exit_utc, option_type)
+        entry_bar = self._row_at(df, entry_utc, option_type, series=entry_series)
+        exit_bar = self._row_at(df, exit_utc, option_type, series=exit_series)
         if entry_bar is None or exit_bar is None:
             return None
         return OptionBarPair(entry_bar=entry_bar, exit_bar=exit_bar)
 
     @staticmethod
-    def _row_at(df: Any, ts_utc: datetime, side: str) -> Any:  # pragma: no cover — lake I/O
-        """Build the ``OptionBar`` whose timestamp matches *ts_utc*, or ``None``.
+    def _row_at(
+        df: Any, ts_utc: datetime, side: str, *, series: tuple[tuple[str, int], ...]
+    ) -> Any:
+        """Build the ``OptionBar`` matching *ts_utc* within *series*, or ``None``.
 
-        A poisoned-era duplicate ``(side, timestamp)`` row keeps the FIRST
-        physical row and is WARNED via the COMMON read gate — previously a
-        SILENT first-wins (DEC-LAKE-READ-UNIQUE-001; the write side dedups on
-        the same composite key, ``option_parquet_writer``).
+        Rows are matched on ``timestamp`` AND the resolved series
+        discriminator (``expiry_flag``/``expiry_code``). Multiple surviving
+        rows that agree on every PRICING column (:data:`_OPTION_PRICING_COLUMNS`
+        — open/high/low/close/volume; the nullable ``spot``/``iv``/
+        ``open_interest`` annotations are excluded so aliased-series annotation
+        drift never over-rejects) are the SAME contract stored under two
+        aliased series (a monthly that is also that week's weekly) — the
+        most-annotated survivor is kept (every survivor prices identically) —
+        and a REPEATED series key among them (a poisoned-era physical
+        duplicate) keeps the first row of that ordering and is WARNED via the
+        COMMON read gate, never silent (DEC-LAKE-READ-UNIQUE-001; the write
+        side dedups on the same composite key, ``option_parquet_writer``).
+        Rows that DISAGREE on any pricing column are a genuine ambiguity: the
+        lookup logs ``options_sim.ambiguous_option_rows`` and returns ``None``
+        (→ NO_DATA), never an arbitrary row (R2-OC-1).
         """
         from decimal import Decimal
 
@@ -5572,17 +5726,50 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
         from brutex.data.lake_read import log_read_duplicates
         from brutex.data.models import OptionBar
 
-        hit = df.filter(pl.col("timestamp") == ts_utc)
+        series_mask = pl.lit(False)
+        for flag, code in series:
+            series_mask = series_mask | (
+                (pl.col("expiry_flag") == flag) & (pl.col("expiry_code") == code)
+            )
+        hit = df.filter((pl.col("timestamp") == ts_utc) & series_mask)
         if hit.height == 0:
             return None
         if hit.height > 1:
-            # Keep-FIRST + one aggregated WARNING, never silent: `row(0)` below
-            # already takes the first physical row; the conflict count is how
-            # many distinct value-rows exist beyond the kept one.
+            if hit.select(list(_OPTION_PRICING_COLUMNS)).unique().height > 1:
+                import structlog
+
+                structlog.get_logger("brutex.cli.options_sim").warning(
+                    "options_sim.ambiguous_option_rows",
+                    timestamp=str(ts_utc),
+                    side=side,
+                    n_rows=int(hit.height),
+                    series=[f"{flag}/{code}" for flag, code in series],
+                )
+                return None
+            # Surviving rows AGREE on every pricing column: distinct series
+            # keys are the SAME physical contract under aliased series (priced
+            # normally + silently, keep-first via `row(0)` below), while a
+            # REPEATED series key is a poisoned-era physical duplicate —
+            # keep-first + the ONE aggregated WARNING, never silent
+            # (DEC-LAKE-READ-UNIQUE-001; no-op when every series key is
+            # distinct). Price-conflicts are 0 by construction here: a
+            # pricing-DISAGREEING survivor took the ambiguity reject above;
+            # annotation drift among agreeing rows is benign (see below).
             log_read_duplicates(
                 source=f"options_sim:{side}@{ts_utc.isoformat()}",
-                dropped=hit.height - 1,
-                conflicts=max(0, hit.unique(maintain_order=True).height - 1),
+                dropped=hit.height - hit.select(["expiry_flag", "expiry_code"]).unique().height,
+                conflicts=0,
+            )
+            # Among the price-agreeing survivors prefer the MOST-ANNOTATED row
+            # (fewest None spot/iv/open_interest — the nullable annotations the
+            # ambiguity key deliberately excludes), so an aliased pair with
+            # annotation drift keeps its annotations instead of arbitrarily
+            # dropping them; the priced result is identical for any survivor.
+            hit = hit.sort(
+                pl.col("spot").is_null().cast(pl.Int8)
+                + pl.col("iv").is_null().cast(pl.Int8)
+                + pl.col("open_interest").is_null().cast(pl.Int8),
+                maintain_order=True,
             )
         r = hit.row(0, named=True)
 
