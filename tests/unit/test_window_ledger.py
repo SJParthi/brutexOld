@@ -1633,6 +1633,22 @@ class TestAuditReopenSkipped:
         assert statuses == {"A": FAILED, "B": SKIPPED, "C": FAILED}
         assert cursor2 is not None and cursor2[1] == "A"  # last in rotation order
 
+    def test_tail_fills_cap_exactly_without_wrapping(self) -> None:
+        # Branch pin (DEC-SKIPPED-AUDIT-ROUNDROBIN-001): when the strictly-after
+        # tail alone satisfies the cap, the wrap-to-head block is SKIPPED — no
+        # head row is re-selected and the cursor advances within the tail.
+        ledger = self._skipped_ledger(["A", "B", "C", "D"])
+        _count, cursor = ledger.audit_reopen_skipped(start_after=None, cap=1)
+        assert cursor is not None and cursor[1] == "A"
+        # Model the NEXT pull: a fresh ledger with the same skipped population.
+        nxt = self._skipped_ledger(["A", "B", "C", "D"])
+        count, cursor2 = nxt.audit_reopen_skipped(start_after=cursor, cap=2)
+        assert count == 2
+        statuses = {r.security_id: r.status for r in nxt.records()}
+        # Tail [B, C, D] fills cap=2 with [B, C] — A (head) and D untouched.
+        assert statuses == {"A": SKIPPED, "B": FAILED, "C": FAILED, "D": SKIPPED}
+        assert cursor2 is not None and cursor2[1] == "C"
+
     def test_cursor_past_the_tail_wraps_to_head(self) -> None:
         ledger = self._skipped_ledger(["A", "B"])
         _c, tail_cursor = ledger.audit_reopen_skipped(start_after=None, cap=2)
