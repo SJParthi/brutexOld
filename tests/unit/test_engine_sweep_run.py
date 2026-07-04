@@ -1851,3 +1851,93 @@ class TestResidentKernelBarMismatch:
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
             )
+
+
+class TestSweepLookaheadGuardWiring:
+    """The opt-in sweep look-ahead barrier is wired at run_persisted_sweep's setup.
+
+    DEC-SWEEP-LOOKAHEAD-GUARD-001: the env flag is resolved ONCE per sweep run
+    (never per bar); OFF keeps the hot path byte-identical (the identical bars
+    object flows through), ON wraps the window in a ``GuardedBarWindow`` — and
+    the guarded run's persisted output is bit-identical to the unguarded run's
+    (the barrier observes, it never alters the computation).
+    """
+
+    def _run(
+        self, tmp_path: Path, tag: str, bars: list[CandleBar]
+    ) -> tuple[SweepRunSummary, bytes]:
+        store_path = tmp_path / f"{tag}.parquet"
+        store = ResultsStore(path=store_path)
+        with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        return summary, store_path.read_bytes()
+
+    def test_guard_on_is_bit_identical_to_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_lookahead import SWEEP_LOOKAHEAD_GUARD_ENV
+
+        bars = _trending_bars()
+        monkeypatch.delenv(SWEEP_LOOKAHEAD_GUARD_ENV, raising=False)
+        off_summary, off_bytes = self._run(tmp_path, "off", bars)
+        monkeypatch.setenv(SWEEP_LOOKAHEAD_GUARD_ENV, "1")
+        on_summary, on_bytes = self._run(tmp_path, "on", bars)
+        assert on_summary == off_summary
+        assert on_bytes == off_bytes
+
+    def test_guard_env_on_actually_wraps_the_bar_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Prove the seam is LIVE: with the env flag ON, the sequence every
+        # downstream phase consumes is the GuardedBarWindow, not the raw list.
+        import brutex.engine.sweep_run as sweep_run_module
+        from brutex.engine.sweep_lookahead import (
+            SWEEP_LOOKAHEAD_GUARD_ENV,
+            GuardedBarWindow,
+            maybe_guard_bars,
+        )
+
+        monkeypatch.setenv(SWEEP_LOOKAHEAD_GUARD_ENV, "1")
+        seen: list[object] = []
+
+        def _spy(bars: object) -> object:
+            result = maybe_guard_bars(bars)  # type: ignore[arg-type]
+            seen.append(result)
+            return result
+
+        monkeypatch.setattr(sweep_run_module, "maybe_guard_bars", _spy)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            run_persisted_sweep(
+                _trending_bars(), _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        assert len(seen) == 1
+        assert isinstance(seen[0], GuardedBarWindow)
+
+    def test_guard_off_passes_the_identical_object_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The zero-cost OFF contract at the wiring site: the seam hands the
+        # SAME bars object downstream (no wrapper, no per-bar cost).
+        import brutex.engine.sweep_run as sweep_run_module
+        from brutex.engine.sweep_lookahead import SWEEP_LOOKAHEAD_GUARD_ENV, maybe_guard_bars
+
+        monkeypatch.delenv(SWEEP_LOOKAHEAD_GUARD_ENV, raising=False)
+        seen: list[tuple[object, object]] = []
+
+        def _spy(bars: object) -> object:
+            result = maybe_guard_bars(bars)  # type: ignore[arg-type]
+            seen.append((bars, result))
+            return result
+
+        monkeypatch.setattr(sweep_run_module, "maybe_guard_bars", _spy)
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            run_persisted_sweep(bars, _make_config(), store=store, dedup=_dedup(), audit=audit)
+        assert len(seen) == 1
+        passed, returned = seen[0]
+        assert passed is bars
+        assert returned is bars

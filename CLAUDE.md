@@ -1591,7 +1591,23 @@ hostile-review pass._
   the same site, and NOT a perf path; the accessor is O(1) per bar access (NOT
   an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
-  DEC-DOC-DRIFT-RECONCILE-001).
+  DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
+  runner/driver guards above never covered) now has its own three-layer
+  defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1180): structural
+  causality (audit-verified — Stage-1A updates prior-bar history AFTER
+  evaluation; the trade sim enters at the next bar's open) + PERMANENT
+  suffix-independence property gates
+  (`tests/property/test_sweep_suffix_independence.py`: Stage-1A bar_bits, the
+  resample path, and full-spine trades over bars `0..N` are bit-identical
+  whether bars `N+1..` are absent, mutated, or extreme — the layer that
+  catches a leak through DERIVED state) + an OPT-IN instrumented barrier
+  (`brutex.engine.sweep_lookahead`, env `BRUTEX_SWEEP_LOOKAHEAD_GUARD=1`,
+  default OFF) wrapping the sweep's bar window in an index-guarded sequence
+  that REUSES `LookAheadBarrier` — honest envelope: it catches an indexed /
+  sliced / reversed read AHEAD of the forward consumption front (strongest on
+  the first sequential pass), NOT derived-state leaks; OFF returns the
+  identical bars object, so the hot path is byte-identical + cost-unchanged
+  (identity contract + A/B bench + the existing sweep O(1) gates).
 - **Money display = 2 decimals, money-only** (DEC-MONEY-2DP-001) — every
   paisa→rupee display goes through `brutex.money` (`format_inr` /
   `round_money` / `paisa_to_rupees`). NEVER round statistical metrics (Sharpe,
