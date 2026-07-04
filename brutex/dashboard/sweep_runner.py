@@ -262,15 +262,33 @@ def resolve_sweep_request(
     resolved_end = _normalise_date(end, today.isoformat(), label="end")
     if resolved_end < resolved_start:
         raise ValueError(f"end {resolved_end!r} must not precede start {resolved_start!r}")
+    resolved_symbols = _normalise_symbols(symbols)
+    resolved_exchange = _normalise_nonblank(exchange, DEFAULT_EXCHANGE)
+    resolved_segment = _normalise_nonblank(segment, DEFAULT_SEGMENT)
+    # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): an
+    # out-of-engine-scope dashboard launch is a 400 via the existing
+    # ValueError → route mapping. There is deliberately NO override parameter
+    # on the dashboard — the research escape hatch is CLI-only
+    # (--allow-out-of-scope, loud + audit-stamped).
+    from brutex.engine.sweep_scope import check_sweep_scope
+
+    scope = check_sweep_scope(
+        resolved_symbols.split(","),
+        exchange=resolved_exchange,
+        segment=resolved_segment,
+        allow_out_of_scope=False,
+    )
+    if not scope.ok:
+        raise ValueError(scope.refusal_message())
     return SweepRunRequest(
-        symbols=_normalise_symbols(symbols),
+        symbols=resolved_symbols,
         intervals=_normalise_intervals(intervals),
         directions=_normalise_directions(directions),
         k=_normalise_k(k),
         sl=_normalise_leg(sl, DEFAULT_SL, label="sl"),
         tp=_normalise_leg(tp, DEFAULT_TP, label="tp"),
-        exchange=_normalise_nonblank(exchange, DEFAULT_EXCHANGE),
-        segment=_normalise_nonblank(segment, DEFAULT_SEGMENT),
+        exchange=resolved_exchange,
+        segment=resolved_segment,
         start=resolved_start,
         end=resolved_end,
         mode=_normalise_nonblank(mode, DEFAULT_MODE),
@@ -355,6 +373,12 @@ def build_sweep_kwargs(
         "options_sim": False,
         "stage3_enable": False,
         "allow_missing_slices": True,
+        # DEC-ENGINE-SCOPE-GUARD-001: the dashboard NEVER overrides the engine
+        # scope — explicit here to keep the 1:1 cmd_sweep_all kwargs doctrine
+        # visible (the request was already scope-checked in
+        # resolve_sweep_request; the CLI escape hatch does not exist on this
+        # surface by design).
+        "allow_out_of_scope": False,
     }
 
 
