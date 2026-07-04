@@ -1349,6 +1349,31 @@ class TestWindowStatusLabel:
             "vendor confirmed no trades (1 clean attempt(s) — settled)"
         )
 
+    def test_skipped_with_expired_window_stamp_reads_the_honest_reason(self) -> None:
+        """DEC-OLD-EMPTY-SINGLE-CONFIRM-001: the single-confirm settle stamps its
+        reason as last_error; the label uses IT verbatim (+ "— settled") instead
+        of the streak-derived count — the forced-threshold streak would lie
+        ("3 clean attempt(s)") about a 1-attempt expired-window settle."""
+        from brutex.data.window_ledger import expired_window_settle_reason
+
+        stamp = expired_window_settle_reason(1)
+        assert window_status_label("SKIPPED", 3, stamp) == (
+            "vendor confirmed no trades (1 clean attempt, expired window) — settled"
+        )
+        # Plural genuine count kept honest too.
+        assert window_status_label("SKIPPED", 3, expired_window_settle_reason(2)) == (
+            "vendor confirmed no trades (2 clean attempts, expired window) — settled"
+        )
+
+    def test_skipped_with_unrelated_last_error_keeps_streak_label(self) -> None:
+        """A non-stamp last_error (e.g. REOPENED) keeps the streak-derived label."""
+        assert window_status_label("SKIPPED", 2, "REOPENED") == (
+            "vendor confirmed no trades (2 clean attempt(s) — settled)"
+        )
+        assert window_status_label("SKIPPED", 2, None) == (
+            "vendor confirmed no trades (2 clean attempt(s) — settled)"
+        )
+
     def test_failed_reads_will_repull(self) -> None:
         assert window_status_label("FAILED", 0) == "FAILED (will re-pull)"
 
