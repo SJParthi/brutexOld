@@ -79,7 +79,7 @@ from brutex.data.partition import (
 from brutex.data.session import format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
-from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
+from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, is_expired_window_settle_reason
 from brutex.money import round_money
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
@@ -3061,7 +3061,7 @@ def _decode_option_window(
     return (f"{label} · {segment}", f"{flag}#{code} {strike} {opt_type} · 1m")
 
 
-def window_status_label(status: str, empty_streak: int) -> str:
+def window_status_label(status: str, empty_streak: int, last_error: str | None = None) -> str:
     """The honest, spelled-out meaning of a window's bare *status* — pure, O(1).
 
     DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (empty-vs-failed honesty on
@@ -3072,12 +3072,19 @@ def window_status_label(status: str, empty_streak: int) -> str:
     payload paths (the DuckDB fast path and the legacy pyarrow path) share via
     :func:`_window_row` (CLAUDE.md §11 COMMON — the two can never drift):
 
+    * ``SKIPPED`` carrying an EXPIRED-WINDOW settle stamp
+      (DEC-OLD-EMPTY-SINGLE-CONFIRM-001 — the old-empty single-confirm settle
+      stamps :func:`~brutex.data.window_ledger.expired_window_settle_reason`
+      as ``last_error``) → that stamp verbatim, suffixed ``— settled``: the
+      streak-derived count would LIE (the settle forces the streak to the
+      threshold), so the honest ``"vendor confirmed no trades (1 clean
+      attempt, expired window) — settled"`` comes from the stamp.
     * ``EMPTY`` → ``"vendor confirmed no trades (N clean attempt(s))"`` — N is
       the row's genuine clean-empty streak, floored at 1 (a legacy record with
       no streak column still had at least the one clean attempt that classified
       it EMPTY).
-    * ``SKIPPED`` (terminally-settled empty) → the same, suffixed ``— settled``
-      (the ledger promoted it; no further re-pull).
+    * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
+      ``— settled`` (the ledger promoted it; no further re-pull).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
       no-data; the window stays re-pullable.
     * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
@@ -3086,6 +3093,8 @@ def window_status_label(status: str, empty_streak: int) -> str:
     if status == "EMPTY":
         return f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s))"
     if status == "SKIPPED":
+        if is_expired_window_settle_reason(last_error):
+            return f"{last_error} — settled"
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
@@ -3127,7 +3136,11 @@ def _window_row(
         # DuckDB fast + legacy pyarrow — since both project through this row
         # builder): EMPTY/SKIPPED read "vendor confirmed no trades (N clean
         # attempt(s)[ — settled])", FAILED reads "FAILED (will re-pull)".
-        "status_label": window_status_label(str(record.status), getattr(record, "empty_streak", 0)),
+        "status_label": window_status_label(
+            str(record.status),
+            getattr(record, "empty_streak", 0),
+            getattr(record, "last_error", None),
+        ),
         "bars": record.bars,
         "attempts": record.attempts,
         # The genuine-EMPTY count (window_ledger R1) — surfaces WHY an EMPTY row

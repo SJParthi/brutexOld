@@ -3088,23 +3088,23 @@ def test_budget_transient_empty_then_data_strike_not_skipped() -> None:
     assert report.bars_appended == 1  # data captured despite the reduced empty budget
 
 
-def test_budget_reduced_empty_strike_remains_refetchable_next_pull() -> None:
-    """PERMUTATION 8 — a wrongly-empty reduced-budget window is RE-FETCHABLE on the next pull.
+def test_old_empty_settle_recoverable_via_reopen_skipped() -> None:
+    """PERMUTATION 8 REWRITTEN under DEC-OLD-EMPTY-SINGLE-CONFIRM-001.
 
-    A reduced-budget strike that returns a clean empty is recorded but its ONE in-pull fetch is
-    BELOW the CONFIRMED_EMPTY_MIN_FETCHES (2) old-gap fast-settle threshold, so it is NEVER
-    settled SKIPPED permanently — a later idempotent pull re-attempts it (the recovery net,
-    keep-first sink + durable ledger). Even a vendor-bug 200-empty is recoverable.
+    CONSCIOUSLY SUPERSEDES the #1172 "one reduced-budget clean empty never
+    settles" pin (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): the operator decreed a
+    SINGLE clean empty on an expired window settles SKIPPED in the same pass
+    (the round-2 re-confirmation sweep cost hours). The recovery net for a
+    vendor-bug 200-empty is now the MANUAL ``brutex reopen-skipped``
+    (``WindowLedger.reopen_skipped``) — pinned here: reopen → the next pull
+    re-fetches → data recovered + stored (keep-first sink, no permanent loss).
     """
     deep = _opt(18000)
     ledger = WindowLedger()
-    # an OLD window (clock 6 months later) so the fast-settle WOULD fire IF fetch_count >= 2;
-    # the reduced budget makes fetch_count == 1, so it must NOT fast-settle.
     sdk = _PerSymbolSDK()
     _run_with_budget(sdk, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
     rec = ledger.records()[0]
     assert rec.in_pull_fetches == 1  # only one fetch this pull (reduced)
-    # NOT fast-settled SKIPPED (needs >= 2 in-pull fetches) — so still re-fetchable next pull.
     key = WindowKey(
         market=GROWW_OPTION_COVERAGE_MARKET,
         security_id=deep.symbol,
@@ -3112,26 +3112,27 @@ def test_budget_reduced_empty_strike_remains_refetchable_next_pull() -> None:
         start=date(2024, 1, 1),
         end=date(2024, 1, 5),
     )
-    assert not ledger.is_skippable(key)  # a later pull re-attempts it — no permanent loss
-
-    # And the second pull DOES re-fetch it (the recovery net actually re-attempts).
+    # The single-confirm law: settled NOW (expired window, genuine clean empty).
+    assert ledger.is_skippable(key)
+    # MANUAL recovery: the operator re-opens the settle...
+    assert ledger.reopen_skipped() == 1
+    assert not ledger.is_skippable(key)
+    # ...and the next pull re-fetches it — data recovered + stored.
     sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})  # now it has data
-    _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
-    assert sdk2.fetches[deep.symbol] == 1  # re-fetched on the next pull → data recovered
+    report = _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    assert sdk2.fetches[deep.symbol] == 1  # re-fetched after the reopen
+    assert report.bars_appended == 1
 
 
-def test_budget_reduced_dead_strike_settles_on_cumulative_cross_pull_count() -> None:
-    """REGRESSION (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) — a dead deep strike settles at pull 2.
+def test_old_empty_single_confirm_settles_in_pass_one_zero_round2_calls() -> None:
+    """DEC-OLD-EMPTY-SINGLE-CONFIRM-001 — the until-clean ZERO-extra-calls proof.
 
-    FAILS BEFORE the fix: a reduced-budget (1 fetch/pull) old dead strike could never reach
-    ``CONFIRMED_EMPTY_MIN_FETCHES`` (2) inside one pull, so the old-gap fast-settle was
-    structurally unreachable and the strike re-fetched every pull until the slower 3-pull
-    streak promotion (an honest bounded 3-pull tax for an expired contract — and unbounded
-    only for the breaker-suppressed / key-reset shapes this fix deliberately does NOT
-    settle, data-safety first). PASSES AFTER: the ledger
-    accumulates the genuine clean-EMPTY confirmations ACROSS pulls (``prior.empty_streak +
-    in_pull_fetches``), so the second pull's clean empty settles it SKIPPED and the third
-    pull makes ZERO vendor calls for it.
+    CONSCIOUSLY SUPERSEDES the #1172 cumulative-cross-pull pin
+    (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): the 2026-07-03 production run spent
+    hours in a round-2 sweep re-confirming every deep-wing empty because an OLD
+    window needed 2 confirmations. Now ONE clean-empty fetch on an expired
+    (old) window settles it SKIPPED in the SAME pass — pass 2 makes ZERO
+    vendor calls for it (no round-2 re-fetch).
     """
     from brutex.data.window_ledger import SKIPPED
 
@@ -3144,31 +3145,27 @@ def test_budget_reduced_dead_strike_settles_on_cumulative_cross_pull_count() -> 
         end=date(2024, 1, 5),
     )
     ledger = WindowLedger()
-    # Pull 1 — ONE clean empty (reduced budget): NOT confirmation, stays re-fetchable.
+    # Pass 1 — ONE clean empty (reduced budget = 1 fetch) settles SKIPPED NOW.
     sdk1 = _PerSymbolSDK()
     _run_with_budget(sdk1, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
     assert sdk1.fetches[deep.symbol] == 1
-    assert not ledger.is_skippable(key)
-    # Pull 2 — the SECOND independent clean empty crosses the SAME 2-confirmation bar.
+    rec = ledger.records()[0]
+    assert rec.status == SKIPPED  # settled off the SINGLE clean empty, this pass
+    assert rec.last_error == "vendor confirmed no trades (1 clean attempt, expired window)"
+    assert ledger.is_skippable(key)
+    # Pass 2 (the until-clean round-2 sweep) — ZERO vendor calls for it.
     sdk2 = _PerSymbolSDK()
     _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
-    assert sdk2.fetches[deep.symbol] == 1
-    rec = ledger.records()[0]
-    assert rec.status == SKIPPED  # settled on the CUMULATIVE count, not the per-pull count
-    assert ledger.is_skippable(key)
-    # Pull 3 — ZERO vendor calls: the confirmed-dead strike no longer costs a fetch per pull.
-    sdk3 = _PerSymbolSDK()
-    _run_with_budget(sdk3, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
-    assert deep.symbol not in sdk3.fetches
+    assert deep.symbol not in sdk2.fetches, "no round-2 re-confirmation fetch may fire"
 
 
-def test_budget_reduced_uncertain_window_stays_refetchable_and_data_wins() -> None:
-    """DATA-SAFETY law (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) — "if uncertain, fetch".
+def test_old_empty_transient_never_settles_and_data_wins() -> None:
+    """DATA-SAFETY law under DEC-OLD-EMPTY-SINGLE-CONFIRM-001 — "if uncertain, fetch".
 
-    A window that could still have data is NEVER settled by the cumulative rule: a
-    transient-only pull (429 storm, no clean answer) advances NOTHING, the window stays
-    re-fetchable, and when data finally arrives it is stored — the prior clean-empty
-    evidence never masks it.
+    A transient-only pull (429 storm, no clean answer) settles NOTHING even on
+    an OLD window — the window stays re-fetchable, and when data finally
+    arrives it is stored (a 429 is never no-data evidence; only a genuine,
+    unsuppressed clean empty settles).
     """
     deep = _opt(18000)
     key = WindowKey(
@@ -3179,20 +3176,18 @@ def test_budget_reduced_uncertain_window_stays_refetchable_and_data_wins() -> No
         end=date(2024, 1, 5),
     )
     ledger = WindowLedger()
-    # Pull 1 — one clean empty (streak 1).
-    _run_with_budget(_PerSymbolSDK(), [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
-    # Pull 2 — an all-429 transient storm: NOT clean-empty evidence, never settles.
-    sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: GrowwAPIRateLimitException("429")})
+    # Pull 1 — an all-429 transient storm: NOT clean-empty evidence, never settles.
+    sdk1 = _PerSymbolSDK({deep.symbol: lambda _i: GrowwAPIRateLimitException("429")})
     _run_with_budget(
-        sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=1, ledger=ledger
+        sdk1, [deep], empty_retry_by_symbol={deep.symbol: 1}, max_attempts=1, ledger=ledger
     )
     assert not ledger.is_skippable(key)  # still re-fetchable — a 429 is not evidence
-    # Pull 3 — DATA arrives: stored, never masked by the accumulated empty evidence.
-    sdk3 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})
-    report = _run_with_budget(sdk3, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
+    # Pull 2 — DATA arrives: stored, never masked.
+    sdk2 = _PerSymbolSDK({deep.symbol: lambda _i: _candles()})
+    report = _run_with_budget(sdk2, [deep], empty_retry_by_symbol={deep.symbol: 1}, ledger=ledger)
     assert report.bars_appended == 1
     assert ledger.records()[0].status == "SUCCESS"
-    assert ledger.records()[0].empty_streak == 0  # the evidence reset — data wins
+    assert ledger.records()[0].empty_streak == 0
 
 
 def test_budget_none_map_byte_identical_full_budget() -> None:

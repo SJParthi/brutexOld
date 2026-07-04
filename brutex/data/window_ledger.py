@@ -45,6 +45,7 @@ __all__ = [
     "CONFIRMED_EMPTY_MIN_FETCHES",
     "EMPTY",
     "EMPTY_TERMINAL_THRESHOLD",
+    "EXPIRED_WINDOW_SETTLE_SUFFIX",
     "FAILED",
     "PLANNED",
     "REOPENED_MARKER",
@@ -54,6 +55,8 @@ __all__ = [
     "LedgerProgress",
     "WindowLedger",
     "WindowLedgerRecord",
+    "expired_window_settle_reason",
+    "is_expired_window_settle_reason",
 ]
 
 #: A window the tiler will attempt this pull — upserted at pull start, no outcome
@@ -85,21 +88,53 @@ SKIPPED: str = "SKIPPED"
 EMPTY_TERMINAL_THRESHOLD: int = 3
 
 #: Minimum CLEAN-EMPTY confirmations an old empty window needs before its empty is
-#: trusted as "confirmed" for the OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001).
-#: ``2`` means the empty was observed at least twice — historically both had to land
-#: WITHIN one pull (the in-pull empty retry re-hit it), which a REDUCED per-strike
-#: empty-retry budget of 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) made STRUCTURALLY
-#: unreachable, so a confirmed-dead deep-OTM strike re-fetched once per pull far past
-#: the point its empty was proven. DEC-DEAD-STRIKE-LEDGER-SETTLE-001 makes the settle
-#: BUDGET-AWARE: confirmations now accumulate ACROSS pulls (``prior.empty_streak`` —
-#: each unit one distinct pull's genuine, unsuppressed clean-EMPTY — plus this pull's
-#: ``in_pull_fetches``), compared against this SAME threshold inside
-#: :meth:`WindowLedger.record`. CANONICAL HOME moved here from
-#: ``brutex.adapters.ingest_common`` (which re-exports it — one source of truth,
-#: CLAUDE.md §11 COMMON) because the ledger applies the cumulative rule and
-#: ``ingest_common`` already imports from ``brutex.data`` (the reverse import would
-#: be a cycle).
+#: trusted as "confirmed" for the in-pull OLD-gap fast-settle HINT computed by the
+#: spines (DEC-OLD-GAP-FAST-SETTLE-001 ``settle_empty``). ``2`` means the empty was
+#: observed at least twice — historically both had to land WITHIN one pull (the
+#: in-pull empty retry re-hit it), which a REDUCED per-strike empty-retry budget of 1
+#: (DEC-FETCH-PER-WINDOW-GUARANTEE-001) made STRUCTURALLY unreachable;
+#: DEC-DEAD-STRIKE-LEDGER-SETTLE-001 then accumulated confirmations ACROSS pulls.
+#: **DEC-OLD-EMPTY-SINGLE-CONFIRM-001 (operator-decreed 2026-07-04) SUPERSEDES both
+#: arms for the LEDGER settle:** an OLD window (``record(old_window=True)``) now
+#: settles ``SKIPPED`` on a SINGLE genuine, unsuppressed clean-EMPTY fetch — the
+#: 2026-07-03 production run spent HOURS in a round-2 until-clean sweep re-confirming
+#: every deep-wing empty this threshold forced. This constant still governs the
+#: spines' in-pull ``settle_empty`` confirmation hint (and stays re-exported from
+#: ``brutex.adapters.ingest_common`` — one source of truth, CLAUDE.md §11 COMMON;
+#: the canonical home is here because ``ingest_common`` already imports from
+#: ``brutex.data``); it no longer gates the ledger's old-window settle.
 CONFIRMED_EMPTY_MIN_FETCHES: int = 2
+
+#: The recognisable tail of an expired-window settle reason
+#: (:func:`expired_window_settle_reason`) — the ONE marker
+#: ``brutex.dashboard.db_view.window_status_label`` keys the honest UI label on
+#: (DEC-OLD-EMPTY-SINGLE-CONFIRM-001; CLAUDE.md §11 COMMON — no second spelling).
+EXPIRED_WINDOW_SETTLE_SUFFIX: str = ", expired window)"
+
+
+def expired_window_settle_reason(clean_attempts: int) -> str:
+    """The honest ``last_error`` reason stamped on an expired-window settle — pure.
+
+    DEC-OLD-EMPTY-SINGLE-CONFIRM-001: an OLD window settled ``SKIPPED`` off a
+    single clean-empty must SAY so on the UI — the generic streak-derived label
+    would claim ``3 clean attempt(s)`` (the forced-threshold streak), a lie.
+    ``clean_attempts`` is the genuine count of distinct clean-EMPTY pull
+    observations (``prior.empty_streak + 1``); the normal fresh settle reads
+    exactly the operator-decreed ``"vendor confirmed no trades (1 clean
+    attempt, expired window)"``.
+    """
+    plural = "" if clean_attempts == 1 else "s"
+    return f"vendor confirmed no trades ({clean_attempts} clean attempt{plural}, expired window)"
+
+
+def is_expired_window_settle_reason(reason: str | None) -> bool:
+    """``True`` iff *reason* is an :func:`expired_window_settle_reason` stamp — pure, O(1)."""
+    return (
+        reason is not None
+        and reason.startswith("vendor confirmed no trades (")
+        and reason.endswith(EXPIRED_WINDOW_SETTLE_SUFFIX)
+    )
+
 
 #: The ``last_error`` marker :meth:`WindowLedger.reopen_skipped` stamps on a
 #: re-opened row (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). A ``FAILED`` row carrying
@@ -561,38 +596,33 @@ class WindowLedger:
                 # accept the gap and settle SKIPPED so the pull converges (the operator has
                 # been warned each time; the stored bars are kept).
                 status = SKIPPED
-            elif (
-                classified == EMPTY
-                and not suppress_settle
-                and (
-                    settle_empty
-                    or (
-                        old_window and prior_streak + in_pull_fetches >= CONFIRMED_EMPTY_MIN_FETCHES
-                    )
-                )
-            ):
-                # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an in-pull-confirmed
-                # empty window OLD enough that vendor data can never appear is a PERMANENT
-                # gap — settle it SKIPPED in ONE pull, forcing the streak to the threshold
-                # so the persisted row is identical to a normal across-pull settle. Only
-                # ever reached for EMPTY (a SUCCESS/FAILED ignores the hint), so it can
-                # never mask a window with data. RECENT windows (settle_empty False,
-                # old_window False) keep the conservative across-pull streak below. GATED
-                # OFF while the pull's mass-empty breaker is tripped (suppress_settle — a
-                # throttle-shaped empty must never cement,
-                # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
-                #
-                # BUDGET-AWARE arm (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): a reduced
-                # empty-retry budget (1 fetch/pull, DEC-FETCH-PER-WINDOW-GUARANTEE-001)
-                # can never reach CONFIRMED_EMPTY_MIN_FETCHES inside one pull, so the
-                # confirmation count for an OLD window accumulates ACROSS pulls —
-                # ``prior_streak`` (one unit per distinct prior pull's genuine,
-                # unsuppressed clean-EMPTY) + this pull's ``in_pull_fetches``. Two
-                # independent pulls' clean empties meet the same 2-confirmation evidence
-                # bar the one-pull fast-settle demands; anything short of it stays
-                # re-fetchable ("if uncertain, fetch").
+            elif classified == EMPTY and not suppress_settle and (settle_empty or old_window):
+                # OLD-EMPTY SINGLE-CONFIRM (DEC-OLD-EMPTY-SINGLE-CONFIRM-001,
+                # operator-decreed 2026-07-04 — SUPERSEDES the budget-aware
+                # cumulative arm of DEC-DEAD-STRIKE-LEDGER-SETTLE-001 #1172): an
+                # EMPTY window OLD enough that vendor data can never appear
+                # (``old_window`` — ``clamped_end`` older than
+                # OLD_GAP_HORIZON_DAYS) settles SKIPPED off this SINGLE genuine,
+                # unsuppressed clean-empty fetch, in THIS pass — effectively
+                # ``min_fetches = 1`` for expired windows. The 2026-07-03
+                # production run spent HOURS in a round-2 until-clean sweep
+                # re-confirming every deep-wing empty the old 2-confirmation bar
+                # forced. The streak is still FORCED to the threshold (the
+                # persisted row keeps the same settled shape as an across-pull
+                # settle) and the honest reason is stamped as ``last_error`` so
+                # the UI says "1 clean attempt, expired window" instead of the
+                # streak-derived lie. Only ever reached for EMPTY (SUCCESS/FAILED
+                # ignore the hints — data always wins; a 429/timeout is never
+                # evidence), RECENT windows (old_window False) keep the
+                # conservative across-pull streak below, and the arm is GATED OFF
+                # while the pull's mass-empty breaker is tripped (suppress_settle
+                # — a throttle-shaped empty must never cement,
+                # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001; the #1129 breaker + the
+                # #919 all-empty detector remain the systemic-glitch guards, and
+                # ``brutex reopen-skipped`` is the manual recovery).
                 empty_streak = self._threshold
                 status = SKIPPED
+                error_type = expired_window_settle_reason(prior_streak + 1)
             elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
