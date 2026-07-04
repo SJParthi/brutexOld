@@ -201,7 +201,8 @@ def test_real_pull_writes_intent_and_clears_it_on_success(
     gate = threading.Event()
 
     def _blocking_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
-        assert gate.wait(timeout=10.0)
+        opened = gate.wait(timeout=10.0)
+        assert opened
         return _fake_spot(*args, **kwargs)
 
     monkeypatch.setattr(app_module, "pull_all_spot", _blocking_spot)
@@ -239,7 +240,8 @@ def test_failed_pull_still_clears_the_intent(
     monkeypatch.setattr(app_module, "pull_all_spot", _boom_spot)
     monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
-    assert client.post("/api/v1/universe/pull-pipeline").json()["started"] is True
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.json()["started"] is True
     assert _wait_for_job(client)["state"] == "error"
     # on_finally fires on FAILURE too — the worker exited, so the intent clears.
     _wait_for(lambda: not intent_store.path.exists())
@@ -252,7 +254,8 @@ def test_dry_run_never_writes_and_never_erases_a_crashed_intent(
     _patch_spines(monkeypatch)
     # A crashed REAL pull left this intent behind…
     crashed = PullIntent(symbols="NIFTY", symbol=None, from_date=None, to_date=None, restarts=1)
-    assert intent_store.write(crashed) is True
+    wrote = intent_store.write(crashed)
+    assert wrote is True
     # …and a dry-run must neither overwrite nor clear it.
     resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
     assert resp.status_code == 200

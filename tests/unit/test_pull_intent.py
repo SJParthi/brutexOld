@@ -165,7 +165,8 @@ def test_store_paths(tmp_path: Path) -> None:
 def test_write_then_load_round_trip(tmp_path: Path) -> None:
     store = PullIntentStore(tmp_path)
     intent = _intent(restarts=1)
-    assert store.write(intent) is True
+    wrote = store.write(intent)
+    assert wrote is True
     assert store.load() == intent
     # The on-disk shape is plain JSON (forensics-readable).
     raw = json.loads(store.path.read_text(encoding="utf-8"))
@@ -175,8 +176,10 @@ def test_write_then_load_round_trip(tmp_path: Path) -> None:
 
 def test_write_is_atomic_overwrite_and_leaves_no_temp(tmp_path: Path) -> None:
     store = PullIntentStore(tmp_path)
-    assert store.write(_intent(restarts=0)) is True
-    assert store.write(_intent(restarts=2)) is True
+    wrote_first = store.write(_intent(restarts=0))
+    assert wrote_first is True
+    wrote_second = store.write(_intent(restarts=2))
+    assert wrote_second is True
     loaded = store.load()
     assert loaded is not None
     assert loaded.restarts == 2
@@ -190,14 +193,16 @@ def test_write_failure_is_logged_false_and_preserves_prior_intent(
     # A torn write can never corrupt the prior intent: the atomic core raising
     # mid-write returns False and the previous file content survives byte-for-byte.
     store = PullIntentStore(tmp_path)
-    assert store.write(_intent(restarts=1)) is True
+    wrote = store.write(_intent(restarts=1))
+    assert wrote is True
     before = store.path.read_bytes()
 
     def _boom(dest: Path, write_to: Any, **kwargs: Any) -> None:
         raise OSError("disk exploded mid-write")
 
     monkeypatch.setattr(pull_intent_module, "atomic_write_simple", _boom)
-    assert store.write(_intent(restarts=2)) is False
+    wrote_after_boom = store.write(_intent(restarts=2))
+    assert wrote_after_boom is False
     assert store.path.read_bytes() == before
 
 
@@ -206,7 +211,8 @@ def test_write_failure_on_unwritable_root_returns_false(tmp_path: Path) -> None:
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("file, not dir", encoding="utf-8")
     store = PullIntentStore(blocker / "lake")
-    assert store.write(_intent()) is False
+    wrote = store.write(_intent())
+    assert wrote is False
 
 
 def test_load_missing_is_none(tmp_path: Path) -> None:
@@ -261,7 +267,8 @@ def test_bump_restarts_increments_and_persists(tmp_path: Path) -> None:
 
 
 def test_bump_restarts_without_intent_is_none(tmp_path: Path) -> None:
-    assert PullIntentStore(tmp_path).bump_restarts() is None
+    bumped = PullIntentStore(tmp_path).bump_restarts()
+    assert bumped is None
 
 
 # ── persist_intent_for_launch (the dry-run-never-persists law) ───────────────
@@ -309,7 +316,8 @@ def test_real_launch_persists_quadruple_and_restarts(tmp_path: Path) -> None:
 
 
 def test_probe_free_lock_is_true_and_releases(tmp_path: Path) -> None:
-    assert probe_pull_singleflight(tmp_path) is True
+    probed_free = probe_pull_singleflight(tmp_path)
+    assert probed_free is True
     # The probe released — a real acquire succeeds afterwards.
     with pull_singleflight_lock(tmp_path):
         pass
@@ -317,14 +325,16 @@ def test_probe_free_lock_is_true_and_releases(tmp_path: Path) -> None:
 
 def test_probe_held_lock_is_false(tmp_path: Path) -> None:
     with pull_singleflight_lock(tmp_path):
-        assert probe_pull_singleflight(tmp_path) is False
+        probed_held = probe_pull_singleflight(tmp_path)
+        assert probed_held is False
 
 
 def test_probe_error_reads_not_acquirable(tmp_path: Path) -> None:
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("file, not dir", encoding="utf-8")
     # ``.locks`` mkdir under a FILE raises → when uncertain, do not fire.
-    assert probe_pull_singleflight(blocker) is False
+    probed_blocked = probe_pull_singleflight(blocker)
+    assert probed_blocked is False
 
 
 # ── pull_intent_resume_active (the ONE decision predicate) ───────────────────
@@ -569,7 +579,9 @@ def test_run_default_probe_uses_the_real_flock(tmp_path: Path) -> None:
     store.write(_intent(restarts=0))
     launched: list[PullIntent] = []
     with pull_singleflight_lock(tmp_path):
-        assert run_auto_resume(store, launch=launched.append) is ResumeAction.PEER_ACTIVE
+        held_action = run_auto_resume(store, launch=launched.append)
+        assert held_action is ResumeAction.PEER_ACTIVE
     assert launched == []
-    assert run_auto_resume(store, launch=launched.append) is ResumeAction.FIRED
+    free_action = run_auto_resume(store, launch=launched.append)
+    assert free_action is ResumeAction.FIRED
     assert len(launched) == 1

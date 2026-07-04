@@ -1099,7 +1099,8 @@ class TestOnFinally:
     def test_fires_once_on_success(self) -> None:
         job = _job()
         fired: list[str] = []
-        assert job.start(lambda _h: None, total=1, on_finally=lambda: fired.append("f")) is True
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: fired.append("f"))
+        assert started is True
         assert job.snapshot().state == STATE_DONE
         assert fired == ["f"]
 
@@ -1110,7 +1111,8 @@ class TestOnFinally:
         def work(_on_progress: ProgressHook) -> None:
             raise RuntimeError("boom")
 
-        assert job.start(work, total=1, on_finally=lambda: fired.append("f")) is True
+        started = job.start(work, total=1, on_finally=lambda: fired.append("f"))
+        assert started is True
         assert job.snapshot().state == STATE_ERROR
         assert fired == ["f"], "the intent clear must fire on failure too (worker exited)"
 
@@ -1130,7 +1132,8 @@ class TestOnFinally:
             lake_root_resolver=lambda: tmp_path,
             singleflight_factory=lambda _root: _OrderGuard(order),
         )
-        assert job.start(lambda _h: None, total=1, on_finally=lambda: order.append("finally"))
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: order.append("finally"))
+        assert started
         assert order == ["finally", "released"]
 
     def test_raising_hook_is_swallowed_and_release_continues(self, tmp_path: Path) -> None:
@@ -1177,7 +1180,8 @@ class TestOnFinally:
             spawn=captured.append,
             watchdog_factory=factory,
         )
-        assert job.start(lambda _h: None, total=1, on_finally=lambda: fired.append("f")) is True
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: fired.append("f"))
+        assert started is True
         job._running = True  # pyright: ignore[reportPrivateUsage]
         job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
         captured[0]()  # drain the stale worker → its finally hits the ->exit branch

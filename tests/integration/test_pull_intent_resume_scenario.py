@@ -142,7 +142,8 @@ def test_peer_running_pull_defers_resume_then_completion_clears_the_intent(
     gate = threading.Event()
 
     def _blocking_spot(*args: Any, **kwargs: Any) -> Any:
-        assert gate.wait(timeout=10.0)
+        opened = gate.wait(timeout=10.0)
+        assert opened
         return _fake_spot(*args, **kwargs)
 
     monkeypatch.setattr(app_module, "pull_all_spot", _blocking_spot)
@@ -150,12 +151,8 @@ def test_peer_running_pull_defers_resume_then_completion_clears_the_intent(
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
 
     with _fresh_client(store, intent_store) as peer:
-        assert (
-            peer.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"}).json()[
-                "started"
-            ]
-            is True
-        )
+        peer_resp = peer.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
+        assert peer_resp.json()["started"] is True
         # The peer's pull is mid-flight: the intent is durable + the flock held.
         assert intent_store.path.exists()
         with _fresh_client(store, intent_store) as sibling:
