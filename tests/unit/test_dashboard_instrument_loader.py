@@ -853,7 +853,7 @@ def test_ntm_stale_cache_covers_background_live_raises(
     assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
     assert any(e["event"] == "ntm.revalidate_failed" for e in logs)
     # The flag was cleared in the worker's finally — a later spawn is possible.
-    assert il._ntm_revalidating is False
+    assert il._NTM_REVALIDATE_STATE["in_flight"] is False
 
 
 def test_ntm_no_cache_empty_live_degrades_to_base(tmp_path: Path) -> None:
@@ -1214,9 +1214,9 @@ class TestNtmStaleWhileRevalidate:
 
     @pytest.fixture(autouse=True)
     def _reset_single_flight(self) -> Iterator[None]:
-        il._ntm_revalidating = False
+        il._NTM_REVALIDATE_STATE["in_flight"] = False
         yield
-        il._ntm_revalidating = False
+        il._NTM_REVALIDATE_STATE["in_flight"] = False
 
     def test_no_cache_boot_stays_synchronous_live(self, tmp_path: Path) -> None:
         """Truly-no-cache boot: the bounded SYNCHRONOUS fetch runs and seeds the cache."""
@@ -1278,7 +1278,7 @@ class TestNtmStaleWhileRevalidate:
             )
         assert (text, source) == (stale, "cache_stale_revalidating")  # load unaffected
         assert any(e["event"] == "ntm.revalidate_spawn_failed" for e in logs)
-        assert il._ntm_revalidating is False  # a later load can revalidate again
+        assert il._NTM_REVALIDATE_STATE["in_flight"] is False  # a later load can revalidate again
 
     def test_default_runner_spawns_a_daemon_thread(self) -> None:
         """The production spawner runs the job on a named daemon thread."""

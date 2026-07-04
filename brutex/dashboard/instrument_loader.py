@@ -227,9 +227,11 @@ _LOAD_LOCK: threading.Lock = threading.Lock()
 #: as :data:`_LOAD_LOCK` above (a process-wide coordination primitive, documented — not
 #: hidden business state): while one background refresh is in flight, a concurrent
 #: post-TTL load serves its stale cache WITHOUT spawning a second refresh, so the slow
-#: niftyindices host is hit AT MOST once per revalidation cycle per process.
+#: niftyindices host is hit AT MOST once per revalidation cycle per process. The
+#: in-flight flag lives in a one-key mutable holder (mutated in place under the lock)
+#: rather than a rebindable module global — same semantics, no ``global`` statement.
 _NTM_REVALIDATE_LOCK: threading.Lock = threading.Lock()
-_ntm_revalidating: bool = False
+_NTM_REVALIDATE_STATE: Final[dict[str, bool]] = {"in_flight": False}
 
 
 def _default_revalidate_runner(job: Callable[[], None]) -> None:
@@ -274,14 +276,12 @@ def _spawn_ntm_revalidation(
     a later post-TTL load can always revalidate again. Returns ``False`` when a
     refresh is already in flight (single-flight — no second spawn).
     """
-    global _ntm_revalidating  # noqa: PLW0603 — the documented single-flight flag above
     with _NTM_REVALIDATE_LOCK:
-        if _ntm_revalidating:
+        if _NTM_REVALIDATE_STATE["in_flight"]:
             return False
-        _ntm_revalidating = True
+        _NTM_REVALIDATE_STATE["in_flight"] = True
 
     def _job() -> None:
-        global _ntm_revalidating  # noqa: PLW0603 — cleared in finally, single-flight
         try:
             refreshed = _refresh_constituent_cache(opener, cache_dir=cache_dir)
             _LOG.info(
@@ -293,14 +293,14 @@ def _spawn_ntm_revalidation(
             _LOG.warning("ntm.revalidate_failed", cache_dir=str(cache_dir), exc_info=True)
         finally:
             with _NTM_REVALIDATE_LOCK:
-                _ntm_revalidating = False
+                _NTM_REVALIDATE_STATE["in_flight"] = False
 
     run = _default_revalidate_runner if runner is None else runner
     try:
         run(_job)
     except Exception:  # pylint: disable=broad-exception-caught — a failed spawn must never break the load
         with _NTM_REVALIDATE_LOCK:
-            _ntm_revalidating = False
+            _NTM_REVALIDATE_STATE["in_flight"] = False
         _LOG.warning("ntm.revalidate_spawn_failed", cache_dir=str(cache_dir), exc_info=True)
     return True
 
