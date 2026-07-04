@@ -1,6 +1,6 @@
 """Flag-gated Rust sweep-metrics seam — the per-mask drawdown kernel binding.
 
-DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1185) — Phase B of the Rust-migration
+DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1186) — Phase B of the Rust-migration
 blueprint. Phase A (DEC-SWEEP-RUST-TRADESIM-WIRE-001, #1182) moved the sweep's
 trade walk into Rust; the per-mask trades→metrics TAIL
 (:func:`brutex.engine.sweep_driver.metrics_from_trades` =
@@ -24,7 +24,7 @@ once-per-process memo so that (a) there is no module-global FLAG state, and
 (b) every ``sweep_parallel`` worker process reads its OWN inherited
 environment at call time — workers can never arm inconsistently from a
 parent-only resolution. OFF (unset / empty / ``0`` / garbage) keeps the
-caller on the verbatim pre-#1185 Python path, byte-identical by construction.
+caller on the verbatim pre-#1186 Python path, byte-identical by construction.
 **The default stays OFF; flipping it ON by default is a SEPARATE later ADR,
 explicitly NOT this change.**
 

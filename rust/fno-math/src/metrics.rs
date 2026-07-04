@@ -1,7 +1,7 @@
 //! Sweep-metrics kernel — the fused per-mask equity fold + drawdown scan.
 //!
 //! DEC-SWEEP-RUST-METRICS-001 (Phase B of the Rust-migration blueprint;
-//! MIGRATION.md #1185). The Rust port of the measured-hot part of the sweep's
+//! MIGRATION.md #1186). The Rust port of the measured-hot part of the sweep's
 //! per-mask trades→metrics tail: `brutex.engine.sweep_driver.build_equity_curve`'s
 //! running-sum equity fold FUSED with `brutex.metrics.compute._drawdown_stats`'s
 //! per-bar drawdown scan (max-drawdown paisa / %, drawdown duration, Ulcer

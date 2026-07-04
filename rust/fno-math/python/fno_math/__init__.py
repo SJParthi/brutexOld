@@ -65,6 +65,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
+    "sweep_drawdown_stats",
 )
 
 
