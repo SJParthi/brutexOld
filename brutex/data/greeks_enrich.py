@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.lake_keys import spot_key_candidates
@@ -439,10 +440,19 @@ class GreeksEnrichReport:
         Option targets with no stored 1-minute bars in the window (honest
         no-op — nothing to enrich, never an invented bar).
     errored
-        Targets quarantined by a per-target error (corrupt slice / write
-        failure) — one bad contract never sinks the pass (plan §15.4).
+        Targets quarantined by a PER-CONTRACT error (corrupt slice / write
+        failure) — one bad contract never sinks the pass (plan §15.4). This
+        counts per-contract quarantines ONLY: a pull-wide
+        :class:`~brutex.data.errors.LakeWriteHalt` (disk full / OOM)
+        re-raises out of the pass instead of inflating this tally
+        (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-2). A quarantined target may
+        still have durably landed SOME month partitions before its error
+        (the sink writes months sequentially, each atomically) — those bars
+        are excluded from every tally here and self-heal on the next pass.
     bars_written
-        Total bars carried in the ``latest-wins`` writes.
+        Total bars carried in the ``latest-wins`` writes of the targets
+        counted under ``enriched`` — partitions durably landed by a target
+        that then ERRORED are honestly NOT included (see ``errored``).
     bars_solved, bars_null, bars_reused
         Bar-level tallies summed across the written targets.
     bars_skipped
@@ -1186,6 +1196,15 @@ def enrich_greeks_for_targets(
                 reused=stats.reused,
                 style=_style_for_segment(join.segment),
             )
+        except LakeWriteHalt:
+            # A pull-wide global stop (disk full / OOM) fails EVERY remaining
+            # write identically — re-raised BEFORE the per-target quarantine
+            # so the pass never keeps solving + write-hammering N-1 doomed
+            # contracts (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-2). The FENCED
+            # `_enrich_greeks_from_minute` wrapper catches everything and
+            # logs ONE `fno.greeks_enrich.error` — the pull itself can never
+            # fail from this re-raise.
+            raise
         except Exception as exc:
             errored += 1
             _LOG.warning(

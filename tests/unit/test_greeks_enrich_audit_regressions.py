@@ -327,6 +327,74 @@ class TestSpotKeyRecoveryLadder:
         assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
 
 
+class TestLakeWriteHaltReRaise:
+    """CTR-2 (FIX-8): a pull-wide global stop is never per-target quarantined.
+
+    ``LakeWriteHalt`` (disk full / OOM) fails EVERY remaining write
+    identically; the per-target ``except Exception`` used to swallow it and
+    keep reading + solving + write-hammering every remaining contract with
+    ``errored=N`` indistinguishable from N corrupt contracts. It now
+    re-raises immediately (the FENCED ``_enrich_greeks_from_minute`` wrapper
+    still catches everything, so the pull itself can never fail).
+    """
+
+    def test_halt_on_first_target_stops_the_pass_immediately(self, tmp_path: Path) -> None:
+        from brutex.data.errors import LakeWriteHalt
+
+        reads: list[str] = []
+        symbols = [
+            _CE_SYMBOL,
+            "NSE-NIFTY-25Jan24-21600-CE",
+            "NSE-NIFTY-25Jan24-21700-CE",
+        ]
+
+        def _read(t: GreeksEnrichTarget) -> list[dict[str, object]]:
+            reads.append(t.symbol)
+            return [_row(close=200.0)]
+
+        def _halt_write(_t: GreeksEnrichTarget, _b: object) -> int:
+            raise LakeWriteHalt("disk_full")
+
+        with pytest.raises(LakeWriteHalt):
+            enrich_greeks_for_targets(
+                targets=[
+                    GreeksEnrichTarget(
+                        exchange="NSE", symbol=s, start=_WINDOW[0], end=_WINDOW[1]
+                    )
+                    for s in symbols
+                ],
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=_read,
+                read_spot=lambda _t, _p: SpotJoin({_BAR_TS: _SPOT}, "INDEX"),
+                write_bars=_halt_write,
+            )
+        # Pre-fix: swallowed per-target — all 3 read + solved + write-hammered,
+        # errored == 3. Post-fix: targets 2-3 are never even read.
+        assert reads == [_CE_SYMBOL]
+
+    def test_per_target_quarantine_still_holds_for_ordinary_errors(
+        self, tmp_path: Path
+    ) -> None:
+        def _read(t: GreeksEnrichTarget) -> list[dict[str, object]]:
+            if t.symbol == _CE_SYMBOL:
+                raise OSError("corrupt partition")
+            return [_row(close=150.0)]
+
+        report = enrich_greeks_for_targets(
+            targets=[
+                GreeksEnrichTarget(exchange="NSE", symbol=s, start=_WINDOW[0], end=_WINDOW[1])
+                for s in (_CE_SYMBOL, "NSE-NIFTY-25Jan24-21400-PE")
+            ],
+            lake_root=tmp_path,
+            rate_source=_RATE,
+            read_bars=_read,
+            read_spot=lambda _t, _p: SpotJoin({_BAR_TS: _SPOT}, "INDEX"),
+            write_bars=lambda _t, b: len(list(b)),  # type: ignore[arg-type]
+        )
+        assert report.errored == 1 and report.enriched == 1
+
+
 class TestSpotRecoveryCandidates:
     """The pure candidate builder behind the FIX-7 ladder (env parsed locally)."""
 
