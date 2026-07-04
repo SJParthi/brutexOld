@@ -58,7 +58,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date
 
-from brutex.calendars.nse import is_trading_day_checked
+from brutex.calendars.observed_sessions import is_trading_day_checked_observed
 from brutex.indicators.prev_day_ohlc import DailyCandle, find_prev_trading_day
 
 
@@ -119,7 +119,7 @@ def rolling_weekly_anchor(
             the strict variant refuses to guess rather than fold an
             out-of-coverage 2020 holiday into the weekly window.
     """
-    if not (is_trading_day_checked(today) and today not in observed):
+    if not is_trading_day_checked_observed(today, observed=observed):
         raise ValueError(f"today ({today}) is not a trading day — rolling-weekly anchor invalid")
     if sessions < 1:
         raise ValueError(f"sessions must be >= 1, got {sessions}")
@@ -189,7 +189,7 @@ def weekly_static_anchor(
             walk visits) lies outside the published holiday span so its
             trading-day verdict is unknown (DEC-CALENDAR-2020-HONEST-001).
     """
-    if not (is_trading_day_checked(today) and today not in observed):
+    if not is_trading_day_checked_observed(today, observed=observed):
         raise ValueError(f"today ({today}) is not a trading day — weekly-static anchor invalid")
 
     current_week = _iso_week(today)

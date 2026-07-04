@@ -55,8 +55,7 @@ from typing import Any, Final, Literal
 import duckdb
 import structlog
 
-from brutex.calendars.nse import is_trading_day
-from brutex.calendars.observed_sessions import load_observed_holidays
+from brutex.calendars.observed_sessions import is_trading_day_observed, load_observed_holidays
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _INTRADAY_BASE_INTERVAL,
@@ -191,9 +190,10 @@ def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset(
     weekends and listed NSE/BSE holidays are stepped over (they are NOT trading
     sessions) and a special weekend session (e.g. a Budget-Day Saturday) IS
     honoured. The walk always terminates: any weekday outside the holiday list is
-    a trading day and the overlay is capped at 8 days/year, so the
-    immediately-preceding session is at most a handful of days back (bounded
-    constant work, not unbounded).
+    a trading day and the DETECTOR-written overlay is capped at 8 days/year
+    (write-time — ``classify_month_drift``; a hand-edited sidecar still loads a
+    FINITE set), so the immediately-preceding session is at most a handful of
+    days back (bounded constant work, not unbounded).
 
     Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as a
     holiday by :func:`is_trading_day`, so it is treated as a NON-session here.
@@ -203,7 +203,7 @@ def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset(
     rule) — recorded in the decision ledger, not a silent wrong number.
     """
     probe = day - timedelta(days=1)
-    while not (is_trading_day(probe) and probe not in observed):
+    while not is_trading_day_observed(probe, observed=observed):
         probe -= timedelta(days=1)
     return probe
 

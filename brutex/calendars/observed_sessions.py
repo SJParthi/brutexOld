@@ -32,8 +32,13 @@ Hard bounds (operator decree, each STRUCTURAL, each test-pinned)
   plausibly a data disaster than drift) and at most
   :data:`MAX_OVERLAY_DAYS_PER_YEAR` overlay days per calendar year; over-cap
   refuses LOUDLY (structlog error, NO overlay write). Fully-past months only.
-* **Labeled.** Every entry carries ``"observed-not-official"``; the loader REJECTS
-  an unlabeled entry, so a hand-edited ADD-style entry can never sneak in.
+* **Labeled.** Every entry carries ``"observed-not-official"`` AND a canonical
+  ISO-format ``date``; the loader REJECTS an unlabeled or non-canonical entry.
+  Honest limit: a hand-edited entry that COPIES the label + canonical form DOES
+  load — that is the same single-operator trust envelope as the documented
+  delete escape hatch (remove-only means a hand-add can only REMOVE sessions),
+  and the month/year caps are enforced at DETECTION time
+  (:func:`classify_month_drift`), not re-checked at load.
 
 Why ``MIN_CLEAN_SUCCESS_WINDOWS == 1`` (not the sketched 2)
 -----------------------------------------------------------
@@ -74,6 +79,14 @@ Honest envelope (Golden Rule #10)
   operator), so the race is an accepted, ledgered envelope item (refuter fold
   R11), not mechanised away.
 * The overlay is loaded once per report/pull/process — no live invalidation.
+* A VERIFIED special weekend trading session (``SPECIAL_WEEKEND_TRADING_SESSIONS``
+  — e.g. the 2026-02-01 Budget Sunday) is a detector CANDIDATE like any other
+  derived session: ``trading_days_between`` includes it, so a bar-less special
+  session under clean evidence CAN be flagged into the overlay. This is
+  design-consistent (the observation "no bars were served" is honest, consumers
+  behave better with the flag than without on a bar-less day, and a later
+  backfill self-heals the entry) but it IS the overlay overriding a
+  circular-verified calendar entry — stated, not hidden.
 
 Import layering: this module imports ONLY stdlib + structlog +
 ``brutex.calendars.nse`` at module level; every ``brutex.data.*`` /
@@ -250,9 +263,14 @@ def is_trading_day_checked_observed(d: date, *, observed: AbstractSet[date]) -> 
 def _valid_entry_day(entry: Any) -> date | None:
     """Parse one sidecar entry into its overlaid date, or ``None`` when invalid.
 
-    An entry is valid iff it is a mapping whose ``date`` parses as ISO and whose
-    ``label`` is exactly :data:`OBSERVED_LABEL` — the loader-side half of the
-    labeled bound (an unlabeled / hand-edited ADD-style entry is REJECTED).
+    An entry is valid iff it is a mapping whose ``date`` is the CANONICAL ISO
+    spelling (``YYYY-MM-DD`` — exactly ``day.isoformat()``) and whose ``label``
+    is exactly :data:`OBSERVED_LABEL` — the loader-side half of the labeled
+    bound (an unlabeled entry is REJECTED). Canonical-form-only (hostile-review
+    fold): Python 3.11+ ``date.fromisoformat`` also parses compact spellings
+    like ``"20260513"``, which the reconciler's string-prefix month/year
+    grouping cannot see — such a hand-edited twin entry would evade the year
+    cap and never self-heal, so any non-canonical spelling is rejected.
     """
     if not isinstance(entry, dict):
         return None
@@ -262,9 +280,12 @@ def _valid_entry_day(entry: Any) -> date | None:
     if not isinstance(raw, str):
         return None
     try:
-        return date.fromisoformat(raw)
+        day = date.fromisoformat(raw)
     except ValueError:
         return None
+    if raw != day.isoformat():
+        return None
+    return day
 
 
 def load_observed_holidays(lake_root: Path) -> frozenset[date]:

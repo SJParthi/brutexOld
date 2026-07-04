@@ -48,10 +48,10 @@ A derived trading day `d` of a **fully-past** month is flagged iff:
 
 | Bound | Value | Enforcement |
 |---|---|---|
-| Remove-only | structural | the ONLY consumption primitive is `is_trading_day_observed(d) = is_trading_day(d) AND d ∉ observed`; no ADD channel exists in the data shape, API, or any consumer |
+| Remove-only | structural | the ONLY consumption primitive is `is_trading_day_observed(d) = is_trading_day(d) AND d ∉ observed` (strict twin `is_trading_day_checked_observed`) — since the hostile-review fold EVERY consumer site routes through the two primitives (no inlined copies); no ADD channel exists in the data shape, API, or any consumer |
 | Flags per month | ≤ 3 | more admitted candidates refuses the WHOLE month (`observed_sessions.month_cap_exceeded`, error, NO write) — never "first 3 kept" |
 | Overlay days per year | ≤ 8 | `observed_sessions.year_cap_exceeded`, error, NO write |
-| Label | `observed-not-official` on every entry | the loader REJECTS an unlabeled entry (whole sidecar degrades to empty, warned) |
+| Label | `observed-not-official` + canonical ISO date on every entry | the loader REJECTS an unlabeled or non-canonical entry (whole sidecar degrades to empty, warned; a compact `"20260513"` spelling would evade the string-prefix month/year grouping + the year cap and never self-heal — hostile-review fold). Honest limit: a hand-edited entry that COPIES the label + canonical form DOES load — the same single-operator trust envelope as the delete escape hatch (remove-only: a hand-add can only remove sessions); the caps are enforced at DETECTION time, not re-checked at load |
 | Month scope | fully-past, in-coverage | current/future month → `ValueError`; out-of-coverage year → `ValueError` (the derived calendar itself is unknown there) |
 
 ### 2.3 Sidecar
@@ -83,7 +83,7 @@ the file to restore the plain derived calendar).
 |---|---|
 | `indicators/prev_day_ohlc.py` + `indicators/weekly_anchors.py` | keyword-only `observed` (default `frozenset()` = byte-identical) |
 | `dashboard/preopen_report.py` | `build_preopen_rows` loads the overlay once per report → `_previous_trading_day(…, observed=…)` |
-| `doctor_live.py` `_probe_day` | overlay loaded from the resolved lake root; an observed holiday is never probed |
+| `doctor_live.py` probe day | PURE `resolve_probe_day(now, observed=…)` (module-level, 100% tested + mutation-protected — hostile-review fold; the `# pragma: no cover` `build_real_deps` factory keeps only the binding and loads the overlay ONCE per deps build); an observed holiday is never probed |
 | interior-gap + partial-window detectors | `observed` on the pure classifiers + observe helpers; threaded as `observed_holidays` through BOTH ingest spines (mirroring `detect_completeness_gaps`), armed at the dashboard + CLI live-pull sites and the F&O historical phase; a dry-run threads the empty overlay |
 
 **Explicit NON-wiring (scope-lock, regression-tested):** pull window planning
@@ -116,6 +116,14 @@ ONE `prev_day_ohlc.stale_anchor` WARNING.
   the warn fires only for days the overlay does not explain.
 * No candle within 14 days → `prev_day_ohlc.no_anchor_within_lookback` + `None`
   (the sole remaining `None` path).
+* **Coverage-floor bound (hostile-review fold):** once the calendar prior
+  session is established, the candle hunt never probes past the
+  published-holiday coverage floor — a candle-less span reaching pre-2020 ends
+  with the no-anchor WARN + `None` (main-parity: `lookup_prev_day_ohlc(2020-01-10, {})`
+  returned `None` on origin/main), NOT a `HolidayDataUnavailableError` raised
+  out of a data gap. The strict raise is preserved for the genuinely-calendar
+  case (the walk out of coverage BEFORE any prior session is found) —
+  regression-pinned both ways.
 * **Engine impact: none.** The brute-force engine's PREV_DAY fib path is
   stream-based (`engine/stage1a.py` computes `prev_ohlc` off the bar stream) and
   never calls this lookup — sweep output is byte-identical; the change lives on
@@ -156,7 +164,14 @@ ONE `prev_day_ohlc.stale_anchor` WARNING.
    ledgered envelope item — not mechanised.
 6. **No live invalidation:** the overlay is loaded once per report/pull/process.
 7. **POSIX envelope** inherited from `atomic_io` (Windows out of scope).
-8. **Arming parity note:** `observed_holidays` is armed exactly where the pull
+8. **Special-session candidacy:** a VERIFIED special weekend trading session
+   (`SPECIAL_WEEKEND_TRADING_SESSIONS`, e.g. the 2026-02-01 Budget Sunday) is a
+   detector CANDIDATE like any derived session — a bar-less special session
+   under clean evidence CAN be flagged into the overlay (the overlay overriding
+   a circular-verified calendar entry). Design-consistent (the observation is
+   honest; consumers behave better with the flag on a bar-less day; a backfill
+   self-heals) — stated in the module docstring, not hidden.
+9. **Arming parity note:** `observed_holidays` is armed exactly where the pull
    sites already arm their live-only collaborators; `pull_all_spot` additionally
    threads it (its observe-only detector WARNs run unconditionally) even though
    it does not arm `detect_completeness_gaps` — a pre-existing shape, unchanged.
@@ -177,3 +192,21 @@ ONE `prev_day_ohlc.stale_anchor` WARNING.
 | R10 | `calendar_prev_day=None` warn payload undefined | FOLDED — structurally impossible under the session-restricted walk (a winner implies the first session was seen); documented + exhaustion test |
 | R11 | sidecar read-merge-write race | ACCEPTED envelope item (§5.5) — manual single-operator surface; not mechanised |
 | R12 | verified-correct list + ledger `load_failed` fold | FOLDED — unreadable ledger aborts LOUDLY (`observed_sessions.ledger_unreadable` + `ObservedSessionsError`), never silently "no evidence" |
+
+## 7. Post-ship hostile-review folds (4-lens review: all SHIP)
+
+The 4-lens hostile review (correctness / wiring / coverage-honesty /
+scope-honesty) returned **SHIP on every lens** with zero BLOCKER/MAJOR
+findings; the worthwhile MINOR/NIT findings were folded in-PR:
+
+| Lens | Finding | Fold |
+|---|---|---|
+| correctness (MINOR) | compact-ISO hand-edited entry (`"20260513"`) loads but is invisible to the string-prefix month/year grouping — never self-heals, evades the year cap | loader + merge reader are canonical-form-only (`raw != day.isoformat()` rejected); regression tests both sides |
+| correctness+wiring (MINOR) | un-ledgered 4th semantic change: `lookup_prev_day_ohlc` raised `HolidayDataUnavailableError` at the 2020 coverage floor where main returned `None` | coverage-floor abstain (§3 bullet above): candle hunt stops at the floor once the calendar prior session exists → no-anchor WARN + `None` (main-parity); the calendar-question raise preserved; both regression-pinned |
+| wiring (MINOR) | the claimed "single consumption primitive" had ZERO production consumers — all 10 sites inlined the expression | all 10 consumer sites across 6 files routed through `is_trading_day_observed` / `is_trading_day_checked_observed` (Rule 11 COMMON — the docstring claim is now literally true) |
+| coverage-honesty (MINOR) | the doctor `_probe_day` overlay wiring sat under the pre-existing `# pragma: no cover` factory — a calendar-only mutation survived the full doctor suite | probe-day rule extracted PURE as `doctor_live.resolve_probe_day` (module-level, 100% line+branch, the survived mutation now killed by `test_observed_overlay_day_never_probed`); the factory keeps only the binding + loads the overlay ONCE per deps build (design W5) |
+| coverage-honesty (NIT) | `_ENGINE_INDEX_COUNT` hardcodes 3, duplicating `len(ENGINE_INDEX_COORDS)` with no pin | pin test `_ENGINE_INDEX_COUNT == len(ENGINE_INDEX_COORDS)` (the literal stays — `brutex.data.*` must remain function-local in the module) |
+| correctness (NIT) | detector can flag a bar-less VERIFIED special weekend session; envelope named Muhurat only for the anchor walk | §5.8 + module-docstring honest-envelope bullets added |
+| scope (NIT) | docstring overstated the label bound ("can never sneak in"); two consumers cited the 8/year cap as a load-time bound | label bound reworded (loader-side only; caps write-time-enforced); boundedness comments in `preopen_report` / `partial_window_detect` corrected to detector-written-cap + finite-set |
+| scope (NIT) | 7 pyright `reportPrivateUsage` warnings on the test suite | file-level suppression per the repo convention |
+| scope (MINOR) | PR-body real-run count "70 passed" did not reproduce (67 at head) | PR body restated from a fresh run |

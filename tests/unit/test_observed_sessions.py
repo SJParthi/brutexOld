@@ -12,7 +12,13 @@ The synthetic drift month used throughout is 2026-05 with a FICTIONAL observed
 holiday 2026-05-12 — a test fixture, NOT a claim about any real NSE date
 (Golden Rule #1: the real Jan-2026 vendor-observed holiday date stays UNVERIFIED
 and is deliberately never used here).
+
+The suite deliberately reaches module-private helpers (``_window_covers``,
+``_read_sidecar_entries``, ``_ENGINE_INDEX_COUNT``) cross-module, so per repo
+convention the file silences ``reportPrivateUsage`` at the top.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -294,6 +300,19 @@ class TestLoadObservedHolidays:
     def test_invalid_date_entry_rejected(self, tmp_path: Path) -> None:
         self._write(
             tmp_path, {"version": OBSERVED_OVERLAY_VERSION, "entries": [self._entry("not-a-date")]}
+        )
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
+        assert len(_events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)) == 1
+
+    def test_compact_iso_date_entry_rejected(self, tmp_path: Path) -> None:
+        # Canonical-form-only (hostile-review fold): Python 3.11+
+        # ``date.fromisoformat`` also parses the compact "20260513", but the
+        # reconciler's string-prefix month/year grouping cannot see that
+        # spelling — a hand-edited compact twin would evade the 8/year cap and
+        # never self-heal — so the loader now rejects any non-canonical form.
+        self._write(
+            tmp_path, {"version": OBSERVED_OVERLAY_VERSION, "entries": [self._entry("20260513")]}
         )
         with capture_logs() as logs:
             assert load_observed_holidays(tmp_path) == frozenset()
@@ -681,3 +700,34 @@ class TestReadSidecarEntries:
             encoding="utf-8",
         )
         assert obs._read_sidecar_entries(path) == [good]
+
+    def test_compact_iso_entry_filtered(self, tmp_path: Path) -> None:
+        # The merge-side reader applies the SAME canonical-form-only rule
+        # (hostile-review fold): a compact-date twin like "20260513" can never
+        # survive a reconcile as an invisible stored_other duplicate.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        good = {
+            "date": "2026-05-13",
+            "detected_at": _NOW.isoformat(),
+            "month": "2026-05",
+            "label": OBSERVED_LABEL,
+        }
+        compact_twin = dict(good, date="20260513")
+        path.write_text(
+            json.dumps({"version": OBSERVED_OVERLAY_VERSION, "entries": [good, compact_twin]}),
+            encoding="utf-8",
+        )
+        assert obs._read_sidecar_entries(path) == [good]
+
+
+class TestEngineIndexCountPin:
+    def test_engine_index_count_matches_coords(self) -> None:
+        # Rule 11 COMMON pin (hostile-review fold): the pure classifier's
+        # module-level admission bar (`_ENGINE_INDEX_COUNT`, kept a literal
+        # because `brutex.data.*` must stay function-local in the module) must
+        # track the imported coord set. If ENGINE_INDEX_COORDS ever grows the
+        # classifier fail-CLOSES (every candidate lands in no_evidence — the
+        # safe direction); this pin turns that silent never-flag into a LOUD
+        # failure forcing a conscious update.
+        assert len(ENGINE_INDEX_COORDS) == obs._ENGINE_INDEX_COUNT

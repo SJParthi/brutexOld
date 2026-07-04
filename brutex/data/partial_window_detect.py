@@ -79,7 +79,8 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from brutex.calendars.nse import IST, is_holiday_data_available, is_trading_day
+from brutex.calendars.nse import IST, is_holiday_data_available
+from brutex.calendars.observed_sessions import is_trading_day_observed
 
 __all__ = [
     "NOT_TRUNCATED",
@@ -184,12 +185,14 @@ def last_completed_session_on_or_before(
     (DEC-CALENDAR-OBSERVED-SESSIONS-001 — an observably-untraded day is not a
     session, so the expected end rolls back past it). A weekend / holiday rolls
     back to the prior session. Bounded: the NSE week always contains a trading
-    day and the overlay is capped at 8 days/year, so this returns within a
-    handful of steps (O(1) amortised — never an unbounded loop). Used to map a
+    day, the DETECTOR-written overlay is capped at 8 days/year (write-time —
+    ``classify_month_drift``; a hand-edited sidecar still loads a FINITE set),
+    so this returns within a handful of steps (O(1) amortised — never an
+    unbounded loop). Used to map a
     calendar end boundary onto the trading-session grid the bars actually live on.
     """
     cursor = d
-    while not (is_trading_day(cursor) and cursor not in observed):
+    while not is_trading_day_observed(cursor, observed=observed):
         cursor -= timedelta(days=1)
     return cursor
 
@@ -212,7 +215,7 @@ def sessions_between(start: date, end: date, *, observed: AbstractSet[date] = fr
     count = 0
     cursor = start + timedelta(days=1)
     while cursor <= end:
-        if is_trading_day(cursor) and cursor not in observed:
+        if is_trading_day_observed(cursor, observed=observed):
             count += 1
         cursor += timedelta(days=1)
     return count

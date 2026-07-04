@@ -61,7 +61,8 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from brutex.calendars.nse import IST, is_holiday_data_available, is_trading_day
+from brutex.calendars.nse import IST, is_holiday_data_available
+from brutex.calendars.observed_sessions import is_trading_day_observed
 
 __all__ = [
     "INTERIOR_GAP",
@@ -172,7 +173,7 @@ def _largest_interior_session_gap(
     cursor = covered[0] + timedelta(days=1)
     last = covered[-1]
     while cursor < last:
-        if is_trading_day(cursor) and cursor not in observed:
+        if is_trading_day_observed(cursor, observed=observed):
             if cursor in have:
                 run = 0
             else:

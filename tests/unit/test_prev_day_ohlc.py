@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 
 import pytest
+from brutex.calendars.nse import HolidayDataUnavailableError
 from brutex.indicators.prev_day_ohlc import (
     PREV_DAY_NO_ANCHOR_EVENT,
     PREV_DAY_STALE_ANCHOR_EVENT,
@@ -358,6 +359,39 @@ class TestDataWinsWalkBack:
         # 05-11 candle anchors it SILENTLY (overlay-reconciled path).
         assert result[date(2026, 5, 13)].prev_day == date(2026, 5, 11)
         assert _stale_warns(logs) == []
+
+    def test_coverage_floor_gap_returns_none_not_raise(self) -> None:
+        # Hostile-review fold (main-parity regression): a data gap near the 2020
+        # coverage floor. today = Fri 2020-01-10 with an EMPTY candle dict — the
+        # calendar prior session (Thu 2020-01-09) is established but candle-less,
+        # and the candle hunt reaches the pre-2020 out-of-coverage span. The walk
+        # must ABSTAIN (no-anchor WARN + None); the review proved the pre-fold
+        # walk RAISED HolidayDataUnavailableError here where origin/main
+        # returned None.
+        with capture_logs() as logs:
+            result = lookup_prev_day_ohlc(date(2020, 1, 10), {})
+        assert result is None
+        no_anchor = [e for e in logs if e["event"] == PREV_DAY_NO_ANCHOR_EVENT]
+        assert len(no_anchor) == 1
+
+    def test_coverage_floor_calendar_question_still_raises(self) -> None:
+        # The strict raise is PRESERVED for the genuinely-CALENDAR case: today is
+        # the first covered session (Wed 2020-01-01), so the walk reaches
+        # 2019-12-31 BEFORE any calendar prior session exists — refusing to guess
+        # a pre-coverage trading-day verdict stays LOUD
+        # (DEC-CALENDAR-2020-HONEST-001; byte-identical to origin/main).
+        with pytest.raises(HolidayDataUnavailableError):
+            lookup_prev_day_ohlc(date(2020, 1, 1), {})
+
+    def test_coverage_floor_candle_present_normal_silent_path(self) -> None:
+        # Near the floor WITH data: the calendar prior session carries its candle
+        # -> normal silent path; the floor guard never fires.
+        daily = {date(2020, 1, 9): _candle(date(2020, 1, 9))}
+        with capture_logs() as logs:
+            result = lookup_prev_day_ohlc(date(2020, 1, 10), daily)
+        assert result is not None
+        assert result.prev_day == date(2020, 1, 9)
+        assert logs == []
 
     def test_series_skips_day_with_no_anchor_at_all(self) -> None:
         # A `today` whose ENTIRE 14-day lookback has no candle stays absent from

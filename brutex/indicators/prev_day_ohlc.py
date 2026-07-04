@@ -63,6 +63,13 @@ preserving the ledgered Muhurat exclusion (ADR-0012 §4.5 #7) the weekly anchors
 cite. Because a candle can only win ON a session, a found winner implies the
 calendar prior session exists; the two coincide on the silent normal path.
 
+Coverage-floor bound (hostile-review fold): once the calendar prior session is
+established, the candle hunt never probes past the published-holiday coverage
+floor — a candle-less span reaching pre-2020 ends with the honest no-anchor
+WARN + ``None`` (main-parity), NOT a ``HolidayDataUnavailableError`` raised out
+of a data gap. The strict raise remains for the genuinely-calendar case (today /
+the walk out of coverage before any prior session is found).
+
 ## Observed-sessions overlay (remove-only)
 
 Every function takes an optional keyword-only ``observed`` set
@@ -94,7 +101,8 @@ from typing import Final
 
 import structlog
 
-from brutex.calendars.nse import is_trading_day_checked
+from brutex.calendars.nse import is_holiday_data_available
+from brutex.calendars.observed_sessions import is_trading_day_checked_observed
 
 _LOG = structlog.get_logger(__name__)
 
@@ -164,7 +172,7 @@ def find_prev_trading_day(
     """
     d = today - timedelta(days=1)
     for _ in range(lookback_max):
-        if is_trading_day_checked(d) and d not in observed:
+        if is_trading_day_checked_observed(d, observed=observed):
             return d
         d -= timedelta(days=1)
     return None
@@ -210,11 +218,16 @@ def lookup_prev_day_ohlc(
         ValueError: if `today` itself is not a trading day — overlaid days
             included (likely programmer error — should not be asking for PDH on
             a holiday / an observably-untraded day).
-        HolidayDataUnavailableError: if `today` (or a date the backward
-            walk visits) lies outside the published holiday span so its
-            trading-day verdict is unknown (DEC-CALENDAR-2020-HONEST-001).
+        HolidayDataUnavailableError: if `today` lies outside the published
+            holiday span, or the backward walk reaches an out-of-coverage
+            date BEFORE the calendar prior session is established
+            (DEC-CALENDAR-2020-HONEST-001). Once the calendar prior session
+            IS established, an out-of-coverage date ends the walk with the
+            no-anchor WARN + ``None`` instead — a data gap near the 2020
+            coverage floor is a CANDLE question, not a calendar one
+            (main-parity, regression-pinned; hostile-review fold).
     """
-    if not (is_trading_day_checked(today) and today not in observed):
+    if not is_trading_day_checked_observed(today, observed=observed):
         raise ValueError(f"today ({today}) is not a trading day — PDH/PDL lookup invalid")
 
     lookback_max = 14
@@ -222,7 +235,16 @@ def lookup_prev_day_ohlc(
     winner: tuple[date, DailyCandle] | None = None
     d = today - timedelta(days=1)
     for _ in range(lookback_max):
-        if is_trading_day_checked(d) and d not in observed:
+        if calendar_prev is not None and not is_holiday_data_available(d):
+            # Coverage-floor abstain (hostile-review fold): the calendar prior
+            # session is already established — probing further back past the
+            # published-holiday coverage floor (pre-2020) is only a CANDLE hunt,
+            # not a calendar question, so a data gap near the 2020 floor yields
+            # the honest no-anchor WARN + None (main-parity: this case returned
+            # None before the walk-back) instead of the strict walk raising
+            # HolidayDataUnavailableError out of a candle hunt.
+            break
+        if is_trading_day_checked_observed(d, observed=observed):
             if calendar_prev is None:
                 calendar_prev = d
             candle = daily_candles_by_date.get(d)
