@@ -1898,6 +1898,10 @@ def pull_all_spot(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=auth_failures)
             )
 
+        # Success-path latch for the post-drain L2 lake heal below (DEC-LAKE-HEAL-001):
+        # set as the try body's LAST statement, so a phase error leaves it False and
+        # the ``finally`` skips the heal (the drains + ledger persist still run).
+        fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (over EVERY symbol; full range) ──
             if daily_requested:
@@ -1962,6 +1966,8 @@ def pull_all_spot(
                             window_days_for=groww_window_days_for,
                         )
                     _run_phase(minute_intervals, instruments, None)
+            # Fetch phases done — arm the post-drain L2 lake heal in the finally.
+            fetch_phases_ok = True
         finally:
             # Drain the FULL async fetch/process pipeline FIRST (DEC-GROWW-FETCH-ASYNC-SEPARATION-001
             # MAJOR-4 fix): a pipeline consumer's tail calls ``sink.append`` which may FEED the
@@ -1985,6 +1991,20 @@ def pull_all_spot(
             # intraday TFs + the derived ``1day``) is written ONLY by the pipeline's
             # final prebuild phase (brutex.dashboard.pipeline_prebuild), which runs
             # strictly after a fully-successful fetch. Never mid-pull.
+            # DEC-LAKE-HEAL-001 L2: heal the just-pulled slice at the SAME
+            # post-drain seam (the fetched 1-minute is durably in the lake only
+            # after both drains above), so the pipeline's later prebuild phase
+            # reads clean 1-minute. SUCCESS-path only (``fetch_phases_ok``);
+            # LakeWriteHalt re-raises inside (graceful pull-halt), any other
+            # heal error is swallowed — it can never fail the pull.
+            if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
+                _heal_after_pull(
+                    instruments=instruments,
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    pull_id=pid,
+                )
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
@@ -2108,6 +2128,66 @@ def pull_all_spot(
         # signature stage 12 diagnoses. Never raises.
         record_pull_finish(lake_root, pull_id=pid, verdict=verdict.kind)
     return bulk
+
+
+def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 100%-unit-tested
+    *,
+    instruments: Sequence[Instrument],
+    lake_root: Path,
+    start: date,
+    end: date,
+    pull_id: str,
+) -> None:
+    """L2 lake heal over the just-pulled coordinates (DEC-LAKE-HEAL-001).
+
+    Runs the COMMON :func:`~brutex.data.lake_heal.heal_after_pull` core —
+    a scan BOUNDED to the pulled ``(exchange, segment, symbol)`` targets ×
+    the pulled span's UTC months, then the automatic keep-FIRST heal
+    (``BRUTEX_LAKE_HEAL=observe`` logs only) — at the post-drain seam, so
+    the pipeline's final prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001,
+    which now owns ALL derived-TF/1-day writes) reads clean 1-minute.
+    :class:`~brutex.data.errors.LakeWriteHalt` RE-RAISES (a disk-full heal
+    must halt the pull exactly like any lake write — it reaches the existing
+    ``_is_pull_halt`` / ``emit_pull_halt_alert`` handling); every OTHER error
+    is swallowed + logged ``lake_heal.post_pull_error`` (a heal bug never
+    fails a successful pull). The catalog at ``<lake>/catalog.duckdb`` is
+    opened best-effort WHEN THE FILE EXISTS (the L3 sweeper's convention, via
+    the COMMON :func:`~brutex.data.lake_heal.open_lake_catalog`) so a healed
+    partition's rotated ``raw_hash`` reaches the catalog immediately — an
+    open failure logs + proceeds with ``catalog=None``, never blocking the
+    pull. Marked ``no cover`` per the raw-lake-I/O-glue convention; the core
+    is 100%-unit-tested and the glue contract is pinned by
+    ``tests/integration/test_lake_heal_pull_seam.py``.
+    """
+    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog
+    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
+
+    scope = f"pull:{pull_id}"
+    try:
+        with lake_heal_audit(lake_root) as audit:
+            catalog = open_lake_catalog(lake_root)
+            try:
+                heal_after_pull(
+                    lake_root=lake_root,
+                    targets=[
+                        (inst.exch_id.value, inst.segment.value, inst.symbol_name)
+                        for inst in instruments
+                    ],
+                    start=start,
+                    end=end,
+                    scope=scope,
+                    catalog=catalog,
+                    audit=audit,
+                    on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+                )
+            finally:
+                if catalog is not None:
+                    catalog.close()
+    except LakeWriteHalt:
+        raise
+    except Exception as exc:  # pylint: disable=broad-exception-caught — never fail the pull
+        _LOG.warning("lake_heal.post_pull_error", pull_id=pull_id, error=str(exc))
 
 
 def pull_candles(
@@ -2402,6 +2482,10 @@ def pull_candles(
             phase_auth_aborted = phase_auth_aborted or phase_report.auth_aborted
             return phase_report
 
+        # Success-path latch for the post-drain L2 lake heal below (DEC-LAKE-HEAL-001):
+        # set as the try body's LAST statement, so a phase error leaves it False and
+        # the ``finally`` skips the heal (the drains + ledger persist still run).
+        fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (full range) ──
             if daily_requested:
@@ -2451,6 +2535,8 @@ def pull_candles(
                             window_days_for=groww_window_days_for,
                         )
                     _run_phase(minute_intervals, None)
+            # Fetch phases done — arm the post-drain L2 lake heal in the finally.
+            fetch_phases_ok = True
         finally:
             # Drain the FULL async fetch/process pipeline FIRST (DEC-GROWW-FETCH-ASYNC-SEPARATION-001
             # MAJOR-4 fix): a pipeline consumer's tail calls ``sink.append`` which may FEED the
@@ -2469,6 +2555,19 @@ def pull_candles(
             # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the mid-pull 1-day derivation
             # that ran here is REMOVED — derived data is written ONLY by the
             # pipeline's final prebuild phase (brutex.dashboard.pipeline_prebuild).
+            # DEC-LAKE-HEAL-001 L2: heal the just-pulled slice at the SAME
+            # post-drain seam (both drains above landed the 1-minute durably),
+            # so the pipeline's later prebuild phase reads clean 1-minute.
+            # SUCCESS-path only (``fetch_phases_ok``); LakeWriteHalt re-raises
+            # inside (graceful pull-halt), any other heal error is swallowed.
+            if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
+                _heal_after_pull(
+                    instruments=[instrument],
+                    lake_root=lake_root,
+                    start=start.date(),
+                    end=end.date(),
+                    pull_id=pid,
+                )
             end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
         # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair

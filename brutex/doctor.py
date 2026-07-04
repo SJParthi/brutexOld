@@ -67,6 +67,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
 
@@ -427,6 +428,95 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
         )
 
 
+def _lake_offender(finding: Any) -> str:
+    """Name one lake-scanner finding for the FAIL detail.
+
+    Dup / foreign findings carry ``coords`` — named by their lake-relative
+    partition path; any other finding shape degrades to ``repr`` (never a
+    crash inside the doctor's naming loop).
+    """
+    coords = getattr(finding, "coords", None)
+    if coords is not None:
+        return str(coords.relpath())
+    return repr(finding)
+
+
+def check_lake_uniqueness(lake_root: Path) -> CheckResult:
+    """Verify the ENGINE-index lake series (NIFTY/BANKNIFTY/SENSEX) are duplicate-free.
+
+    The DEC-LAKE-HEAL-001 doctor check: runs the bounded invariant scanner
+    (:func:`brutex.data.lake_invariants.scan_lake_invariants`) over ONLY the
+    three :data:`~brutex.data.lake_invariants.ENGINE_INDEX_COORDS` series (all
+    stored intervals) — the question this check answers is "does the ENGINE's
+    index data carry any duplicate / misplaced rows". The whole-lake census is
+    ``brutex lake audit-unique``'s job: an O(all-files) doctor check on a
+    100k-file lake would be dishonestly slow (Golden Rule #10). PASS detail
+    carries the last full L3 startup-sweep sentinel when one exists; FAIL
+    names up to 3 offending partitions plus the remediation pointer. SKIP (a
+    valid state, not a failure) when no lake exists yet. Whole body guarded —
+    a probe error is a loud FAIL, never a doctor crash.
+    """
+    bars_root = lake_root / "bars"
+    if not bars_root.is_dir():
+        return CheckResult(
+            name="lake_uniqueness",
+            status="SKIP",
+            detail=f"no lake at {lake_root} — nothing to verify",
+        )
+    try:
+        from brutex.data.lake_heal import load_last_sweep
+        from brutex.data.lake_invariants import ENGINE_INDEX_COORDS, scan_lake_invariants
+
+        offenders: list[str] = []
+        files = 0
+        for exchange, segment, symbol in ENGINE_INDEX_COORDS:
+            report = scan_lake_invariants(
+                lake_root,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                include_options=False,
+            )
+            files += report.files_scanned
+            offenders.extend(_lake_offender(finding) for finding in report.findings)
+        if offenders:
+            named = ", ".join(offenders[:3])
+            extra = len(offenders) - len(offenders[:3])
+            suffix = f" (+{extra} more)" if extra else ""
+            return CheckResult(
+                name="lake_uniqueness",
+                status="FAIL",
+                detail=(
+                    f"engine-index partitions poisoned: {named}{suffix} — heal runs "
+                    "automatically (BRUTEX_LAKE_HEAL=auto) on dashboard startup / "
+                    "post-pull / sweep start; run `brutex lake audit-unique --json` "
+                    "for the full census; quarantined originals under "
+                    f"{lake_root / '.quarantine'}"
+                ),
+            )
+        sweep = load_last_sweep(lake_root)
+        sweep_note = ""
+        if sweep is not None:
+            sweep_note = (
+                f"; last full sweep: {sweep.get('completed_utc')}, "
+                f"findings={sweep.get('findings')}, healed={sweep.get('healed')}"
+            )
+        return CheckResult(
+            name="lake_uniqueness",
+            status="PASS",
+            detail=(
+                "engine indexes (NIFTY/BANKNIFTY/SENSEX): 0 findings over "
+                f"{files} files{sweep_note}"
+            ),
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="lake_uniqueness",
+            status="FAIL",
+            detail=f"lake uniqueness probe errored: {exc}",
+        )
+
+
 def check_wheel_freshness(
     fingerprint_file: Path | None = None,
     env: Mapping[str, str] | None = None,
@@ -623,7 +713,9 @@ def run_doctor(
     )
     from brutex.config.paths import resolve_lake_root
 
-    report.add(check_derived_freshness(lake_root if lake_root is not None else resolve_lake_root()))
+    resolved_lake = lake_root if lake_root is not None else resolve_lake_root()
+    report.add(check_derived_freshness(resolved_lake))
+    report.add(check_lake_uniqueness(resolved_lake))
     report.add(check_wheel_freshness(fingerprint_file=wheel_fingerprint_file))
     return report
 
