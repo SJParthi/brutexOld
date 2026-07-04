@@ -543,3 +543,44 @@ def test_months_matching_nothing_on_disk_raises(tmp_path: Path) -> None:
             tfs=("5m",),
             months=[(2030, 1)],
         )
+
+
+# ── session-close-aware default cutoff (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001) ──
+
+
+def test_default_cutoff_is_session_close_aware(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``daily_before=None`` (production) the default cutoff is
+    session-close-aware: a MID-SESSION run on the run day defers its own
+    still-forming session, a POST-CLOSE run derives it. Drives the REAL
+    :func:`brutex.calendars.nse.daily_derive_cutoff` through the REAL wiring —
+    ONLY the clock seam (``_now_ist``) is frozen, never the cutoff law."""
+    from brutex.calendars.nse import IST
+    from brutex.data import timeframe_materialize as tfm
+
+    _write_1m_bars(tmp_path, n=120)  # one full session on Mon 2021-01-04
+    run_day_noon = datetime(2021, 1, 4, 12, 0, tzinfo=IST)
+    run_day_evening = datetime(2021, 1, 4, 16, 0, tzinfo=IST)
+
+    def _run() -> int:
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+            include_daily=True,
+        )
+        return result.written[DAILY_TF_LABEL]
+
+    # MID-SESSION run: the run day's session is still forming → deferred.
+    monkeypatch.setattr(tfm, "_now_ist", lambda: run_day_noon)
+    assert _run() == 0
+
+    # POST-CLOSE run the SAME day: the session provably closed → derived NOW
+    # (pre-DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 this stayed 0 until the next
+    # calendar day's pipeline run — the whole-day-granular clause).
+    monkeypatch.setattr(tfm, "_now_ist", lambda: run_day_evening)
+    assert _run() == 1

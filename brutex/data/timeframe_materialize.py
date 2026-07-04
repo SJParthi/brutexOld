@@ -59,7 +59,7 @@ from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-    from datetime import date
+    from datetime import date, datetime
     from pathlib import Path
 
     import polars as pl
@@ -90,6 +90,17 @@ MATERIALIZABLE_TFS: Final[tuple[str, ...]] = tuple(INTRADAY_TF_INTERVALS)
 #: ``materialize_lake_timeframes(include_daily=True)`` reports its daily bar
 #: count under in :attr:`MaterializeResult.written` (DEC-PIPELINE-AUTOPREBUILD-001).
 DAILY_TF_LABEL: Final[str] = "1day"
+
+
+def _now_ist() -> datetime:
+    """The current IST wall-clock instant — the ONE injectable clock seam for
+    the default daily-derive cutoff (tests freeze THIS, never the cutoff law —
+    DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001)."""
+    from datetime import UTC, datetime
+
+    from brutex.calendars.nse import IST
+
+    return datetime.now(UTC).astimezone(IST)
 
 
 def month_partition_files(base: Path, months: Iterable[tuple[int, int]]) -> list[str]:
@@ -372,20 +383,28 @@ def materialize_lake_timeframes(
       daily bar count joins the result under :data:`DAILY_TF_LABEL`.
 
     ``daily_before`` is the forming-session cutoff (an IST date); ``None``
-    (production) resolves to today IST, so a still-forming session is never
-    written as a final daily bar (no look-ahead). Rerun-safe: the intraday
-    partitions are keep-first idempotent and the derived daily is latest-wins
-    (a re-derivation of identical data is a silent no-op) — CLAUDE.md §2 Rule 7.
+    (production) resolves via
+    :func:`~brutex.calendars.nse.daily_derive_cutoff` on the current IST
+    instant (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001): a still-forming /
+    pre-close session is never written as a final daily bar (no look-ahead),
+    while a run on a non-trading day OR provably AFTER the run day's own
+    close (per-date close honored — regular, ``SPECIAL_WEEKEND_TRADING_
+    SESSIONS`` Budget weekends, Muhurat evenings) includes the run day.
+    Rerun-safe: the intraday partitions are keep-first idempotent and the
+    derived daily is latest-wins (a re-derivation of identical data is a
+    silent no-op) — CLAUDE.md §2 Rule 7.
 
     DELIBERATE live-edge divergence (DEC-DOCTOR-KIT-HONESTY-001 fix-4 verdict,
     pinned by ``TestPrebuildLiveEdgeDivergencePinned``): the intraday TFs carry
     the RUN DAY's own session when the stored 1-minute contains it, while the
     derived ``1day`` EXCLUDES it (``ist_date >= before`` — the forming-session
-    guard above), so such a prebuild run writes exactly ONE fewer daily session
-    than the intraday TFs (the operator's 122-vs-123 ADANIENT observation).
-    The guard is whole-day-granular — even a post-close run excludes the run
-    day (the code cannot cheaply prove the session closed) — and SELF-HEALS on
-    the next pipeline run via the latest-wins derived ``1day``. Partition-row
+    guard above), so a MID-SESSION prebuild run writes exactly ONE fewer daily
+    session than the intraday TFs (the operator's 122-vs-123 ADANIENT
+    observation). Since DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 the divergence is
+    confined to a mid-session run: a POST-CLOSE run derives the run day too
+    (superseding the fix-4 "whole-day-granular — the code cannot cheaply prove
+    the session closed" clause), and a mid-session run still SELF-HEALS on the
+    next pipeline run via the latest-wins derived ``1day``. Partition-row
     counting note: midnight-IST stamping places an IST date-D daily bar in the
     UTC month of D−1 (a Jan-1 bar lives in the December partition) — shifted,
     never missing.
@@ -431,9 +450,7 @@ def materialize_lake_timeframes(
             tfs=tfs, read_1m=read_1m, write_tf=write_tf, resampler=resampler
         )
 
-    from datetime import UTC, datetime
-
-    from brutex.calendars.nse import IST
+    from brutex.calendars.nse import daily_derive_cutoff
     from brutex.data.spot_daily_resample import fill_daily_from_minute, make_lake_write_1day
 
     # Read the 1-minute base ONCE and share the frame between the intraday
@@ -442,7 +459,10 @@ def materialize_lake_timeframes(
     intraday = materialize_timeframes(
         tfs=tfs, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
     )
-    before = daily_before if daily_before is not None else datetime.now(UTC).astimezone(IST).date()
+    # DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001: the production default is the
+    # session-close-aware cutoff — a post-close (or non-trading-day) run
+    # includes the run day's completed session; a mid-session run excludes it.
+    before = daily_before if daily_before is not None else daily_derive_cutoff(_now_ist())
     daily = fill_daily_from_minute(
         read_1m=lambda: df_1m,
         write_1day=make_lake_write_1day(
