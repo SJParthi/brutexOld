@@ -1001,7 +1001,7 @@ matrix, now written to STORED columns).
 | Re-pull re-fetches the SAME minute | OHLCV keep-first no-ops (`bars_net_new=0`); enrich re-runs against identical inputs → `latest-wins` restates an IDENTICAL tuple → byte-identical render → effective no-op (Golden Rule #7). |
 | Partial-session window filled by a LATER complete pull | the option bar's `spot_at_bar` changes → `latest-wins` re-enrich CORRECTS the previously-stale Greek. |
 | Standalone `/pull-historical`, no spot in the same run | relies on spot already in the lake; spot absent → honest no-op (Greek NULL), tallied like `no_minute`, never a crash; fills on the next pull once spot exists. |
-| Rate / model / convention revision | stored `greeks_provenance_id` ≠ current → detectable re-enrich (clean, not silent); the read guard renders un-healed bars `stale`; the stamped inputs turn a formula change into a positive invalidation signal. |
+| Rate / model / convention revision | stored `greeks_provenance_id` ≠ current → detectable re-enrich (clean, not silent); the read guard renders un-healed bars `stale`; the stamped inputs turn a formula change into a positive invalidation signal. **Scope note (DEC-GREEKS-CORRECTNESS-AUDIT-001):** a same-KIND rate-VALUE revision (a revised `BRUTEX_RISK_FREE_CSV` / re-configured fixed rate) carries no stamp bit — it is detected by the reuse gate's `rate_used` VALUE-check, not the stamp. |
 
 ### 15.9 Two call sites to document (recorded in §5 + ADR-0015 D8)
 
