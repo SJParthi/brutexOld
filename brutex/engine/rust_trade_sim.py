@@ -94,6 +94,13 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
     from brutex.data.models import CandleBar
 
+    # Typing-only alias for the resident-kernel type — the ``self._rust``
+    # annotation below references it. The explicit attribute access here also
+    # gives the ``fno_math`` import an in-scope use that CodeQL's
+    # unused-import query can SEE (it cannot see through the stringified
+    # annotations of ``from __future__ import annotations``).
+    _RustKernel = fno_math.ResidentSweepSim
+
     # ``ClosedTrade`` is imported lazily at its construction site (see the note in
     # :mod:`brutex.engine.trade_sim`) to keep numpy out of the engine package's
     # collection-time import chain (the per-module strict-coverage gate's
@@ -207,7 +214,7 @@ class ResidentTradeSim:
         # Today's 60-bit vocab fits u64, so real windows take the Rust fast
         # path byte-identically; the guard also skips the (Rust-only)
         # paisa/forced derivation below — the fallback recomputes its own.
-        self._rust: fno_math.ResidentSweepSim | None = None
+        self._rust: _RustKernel | None = None
         oversize_bar = _first_over_u64(self._bar_bits)
         if oversize_bar is not None:
             _warn_u64_fallback(
