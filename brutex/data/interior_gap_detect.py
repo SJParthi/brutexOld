@@ -56,7 +56,7 @@ spine. The trading-session arithmetic reuses the COMMON NSE calendar
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -72,6 +72,7 @@ __all__ = [
     "NO_INTERIOR_GAP",
     "InteriorGapVerdict",
     "classify_interior_gap",
+    "classify_interior_gap_dates",
     "observe_interior_gap",
 ]
 
@@ -183,23 +184,27 @@ def _largest_interior_session_gap(
     return largest
 
 
-def classify_interior_gap(
+def classify_interior_gap_dates(
     *,
-    bar_timestamps: Sequence[datetime],
+    covered_dates: Iterable[date],
     tolerance_sessions: int | None = None,
     observed: AbstractSet[date] = frozenset(),
 ) -> InteriorGapVerdict:
-    """Classify one SUCCESS window as :data:`INTERIOR_GAP` or :data:`NO_INTERIOR_GAP`.
+    """Classify a set of covered IST dates as :data:`INTERIOR_GAP` or :data:`NO_INTERIOR_GAP`.
 
-    The pure, false-positive-safe interior-hole classifier (see the module docstring).
-    It NEVER changes the window's stored status — it only OBSERVES.
+    The DATE-SET core of the pure, false-positive-safe interior-hole classifier
+    (see the module docstring) — the ONE source of interior-hole truth shared by
+    the fetch-time :func:`classify_interior_gap` / :func:`observe_interior_gap`
+    wiring AND the cold-start ledger seed's density cross-check
+    (:func:`~brutex.data.window_ledger_store.seed_enclosed_windows`,
+    DEC-COLDSTART-SEED-INTERIOR-GAP-001), so the two can never drift (CLAUDE.md
+    §11 COMMON). It NEVER changes any stored status — it only OBSERVES.
 
     Parameters
     ----------
-    bar_timestamps
-        UTC-aware timestamps of the window's stored bars (any order, any density).
-        Each is mapped to its IST trading date internally (the bars are stored UTC but
-        trade on the IST session grid, CLAUDE.md §6); only the SET of distinct covered
+    covered_dates
+        The IST trading dates that carry bars (any order, duplicates fine —
+        internally de-duplicated + sorted). Only the SET of distinct covered
         dates matters, so intraday density never affects the verdict.
     tolerance_sessions
         Override the interior-hole tolerance (trading sessions). ``None`` reads
@@ -222,7 +227,7 @@ def classify_interior_gap(
         )
     )
 
-    covered = sorted({ts.astimezone(IST).date() for ts in bar_timestamps})
+    covered = sorted(set(covered_dates))
 
     # TOO-FEW-SESSIONS exclusion: an interior hole needs a bar-session on BOTH sides,
     # so a window covering fewer than two distinct sessions has no interior to bracket.
@@ -263,6 +268,48 @@ def classify_interior_gap(
         last_bar_date=covered[-1],
         largest_gap_sessions=largest,
         reason="continuous",
+    )
+
+
+def classify_interior_gap(
+    *,
+    bar_timestamps: Sequence[datetime],
+    tolerance_sessions: int | None = None,
+    observed: AbstractSet[date] = frozenset(),
+) -> InteriorGapVerdict:
+    """Classify one SUCCESS window as :data:`INTERIOR_GAP` or :data:`NO_INTERIOR_GAP`.
+
+    The pure, false-positive-safe interior-hole classifier (see the module docstring).
+    A thin timestamp→IST-date delegator over the COMMON date-set core
+    (:func:`classify_interior_gap_dates` — extracted for the cold-start ledger
+    seed, DEC-COLDSTART-SEED-INTERIOR-GAP-001; every existing caller is
+    byte-identical). It NEVER changes the window's stored status — it only
+    OBSERVES.
+
+    Parameters
+    ----------
+    bar_timestamps
+        UTC-aware timestamps of the window's stored bars (any order, any density).
+        Each is mapped to its IST trading date internally (the bars are stored UTC but
+        trade on the IST session grid, CLAUDE.md §6); only the SET of distinct covered
+        dates matters, so intraday density never affects the verdict.
+    tolerance_sessions
+        Override the interior-hole tolerance (trading sessions). ``None`` reads
+        :data:`INTERIOR_GAP_TOLERANCE_SESSIONS` (env-tunable).
+    observed
+        Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+        remove-only; default empty = byte-identical back-compat). An overlaid
+        date is not a session, so it never counts toward an interior hole.
+
+    Returns
+    -------
+    InteriorGapVerdict
+        The immutable verdict + the facts that produced it.
+    """
+    return classify_interior_gap_dates(
+        covered_dates=(ts.astimezone(IST).date() for ts in bar_timestamps),
+        tolerance_sessions=tolerance_sessions,
+        observed=observed,
     )
 
 

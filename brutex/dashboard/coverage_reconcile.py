@@ -25,7 +25,11 @@ from typing import Any
 __all__ = ["load_lake_spans"]
 
 
-def load_lake_spans(lake_root: Path) -> list[dict[str, Any]]:  # pragma: no cover - thin DuckDB I/O
+def load_lake_spans(
+    lake_root: Path,
+    *,
+    session_date_segments: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - thin DuckDB I/O
     """Read every spot dataset's stored span from the lake via an ephemeral DuckDB conn.
 
     The one read-only ``read_parquet`` surface (a single aggregate scalar per
@@ -33,6 +37,18 @@ def load_lake_spans(lake_root: Path) -> list[dict[str, Any]]:  # pragma: no cove
     exercised by the integration test over a real tmp lake; the conn is local +
     closed, so the pull path takes no dependency on the dashboard's store
     connection. Returns ``[]`` when DuckDB is unavailable or the lake is empty.
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+    session_date_segments
+        Forwarded verbatim to
+        :func:`~brutex.dashboard.db_view.summarize_spot_datasets` — the SPOT
+        ledger cold-start passes ``{"INDEX"}`` so the dense index ``1minute``
+        spans carry ``session_dates`` for the interior-gap density cross-check
+        (DEC-COLDSTART-SEED-INTERIOR-GAP-001). The default ``None`` keeps every
+        other caller (the F&O reconcile included) byte-identical.
     """
     try:
         import duckdb
@@ -42,6 +58,6 @@ def load_lake_spans(lake_root: Path) -> list[dict[str, Any]]:  # pragma: no cove
 
     conn = duckdb.connect()
     try:
-        return summarize_spot_datasets(conn, lake_root)
+        return summarize_spot_datasets(conn, lake_root, session_date_segments=session_date_segments)
     finally:
         conn.close()
