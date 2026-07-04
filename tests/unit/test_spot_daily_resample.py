@@ -25,6 +25,7 @@ from brutex.data.spot_daily_resample import (
     DailyResampleWindow,
     derive_daily_for_targets,
     fill_daily_from_minute,
+    frame_to_candle_bars,
     ist_span_partition_files,
     ist_span_partition_months,
     plan_daily_resample_windows,
@@ -720,3 +721,44 @@ class TestResampleVectorizedParity:
         ]
         frame = pl.DataFrame(rows, schema=_1M_SCHEMA).sort("ts_utc")
         self._assert_parity(frame, before=_BEFORE)
+
+
+class TestFrameToCandleBarsOpenInterest:
+    """The ``open_interest``-column arm of :func:`frame_to_candle_bars`.
+
+    The batched frame → ``CandleBar`` helper LIVES here (the import-graph
+    leaf, re-exported from ``timeframe_materialize`` for its original
+    callers), so its OI-column branch must be covered by THIS module's own
+    per-module 100% gate — not only by the timeframe_materialize suite that
+    exercises it through the intraday-TF writers. Contract (the legacy
+    ``_oi`` helper's): a present-but-null OI maps to *absent_open_interest*;
+    a present int passes through.
+    """
+
+    @staticmethod
+    def _frame_with_oi(open_interests: list[int | None]) -> pl.DataFrame:
+        rows = [
+            {
+                "ts_utc": datetime(2026, 6, 18, 3, 45 + i, tzinfo=UTC),
+                "open": 100.0 + i,
+                "high": 105.0 + i,
+                "low": 99.0 + i,
+                "close": 101.0 + i,
+                "volume": 10 + i,
+                "open_interest": oi,
+            }
+            for i, oi in enumerate(open_interests)
+        ]
+        return pl.DataFrame(rows, schema={**_1M_SCHEMA, "open_interest": pl.Int64})
+
+    def test_present_oi_column_int_passes_through_and_null_maps_to_default(self) -> None:
+        bars = frame_to_candle_bars(self._frame_with_oi([None, 75]))
+        assert [bar.open_interest for bar in bars] == [0, 75]
+        # The rest of the bar is the same batched conversion the no-OI path uses.
+        assert bars[0].timestamp == datetime(2026, 6, 18, 3, 45, tzinfo=UTC)
+        assert str(bars[0].open) == "100.0"
+        assert [bar.volume for bar in bars] == [10, 11]
+
+    def test_present_null_oi_respects_explicit_absent_value(self) -> None:
+        bars = frame_to_candle_bars(self._frame_with_oi([None, 42]), absent_open_interest=None)
+        assert [bar.open_interest for bar in bars] == [None, 42]
