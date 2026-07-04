@@ -1,0 +1,367 @@
+"""Production ARMING-site wiring pins for the error-storm breaker (DEC-VENDOR-DOWN-BREAKER-001).
+
+The 4-agent hostile review flagged the exact dormant-shipping failure mode
+DEC-PULL-HEALTH-WIRING-001 (#935) / DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001
+(#1014) previously had to fix post-hoc: the four production arming sites
+(``pull_controller.pull_all_spot`` / ``pull_controller.pull_candles`` /
+``historical_pull._run_phase`` / ``cli.cmd_fetch``) each carry a
+``None if dry_run else resolve_error_storm_breaker()`` single-statement ternary,
+so 100% line+branch held even if the constructed breaker never reached the spine
+kwarg — deleting ``storm_breaker=_storm_breaker`` at any site left the whole
+suite green and shipped the feature DORMANT.
+
+These tests pin each site BEHAVIORALLY: patch ``resolve_error_storm_breaker`` in
+the site's namespace to return a SENTINEL breaker, spy the spine entry the site
+calls, and assert (a) a REAL (non-dry-run) pull threads the SENTINEL into the
+spine's ``storm_breaker`` kwarg, and (b) a dry-run threads ``None`` AND never
+even calls the resolver (the arming gate).
+"""
+
+# Whitebox test of the module-private `_run_phase` arming site (sanctioned).
+# pyright: reportPrivateUsage=none
+
+from __future__ import annotations
+
+import importlib
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pytest
+from brutex import cli
+from brutex.adapters.error_storm_breaker import ErrorStormBreaker
+from brutex.adapters.groww.option_ingest import GrowwOptionIngestReport
+from brutex.adapters.ingest_common import SyntheticSpotAdapter
+from brutex.adapters.protocol import DerivativeContract, MarketAdapter
+from brutex.dashboard import historical_pull, pull_controller
+from brutex.dashboard.pull_controller import pull_all_spot, pull_candles
+from brutex.data.registry_store import ContractRow
+from brutex.data.sink import BarSink, NullBarSink
+from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+_NOW = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
+
+
+def _index(symbol: str = "13") -> Instrument:
+    """A minimal spot index :class:`Instrument` (mirrors the pull-controller suite)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=1,
+        symbol_name=symbol,
+        display_name=None,
+        instrument=InstrumentType.IDX,
+        segment=Segment.CASH,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal("0"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _sentinel() -> ErrorStormBreaker:
+    """A distinguishable real breaker instance — the identity the sites must thread."""
+    return ErrorStormBreaker()
+
+
+def _never_resolve(**_kw: object) -> ErrorStormBreaker:
+    """A resolver that must NEVER run on the dry-run arm of the arming ternary."""
+    raise AssertionError("resolve_error_storm_breaker must not be called for a dry-run")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Site 1 — dashboard pull_all_spot (the bulk one-click pull)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPullAllSpotArming:
+    def test_live_pull_threads_the_resolved_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel = _sentinel()
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("storm_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_error_storm_breaker", lambda: sentinel)
+
+        def _factory(
+            lake_root: Path, _insts: Sequence[Instrument]
+        ) -> tuple[MarketAdapter, BarSink]:
+            del lake_root
+            return SyntheticSpotAdapter(), NullBarSink()
+
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            adapter_factory=_factory,
+        )
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+
+    def test_dry_run_threads_none_and_never_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("storm_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_error_storm_breaker", _never_resolve)
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_NOW)
+        assert captured, "the spine was never reached"
+        assert all(b is None for b in captured)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Site 2 — dashboard pull_candles (the single-symbol pull)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPullCandlesArming:
+    def test_live_pull_threads_the_resolved_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel = _sentinel()
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("storm_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        monkeypatch.setattr(pull_controller, "resolve_error_storm_breaker", lambda: sentinel)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+
+    def test_dry_run_threads_none_and_never_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("storm_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        monkeypatch.setattr(pull_controller, "resolve_error_storm_breaker", _never_resolve)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=True,
+        )
+        assert captured, "the spine was never reached"
+        assert all(b is None for b in captured)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Site 3 — dashboard historical_pull._run_phase (the F&O phase driver)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _fno_bucket() -> dict[str, list[tuple[ContractRow, DerivativeContract]]]:
+    row = ContractRow(
+        exch="NSE",
+        underlying="NIFTY",
+        expiry_date=date(2025, 1, 2),
+        contract_symbol="NSE-NIFTY-02Jan25-20000-CE",
+        strike=20000.0,
+        side="CE",
+        candle_status="",
+        last_run_id="",
+        fetched_at=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    contract = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2025, 1, 2),
+        symbol="NSE-NIFTY-02Jan25-20000-CE",
+        contract_type="CE",
+        strike=20000.0,
+    )
+    return {"groww-option": [(row, contract)]}
+
+
+def _run_fno_phase(*, lake_root: Path, dry_run: bool) -> None:
+    historical_pull._run_phase(
+        interval="1minute",
+        by_market=_fno_bucket(),
+        selected_symbols=frozenset({"NSE-NIFTY-02Jan25-20000-CE"}),
+        client=object(),  # type: ignore[arg-type] — never touched, the ingest spine is a spy
+        sink=NullBarSink(),
+        lake_root=lake_root,
+        dry_run=dry_run,
+        start=date(2024, 12, 1),
+        end=date(2025, 1, 2),
+        pace=None,
+        on_rate_limit=None,
+        on_timeout=None,
+        on_success=None,
+        on_progress=None,
+        session_rate=None,
+        until_clean=False,
+        until_clean_rounds=1,
+        contract_windows=None,
+        empty_retry_by_symbol=None,
+        run_parallel=None,
+        write_pool=None,
+        fetch_pipeline=None,
+    )
+
+
+class TestHistoricalPullPhaseArming:
+    def test_live_phase_threads_the_resolved_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel = _sentinel()
+        captured: list[object] = []
+
+        def spy(*_args: Any, **kwargs: Any) -> GrowwOptionIngestReport:
+            captured.append(kwargs.get("storm_breaker"))
+            return GrowwOptionIngestReport(pairs={}, failures=())
+
+        monkeypatch.setattr(historical_pull, "run_groww_option_ingest", spy)
+        monkeypatch.setattr(historical_pull, "resolve_error_storm_breaker", lambda: sentinel)
+        _run_fno_phase(lake_root=tmp_path, dry_run=False)
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+
+    def test_dry_run_threads_none_and_never_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[object] = []
+
+        def spy(*_args: Any, **kwargs: Any) -> GrowwOptionIngestReport:
+            captured.append(kwargs.get("storm_breaker"))
+            return GrowwOptionIngestReport(pairs={}, failures=())
+
+        monkeypatch.setattr(historical_pull, "run_groww_option_ingest", spy)
+        monkeypatch.setattr(historical_pull, "resolve_error_storm_breaker", _never_resolve)
+        _run_fno_phase(lake_root=tmp_path, dry_run=True)
+        assert captured, "the spine was never reached"
+        assert all(b is None for b in captured)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Site 4 — CLI cmd_fetch (the `brutex fetch` live pull)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _FakeIngestReport:
+    """Duck-typed ``GrowwIngestReport`` surface the fetch summary printing reads."""
+
+    windows: int = 1
+    bars_appended: int = 0
+    failed_pairs: int = 0
+    transient_failures: int = 0
+    still_failed_windows: int = 0
+    pairs: dict[tuple[str, str], Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _FakeIngestResult:
+    """Duck-typed ``SpotIngestWithRetry`` — a clean pull (no retry ran)."""
+
+    report: _FakeIngestReport = field(default_factory=_FakeIngestReport)
+    retry: None = None
+
+    @property
+    def still_failed_windows(self) -> int:
+        return self.report.still_failed_windows
+
+
+def _wire_cli_fakes(monkeypatch: pytest.MonkeyPatch, captured: list[object]) -> None:
+    """Fake every network-shaped CLI seam + spy the spine's ``storm_breaker`` kwarg."""
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda _lake: [_index("NIFTY")])
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda _lake, catalog=None: (object(), object())
+    )
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+
+    def fake_ingest(*_args: Any, **kwargs: Any) -> _FakeIngestResult:
+        captured.append(kwargs.get("storm_breaker"))
+        return _FakeIngestResult()
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
+
+
+class TestCliCmdFetchArming:
+    def test_live_pull_threads_the_resolved_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        pytest.importorskip("pyarrow")
+        sentinel = _sentinel()
+        captured: list[object] = []
+        _wire_cli_fakes(monkeypatch, captured)
+        esb = importlib.import_module("brutex.adapters.error_storm_breaker")
+        monkeypatch.setattr(esb, "resolve_error_storm_breaker", lambda: sentinel)
+        rc = cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=True,  # persistence-free live wiring (NullBarSink, no ledger)
+            rows_per_chunk=5,
+        )
+        assert rc == cli.EXIT_OK
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+
+    def test_dry_run_threads_none_and_never_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        pytest.importorskip("pyarrow")
+        captured: list[object] = []
+        _wire_cli_fakes(monkeypatch, captured)
+        esb = importlib.import_module("brutex.adapters.error_storm_breaker")
+        monkeypatch.setattr(esb, "resolve_error_storm_breaker", _never_resolve)
+        rc = cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=True,
+            inspect=True,
+            rows_per_chunk=5,
+        )
+        assert rc == cli.EXIT_OK
+        assert captured, "the spine was never reached"
+        assert all(b is None for b in captured)

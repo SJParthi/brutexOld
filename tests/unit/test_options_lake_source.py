@@ -24,12 +24,14 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
 from brutex.options.lake_source import (
+    STRIKE_COLLISION_EVENT,
     LakeOptionBarSource,
     _as_datetime,
     _as_decimal,
     _utc_instant,
 )
 from brutex.options.lot_size_history import OptionsUnderlying
+from structlog.testing import capture_logs
 
 _IST = ZoneInfo("Asia/Kolkata")
 #: 09:15 IST entry + 15:20 IST forced exit on 2025-01-02 (Track-1 exit, CLAUDE.md §7).
@@ -244,6 +246,111 @@ def test_future_and_junk_dirs_excluded_from_index(tmp_path: Path) -> None:
     index = src._build_symbol_index("NSE", "NIFTY")
     # ONLY the NIFTY CE option is indexed; FUT / RELIANCE / junk / file excluded.
     assert index == {(date(2025, 1, 2), Decimal("24000"), "CE"): "NSE-NIFTY-02Jan25-24000-CE"}
+
+
+# ── Decimal-equal strike collision (DEC-LAKE-SOURCE-STRIKE-COLLIDE-001) ─────
+#: Two raw dir names decoding to Decimal-EQUAL strikes (``Decimal("24650") ==
+#: Decimal("24650.0")`` and they hash alike → ONE index key). Sorted-walk
+#: keep-policy: ``"-CE" < ".0-CE"`` so the ``24650.0`` spelling is the
+#: lexicographically-LATER name and deterministically WINS.
+_COLLIDE_SHADOWED = "NSE-NIFTY-02Jan25-24650-CE"
+_COLLIDE_KEPT = "NSE-NIFTY-02Jan25-24650.0-CE"
+
+
+@pytest.mark.parametrize(
+    "write_order",
+    [(_COLLIDE_SHADOWED, _COLLIDE_KEPT), (_COLLIDE_KEPT, _COLLIDE_SHADOWED)],
+    ids=["shadowed-created-first", "kept-created-first"],
+)
+def test_strike_collision_warns_once_naming_both_and_still_resolves(
+    tmp_path: Path, write_order: tuple[str, str]
+) -> None:
+    """Regression (fails-before): a Decimal-equal collision was a SILENT last-wins
+    overwrite in OS-arbitrary ``iterdir()`` order. Now: exactly ONE
+    ``lake_source.strike_collision`` WARNING names BOTH raw dirs via ``repr()``,
+    and the index still resolves — deterministically to the lexicographically-later
+    name — regardless of directory-creation order (never a fabricated price)."""
+    lake = tmp_path / "lake"
+    prices = {_COLLIDE_SHADOWED: "100.00", _COLLIDE_KEPT: "111.00"}
+    for symbol in write_order:
+        _write_contract(
+            lake,
+            exchange="NSE",
+            symbol=symbol,
+            bars=[_bar(_ENTRY, prices[symbol]), _bar(_EXIT, prices[symbol])],
+        )
+    src = LakeOptionBarSource(lake)
+    with capture_logs() as logs:
+        pair = src.load_pair(
+            instrument=OptionsUnderlying.NIFTY,
+            expiry_date=date(2025, 1, 2),
+            strike=24650,
+            option_type="CE",
+            entry_ts=_ENTRY,
+            exit_ts=_EXIT,
+        )
+    collisions = [entry for entry in logs if entry["event"] == STRIKE_COLLISION_EVENT]
+    assert len(collisions) == 1  # one warning per collided PAIR (2-way ⇒ exactly one)
+    warn = collisions[0]
+    assert warn["log_level"] == "warning"
+    # BOTH raw directory names are named via repr(), plus the decoded coordinates.
+    assert warn["shadowed"] == repr(_COLLIDE_SHADOWED)
+    assert warn["kept"] == repr(_COLLIDE_KEPT)
+    assert warn["exchange"] == "NSE" and warn["underlying"] == "NIFTY"
+    assert warn["expiry"] == "2025-01-02"
+    assert warn["strike"] == "24650.0" and warn["option_type"] == "CE"
+    # The index still resolves — to the KEPT contract's real stored bars.
+    assert pair is not None
+    assert pair.entry_bar.open == Decimal("111.00")
+    index = src._symbol_index["NSE", "NIFTY"]
+    assert index[date(2025, 1, 2), Decimal("24650"), "CE"] == _COLLIDE_KEPT
+
+
+def test_three_way_collision_emits_one_warning_per_pair_naming_all_dirs(tmp_path: Path) -> None:
+    """An N-way Decimal-equal collision emits N−1 warnings — every raw dir named.
+
+    The honesty envelope of the pairwise WARN (DEC-LAKE-SOURCE-STRIKE-COLLIDE-001,
+    reworded from the 2-way "exactly ONE" claim): three spellings of one strike
+    (``24650`` / ``24650.0`` / ``24650.00``) emit TWO warnings, the intermediate
+    winner appearing as ``kept`` in the first and ``shadowed`` in the second, so
+    ALL THREE raw dirs are named across the warnings — no silent shadow.
+    """
+    three = [
+        "NSE-NIFTY-02Jan25-24650-CE",
+        "NSE-NIFTY-02Jan25-24650.0-CE",
+        "NSE-NIFTY-02Jan25-24650.00-CE",
+    ]
+    assert sorted(three) == three  # the deterministic sorted-walk order this test pins
+    lake = tmp_path / "lake"
+    for symbol in three:
+        _write_contract(
+            lake,
+            exchange="NSE",
+            symbol=symbol,
+            bars=[_bar(_ENTRY, "100.00"), _bar(_EXIT, "100.00")],
+        )
+    src = LakeOptionBarSource(lake)
+    with capture_logs() as logs:
+        index = src._build_symbol_index("NSE", "NIFTY")
+    collisions = [entry for entry in logs if entry["event"] == STRIKE_COLLISION_EVENT]
+    assert len(collisions) == 2  # N−1 pairwise warnings for an N-way collision
+    assert collisions[0]["shadowed"] == repr(three[0])
+    assert collisions[0]["kept"] == repr(three[1])
+    assert collisions[1]["shadowed"] == repr(three[1])  # the intermediate winner, re-named
+    assert collisions[1]["kept"] == repr(three[2])
+    # Every colliding raw dir is named at least once across the warnings.
+    named = {c["shadowed"] for c in collisions} | {c["kept"] for c in collisions}
+    assert named == {repr(s) for s in three}
+    # The final index resolves to the lexicographically-last spelling.
+    assert index[date(2025, 1, 2), Decimal("24650"), "CE"] == three[-1]
+
+
+def test_no_collision_emits_no_strike_collision_warning(lake_with_nifty_ce: Path) -> None:
+    """A clean lake (distinct strikes only) never emits the collision event."""
+    src = LakeOptionBarSource(lake_with_nifty_ce)
+    with capture_logs() as logs:
+        src._build_symbol_index("NSE", "NIFTY")
+    assert not [entry for entry in logs if entry["event"] == STRIKE_COLLISION_EVENT]
 
 
 # ── caching (O(1) on repeat) ────────────────────────────────────────────────

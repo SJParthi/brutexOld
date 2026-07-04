@@ -35,11 +35,111 @@ wheel is built by maturin and installed in every CI job that imports
   per bar so the per-bar compute runs in Rust (the bit-identical
   backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-INDICATORS-001``
   / ``DEC-NIFTY-BOS-CHOCH-001``).
+
+Wheel-source freshness handshake (R2-CC-G1)
+-------------------------------------------
+Import-time guard: the compiled ``.so`` is asserted to expose EVERY symbol this
+shim re-exports (``_EXPECTED_COMPILED_SYMBOLS``) BEFORE the re-export runs, so a
+stale installed wheel that predates a source-tree symbol (the exact failure
+three audit agents hit — a ``.so`` missing ``seconds_of_day``) raises a clear,
+actionable ``ImportError`` naming the missing symbol(s) instead of a bare
+symbol-not-found deep inside a consumer. ``__build_crate_version__`` (derived
+from the compiled module's ``CARGO_PKG_VERSION``-baked ``__version__``, never
+hardcoded) plus the in-repo ``EXPECTED_BUILD.json`` fingerprint give
+``brutex doctor`` a wheel-freshness stage.
+
+The import-time handshake is deliberately UNCONDITIONAL — there is NO env
+escape. One could not help anyway: a ``.so`` genuinely missing a re-exported
+symbol would fail the ``from ._trading_core import (...)`` below regardless,
+so the only remedy for a symbol-stale install is the rebuild the ImportError
+message names. Consequently any entry point that (transitively) imports
+``trading_core`` — including every ``brutex`` CLI command via
+``brutex.vocabulary`` — hard-fails on a symbol-stale wheel with THIS
+actionable message; ``brutex doctor``'s softer ``wheel_freshness`` WARN stage
+covers only the drift classes that still import (see ``brutex/doctor.py``).
+
+HONEST residual gap (Golden Rule #10): the version + symbol-set handshake
+catches a stale wheel that dropped/added a symbol or changed crate version. It
+does NOT catch same-version, symbol-compatible BEHAVIORAL drift (Rust source
+changed while version + symbol surface stayed identical). Closing that needs a
+``build.rs`` source-content digest baked into the wheel — the named follow-up,
+deliberately outside this change's scope.
 """
 
 from __future__ import annotations
 
-from ._trading_core import (  # type: ignore[import-not-found]
+import importlib
+from collections.abc import Sequence
+
+#: Every symbol this shim re-exports from the compiled PyO3 module — the ONE
+#: in-code source of truth for the import-time freshness handshake. The
+#: in-repo ``EXPECTED_BUILD.json`` (read by ``brutex doctor``) mirrors this
+#: list; a test pins the two equal so they cannot drift.
+_EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
+    "FIB_LEVELS_LEN",
+    "GREEKS_DELTA_ADMISSION_FLOOR",
+    "GREEKS_IV_CLAMP_MAX",
+    "GREEKS_IV_CLAMP_MIN",
+    "GREEKS_T_FLOOR_YEARS",
+    "GREEKS_VEGA_ADMISSION_FLOOR",
+    "IMPLEMENTED_MASK",
+    "MarketStructureState",
+    "PIVOT_LEVELS_LEN",
+    "SPEC_SCHEMA_VERSION",
+    "TOTAL_CONDITIONS",
+    "VwapState",
+    "__version__",
+    "compute_ema",
+    "compute_fib_levels",
+    "compute_pivot_levels",
+    "derive_bar_metadata",
+    "ema_alpha",
+    "ema_seed",
+    "ema_step",
+    "evaluate_from_raw",
+    "evaluate_spec",
+    "evaluate_with_levels",
+    "greeks",
+    "minute_of_session",
+    "resolve_near_month",
+    "seconds_of_day",
+    "spec_canonical_bytes",
+    "total_conditions",
+    "version",
+    "weekday_from_ordinal",
+)
+
+
+def _assert_compiled_surface(
+    compiled: object,
+    expected: Sequence[str] = _EXPECTED_COMPILED_SYMBOLS,
+) -> None:
+    """Raise an actionable ``ImportError`` if ``compiled`` misses any expected symbol.
+
+    The teeth of the wheel-source freshness handshake: a symbol-incomplete
+    (stale) compiled module fails HERE, at import, naming exactly what is
+    missing and how to fix it — never a confusing ``ImportError: cannot import
+    name ...`` or an ``AttributeError`` deep inside a consumer.
+    """
+    missing = sorted(name for name in expected if not hasattr(compiled, name))
+    if missing:
+        location = getattr(compiled, "__file__", "<unknown location>")
+        raise ImportError(
+            "trading_core: the installed compiled wheel "
+            f"(trading_core._trading_core at {location}) is STALE — it is missing "
+            f"symbol(s) {', '.join(missing)} that this source tree's shim "
+            "re-exports. Rebuild + reinstall the wheel from the current source: "
+            "run `maturin develop --release` inside rust/trading-core "
+            "(with the project venv active)."
+        )
+
+
+_compiled = importlib.import_module("._trading_core", __name__)
+_assert_compiled_surface(_compiled)
+
+# The freshness handshake above MUST run before this re-export so a stale
+# wheel raises the actionable message, not a bare from-import failure.
+from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     FIB_LEVELS_LEN,
     GREEKS_DELTA_ADMISSION_FLOOR,
     GREEKS_IV_CLAMP_MAX,
@@ -72,6 +172,21 @@ from ._trading_core import (  # type: ignore[import-not-found]
     version,
     weekday_from_ordinal,
 )
+
+#: Crate version of the INSTALLED compiled kernel — derived at import from the
+#: compiled module's ``__version__`` (``env!("CARGO_PKG_VERSION")`` baked into
+#: the ``.so`` at build time), NEVER hardcoded here. ``brutex doctor``'s
+#: wheel-freshness stage compares this against the in-repo
+#: ``EXPECTED_BUILD.json`` fingerprint.
+#:
+#: Deliberately NOT in ``__all__``: it is a build stamp, not kernel API. Both
+#: consumers (``brutex.doctor.check_wheel_freshness`` and the golden-fixture
+#: generator) read it via plain attribute access, which needs no ``__all__``
+#: membership — and ``brutex.math`` rebuilds the merged two-kernel facade's
+#: frozen public surface from each kernel's ``__all__``, so listing a
+#: trading-core-specific stamp there would leak it into (and break) the frozen
+#: facade golden (``tests/golden/test_math_facade_golden.py``).
+__build_crate_version__: str = __version__
 
 __all__ = [
     "FIB_LEVELS_LEN",

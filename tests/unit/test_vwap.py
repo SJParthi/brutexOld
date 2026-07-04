@@ -209,6 +209,18 @@ def test_negative_volume_is_ignored() -> None:
     )
 
 
+def test_negative_typical_raises_value_error_before_any_state_change() -> None:
+    # DEC-RUST-HARDENING-R2-001: a negative typical price is rejected at the
+    # boundary (the Python//Rust floor-vs-truncating-division identity holds
+    # only for non-negative operands), mirroring the PyO3 twin's guard.
+    v = VwapState()
+    with pytest.raises(ValueError, match="must be non-negative"):
+        v.update(-1, 100, is_pre_open=False, session_key=KEY, session_day=DAY, tod_seconds=T0916)
+    # Guard-first ordering: the rejected bar mutated NOTHING — the state is
+    # still bit-equal to a fresh one (matching the Rust twin's ordering).
+    assert v == VwapState()
+
+
 def test_invalid_construction_via_dataclass_defaults() -> None:
     # A fresh VwapState is cold and equal to another fresh one (dataclass eq).
     assert VwapState() == VwapState()

@@ -439,11 +439,14 @@ def derive_contract_minute_windows(
         from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
         try:
+            # check_invariants=False: mid-pull HOT non-healing site — the L2 post-pull
+            # heal owns this path's findings; skip the CPU-only per-file n_unique pass.
             reconcile_catalog_from_lake(
                 lake_root=lake_root,
                 catalog=catalog,
                 segment=OPTION_SEGMENT,
                 interval=interval,
+                check_invariants=False,
             )
         except CatalogError as exc:
             # The catalog file is busy / the data-lake deps are missing — degrade to

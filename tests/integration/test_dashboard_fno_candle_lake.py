@@ -142,3 +142,69 @@ class TestSchemaMetaRegistration:
         assert registered["fno_candle_lake.segment"] == "FNO"
         # v3: the stored nullable Greeks overlay landed (DEC-GREEKS-ENGINE-PR2B-001).
         assert registered["fno_candle_lake.schema_version"] == "3"
+
+
+class TestFnoCandleRegistryStep:
+    """DEC-MONEYNESS-REGISTRY-STEP-001 — the /db candle route threads the registry.
+
+    The route passes ``registry_path_for(store.path)`` into ``query_candles`` so an
+    F&O page's ATM±N strike-grid step prefers the AUTHORITATIVE vendor chain, and the
+    payload carries the ``strike_step_confidence`` honesty label either way.
+    """
+
+    _CE_24100 = "NSE-NIFTY-02Jan25-24100-CE"
+
+    def _seed_sparse(self, tmp_path: Path) -> None:
+        # Only alternate strikes pulled (observed gap 100 — 2× the true 50 grid).
+        _write(tmp_path, segment="FNO", symbol=_CE, oi=12000)
+        _write(tmp_path, segment="FNO", symbol=self._CE_24100, oi=9000)
+
+    def _seed_registry(self, tmp_path: Path) -> None:
+        from brutex.data.registry_store import RegistryStore
+
+        now = datetime(2025, 1, 1, tzinfo=UTC)
+        with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
+            for strike in (24000.0, 24050.0, 24100.0):
+                reg.upsert_contract(
+                    "NSE",
+                    "NIFTY",
+                    date(2025, 1, 2),
+                    f"NSE-NIFTY-02Jan25-{int(strike)}-CE",
+                    side="CE",
+                    strike=strike,
+                    run_id="r1",
+                    fetched_at=now,
+                )
+
+    def _page(self, store: InstrumentStore) -> dict[str, object]:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        return client.get(
+            "/api/v1/db/candles",
+            params={"exchange": "NSE", "segment": "FNO", "symbol": _CE, "interval": "1minute"},
+        ).json()
+
+    def test_without_registry_the_page_is_honestly_low_confidence(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        self._seed_sparse(tmp_path)
+        page = self._page(store)
+        assert page["strike_step_confidence"] == "observed"
+
+    def test_registry_chain_reaches_the_route(self, store: InstrumentStore, tmp_path: Path) -> None:
+        # The registry sits beside the instrument store (registry_path_for), so the
+        # route-threaded chain flips the page to high confidence end-to-end.
+        self._seed_sparse(tmp_path)
+        self._seed_registry(tmp_path)
+        page = self._page(store)
+        assert page["strike_step_confidence"] == "registry"
+
+    def test_db_template_renders_the_low_confidence_marker(self) -> None:
+        # The frontend honesty marker (a small muted note keyed off the payload
+        # field) is present in the served template — display-only, string-pinned.
+        import brutex.dashboard as dashboard_pkg
+
+        template = (Path(dashboard_pkg.__file__).parent / "templates" / "db.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'strike_step_confidence === "observed"' in template
+        assert "stepnote" in template

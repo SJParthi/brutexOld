@@ -282,6 +282,11 @@ def _make_sla_callback(*, telegram_enabled: bool) -> SLAEventCallback:
     singleton :class:`TelegramNotifier` and publish a TelegramEvent.
     Otherwise the closure logs at INFO level. Both paths swallow
     callback exceptions per Golden Rule #10.
+
+    The body built here is RAW plain text (rule names / decimals /
+    parentheses included); :func:`_publish_telegram` MarkdownV2-escapes
+    it exactly once before the notifier — the log-only path keeps the
+    readable raw text.
     """
 
     def _cb(event: SLAEvent) -> None:
@@ -305,7 +310,11 @@ def _make_sla_callback(*, telegram_enabled: bool) -> SLAEventCallback:
 
 
 def _make_watchdog_callback(*, telegram_enabled: bool) -> WorkerEventCallback:
-    """Return a watchdog on-hung / on-recovery callback (Telegram or log-only)."""
+    """Return a watchdog on-hung / on-recovery callback (Telegram or log-only).
+
+    Like :func:`_make_sla_callback`, the body is raw plain text;
+    :func:`_publish_telegram` escapes it for MarkdownV2 exactly once.
+    """
 
     def _cb(event: WorkerEvent) -> None:
         """Watchdog transition handler: log + optionally publish to Telegram."""
@@ -336,6 +345,15 @@ def _publish_telegram(
 ) -> None:
     """Best-effort Telegram publish via the lazy singleton notifier.
 
+    *message* is the RAW plain-text body; this funnel escapes it for
+    MarkdownV2 via the common
+    :func:`brutex.notifications.sweep_alerts.escape_markdown_v2` before
+    handing it to the notifier — :class:`TelegramEvent` requires a
+    pre-escaped body and the transport sends it verbatim, so an
+    unescaped ``.`` / ``-`` / ``(`` would make Telegram reject the alert
+    with HTTP 400. Escape-once: callers pass raw text, ONLY this funnel
+    escapes (never double-escaped).
+
     Swallows EVERY exception class (OSError, ValueError, RuntimeError,
     AttributeError) per Golden Rule #10 — a misconfigured Telegram
     must never crash the monitor.
@@ -343,6 +361,7 @@ def _publish_telegram(
     try:
         # Local import keeps this module importable without
         # brutex.notifications being initialised at module-load time.
+        from brutex.notifications.sweep_alerts import escape_markdown_v2
         from brutex.notifications.telegram import TelegramEvent
         from brutex.notifications.wiring import get_or_start_notifier
     except (ImportError, AttributeError):
@@ -358,7 +377,7 @@ def _publish_telegram(
             TelegramEvent(
                 kind=kind,
                 severity=severity,
-                message=message,
+                message=escape_markdown_v2(message),
                 dedupe_key=dedupe_key,
             )
         )

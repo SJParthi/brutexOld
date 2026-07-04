@@ -70,6 +70,12 @@ from brutex.adapters.empty_circuit_breaker import (
     MassEmptySettleHalt,
     resolve_empty_breaker,
 )
+from brutex.adapters.error_storm_breaker import (
+    ErrorStormBreaker,
+    VendorDownError,
+    observe_window_failure,
+    observe_window_success,
+)
 from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClientProtocol, client_self_paces
 from brutex.adapters.groww.constants import (
@@ -85,6 +91,7 @@ from brutex.adapters.groww.contracts import (
 )
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
+    GrowwCredentialDeadError,
     GrowwError,
     is_auth_failure,
     is_rate_limit,
@@ -183,12 +190,22 @@ _MAX_BACKOFF_S: float = 8.0
 #: :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` — a transient
 #: auth-family shape stays a per-contract quarantine, and the mid-pull re-mint
 #: self-heal (DEC-GROWW-TOKEN-REAUTH-001) never raises out of ``client._call`` at all.
+#: ``VendorDownError`` + ``GrowwCredentialDeadError`` join it
+#: (DEC-VENDOR-DOWN-BREAKER-001): a tripped vendor-down error-storm breaker means the
+#: VENDOR (or the network path to it) is down — every remaining contract would burn
+#: its whole retry ladder identically; a dead-credential escalation means every
+#: remaining fetch is auth-stalled against the SAME dead token. Both halt
+#: (``GrowwCredentialDeadError`` is a TERMINAL ``GrowwAuthError`` subclass, so it also
+#: satisfies the ``is_terminal_auth_failure`` carve-out — listed explicitly as the
+#: DEC-VENDOR-DOWN-BREAKER-001 escalation member).
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
     LakeWriteHalt,
     MassEmptySettleHalt,
     GrowwAuthError,
+    VendorDownError,
+    GrowwCredentialDeadError,
 )
 
 #: One unit of OUTER-loop work for the parallel fan-out: a derivative
@@ -289,6 +306,15 @@ class _OptionRawWindow:
     raw_bars: list[CandleBar]
     fetch_count: int
     settle_empty: bool
+    #: The pure "vendor data can never appear" fact (``clamped_end`` strictly before the
+    #: OLD_GAP_HORIZON_DAYS cutoff) — threaded to ``ledger.record(old_window=…)`` so the
+    #: old-gap settle is BUDGET-AWARE (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): a reduced
+    #: empty-retry budget (1 fetch/pull) accumulates clean-EMPTY confirmations ACROSS
+    #: pulls in the durable ledger, settling a confirmed-dead deep strike at pull 2
+    #: instead of the across-pull streak promotion's pull 3 (an honest 3-pull tax, not
+    #: literal immortality; the genuinely unbounded shapes — a breaker-suppressed empty
+    #: or a live-contract key reset — deliberately stay unsettled, data-safety first).
+    old_window: bool
     attempt: int
 
 
@@ -352,6 +378,7 @@ def ingest_option_contract(
     on_raw_payload: RawPayloadHook | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -493,6 +520,26 @@ def ingest_option_contract(
                     **fields,
                 )
                 if attempt >= max_attempts:
+                    # Vendor-down error-storm breaker + dead-credential StillStale
+                    # escalation (DEC-VENDOR-DOWN-BREAKER-001): this window's bounded
+                    # transient-retry ladder is EXHAUSTED — feed the per-pull breaker
+                    # AFTER the ledger record above (the window stays re-pullable). The
+                    # storm's distinct-symbol unit is the UNDERLYING symbol — one
+                    # underlying's whole multi-contract chain failing alone can never
+                    # satisfy the >=3-distinct-symbols floor (the constants.py
+                    # guarantee) — while the window identity stays the CONTRACT-level
+                    # ledger `key`, so each contract window counts once per pull. A
+                    # sustained zero-success storm across distinct underlyings RAISES
+                    # VendorDownError; K consecutive StillStale outcomes over T minutes
+                    # RAISE GrowwCredentialDeadError — both _GLOBAL_STOP_ERRORS members,
+                    # so the driver halts the pull instead of quarantining per contract.
+                    # None (dry-run / synthetic / tests) observes nothing.
+                    observe_window_failure(
+                        storm_breaker,
+                        symbol=contract.underlying_symbol,
+                        window_key=key,
+                        exc=exc,
+                    )
                     # Budget spent — leave the window UNMARKED-as-success (deferred).
                     return IngestReport(
                         windows=1,
@@ -529,6 +576,12 @@ def ingest_option_contract(
     # re-confirming empty is EXPECTED, not throttle evidence — observed but never counted
     # (`is_expected_empty_recheck`). Observed BEFORE the fast-settle math so a poisoned
     # window can never settle on the tripping call.
+    # Vendor-down error-storm breaker (DEC-VENDOR-DOWN-BREAKER-001): a clean fetch —
+    # bars OR a vendor-confirmed empty 200 — is a transport SUCCESS (the vendor answered:
+    # it is ALIVE), so it resets BOTH the vendor-down storm and the StillStale streak.
+    # Observed before the mass-EMPTY breaker feed (a separate, content-level verdict).
+    # The UNDERLYING symbol mirrors the failure seam (the storm's per-underlying unit).
+    observe_window_success(storm_breaker, symbol=contract.underlying_symbol)
     if empty_breaker is not None:
         series = f"{contract.symbol}:{interval}"
         if raw_bars:
@@ -548,6 +601,17 @@ def ingest_option_contract(
     # Computed on the PRODUCER from the pure fetch facts; the tail RE-CHECKS the breaker at
     # record time (``allow_settle``), so a settle computed here but recorded after a trip is
     # still suppressed (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
+    #
+    # BUDGET-AWARE cumulative settle (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): ``is_old`` is
+    # ALSO threaded to the tail's ``ledger.record(old_window=…)`` — a confirmed-deep
+    # strike's REDUCED empty-retry budget of 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) makes
+    # ``fetch_count >= 2`` structurally unreachable in one pull, so the ledger accumulates
+    # its genuine clean-EMPTY confirmations ACROSS pulls (``prior.empty_streak`` +
+    # ``in_pull_fetches``) and settles once the SAME threshold is crossed — pull 2 instead
+    # of the across-pull streak promotion's pull 3 (an honest one-fetch-per-pull tax that
+    # was BOUNDED at 3 pulls for an expired contract, not literally infinite; the
+    # genuinely unbounded shapes — breaker-suppressed empties, live-contract key resets —
+    # deliberately stay unsettled: data-safety first).
     confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
     is_old = clamped_end < old_cutoff
     settle_empty = confirmed_empty_after_retry and is_old
@@ -559,6 +623,7 @@ def ingest_option_contract(
         raw_bars=raw_bars,
         fetch_count=fetch_count,
         settle_empty=settle_empty,
+        old_window=is_old,
         attempt=attempt,
     )
     if fetch_pipeline is None:
@@ -767,6 +832,7 @@ def _process_option_window_tail(
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,
+            old_window=raw.old_window,
             suppress_settle=suppress_settle,
         )
     # Observe-only (DEC-PARTIAL-WINDOW-DETECT-001): for a FUTURES window only (options are
@@ -874,8 +940,14 @@ UNDERLYING_ALL_EMPTY_EVENT = "pull.underlying_all_empty"
 #: Emitted if the observe-only scan itself raises — it NEVER breaks the pull.
 UNDERLYING_ALL_EMPTY_ERROR_EVENT = "pull.underlying_all_empty_error"
 #: Minimum CLEANLY-fetched contracts an underlying must have before a 100%-empty
-#: result is "suspicious". Below this, one or two thinly-traded empty legs are
-#: normal and do not warrant a warning (false-positive guard). Tunable constant.
+#: result is "suspicious" UNCONDITIONALLY (Tier A — non-clean siblings ignored, as
+#: shipped by DEC-SUSPICIOUS-EMPTY-FLAG-001). Below this, a 1-2-leg illiquid chain
+#: is flagged ONLY by the STRICTER low-leg Tier B rule
+#: (DEC-SILENT-VANISH-LOWLEG-001): every pair seen for the underlying was a CLEAN
+#: empty AND no sibling pair was skipped / transient / empty-clamped AND no sibling
+#: leg was terminally quarantined — so the false-positive shapes the #919 guards
+#: exclude (a re-pull, a transient storm, a clamped no-op, a quarantined leg) can
+#: never trip the low-leg flag. Tunable constant.
 _ALL_EMPTY_MIN_CONTRACTS = 3
 #: Cap on the number of flagged underlyings NAMED per pull, so a pathological pull
 #: cannot flood the log (mirrors completeness.py's sample cap).
@@ -899,11 +971,23 @@ class UnderlyingEmptyReport:
     stored_bars
         Total bars stored across those attempted pairs — ``0`` for a flagged
         underlying (the whole chain produced nothing).
+    low_leg
+        ``True`` iff the flag fired via the LOW-LEG Tier B rule
+        (DEC-SILENT-VANISH-LOWLEG-001 — ``attempted_pairs`` below
+        :data:`_ALL_EMPTY_MIN_CONTRACTS`, every pair clean-empty, no non-clean or
+        quarantined sibling). Surfaced in the WARNING payload so triage can weigh a
+        1-leg flag lower than a whole-chain Tier A flag. HONEST caveat (Golden Rule
+        #1/#10): a genuinely-illiquid 1-leg contract that truly never traded is
+        INDISTINGUISHABLE at the pull's vantage point from a vendor silent-vanish —
+        whether Groww returns a clean-200-empty for such legs is UNVERIFIED from an
+        offline sandbox; Tier B trades that bounded warning noise for coverage and
+        stays observe-only.
     """
 
     underlying: str
     attempted_pairs: int
     stored_bars: int
+    low_leg: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -932,15 +1016,41 @@ def _is_clean_fetch(report: IngestReport) -> bool:
 def scan_underlying_all_empty(
     pairs: Mapping[tuple[str, str], IngestReport],
     contract_list: Sequence[DerivativeContract],
+    failed_symbols: Iterable[str] = (),
 ) -> AllEmptyScan:
     """Scan one pull's ``pairs`` for underlyings whose every cleanly-fetched contract was empty.
 
     Groups the ``(contract symbol, interval)`` pairs by their contract's
     ``underlying_symbol`` (resolved via *contract_list*), counts the CLEANLY-fetched
-    pairs (:func:`_is_clean_fetch`) per underlying, and flags an underlying iff it had
-    at least :data:`_ALL_EMPTY_MIN_CONTRACTS` clean fetches AND they stored ZERO bars
-    in total. Pure + O(pairs); a pair whose symbol is not in *contract_list* is skipped
-    (defensive — never raises).
+    pairs (:func:`_is_clean_fetch` — the ONE COMMON per-pair guard predicate, untouched)
+    per underlying, and flags an underlying whose clean pairs stored ZERO bars in total
+    iff EITHER tier holds:
+
+    * **Tier A** (DEC-SUSPICIOUS-EMPTY-FLAG-001, unchanged): at least
+      :data:`_ALL_EMPTY_MIN_CONTRACTS` clean fetches — non-clean / quarantined
+      siblings are ignored exactly as shipped (never stricter).
+    * **Tier B — low-leg** (DEC-SILENT-VANISH-LOWLEG-001): 1-2 clean fetches AND
+      ZERO non-clean sibling pairs (no ledger-skip / transient residual /
+      empty-clamp no-op — the pairs previously ``continue``-dropped are now
+      COUNTED per underlying so a 1-clean-empty + 2-skipped chain is
+      distinguishable from a genuinely 1-leg all-clean-empty chain) AND ZERO
+      terminally-quarantined sibling legs (*failed_symbols* — invisible to
+      *pairs*, so it must be threaded in). This keeps every #919 false-positive
+      shape excluded: a re-pull, a transient storm, a clamped range, and a
+      quarantined leg each leave a non-clean/failed sibling that disqualifies the
+      whole underlying at the low-leg tier.
+
+    HONEST residual (accepted, Golden Rule #10): a NEVER-PLANNED sibling — a
+    far-future contract skipped at planning time (``fno.window_not_open``,
+    DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
+    ``IngestReport`` pair, no failure) — is structurally invisible to both the
+    non-clean tally and *failed_symbols*, so a chain of one clean-empty near leg +
+    one not-yet-open far leg still flags ``low_leg=True``. Consistent with the
+    tried-vs-never-tried philosophy (Tier A ignores never-tried siblings
+    identically); observe-only WARN noise, deliberately not mechanised away.
+
+    Pure + O(pairs + failures); a pair (or failed symbol) not in *contract_list* is
+    skipped (defensive — never raises).
 
     Parameters
     ----------
@@ -948,6 +1058,12 @@ def scan_underlying_all_empty(
         The ``(symbol, interval) -> IngestReport`` map a pull assembled.
     contract_list
         The contracts the pull attempted (carries each symbol's underlying).
+    failed_symbols
+        Contract symbols quarantined on a TERMINAL error this pull
+        (:class:`OptionPairFailure` symbols / the post-drain phase's failure set) —
+        they never enter *pairs*, so without them a 2-leg chain with one
+        quarantined leg would be indistinguishable from a 1-leg clean-empty chain.
+        Default empty (Tier A behaviour is failure-blind, unchanged).
 
     Returns
     -------
@@ -957,20 +1073,36 @@ def scan_underlying_all_empty(
     symbol_to_underlying = {c.symbol: c.underlying_symbol for c in contract_list}
     attempted: dict[str, int] = {}
     stored: dict[str, int] = {}
+    nonclean: dict[str, int] = {}
     for (symbol, _interval), report in pairs.items():
         underlying = symbol_to_underlying.get(symbol)
-        if underlying is None or not _is_clean_fetch(report):
+        if underlying is None:
+            continue
+        if not _is_clean_fetch(report):
+            nonclean[underlying] = nonclean.get(underlying, 0) + 1
             continue
         attempted[underlying] = attempted.get(underlying, 0) + 1
         stored[underlying] = stored.get(underlying, 0) + report.bars_appended
+    failed_underlyings = {
+        underlying
+        for symbol in failed_symbols
+        if (underlying := symbol_to_underlying.get(symbol)) is not None
+    }
     flagged = tuple(
         UnderlyingEmptyReport(
             underlying=underlying,
             attempted_pairs=attempted[underlying],
             stored_bars=stored[underlying],
+            low_leg=attempted[underlying] < _ALL_EMPTY_MIN_CONTRACTS,
         )
         for underlying in sorted(attempted)
-        if attempted[underlying] >= _ALL_EMPTY_MIN_CONTRACTS and stored[underlying] == 0
+        if stored[underlying] == 0
+        and (
+            attempted[underlying] >= _ALL_EMPTY_MIN_CONTRACTS  # Tier A (unchanged)
+            or (  # Tier B low-leg: EVERY pair clean-empty, no failed/non-clean sibling
+                nonclean.get(underlying, 0) == 0 and underlying not in failed_underlyings
+            )
+        )
     )
     return AllEmptyScan(suspicious=flagged)
 
@@ -992,6 +1124,7 @@ def _log_underlying_all_empty(scan: AllEmptyScan, *, pull_id: str | None) -> Non
             underlying=repr(rep.underlying),
             attempted_pairs=rep.attempted_pairs,
             stored_bars=rep.stored_bars,
+            low_leg=rep.low_leg,
         )
 
 
@@ -999,6 +1132,7 @@ def emit_underlying_all_empty(
     pairs: Mapping[tuple[str, str], IngestReport],
     contract_list: Sequence[DerivativeContract],
     *,
+    failed_symbols: Iterable[str] = (),
     pull_id: str | None = None,
 ) -> None:
     """Scan one pull's *pairs* for whole-underlying empties + WARN — fully guarded, observe-only.
@@ -1020,11 +1154,17 @@ def emit_underlying_all_empty(
     stays NIFTY/BANKNIFTY/SENSEX (CLAUDE.md §3). *pull_id* defaults to the current
     pull-scope id (:func:`~brutex.observability.correlation.current_pull_id`) so an
     out-of-scope caller need not thread it; pass it explicitly to override.
+    *failed_symbols* (DEC-SILENT-VANISH-LOWLEG-001) is the pull's terminally
+    quarantined contract symbols, threaded to
+    :func:`scan_underlying_all_empty` so the LOW-LEG Tier B rule can disqualify an
+    underlying with a quarantined sibling leg (quarantines never enter *pairs*);
+    default empty keeps the Tier A behaviour byte-identical.
     """
     resolved_pull_id = pull_id if pull_id is not None else current_pull_id()
     try:
         _log_underlying_all_empty(
-            scan_underlying_all_empty(pairs, contract_list), pull_id=resolved_pull_id
+            scan_underlying_all_empty(pairs, contract_list, failed_symbols),
+            pull_id=resolved_pull_id,
         )
     except Exception as exc:  # observe-only diagnostic must never break the pull
         _LOG.warning(UNDERLYING_ALL_EMPTY_ERROR_EVENT, pull_id=resolved_pull_id, error=str(exc))
@@ -1405,6 +1545,7 @@ def run_groww_option_ingest(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
+    storm_breaker: ErrorStormBreaker | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1527,6 +1668,17 @@ def run_groww_option_ingest(
     Rule #10: the residual false-positive budget on genuinely-illiquid in-band
     chains rides on the env-tunable thresholds, not a silent exclusion).
 
+    *storm_breaker* (DEC-VENDOR-DOWN-BREAKER-001): the vendor-down error-storm
+    breaker + dead-credential StillStale escalator, threaded verbatim into every
+    contract's window fetches. Its trip
+    (:class:`~brutex.adapters.error_storm_breaker.VendorDownError` /
+    :class:`~brutex.adapters.groww.errors.GrowwCredentialDeadError`) is a
+    :data:`_GLOBAL_STOP_ERRORS` member — the pull halts loudly. ``None`` (the
+    default — dry-run / synthetic / unit-test callers) never arms it; ONLY the
+    real-vendor production sites construct one via
+    :func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`
+    (the ``capture_hook_factory`` / ``detect_completeness_gaps`` gating pattern).
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -1636,6 +1788,7 @@ def run_groww_option_ingest(
                 on_raw_payload=contract_hook,
                 fetch_pipeline=fetch_pipeline,
                 empty_breaker=breaker,
+                storm_breaker=storm_breaker,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -1714,7 +1867,12 @@ def run_groww_option_ingest(
     # COMMON :func:`emit_underlying_all_empty` helper (DEC-EMPTY-DETECTOR-PRODUCTION-WIRING-001,
     # in ``dashboard/historical_pull.py``), so this skip no longer leaves the detector dead.
     if fetch_pipeline is None:
-        emit_underlying_all_empty(pairs, contract_list, pull_id=pull_id)
+        emit_underlying_all_empty(
+            pairs,
+            contract_list,
+            failed_symbols=[f.symbol for f in failures],
+            pull_id=pull_id,
+        )
     run_report = GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
     # VISIBLE settled-window skips (DEC-WINDOW-LEDGER-RESCUE-001): ONE INFO line per
     # driver pass with the AGGREGATE count — the per-window skip stays DEBUG (a

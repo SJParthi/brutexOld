@@ -100,7 +100,7 @@ mover.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date as date_cls
 from decimal import Decimal
@@ -127,7 +127,13 @@ from brutex.dashboard.movers_snapshot import (
     value_meets_volume_floor,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
-from brutex.data.moneyness import Moneyness, derive_strike_step, moneyness_view
+from brutex.data.moneyness import (
+    Moneyness,
+    StepConfidence,
+    StrikeStepResult,
+    moneyness_view,
+    resolve_strike_step,
+)
 from brutex.data.registry_store import RegistryError, RegistryStore
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
@@ -167,6 +173,10 @@ DEFAULT_OPTIONS_TOP_N: Final[int] = 100
 #: the lake (``bars/<exch>/FNO/<contract>/<interval>/...``). Mirrors the
 #: instrument-master backtesting segment (CLAUDE.md §6).
 _FNO_SEGMENT: Final[str] = "FNO"
+
+#: The honest "no strike grid" resolution (DEC-MONEYNESS-REGISTRY-STEP-001) — the
+#: defensive default for the per-contract step lookup (no step, nothing to qualify).
+_NO_STEP: Final[StrikeStepResult] = StrikeStepResult(None, None)
 
 #: The ``?expiry=`` selector → the 0-based rank of the chosen expiry among an
 #: underlying's DISTINCT live (``>= snapshot date``) expiries, sorted ascending:
@@ -283,6 +293,15 @@ class OptionMover:
         the partition pre-dates the enrichment (legacy 7-column), when the
         enrichment stamped an honest §15.8 NULL (no spot / no solution / …),
         or for a never-enriched series — never a fabricated Greek.
+    strike_step_confidence
+        The honesty label of the strike-grid step behind ``atm_offset`` /
+        ``moneyness_label`` (DEC-MONEYNESS-REGISTRY-STEP-001):
+        :attr:`~brutex.data.moneyness.StepConfidence.REGISTRY` when the
+        AUTHORITATIVE vendor chain sized the grid,
+        :attr:`~brutex.data.moneyness.StepConfidence.OBSERVED` when only the sparse
+        lake-observed ladder did (the screen shows a low-confidence marker — the
+        observed min gap can overestimate the true base step), or ``None`` when no
+        step was presented at all.
     """
 
     underlying: str
@@ -305,6 +324,7 @@ class OptionMover:
     moneyness_label: str
     iv: float | None = None
     delta: float | None = None
+    strike_step_confidence: StepConfidence | None = None
 
     @property
     def name(self) -> str:
@@ -429,6 +449,7 @@ def compute_option_mover(
     spot_ltp: Decimal | None,
     prev_oi: int | None,
     strike_step: Decimal | None = None,
+    strike_step_confidence: StepConfidence | None = None,
     iv: float | None = None,
     delta: float | None = None,
 ) -> OptionMover:
@@ -465,6 +486,14 @@ def compute_option_mover(
         The contract's previous trading-day 1-day open interest, or ``None``.
     strike_step
         The ``(underlying, expiry)`` strike-grid step (rupees), or ``None``.
+    strike_step_confidence
+        The honesty label of *strike_step*'s source
+        (DEC-MONEYNESS-REGISTRY-STEP-001 — ``REGISTRY`` = the authoritative vendor
+        chain, ``OBSERVED`` = the sparse lake ladder only). Surfaced on the row ONLY
+        when a *strike_step* is actually present (no step → nothing to qualify →
+        ``None``, Golden Rule #1); a present step passed WITHOUT a label defaults to
+        the honest ``OBSERVED`` floor so the pair can never split into
+        "grid shown, confidence null".
     iv, delta
         The last kept session bar's STORED Greeks overlay values
         (DEC-GREEKS-ENGINE-PR3B-001 — sourced from the SAME session read, never
@@ -490,6 +519,18 @@ def compute_option_mover(
     # Moneyness vs the snapshot spot (the snapped 2dp spot keeps it consistent with
     # the displayed spot/strike); UNKNOWN when the spot is absent (Golden Rule #1).
     view = moneyness_view(opt_type, strike, snapped_spot, strike_step)
+    # The confidence label qualifies a PRESENT step only — with no step there is
+    # nothing displayed to qualify, so it is honestly None (never a dangling flag).
+    # The REVERSE split is also guarded (DEC-FNO-HONESTY-PACK-001): a caller passing
+    # a real step WITHOUT a label gets the honest LOW-confidence floor (OBSERVED) —
+    # a displayed grid can never carry a `null` confidence, which the payload doc
+    # defines as "no grid presented" (Golden Rule #1).
+    if strike_step is None:
+        step_confidence = None
+    elif strike_step_confidence is None:
+        step_confidence = StepConfidence.OBSERVED
+    else:
+        step_confidence = strike_step_confidence
     return OptionMover(
         underlying=underlying,
         expiry=expiry,
@@ -511,6 +552,7 @@ def compute_option_mover(
         moneyness_label=view.label,
         iv=iv,
         delta=delta,
+        strike_step_confidence=step_confidence,
     )
 
 
@@ -534,6 +576,13 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "moneyness": mover.moneyness_label,
         "moneyness_bucket": mover.moneyness.value,
         "atm_offset": mover.atm_offset,
+        # The strike-grid honesty label (DEC-MONEYNESS-REGISTRY-STEP-001): "registry"
+        # = the AUTHORITATIVE vendor chain sized the ATM±N grid; "observed" = only
+        # the sparse lake ladder did — the screen renders a low-confidence marker so
+        # a possibly-overestimated step is never presented silently; null = no grid.
+        "strike_step_confidence": (
+            mover.strike_step_confidence.value if mover.strike_step_confidence is not None else None
+        ),
         # STORED Greeks as of the snapshot (DEC-GREEKS-ENGINE-PR3B-001) — full
         # precision floats (never rounded — CLAUDE.md §4); null = honest NA
         # (legacy partition / stamped-NULL bar), the screen renders "—".
@@ -985,6 +1034,7 @@ def compute_options_candidates(
     names: Mapping[str, str] | None = None,
     datasets: list[dict[str, str]] | None = None,
     calendar_expiries: Mapping[str, set[date_cls]] | None = None,
+    registry_chain_for: Callable[[str, date_cls], Sequence[Decimal] | None] | None = None,
 ) -> OptionsCandidates:
     """Scan the lake → the :class:`OptionsCandidates` for one snapshot coordinate.
 
@@ -1012,6 +1062,19 @@ def compute_options_candidates(
         the Near/Next/Far + Weekly/Monthly tiers classify over the FULL calendar, so a
         sparsely-pulled lake no longer mislabels a tier. ``None`` derives the tiers
         from the lake-partition contract set (the graceful fallback).
+    registry_chain_for
+        The LAZY ``(underlying, expiry) → strike chain`` loader over the
+        AUTHORITATIVE vendor registry
+        (:func:`~brutex.dashboard.registry_strikes.make_registry_chain_loader`,
+        DEC-MONEYNESS-REGISTRY-STEP-001) — invoked ONLY for the snapshot's own
+        tier-target keys, so a growing registry never costs a whole-table read
+        (Golden Rule #5, DEC-FNO-HONESTY-PACK-001). When a key's chain is present
+        the ATM±N strike-grid step derives from the FULL chain (confidence
+        ``registry``), so a sparsely-pulled expiry no longer overestimates the
+        step. ``None`` — or a per-key ``None`` (absent registry, or a
+        registry↔lake underlying-naming mismatch, honest graceful degrade) —
+        falls back to the screened lake ladder with the low-confidence
+        ``observed`` label.
 
     Returns
     -------
@@ -1056,14 +1119,25 @@ def compute_options_candidates(
             calendar_only_expiry=calendar_only_expiry,
         )
 
-    # Derive the DYNAMIC strike-grid step ONCE per (underlying, expiry) from the
-    # screened strike ladder (CE + PE share the grid) — the min positive gap. This
-    # works for EVERY F&O underlying (all stocks + indices), never a hardcoded NSE
-    # rule (Golden Rule #1). O(K log K) once here; the per-contract ATM±N is O(1).
+    # Resolve the DYNAMIC strike-grid step ONCE per (underlying, expiry) — the min
+    # positive gap over the AUTHORITATIVE registry chain when the LAZY loader yields
+    # one (DEC-MONEYNESS-REGISTRY-STEP-001; invoked only for THESE tier-target keys —
+    # the bounded read, Golden Rule #5), else over the screened lake ladder (CE + PE
+    # share the grid) with an honest low-confidence label. This works for EVERY F&O
+    # underlying (all stocks + indices), never a hardcoded NSE rule (Golden Rule #1).
+    # O(K log K) once here; the per-contract ATM±N is O(1).
     strikes_by_key: dict[tuple[str, date_cls], list[Decimal]] = {}
     for _sym, _exch, c_underlying, c_expiry, c_strike, _opt in contracts:
         strikes_by_key.setdefault((c_underlying, c_expiry), []).append(c_strike)
-    step_by_key = {key: derive_strike_step(strikes) for key, strikes in strikes_by_key.items()}
+    step_by_key = {
+        key: resolve_strike_step(
+            strikes,
+            authoritative_strikes=(
+                registry_chain_for(key[0], key[1]) if registry_chain_for is not None else None
+            ),
+        )
+        for key, strikes in strikes_by_key.items()
+    }
 
     movers: list[OptionMover] = []
     skipped = 0
@@ -1126,7 +1200,8 @@ def compute_options_candidates(
                 prev_close=prev_close,
                 spot_ltp=spot_ltp,
                 prev_oi=prev_oi,
-                strike_step=step_by_key.get((underlying, expiry)),
+                strike_step=step_by_key.get((underlying, expiry), _NO_STEP).step,
+                strike_step_confidence=step_by_key.get((underlying, expiry), _NO_STEP).confidence,
                 iv=iv,
                 delta=delta,
             )
@@ -1154,6 +1229,7 @@ def run_options_snapshot(
     names: Mapping[str, str] | None = None,
     min_volume: int | None = None,
     calendar_expiries: Mapping[str, set[date_cls]] | None = None,
+    registry_chain_for: Callable[[str, date_cls], Sequence[Decimal] | None] | None = None,
 ) -> dict[str, Any]:
     """Compute the options movers snapshot over the lake → the ``/api/v1/movers`` payload.
 
@@ -1195,6 +1271,10 @@ def run_options_snapshot(
         The AUTHORITATIVE per-underlying vendor expiry calendar from
         :func:`load_registry_expiries` (DEC-MOVERS-CALENDAR-TIERS-001), or ``None`` to
         derive the tiers from the lake-partition contract set.
+    registry_chain_for
+        The LAZY per-``(underlying, expiry)`` AUTHORITATIVE strike-chain loader
+        (DEC-MONEYNESS-REGISTRY-STEP-001 — see :func:`compute_options_candidates`),
+        or ``None`` for the lake-ladder step with its honest ``observed`` label.
 
     Returns
     -------
@@ -1216,6 +1296,7 @@ def run_options_snapshot(
         exchange=exchange,
         names=names,
         calendar_expiries=calendar_expiries,
+        registry_chain_for=registry_chain_for,
     )
     return build_options_payload(
         candidates.movers,

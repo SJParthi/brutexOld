@@ -7,9 +7,16 @@ byte-exact golden fixture.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import numpy.typing as npt
-from brutex.metrics.cascade import CandidateInput, CascadeConfig, run_stage4_cascade
+from brutex.metrics.cascade import (
+    CandidateInput,
+    CascadeConfig,
+    DsrTrialStats,
+    run_stage4_cascade,
+)
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -98,14 +105,40 @@ def test_cascade_structural_invariants(pool: list[CandidateInput]) -> None:
     assert set(rep.survivor_ids) == {v.candidate_id for v in passed}
     assert set(rep.rejected_ids) == {v.candidate_id for v in rejected}
 
-    # Survivors are ranked best-first by composite score (non-None, narrowed).
+    # Survivors are ranked in the STRICT total order (DEC-STATS-GATE-
+    # INTEGRITY-001, R2-SR-F6): score descending, candidate_id ascending on a
+    # tie — for consecutive survivors, score[i] > score[i+1] OR (equal AND
+    # id[i] < id[i+1]). Every composite is finite (the sort key's contract).
     scores = {v.candidate_id: v.composite_score for v in passed if v.composite_score is not None}
-    ordered = [scores[cid] for cid in rep.survivor_ids]
-    assert ordered == sorted(ordered, reverse=True)
+    assert all(math.isfinite(s) for s in scores.values())
+    for earlier, later in zip(rep.survivor_ids, rep.survivor_ids[1:], strict=False):
+        assert scores[earlier] > scores[later] or (
+            scores[earlier] == scores[later] and earlier < later
+        )
+
+    # Pool-fallback provisional invariant (R2-SR-F4): with NO trial_stats the
+    # DSR deflates against the pool ⇒ every verdict's provisional flag equals
+    # its passed flag (pass-scoped, run-level source).
+    assert rep.dsr_n_source == "pool"
+    for v in rep.verdicts:
+        assert v.provisional == v.passed
+    assert rep.provisional_pass_ids == rep.survivor_ids
 
     # Stage-survivor counts are monotonically non-increasing down the pipeline.
     counts = list(rep.stage_survivors.values())
     assert all(counts[i] >= counts[i + 1] for i in range(len(counts) - 1))
+
+
+@given(pool=_pool())
+@settings(max_examples=15, deadline=None)
+def test_cascade_trial_stats_passes_never_provisional(pool: list[CandidateInput]) -> None:
+    # With frozen leaderboard trial stats supplied, NO verdict is provisional
+    # (the leaderboard N is the honest deflation population).
+    stats = DsrTrialStats(n_trials=50, sharpe_variance=0.25, n_finite=50)
+    rep = run_stage4_cascade(pool, _CONFIG, trial_stats=stats)
+    assert rep.dsr_n_source == "leaderboard"
+    assert all(v.provisional is False for v in rep.verdicts)
+    assert rep.provisional_pass_ids == ()
 
 
 @given(pool=_pool())

@@ -430,13 +430,19 @@ jobs:
           # — explicitly engineered for 100% line + branch coverage.
           # This is step 1 of the multi-PR ratchet path to lift the
           # global floor from 90% → 100% (per Golden Rule #12 #1+#2).
+          # DEC-RUST-HARDENING-R2-001 (MIGRATION.md #1166) added the
+          # `check_wheel_freshness` stage whose dedicated suite lives in
+          # `test_doctor_wheel_freshness.py` — the module's covering set
+          # is BOTH files (test_doctor.py alone reads 92% since that
+          # stage landed), so the gate runs them together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_doctor.py
+              tests/unit/test_doctor.py \
+              tests/unit/test_doctor_wheel_freshness.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
@@ -767,8 +773,11 @@ jobs:
           # exercise the urllib transport's success+error paths, worker
           # start/stop lifecycle, queue.Full + queue.Empty branches, and
           # drain's edge cases. Module: 210 stmts, 38 branches, 34 tests.
+          # DEC-DASHBOARD-SECURITY-HYGIENE-001: the notifier lifecycle/dedupe +
+          # config-hygiene code is covered by the two sibling suites added to
+          # the invocation (test_telegram_lifecycle_dedupe + test_telegram_config_hygiene).
           if compgen -G "tests/unit/test_notifications_telegram.py" > /dev/null; then
-            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py
+            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py tests/unit/test_telegram_lifecycle_dedupe.py tests/unit/test_telegram_config_hygiene.py
           else
             echo "(brutex.notifications.telegram test file not present yet — gate inactive)"
           fi
@@ -1020,9 +1029,12 @@ jobs:
           else
             echo "(brutex.vocabulary.describe test file not present yet — gate inactive)"
           fi
-          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests)
+          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests) — since
+          # DEC-RUST-HARDENING-R2-001 (#1166) the module's covering set is
+          # test_doctor.py + test_doctor_wheel_freshness.py (mirrors the
+          # DEC-COV-001 block above; test_doctor.py alone reads 92%).
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
-            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py
+            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
@@ -1661,8 +1673,13 @@ jobs:
           # DEC-CATALOG-RECONCILE-WIRE-001: the lake→catalog reconciler ships at
           # 100% line+branch from the start (read-side fix that makes an
           # already-pulled lake sweep-able with no re-pull).
+          # DEC-LAKE-HEAL-001: the free L1 invariant piggyback (`check_invariants`
+          # branches + the findings/drift paths) is covered by the dedicated
+          # tests/unit/test_catalog_reconcile_invariants.py suite, so this gate
+          # runs BOTH files (same pattern as the pull_controller gate above) —
+          # the base file alone reads 89.47% on the module.
           if compgen -G "tests/unit/test_catalog_reconcile.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py
+            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py tests/unit/test_catalog_reconcile_invariants.py
           else
             echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
           fi
@@ -1875,7 +1892,7 @@ jobs:
           # (_default_opener) is `# pragma: no cover` (NSE bot-blocks + this
           # build env network-blocks nseindia.com, so it is UNVERIFIABLE in CI).
           if compgen -G "tests/unit/test_nse_constituents.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py
+            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py tests/unit/test_nse_constituents_opener_guard.py
           else
             echo "(brutex.dashboard.nse_constituents test file not present yet — gate inactive)"
           fi
