@@ -1,7 +1,7 @@
 //! Sweep-metrics kernel — the fused per-mask equity fold + drawdown scan.
 //!
 //! DEC-SWEEP-RUST-METRICS-001 (Phase B of the Rust-migration blueprint;
-//! MIGRATION.md #1183). The Rust port of the measured-hot part of the sweep's
+//! MIGRATION.md #1185). The Rust port of the measured-hot part of the sweep's
 //! per-mask trades→metrics tail: `brutex.engine.sweep_driver.build_equity_curve`'s
 //! running-sum equity fold FUSED with `brutex.metrics.compute._drawdown_stats`'s
 //! per-bar drawdown scan (max-drawdown paisa / %, drawdown duration, Ulcer
@@ -195,11 +195,7 @@ mod tests {
     /// Naive two-pass oracle: materialise the equity curve, then scan it —
     /// the shape of the Python `build_equity_curve` + `_drawdown_stats`
     /// pair. The fused kernel must match it bit-for-bit.
-    fn two_pass_oracle(
-        n_bars: usize,
-        start: i64,
-        exits: &[(usize, i64)],
-    ) -> (i64, f64, i64, f64) {
+    fn two_pass_oracle(n_bars: usize, start: i64, exits: &[(usize, i64)]) -> (i64, f64, i64, f64) {
         let mut realized = vec![0i64; n_bars];
         for &(idx, pnl) in exits {
             realized[idx] += pnl;
@@ -265,8 +261,7 @@ mod tests {
     #[test]
     fn monotone_up_has_zero_drawdown_nonzero_only_at_no_bar() {
         let exits = vec![(1usize, 50i64), (3usize, 25i64)];
-        let (dd, pct, bars, ulcer) =
-            drawdown_stats_checked(4, 1_000, &exits).expect("in envelope");
+        let (dd, pct, bars, ulcer) = drawdown_stats_checked(4, 1_000, &exits).expect("in envelope");
         assert_eq!((dd, bars), (0, 0));
         assert_eq!(bits(pct), bits(0.0));
         assert_eq!(bits(ulcer), bits(0.0));
@@ -330,11 +325,7 @@ mod tests {
     fn duration_resets_on_new_peak_and_keeps_longest_run() {
         // equity: [100, 90, 90, 120, 110] — run of 2 below the 100 peak,
         // reset at the new 120 peak, then a fresh 1-bar run.
-        let exits = vec![
-            (1usize, -10i64),
-            (3usize, 30i64),
-            (4usize, -10i64),
-        ];
+        let exits = vec![(1usize, -10i64), (3usize, 30i64), (4usize, -10i64)];
         let (dd, _pct, bars, _ulcer) = drawdown_stats_checked(5, 100, &exits).expect("ok");
         assert_eq!(bars, 2);
         assert_eq!(dd, 10);
@@ -393,8 +384,7 @@ mod tests {
         // A start above 2^52 with ONE exit trips the magnitude check on the
         // first exit (a zero-exit call never enters the pct-hazard division
         // with drop > 0, but the wrapper pre-guards it anyway — belt).
-        let err =
-            drawdown_stats_checked(1, MAX_EXACT_EQUITY_PAISA + 1, &[(0, 0)]).unwrap_err();
+        let err = drawdown_stats_checked(1, MAX_EXACT_EQUITY_PAISA + 1, &[(0, 0)]).unwrap_err();
         assert!(err.contains("exceeds the"), "{err}");
     }
 
@@ -409,8 +399,7 @@ mod tests {
     #[test]
     fn sum_of_pnls_overflowing_i64_is_rejected() {
         let big = i64::MAX / 2 + 1;
-        let err =
-            drawdown_stats_checked(2, 1_000, &[(0usize, big), (1usize, big)]).unwrap_err();
+        let err = drawdown_stats_checked(2, 1_000, &[(0usize, big), (1usize, big)]).unwrap_err();
         // The FIRST big pnl already exceeds the 2^52 envelope, so the
         // envelope message fires before the checked_add could; both are Err.
         assert!(err.contains("envelope"), "{err}");

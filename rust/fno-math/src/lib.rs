@@ -66,7 +66,7 @@ pub mod python;
 /// to Rust + fused with the per-mask entry projection over a resident bar window.
 pub mod trade_sim;
 
-/// DEC-SWEEP-RUST-METRICS-001 (#1183): Phase-B sweep-metrics kernel — the fused
+/// DEC-SWEEP-RUST-METRICS-001 (#1185): Phase-B sweep-metrics kernel — the fused
 /// per-mask equity fold + drawdown scan (`build_equity_curve` +
 /// `_drawdown_stats`), bit-identical to the Python oracle inside the 2^52
 /// f64-exactness envelope the Python wrapper pre-guards.

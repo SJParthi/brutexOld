@@ -451,7 +451,7 @@ class TestRustMetricsTail:
     def test_off_arm_never_touches_the_kernel_machinery(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OFF is the verbatim pre-#1183 path — no envelope check, no kernel."""
+        """OFF is the verbatim pre-#1185 path — no envelope check, no kernel."""
 
         def _bomb(*args: object, **kwargs: object) -> None:
             raise AssertionError("flag OFF must not reach the Rust metrics seam")

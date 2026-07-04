@@ -309,7 +309,7 @@ def metrics_from_trades(
     COMMON, the flag arms EVERY consumer together (sweep, walk-forward,
     validation, Stage 3) — safe precisely because the arms are bit-identical
     (golden + property pinned). OFF (the default) never touches the kernel
-    machinery: one env read, then the pre-#1183 path byte-for-byte.
+    machinery: one env read, then the pre-#1185 path byte-for-byte.
     """
     if sweep_rust_metrics_enabled():
         metrics = _metrics_from_trades_via_kernel(

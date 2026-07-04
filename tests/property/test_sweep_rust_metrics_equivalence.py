@@ -25,9 +25,13 @@ from brutex.engine.rust_metrics import (
     MAX_EXACT_EQUITY_PAISA,
     SWEEP_RUST_METRICS_ENV,
     drawdown_stats_via_kernel,
+    exceeds_exact_equity_envelope,
 )
 from brutex.engine.sweep_driver import metrics_from_trades
-from brutex.metrics.compute import ResultMetrics, _drawdown_stats
+from brutex.metrics.compute import (
+    ResultMetrics,
+    _drawdown_stats,  # pyright: ignore[reportPrivateUsage] — oracle seam pin
+)
 from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.strategies.types import Side
 from hypothesis import HealthCheck, example, given, settings
@@ -163,11 +167,17 @@ def test_near_envelope_boundary_stays_bit_identical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The LAST admissible magnitude (start + Σ|pnl| == 2⁵²) still runs the
-    kernel and matches Python bit-for-bit; +1 paisa falls back (also equal)."""
+    kernel and matches Python bit-for-bit; ONE extra paisa (2⁵² + 1) exceeds
+    the envelope so the ON arm falls back to the oracle (also bit-equal).
+    Each side of the boundary is asserted against the envelope predicate so
+    the fixture can never silently drift onto one arm only."""
     start = 1_000
-    at_pnl = MAX_EXACT_EQUITY_PAISA - start  # exactly at the bound
-    for pnl in (at_pnl, at_pnl - 1):
-        trades = _trades_from([(1, -pnl // 2), (2, pnl // 2)])
+    at_pnl = MAX_EXACT_EQUITY_PAISA - start  # even ⇒ Σ|pnl| == at_pnl exactly
+    at_bound = [(1, -at_pnl // 2), (2, at_pnl // 2)]  # start + Σ|pnl| == 2⁵²
+    over_bound = [*at_bound, (3, 1)]  # start + Σ|pnl| == 2⁵² + 1 → fallback
+    for raw, exceeds in ((at_bound, False), (over_bound, True)):
+        trades = _trades_from(raw)
+        assert exceeds_exact_equity_envelope(start, trades) is exceeds
         monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
         off = metrics_from_trades(_BARS, trades, start_equity_paisa=start, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")

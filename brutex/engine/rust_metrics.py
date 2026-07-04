@@ -1,6 +1,6 @@
 """Flag-gated Rust sweep-metrics seam — the per-mask drawdown kernel binding.
 
-DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1183) — Phase B of the Rust-migration
+DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1185) — Phase B of the Rust-migration
 blueprint. Phase A (DEC-SWEEP-RUST-TRADESIM-WIRE-001, #1182) moved the sweep's
 trade walk into Rust; the per-mask trades→metrics TAIL
 (:func:`brutex.engine.sweep_driver.metrics_from_trades` =
@@ -24,7 +24,7 @@ once-per-process memo so that (a) there is no module-global FLAG state, and
 (b) every ``sweep_parallel`` worker process reads its OWN inherited
 environment at call time — workers can never arm inconsistently from a
 parent-only resolution. OFF (unset / empty / ``0`` / garbage) keeps the
-caller on the verbatim pre-#1183 Python path, byte-identical by construction.
+caller on the verbatim pre-#1185 Python path, byte-identical by construction.
 **The default stays OFF; flipping it ON by default is a SEPARATE later ADR,
 explicitly NOT this change.**
 
@@ -244,12 +244,16 @@ def drawdown_stats_via_kernel(
     The ONE FFI call site. Returns the ``_drawdown_stats``-shaped 4-tuple
     ``(max_dd_paisa, max_dd_pct, max_dd_duration_bars, ulcer_index)`` on
     success. Returns ``None`` — after a warn-once (or, for a refused result,
-    an ERROR) — when the kernel is unavailable, raises, or returns a
-    domain-invalid tuple; the caller then serves the mask through the
-    bit-exact Python oracle, so wheel state can never change results or
-    error behaviour (the Phase-A law). ``MemoryError`` re-raises BARE
-    (OOM is a GLOBAL stop, DEC-LAKE-WRITE-HALT-001 — never swallowed into a
-    fallback).
+    an ERROR) — when the kernel is unavailable, raises a boundary/conversion
+    error, or returns a domain-invalid tuple; the caller then serves the mask
+    through the bit-exact Python oracle, so wheel state can never change
+    results or error behaviour (the Phase-A law). The fallback catch is
+    NARROW (``ValueError`` — the kernel's own boundary arms; ``TypeError`` /
+    ``OverflowError`` — PyO3 argument-conversion failures): a truly
+    unexpected exception type PROPAGATES, the repo's genuine-code-bug-still-
+    raises stance (CLAUDE.md §4 — no broad excepts), and ``MemoryError``
+    re-raises BARE (OOM is a GLOBAL stop, DEC-LAKE-WRITE-HALT-001 — never
+    swallowed into a fallback).
 
     The caller is expected to have pre-guarded the exactness envelope
     (:func:`exceeds_exact_equity_envelope`) and the exit indices (mapped
@@ -261,9 +265,10 @@ def drawdown_stats_via_kernel(
         return None
     try:
         result = kernel(n_bars, start_equity_paisa, exits)
-    except MemoryError:
-        raise
-    except Exception as exc:  # any kernel failure degrades to the bit-exact oracle
+    except (ValueError, TypeError, OverflowError) as exc:
+        # The kernel's boundary ValueError arms + PyO3 argument-conversion
+        # TypeError/OverflowError degrade to the bit-exact oracle; any OTHER
+        # exception type (incl. MemoryError — a GLOBAL stop) propagates.
         warn_fallback_once("kernel_error", error=repr(exc))
         return None
     if not _valid_drawdown(result, n_bars):

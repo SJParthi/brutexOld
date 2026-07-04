@@ -459,7 +459,7 @@ def compute_metrics(
         ``(max_dd_paisa, max_dd_pct, max_dd_duration_bars, ulcer_index)``
         for ``equity``. ``None`` (the default) computes it here exactly
         as before — the default path is byte-identical. The injection
-        seam exists for DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1183):
+        seam exists for DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1185):
         the flag-gated sweep tail supplies the bit-identical fused Rust
         fold's output so the O(N_bars) Python scan is not re-run. A
         caller-supplied tuple is trusted to BE ``_drawdown_stats``
@@ -512,7 +512,7 @@ def compute_metrics_from_scalars(
 ) -> ResultMetrics:
     """Curve-less :func:`compute_metrics`: scalars in place of an :class:`EquityCurve`.
 
-    DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1183). :func:`compute_metrics`
+    DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1185). :func:`compute_metrics`
     reads exactly three things from its ``equity`` argument — the
     ``start_equity_paisa`` denominator, the ``span_years`` annualiser, and
     the :func:`_drawdown_stats` 4-tuple. The flag-gated sweep tail computes
@@ -563,7 +563,7 @@ def _compute_metrics_impl(
 ) -> ResultMetrics:
     """Shared metric body behind :func:`compute_metrics` / the scalar entry.
 
-    The verbatim pre-#1183 :func:`compute_metrics` body with the three
+    The verbatim pre-#1185 :func:`compute_metrics` body with the three
     ``equity`` reads replaced by the already-extracted scalars and the
     :func:`_drawdown_stats` call replaced by the supplied ``drawdown``
     tuple — a pure parameterisation, no behaviour change (the golden +

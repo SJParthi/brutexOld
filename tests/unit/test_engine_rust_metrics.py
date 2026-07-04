@@ -31,7 +31,7 @@ from brutex.metrics.compute import _drawdown_stats  # pyright: ignore[reportPriv
 from brutex.metrics.types import EquityCurve
 from structlog.testing import capture_logs
 
-from tests.unit.test_metrics_compute import _trade
+from tests.unit.test_metrics_compute import _trade  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.fixture(autouse=True)
