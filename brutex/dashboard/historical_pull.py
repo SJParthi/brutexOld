@@ -110,6 +110,7 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
@@ -887,6 +888,12 @@ def _run_phase(
     # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
     # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
     storm_breaker = None if dry_run else resolve_error_storm_breaker()
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
+    # phase and threaded into the FUTURES partial-window observe margin ONLY (an
+    # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
+    # window law. A dry-run threads the empty overlay (the ``capture_hook_factory``
+    # gating pattern); the loader never raises (missing/corrupt -> empty).
+    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional)."""
@@ -944,6 +951,7 @@ def _run_phase(
                     capture_hook_factory=capture_hook_factory,
                     write_pool=write_pool,
                     fetch_pipeline=fetch_pipeline,
+                    observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
                 )
             except GrowwAuthError as exc:

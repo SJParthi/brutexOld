@@ -2451,6 +2451,7 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
     from brutex.adapters.groww.live import installed_growwapi_version
     from brutex.adapters.groww.reauth import _real_sdk_factory
     from brutex.calendars.nse import is_trading_day
+    from brutex.calendars.observed_sessions import load_observed_holidays
     from brutex.data.bhavcopy import urllib_http_get_nse
 
     def _git(*args: str) -> str | None:
@@ -2496,8 +2497,14 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         return (datetime.now(UTC) - server).total_seconds()
 
     def _probe_day() -> date:
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): an
+        # observably-untraded day (remove-only sidecar under the resolved lake
+        # root) is NOT a probe day — step over it like a holiday, so the live
+        # vendor probe never targets a day the vendor demonstrably served no
+        # bars for. The loader never raises (missing/corrupt -> empty overlay).
+        observed = load_observed_holidays(resolve_lake_root(os.environ, home=Path.home()))
         day = datetime.now(UTC).astimezone(IST).date() - timedelta(days=1)
-        while not is_trading_day(day):
+        while not (is_trading_day(day) and day not in observed):
             day -= timedelta(days=1)
         return day
 

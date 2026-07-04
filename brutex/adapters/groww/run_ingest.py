@@ -315,6 +315,7 @@ def run_groww_spot_ingest(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
 ) -> GrowwIngestReport:
@@ -499,6 +500,7 @@ def run_groww_spot_ingest(
                 on_window=on_window,
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
+                observed_holidays=observed_holidays,
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
             )
@@ -707,6 +709,7 @@ def run_groww_spot_ingest_with_retry(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
 ) -> SpotIngestWithRetry:
@@ -791,6 +794,7 @@ def run_groww_spot_ingest_with_retry(
             write_pool=write_pool,
             fetch_pipeline=fetch_pipeline,
             detect_completeness_gaps=detect_completeness_gaps,
+            observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
             storm_breaker=storm_breaker,
         )
