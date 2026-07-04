@@ -730,7 +730,7 @@ def test_pull_pipeline_gates_movers_while_running_then_releases_ok_true(
             # MID-RUN: the gate blocks and the movers route answers honestly.
             body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
             assert body["gated"] is True
-            assert "prebuild in progress" in body["note"]
+            assert "pull pipeline running" in body["note"]
             assert compute_calls == []  # ZERO lake-reading computation while gated
         finally:
             proceed.set()
