@@ -62,6 +62,23 @@ Honest envelope (Golden Rule #10): :func:`run_persisted_sweep` refuses to
 enumerate more than ``cfg.max_combos`` masks (raising before any ``bar_bits``
 build), the same opt-in guardrail :func:`brutex.engine.sweep_driver.rank_sweep_over_bits`
 uses — an oversized sweep is a conscious choice, not an accident.
+
+**Bounded rank + memory budget (DEC-SWEEP-STREAMING-RANK-001 part 2).** The
+Phase-C rank retention is budget-guarded: a pre-flight plan
+(:func:`brutex.engine.sweep_mem_budget.plan_rank_memory`, mode env
+``BRUTEX_SWEEP_BOUNDED_RANK`` in ``{off, auto, on}`` default ``auto``, budget
+env ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``) keeps today's batch ``pairs`` +
+:func:`~brutex.ranking.rank_combos` path byte-identical below budget, and past
+budget either ENGAGES the bounded columnar rank
+(:mod:`brutex.engine.sweep_stream` — O(kept) columnar payload at ~80-105 B/kept
+instead of ~1 KB/kept rich objects, ranked through the SAME shared
+:mod:`brutex.ranking` internals so bounded == batch BIT-FOR-BIT, top-K selected
+via an O(survivors x log K) heap on the strict ``(-composite, mask)`` key) or
+REFUSES the tuple gracefully with a typed :class:`SweepMemoryBudgetError`
+(a ``SweepComboError`` tuple-skip — never a raw ``MemoryError`` crash). The
+bounded arm requires the digest path + a finite ``top_k``; a genuine
+``MemoryError`` remains a bare global stop (DEC-LAKE-WRITE-HALT-001). Retained
+memory in bounded mode is O(kept), NOT O(1).
 """
 
 from __future__ import annotations
@@ -1174,6 +1191,15 @@ def run_persisted_sweep(
        :func:`~brutex.engine.sweep_driver.metrics_for_mask` loop (which remains
        the per-mask oracle for chunk-failure re-attribution). Rank them
        (:func:`brutex.ranking.rank_combos`), take the top ``cfg.top_k``.
+       Under the rank-memory budget plan (DEC-SWEEP-STREAMING-RANK-001 part 2
+       — resolved BEFORE step 3, after the sentinel check) the BOUNDED arm
+       instead folds each kept mask into
+       :class:`~brutex.engine.sweep_stream.SurvivorColumns` (the metrics
+       object dropped per mask, an exact owned-bytes watermark enforcing the
+       budget) and ranks via
+       :func:`~brutex.engine.sweep_stream.rank_survivor_columns` — pinned
+       BIT-IDENTICAL to the batch arm — recomputing only the ≤ ``top_k``
+       finalists' full metrics through the same sim spine.
     8. Project each finalist to a :class:`ResultRow` and append to the store.
     9. Flush the store; write the trial-stats sidecar (digest path); mark
        **all** evaluated identities seen; then write the completion sentinel
@@ -1236,8 +1262,17 @@ def run_persisted_sweep(
     ------
     ValueError
         If ``bars`` is empty, ``cfg.direction`` is ``HOLD``, the enumerated combo
-        count exceeds ``cfg.max_combos``, or ``kernel`` was built from a different
-        number of bars than ``bars``.
+        count exceeds ``cfg.max_combos``, ``kernel`` was built from a different
+        number of bars than ``bars``, an env knob is malformed
+        (``BRUTEX_SWEEP_BOUNDED_RANK`` / ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``), or
+        ``BRUTEX_SWEEP_BOUNDED_RANK=on`` is forced without the digest path or a
+        finite ``top_k`` (a config error — global, not a tuple condition).
+    SweepMemoryBudgetError
+        The graceful tuple-skip refusal (DEC-SWEEP-STREAMING-RANK-001): the
+        batch-rank projection exceeds ``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` and the
+        bounded rank may not / cannot engage (mode ``off``, ``top_k=None``, or
+        the legacy no-digest path), or the bounded accumulator's EXACT owned
+        bytes crossed the budget mid-flight — never a raw ``MemoryError``.
     """
     if not bars:
         raise ValueError("run_persisted_sweep: bars must be non-empty")
