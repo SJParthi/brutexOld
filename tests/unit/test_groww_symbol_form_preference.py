@@ -82,7 +82,7 @@ class TestSymbolFormPreference:
     def test_thread_safety_smoke(self) -> None:
         pref = SymbolFormPreference()
         forms = ("M&M", "M%26M")
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def _worker() -> None:
             try:
@@ -90,7 +90,7 @@ class TestSymbolFormPreference:
                     pref.record_winner("M&M", forms, "M%26M")
                     out = pref.order("M&M", forms)
                     assert sorted(out) == sorted(forms)
-            except BaseException as exc:  # captured for the assert below
+            except Exception as exc:  # captured for the assert below (AssertionError included)
                 errors.append(exc)
 
         threads = [threading.Thread(target=_worker) for _ in range(8)]
