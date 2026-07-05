@@ -1815,3 +1815,34 @@ class TestDefensiveArms:
         assert outcome.status == dl.STATUS_WARN
         assert outcome.lines[0].startswith("EVIDENCE rate[R4/M6]:")
         assert len(outcome.lines) == 1  # no abort line — the burst never sustained
+
+
+class TestResolveProbeDay:
+    """The PURE probe-day rule (hostile-review fold: extracted from the
+    ``# pragma: no cover`` ``build_real_deps`` factory so the observed-overlay
+    step-over is executable-tested and mutation-protected)."""
+
+    def test_yesterday_trading_returned_directly(self) -> None:
+        # Tue 2026-06-30 IST -> yesterday Mon 2026-06-29 is a session.
+        now = datetime(2026, 6, 30, 10, 0, tzinfo=UTC)
+        assert dl.resolve_probe_day(now) == date(2026, 6, 29)
+
+    def test_weekend_stepped_over(self) -> None:
+        # Mon 2026-06-29 IST -> Sun/Sat stepped over -> Fri 2026-06-26.
+        now = datetime(2026, 6, 29, 10, 0, tzinfo=UTC)
+        assert dl.resolve_probe_day(now) == date(2026, 6, 26)
+
+    def test_observed_overlay_day_never_probed(self) -> None:
+        # An observably-untraded Monday (overlay) is NOT a probe day: the walk
+        # steps over it AND the weekend to Fri 2026-06-26. Reverting the overlay
+        # subtraction to the plain calendar walk fails this test (the mutation
+        # the review proved SURVIVED the pre-fold suite).
+        now = datetime(2026, 6, 30, 10, 0, tzinfo=UTC)
+        observed = frozenset({date(2026, 6, 29)})
+        assert dl.resolve_probe_day(now, observed=observed) == date(2026, 6, 26)
+
+    def test_ist_rollover_not_utc(self) -> None:
+        # 20:00 UTC on Mon 2026-06-29 is ALREADY Tue 01:30 IST -> the probe day
+        # is Mon 2026-06-29, pinning the astimezone(IST) conversion.
+        now = datetime(2026, 6, 29, 20, 0, tzinfo=UTC)
+        assert dl.resolve_probe_day(now) == date(2026, 6, 29)

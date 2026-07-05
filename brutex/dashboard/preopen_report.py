@@ -44,6 +44,7 @@ import io
 import re
 import zipfile
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -54,7 +55,7 @@ from typing import Any, Final, Literal
 import duckdb
 import structlog
 
-from brutex.calendars.nse import is_trading_day
+from brutex.calendars.observed_sessions import is_trading_day_observed, load_observed_holidays
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _INTRADAY_BASE_INTERVAL,
@@ -178,16 +179,21 @@ def resolve_report_datasets(
     return sorted(resolved, key=lambda k: k[2])
 
 
-def _previous_trading_day(day: date) -> date:
+def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset()) -> date:
     """The NSE trading session immediately before *day* (per the shared calendar).
 
     Walks back one calendar day at a time from ``day - 1`` until
-    :func:`brutex.calendars.nse.is_trading_day` is satisfied — so weekends and
-    listed NSE/BSE holidays are stepped over (they are NOT trading sessions) and
-    a special weekend session (e.g. a Budget-Day Saturday) IS honoured. The walk
-    always terminates: any weekday outside the holiday list is a trading day, so
-    the immediately-preceding session is at most a handful of days back (bounded
-    constant work, not unbounded).
+    :func:`brutex.calendars.nse.is_trading_day` is satisfied AND the date is not
+    an *observed* overlay day (DEC-CALENDAR-OBSERVED-SESSIONS-001 — an
+    observably-untraded day is NOT a session, so the anchor steps over it exactly
+    like a holiday; remove-only, default empty = byte-identical back-compat) — so
+    weekends and listed NSE/BSE holidays are stepped over (they are NOT trading
+    sessions) and a special weekend session (e.g. a Budget-Day Saturday) IS
+    honoured. The walk always terminates: any weekday outside the holiday list is
+    a trading day and the DETECTOR-written overlay is capped at 8 days/year
+    (write-time — ``classify_month_drift``; a hand-edited sidecar still loads a
+    FINITE set), so the immediately-preceding session is at most a handful of
+    days back (bounded constant work, not unbounded).
 
     Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as a
     holiday by :func:`is_trading_day`, so it is treated as a NON-session here.
@@ -197,13 +203,17 @@ def _previous_trading_day(day: date) -> date:
     rule) — recorded in the decision ledger, not a silent wrong number.
     """
     probe = day - timedelta(days=1)
-    while not is_trading_day(probe):
+    while not is_trading_day_observed(probe, observed=observed):
         probe -= timedelta(days=1)
     return probe
 
 
 def _daily_prev_close_contiguous(
-    daily: dict[date, Decimal], daily_dates: list[date], day: date
+    daily: dict[date, Decimal],
+    daily_dates: list[date],
+    day: date,
+    *,
+    observed: AbstractSet[date] = frozenset(),
 ) -> Decimal | None:
     """Daily-basis PREV. CLOSE that REFUSES to anchor across a MISSING daily bar.
 
@@ -240,7 +250,7 @@ def _daily_prev_close_contiguous(
     idx = bisect.bisect_left(daily_dates, day)
     if idx == 0:
         return None
-    expected = _previous_trading_day(day)
+    expected = _previous_trading_day(day, observed=observed)
     if daily_dates[idx - 1] != expected:
         return None
     close = daily[expected]
@@ -318,6 +328,12 @@ def build_preopen_rows(
     export (DEC-PREOPEN-SPACE-SYMBOL-001). Rows sorted by ``(day, symbol)``.
     """
     rows: list[PreOpenRow] = []
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
+    # report and threaded into the daily-basis prior-session walk, so an observably
+    # untraded day (an overlay entry) is stepped over like a holiday instead of the
+    # row being skipped for a "missing" daily bar. Remove-only; the loader never
+    # raises (missing/corrupt sidecar -> empty overlay = the pre-change behaviour).
+    observed = load_observed_holidays(lake_root)
     for exchange, segment, symbol in datasets:
         # Resilience (DEC-PREOPEN-SPACE-SYMBOL-001): one un-queryable symbol must
         # NEVER 500 the whole multi-symbol export — a ``ValueError`` (the candle-
@@ -370,7 +386,7 @@ def build_preopen_rows(
             if day < start or day > end:
                 continue
             if basis != "minute":
-                anchor = _daily_prev_close_contiguous(daily, daily_dates, day)
+                anchor = _daily_prev_close_contiguous(daily, daily_dates, day, observed=observed)
             elif daily_dates:
                 anchor = _minute_prev_close_contiguous(minute_last, daily_dates, day)
             else:
