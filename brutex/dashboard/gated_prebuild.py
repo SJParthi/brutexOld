@@ -96,6 +96,14 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
     return (ValueError, ResampleInputError, *skip)
 
 
+#: Public alias of :func:`_per_symbol_data_errors` (CLAUDE.md §11 COMMON) — the
+#: ONE per-symbol quarantine set, reused by the parallel prebuild worker
+#: (:mod:`brutex.dashboard.prebuild_parallel`, DEC-HARDWARE-ENVELOPE-001) so the
+#: process-pool path quarantines EXACTLY the same data faults the sequential
+#: spine does (and re-raises global-stops identically).
+per_symbol_data_errors = _per_symbol_data_errors
+
+
 #: The instrument-type token the F&O candle lake's decoded ``instrument_type``
 #: carries for a future (:func:`brutex.data.fno_symbol.parse_fno_symbol`).
 _FUTURES_TYPE: str = "FUT"
@@ -556,6 +564,7 @@ __all__ = [
     "PhasePrebuildReport",
     "discover_futures_contracts",
     "discover_option_contracts",
+    "per_symbol_data_errors",
     "run_gated_prebuild",
     "underlying_match_tokens",
 ]

@@ -1867,6 +1867,19 @@ bruteX/
 8 TB external SSD. Daily apps run concurrently (10 cores used by sweep,
 2 reserved).
 
+This envelope is now **auto-detected at RUNTIME**, never hardcoded — the COMMON
+`brutex/config/hardware_envelope.py` (DEC-HARDWARE-ENVELOPE-001, MIGRATION.md
+#1401) probes cores + RAM (macOS `sysctl` P/E split, Linux
+`sched_getaffinity`/`/proc/meminfo`, fallback `os.cpu_count()`) and sizes every
+CPU-bound stage off it (`cpu_pool_workers(reserve=2, prefer_performance=True)` →
+8 on this machine). The engine sweep pool (`auto_sweep_workers`) and the pull
+pipeline's timeframe PREBUILD (parallelised across cores via a
+`ThreadPoolExecutor`, byte-identical lake output) both size off it;
+`BRUTEX_CPU_WORKERS` / `BRUTEX_PREBUILD_WORKERS` / `BRUTEX_SWEEP_WORKERS=1`
+override. The Groww FETCH pool + the per-second rate ceiling + the 500/min
+governor are a REAL vendor limit (a single TOTP token; §2 Rule 6) and are
+deliberately NOT hardware-scaled.
+
 **Production sweep SLA:** **2-4 days wall time** for ~33 billion trials
 on this envelope, after Stage 1A → 1B → 2 → 3 → 4 pipeline. Public
 benchmarks (vectorbt, NautilusTrader, Jesse) constrain the upper bound;

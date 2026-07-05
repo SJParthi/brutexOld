@@ -61,12 +61,31 @@ class LakeWriteHalt(DataLakeError):
     longer than the ``BRUTEX_VOLUME_WEDGE_HALT_S`` bound — a spun-down / wedged
     external volume; raised FROM THE PRODUCER THREAD at the
     :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.submit` wedge gate,
-    DEC-VOLUME-KEEPALIVE-001).
+    DEC-VOLUME-KEEPALIVE-001), or ``"worker_pool_broken"`` (a parallel-prebuild
+    worker process DIED — an OOM ``SIGKILL`` or an un-picklable crash — so the
+    :class:`~concurrent.futures.process.BrokenProcessPool` cannot run any further
+    derive; raised by
+    :func:`~brutex.dashboard.prebuild_parallel.run_work_items`, DEC-HARDWARE-ENVELOPE-001,
+    so the honest halt reaches the CRITICAL Telegram alert instead of an
+    anonymous crash).
     """
 
     def __init__(self, reason: str) -> None:
         super().__init__(f"lake write halted: {reason}")
         self.reason = reason
+
+    def __reduce__(self) -> tuple[type[LakeWriteHalt], tuple[str]]:
+        """Pickle round-trip on the ORIGINAL ``reason``, not the formatted message.
+
+        The default ``BaseException`` reduce reconstructs from ``self.args`` (the
+        already-formatted ``"lake write halted: <reason>"`` string), which
+        ``__init__`` would then RE-wrap → a double-prefixed reason. A worker in
+        the parallel prebuild pool (DEC-HARDWARE-ENVELOPE-001) pickles a raised
+        exception back to the parent, so a clean round-trip is required — this
+        reconstructs from the raw ``reason`` (Golden Rule #7). Pinned by a
+        pickle-round-trip regression test.
+        """
+        return (self.__class__, (self.reason,))
 
 
 class PartitionLockTimeout(DataLakeError):
@@ -92,6 +111,20 @@ class PartitionLockTimeout(DataLakeError):
             "(peer holding the lock); window deferred to the next pull"
         )
         self.timeout_seconds = timeout_seconds
+
+    def __reduce__(self) -> tuple[type[PartitionLockTimeout], tuple[float]]:
+        """Pickle round-trip on the ORIGINAL ``timeout_seconds`` float.
+
+        CRITICAL for the parallel prebuild pool (DEC-HARDWARE-ENVELOPE-001): the
+        default reduce reconstructs from ``self.args`` (the formatted message
+        STRING), so ``__init__``'s ``f"{timeout_seconds:g}"`` would receive that
+        string and raise ``ValueError: Unknown format code 'g'`` at UNPICKLE —
+        turning any worker's ``PartitionLockTimeout`` into an anonymous
+        ``BrokenProcessPool`` that kills the whole pool + masks the root cause.
+        Reconstructing from the raw float round-trips cleanly (Golden Rule #7).
+        Pinned by a pickle-round-trip regression test.
+        """
+        return (self.__class__, (self.timeout_seconds,))
 
 
 class WriteDeadlineExceeded(DataLakeError):
@@ -131,6 +164,18 @@ class WriteDeadlineExceeded(DataLakeError):
             "(wedged fsync/replace); window deferred to the next pull"
         )
         self.deadline_seconds = deadline_seconds
+
+    def __reduce__(self) -> tuple[type[WriteDeadlineExceeded], tuple[float]]:
+        """Pickle round-trip on the ORIGINAL ``deadline_seconds`` float.
+
+        Same defect + fix as :meth:`PartitionLockTimeout.__reduce__`: the default
+        reduce would feed the formatted message string back through
+        ``f"{deadline_seconds:g}"`` at unpickle and raise ``ValueError`` — a
+        pool-killing anonymous ``BrokenProcessPool`` in the parallel prebuild
+        (DEC-HARDWARE-ENVELOPE-001). Reconstruct from the raw float
+        (Golden Rule #7). Pinned by a pickle-round-trip regression test.
+        """
+        return (self.__class__, (self.deadline_seconds,))
 
 
 class CatalogError(DataLakeError):

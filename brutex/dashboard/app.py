@@ -153,6 +153,7 @@ from brutex.dashboard.pipeline_prebuild import (
 )
 from brutex.dashboard.pipeline_pull import run_full_pipeline
 from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
+from brutex.dashboard.prebuild_parallel import resolve_prebuild_workers
 from brutex.dashboard.preopen_report import (
     ReportBasis,
     ReportMode,
@@ -3358,6 +3359,14 @@ def build_app(
                     )
 
                 nonlocal prebuild_ok
+                # Parallelise the per-symbol derive across the host's CPU cores
+                # (DEC-HARDWARE-ENVELOPE-001): auto-detect the worker count at
+                # runtime (BRUTEX_PREBUILD_WORKERS=1 forces sequential). A
+                # ``> 1`` count routes the guard to the process-pool path
+                # (byte-identical lake output); ``1`` keeps the sequential
+                # injected-callable path. This sizes CPU COMPUTE only — never the
+                # Groww fetch pool / rate ceiling (a real vendor limit).
+                prebuild_workers = resolve_prebuild_workers(target_count=len(targets))
                 try:
                     outcome = run_pipeline_prebuild_guarded(
                         instruments=targets,
@@ -3370,6 +3379,7 @@ def build_app(
                         # Allocation probe at the tiny-file writer's start
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
+                        workers=prebuild_workers,
                     )
                 finally:
                     # New derived partitions may be on disk (even a partial run —

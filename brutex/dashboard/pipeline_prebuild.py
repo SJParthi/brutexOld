@@ -45,22 +45,26 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
 from brutex.dashboard.gated_prebuild import (
+    GatedPrebuildReport,
+    PhasePrebuildReport,
     discover_futures_contracts,
     discover_option_contracts,
     run_gated_prebuild,
     underlying_match_tokens,
 )
+from brutex.dashboard.prebuild_parallel import PrebuildWorkItem, run_work_items
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fs_probe import probe_allocation_granularity
 from brutex.data.timeframe_materialize import PrebuildKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from datetime import date
     from pathlib import Path
 
     from brutex.dashboard.fno_cascade import FnoCascadeIndex, FnoContract
@@ -333,6 +337,19 @@ def run_pipeline_prebuild(
         materialize_option=lambda symbol: _materialize_contract(symbol, PrebuildKind.OPTIONS),
         source=source,
     )
+    _log_phase_done(report)
+    outcome = _build_outcome(
+        report,
+        fs_note=fs_note,
+        unchanged_skips=unchanged_skips,
+        opens_substituted=opens_substituted,
+    )
+    _log_prebuild_done(outcome, started)
+    return outcome
+
+
+def _log_phase_done(report: GatedPrebuildReport) -> None:
+    """Emit ONE ``pipeline.prebuild.phase_done`` structured log per phase (COMMON)."""
     for phase in report.phases:
         _LOG.info(
             "pipeline.prebuild.phase_done",
@@ -342,17 +359,10 @@ def run_pipeline_prebuild(
             failed=len(phase.failed),
             total_bars=phase.total_bars,
         )
-    failed_names = tuple(s for phase in report.phases for s, _ in phase.failed)
-    outcome = PrebuildOutcome(
-        symbols_built=sum(len(phase.succeeded) for phase in report.phases),
-        total_bars=report.total_bars,
-        failed=failed_names[:MAX_REPORTED_FAILURES],
-        failed_count=len(failed_names),
-        ok=report.ok,
-        fs_note=fs_note,
-        unchanged_skips=unchanged_skips,
-        opens_substituted=opens_substituted,
-    )
+
+
+def _log_prebuild_done(outcome: PrebuildOutcome, started: float) -> None:
+    """Emit the ``pipeline.prebuild.done`` roll-up (COMMON to both paths)."""
     _LOG.info(
         "pipeline.prebuild.done",
         symbols_built=outcome.symbols_built,
@@ -362,6 +372,252 @@ def run_pipeline_prebuild(
         opens_substituted=outcome.opens_substituted,
         duration_s=round(time.monotonic() - started, 3),
     )
+
+
+def _build_outcome(
+    report: GatedPrebuildReport,
+    *,
+    fs_note: str | None,
+    unchanged_skips: int,
+    opens_substituted: int,
+) -> PrebuildOutcome:
+    """Roll a :class:`~brutex.dashboard.gated_prebuild.GatedPrebuildReport` into a :class:`PrebuildOutcome`.
+
+    The ONE outcome-assembly point (CLAUDE.md §11 COMMON) shared by the
+    sequential :func:`run_pipeline_prebuild` and the parallel
+    :func:`run_pipeline_prebuild_parallel`, so both produce an identical outcome
+    shape (the failure-name cap, the true failure count, the ``ok`` verdict, the
+    incremental + daily-open tallies).
+    """
+    failed_names = tuple(s for phase in report.phases for s, _ in phase.failed)
+    return PrebuildOutcome(
+        symbols_built=sum(len(phase.succeeded) for phase in report.phases),
+        total_bars=report.total_bars,
+        failed=failed_names[:MAX_REPORTED_FAILURES],
+        failed_count=len(failed_names),
+        ok=report.ok,
+        fs_note=fs_note,
+        unchanged_skips=unchanged_skips,
+        opens_substituted=opens_substituted,
+    )
+
+
+def run_pipeline_prebuild_parallel(
+    *,
+    instruments: Sequence[Instrument],
+    cascade: FnoCascadeIndex,
+    lake_root: Path,
+    workers: int,
+    include_daily: bool = True,
+    daily_before: date | None = None,
+    incremental: bool | None = None,
+    fno_segment: str = FNO_CANDLE_LAKE_SEGMENT,
+    source: str = "pipeline",
+    exclude_symbols: frozenset[str] = frozenset(),
+) -> PrebuildOutcome:
+    """PARALLEL twin of :func:`run_pipeline_prebuild` — fan the per-symbol derive across cores.
+
+    The CPU-bound win (DEC-HARDWARE-ENVELOPE-001): the SAME SPOT → FUTURES →
+    OPTIONS discovery + report + outcome as the sequential path, but every
+    symbol's :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes`
+    runs in a :class:`~concurrent.futures.ProcessPoolExecutor` of *workers*
+    processes (:func:`brutex.dashboard.prebuild_parallel.run_work_items`).
+    Different symbols write DIFFERENT lake partitions under a per-partition
+    ``flock`` (DEC-LAKE-PARTITION-FLOCK-001), so the lake output is
+    **byte-identical** to the sequential run (golden-pinned), and the per-symbol
+    quarantine + the pull-wide global-stop propagation mirror the spine exactly.
+
+    Unlike the sequential path this takes the materialise arguments EXPLICITLY
+    (``lake_root`` / ``include_daily`` / ``daily_before`` / ``incremental``)
+    instead of an injected closure — a process worker cannot receive an
+    un-picklable parent closure, so it reconstructs the call from the picklable
+    :class:`~brutex.dashboard.prebuild_parallel.PrebuildWorkItem` DATA. The route
+    binds ``include_daily=True`` (matching the sequential ``_materialize``), so
+    the two paths are equivalent. ``daily_before`` is passed explicitly so the
+    forming-session cutoff is identical across every worker (never a per-process
+    clock skew). Cost: O(symbols × bars) work spread over *workers* cores — NOT
+    an O(1) claim (Golden Rule #10).
+
+    Parameters mirror :func:`run_pipeline_prebuild` except for the explicit
+    materialise arguments above and *workers* (``>= 2``; the caller resolves it
+    via :func:`~brutex.dashboard.prebuild_parallel.resolve_prebuild_workers` and
+    routes ``<= 1`` to the sequential path).
+    """
+    started = time.monotonic()
+    fs_probe = probe_allocation_granularity(lake_root)
+    fs_note = fs_probe.note
+    kept = [inst for inst in instruments if not (underlying_match_tokens(inst) & exclude_symbols)]
+    excluded_count = len(instruments) - len(kept)
+    if excluded_count and not kept:
+        _LOG.warning("pipeline.prebuild.all_excluded", excluded_symbols=excluded_count)
+    instruments = kept
+
+    # M1 (byte-identity): resolve the forming-session daily cutoff ONCE per RUN.
+    # ``materialize_lake_timeframes`` resolves ``daily_before=None`` to now-IST
+    # PER CALL, so a run straddling midnight IST would write an extra trailing
+    # ``1day`` bar for whichever symbols materialise after midnight →
+    # order/concurrency-dependent bytes (a byte-identity break the golden would
+    # flag). Resolving it HERE pins EVERY worker to the SAME cutoff so the
+    # parallel lake is byte-identical to a sequential run (Golden Rule #7).
+    if include_daily and daily_before is None:
+        from datetime import UTC, datetime
+
+        from brutex.calendars.nse import IST
+
+        daily_before = datetime.now(UTC).astimezone(IST).date()
+
+    def _item(
+        exchange: str, segment: str, symbol: str, kind: PrebuildKind, *, dense: bool
+    ) -> PrebuildWorkItem:
+        return PrebuildWorkItem(
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            kind=kind,
+            include_daily=include_daily,
+            daily_before=daily_before,
+            incremental=incremental,
+            dense_symbol=dense,
+        )
+
+    # Ordered per-phase work items — EAGER, in-parent cascade discovery (pure
+    # in-memory), exactly like the sequential path. SPOT dense = is_index; the
+    # #1031 density gate (contracts stay dense=False).
+    spot_items = [
+        (
+            inst.symbol_name,
+            _item(
+                inst.exch_id.value,
+                inst.segment.value,
+                inst.symbol_name,
+                PrebuildKind.SPOT,
+                dense=inst.is_index,
+            ),
+        )
+        for inst in instruments
+    ]
+    futures_items: list[tuple[str, PrebuildWorkItem]] = []
+    options_items: list[tuple[str, PrebuildWorkItem]] = []
+    for inst in instruments:
+        for contract in discover_futures_contracts(inst, cascade):
+            futures_items.append(
+                (
+                    contract.symbol,
+                    _item(
+                        contract.exchange,
+                        fno_segment,
+                        contract.symbol,
+                        PrebuildKind.FUTURES,
+                        dense=False,
+                    ),
+                )
+            )
+        for contract in discover_option_contracts(inst, cascade):
+            options_items.append(
+                (
+                    contract.symbol,
+                    _item(
+                        contract.exchange,
+                        fno_segment,
+                        contract.symbol,
+                        PrebuildKind.OPTIONS,
+                        dense=False,
+                    ),
+                )
+            )
+    _LOG.info(
+        "pipeline.prebuild.started",
+        spot_symbols=len(spot_items),
+        futures_contracts=len(futures_items),
+        options_contracts=len(options_items),
+        excluded_symbols=excluded_count,
+        fs_allocation=fs_note if fs_note is not None else "ok",
+        parallel_workers=workers,
+    )
+
+    phase_groups: tuple[tuple[PrebuildKind, list[tuple[str, PrebuildWorkItem]], str], ...] = (
+        (PrebuildKind.SPOT, spot_items, ""),
+        (
+            PrebuildKind.FUTURES,
+            futures_items,
+            "no futures contracts found in the F&O candle lake for the selection",
+        ),
+        (
+            PrebuildKind.OPTIONS,
+            options_items,
+            "no option contracts found in the F&O candle lake for the selection",
+        ),
+    )
+
+    # M4 (no double-write race): DEDUPE work by ``(exchange, segment, symbol)``
+    # BEFORE sharding. The loose token-set contract discovery
+    # (gated_prebuild.underlying_match_tokens) can match a #911 drift pair
+    # (``NSE-M&M`` vs ``M&M``) to the SAME lake partition under two underlyings,
+    # so the SAME partition + its derive-stamp could land in two workers (a
+    # write/stamp race). One work unit per partition; the FIRST occurrence in
+    # phase order (SPOT → FUTURES → OPTIONS) keeps the report slot.
+    seen_coords: set[tuple[str, str, str]] = set()
+    deduped_groups: list[tuple[PrebuildKind, list[tuple[str, PrebuildWorkItem]], str]] = []
+    for kind, group, note in phase_groups:
+        unique_group: list[tuple[str, PrebuildWorkItem]] = []
+        for symbol, item in group:
+            coords = (item.exchange, item.segment, item.symbol)
+            if coords in seen_coords:
+                continue
+            seen_coords.add(coords)
+            unique_group.append((symbol, item))
+        deduped_groups.append((kind, unique_group, note))
+
+    # ONE pool over ALL phases' UNIQUE items (cores stay busy ACROSS phase
+    # boundaries); results looked up per phase by partition coords.
+    flat_items = [item for _, group, _ in deduped_groups for _, item in group]
+    results = run_work_items(flat_items, workers=workers)
+    result_by_coords = {
+        (it.exchange, it.segment, it.symbol): res
+        for it, res in zip(flat_items, results, strict=True)
+    }
+
+    phases: list[PhasePrebuildReport] = []
+    unchanged_skips = 0
+    opens_substituted = 0
+    for kind, group, empty_note in deduped_groups:
+        attempted = tuple(symbol for symbol, _ in group)
+        succeeded: list[str] = []
+        failed: list[tuple[str, str]] = []
+        total_bars = 0
+        for symbol, item in group:
+            res = result_by_coords[(item.exchange, item.segment, item.symbol)]
+            if res.error is not None:
+                failed.append((symbol, res.error))
+                continue
+            # A non-error result ALWAYS carries a MaterializeResult (a pure
+            # type-narrowing cast — no runtime branch, keeps 100% branch cover).
+            materialized = cast("MaterializeResult", res.result)
+            succeeded.append(symbol)
+            total_bars += materialized.total_bars
+            if materialized.unchanged:
+                unchanged_skips += 1
+            opens_substituted += materialized.opens_substituted
+        phases.append(
+            PhasePrebuildReport(
+                phase=kind.value,
+                attempted=attempted,
+                succeeded=tuple(succeeded),
+                failed=tuple(failed),
+                total_bars=total_bars,
+                note=(empty_note if not attempted and not failed else ""),
+            )
+        )
+    report = GatedPrebuildReport(phases=tuple(phases), source=source)
+    _log_phase_done(report)
+    outcome = _build_outcome(
+        report,
+        fs_note=fs_note,
+        unchanged_skips=unchanged_skips,
+        opens_substituted=opens_substituted,
+    )
+    _log_prebuild_done(outcome, started)
     return outcome
 
 
@@ -374,8 +630,18 @@ def run_pipeline_prebuild_guarded(
     source: str = "pipeline",
     exclude_symbols: frozenset[str] = frozenset(),
     lake_root: Path | None = None,
+    workers: int | None = None,
+    include_daily: bool = True,
+    daily_before: date | None = None,
+    incremental: bool | None = None,
 ) -> PrebuildOutcome:
     """Crash-guarded :func:`run_pipeline_prebuild` for the route seam.
+
+    When *workers* resolves ``> 1`` AND a *lake_root* is given, the guard runs
+    the PARALLEL path (:func:`run_pipeline_prebuild_parallel`) — the CPU-bound
+    fan-out of DEC-HARDWARE-ENVELOPE-001; otherwise (``workers`` unset/``1``, or
+    no ``lake_root``) it runs the sequential injected-callable path
+    byte-identically (the kill switch). Both share the ONE crash guard below.
 
     ``exclude_symbols`` is forwarded verbatim — the clean-set exclusion of
     DEC-PREBUILD-CLEANSET-001 (see :func:`run_pipeline_prebuild`).
@@ -399,6 +665,19 @@ def run_pipeline_prebuild_guarded(
     """
     try:
         cascade = cascade_or_error()
+        if workers is not None and workers > 1 and lake_root is not None:
+            return run_pipeline_prebuild_parallel(
+                instruments=instruments,
+                cascade=cascade,
+                lake_root=lake_root,
+                workers=workers,
+                include_daily=include_daily,
+                daily_before=daily_before,
+                incremental=incremental,
+                fno_segment=fno_segment,
+                source=source,
+                exclude_symbols=exclude_symbols,
+            )
         return run_pipeline_prebuild(
             instruments=instruments,
             cascade=cascade,
@@ -439,4 +718,5 @@ __all__ = [
     "PrebuildTarget",
     "run_pipeline_prebuild",
     "run_pipeline_prebuild_guarded",
+    "run_pipeline_prebuild_parallel",
 ]
