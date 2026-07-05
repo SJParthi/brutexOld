@@ -1836,6 +1836,50 @@ def test_pull_skips_not_yet_open_contracts_no_fetch_no_ledger(
     assert events == far
 
 
+def test_low_leg_vanish_warn_self_describes_never_planned_siblings(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The post-drain WARN carries the planner's omitted set as ``never_planned_pairs``.
+
+    DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001 at the PRODUCTION seam: a DEFAULT (no
+    explicit dates) pipeline-wired pull over ONE near CE that fetches CLEANLY EMPTY
+    plus TWO far Sep-2026 siblings skipped at planning time (``fno.window_not_open``
+    — zero vendor calls, zero ledger rows) must STILL flag ``low_leg=True`` (annotate,
+    NEVER suppress) with ``never_planned_pairs == 2`` so triage reads the flag as a
+    probable far-leg-not-open chain.
+    """
+    monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+    _seed_far_expiry_pair(registry)
+    sdk = _EmptyCandleSDK()
+    sink = _RecordingSink()
+    near_ce = next(
+        r
+        for r in registry.list_contracts(underlying="NIFTY")
+        if r.contract_symbol == "NSE-NIFTY-25Jan24-21000-CE"
+    )
+    far = [
+        r for r in registry.list_contracts(underlying="NIFTY") if r.expiry_date == date(2026, 9, 29)
+    ]
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            [near_ce, *far],
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+            now=_NOW,
+        )
+    assert report.bars_appended == 0
+    assert report.contracts_not_yet_in_window == 2
+    warns = [r for r in logs if r["event"] == "pull.underlying_all_empty"]
+    assert len(warns) == 1
+    assert warns[0]["underlying"] == repr("NIFTY")
+    assert warns[0]["attempted_pairs"] == 1
+    assert warns[0]["low_leg"] is True  # the flag STILL fires — annotation only
+    assert warns[0]["never_planned_pairs"] == 2  # …and now self-describes
+
+
 def test_pull_all_contracts_not_yet_open_is_a_clean_noop(
     registry: RegistryStore, tmp_lake: Path
 ) -> None:

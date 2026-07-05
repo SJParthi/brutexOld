@@ -64,6 +64,7 @@ from brutex.data.fno_candle_lake import (
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_read import (
     DEDUP_PARQUET_SOURCE_SQL,
     DEDUP_STAR_SELECT_SQL,
@@ -358,9 +359,14 @@ _IST_TS_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 
 
 #: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
 #: the candle grid renders (:func:`_format_candle_timestamp`). Derived from
-#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant) by truncating to DATE.
-#: Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O
-#: full-stored-life span + the coverage per-session aggregate.
+#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant — ``AT TIME ZONE 'UTC'``
+#: BEFORE the +05:30 shift, so the date is independent of the ambient DuckDB
+#: session ``TimeZone``; a bare CAST-to-DATE on the TIMESTAMPTZ column resolves
+#: in the session zone and split one NSE session into two dates on a
+#: negative-offset host — DEC-SPOT-SESSION-DAYS-IST-TZ-001) by truncating to
+#: DATE. Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) +
+#: the F&O full-stored-life span + the coverage per-session aggregate + the
+#: ``session_days`` distinct-IST-date count.
 _IST_DATE_EXPR: Final[str] = f"{_IST_TS_EXPR}::DATE"
 
 #: The SQL fragment for a bar's **UTC calendar date** — the legacy intraday date
@@ -1346,8 +1352,13 @@ def summarize_spot_datasets(
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
-    stored, NOT whether the full ``2020 → today`` range is complete.
-    Partial-date-range detection is an explicit follow-up, not claimed here.
+    stored, NOT whether the full ``2020 → today`` range is complete. What IS
+    now audited (DEC-SPOT-PARTIAL-RANGE-CHIP-001): ``session_days`` — the
+    per-session CTE's distinct-IST-date count (via the ambient-TZ-robust
+    :data:`_IST_DATE_EXPR`, DEC-SPOT-SESSION-DAYS-IST-TZ-001) — feeds the
+    ``/completeness`` amber ``settled_partial_range`` session-density verdict.
+    The PER-WINDOW trading-day gap audit and the options-side range audit
+    remain explicit follow-ups, not claimed.
     ``open_substituted_days`` is a SUBSTITUTION signal, not exclusively "vendor
     lost data": a genuine late/special open (Muhurat), a sparse reference
     symbol, and a vendor gap all count — each honestly means the derived daily
@@ -1434,6 +1445,16 @@ def summarize_spot_datasets(
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
+        # ``session_days`` (DEC-SPOT-PARTIAL-RANGE-CHIP-001) — the CTE's
+        # ``COUNT(*)`` of per-session rows, i.e. the DISTINCT IST calendar dates
+        # holding at least one bar — additionally feeds the /completeness
+        # session-density range audit with ZERO extra passes over the lake. The
+        # IST date comes from the COMMON :data:`_IST_DATE_EXPR` (AT TIME ZONE
+        # 'UTC' BEFORE the +05:30 shift), so the count is independent of the
+        # ambient DuckDB session ``TimeZone`` — a bare CAST-to-DATE on the
+        # TIMESTAMPTZ column resolves in the session zone and split one NSE
+        # session into two dates on a negative-offset host, inflating
+        # ``session_days`` and masking sparsity (DEC-SPOT-SESSION-DAYS-IST-TZ-001).
         if use_session_cte:
             # The ONE folded per-session CTE (DEC-DAILY-OPEN-SUBSTITUTION-
             # HONESTY-001, shared with the (a)-fix session_dates enrichment) —
@@ -2682,35 +2703,66 @@ def _underlying_spot_close_by_ts(
     Returns ``{}`` (→ every bar classifies UNKNOWN, never raising) when *ts_values* is
     empty, the underlying coordinate is illegal, or the underlying spot is absent from
     both segments (Golden Rule #1 — an honest UNKNOWN, never a fabricated spot).
+
+    When the exact *underlying* probe comes back EMPTY (and only then — zero extra
+    I/O and NO log on the hot path), the COMMON spot-key drift-recovery ladder
+    (:func:`~brutex.data.lake_keys.spot_recovery_candidates` — index aliases BOTH
+    directions + the ``BRUTEX_FNO_INDEX_ALIASES`` env override + the
+    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs) is walked in
+    order, returning the FIRST candidate with any joined spot bar and emitting ONE
+    ``db_view.spot_key_recovered`` info naming both keys
+    (DEC-DB-MONEYNESS-KEY-RECOVER-001 — pre-fix, a verbose-symbol index such as
+    ``MIDCPNIFTY`` over a ``NIFTYMIDSELECT``-keyed spot dir read moneyness UNKNOWN on
+    every bar even though the spot data existed on disk). Ladder exhaustion returns
+    the honest empty map — never a fabricated spot.
     """
     if not ts_values:
         return {}
     min_ts, max_ts = min(ts_values), max(ts_values)
-    for segment in _SPOT_PROBE_SEGMENTS:
-        try:
-            _validate_candle_coords(exchange, segment, underlying, interval)
-        except ValueError:
-            return {}  # a derived underlying that is not a legal coordinate → no spot.
-        base = lake_root / "bars" / exchange / segment / underlying / interval
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
-            continue
-        # glob built from validated coordinates (no free user text); path + both bounds
-        # are bound parameters (same SQL/path-injection guard as query_candles). A NULL
-        # close is filtered in SQL so a stray null spot bar degrades that instant to
-        # UNKNOWN (the no-spot bucket) rather than raising in `_to_decimal(None)` —
-        # honouring the "never raises / honest UNKNOWN" contract. Resilient read
-        # (DEC-DB-CORRUPT-SKIP-001): a corrupt underlying-spot Parquet degrades the join
-        # to its readable subset (the affected option bars classify UNKNOWN), never a 500.
-        rows = _execute_parquet_resilient(
-            conn,
-            base,
-            'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
-            'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
-            [min_ts, max_ts],
-            source=f"candle-spotjoin:{exchange}/{segment}/{underlying}/{interval}",
-        )
-        return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
-    return {}
+
+    def _probe(key: str) -> dict[datetime, Decimal]:
+        for segment in _SPOT_PROBE_SEGMENTS:
+            try:
+                _validate_candle_coords(exchange, segment, key, interval)
+            except ValueError:
+                return {}  # a key that is not a legal coordinate → no spot under it.
+            base = lake_root / "bars" / exchange / segment / key / interval
+            if not (base.is_dir() and any(base.rglob("*.parquet"))):
+                continue
+            # glob built from validated coordinates (no free user text); path + both
+            # bounds are bound parameters (same SQL/path-injection guard as
+            # query_candles). A NULL close is filtered in SQL so a stray null spot bar
+            # degrades that instant to UNKNOWN (the no-spot bucket) rather than raising
+            # in `_to_decimal(None)` — honouring the "never raises / honest UNKNOWN"
+            # contract. Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt
+            # underlying-spot Parquet degrades the join to its readable subset (the
+            # affected option bars classify UNKNOWN), never a 500.
+            rows = _execute_parquet_resilient(
+                conn,
+                base,
+                'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
+                'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
+                [min_ts, max_ts],
+                source=f"candle-spotjoin:{exchange}/{segment}/{key}/{interval}",
+            )
+            return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
+        return {}
+
+    spots = _probe(underlying)
+    if spots:
+        return spots
+    for candidate in spot_recovery_candidates(underlying, exchange):
+        recovered = _probe(candidate)
+        if recovered:
+            _LOG.info(
+                "db_view.spot_key_recovered",
+                underlying=underlying,
+                recovered_key=candidate,
+                exchange=exchange,
+                interval=interval,
+            )
+            return recovered
+    return spots
 
 
 def _fno_strike_step(

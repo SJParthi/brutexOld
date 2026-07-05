@@ -22,9 +22,14 @@ Design notes (COMMON · O(1) · honest):
   partition's INODE on every write, so an ``flock`` held on the partition fd would
   guard an orphaned inode while a second process locks the NEW one — no mutual
   exclusion. The lock is therefore taken on a stable per-partition sidecar under
-  ``<lake_root>/.locks/<sha256(dest)>.lock`` that is only ever opened + locked,
-  never replaced. The ``.locks`` dir is OUTSIDE the ``bars/`` + ``options/`` trees
-  and is not a ``*.parquet`` file, so no lake scanner / dataset glob ever sees it.
+  ``<lake_root>/.locks/<sha256(realpath(dest))>.lock`` that is only ever opened +
+  locked, never replaced. The dest path is CANONICALISED via ``os.path.realpath``
+  before hashing (DEC-PARTITION-LOCK-REALPATH-001) so two processes reaching one
+  physical partition via different path spellings (symlink / relative ``lake_root``
+  / ``..``) key the SAME lock file; an already-canonical absolute path hashes
+  byte-identically to the pre-fix scheme. The ``.locks`` dir is OUTSIDE the
+  ``bars/`` + ``options/`` trees and is not a ``*.parquet`` file, so no lake
+  scanner / dataset glob ever sees it.
 * **Per partition, never global.** Writers to DIFFERENT partitions hash to
   DIFFERENT lock files and never contend — the pull's per-window fan-out keeps its
   parallelism; only same-partition writers (across processes) queue. A single
@@ -309,9 +314,21 @@ class BoundedLockRegistry:
 def partition_lock_path(lake_root: Path, dest: Path) -> Path:
     """Return the stable lock-file path for the partition at *dest*.
 
-    Keyed by ``sha256(str(dest))`` so a given partition ALWAYS maps to the same
-    lock file (within a lake root) and two different partitions map to different
-    files — the per-partition granularity the cross-process lock relies on.
+    Keyed by ``sha256(os.path.realpath(dest))`` — the CANONICALISED path
+    (DEC-PARTITION-LOCK-REALPATH-001) — so a given PHYSICAL partition ALWAYS
+    maps to the same lock file (within a lake root) and two different
+    partitions map to different files — the per-partition granularity the
+    cross-process lock relies on. Pre-fix the digest keyed on the RAW path
+    string, so two processes reaching ONE physical partition via DIFFERENT
+    path spellings (a symlinked lake root, a relative ``lake_root``, a ``..``
+    component) computed DIFFERENT lock files and did NOT mutually exclude —
+    silently re-opening the lost-update race this module exists to close.
+    ``os.path.realpath`` resolves symlinks + ``..`` + relative prefixes and is
+    the IDENTITY on an already-canonical absolute path, so every existing lock
+    file name for a canonical path is UNCHANGED (no cross-version split-lock
+    window on the normal deploy). A not-yet-created *dest* is fine —
+    ``realpath`` resolves the existing prefix and keeps the non-existent tail
+    (POSIX, non-strict mode — the same Linux/macOS envelope as ``flock``).
 
     Parameters
     ----------
@@ -324,9 +341,9 @@ def partition_lock_path(lake_root: Path, dest: Path) -> Path:
     Returns
     -------
     Path
-        ``<lake_root>/.locks/<sha256(dest)>.lock`` (never created here).
+        ``<lake_root>/.locks/<sha256(realpath(dest))>.lock`` (never created here).
     """
-    digest = hashlib.sha256(str(dest).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(os.path.realpath(dest).encode("utf-8")).hexdigest()
     return lake_root / _LOCK_SUBDIR / f"{digest}.lock"
 
 
