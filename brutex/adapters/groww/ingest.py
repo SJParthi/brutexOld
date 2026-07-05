@@ -100,7 +100,12 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
 from brutex.data.partial_window_detect import SUSPECTED_PARTIAL, observe_partial_window
-from brutex.data.session import ALL_FILTERED, filter_to_trading_session, is_session_exempt
+from brutex.data.session import (
+    ALL_FILTERED,
+    filter_to_trading_session,
+    is_session_exempt,
+    observe_all_filtered,
+)
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.models import Instrument
@@ -1001,7 +1006,6 @@ def _process_window_tail(
     # and kept holiday bars whose wall clock looked in-session). Intraday only (a
     # daily bar has no intraday time — deliberately unfiltered); an exempt symbol
     # (e.g. a ~21h instrument) keeps its full-day series verbatim.
-    all_session_filtered = False
     if interval != _DAILY and not is_session_exempt(instrument.symbol_name):
         session_verdict = filter_to_trading_session(raw_bars)
         bars = session_verdict.kept
@@ -1019,7 +1023,6 @@ def _process_window_tail(
                 non_trading_date=session_verdict.dropped_non_trading_date,
                 **series_fields,
             )
-        all_session_filtered = session_verdict.all_filtered
     else:
         bars = raw_bars
     # Drop any bar timestamped on a date STRICTLY AFTER the clamped window end
@@ -1028,6 +1031,24 @@ def _process_window_tail(
     # this only ever removes an out-of-window / clock-skew phantom — a bar ON the boundary
     # is KEPT, so the existing behaviour is byte-unchanged for every legitimate in-range bar.
     bars = drop_bars_after(bars, window_end)
+    # ALL-FILTERED at the WHOLE boundary (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
+    # widening DEC-INGEST-BOUNDARY-INTEGRITY-001's session-filter-only check): the
+    # kept count is read AFTER the session filter AND the future-bar drop, so a
+    # window emptied by EITHER stage — incl. an exempt symbol's all-future-phantom
+    # window the session branch never sees — is caught. The dedicated WARNING
+    # ALWAYS fires on the shape (visibility never gated); only the demotion below
+    # is gated.
+    all_boundary_filtered = observe_all_filtered(
+        _LOG,
+        raw_count=len(raw_bars),
+        kept_count=len(bars),
+        pull_id=pull_id,
+        fields={
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            **series_fields,
+        },
+    )
     _LOG.debug(
         "ingest.parse",
         pull_id=pull_id,
@@ -1193,18 +1214,21 @@ def _process_window_tail(
     #       1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001), never vendor-fetched, so a "truncated"
     #       daily window is meaningless; its completeness follows the 1-minute.
     demotable = detect_completeness_gaps and instrument.is_index and interval != _DAILY
-    # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001): the vendor returned
-    # bars but EVERY one was dropped by the calendar-aware session filter — a
-    # would-be SUCCESS with ZERO stored bars the skip rule would never revisit.
-    # INTRINSIC (vendor sent bars, all out-of-session — not a liquidity heuristic),
-    # so it is NOT gated on ``instrument.is_index``; it IS gated on
-    # ``detect_completeness_gaps`` because the dry-run synthetic adapter anchors its
-    # bars on the window-START day regardless of the trading calendar, so a
-    # weekend-start ``--dry-run`` window would otherwise demote → false-red (the
-    # same protection gate #1031 chose). Orthogonal to sink dedup: a re-pull whose
-    # bars all dedup to zero NET-NEW still passes bars THROUGH the filter
-    # (``bars`` non-empty), so it stays SUCCESS.
-    all_filtered = detect_completeness_gaps and all_session_filtered
+    # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001, boundary-widened by
+    # DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the vendor returned bars but EVERY
+    # one was removed at the filter boundary — the calendar-aware session filter
+    # AND/OR the future-bar drop — a would-be SUCCESS with ZERO stored bars the
+    # skip rule would never revisit. INTRINSIC (vendor sent bars, the boundary kept
+    # none — not a liquidity heuristic), so it is NOT gated on
+    # ``instrument.is_index``; it IS gated on ``detect_completeness_gaps`` because
+    # the dry-run synthetic adapter anchors its bars on the window-START day
+    # regardless of the trading calendar, so a weekend-start ``--dry-run`` window
+    # would otherwise demote → false-red (the same protection gate #1031 chose) —
+    # and on ``interval != _DAILY`` (the derived 1day's completeness follows its
+    # 1-minute; the daily path is deliberately unfiltered). Orthogonal to sink
+    # dedup: a re-pull whose bars all dedup to zero NET-NEW still passes bars
+    # THROUGH the boundary (``bars`` non-empty), so it stays SUCCESS.
+    all_filtered = detect_completeness_gaps and interval != _DAILY and all_boundary_filtered
     degraded = all_filtered or (demotable and (truncated or interior_gap))
     if all_filtered:
         degraded_reason: str | None = ALL_FILTERED

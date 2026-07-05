@@ -39,10 +39,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.interior_gap_detect import INTERIOR_GAP
+from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
+from brutex.data.session import ALL_FILTERED
 from brutex.data.window_status import EMPTY, FAILED, SUCCESS, classify_window_status
 
 __all__ = [
     "CONFIRMED_EMPTY_MIN_FETCHES",
+    "DEMOTED_SETTLE_REASONS",
     "EMPTY",
     "EMPTY_TERMINAL_THRESHOLD",
     "EXPIRED_WINDOW_SETTLE_SUFFIX",
@@ -110,6 +114,26 @@ CONFIRMED_EMPTY_MIN_FETCHES: int = 2
 #: ``brutex.dashboard.db_view.window_status_label`` keys the honest UI label on
 #: (DEC-OLD-EMPTY-SINGLE-CONFIRM-001; CLAUDE.md §11 COMMON — no second spelling).
 EXPIRED_WINDOW_SETTLE_SUFFIX: str = ", expired window)"
+
+#: Every ``degraded_reason`` tag the data-completeness demotion channel
+#: (:meth:`WindowLedger.record` ``degraded=True``) can stamp as a row's
+#: ``last_error`` — the ONE canonical set (CLAUDE.md §11 COMMON;
+#: DEC-DATA-HONESTY-ALLFILTERED-SEED-001) so the ``/coverage/windows`` label
+#: (:func:`brutex.dashboard.db_view.window_status_label`) can render a
+#: demotion-settled ``SKIPPED`` honestly instead of the "vendor confirmed no
+#: trades" wording (factually WRONG for these rows: the vendor RETURNED bars —
+#: they were boundary-filtered / hole-flagged / truncation-flagged, never a
+#: clean no-trades answer). Each tag's detector module stays its source of
+#: truth; this set only ENUMERATES them beside the channel that stamps them.
+#: ``"DEGRADED"`` is the FOURTH member by convention, not detection: it is the
+#: :meth:`WindowLedger.record` defensive fallback stamped when a caller passes
+#: ``degraded=True`` with no ``degraded_reason`` — unreachable from the current
+#: production spines (both always pass a concrete tag) but, were it ever
+#: stamped, its settle is STILL a demotion settle and must never fall through
+#: to the "vendor confirmed no trades" wording (wiring-review fold, PR #1158).
+DEMOTED_SETTLE_REASONS: frozenset[str] = frozenset(
+    {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"}
+)
 
 
 def expired_window_settle_reason(clean_attempts: int) -> str:
@@ -436,6 +460,20 @@ class WindowLedger:
             )
             return True
 
+    def has_window(self, key: WindowKey) -> bool:
+        """True iff ANY row exists for *key* (any status) — **O(1)**, atomic, read-only.
+
+        The cold-start seed's existence probe (DEC-DATA-HONESTY-ALLFILTERED-SEED-001):
+        :func:`~brutex.data.window_ledger_store.seed_enclosed_windows` skips its
+        density cross-check + refusal WARNING for a window that already HAS a row,
+        because the only-if-absent :meth:`seed_lake_success` would no-op anyway —
+        without this probe every steady-state reconcile re-warned about windows
+        that were long since fetched/settled. Never mutates anything.
+        """
+        wk = self._key(key)
+        with self._lock:
+            return wk in self._by_window
+
     def is_skippable(self, key: WindowKey) -> bool:
         """Return ``True`` iff *key* is SETTLED (``SUCCESS`` / ``SKIPPED``) — **O(1)**, atomic.
 
@@ -531,30 +569,43 @@ class WindowLedger:
 
         *old_window* (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) is the pure "vendor data can
         never appear" fact (``window_end`` older than
-        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`), threaded so the
-        old-gap fast-settle can be BUDGET-AWARE: a strike whose in-pull EMPTY-retry
-        budget was REDUCED to 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) can never reach
-        :data:`CONFIRMED_EMPTY_MIN_FETCHES` fetches inside ONE pull, so without this
-        it re-fetched once per pull long after its empty was confirmed. When the
-        classification is ``EMPTY``, the window is old, and the settle is not
-        suppressed, the confirmation count is CUMULATIVE across pulls:
-        ``prior.empty_streak`` (each unit one distinct prior pull's genuine,
-        unsuppressed clean-EMPTY observation — an independent confirmation at least as
-        strong as an in-pull re-fetch) plus this pull's *in_pull_fetches*; crossing
-        :data:`CONFIRMED_EMPTY_MIN_FETCHES` settles ``SKIPPED`` exactly like the
-        one-pull fast-settle (streak forced to the threshold). The data-safety law is
-        untouched ("if uncertain, fetch"): a ``SUCCESS`` resets the streak, a
-        ``FAILED`` (429/timeout) never counts and never settles, a breaker-suppressed
-        empty neither bumps nor settles, a RECENT window (*old_window* ``False``)
-        keeps the conservative across-pull streak, and :meth:`reopen_skipped` resets
-        the streak so an operator re-open regains the full confirmation budget. The
-        default ``False`` is byte-identical to the prior behaviour. HONEST envelope:
-        *in_pull_fetches* counts transient re-attempts too, preserving the
-        already-shipped in-pull generosity (1 transient + 1 clean empty == 2), and on
-        the SPOT spine ``empty_streak`` may include degraded-demotion bumps — but the
-        spot spine never passes *old_window* (its full empty-retry budget always
-        reaches the in-pull confirmation), so the cumulative rule's evidence there is
-        genuine clean-EMPTY pulls only.
+        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`). Since
+        **DEC-OLD-EMPTY-SINGLE-CONFIRM-001** (operator-decreed 2026-07-04, superseding
+        #1172's budget-aware cumulative accumulation) an OLD window settles ``SKIPPED``
+        off a SINGLE genuine, unsuppressed clean-EMPTY fetch in THIS pull — the streak
+        is forced to the threshold and the honest
+        :func:`expired_window_settle_reason` stamp becomes the ``last_error`` (see the
+        settle arm below). The data-safety law is untouched ("if uncertain, fetch"): a
+        ``SUCCESS`` resets the streak, a ``FAILED`` (429/timeout) never counts and
+        never settles, a breaker-suppressed empty neither bumps nor settles, a RECENT
+        window (*old_window* ``False``) keeps the conservative across-pull streak, and
+        :meth:`reopen_skipped` resets the streak so an operator re-open regains the
+        full confirmation budget. The default ``False`` is byte-identical to the prior
+        behaviour. HONEST envelope (DEC-DATA-HONESTY-ALLFILTERED-SEED-001 doc
+        reconcile): BOTH spines' ``empty_streak`` may now include degraded-demotion
+        bumps — the F&O spine passes *degraded* (an ``ALL_FILTERED`` boundary verdict)
+        AND *old_window* on the SAME record call. Because the old-empty settle is
+        single-confirm (it fires off THIS pull's own genuine clean EMPTY), a prior
+        degraded bump can never SUBSTITUTE for clean-EMPTY evidence — but the
+        :func:`expired_window_settle_reason` stamp's clean-attempt COUNT is
+        streak-derived (``prior_streak + 1``), so a prior degraded bump INFLATES that
+        display count by one (e.g. one all-filtered demotion then one clean EMPTY
+        reads "2 clean attempts"). Accepted + regression-pinned: the settle decision
+        is sound (a real clean EMPTY landed), only the count conflates flagged
+        attempts with clean ones; ``brutex reopen-skipped`` stays the recovery.
+        The same no-provenance conflation applies to the THRESHOLD settle over
+        MIXED evidence (correctness-review fold, PR #1158): degraded bumps and
+        clean-EMPTY bumps share this ONE ``empty_streak``, so a mixed-evidence
+        settle labels ALL its attempts by whichever channel landed the FINAL
+        record — two ``ALL_FILTERED`` demotions then one genuine clean EMPTY
+        settle ``SKIPPED`` with ``last_error=None`` ("vendor confirmed no
+        trades (3 clean attempt(s))" though two were boundary-filter
+        demotions), and the symmetric two-clean-empties-then-one-demotion
+        settle reads "3 flagged attempt(s)". Display-only (#1031/#1294
+        pre-existing streak-sharing semantics — the settle itself is sound and
+        ``reopen-skipped`` recovers); an honest per-channel count needs a
+        streak-provenance column — the SAME named follow-up as the expired-stamp
+        inflation above, deliberately NOT claimed here.
 
         *degraded* (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001) is the
         DATA-COMPLETENESS demotion hint: a clean bars-returning fetch whose stored bars
@@ -562,7 +613,8 @@ class WindowLedger:
         complete window, so it must NOT be marked terminal/skippable on a ``SUCCESS``.
         When ``True`` AND the natural classification is ``SUCCESS`` the window is recorded
         ``FAILED`` (re-pullable — exactly like a transient) with *degraded_reason* (a
-        non-secret tag such as ``"INTERIOR_GAP"`` / ``"TRUNCATED"``) stamped as the
+        non-secret tag from :data:`DEMOTED_SETTLE_REASONS` — ``"INTERIOR_GAP"`` /
+        ``"SUSPECTED_PARTIAL"`` / ``"ALL_FILTERED"``) stamped as the
         ``last_error``, and the ``empty_streak`` is BUMPED so the re-pull is BOUNDED: after
         :data:`EMPTY_TERMINAL_THRESHOLD` consecutive degraded pulls the window settles
         ``SKIPPED`` (the gap is accepted after the operator has been warned that many
