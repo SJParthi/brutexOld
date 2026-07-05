@@ -3256,13 +3256,20 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       it EMPTY).
     * ``SKIPPED`` carrying a data-completeness DEMOTION reason
       (:data:`~brutex.data.window_ledger.DEMOTED_SETTLE_REASONS` —
-      ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL``, the #1031
+      ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL`` plus the
+      ``"DEGRADED"`` record()-side reason-less fallback, the #1031
       degraded channel's accept-gap settle) → ``"completeness gap accepted
       (<reason>, N flagged attempt(s)) — settled"``
       (DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the generic "vendor confirmed
       no trades" wording is factually WRONG for these rows — the vendor
       RETURNED bars every time; they were boundary-filtered / hole-flagged /
-      truncation-flagged, never a clean no-trades answer.
+      truncation-flagged, never a clean no-trades answer. HONEST envelope:
+      the label keys on the row's FINAL ``last_error`` only — degraded and
+      clean-EMPTY bumps share ONE un-provenance'd streak
+      (:meth:`~brutex.data.window_ledger.WindowLedger.record`), so a
+      MIXED-evidence settle attributes all N attempts to the final channel
+      (documented beside the streak arms; a per-channel count needs the named
+      streak-provenance follow-up, NOT claimed).
     * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
       ``— settled`` (the ledger promoted it; no further re-pull).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of

@@ -881,7 +881,18 @@ def seed_enclosed_windows(
     detector; note the abstain now keys on the DATASET's first/last covered
     dates, so a span reaching past holiday coverage abstains for ALL its
     windows — conservative in the seed direction, byte-identical to the
-    span-only path); sub-tolerance holes still seed; and CONVERGENCE after a
+    span-only path); the seed calls :func:`interior_gap_runs` WITHOUT the
+    DEC-CALENDAR-OBSERVED-SESSIONS-001 ``observed=`` drift overlay the
+    fetch-time detector threads (``ingest.observe_interior_gap`` passes
+    ``observed=observed_holidays``; the reconcile chokepoints have no overlay
+    plumbed), so on a vendor-observed holiday the seed counts one more bar-less
+    "session" than the classifier would — the overlay is REMOVE-only, so the
+    omission can only EXTEND a run: at worst ONE conservative refusal → one
+    idempotent re-fetch, after which the recorded row trips ``has_window`` and
+    the gate is permanently silent (a single drift day can never mint a
+    >tolerance run alone; threading the overlay to the reconcile callers is a
+    named follow-up, NOT claimed — wiring-review fold, PR #1158);
+    sub-tolerance holes still seed; and CONVERGENCE after a
     refusal is fetch-verdict-dependent — a run CONTAINED in one window is
     demoted at fetch time (``INTERIOR_GAP``, bounded → SKIPPED), while a
     STRADDLING run's halves read as edge holes per fetched window (the

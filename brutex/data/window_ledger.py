@@ -125,7 +125,15 @@ EXPIRED_WINDOW_SETTLE_SUFFIX: str = ", expired window)"
 #: they were boundary-filtered / hole-flagged / truncation-flagged, never a
 #: clean no-trades answer). Each tag's detector module stays its source of
 #: truth; this set only ENUMERATES them beside the channel that stamps them.
-DEMOTED_SETTLE_REASONS: frozenset[str] = frozenset({ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL})
+#: ``"DEGRADED"`` is the FOURTH member by convention, not detection: it is the
+#: :meth:`WindowLedger.record` defensive fallback stamped when a caller passes
+#: ``degraded=True`` with no ``degraded_reason`` — unreachable from the current
+#: production spines (both always pass a concrete tag) but, were it ever
+#: stamped, its settle is STILL a demotion settle and must never fall through
+#: to the "vendor confirmed no trades" wording (wiring-review fold, PR #1158).
+DEMOTED_SETTLE_REASONS: frozenset[str] = frozenset(
+    {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"}
+)
 
 
 def expired_window_settle_reason(clean_attempts: int) -> str:
@@ -585,6 +593,19 @@ class WindowLedger:
         reads "2 clean attempts"). Accepted + regression-pinned: the settle decision
         is sound (a real clean EMPTY landed), only the count conflates flagged
         attempts with clean ones; ``brutex reopen-skipped`` stays the recovery.
+        The same no-provenance conflation applies to the THRESHOLD settle over
+        MIXED evidence (correctness-review fold, PR #1158): degraded bumps and
+        clean-EMPTY bumps share this ONE ``empty_streak``, so a mixed-evidence
+        settle labels ALL its attempts by whichever channel landed the FINAL
+        record — two ``ALL_FILTERED`` demotions then one genuine clean EMPTY
+        settle ``SKIPPED`` with ``last_error=None`` ("vendor confirmed no
+        trades (3 clean attempt(s))" though two were boundary-filter
+        demotions), and the symmetric two-clean-empties-then-one-demotion
+        settle reads "3 flagged attempt(s)". Display-only (#1031/#1294
+        pre-existing streak-sharing semantics — the settle itself is sound and
+        ``reopen-skipped`` recovers); an honest per-channel count needs a
+        streak-provenance column — the SAME named follow-up as the expired-stamp
+        inflation above, deliberately NOT claimed here.
 
         *degraded* (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001) is the
         DATA-COMPLETENESS demotion hint: a clean bars-returning fetch whose stored bars

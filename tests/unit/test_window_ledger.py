@@ -1638,13 +1638,27 @@ class TestDemotedSettleReasons:
     """`DEMOTED_SETTLE_REASONS` — the canonical demotion reason-tag set the
     /coverage label keys on (DEC-DATA-HONESTY-ALLFILTERED-SEED-001)."""
 
-    def test_enumerates_exactly_the_three_channel_tags(self) -> None:
+    def test_enumerates_exactly_the_channel_tags_plus_fallback(self) -> None:
         from brutex.data.interior_gap_detect import INTERIOR_GAP
         from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
         from brutex.data.session import ALL_FILTERED
 
-        expected = frozenset({ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL})
+        # The three detector tags PLUS "DEGRADED" — record()'s defensive
+        # fallback for a degraded=True call with no reason (latent: both
+        # production spines always pass a concrete tag). Enumerated so a
+        # reason-less demotion settle can never fall through to the
+        # "vendor confirmed no trades" label (wiring-review fold, PR #1158).
+        expected = frozenset({ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"})
         assert expected == DEMOTED_SETTLE_REASONS
+
+    def test_reasonless_degraded_record_stamps_a_demoted_reason(self) -> None:
+        # The fallback stamp itself is IN the set — the invariant the label
+        # branch relies on: every degraded-channel last_error ∈ the frozenset.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW, degraded=True)
+        rec = ledger.records()[0]
+        assert rec.last_error == "DEGRADED"
+        assert rec.last_error in DEMOTED_SETTLE_REASONS
 
     def test_expired_window_stamp_is_not_a_demoted_reason(self) -> None:
         # The two SKIPPED label branches must never collide.

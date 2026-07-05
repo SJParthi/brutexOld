@@ -1378,12 +1378,17 @@ class TestWindowStatusLabel:
             "vendor confirmed no trades (2 clean attempt(s) — settled)"
         )
 
-    @pytest.mark.parametrize("reason", ["ALL_FILTERED", "INTERIOR_GAP", "SUSPECTED_PARTIAL"])
+    @pytest.mark.parametrize(
+        "reason", ["ALL_FILTERED", "INTERIOR_GAP", "SUSPECTED_PARTIAL", "DEGRADED"]
+    )
     def test_skipped_with_demoted_reason_reads_completeness_gap(self, reason: str) -> None:
         """DEC-DATA-HONESTY-ALLFILTERED-SEED-001 (refuter F-3 fold): a SKIPPED row
         settled through the #1031 degraded channel must NOT read "vendor confirmed
         no trades" — the vendor RETURNED bars every time (boundary-filtered /
-        hole-flagged / truncation-flagged); the label names the reason honestly."""
+        hole-flagged / truncation-flagged); the label names the reason honestly.
+        ``DEGRADED`` is record()'s reason-less defensive fallback (latent — both
+        spines always pass a concrete tag): same channel, same honest wording
+        (wiring-review fold, PR #1158)."""
         assert window_status_label("SKIPPED", 3, reason) == (
             f"completeness gap accepted ({reason}, 3 flagged attempt(s)) — settled"
         )
