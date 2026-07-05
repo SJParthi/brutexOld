@@ -1232,6 +1232,18 @@ class TestSeedEnclosureBoundary:
 # --- DEC-COLDSTART-SEED-INTERIOR-GAP-001: the seed's density cross-check --------------
 
 
+def _interior_trading_bounds(first_covered: date, last_covered: date) -> tuple[date, date]:
+    """First + last NSE trading session STRICTLY between two covered dates (real calendar)."""
+    from brutex.calendars.nse import is_trading_day
+
+    sessions = [
+        first_covered + timedelta(days=i)
+        for i in range(1, (last_covered - first_covered).days)
+        if is_trading_day(first_covered + timedelta(days=i))
+    ]
+    return sessions[0], sessions[-1]
+
+
 def _march_trading_days() -> frozenset[date]:
     """Every NSE trading day in [2024-03-01, 2024-03-28] — a CONTINUOUS covered set."""
     from brutex.calendars.nse import is_trading_day
@@ -1302,8 +1314,13 @@ class TestSeedInteriorGapDensityGate:
         assert skips[0]["log_level"] == "warning"
         assert skips[0]["window_start"] == "2024-03-01"
         assert skips[0]["window_end"] == "2024-03-29"
-        gap = skips[0]["largest_gap_sessions"]
-        assert isinstance(gap, int) and gap > 5
+        # DEC-DATA-HONESTY-ALLFILTERED-SEED-001: the WARNING names the confirmed
+        # run's INCLUSIVE bar-less bounds — the first/last trading session
+        # strictly between the two covered endpoints (computed from the real NSE
+        # calendar so the pin never hardcodes an unverifiable date).
+        gap_first, gap_last = _interior_trading_bounds(date(2024, 3, 1), date(2024, 3, 28))
+        assert skips[0]["gap_first"] == gap_first.isoformat()
+        assert skips[0]["gap_last"] == gap_last.isoformat()
 
     def test_continuous_1minute_window_still_seeds(self) -> None:
         # No false-skip: a window covered on EVERY trading session seeds exactly as
@@ -1351,6 +1368,157 @@ class TestSeedInteriorGapDensityGate:
         seeded, ledger, logs = _seed_density(session_dates=gappy, interval="1day")
         assert seeded == 1
         assert ledger.records()[0].status == SUCCESS
+        assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
+
+
+def _march_2024_sessions() -> list[date]:
+    """Every NSE trading day in [2024-03-01, 2024-03-28], ascending (real calendar)."""
+    return sorted(_march_trading_days())
+
+
+def _key_march(start: date, end: date) -> WindowKey:
+    return WindowKey(market="spot", security_id="NIFTY", interval="1minute", start=start, end=end)
+
+
+_MARCH_SPAN_KEY = ("NSE", "INDEX", "NIFTY", "1minute")
+
+
+def _seed_march(
+    session_dates: frozenset | None,
+    candidates: list[tuple[WindowKey, tuple[str, str, str, str]]],
+    *,
+    ledger: WindowLedger | None = None,
+) -> tuple[int, WindowLedger, list]:
+    """Run the COMMON seed core over ONE March-2024 INDEX 1-minute span."""
+    led = ledger if ledger is not None else WindowLedger()
+    span_index = index_lake_spans(
+        [
+            _span(
+                interval="1minute",
+                segment="INDEX",
+                first="2024-03-01",
+                last="2024-03-28",
+                session_dates=session_dates,
+            )
+        ]
+    )
+    with capture_logs() as logs:
+        seeded = seed_enclosed_windows(
+            led, span_index, candidates, now=_NOW, today_ist=date(2026, 6, 8)
+        )
+    return seeded, led, logs
+
+
+class TestSeedContinuityGateDatasetRuns:
+    """DEC-DATA-HONESTY-ALLFILTERED-SEED-001 — the continuity gate is DATASET-wide:
+    the confirmed >tolerance bar-less runs are computed once per span and a window
+    INTERSECTING a run is refused, closing the two per-window blind spots the
+    original DEC-COLDSTART-SEED-INTERIOR-GAP-001 check documented as non-goals
+    (a hole straddling a window boundary; a window entirely inside a hole)."""
+
+    def test_hole_straddling_window_boundary_refuses_both_windows(self) -> None:
+        # FAILS-BEFORE / PASSES-AFTER (blind spot 1): an ~11-session hole crossing
+        # the boundary between two windows reads, PER WINDOW, as a trailing edge
+        # (window A) and a leading edge (window B) — the old per-window classifier
+        # seeded BOTH; the dataset-run intersection refuses BOTH.
+        t = _march_2024_sessions()
+        hole = t[4:15]  # 11 bar-less sessions > tolerance 5
+        covered = frozenset(t[:4]) | frozenset(t[15:])
+        mid = hole[5]  # a boundary INSIDE the hole
+        win_a = _key_march(date(2024, 3, 1), mid)
+        win_b = _key_march(mid, date(2024, 3, 29))
+        seeded, led, logs = _seed_march(
+            covered, [(win_a, _MARCH_SPAN_KEY), (win_b, _MARCH_SPAN_KEY)]
+        )
+        assert seeded == 0
+        assert led.count == 0  # both stay PLANNED-able — the hole is never masked
+        skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
+        assert len(skips) == 2
+        assert {s["window_start"] for s in skips} == {"2024-03-01", mid.isoformat()}
+        for s in skips:
+            assert s["gap_first"] == hole[0].isoformat()
+            assert s["gap_last"] == hole[-1].isoformat()
+
+    def test_window_entirely_inside_hole_is_refused(self) -> None:
+        # FAILS-BEFORE / PASSES-AFTER (blind spot 2): a window with ZERO covered
+        # dates inside a giant hole — the old per-window classifier could only
+        # abstain (too_few_sessions) and seeded it; the run intersection refuses.
+        t = _march_2024_sessions()
+        hole = t[4:15]
+        covered = frozenset(t[:4]) | frozenset(t[15:])
+        inside = _key_march(hole[2], hole[7] + timedelta(days=1))
+        seeded, led, logs = _seed_march(covered, [(inside, _MARCH_SPAN_KEY)])
+        assert seeded == 0
+        assert led.count == 0
+        skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
+        assert len(skips) == 1
+
+    def test_window_not_intersecting_the_hole_still_seeds(self) -> None:
+        # No over-refusal: a window covering only the DENSE region of a holed
+        # dataset seeds exactly as before (the run does not intersect it).
+        t = _march_2024_sessions()
+        covered = frozenset(t[:4]) | frozenset(t[15:])
+        dense = _key_march(t[0], t[3] + timedelta(days=1))
+        seeded, led, logs = _seed_march(covered, [(dense, _MARCH_SPAN_KEY)])
+        assert seeded == 1
+        assert led.records()[0].status == SUCCESS
+        assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
+
+    def test_sub_tolerance_hole_still_seeds(self) -> None:
+        # Envelope pin: a ≤5-session hole is NOT a confirmed run — seeded (ONE
+        # tolerance knob shared with the fetch-time detector).
+        t = _march_2024_sessions()
+        covered = frozenset(t) - frozenset(t[6:10])  # a 4-session hole
+        win = _key_march(date(2024, 3, 1), date(2024, 3, 29))
+        seeded, _led, logs = _seed_march(covered, [(win, _MARCH_SPAN_KEY)])
+        assert seeded == 1
+        assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
+
+    def test_existing_row_skips_gate_and_never_rewarns(self) -> None:
+        # Refuter F-4 fold: once a refused window HAS a row (fetched → FAILED /
+        # settled / anything), the steady-state reconcile must not re-WARN about
+        # it on every pull — the existence probe short-circuits the gate, and the
+        # existing row is bit-identical after the call.
+        t = _march_2024_sessions()
+        covered = frozenset(t[:4]) | frozenset(t[15:])
+        win = _key_march(date(2024, 3, 1), date(2024, 3, 29))
+        led = WindowLedger()
+        led.record(
+            win, raw_bars=0, error_type="GrowwTimeoutError", bars_appended=0, now=_NOW
+        )  # a FAILED row from a prior fetch
+        before = led.records()
+        seeded, led, logs = _seed_march(covered, [(win, _MARCH_SPAN_KEY)], ledger=led)
+        assert seeded == 0
+        assert led.records() == before  # bit-identical — a probe/refusal never writes
+        assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
+
+    def test_error_memo_still_warns_per_window_and_refuses(self) -> None:
+        # FAIL-CLOSED with the per-span memo: a malformed enrichment refuses EVERY
+        # window of that span with one error WARNING each (never a crash, never a
+        # minted SUCCESS) — the memo caches the failure, not a verdict.
+        malformed = frozenset({"2024-03-01", "2024-03-28"})
+        t = _march_2024_sessions()
+        mid = t[9]
+        win_a = _key_march(date(2024, 3, 1), mid)
+        win_b = _key_march(mid, date(2024, 3, 29))
+        seeded, led, logs = _seed_march(
+            malformed, [(win_a, _MARCH_SPAN_KEY), (win_b, _MARCH_SPAN_KEY)]
+        )
+        assert seeded == 0
+        assert led.count == 0
+        errors = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_error"]
+        assert len(errors) == 2
+
+    def test_out_of_coverage_dataset_abstains_and_seeds(self) -> None:
+        # Honest abstain (Golden Rule #1): a dataset whose covered ends run past
+        # the NSE holiday-list coverage returns None from the runs API → the gate
+        # is inert and the span seed proceeds (consistent with the fetch-time
+        # detector's abstain).
+        covered = frozenset({date(2024, 3, 1), date(2028, 1, 10)})
+        win = _key_march(date(2024, 3, 1), date(2024, 3, 29))
+        seeded, led, logs = _seed_march(covered, [(win, _MARCH_SPAN_KEY)])
+        assert seeded == 1
+        assert led.records()[0].status == SUCCESS
         assert [e for e in logs if "seed_interior_gap" in str(e.get("event"))] == []
 
 

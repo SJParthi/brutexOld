@@ -12,7 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import ClassVar
 
 import pytest
-from brutex.calendars.nse import IST
+from brutex.calendars.nse import IST, is_trading_day
 from brutex.data.interior_gap_detect import (
     INTERIOR_GAP,
     INTERIOR_GAP_WINDOW_ERROR_EVENT,
@@ -22,8 +22,11 @@ from brutex.data.interior_gap_detect import (
     _largest_interior_session_gap,
     classify_interior_gap,
     classify_interior_gap_dates,
+    interior_gap_runs,
     observe_interior_gap,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 # 04:05 UTC = 09:35 IST → inside the [09:15, 15:30) session for that trading date.
 _SESSION_UTC_HOUR = 4
@@ -269,6 +272,117 @@ class TestLargestInteriorSessionGap:
         # Mar 4 → Mar 22 has more missing sessions than Mar 1 → Mar 4 (2), so the run reset
         # is exercised and the larger second hole wins.
         assert gap > 2
+
+
+def _trading_days_from(seed: date, count: int) -> list[date]:
+    """The first *count* real NSE trading days on/after *seed* (calendar-derived)."""
+    out: list[date] = []
+    cursor = seed
+    while len(out) < count:
+        if is_trading_day(cursor):
+            out.append(cursor)
+        cursor += timedelta(days=1)
+    return out
+
+
+def _trading_day_count(first: date, last: date) -> int:
+    """NSE trading days in ``[first, last]`` inclusive (calendar-derived)."""
+    return sum(
+        1 for i in range((last - first).days + 1) if is_trading_day(first + timedelta(days=i))
+    )
+
+
+class TestInteriorGapRuns:
+    """`interior_gap_runs` — the DATASET-wide confirmed-run API for the cold-start
+    seed's continuity gate (DEC-DATA-HONESTY-ALLFILTERED-SEED-001)."""
+
+    def test_confirmed_run_bounds_are_exact(self) -> None:
+        t = _trading_days_from(date(2021, 6, 1), 8)
+        covered = [t[0], t[7]]  # 6 interior bar-less sessions > tolerance 5
+        runs = interior_gap_runs(covered_dates=covered)
+        assert runs == ((t[1], t[6]),)
+
+    def test_hole_equal_to_tolerance_is_not_confirmed(self) -> None:
+        t = _trading_days_from(date(2021, 6, 1), 7)
+        covered = [t[0], t[6]]  # exactly 5 interior sessions == tolerance → not a run
+        assert interior_gap_runs(covered_dates=covered) == ()
+
+    def test_multiple_holes_reported_in_date_order(self) -> None:
+        t = _trading_days_from(date(2021, 6, 1), 20)
+        covered = [t[0], t[7], t[8], t[16]]  # holes t1..t6 (6) and t9..t15 (7)
+        runs = interior_gap_runs(covered_dates=covered)
+        assert runs == ((t[1], t[6]), (t[9], t[15]))
+
+    def test_sub_tolerance_blip_stays_unreported(self) -> None:
+        t = _trading_days_from(date(2021, 6, 1), 11)
+        covered = [t[0], t[3], t[10]]  # blip t1..t2 (2 ≤ 5); hole t4..t9 (6 > 5)
+        assert interior_gap_runs(covered_dates=covered) == ((t[4], t[9]),)
+
+    def test_too_few_covered_dates_returns_empty(self) -> None:
+        assert interior_gap_runs(covered_dates=[]) == ()
+        assert interior_gap_runs(covered_dates=[date(2021, 6, 1)]) == ()
+
+    def test_out_of_calendar_coverage_abstains_none(self) -> None:
+        # 2019 is outside the NSE holiday-list coverage → None (abstain, never
+        # guess — the SAME rule as classify_interior_gap_dates), including when
+        # only ONE end is out of coverage.
+        assert interior_gap_runs(covered_dates=[date(2019, 3, 1), date(2019, 3, 22)]) is None
+        assert interior_gap_runs(covered_dates=[date(2019, 12, 20), date(2021, 3, 22)]) is None
+
+    def test_custom_tolerance_confirms_smaller_hole(self) -> None:
+        t = _trading_days_from(date(2021, 6, 1), 4)
+        covered = [t[0], t[3]]  # 2 interior sessions
+        assert interior_gap_runs(covered_dates=covered, tolerance_sessions=1) == ((t[1], t[2]),)
+        assert interior_gap_runs(covered_dates=covered) == ()  # default 5 → not confirmed
+
+    def test_env_tunable_shared_with_classifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ONE knob (CLAUDE.md §11 COMMON): the env tolerance moves BOTH the
+        # fetch-time classifier and the seed-time runs API.
+        monkeypatch.setenv("BRUTEX_INTERIOR_GAP_TOLERANCE_SESSIONS", "1")
+        t = _trading_days_from(date(2021, 6, 1), 4)
+        covered = [t[0], t[3]]
+        assert interior_gap_runs(covered_dates=covered) == ((t[1], t[2]),)
+        assert classify_interior_gap_dates(covered_dates=covered).is_interior_gap()
+
+    def test_observed_overlay_shrinks_a_run(self) -> None:
+        # An observed holiday (DEC-CALENDAR-OBSERVED-SESSIONS-001) is not a
+        # session — remove-only: subtracting it can only SHRINK a run.
+        t = _trading_days_from(date(2021, 6, 1), 4)
+        covered = [t[0], t[3]]
+        assert interior_gap_runs(covered_dates=covered, tolerance_sessions=1) == ((t[1], t[2]),)
+        shrunk = interior_gap_runs(
+            covered_dates=covered, tolerance_sessions=1, observed=frozenset({t[1]})
+        )
+        assert shrunk == ()  # the surviving 1-session run is within tolerance
+
+    @given(
+        offsets=st.sets(st.integers(min_value=0, max_value=90), min_size=0, max_size=10),
+        tolerance=st.integers(min_value=0, max_value=6),
+    )
+    def test_property_runs_parity_with_largest_gap(self, offsets: set[int], tolerance: int) -> None:
+        # PARITY (pins the shared-run-walker refactor): over in-coverage date sets,
+        # (1) a confirmed run exists ⇔ the classifier flags INTERIOR_GAP at the
+        # same tolerance; (2) each run's recomputed trading-session length is
+        # > tolerance and its max equals `_largest_interior_session_gap` at
+        # tolerance 0; (3) no run contains a covered TRADING day (a covered
+        # NON-trading date — e.g. a weekend bar — never splits a run: only
+        # trading sessions participate in the walk).
+        covered = sorted(date(2021, 1, 4) + timedelta(days=o) for o in offsets)
+        runs = interior_gap_runs(covered_dates=covered, tolerance_sessions=tolerance)
+        assert runs is not None  # 2021 is fully in coverage — never an abstain
+        verdict = classify_interior_gap_dates(covered_dates=covered, tolerance_sessions=tolerance)
+        assert bool(runs) == verdict.is_interior_gap()
+        covered_set = set(covered)
+        for run_first, run_last in runs:
+            assert covered[0] < run_first <= run_last < covered[-1]
+            length = _trading_day_count(run_first, run_last)
+            assert length > tolerance
+            span = {run_first + timedelta(days=i) for i in range((run_last - run_first).days + 1)}
+            assert not any(is_trading_day(d) for d in span & covered_set)
+        all_runs = interior_gap_runs(covered_dates=covered, tolerance_sessions=0)
+        assert all_runs is not None
+        lengths = [_trading_day_count(f, last) for f, last in all_runs]
+        assert max(lengths, default=0) == _largest_interior_session_gap(covered)
 
 
 def test_verdict_is_frozen() -> None:
