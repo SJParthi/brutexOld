@@ -68,6 +68,19 @@ class LakeWriteHalt(DataLakeError):
         super().__init__(f"lake write halted: {reason}")
         self.reason = reason
 
+    def __reduce__(self) -> tuple[type[LakeWriteHalt], tuple[str]]:
+        """Pickle as constructor args — REQUIRED for a process-pool crossing.
+
+        The default ``BaseException`` reduce re-feeds ``args`` (the FORMATTED
+        message) to ``__init__``, so an unpickled copy read
+        ``"lake write halted: lake write halted: <reason>"`` — a doubled
+        message (empirically proven; the DEC-GREEKS-PARALLEL-001 pickle
+        round-trip suite pins the fix). ``type(self)`` keeps a same-signature
+        subclass safe; a subclass CHANGING the constructor signature must
+        override ``__reduce__``.
+        """
+        return (type(self), (self.reason,))
+
 
 class PartitionLockTimeout(DataLakeError):
     """A cross-process partition write-lock could not be acquired within the deadline.
@@ -92,6 +105,20 @@ class PartitionLockTimeout(DataLakeError):
             "(peer holding the lock); window deferred to the next pull"
         )
         self.timeout_seconds = timeout_seconds
+
+    def __reduce__(self) -> tuple[type[PartitionLockTimeout], tuple[float]]:
+        """Pickle as constructor args — REQUIRED for a process-pool crossing.
+
+        The default ``BaseException`` reduce re-calls
+        ``PartitionLockTimeout(<formatted message string>)``, and the ``:g``
+        format spec then blows up on the string — ``pickle.loads`` raised
+        ``ValueError: Unknown format code 'g' for object of type 'str'``
+        (empirically proven pre-fix). An unpicklable exception escaping a
+        pool worker poisons the WHOLE pool into a generic
+        ``BrokenProcessPool`` (DEC-GREEKS-PARALLEL-001), so the round-trip
+        must be exact. Same subclass note as :class:`LakeWriteHalt`.
+        """
+        return (type(self), (self.timeout_seconds,))
 
 
 class WriteDeadlineExceeded(DataLakeError):
@@ -131,6 +158,46 @@ class WriteDeadlineExceeded(DataLakeError):
             "(wedged fsync/replace); window deferred to the next pull"
         )
         self.deadline_seconds = deadline_seconds
+
+    def __reduce__(self) -> tuple[type[WriteDeadlineExceeded], tuple[float]]:
+        """Pickle as constructor args — same latent ``:g``-re-format bug as
+        :class:`PartitionLockTimeout` (``pickle.loads`` raised ``ValueError``
+        pre-fix). Not reachable from the Greeks pool workers today (the
+        deadline wrapper is Groww-adapter-only), fixed as cheap latent-bug
+        hardening while in this file (DEC-GREEKS-PARALLEL-001)."""
+        return (type(self), (self.deadline_seconds,))
+
+
+class GreeksEnrichPoolBroken(DataLakeError):
+    """The Greeks-enrichment worker POOL died before completing its units.
+
+    Raised by the parallel :func:`~brutex.data.greeks_enrich.enrich_greeks_for_targets`
+    driver when :class:`concurrent.futures.process.BrokenProcessPool` surfaces — a
+    worker process terminated ABRUPTLY (killed, crashed) instead of returning a
+    result. HONEST envelope (Golden Rule #10): an OOM SIGKILL, an operator ``kill
+    -9`` and a hard interpreter crash are NOT distinguishable from
+    ``BrokenProcessPool`` (worker exit codes are not observable through the public
+    executor API), so ``detail`` states the ambiguity instead of guessing a cause.
+
+    Like :class:`LakeWriteHalt` this is a HOST-RESOURCE condition, not a
+    per-contract data fault: it is recognised by the dashboard job layer's
+    :func:`~brutex.dashboard.pull_jobs.is_pull_halt` global-stop predicate, so it
+    re-raises through the fenced ``_enrich_greeks_from_minute`` wrapper and fires
+    the CRITICAL Telegram pull-halt alert (DEC-GREEKS-PARALLEL-001). The
+    just-pulled 1-minute candles are already durable; the overlay is re-derivable
+    on the next pull (idempotent, stamp-driven — Golden Rule #7).
+
+    ``detail`` is the non-secret honest description carried into the message.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"greeks enrichment worker pool broken: {detail}")
+        self.detail = detail
+
+    def __reduce__(self) -> tuple[type[GreeksEnrichPoolBroken], tuple[str]]:
+        """Pickle as constructor args — the same discipline as the fixes above,
+        so this class can never re-introduce the doubled-message bug."""
+        return (type(self), (self.detail,))
 
 
 class CatalogError(DataLakeError):
