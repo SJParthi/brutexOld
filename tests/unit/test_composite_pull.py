@@ -56,8 +56,17 @@ _TO = date(2024, 1, 20)
 
 
 def _candle_payload() -> dict[str, object]:
-    """One 1-day bar (row-of-arrays Groww shape: ts, o, h, l, c, v, oi)."""
-    return {"candles": [["2024-01-25T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
+    """One 1-day bar (row-of-arrays Groww shape: ts, o, h, l, c, v, oi).
+
+    2024-01-19 (Friday, a regular NSE trading day) sits INSIDE every window this
+    file fetches ([_FROM, _TO] spot + the expiry-clamped F&O windows), so the
+    recorded outcome is a genuine stored-bar SUCCESS. The previous 2024-01-25
+    stamp fell PAST the clamped window ends — every bar was future-dropped at the
+    boundary, which DEC-DATA-HONESTY-ALLFILTERED-SEED-001 now honestly demotes to
+    a re-pullable FAILED (the exact silent-green shape it exists to catch), so an
+    out-of-window canned bar can no longer fake a settled SUCCESS fixture.
+    """
+    return {"candles": [["2024-01-19T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
 
 
 class _FakeSDK:
@@ -683,3 +692,53 @@ def test_composite_note_names_out_of_scope_expiries(tmp_path: Path) -> None:
     assert report.historical.contracts_out_of_scope == 3
     assert ", 1 expiries out of scope skipped" in report.note
     assert "then pulled 0/0 contract(s) (0 bar(s))" in report.note
+
+
+# ── Greeks-enrichment failure suffix (DEC-GREEKS-ENRICH-OBSERVE-001) ────────────
+
+
+def test_composite_note_names_greeks_enrich_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WHOLE-pass Greeks-enrichment failure is NAMED in the composite note.
+
+    The driver's risk-free seam is broken (the same failure mode the historical
+    suite pins) so the candle phase completes but its Greeks pass fails whole —
+    the composite note must carry the FAILED suffix, never a swallowed log line.
+    """
+    pytest.importorskip("trading_core")
+    import brutex.data.greeks_enrich as ge
+
+    def _boom() -> object:
+        raise RuntimeError("misconfigured risk-free source")
+
+    monkeypatch.setattr(ge, "resolve_risk_free_source", _boom)
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    report = _run(
+        [_instrument("NIFTY", 13)], sdk=sdk, sink=sink, registry=registry, coverage=_CoverageSink()
+    )
+    assert report.historical is not None
+    assert report.historical.greeks_enrich_ok is False
+    # The clause carries the ErrorType class, uniform with the historical note.
+    assert (
+        ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next pull" in report.note
+    )
+
+
+def test_composite_note_has_no_greeks_clause_on_a_clean_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed Greeks pass leaves the composite note byte-identical (no clause)."""
+    pytest.importorskip("trading_core")
+    monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)  # the fixed-6.5% default
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    report = _run(
+        [_instrument("NIFTY", 13)], sdk=sdk, sink=sink, registry=registry, coverage=_CoverageSink()
+    )
+    assert report.historical is not None
+    assert report.historical.greeks_enrich_ok is True
+    assert "Greeks enrichment FAILED" not in report.note

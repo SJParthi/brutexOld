@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
 from brutex.dashboard.sweep_runner import (
     DEFAULT_DIRECTIONS,
     DEFAULT_EXCHANGE,
@@ -21,6 +22,7 @@ from brutex.dashboard.sweep_runner import (
     DEFAULT_K,
     DEFAULT_MODE,
     DEFAULT_SEGMENT,
+    DEFAULT_START,
     DEFAULT_SYMBOLS,
     DEFAULT_TOP,
     SweepRunRequest,
@@ -48,8 +50,14 @@ def test_all_defaults_mirror_the_cli_contract() -> None:
     assert req.segment == DEFAULT_SEGMENT
     assert req.mode == DEFAULT_MODE
     assert req.top == DEFAULT_TOP
-    assert req.start == "2021-01-01"
+    assert req.start == "2020-01-01"
     assert req.end == "2026-06-13"  # injected today
+
+
+def test_default_start_matches_pull_floor() -> None:
+    # The local literal must track GROWW_HISTORY_FLOOR (a drift-guard, §11 COMMON;
+    # DEC-PULL-FLOOR-2020-001 — mirrors test_spot_filter_floor_matches_pull_floor).
+    assert DEFAULT_START == GROWW_HISTORY_FLOOR.isoformat() == "2020-01-01"
 
 
 def test_blank_and_whitespace_inputs_fall_back_to_defaults() -> None:
@@ -76,7 +84,7 @@ def test_blank_and_whitespace_inputs_fall_back_to_defaults() -> None:
     assert req.mode == DEFAULT_MODE
     assert req.exchange == DEFAULT_EXCHANGE
     assert req.segment == DEFAULT_SEGMENT
-    assert req.start == "2021-01-01"
+    assert req.start == "2020-01-01"
     assert req.end == "2026-06-13"
 
 
@@ -123,7 +131,7 @@ def test_to_dict_round_trips_every_field() -> None:
         "tp": "none",
         "exchange": DEFAULT_EXCHANGE,
         "segment": DEFAULT_SEGMENT,
-        "start": "2021-01-01",
+        "start": "2020-01-01",
         "end": "2026-06-13",
         "mode": DEFAULT_MODE,
         "top": DEFAULT_TOP,
@@ -251,7 +259,7 @@ def test_build_sweep_kwargs_maps_request_and_pins_safe_defaults() -> None:
     assert kwargs["k"] == "2"
     assert kwargs["exchange"] == DEFAULT_EXCHANGE
     assert kwargs["segment"] == DEFAULT_SEGMENT
-    assert kwargs["start"] == "2021-01-01"
+    assert kwargs["start"] == "2020-01-01"
     assert kwargs["end"] == "2026-06-13"
     # Pinned safe dashboard defaults (signal-only, forgiving, no overfit/stage3).
     assert kwargs["conditions"] is None

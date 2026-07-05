@@ -111,6 +111,7 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
@@ -248,6 +249,21 @@ class HistoricalPullReport:
     """Contract legs excluded by the expiry scope (the per-leg sum over
     :attr:`expiries_out_of_scope` groups). These never enter
     :attr:`contracts_selected` — the pull workload counts in-scope legs only."""
+    greeks_enrich_ok: bool | None = None
+    """Whole-pass verdict of the post-pull Greeks enrichment
+    (DEC-GREEKS-ENRICH-OBSERVE-001): ``True`` = the pass COMPLETED (per-target
+    quarantines ride :attr:`greeks_targets_errored`, they never flip this —
+    one corrupt contract must not read as a whole-pass failure); ``False`` =
+    the WHOLE pass failed (see :attr:`greeks_enrich_error`; the overlay is
+    re-derivable — the next pull re-attempts it); ``None`` = the pass did not
+    run (dry-run — nothing was written to enrich)."""
+    greeks_enrich_error: str | None = None
+    """``"ErrorType: message"`` when :attr:`greeks_enrich_ok` is ``False``
+    (mirrors the ONE ``fno.greeks_enrich.error`` log line); ``None`` otherwise."""
+    greeks_targets_errored: int = 0
+    """The Greeks driver's per-target quarantine tally (a per-contract
+    read/solve/write error is quarantined INSIDE the driver — surfaced here,
+    never conflated with a whole-pass failure)."""
 
     @property
     def verdict(self) -> PullVerdict:
@@ -299,6 +315,9 @@ class HistoricalPullReport:
             "settled_skipped": self.settled_skipped,
             "expiries_out_of_scope": self.expiries_out_of_scope,
             "contracts_out_of_scope": self.contracts_out_of_scope,
+            "greeks_enrich_ok": self.greeks_enrich_ok,
+            "greeks_enrich_error": self.greeks_enrich_error,
+            "greeks_targets_errored": self.greeks_targets_errored,
             "verdict": self.verdict.to_dict(),
         }
 
@@ -682,6 +701,8 @@ def _build_note(
     ledger_load_failed: bool = False,
     expiries_out_of_scope: int = 0,
     contracts_out_of_scope: int = 0,
+    greeks_enrich_ok: bool | None = None,
+    greeks_enrich_error: str | None = None,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -712,6 +733,14 @@ def _build_note(
     + contracts first" (the registry IS populated; the operator's scope excluded
     everything). Stored bars are never touched — the note says so. The zero
     defaults render byte-identically to before.
+
+    *greeks_enrich_ok* / *greeks_enrich_error* (DEC-GREEKS-ENRICH-OBSERVE-001):
+    a WHOLE-pass Greeks-enrichment failure (``greeks_enrich_ok is False``)
+    appends ", Greeks enrichment FAILED (<ErrorType>) — overlay re-attempted
+    next pull" to whichever base is built, so the swallowed pass is surfaced as
+    a pull outcome instead of one log line. ``True`` (pass completed —
+    per-target quarantines never flip it) and the ``None`` default (pass did
+    not run: dry-run) render byte-identically to before.
     """
     prefix = (
         "window ledger reload FAILED — running full re-verify pull (no skip); "
@@ -726,6 +755,12 @@ def _build_note(
     scope_suffix = (
         f", {expiries_out_of_scope} expiries out of scope skipped"
         if expiries_out_of_scope and contracts_selected
+        else ""
+    )
+    greeks_suffix = (
+        f", Greeks enrichment FAILED ({(greeks_enrich_error or 'error').split(':', 1)[0]}) "
+        "— overlay re-attempted next pull"
+        if greeks_enrich_ok is False
         else ""
     )
     if contracts_selected == 0 and contracts_out_of_scope:
@@ -775,7 +810,7 @@ def _build_note(
             f"pulled {windows} windows across {contracts_completed}/{contracts_selected} "
             f"contract(s){skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
         )
-    return f"{prefix}{base}{suffix}{scope_suffix}"
+    return f"{prefix}{base}{suffix}{scope_suffix}{greeks_suffix}"
 
 
 def _mark_complete(
@@ -888,6 +923,12 @@ def _run_phase(
     # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
     # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
     storm_breaker = None if dry_run else resolve_error_storm_breaker()
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
+    # phase and threaded into the FUTURES partial-window observe margin ONLY (an
+    # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
+    # window law. A dry-run threads the empty overlay (the ``capture_hook_factory``
+    # gating pattern); the loader never raises (missing/corrupt -> empty).
+    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
     # Mass-empty breaker CANARY (DEC-EMPTY-BREAKER-CANARY-001): armed ONLY for a
     # REAL live pull (a dry-run threads None — the same gating as the storm
     # breaker above). Before the mid-run EmptySettleBreaker halts the whole F&O
@@ -953,6 +994,7 @@ def _run_phase(
                     capture_hook_factory=capture_hook_factory,
                     write_pool=write_pool,
                     fetch_pipeline=fetch_pipeline,
+                    observed_holidays=observed_holidays,
                     breaker_health_probe=breaker_canary,
                     storm_breaker=storm_breaker,
                 )
@@ -1187,6 +1229,41 @@ def _resolve_minute_windows(
     return windows
 
 
+@dataclass(frozen=True, slots=True)
+class _GreeksEnrichOutcome:
+    """The honest outcome of one post-pull Greeks-enrichment pass.
+
+    DEC-GREEKS-ENRICH-OBSERVE-001 — the tiny value the fully-guarded
+    :func:`_enrich_greeks_from_minute` wrapper returns so
+    :func:`pull_contract_candles` can surface the pass on the report + note
+    instead of one swallowed log line.
+
+    Attributes
+    ----------
+    ok
+        ``True`` = the pass COMPLETED (per-target quarantines ride
+        :attr:`errored_targets`, they never flip ``ok`` — one corrupt contract
+        must not read as a whole-pass failure); ``False`` = the WHOLE pass
+        failed (see :attr:`error`); ``None`` = the pass did not run (dry-run).
+    error
+        ``f"{type(exc).__name__}: {exc}"`` on a whole-pass failure; ``None``
+        otherwise.
+    errored_targets
+        The driver's per-target quarantine tally (the success branch's
+        ``report.errored``); ``0`` on a whole-pass failure / not-run.
+    """
+
+    ok: bool | None
+    error: str | None
+    errored_targets: int
+
+
+#: The "pass did not run" outcome (dry-run — nothing was written to enrich).
+_GREEKS_NOT_RUN: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
+    ok=None, error=None, errored_targets=0
+)
+
+
 def _heal_lake_after_pull(
     *,
     rebuilt: Sequence[_RebuiltContract],
@@ -1264,7 +1341,7 @@ def _enrich_greeks_from_minute(
     rebuilt: Sequence[_RebuiltContract],
     windows: dict[str, tuple[date, date]],
     lake_root: Path,
-) -> None:
+) -> _GreeksEnrichOutcome:
     """Post-pull Greeks enrichment over the just-written option 1-minute — best-effort.
 
     ``greeks_enrich_after_pull`` (DEC-GREEKS-ENGINE-PR2B-001 /
@@ -1289,6 +1366,15 @@ def _enrich_greeks_from_minute(
     (stamp-driven, idempotent — Golden Rule #7/#10). Per-contract errors are
     additionally quarantined inside the driver, so one bad contract never
     sinks the pass.
+
+    Returns
+    -------
+    _GreeksEnrichOutcome
+        The honest pass verdict (DEC-GREEKS-ENRICH-OBSERVE-001): ``ok=True`` +
+        the driver's per-target ``errored`` tally when the pass COMPLETED
+        (per-target quarantines never flip ``ok``), or ``ok=False`` +
+        ``"ErrorType: message"`` when the whole pass failed — surfaced on the
+        report/note by the caller, never only a log line.
     """
     try:
         from brutex.data.greeks_enrich import (
@@ -1331,9 +1417,15 @@ def _enrich_greeks_from_minute(
             bars_solved=report.bars_solved,
             bars_null=report.bars_null,
             bars_reused=report.bars_reused,
+            spot_reads=report.spot_reads,
+            spot_hits=report.spot_hits,
         )
+        return _GreeksEnrichOutcome(ok=True, error=None, errored_targets=report.errored)
     except Exception as exc:
         _LOG.error("fno.greeks_enrich.error", error=str(exc))
+        return _GreeksEnrichOutcome(
+            ok=False, error=f"{type(exc).__name__}: {exc}", errored_targets=0
+        )
 
 
 def pull_contract_candles(
@@ -1636,6 +1728,7 @@ def pull_contract_candles(
     # here (``_derive_daily_from_minute``) is REMOVED — derived data (intraday TFs +
     # the derived ``1day``) is written ONLY by the pipeline's final prebuild phase
     # (brutex.dashboard.pipeline_prebuild), strictly after a fully-successful fetch.
+    greeks_outcome = _GREEKS_NOT_RUN
     if not dry_run:
         # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
         # Greeks enrichment below (and the pipeline's later prebuild phase)
@@ -1646,8 +1739,11 @@ def pull_contract_candles(
         # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
         # underlying spot, at the post-drain seam. Best-effort: NEVER fails the pull
         # (fully guarded inside); FUT legs never get Greeks; skipped on a dry-run
-        # (nothing was written).
-        _enrich_greeks_from_minute(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
+        # (nothing was written — the outcome honestly stays "did not run"). The
+        # pass verdict rides the report + note (DEC-GREEKS-ENRICH-OBSERVE-001).
+        greeks_outcome = _enrich_greeks_from_minute(
+            rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root
+        )
 
     # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
     # "historically complete" once its 1-minute landed clean — the only vendor phase).
@@ -1666,6 +1762,8 @@ def pull_contract_candles(
         ledger_load_failed=minute.ledger_load_failed,
         expiries_out_of_scope=scoped.expiries_out_of_scope,
         contracts_out_of_scope=scoped.contracts_out_of_scope,
+        greeks_enrich_ok=greeks_outcome.ok,
+        greeks_enrich_error=greeks_outcome.error,
     )
     return HistoricalPullReport(
         dry_run=dry_run,
@@ -1694,6 +1792,11 @@ def pull_contract_candles(
         # DEC-FNO-EXPIRY-SCOPE-001: the honest out-of-scope tallies (0/0 unscoped).
         expiries_out_of_scope=scoped.expiries_out_of_scope,
         contracts_out_of_scope=scoped.contracts_out_of_scope,
+        # DEC-GREEKS-ENRICH-OBSERVE-001: the post-pull Greeks pass verdict (None on
+        # a dry-run — the pass never ran; per-target quarantines never flip ok).
+        greeks_enrich_ok=greeks_outcome.ok,
+        greeks_enrich_error=greeks_outcome.error,
+        greeks_targets_errored=greeks_outcome.errored_targets,
     )
 
 

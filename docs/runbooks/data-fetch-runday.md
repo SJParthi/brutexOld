@@ -2,11 +2,12 @@
 
 > **Target audience:** the operator (sjparthi) on the day Groww access is
 > first enabled, and any Claude session driving the first real ingest.
-> **Time required:** ~10 min operator setup + ~1-2 h first full index pull
-> (90-day intraday chunks per CLAUDE.md §6); minutes for incremental re-runs.
-> **Prerequisites:** active Groww trade-api access, a Groww API key + TOTP
-> shared secret, and an environment whose **network policy allows the Groww
-> hosts**.
+> **Time required:** ~10 min operator setup + hours for the first full index
+> pull (1-minute tiles in 30-day vendor chunks per CLAUDE.md §6); minutes for
+> incremental re-runs.
+> **Prerequisites:** active Groww trade-api access, the AWS-SSM-seeded
+> credentials (DEC-AWS-ONLY-CREDS-001 — see §1), and an environment whose
+> **network policy allows the Groww hosts**.
 
 This runbook is the single-paste recipe for the operator directive
 (2026-05-29): *"pulling entire instruments, totp, all expiries, all
@@ -16,13 +17,17 @@ It honors CLAUDE.md §2 rule 6 (rate-limit safety), §6 (verified vendor
 facts), and Golden Rule #1 (no hallucination — every value below is
 traceable to the cited file).
 
-> **⚠️ Reconciliation banner (DEC-DHAN-DOC-RECONCILE-001, 2026-06-02):** the
-> live vendor is **Groww** (DEC-GROWW-DHAN-REVERT-001, ADR-0002).
-> The §0–§2 + §6 auth / host / setup steps below are Groww-correct. The exact
-> `brutex fetch` CLI flags in §3–§4 are **pending a live-CLI
-> re-verification** (tracked follow-up): the authoritative live-pull path today
-> is the dashboard **`/universe` "Pull the Universe"** panel + the
-> **`/credentials`** page (live pulls enable from the UI; MIGRATION #261-#267).
+> **✅ Live-CLI verified (2026-07-03):** the `fetch` flag list + the §3–§4
+> runtime behaviour in this runbook were captured from
+> `python -m brutex --help` / `python -m brutex fetch --help` and exercised
+> end-to-end (`fetch --dry-run`) on the branch-base commit (`3914b478…`) — see
+> `## Verification evidence` below. This supersedes the
+> "§3–§4 flags pending re-verification" banner of DEC-DHAN-DOC-RECONCILE-001
+> (2026-06-02). The authoritative LIVE-pull surface remains the dashboard
+> **`/universe` "Pull · full pipeline"** button (DEC-ONE-CLICK-PIPELINE-001
+> #872 / DEC-PIPELINE-AUTOPREBUILD-001 #1145); the `/credentials` page named
+> by the old banner was REMOVED — credentials are AWS-SSM-only
+> (DEC-AWS-ONLY-CREDS-001).
 
 ---
 
@@ -34,7 +39,7 @@ by three checks, two of which only the operator can clear:
 | Wall | Proof | Who clears it |
 |------|-------|---------------|
 | Network policy denies Groww hosts | a `curl -I` against the Groww instrument-master / API host returns `HTTP 403 host_not_allowed` when blocked | **operator** (environment network policy) |
-| No Groww credentials | `BRUTEX_GROWW_API_KEY` + `BRUTEX_GROWW_TOTP_SECRET` both unset | **operator** (env vars, or the dashboard `/credentials` page) |
+| No Groww credentials | AWS SSM parameters not seeded / AWS credentials not usable (DEC-AWS-ONLY-CREDS-001) | **operator** (`aws configure`; seed the SecureStrings + deploy `deploy/aws_token_minter/deploy.sh`) |
 | Runtime deps not installed | no `.venv`; `brutex` import fails | Claude / `make setup` (PyPI is reachable) |
 
 PyPI itself **is** reachable (`curl -I https://pypi.org/simple/` → `HTTP 200`),
@@ -55,20 +60,26 @@ so only the Groww road and the keys are operator-side.
    See https://code.claude.com/docs/en/claude-code-on-the-web for how
    network policies are chosen at environment-creation time.
 
-3. **Set the two credentials** as environment variables (never commit them;
-   the dashboard `/credentials` page can also store them):
-   ```
-   BRUTEX_GROWW_API_KEY=<Groww API key from the trade-api console>
-   BRUTEX_GROWW_TOTP_SECRET=<your Groww TOTP shared secret>
-   ```
-   Full var reference: `docs/runbooks/ENV_VARS.md` §5.
+3. **Seed the credentials into AWS Parameter Store** (never commit them, never
+   env vars — DEC-AWS-ONLY-CREDS-001; the old dashboard `/credentials` page was
+   REMOVED). Store the api-key + TOTP secret as SecureStrings at
+   `/tickvault/prod/groww/api-key` / `/tickvault/prod/groww/totp-secret`
+   (region `ap-south-1`), deploy the Lambda token minter that owns
+   `/tickvault/prod/groww/access-token` (`deploy/aws_token_minter/deploy.sh`),
+   then give the pull box usable AWS credentials (`aws configure` /
+   `AWS_PROFILE` — read-only `ssm:GetParameter` + `kms:Decrypt`).
+   Full var reference: `docs/runbooks/ENV_VARS.md` §5; broker setup:
+   `docs/runbooks/aws-token-broker.md`.
 
-4. (Optional) **Arm Telegram alerts** so the run reports to your phone:
+4. (Optional) **Arm Telegram alerts** so the run reports to your phone (all
+   three vars are required when enabled — `notifications/telegram.py:91-93`):
    ```
    BRUTEX_TELEGRAM_ENABLED=true
    BRUTEX_TELEGRAM_BOT_TOKEN=<bot token>
+   BRUTEX_TELEGRAM_CHAT_ID=<numeric chat id>
    ```
-   Setup: `docs/runbooks/telegram-setup.md`.
+   Setup: `docs/runbooks/telegram-setup.md`; what each alert means:
+   `docs/runbooks/critical-alerts.md`.
 
 ---
 
@@ -90,66 +101,72 @@ DEC-CLONE-RUN-002 (MIGRATION #297).
 
 | Surface you asked for | Command | Notes / source |
 |-----------------------|---------|----------------|
-| **Prove the pipe (no creds)** | `.venv/bin/python -m brutex fetch --dry-run` | synthetic candles → real Parquet sink; offline smoke |
-| **Probe Groww data shape** | `.venv/bin/python -m brutex fetch --inspect` | per-timeframe pre/regular/post-market bar counts + grid alignment (IST) |
-| **Entire instrument master** | (universe ingest — see §4) | public CSV, no auth; `InstrumentMasterFetcher` (`instruments.py`) |
-| **All expiries** | (universe ingest — see §4) | `ExpiryFetcher` (`expiries.py`) — F&O underlyings |
-| **All contracts** | (universe ingest — see §4) | `ContractFetcher` (`contracts.py`) |
-| **NIFTY 50 · BANKNIFTY · SENSEX, all timeframes, current year** | `.venv/bin/python -m brutex fetch` | `BRUTE_FORCE_INDEX_SYMBOLS` = `NSE-NIFTY, NSE-BANKNIFTY, BSE-SENSEX`; `--interval all`; default `--start` = Jan 1 this year (`cli.py:512`) |
+| **Prove the pipe (no creds)** | `.venv/bin/python -m brutex fetch --dry-run` | synthetic candles → real Parquet sink into an EPHEMERAL temp lake (production lake untouched); offline smoke |
+| **Probe Groww data shape** | `.venv/bin/python -m brutex fetch --inspect` | flag parses, but the runtime prints "`--inspect` is not yet ported to the Groww adapter — running to a NullBarSink (no persistence)" (`cli.py:2916-2921`); the parser-help's per-timeframe-counts report is NOT produced today |
+| **Entire instrument master** | `.venv/bin/python -m brutex fetch --instruments` | keyless public CSV — loads the master only, prints counts, exits (no candles) |
+| **All expiries + all contracts** | (dashboard pipeline — see §4) | metadata phase of `/universe` "Pull · full pipeline" (Groww `get_expiries` → `get_contracts`) |
+| **NIFTY 50 · BANKNIFTY · SENSEX, full history** | `.venv/bin/python -m brutex fetch` | `BRUTE_FORCE_INDICES` = `NSE-NIFTY, NSE-BANKNIFTY, BSE-SENSEX`; defaults below |
 
 Defaults for the index pull (no flags needed for the run-day ask):
-- **symbols:** the 3 brute-force indices (`ingest.py:37`)
-- **interval:** `all` → every native Groww timeframe (`chunks.ALL_GROWW_INTERVALS`)
-- **start:** Jan 1 of the current year, UTC (`cli.py:512`)
+- **symbols:** the 3 brute-force indices (`brutex/universe.py:118`
+  `BRUTE_FORCE_INDICES`)
+- **interval:** `all` → `1minute` + `1day`, BOTH vendor-FETCHED on this
+  vestigial CLI path (`cli.py:2267` `_resolve_fetch_intervals` — its own
+  comment: the DASHBOARD pipeline is what fetches 1-minute ONLY and DERIVES
+  `1day`, DEC-1MINUTE-ONLY-DERIVE-1DAY-001; `brutex fetch` never derives
+  mid-pull). `--interval` accepts exactly `1minute` / `1day` / `1m` / `1d` /
+  `all`; anything else errors. The 19 intraday TFs are DERIVED from the
+  stored 1-minute, never vendor-fetched — NOT "every native Groww timeframe".
+- **start:** `2020-01-01` — the pull floor `GROWW_HISTORY_FLOOR`
+  (`pull_controller.py:137`; DEC-PULL-FLOOR-2020-001), applied at
+  `cli.py:2886-2893`. The `--start` parser help still says "Jan 1 of this
+  year" (`cli.py:560`) — a known help-text drift (code nit, tracked
+  separately); the CODE default is the 2020 floor.
 - **end:** now, UTC
-- **chunking:** per-interval window per CLAUDE.md §6 (1m/2m/3m/5m = 30d, 10m/15m/30m = 90d, 1h/4h/1d = 180d)
-- **rate limit:** adapter caps at the §6 safety factor; the 92-chunk
-  first run is < 0.1% of the 100k/day quota.
+- **chunking:** 1-minute tiles in 30-day vendor chunks (CLAUDE.md §6 interval
+  tier table). `--window-days` is accepted but IGNORED on Groww
+  (`cli.py:2894-2899`).
+- **rate limit:** the shared `RateController` paces at the production
+  **8 r/s** ceiling (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`,
+  DEC-GROWW-RATE-CEILING-8-002; AIMD steps down toward soft floor 3 / deep
+  floor 1 on 429s) under the operator-confirmed **500 req/min HARD governor
+  — there is NO daily quota** (DEC-GROWW-RATE-PERMIN-001, 2026-06-13). The
+  per-second backtesting cap itself remains vendor-UNVERIFIED (CLAUDE.md §2
+  Rule 6).
 
 ---
 
 ## 4. Universe ingest (instruments + expiries + contracts)
 
-A single turnkey command pulls the **entire** lake surface — instrument
-master + all expiries + all contracts — and then the 3 index candle series,
-all in one invocation (DEC-FETCH-UNIVERSE-001, MIGRATION #299):
+> **⚠️ `fetch --universe` is RETIRED — runtime-refused.** The flag still
+> *parses* (the parser help at `cli.py:598-611` still describes the old
+> three-phase ingest — a known help-text drift, tracked as a code nit), but
+> `cmd_fetch` refuses it and exits `EXIT_USER_ERROR` with:
+>
+> > `--universe is retired (legacy three-phase ingest removed); use `brutex
+> > fetch --instruments` to load the master, then the /universe dashboard
+> > buttons to pull spot + options`
+>
+> (`cli.py:2901-2914`; the auto-resume argv validator likewise rejects it.)
+
+The replacement paths:
 
 ```bash
-# LIVE (Groww-auth gated): instruments → expiries → contracts → index candles
-.venv/bin/python -m brutex fetch --universe
-
-# OFFLINE proof (no creds, no network): synthetic instruments/expiries/contracts
-# through the REAL parse + sink pipeline, then synthetic index candles:
-.venv/bin/python -m brutex fetch --universe --dry-run
+# Instrument master ONLY — keyless public CSV, no vendor API keys, no candles:
+.venv/bin/python -m brutex fetch --instruments
 ```
 
-`--universe` runs the LAKE-surface discovery pass **before** the candle
-ingest, reusing the adapter primitives (`InstrumentMasterFetcher` →
-`ExpiryFetcher` → `ContractFetcher` via `universe_ingest.run_universe_ingest`):
-
-| Surface | Primitive | Source |
-|---------|-----------|--------|
-| Instrument master | `InstrumentMasterFetcher` (`instruments.py`) | public CSV, no auth |
-| Expiries (per underlying / year) | `ExpiryFetcher` (`expiries.py`) | Groww `get_expiries`, FNO from 2020 |
-| Contracts (per expiry) | `ContractFetcher` (`contracts.py`) | Groww `get_contracts` + master enrichment |
+For the **full universe** — spot 1-minute → expiries+contracts metadata →
+F&O historical candles → the ONE automatic FINAL timeframe-prebuild stage —
+use the dashboard **`/universe` "Pull · full pipeline"** button
+(`POST /api/v1/universe/pull-pipeline`; DEC-ONE-CLICK-PIPELINE-001 #872,
+DEC-PIPELINE-AUTOPREBUILD-001 #1145). The metadata phase resolves expiries +
+contracts via Groww `get_expiries` → `get_contracts`
+(`adapters/groww/contracts.py`).
 
 Scope (Golden Rule #3): this populates the **LAKE only** — the brute-force
 ENGINE stays the 3 indices; the discovered F&O universe is `REFERENCE_ONLY`
 (DEC-P0-063, MIGRATION #200).
-
-> Honest envelope: the LIVE `--universe` path needs the §1 operator unblock
-> (network policy + TOTP creds). The `--dry-run` path additionally needs the
-> `fno_math` kernel built (`make setup`) because the DuckDB `InstrumentStore`
-> imports it transitively. The pure orchestration core is unit-tested offline
-> in `tests/unit/test_groww_universe_ingest.py`.
-
-Optionally, the standalone discovery script still emits JSON inventories of
-the complete NSE+BSE universe (no auth, no lake write) for a quick eyeball:
-
-```bash
-.venv/bin/python scripts/groww_universe_discovery.py
-#   → docs/groww/universe/0[1-5]_*.json
-```
 
 ---
 
@@ -173,10 +190,10 @@ every new Claude session, so you see live state with zero clicks.
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `HTTP 403 host_not_allowed` | network policy still denies Groww | re-check §1 step 2 |
-| auth failure / `HTTP 401` | `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET` unset or wrong (the per-session TOTP code could not be minted/exchanged) | §1 step 3; re-check the API key + TOTP secret |
+| auth failure / `HTTP 401` | SSM api-key / totp-secret parameter wrong or unseeded, or the AWS reader lacks `ssm:GetParameter` + `kms:Decrypt` (the per-session TOTP code could not be minted/exchanged) | §1 step 3; re-check the SecureStrings + the IAM policy (`docs/runbooks/aws-token-broker.md` §2) |
 | `ModuleNotFoundError` on import | `[data,ui]` extras not installed | `uv pip install --python .venv -e ".[data,ui]"` |
 | `ModuleNotFoundError: fno_math` (only on engine paths) | Rust kernel not built | `make setup`, or `cd rust/fno-math && maturin develop --release` |
-| Rate-limit exception (`HTTP 429`) | burst over the 5 r/s Groww cap | `rate_control` auto-backs-off 5→4→3; retry |
+| Rate-limit exception (`HTTP 429`) | burst over the vendor's tolerance at the 8 r/s production ceiling (CLAUDE.md §2 Rule 6) | the AIMD `RateController` auto-steps-down toward soft floor 3 / deep floor 1 and recovers once the storm clears; retry |
 | INDIA VIX missing from CSV | Phase 0 HARD-GATE probe failure | escalate — CLAUDE.md §6 (INDIA VIX presence UNVERIFIED) |
 
 ---
@@ -205,11 +222,35 @@ write no real data and pace no real account requests).
 
 ---
 
-## 7. Decision trail
+## 7. Verification evidence (2026-07-03, branch-base capture)
+
+Captured on the branch-base commit `3914b478…` with a python-3.12 venv +
+locally-built `trading_core` / `fno_math` wheels (`PYTHONPATH=<repo root>`):
+
+- `python -m brutex --help` → subcommands
+  `{version,status,audit,catalog,reopen-skipped,auth,dashboard,run,fetch,
+  doctor,monitor,notify,wipe,sweep,sweep-all,sweep-daemon,supervisor,results,
+  options-sim,cascade,verify-lookahead,sweep-verify,sweep-heal}`.
+- `python -m brutex fetch --help` → exactly the flags documented in §3–§4
+  (`--lake-root --start --end --interval --window-days --dry-run --inspect
+  --rows-per-chunk --universe --instruments --no-auto-retry --retry-failed
+  --until-clean --until-clean-rounds --max-retry-minutes`).
+- `fetch --dry-run` (scratch lake) → **windows=282, bars_appended=1410,
+  failed_pairs=0, transient=0** across NIFTY/BANKNIFTY/SENSEX
+  (`1minute` + `1day` pairs), closing line
+  "`dry-run — production lake untouched`" (the ephemeral-lake isolation of
+  DEC-DRYRUN-LAKE-ISOLATION-001).
+- The §3 runtime-truth claims (`--universe` refusal, `--inspect` NullBarSink
+  notice, `--window-days` ignored, the 2020-01-01 start floor) were verified
+  against `brutex/cli.py` on the same commit (line anchors cited inline).
+
+---
+
+## 8. Decision trail
 
 - **Network/creds blocker + unblock path:** this runbook + DEC-SESSION-HOOK-LIVESTATE-001 (MIGRATION #298).
 - **Cross-process pull single-flight (per lake) + CLI wiring + two-lake-root residual:** DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION #996); `brutex/adapters/groww/pull_singleflight.py`, `brutex/cli.py` (`_enter_pull_singleflight`).
-- **Index symbols + scope:** Golden Rule #3; `ingest.py:37`.
-- **Rate-limit + chunk windows:** CLAUDE.md §6.
-- **Auth (Groww API key + TOTP shared secret):** CLAUDE.md §6; `brutex/adapters/groww/auth.py`.
+- **Index symbols + scope:** Golden Rule #3; `brutex/universe.py:118` (`BRUTE_FORCE_INDICES`).
+- **Rate-limit + chunk windows:** CLAUDE.md §2 Rule 6 + §6 (8 r/s ceiling, 500 req/min governor, NO daily quota).
+- **Auth (AWS-SSM-only credentials + shared token broker):** DEC-AWS-ONLY-CREDS-001 (MIGRATION #1065); `brutex/config/credentials_aws.py`, `brutex/adapters/groww/token_store_aws.py`; CLAUDE.md §6.
 - **Universe expansion to F&O lake:** DEC-P0-063 (MIGRATION #200).

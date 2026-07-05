@@ -73,8 +73,10 @@ _MINUTES_PER_YEAR: Final[float] = 365.25 * 24.0 * 60.0
 #: without an explicit opt-in — the honest "this is a BIG sweep, raise the cap on
 #: purpose" guardrail (Golden Rule #10, no-illusion limits). For scale:
 #: ``C(60,3)=34,220``; ``C(60,4)=487,635``; ``C(60,5)=5,461,512`` — so the default
-#: admits a full-vocab K≤3 sweep and forces a conscious choice beyond that, rather
-#: than silently launching a multi-hundred-thousand-combo run.
+#: admits a full-vocab K≤3 sweep and forces a conscious choice beyond that (K=4
+#: over the full 60 already exceeds the cap and is loudly REFUSED — pinned by
+#: ``test_default_bits_k4_hits_loud_refusal_cap``), rather than silently
+#: launching a multi-100k-combo run.
 DEFAULT_MAX_COMBOS: Final[int] = 100_000
 
 

@@ -129,7 +129,9 @@ def test_rolling_weekly_no_prior_history_returns_none() -> None:
 def test_rolling_weekly_breaks_when_no_prior_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
     # Force the defensive `prev is None` break (no trading day in the lookback).
     today = _trading_days(date(2024, 1, 2), 1)[0]
-    monkeypatch.setattr(weekly_anchors, "find_prev_trading_day", lambda _d: None)
+    monkeypatch.setattr(
+        weekly_anchors, "find_prev_trading_day", lambda _d, observed=frozenset(): None
+    )
     assert weekly_anchors.rolling_weekly_anchor(today, {}) is None
 
 
@@ -193,7 +195,9 @@ def test_weekly_static_stops_at_target_week_boundary() -> None:
 
 def test_weekly_static_breaks_when_no_prior_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
     today = _trading_days(date(2024, 1, 2), 1)[0]
-    monkeypatch.setattr(weekly_anchors, "find_prev_trading_day", lambda _d: None)
+    monkeypatch.setattr(
+        weekly_anchors, "find_prev_trading_day", lambda _d, observed=frozenset(): None
+    )
     assert weekly_anchors.weekly_static_anchor(today, {}) is None
 
 
@@ -204,7 +208,7 @@ def test_weekly_static_guard_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None
     # guard runs out and the cold-start `None` is returned.
     today = _trading_days(date(2024, 1, 9), 1)[0]  # mid-week (Tue)
     monkeypatch.setattr(
-        weekly_anchors, "find_prev_trading_day", lambda _d: today
+        weekly_anchors, "find_prev_trading_day", lambda _d, observed=frozenset(): today
     )  # same-week forever
     assert weekly_anchors.weekly_static_anchor(today, {}) is None
 
@@ -330,3 +334,46 @@ def test_fib_anchor_is_frozen_dataclass() -> None:
     )
     with pytest.raises((AttributeError, TypeError)):
         anchor.high_paisa = 99  # type: ignore[misc]
+
+
+# ─────────── observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001) ───────────
+
+
+def test_rolling_weekly_anchor_observed_subtraction() -> None:
+    # An overlaid day is excluded from the trailing-5 collection — the window
+    # extends one session earlier instead (remove-only).
+    days = _trading_days(date(2026, 5, 4), 7)
+    candles = _candles(days)
+    today = days[6]
+    overlaid = days[5]  # the most recent prior session becomes an observed holiday
+    base = weekly_anchors.rolling_weekly_anchor(today, candles)
+    shifted = weekly_anchors.rolling_weekly_anchor(today, candles, observed=frozenset({overlaid}))
+    assert base is not None and shifted is not None
+    assert overlaid in base.source_days
+    assert overlaid not in shifted.source_days
+    assert shifted.source_days == tuple(days[0:5])  # one session earlier on both ends
+
+
+def test_weekly_static_anchor_observed_subtraction() -> None:
+    # Anchor week = the last completed ISO week; an overlaid member of that week
+    # cannot contribute to its High/Low.
+    days = _trading_days(date(2026, 5, 4), 8)  # Mon..Fri (wk1) + Mon..Wed (wk2)
+    candles = _candles(days)
+    today = days[6]  # inside week 2
+    overlaid = days[4]  # Friday of the completed week — the max-High holder
+    base = weekly_anchors.weekly_static_anchor(today, candles)
+    shifted = weekly_anchors.weekly_static_anchor(today, candles, observed=frozenset({overlaid}))
+    assert base is not None and shifted is not None
+    assert overlaid in base.source_days
+    assert overlaid not in shifted.source_days
+    assert shifted.high_paisa < base.high_paisa  # the overlaid day's high dropped out
+
+
+def test_anchor_today_overlaid_raises_valueerror() -> None:
+    days = _trading_days(date(2026, 5, 4), 6)
+    candles = _candles(days)
+    today = days[5]
+    with pytest.raises(ValueError, match="not a trading day"):
+        weekly_anchors.rolling_weekly_anchor(today, candles, observed=frozenset({today}))
+    with pytest.raises(ValueError, match="not a trading day"):
+        weekly_anchors.weekly_static_anchor(today, candles, observed=frozenset({today}))

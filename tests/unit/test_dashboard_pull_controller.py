@@ -2686,3 +2686,131 @@ class TestMassEmptyCircuitBreaker:
         assert report.verdict.kind == "clean"
         assert report.settled_skipped == 0
         assert report.verdict.action == "No action needed."
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Observed-sessions overlay arming (DEC-CALENDAR-OBSERVED-SESSIONS-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _write_overlay_sidecar(lake_root: Path, day: str = "2026-05-12") -> frozenset[date]:
+    """Write a minimal valid overlay sidecar; return the expected loaded set."""
+    import json
+
+    from brutex.calendars.observed_sessions import (
+        OBSERVED_LABEL,
+        OBSERVED_OVERLAY_VERSION,
+        overlay_path,
+    )
+
+    path = overlay_path(lake_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": OBSERVED_OVERLAY_VERSION,
+                "entries": [
+                    {
+                        "date": day,
+                        "detected_at": "2026-07-04T00:00:00+00:00",
+                        "month": day[:7],
+                        "label": OBSERVED_LABEL,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return frozenset({date.fromisoformat(day)})
+
+
+class TestObservedHolidaysArming:
+    """The overlay is loaded ONCE per pull and threaded into the ingest spine —
+    live pull only (a dry-run threads the empty overlay, mirroring the
+    ``detect_completeness_gaps`` gating pattern)."""
+
+    def test_pull_all_spot_dry_run_threads_empty_overlay(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+
+        expected = _write_overlay_sidecar(tmp_path)
+        assert expected  # the sidecar IS present — the dry-run must still ignore it
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("observed_holidays"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert captured
+        assert all(observed == frozenset() for observed in captured)
+
+    def test_pull_all_spot_live_threads_loaded_overlay(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+
+        expected = _write_overlay_sidecar(tmp_path)
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("observed_holidays"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert captured
+        assert all(observed == expected for observed in captured)
+
+    def test_pull_candles_live_threads_loaded_overlay(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+
+        expected = _write_overlay_sidecar(tmp_path)
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("observed_holidays"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert captured
+        assert all(observed == expected for observed in captured)
+
+    def test_pull_candles_dry_run_threads_empty_overlay(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.dashboard.pull_controller as pc
+
+        _write_overlay_sidecar(tmp_path)
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("observed_holidays"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(_index(), lake_root=tmp_path, dry_run=True)
+        assert captured
+        assert all(observed == frozenset() for observed in captured)

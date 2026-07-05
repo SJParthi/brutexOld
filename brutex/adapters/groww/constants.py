@@ -247,13 +247,24 @@ GROWW_HTTP_READ_TIMEOUT_S: Final[float] = 30.0
 #: ceiling. :func:`~brutex.adapters.groww.write_deadline.append_with_deadline` runs
 #: ``sink.append`` under this deadline so a hang raises a TRANSIENT
 #: :class:`~brutex.data.errors.WriteDeadlineExceeded` — the ingest spines DEFER that one
-#: window (record FAILED → re-pull next round) and the fetch lane is FREED. This bounds the
-#: WRITE itself (the merge/render/fsync/replace), DISTINCT from
-#: :data:`~brutex.data.partition_lock.DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS` (which bounds
-#: only the ``flock`` ACQUIRE before the write). 90 s is GENEROUS — a merely-SLOW
-#: deep-month merge (hundreds of ms typical; pathological deep partitions a few seconds)
-#: always completes well within it, but a true hang trips it in bounded time, far under the
-#: 600 s pull watchdog. NOT a vendor-documented limit; operator-tunable via
+#: window (record FAILED → re-pull next round) and the fetch lane is FREED. This deadline
+#: wraps the WHOLE ``sink.append`` — the ``flock`` ACQUIRE (bounded by
+#: :data:`~brutex.data.partition_lock.DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS`) PLUS the
+#: merge/render/fsync/replace — so the ORDERING INVARIANT
+#: (DEC-WRITE-DEADLINE-LOCK-ORDER-001) is: the lock-acquire default MUST stay strictly
+#: BELOW this value with real margin (75 s < 90 s, 15 s margin). When the lock bound sat
+#: ABOVE this deadline (the prior 120 s default), the lock bound was UNREACHABLE — this
+#: deadline abandoned the write thread at 90 s while it still blocked in the ``flock``
+#: poll loop, leaking the thread + lock fd instead of taking the clean
+#: :class:`~brutex.data.errors.PartitionLockTimeout` defer path. The ordering is pinned
+#: by ``tests/unit/test_write_deadline_lock_order.py`` (the two constants deliberately
+#: live in their own modules — ``brutex.data`` never imports ``brutex.adapters``); the
+#: env overrides (``BRUTEX_GROWW_WRITE_DEADLINE_S`` / ``BRUTEX_PARTITION_LOCK_TIMEOUT_S``)
+#: CAN re-invert it at runtime, which ``append_with_deadline`` WARNs about once per
+#: process at use time. 90 s is GENEROUS — a merely-SLOW deep-month merge (hundreds of ms
+#: typical; pathological deep partitions a few seconds) always completes well within it,
+#: but a true hang trips it in bounded time, far under the 600 s pull watchdog. NOT a
+#: vendor-documented limit; operator-tunable via
 #: :func:`~brutex.adapters.groww.write_deadline.resolve_write_deadline_seconds`
 #: (env ``BRUTEX_GROWW_WRITE_DEADLINE_S``).
 GROWW_WRITE_DEADLINE_S: Final[float] = 90.0

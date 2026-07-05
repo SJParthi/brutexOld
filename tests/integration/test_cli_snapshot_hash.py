@@ -50,6 +50,17 @@ _START = "2024-01-02"
 _END = "2024-01-03"
 
 
+@pytest.fixture(autouse=True)
+def _sequential_sweep_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the sequential path EXPLICITLY (ADR-0016 §6).
+
+    This suite's determinism previously rode the small-grid fallback only
+    incidentally (its grids are 1-tuple); the explicit ``=1`` opt-out makes the
+    sequential requirement survive any future grid widening.
+    """
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+
 def _bars() -> list[CandleBar]:
     out: list[CandleBar] = []
     for i in range(8):
