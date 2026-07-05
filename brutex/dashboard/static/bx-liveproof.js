@@ -396,6 +396,12 @@
         parts.push(key + "@" + v.checked_at_utc);
       }
     });
+    // Pull auto-resume refusal (DEC-PULL-INTENT-RESUME-001): a critical
+    // resume payload rides the SAME red banner + dismiss signature — one
+    // banner mechanism site-wide (§11 COMMON), never a second pill script.
+    if (data.resume && data.resume.level === "critical") {
+      parts.push("resume@" + data.resume.message);
+    }
     return parts.join("|");
   }
 
@@ -425,6 +431,12 @@
         body.appendChild(el("div", "bxlp-line", line));
       });
     });
+    if (data.resume && data.resume.level === "critical") {
+      // The backend message is rendered as textContent (never markup) — the
+      // same XSS-safe discipline as every other line in this widget.
+      body.appendChild(el("div", "bxlp-bhead", "pull auto-resume — CRITICAL"));
+      body.appendChild(el("div", "bxlp-line", data.resume.message));
+    }
     if (lastFailSignature !== dismissedSignature) {
       banner.classList.add("open");
     }
@@ -471,13 +483,22 @@
     if (!pill) {
       return;
     }
-    if (!data || data.present !== true || data.enabled === false) {
+    var resumeCritical = !!(data && data.resume && data.resume.level === "critical");
+    if (!data || ((data.present !== true || data.enabled === false) && !resumeCritical)) {
       // Not wired / escape hatch off → no invented state, no widget.
       pill.classList.remove("shown");
       var banner = document.getElementById(BANNER_ID);
       if (banner) {
         banner.classList.remove("open");
       }
+      return;
+    }
+    if (data.present !== true || data.enabled === false) {
+      // Live-proof not wired but a CRITICAL pull auto-resume payload exists
+      // (DEC-PULL-INTENT-RESUME-001): render ONLY the red banner — no invented
+      // live-proof pill state.
+      pill.classList.remove("shown");
+      renderBanner(data);
       return;
     }
     pill.classList.add("shown");

@@ -198,3 +198,73 @@ class TestBootNeverRaisesContract:
             enabled=True,
         )
         assert verdict is ResumeVerdict.RESUMED
+
+
+class TestIntentDecisionPointAtBootSeam:
+    """DEC-PULL-INTENT-RESUME-001 — the extended ``_start_auto_resume_on_boot``:
+    ONE decision point, driven end-to-end through the REAL daemon-thread seam
+    with a REAL ``PullIntentStore`` in a tmp lake root. Intent present ⇒ the
+    pipeline resume fires and the legacy CLI child is NEVER spawned; no intent
+    ⇒ the legacy spawn path is byte-identical."""
+
+    @staticmethod
+    def _wire_legacy_wants_to_fire(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        """Make the LEGACY path eager: env ON + an outstanding ledger + a spawn spy."""
+        import brutex.data.window_ledger_store as ledger_store
+
+        spawned: list[object] = []
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME_ON_BOOT", "1")
+        monkeypatch.setattr(ledger_store, "load_window_ledger", lambda _root: _OutstandingLedger())
+        monkeypatch.setattr(
+            cli,
+            "_spawn_auto_resume_pull",
+            lambda incomplete, lake_root, log: spawned.append(incomplete),
+        )
+        return spawned
+
+    def test_intent_present_fires_pipeline_and_never_spawns_cli_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        spawned = self._wire_legacy_wants_to_fire(monkeypatch)
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        fired = threading.Event()
+        log = mock.Mock()
+        cli._start_auto_resume_on_boot(tmp_path, log, intent_store=store, resume_pipeline=fired.set)
+        assert fired.wait(timeout=10.0), "the pipeline resume must fire on an intent boot"
+        # The daemon thread logs the verdict AFTER the resume — wait for it so the
+        # legacy-spawn assertion cannot race the thread body.
+        deadline = threading.Event()
+        for _ in range(1000):
+            if log.info.call_args_list:
+                break
+            deadline.wait(0.01)
+        assert spawned == [], "the legacy CLI child must NOT spawn on an intent boot"
+
+    def test_no_intent_keeps_legacy_spawn_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        from brutex.dashboard.pull_intent import PullIntentStore
+
+        spawned = self._wire_legacy_wants_to_fire(monkeypatch)
+        fired = threading.Event()
+        cli._start_auto_resume_on_boot(
+            tmp_path,
+            mock.Mock(),
+            intent_store=PullIntentStore(tmp_path),  # no intent file on disk
+            resume_pipeline=fired.set,
+        )
+        for _ in range(1000):
+            if spawned:
+                break
+            threading.Event().wait(0.01)
+        assert len(spawned) == 1, "no intent ⇒ the legacy resume spawn runs as before"
+        assert not fired.is_set(), "the pipeline resume must not fire without an intent"
