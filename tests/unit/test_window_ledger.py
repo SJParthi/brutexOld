@@ -1694,6 +1694,7 @@ class TestDegradedOldWindowInteraction:
         # A degraded (all-filtered) outcome NEVER rides the old-empty settle arm —
         # three demotions settle via the degraded threshold, not the expired stamp.
         ledger = WindowLedger()
+        status = ""
         for _ in range(EMPTY_TERMINAL_THRESHOLD):
             status = ledger.record(
                 _key(),
