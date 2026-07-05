@@ -36,7 +36,7 @@ boundary-filtered) 1-minute, so this single choke point covers all 21 TFs.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Final
@@ -119,6 +119,62 @@ def filter_intraday_session(bars: Sequence[CandleBar]) -> list[CandleBar]:
 #: mirroring :data:`~brutex.data.interior_gap_detect.INTERIOR_GAP` /
 #: :data:`~brutex.data.partial_window_detect.SUSPECTED_PARTIAL`.
 ALL_FILTERED: Final[str] = "ALL_FILTERED"
+
+#: The ONE structlog WARNING both ingest spines emit when a window's EVERY vendor
+#: bar was removed at the ingest filter boundary — the calendar-aware session
+#: filter (:func:`filter_to_trading_session`) **and/or** the future-bar drop
+#: (:func:`~brutex.adapters.ingest_common.drop_bars_after`,
+#: DEC-CANDLE-DROP-FUTURE-BAR-001). One shared event name so the operator greps
+#: a single string across spot + F&O (DEC-DATA-HONESTY-ALLFILTERED-SEED-001;
+#: CLAUDE.md §11 COMMON). ALWAYS emitted on the shape — visibility is never
+#: gated; only the ledger demotion is (mirrors the #1031 observe-vs-act split).
+ALL_FILTERED_WINDOW_EVENT: Final[str] = "ingest.window.all_bars_filtered"
+
+
+def is_all_filtered(raw_count: int, kept_count: int) -> bool:
+    """True iff the vendor returned bars but the filter boundary kept NONE.
+
+    The WHOLE-boundary discriminator (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
+    widening the session-filter-only :attr:`SessionFilterResult.all_filtered` of
+    DEC-INGEST-BOUNDARY-INTEGRITY-001): *kept_count* is the bar count AFTER the
+    session filter **and** the future-bar drop, so a window emptied by EITHER
+    stage is caught. Pure arithmetic — ``raw_count == 0`` is the genuine-EMPTY
+    channel (untouched), and any kept bar means the window has real storable
+    data. Never keyed on the sink's dedup count: a full-dedup re-pull keeps its
+    bars through the boundary and stays SUCCESS.
+    """
+    return raw_count > 0 and kept_count == 0
+
+
+def observe_all_filtered(
+    log: object,
+    *,
+    raw_count: int,
+    kept_count: int,
+    pull_id: str | None,
+    fields: Mapping[str, object],
+) -> bool:
+    """WARN (ALWAYS — visibility never gated) iff ALL bars were boundary-filtered; return the verdict.
+
+    The ONE shared wiring for :data:`ALL_FILTERED_WINDOW_EVENT` (CLAUDE.md §11
+    COMMON — both ingest spines call this, no copy). *fields* is the caller's
+    per-window structlog field dict (window bounds + series coordinates) so the
+    event carries the same identity every other window event does. Pure
+    arithmetic + one log call — nothing here can raise, so no guarded-error twin
+    event is needed (contrast the calendar-walking detectors). *log* is the
+    caller's structlog logger (duck-typed for ``.warning(event, **fields)``,
+    mirroring :func:`~brutex.data.interior_gap_detect.observe_interior_gap`).
+    """
+    verdict = is_all_filtered(raw_count, kept_count)
+    if verdict:
+        log.warning(  # type: ignore[attr-defined]  # duck-typed structlog logger
+            ALL_FILTERED_WINDOW_EVENT,
+            pull_id=pull_id,
+            raw_bars=raw_count,
+            kept_bars=kept_count,
+            **fields,
+        )
+    return verdict
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +274,7 @@ def filter_to_trading_session(bars: Sequence[CandleBar]) -> SessionFilterResult:
 
 __all__ = [
     "ALL_FILTERED",
+    "ALL_FILTERED_WINDOW_EVENT",
     "IST",
     "SESSION_CLOSE",
     "SESSION_EXEMPT_SYMBOLS",
@@ -227,5 +284,7 @@ __all__ = [
     "filter_to_trading_session",
     "format_ist_clock",
     "in_session",
+    "is_all_filtered",
     "is_session_exempt",
+    "observe_all_filtered",
 ]

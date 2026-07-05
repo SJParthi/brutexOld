@@ -124,7 +124,7 @@ from brutex.data.partial_window_detect import (
     observe_partial_window,
 )
 from brutex.data.raw_integrity_store import CaptureHookFactory
-from brutex.data.session import ALL_FILTERED, filter_to_trading_session
+from brutex.data.session import ALL_FILTERED, filter_to_trading_session, observe_all_filtered
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -766,7 +766,6 @@ def _process_option_window_tail(
     # session (pre-open/post-close AND non-trading-date leaks) are dropped before
     # the lake write; evening-muhurat / special-weekend bars are KEPT. Daily bars
     # carry no intraday time — deliberately unfiltered.
-    all_session_filtered = False
     if interval == _DAILY:
         bars = raw_bars
     else:
@@ -785,13 +784,30 @@ def _process_option_window_tail(
                 non_trading_date=session_verdict.dropped_non_trading_date,
                 **fields,
             )
-        all_session_filtered = session_verdict.all_filtered
     # Drop any bar timestamped on a date STRICTLY AFTER the clamped window end
     # (DEC-CANDLE-DROP-FUTURE-BAR-001): a vendor bar PAST the clamped bound would write a
     # PHANTOM FUTURE partition. ``key.end`` is the clamped end (``_clamped_window_key``); a
     # bar ON the boundary is KEPT, so this only ever removes an out-of-window / clock-skew
     # phantom, never a legitimate in-range bar (existing behaviour byte-unchanged).
     bars = drop_bars_after(bars, key.end)
+    # ALL-FILTERED at the WHOLE boundary (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
+    # widening DEC-INGEST-BOUNDARY-INTEGRITY-001's session-filter-only check): the
+    # kept count is read AFTER the session filter AND the future-bar drop, so a
+    # window emptied by EITHER stage is caught. The shared WARNING always fires
+    # on the shape and carries the window bounds (spot-parity triage fields);
+    # only the ledger demotion below is interval-gated.
+    all_boundary_filtered = observe_all_filtered(
+        _LOG,
+        raw_count=len(raw_bars),
+        kept_count=len(bars),
+        pull_id=pull_id,
+        fields={
+            "window_start": key.start.isoformat(),
+            "window_end": key.end.isoformat(),
+            **fields,
+        },
+    )
+    all_filtered = interval != _DAILY and all_boundary_filtered
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
@@ -871,20 +887,22 @@ def _process_option_window_tail(
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,
-            # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001): the vendor
-            # returned bars but EVERY one was session-filtered — a would-be SUCCESS
-            # with ZERO stored bars the skip rule would never revisit. This is the
+            # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001, boundary-
+            # widened by DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the vendor
+            # returned bars but EVERY one was removed at the filter boundary
+            # (session filter AND/OR future-bar drop) — a would-be SUCCESS with
+            # ZERO stored bars the skip rule would never revisit. This is the
             # F&O spine's ONLY demotion: #1031 deliberately kept the F&O
             # interior-gap/partial-window detectors observe-only (option sparsity is
             # indistinguishable from truncation), and that stance is PRESERVED —
-            # all-filtered is a narrower, INTRINSIC signal (vendor sent bars, every
-            # one out-of-session — not a liquidity heuristic), so it is UNgated
+            # all-filtered is a narrower, INTRINSIC signal (vendor sent bars, the
+            # boundary kept none — not a liquidity heuristic), so it is UNgated
             # here: the F&O dry-run client returns EMPTY candle payloads
             # (``raw_bars == 0`` → EMPTY, this flag can never fire offline).
             # Orthogonal to sink dedup — a full-dedup re-pull keeps ``bars``
             # non-empty and stays SUCCESS.
-            degraded=all_session_filtered,
-            degraded_reason=ALL_FILTERED if all_session_filtered else None,
+            degraded=all_filtered,
+            degraded_reason=ALL_FILTERED if all_filtered else None,
             old_window=raw.old_window,
             suppress_settle=suppress_settle,
         )
