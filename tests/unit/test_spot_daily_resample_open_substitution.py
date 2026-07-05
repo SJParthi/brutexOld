@@ -1,4 +1,4 @@
-"""Daily-open substitution observe — detector/emitter/guard (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001).
+"""Daily-open substitution observe — detector/emitter/guard (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001).
 
 The derived 1-day ``open`` silently substitutes the earliest PRESENT minute
 when the 09:15 IST bar is absent — the implicit ``open.first()`` inside
@@ -83,9 +83,7 @@ def _concat(*frames: pl.DataFrame) -> pl.DataFrame:
 
 class TestDetectDailyOpenSubstitutions:
     def test_full_session_not_flagged(self) -> None:
-        scan = detect_daily_open_substitutions(
-            _session_1m(date(2024, 1, 2)), before=_FAR_BEFORE
-        )
+        scan = detect_daily_open_substitutions(_session_1m(date(2024, 1, 2)), before=_FAR_BEFORE)
         assert scan == DailyOpenSubstitutionScan(substituted=(), sessions=1, muhurat_abstained=0)
         assert scan.count == 0
 
@@ -103,9 +101,7 @@ class TestDetectDailyOpenSubstitutions:
         cutoff ``resample_1m_to_daily`` applies, so the scan flags only sessions
         actually written as final daily bars."""
         d = date(2024, 1, 2)
-        scan = detect_daily_open_substitutions(
-            _session_1m(d, first_minute=time(9, 16)), before=d
-        )
+        scan = detect_daily_open_substitutions(_session_1m(d, first_minute=time(9, 16)), before=d)
         assert scan == DailyOpenSubstitutionScan(substituted=(), sessions=0, muhurat_abstained=0)
 
     def test_muhurat_evening_session_abstains(self) -> None:
@@ -298,7 +294,7 @@ class TestEmitDailyOpenSubstitutions:
         )
         with capture_logs() as logs:
             emit_daily_open_substitutions(scan, symbol="NSE-NIFTY", dense=False)
-        agg = [e for e in logs if e["event"] == "daily_open.substituted_aggregate"][0]
+        agg = next(e for e in logs if e["event"] == "daily_open.substituted_aggregate")
         assert (agg["sessions"], agg["muhurat_abstained"]) == (7, 2)
 
 

@@ -1,4 +1,4 @@
-"""Daily-open substitution wiring in the materialiser (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001).
+"""Daily-open substitution wiring in the materialiser (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001).
 
 Pins the ONE production wiring point of the observe-only scan:
 :func:`brutex.data.timeframe_materialize.materialize_lake_timeframes` runs
@@ -115,7 +115,9 @@ def test_materialize_spot_non_dense_aggregate_only(tmp_path: Path) -> None:
 def test_materialize_fno_kinds_never_scan(tmp_path: Path, kind: PrebuildKind) -> None:
     """The SPOT-ONLY pin: F&O kinds over the SAME 09:15-absent shape are never
     scanned — a deep-OTM contract's 09:15-absence is expected illiquidity."""
-    symbol = "NSE-NIFTY-30Jan25-FUT" if kind is PrebuildKind.FUTURES else "NSE-NIFTY-30Jan25-20000-CE"
+    symbol = (
+        "NSE-NIFTY-30Jan25-FUT" if kind is PrebuildKind.FUTURES else "NSE-NIFTY-30Jan25-20000-CE"
+    )
     _write_1m(tmp_path, segment="FNO", symbol=symbol)
     with capture_logs() as logs:
         result = materialize_lake_timeframes(

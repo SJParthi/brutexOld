@@ -128,7 +128,7 @@ __all__ = [
 ]
 
 #: Cap on per-(symbol, date) ``daily_open.substituted`` WARN lines per symbol
-#: per scan (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001; precedent: the #919
+#: per scan (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001; precedent: the #919
 #: silent-vanish logger's cap of 20). The aggregate event ALWAYS carries the
 #: TRUE count, so the cap never lies (Golden Rule #1).
 MAX_OPEN_SUBSTITUTION_WARNS: Final[int] = 20
@@ -182,7 +182,7 @@ def detect_daily_open_substitutions(
 ) -> DailyOpenSubstitutionScan:
     """Scan a 1-minute frame for sessions whose derived daily open is substituted.
 
-    Pure + read-only (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001): one O(sessions)
+    Pure + read-only (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): one O(sessions)
     group-by over the frame ALREADY in memory — zero extra lake I/O, and the
     frame is never mutated (stored bars stay byte-unchanged; golden-pinned).
     Applies the SAME forming-session cutoff :func:`resample_1m_to_daily` uses
@@ -240,7 +240,7 @@ def emit_daily_open_substitutions(
 ) -> None:
     """Emit the observe-only substitution log events for one symbol's scan.
 
-    Log taxonomy (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001):
+    Log taxonomy (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001):
 
     * ``daily_open.substituted`` — WARN per (symbol, date), ONLY for a DENSE
       (index) symbol, capped at :data:`MAX_OPEN_SUBSTITUTION_WARNS` per scan.
@@ -281,7 +281,7 @@ def observe_daily_open_substitutions(
 ) -> int:
     """Detect + emit in ONE guarded call — the production entry point.
 
-    OBSERVE-ONLY by construction (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001): the
+    OBSERVE-ONLY by construction (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): the
     WHOLE detect+emit pass runs inside one ``try/except``, so an unexpected
     detector/emitter error (a dtype quirk, a poisoned frame) can NEVER fail
     the prebuild that hosts it — it logs ``daily_open.substitution_log_error``

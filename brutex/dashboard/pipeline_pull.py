@@ -359,7 +359,7 @@ class PipelinePullReport:
         fine-grained, the probe was unavailable, or the phase did not run.
     prebuild_opens_substituted
         The prebuild's observe-only daily-open substitution total
-        (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001 —
+        (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001 —
         :attr:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome.opens_substituted`):
         (symbol, date) SESSIONS whose derived daily open silently substituted
         a non-09:15 first minute, summed over the prebuild's SPOT targets
@@ -516,7 +516,7 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         # these symbols were verified UNCHANGED and skipped, not built-with-0.
         clause += f", {prebuild.unchanged_skips} unchanged symbol(s) skipped (incremental)"
     if prebuild.opens_substituted:
-        # DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001: the observe-only daily-open
+        # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: the observe-only daily-open
         # substitution total is named in the headline (sessions whose derived
         # daily open fell back to a non-09:15 first minute — full-history,
         # recomputed per run). Zero keeps the note byte-identical.
@@ -821,9 +821,7 @@ def run_full_pipeline(
         prebuild_failed=prebuild.failed if prebuild is not None else (),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
-        prebuild_opens_substituted=(
-            prebuild.opens_substituted if prebuild is not None else None
-        ),
+        prebuild_opens_substituted=(prebuild.opens_substituted if prebuild is not None else None),
         quarantined_symbols=quarantined,
         quarantined_count=quarantined_count,
     )

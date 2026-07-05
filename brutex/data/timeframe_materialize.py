@@ -225,7 +225,7 @@ class MaterializeResult:
         rewritten byte-identically anyway). ``False``
         for every run that actually read + resampled.
     opens_substituted
-        SPOT-only OBSERVE count (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001): how
+        SPOT-only OBSERVE count (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): how
         many COMPLETE sessions in this symbol's 1-minute frame had their
         derived daily open silently substituted (09:15 bar absent — the
         implicit ``open.first()`` fallback). ``0`` for F&O kinds (never
@@ -420,7 +420,7 @@ def materialize_lake_timeframes(
     counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
     integration-tested by the round-trip tests.
 
-    **Daily-open substitution observe (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001,
+    **Daily-open substitution observe (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001,
     SPOT + ``include_daily=True`` only):** after the daily derive, the SAME
     in-memory 1-minute frame is scanned (zero extra I/O) for complete sessions
     whose 09:15 IST bar is absent — the derived daily open silently

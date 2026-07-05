@@ -1453,7 +1453,7 @@ def test_pipeline_note_omits_skip_clause_when_none_skipped() -> None:
     assert "unchanged symbol(s) skipped" not in report.note
 
 
-# ── daily-open substitution headline + report (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001) ──
+# ── daily-open substitution headline + report (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001) ──
 
 
 def test_pipeline_note_names_daily_opens_substituted() -> None:

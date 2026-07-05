@@ -91,7 +91,7 @@ class PrebuildTarget:
         ``True`` for a SPOT INDEX underlying (``Instrument.is_index`` — the
         SAME density gate the #1031 demotion uses): selects per-session
         ``daily_open.substituted`` WARNs in the observe-only daily-open scan
-        (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001). Contracts and non-index spot
+        (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001). Contracts and non-index spot
         keep ``False`` (count-only aggregate). Ignored for F&O kinds.
     """
 
@@ -145,7 +145,7 @@ class PrebuildOutcome:
         ``fs_allocation_note`` + note by the pipeline.
     opens_substituted
         The observe-only daily-open substitution total
-        (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001): (symbol, date) SESSIONS whose
+        (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): (symbol, date) SESSIONS whose
         derived daily open silently substituted a non-09:15 first minute,
         summed over the run's SPOT targets
         (:attr:`~brutex.data.timeframe_materialize.MaterializeResult.opens_substituted`
@@ -284,7 +284,7 @@ def run_pipeline_prebuild(
         nothing (the symbol's 1-minute source was byte-identical to its stamp)
         — count it so the done-log + pipeline note can report the saved work
         honestly (never a fake "built 0 bars"). Also sums the observe-only
-        ``opens_substituted`` count (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001 —
+        ``opens_substituted`` count (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001 —
         SPOT-only by construction; a contract result carries an honest 0).
         The phases run strictly sequentially (``run_gated_prebuild`` has no
         threading), so the nonlocal tallies are race-free.

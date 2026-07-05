@@ -618,7 +618,7 @@ def test_prebuild_done_log_carries_unchanged_skips() -> None:
     assert done[0]["unchanged_skips"] == 1
 
 
-# ── daily-open substitution fold (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001) ─────
+# ── daily-open substitution fold (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001) ─────
 
 
 def _equity(name: str) -> Instrument:

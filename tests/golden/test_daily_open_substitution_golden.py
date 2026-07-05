@@ -1,6 +1,6 @@
 """GOLDEN: stored bars BYTE-UNCHANGED by the daily-open substitution observe.
 
-DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001's hard operator pin: the flag is
+DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001's hard operator pin: the flag is
 OBSERVE-ONLY — the derived daily open STILL silently substitutes the earliest
 present minute (this PR only NAMES it), and the lake output is byte-identical
 with the scan wired in.
