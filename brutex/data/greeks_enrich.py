@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -221,6 +222,14 @@ _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
 #: close-snapshot per plan §15.10 and lands with the resample-consuming
 #: Phase-3 surfaces, NOT here.
 _MINUTE_INTERVAL: Final[str] = "1minute"
+
+#: Capacity of the per-pass LRU memo over the resolved spot reader
+#: (DEC-GREEKS-SPOT-MEMO-001). With targets sorted so identical spot
+#: coordinates are adjacent, 2 covers the active (underlying, window) key plus
+#: one boundary neighbour; each cached :class:`~brutex.data.spot_join.SpotJoin`
+#: holds one window's close map, so the memory envelope is O(2 windows) —
+#: deliberately NOT raised (unbounded would hold every underlying's map).
+_SPOT_MEMO_CAPACITY: Final[int] = 2
 
 # Bit layout of the packed Int32 provenance stamp. The INPUT-defining fields
 # (formula/rate/q/T — bits 0-19) decide staleness; style + status (bits 20-26)
@@ -509,6 +518,12 @@ class GreeksEnrichReport:
         is the ``null_reasons`` dict each ``greeks_enrich.target_enriched``
         log line carries (:attr:`EnrichStats.null_reasons`) — the report
         itself keeps only the total.
+    spot_reads, spot_hits
+        Underlying spot window reads actually PERFORMED vs reads AVOIDED by
+        the capacity-2 LRU memo over the resolved spot reader
+        (DEC-GREEKS-SPOT-MEMO-001) — the measured redundant-read counters
+        surfaced in ``fno.greeks_enrich.done`` (a measurement, never a
+        wall-clock claim; Golden Rule #10).
     bars_skipped
         Rows dropped by the non-finite price screen, summed across EVERY read
         target (including ``already_current`` ones — a skip is tallied even
@@ -525,6 +540,8 @@ class GreeksEnrichReport:
     bars_solved: int
     bars_null: int
     bars_reused: int
+    spot_reads: int
+    spot_hits: int
     bars_skipped: int = 0
 
     @property
@@ -1178,6 +1195,86 @@ def write_option_greeks(
     return result.bars_appended
 
 
+def _target_sort_key(target: GreeksEnrichTarget) -> tuple[str, str, date, date, str]:
+    """Deterministic total order grouping targets that share one spot read.
+
+    ``(exchange, underlying, start, end, symbol)`` — the leading four fields
+    are EXACTLY the :class:`_SpotJoinMemo` key, so after sorting every target
+    sharing one spot window sits adjacent and the capacity-2 LRU reaches
+    O(distinct keys) reads (registry order gives NO adjacency guarantee —
+    the fetch phase's FUT-first market sort never reaches the enrich targets).
+    The underlying comes from :func:`~brutex.data.fno_symbol.parse_fno_symbol`;
+    an undecodable symbol falls back to the raw symbol (sorting by the raw
+    symbol alone would interleave strike/expiry tokens lexically across one
+    chain). The trailing ``symbol`` makes the order total + deterministic.
+    """
+    parts = parse_fno_symbol(target.symbol)
+    underlying = parts.underlying if parts is not None else target.symbol
+    return (target.exchange, underlying, target.start, target.end, target.symbol)
+
+
+class _SpotJoinMemo:
+    """Capacity-bounded LRU memo over the RESOLVED spot reader (DEC-GREEKS-SPOT-MEMO-001).
+
+    Keyed by ``(target.exchange, parts.underlying, target.start, target.end)``
+    — precisely the coordinates
+    :func:`~brutex.data.spot_join.spot_close_by_ts_window` reads by — so every
+    CE/PE strike of one (underlying, expiry) chain (all sharing the identical
+    resolved window) costs ONE spot read instead of ~2×strikes byte-identical
+    month-file scans. Wraps the RESOLVED reader (injected OR the default
+    :func:`read_spot_join_with_recovery`) so the memo is seam-testable —
+    memoising INCLUDES the DEC-GREEKS-CORRECTNESS-AUDIT-001 drift-recovery
+    ladder, which is safe because the ladder is a deterministic function of
+    exactly the memo key (``(exchange, underlying, start, end)`` — the env
+    alias override is read per probe but stable within a pass), so a memoised
+    recovered join is the byte-identical join a fresh probe would return.
+
+    Correctness-safe by construction: the enrich pass writes ONLY FNO option
+    partitions — nothing writes SPOT partitions mid-pass — and a
+    :class:`~brutex.data.spot_join.SpotJoin` is consumed read-only, so a
+    memoised instance is safely aliased across targets. A future IN-PASS spot
+    writer must invalidate this memo (pinning that assumption here).
+
+    Attributes
+    ----------
+    reads
+        Spot window reads actually PERFORMED (memo misses; a RAISING read
+        still counts — the attempt was made and nothing is cached, so the
+        per-target quarantine stays honest).
+    hits
+        Reads AVOIDED by the memo.
+    """
+
+    __slots__ = ("_cache", "_capacity", "_reader", "hits", "reads")
+
+    def __init__(
+        self,
+        reader: Callable[[GreeksEnrichTarget, FnoSymbolParts], SpotJoin],
+        *,
+        capacity: int = _SPOT_MEMO_CAPACITY,
+    ) -> None:
+        self._reader = reader
+        self._capacity = capacity
+        self._cache: OrderedDict[tuple[str, str, date, date], SpotJoin] = OrderedDict()
+        self.reads = 0
+        self.hits = 0
+
+    def get(self, target: GreeksEnrichTarget, parts: FnoSymbolParts) -> SpotJoin:
+        """The window's :class:`SpotJoin` — cached on a hit, read-then-cached on a miss."""
+        key = (target.exchange, parts.underlying, target.start, target.end)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            self.hits += 1
+            return cached
+        self.reads += 1
+        join = self._reader(target, parts)
+        self._cache[key] = join
+        if len(self._cache) > self._capacity:
+            self._cache.popitem(last=False)
+        return join
+
+
 def enrich_greeks_for_targets(
     *,
     targets: Iterable[GreeksEnrichTarget],
@@ -1200,6 +1297,19 @@ def enrich_greeks_for_targets(
     (Golden Rule #7). All lake I/O is injectable for tests; the defaults are
     the real window-bounded readers/writer.
 
+    Processing order (DEC-GREEKS-SPOT-MEMO-001): targets are enriched in the
+    deterministic sorted order ``(exchange, underlying, start, end, symbol)``
+    — NOT caller order — so targets sharing one spot window are adjacent and
+    the capacity-2 :class:`_SpotJoinMemo` over the RESOLVED ``read_spot``
+    (injected OR default) collapses a chain's ~2×strikes identical spot scans
+    to one read per distinct ``(exchange, underlying, window)`` key. HONEST
+    envelope: spot I/O is O(distinct (exchange, underlying, window)) reads per
+    pass, NOT O(1) total — per-expiry windows are distinct keys by design; the
+    performed/avoided counts are reported as ``spot_reads`` / ``spot_hits``.
+    ``read_spot`` must therefore be a pure function of ``(target.exchange,
+    parts.underlying, target.start, target.end)`` — the memo key — never of
+    the individual contract symbol.
+
     Durability / crash-resumability: each partition write is the atomic
     flock-guarded tmp→fsync→``os.replace`` spine, so a crash mid-pass leaves
     every partition either fully old or fully new (never corrupt); the next
@@ -1217,9 +1327,10 @@ def enrich_greeks_for_targets(
         else (lambda t, b: write_option_greeks(lake_root, t, b))
     )
 
+    memo = _SpotJoinMemo(spot_reader)
     enriched = already_current = futures_skipped = undecodable = no_bars = errored = 0
     bars_written = bars_solved = bars_null = bars_reused = bars_skipped = 0
-    for target in targets:
+    for target in sorted(targets, key=_target_sort_key):
         # Liveness beat per contract (DEC-PIPELINE-STALL-HEARTBEAT-001): the Greeks
         # enrichment pass runs minutes-to-hours AFTER the last fetch heartbeat, so
         # without this the pull stall watchdog false-declared a HEALTHY pipeline HUNG
@@ -1238,7 +1349,7 @@ def enrich_greeks_for_targets(
             if not rows:
                 no_bars += 1
                 continue
-            join = spot_reader(target, parts)
+            join = memo.get(target, parts)
             bars, stats = enrich_option_bars(
                 rows,
                 parts=parts,
@@ -1298,5 +1409,7 @@ def enrich_greeks_for_targets(
         bars_solved=bars_solved,
         bars_null=bars_null,
         bars_reused=bars_reused,
+        spot_reads=memo.reads,
+        spot_hits=memo.hits,
         bars_skipped=bars_skipped,
     )

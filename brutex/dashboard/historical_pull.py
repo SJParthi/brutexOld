@@ -1409,6 +1409,8 @@ def _enrich_greeks_from_minute(
             bars_solved=report.bars_solved,
             bars_null=report.bars_null,
             bars_reused=report.bars_reused,
+            spot_reads=report.spot_reads,
+            spot_hits=report.spot_hits,
         )
         return _GreeksEnrichOutcome(ok=True, error=None, errored_targets=report.errored)
     except Exception as exc:

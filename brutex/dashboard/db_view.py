@@ -39,6 +39,12 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+
+# ALIASED on purpose — do NOT "simplify" to `time.sleep`: the bare name `time` in this
+# module is `datetime.time` (imported above), so `time.sleep(...)` is a runtime
+# AttributeError. The alias keeps the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001)
+# unambiguous and injectable-for-tests via the `retry_sleep` parameters below.
+from time import sleep as _default_sleep
 from typing import Any, Final, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -3465,6 +3471,42 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     return rollup
 
 
+#: Delay before the single torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001). A reader-side
+#: multi-open race against the atomic ledger writer (``os.replace`` landing between the
+#: fast path's independent ``read_parquet`` opens — log-observed as a thrift
+#: ``TProtocolException`` surfacing as a ``duckdb.Error``) clears as soon as every open
+#: sees the SAME replaced file; ~100 ms comfortably outlasts one ``os.replace``.
+_DUCKDB_RETRY_DELAY_S: Final[float] = 0.1
+
+
+def _ledger_stat_fields(ledger_file: Path) -> dict[str, Any]:
+    """Best-effort ledger-Parquet forensics for the torn-read fallback logs.
+
+    Returns ``{"ledger_size": st_size, "ledger_mtime_ns": st_mtime_ns}`` from ONE
+    ``stat`` of *ledger_file*, so a ``window_payload.duckdb_fallback`` /
+    ``phase_progress.duckdb_fallback`` event records WHICH on-disk ledger revision
+    the failed read saw (a mid-pull ``os.replace`` shows up as a moved mtime).
+    NEVER raises — a stat failure (file replaced/removed between the read and the
+    log) yields honest ``None`` fields instead of turning the diagnostic log into
+    a new crash surface (Golden Rule #1).
+
+    Parameters
+    ----------
+    ledger_file
+        The resolved window-ledger Parquet path.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``ledger_size`` / ``ledger_mtime_ns`` ints, or both ``None`` on ``OSError``.
+    """
+    try:
+        st = ledger_file.stat()
+    except OSError:
+        return {"ledger_size": None, "ledger_mtime_ns": None}
+    return {"ledger_size": st.st_size, "ledger_mtime_ns": st.st_mtime_ns}
+
+
 class WindowCountsCache(Protocol):
     """Generation-stamped cache contract for the ``/coverage/windows`` GROUP BY counts.
 
@@ -3631,6 +3673,7 @@ def phase_progress_payload(
     current_phase: str,
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> list[dict[str, Any]]:
     """The Universe pull's LIVE per-phase progress rows — REUSES the cached window counts.
 
@@ -3654,23 +3697,67 @@ def phase_progress_payload(
     ``None`` the counts are computed directly (used by the pure-fast-path tests); the
     production route always injects the cache. O(1) on a cache hit; on a miss it runs
     ONE ``GROUP BY market, status`` (:func:`_window_counts_total`).
+
+    TORN-READ resilience (DEC-WINDOW-TORN-READ-RETRY-001): a concurrent pull's atomic
+    ``os.replace`` of the ledger Parquet landing between this reader's independent
+    ``read_parquet`` opens surfaces as a transient ``duckdb.Error`` — previously
+    UNGUARDED here, so the 4 s ``/universe/pull-progress`` poll 500'd. The counts read
+    now RETRIES ONCE after :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable
+    for deterministic tests; ``None`` → the real aliased :func:`time.sleep`); a SECOND
+    ``duckdb.Error`` logs an enriched ``phase_progress.duckdb_fallback`` event and
+    returns ``[]`` — the SAME honest empty-phases shape the no-ledger contract already
+    serves, so the route can never 500. HONEST envelope (Golden Rule #10): the retry
+    bounds ONE transient race; a persistently corrupt ledger blanks the phases block
+    for that poll window (strictly better than the prior 500), and only
+    ``duckdb.Error`` is guarded — no row projection exists here, so KeyError/ValueError
+    stay genuine-bug propagation.
     """
     if not ledger_file.is_file():
         return []
     ledger_glob = ledger_file.as_posix()
-    if count_cache is None:
-        counts, _total = _window_counts_total(conn, ledger_glob)
-    else:
-        # Key the cache on the ledger mtime AS WELL as the generation so a
-        # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
-        # invalidates the cached counts — the SAME (generation, mtime) key
-        # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
-        mtime_ns = ledger_file.stat().st_mtime_ns
-        counts, _total = count_cache.get_or_compute(
-            f"window-counts|{ledger_glob}|{mtime_ns}",
-            generation=generation,
-            compute=lambda: _window_counts_total(conn, ledger_glob),
+
+    def _counts() -> dict[str, dict[str, int]]:
+        """ONE counts read — direct or through the injected generation-stamped cache."""
+        if count_cache is None:
+            counts, _total = _window_counts_total(conn, ledger_glob)
+        else:
+            # Key the cache on the ledger mtime AS WELL as the generation so a
+            # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
+            # invalidates the cached counts — the SAME (generation, mtime) key
+            # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
+            mtime_ns = ledger_file.stat().st_mtime_ns
+            counts, _total = count_cache.get_or_compute(
+                f"window-counts|{ledger_glob}|{mtime_ns}",
+                generation=generation,
+                compute=lambda: _window_counts_total(conn, ledger_glob),
+            )
+        return counts
+
+    sleeper = _default_sleep if retry_sleep is None else retry_sleep
+    try:
+        counts = _counts()
+    except duckdb.Error as exc:
+        # Torn read (reader-side multi-open race vs the atomic writer) — retry ONCE.
+        # The retry runs OUTSIDE any lock (the injected cache computes unlocked and
+        # caches NOTHING on a raise — verified against MoversSnapshotCache), so the
+        # second attempt recomputes cleanly and a retried success is cached normally.
+        _LOG.warning(
+            "phase_progress.duckdb_retry",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            **_ledger_stat_fields(ledger_file),
         )
+        sleeper(_DUCKDB_RETRY_DELAY_S)
+        try:
+            counts = _counts()
+        except duckdb.Error as exc2:
+            _LOG.warning(
+                "phase_progress.duckdb_fallback",
+                error=str(exc2),
+                error_type=type(exc2).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+            return []
     return build_phase_progress(counts, current_phase=current_phase)
 
 
@@ -3830,6 +3917,7 @@ def build_window_payload(
     conn: Any = None,
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -3871,6 +3959,16 @@ def build_window_payload(
         PLANNED rows enter the row list.
     limit
         Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``).
+    retry_sleep
+        Injectable sleeper for the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001;
+        deterministic tests). ``None`` → the real aliased :func:`time.sleep`. A
+        transient ``duckdb.Error`` on the fast path (the reader-side multi-open race
+        against the atomic ledger writer) is retried ONCE after
+        :data:`_DUCKDB_RETRY_DELAY_S`; a second failure — or a deterministic
+        ``KeyError``/``ValueError`` shape error, which is never retried — falls back
+        to the legacy pyarrow path exactly as before. HONEST envelope (Golden Rule
+        #10): the retry bounds ONE transient race; a persistently corrupt ledger
+        still costs the legacy fallback as today.
 
     Returns
     -------
@@ -3891,7 +3989,9 @@ def build_window_payload(
     # *conn* (or no Parquet) keeps the legacy pyarrow path below byte-for-byte
     # (back-compat for existing callers + the ``window_status.json`` fallback).
     if conn is not None and ledger_file.is_file():
-        try:
+        sleeper = _default_sleep if retry_sleep is None else retry_sleep
+
+        def _fast_path() -> dict[str, Any]:
             return _build_window_payload_duckdb(
                 conn,
                 ledger_file,
@@ -3903,13 +4003,50 @@ def build_window_payload(
                 count_cache=count_cache,
                 generation=generation,
             )
-        except (duckdb.Error, KeyError, ValueError) as exc:
-            # A wrong-shape / corrupt ledger Parquet (a missing core column → a DuckDB
-            # binder error, or a KeyError on the row projection) must NOT 500 the page:
-            # fall THROUGH to the legacy pyarrow path below, which guards the core columns
-            # and degrades to an empty ledger (the route's "never a 500" promise — the
+
+        try:
+            return _fast_path()
+        except (KeyError, ValueError) as exc:
+            # A wrong-shape / legacy-shape ledger Parquet (a missing core column → the
+            # explicit probe ValueError, or a KeyError on the row projection) is
+            # DETERMINISTIC — a retry would fail identically, so fall straight THROUGH
+            # to the legacy pyarrow path below, which guards the core columns and
+            # degrades to an empty ledger (the route's "never a 500" promise — the
             # fidelity the fast path would otherwise lose, hostile-review MINOR).
-            _LOG.warning("window_payload.duckdb_fallback", error=str(exc))
+            _LOG.warning(
+                "window_payload.duckdb_fallback",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+        except duckdb.Error as exc:
+            # TORN READ (DEC-WINDOW-TORN-READ-RETRY-001): the fast path performs
+            # MULTIPLE independent `read_parquet` opens per request; a concurrent
+            # pull's atomic `os.replace` landing between them yields a footer/data
+            # mismatch surfacing as a duckdb.Error (log-observed as a thrift
+            # TProtocolException — reader-side only, does NOT contradict the #901
+            # atomic-writer guarantee). Transient by nature → retry ONCE after
+            # ~100 ms; the retry runs OUTSIDE any lock (the injected count cache
+            # computes unlocked and caches nothing on a raise), so the second
+            # attempt recomputes cleanly. A second failure falls back to the legacy
+            # path EXACTLY as before — retry-once bounds one race, it is not a
+            # corrupt-ledger cure (Golden Rule #10).
+            _LOG.warning(
+                "window_payload.duckdb_retry",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+            sleeper(_DUCKDB_RETRY_DELAY_S)
+            try:
+                return _fast_path()
+            except (duckdb.Error, KeyError, ValueError) as exc2:
+                _LOG.warning(
+                    "window_payload.duckdb_fallback",
+                    error=str(exc2),
+                    error_type=type(exc2).__name__,
+                    **_ledger_stat_fields(ledger_file),
+                )
     if ledger_file.is_file():
         source = "ledger"
         records: tuple[Any, ...] = _ledger_records_cached(lake_root)
