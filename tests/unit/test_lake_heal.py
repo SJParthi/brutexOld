@@ -1529,6 +1529,47 @@ class TestDerivedRecall:
                 now=_now,
             )
 
+    def test_recall_tf_rebuild_is_month_bounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-TF-REBUILD-MONTH-BOUND-001: the recall threads the touched-months
+        set into ``materialize_lake_timeframes(months=…)`` so the rebuild READ
+        is O(affected-months), never the whole 1-minute tree — and the bounded
+        rebuild still heals the poisoned bucket."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0)), _bar(_ts(1))])
+        materialize_lake_timeframes(
+            lake_root=lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            tfs=["5m"],
+        )
+        _replant_with_dup(_dest(lake))
+        scan = scan_lake_invariants(lake)
+
+        captured: list[Any] = []
+        real = lake_heal.materialize_lake_timeframes
+
+        def _spy(**kwargs: Any) -> Any:
+            captured.append(kwargs.get("months"))
+            return real(**kwargs)
+
+        monkeypatch.setattr(lake_heal, "materialize_lake_timeframes", _spy)
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.files_scanned,
+            mode="auto",
+            recall=True,
+            now=_now,
+        )
+        assert report.recall is not None
+        assert report.recall.tf_rebuilt == 1
+        assert report.recall.tf_failed == 0
+        assert captured == [{(2024, 6)}]  # the touched-months set, nothing wider
+
     def test_prebuild_kind_from_coords_matrix(self) -> None:
         assert lake_heal._prebuild_kind_from_coords("INDEX", "NIFTY") is PrebuildKind.SPOT
         assert lake_heal._prebuild_kind_from_coords("CASH", "M&M") is PrebuildKind.SPOT
