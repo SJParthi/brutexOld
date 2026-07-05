@@ -1,7 +1,7 @@
 """Expired-option Parquet table writer — the concrete `OptionPartitionWriter`.
 
 The physical lake layer for the expired-option ``options/`` tree (today driven
-by the lake healer's :meth:`OptionParquetWriter.heal_partition` — the Dhan-era
+by the lake healer's :meth:`OptionParquetWriter.heal_partition` — the prior-vendor-era
 ``option_sink.OptionBarSink`` orchestration above it was DELETED as dead code by
 DEC-INGEST-AUDIT-WIRING-001; the Groww F&O pull writes candles through
 :class:`~brutex.data.sink.ParquetBarSink` instead): persists a deduped batch of
@@ -107,7 +107,7 @@ _SAFE: str = "__"
 #: (DEC-DHAN-PARALLEL-INGEST-001) may build one :class:`OptionParquetWriter` per worker, so
 #: the lock MUST be shared across instances that resolve to the same on-disk file. This is
 #: belt-and-braces that makes the writer correct on its OWN (originally below the
-#: now-DELETED Dhan-era ``option_sink.OptionBarSink`` audit lock), so an option write
+#: now-DELETED prior-vendor-era ``option_sink.OptionBarSink`` audit lock), so an option write
 #: can be parallelised without a lost-update race. The intern is
 #: CAPACITY-BOUNDED (:class:`~brutex.data.partition_lock.BoundedLockRegistry`, LRU eviction
 #: of idle locks) so the huge option chain (every strike × CE/PE × month) can no longer
