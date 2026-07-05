@@ -189,6 +189,15 @@
      F&O". The mutually-exclusive partner of .chip.ref (every row is one or
      the other) — together they tag F&O vs spot-only at a glance. */
   .chip.opt { color:var(--green); background:rgba(38,217,176,.13); }
+  /* STALL-SUSPECT chip (DEC-PULL-STALL-CHIP-001) — the pull-progress snapshot
+     has carried stalled/stall_detail since DEC-PIPELINE-STALL-HEARTBEAT-001,
+     but NO template consumed them. This amber chip beside #pulltitle appears
+     ONLY while the payload reads stalled=true (no heartbeat for the audited
+     timeout, worker STILL running — suspect, NOT terminal) and hides the
+     instant it clears. Amber mirrors .chip.ref's "informational" palette;
+     hidden by default + revealed via the established .on toggle (.badge.on). */
+  .chip.stall { color:var(--yellow); background:rgba(255,183,77,.14); display:none; }
+  .chip.stall.on { display:inline-block; }
   .inst.refonly { opacity:.82; }   /* subtle dim so F&O rows pop */
   /* Inline legend explaining the row chips. */
   .legend { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
@@ -596,7 +605,7 @@
 
   <div id="pullpanel">
     <div class="beam"></div>
-    <div class="title"><b id="pulltitle">Pulling…</b><span class="counter" id="counter">0</span><span class="sub">units</span></div>
+    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span></div>
     <div class="tfgrid" id="tfgrid"></div>
     <!-- DEC-PROGRESS-WINDOW-UNITS-001: the card counts COARSE units (spot:
          symbol×interval chunks; options: all-or-nothing SERIES of ~dozens of
@@ -1831,6 +1840,20 @@ function renderPhases(phases, currentPhase) {
    scary network-error string the removed live-feed poll used to show. */
 const POLL_MAX_FEED_RETRIES = 5;
 let pollFeedRetries = 0;
+
+/* Stall-suspect chip (DEC-PULL-STALL-CHIP-001). The progress snapshot has
+   carried stalled/stall_detail since DEC-PIPELINE-STALL-HEARTBEAT-001, but no
+   surface consumed them — this toggles the amber #stallchip from the SAME
+   pollProgress loop (no new poll). textContent ONLY, never innerHTML (CodeQL
+   XSS guard — stall_detail is server text rendered inert). A null snapshot
+   (settle / feed-dropped via finishLive) or stalled=false hides the chip. */
+function updateStallChip(s) {
+  const chip = document.getElementById('stallchip');
+  if (!chip) return;
+  const on = !!(s && s.stalled);
+  chip.classList.toggle('on', on);
+  chip.textContent = on ? ('⚠ ' + (s.stall_detail || 'stalled — no heartbeat')) : '';
+}
 async function pollProgress(label) {
   if (pollTimer) clearTimeout(pollTimer);
   try {
@@ -1842,6 +1865,7 @@ async function pollProgress(label) {
     renderLiveStats(s);
     renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
     if (s.state === 'running') {
+      updateStallChip(s);  // stalled-suspect ⇒ amber chip; a recovery clears it (DEC-PULL-STALL-CHIP-001)
       document.getElementById('pulltitle').textContent =
         `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}`;
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
@@ -1869,6 +1893,7 @@ async function pollProgress(label) {
 
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  updateStallChip(null);  // a settled run is never stalled-suspect — hide the chip (DEC-PULL-STALL-CHIP-001)
   setBulkDisabled(false);
   // Restore the ONE pull button to its selection-driven label/enabled state
   // (the pipeline button is re-enabled by setBulkDisabled(false); the manual
