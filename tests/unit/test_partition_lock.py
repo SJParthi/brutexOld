@@ -348,3 +348,84 @@ class TestBoundedLockRegistry:
         t2.join(timeout=10)
         assert overlap["seen"] is False
         assert sorted(order) == ["a", "b"]
+
+
+# ── partition_lock_path realpath canonicalisation (DEC-PARTITION-LOCK-REALPATH-001) ──
+
+
+class TestLockPathRealpathCanonicalisation:
+    """Path aliases to ONE physical partition key the SAME lock file; the
+    already-canonical digest is byte-unchanged (no cross-version split-lock)."""
+
+    def test_symlinked_lake_root_alias_maps_to_same_lock(self, tmp_path: Path) -> None:
+        # FAILS BEFORE THE FIX: a symlinked lake root spelled a different raw
+        # path string → a different lock file → NO mutual exclusion.
+        real_root = tmp_path / "lake"
+        (real_root / "bars" / "x").mkdir(parents=True)
+        alias_root = tmp_path / "lake-alias"
+        alias_root.symlink_to(real_root, target_is_directory=True)
+        dest_real = real_root / "bars" / "x" / "05.parquet"
+        dest_alias = alias_root / "bars" / "x" / "05.parquet"
+        assert dest_real != dest_alias  # genuinely different spellings…
+        assert (
+            partition_lock_path(real_root, dest_real).name
+            == partition_lock_path(real_root, dest_alias).name
+        )  # …one lock file.
+
+    def test_dotdot_component_alias_maps_to_same_lock(self, tmp_path: Path) -> None:
+        base = tmp_path.resolve()
+        (base / "bars" / "x").mkdir(parents=True)
+        dest = base / "bars" / "x" / "05.parquet"
+        dest_dotdot = base / "bars" / ".." / "bars" / "x" / "05.parquet"
+        assert partition_lock_path(base, dest).name == partition_lock_path(base, dest_dotdot).name
+
+    def test_relative_dest_maps_to_same_lock_as_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path.resolve()
+        (base / "bars" / "x").mkdir(parents=True)
+        monkeypatch.chdir(base)
+        dest_abs = base / "bars" / "x" / "05.parquet"
+        dest_rel = Path("bars") / "x" / "05.parquet"
+        assert partition_lock_path(base, dest_abs).name == partition_lock_path(base, dest_rel).name
+
+    def test_canonical_absolute_path_digest_byte_unchanged(self, tmp_path: Path) -> None:
+        # PIN: for an already-canonical absolute dest (no symlink / .. / relative
+        # prefix) the digest equals sha256(str(dest)) — the PRE-fix scheme — so
+        # existing on-disk lock-file names are preserved across the upgrade.
+        import hashlib
+
+        base = tmp_path.resolve()
+        (base / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2025").mkdir(parents=True)
+        dest = base / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2025" / "05.parquet"
+        expected = hashlib.sha256(str(dest).encode("utf-8")).hexdigest()
+        assert partition_lock_path(base, dest).name == f"{expected}.lock"
+
+    def test_nonexistent_dest_tail_still_keys_consistently(self, tmp_path: Path) -> None:
+        # The partition file does not exist yet on FIRST write — realpath keeps
+        # the non-existent tail, so pre-create and post-create keys agree.
+        base = tmp_path.resolve()
+        dest = base / "bars" / "new" / "05.parquet"  # nothing created.
+        before = partition_lock_path(base, dest)
+        (base / "bars" / "new").mkdir(parents=True)
+        dest.write_bytes(b"")
+        assert partition_lock_path(base, dest) == before
+
+    def test_different_partitions_still_differ(self, tmp_path: Path) -> None:
+        base = tmp_path.resolve()
+        assert partition_lock_path(base, base / "bars" / "a" / "05.parquet") != partition_lock_path(
+            base, base / "bars" / "b" / "05.parquet"
+        )
+
+    def test_cross_alias_mutual_exclusion_end_to_end(self, tmp_path: Path) -> None:
+        # The actual guarantee: a writer entering via the SYMLINK alias is
+        # excluded by a holder that entered via the real path.
+        real_root = tmp_path / "lake"
+        (real_root / "bars" / "x").mkdir(parents=True)
+        alias_root = tmp_path / "alias"
+        alias_root.symlink_to(real_root, target_is_directory=True)
+        dest_real = real_root / "bars" / "x" / "05.parquet"
+        dest_alias = alias_root / "bars" / "x" / "05.parquet"
+        with partition_write_lock(real_root, dest_real):
+            probe = partition_lock_path(real_root, dest_alias)
+            assert _try_lock_held_by_other_fd(probe) is True  # alias spelling blocked.

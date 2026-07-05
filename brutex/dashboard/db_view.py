@@ -64,6 +64,7 @@ from brutex.data.fno_candle_lake import (
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_read import (
     DEDUP_PARQUET_SOURCE_SQL,
     DEDUP_STAR_SELECT_SQL,
@@ -2682,35 +2683,66 @@ def _underlying_spot_close_by_ts(
     Returns ``{}`` (→ every bar classifies UNKNOWN, never raising) when *ts_values* is
     empty, the underlying coordinate is illegal, or the underlying spot is absent from
     both segments (Golden Rule #1 — an honest UNKNOWN, never a fabricated spot).
+
+    When the exact *underlying* probe comes back EMPTY (and only then — zero extra
+    I/O and NO log on the hot path), the COMMON spot-key drift-recovery ladder
+    (:func:`~brutex.data.lake_keys.spot_recovery_candidates` — index aliases BOTH
+    directions + the ``BRUTEX_FNO_INDEX_ALIASES`` env override + the
+    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs) is walked in
+    order, returning the FIRST candidate with any joined spot bar and emitting ONE
+    ``db_view.spot_key_recovered`` info naming both keys
+    (DEC-DB-MONEYNESS-KEY-RECOVER-001 — pre-fix, a verbose-symbol index such as
+    ``MIDCPNIFTY`` over a ``NIFTYMIDSELECT``-keyed spot dir read moneyness UNKNOWN on
+    every bar even though the spot data existed on disk). Ladder exhaustion returns
+    the honest empty map — never a fabricated spot.
     """
     if not ts_values:
         return {}
     min_ts, max_ts = min(ts_values), max(ts_values)
-    for segment in _SPOT_PROBE_SEGMENTS:
-        try:
-            _validate_candle_coords(exchange, segment, underlying, interval)
-        except ValueError:
-            return {}  # a derived underlying that is not a legal coordinate → no spot.
-        base = lake_root / "bars" / exchange / segment / underlying / interval
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
-            continue
-        # glob built from validated coordinates (no free user text); path + both bounds
-        # are bound parameters (same SQL/path-injection guard as query_candles). A NULL
-        # close is filtered in SQL so a stray null spot bar degrades that instant to
-        # UNKNOWN (the no-spot bucket) rather than raising in `_to_decimal(None)` —
-        # honouring the "never raises / honest UNKNOWN" contract. Resilient read
-        # (DEC-DB-CORRUPT-SKIP-001): a corrupt underlying-spot Parquet degrades the join
-        # to its readable subset (the affected option bars classify UNKNOWN), never a 500.
-        rows = _execute_parquet_resilient(
-            conn,
-            base,
-            'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
-            'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
-            [min_ts, max_ts],
-            source=f"candle-spotjoin:{exchange}/{segment}/{underlying}/{interval}",
-        )
-        return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
-    return {}
+
+    def _probe(key: str) -> dict[datetime, Decimal]:
+        for segment in _SPOT_PROBE_SEGMENTS:
+            try:
+                _validate_candle_coords(exchange, segment, key, interval)
+            except ValueError:
+                return {}  # a key that is not a legal coordinate → no spot under it.
+            base = lake_root / "bars" / exchange / segment / key / interval
+            if not (base.is_dir() and any(base.rglob("*.parquet"))):
+                continue
+            # glob built from validated coordinates (no free user text); path + both
+            # bounds are bound parameters (same SQL/path-injection guard as
+            # query_candles). A NULL close is filtered in SQL so a stray null spot bar
+            # degrades that instant to UNKNOWN (the no-spot bucket) rather than raising
+            # in `_to_decimal(None)` — honouring the "never raises / honest UNKNOWN"
+            # contract. Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt
+            # underlying-spot Parquet degrades the join to its readable subset (the
+            # affected option bars classify UNKNOWN), never a 500.
+            rows = _execute_parquet_resilient(
+                conn,
+                base,
+                'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
+                'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
+                [min_ts, max_ts],
+                source=f"candle-spotjoin:{exchange}/{segment}/{key}/{interval}",
+            )
+            return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
+        return {}
+
+    spots = _probe(underlying)
+    if spots:
+        return spots
+    for candidate in spot_recovery_candidates(underlying, exchange):
+        recovered = _probe(candidate)
+        if recovered:
+            _LOG.info(
+                "db_view.spot_key_recovered",
+                underlying=underlying,
+                recovered_key=candidate,
+                exchange=exchange,
+                interval=interval,
+            )
+            return recovered
+    return spots
 
 
 def _fno_strike_step(
