@@ -98,6 +98,7 @@ from brutex.adapters.groww.errors import (
     is_rate_limit,
     is_retryable,
     is_terminal_auth_failure,
+    steps_timeout_ladder,
 )
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.ingest import IngestReport
@@ -498,12 +499,16 @@ def ingest_option_contract(
             except GrowwError as exc:
                 if not is_retryable(exc):
                     raise  # terminal (auth included) → outer quarantine, never swallowed
-                # Transient: feed the controller (a 429 steps the rate down, a timeout
-                # drives the timeout ladder) and record FAILED so the operator SEES it.
+                # Transient: feed the controller (a 429 steps the rate down, a NON-auth
+                # transient drives the timeout ladder — `steps_timeout_ladder`,
+                # DEC-AUTH-LADDER-EXCLUDE-001: a retryable auth-family failure
+                # (token-stale / mint-throttle) feeds NEITHER hook, it is no evidence
+                # about candle-endpoint health) and record FAILED so the operator SEES
+                # it — the ledger record + breaker feed below stay byte-identical.
                 if is_rate_limit(exc):
                     if on_rate_limit is not None:
                         on_rate_limit()
-                elif on_timeout is not None:
+                elif on_timeout is not None and steps_timeout_ladder(exc):
                     on_timeout()
                 if ledger is not None:
                     ledger.record(

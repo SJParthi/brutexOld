@@ -1825,9 +1825,11 @@ def test_make_cli_rate_bridge_on_window_breach_pushes_one_pull_degraded(
     wrapped = cli._make_cli_rate_bridge_on_window(
         lambda: None, tmp_path, controller, _DegradedAdapter(), monitor
     )
-    # One observe is not enough for the hysteresis edge to settle on every rule, but the
-    # WARN rule fires on the first breaching sample; fire a few windows to be deterministic.
-    for _ in range(3):
+    # The WARN rules are dwell-gated (DEC-PULL-HEALTH-WARN-DWELL-001: 5 consecutive
+    # breaching samples before the OK->BREACH edge fires, so a ~1s-old pool never
+    # cold-fires) — fire enough windows to cross the dwell and prove a SUSTAINED
+    # breach still alerts exactly once through the CLI seam.
+    for _ in range(8):
         wrapped()
 
     breaches = [d for d in degraded if d[0] == "pull.achieved_below_allowed"]

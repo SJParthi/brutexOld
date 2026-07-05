@@ -40,6 +40,8 @@ from brutex.data.greeks_enrich import (
     STYLE_UNKNOWN,
     TTE_ACT365_EXPIRY_1530_IST,
     GreeksEnrichTarget,
+    _SpotJoinMemo,
+    _target_sort_key,
     enrich_greeks_for_targets,
     enrich_option_bars,
     expiry_instant_utc,
@@ -60,6 +62,8 @@ from brutex.options.risk_free import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from brutex.data.fno_symbol import FnoSymbolParts
 
 _CE_SYMBOL = "NSE-NIFTY-25Jan24-21500-CE"
@@ -538,6 +542,7 @@ class TestEnrichDriver:
     def test_zero_targets_is_a_zero_report(self, tmp_path: Path) -> None:
         report = enrich_greeks_for_targets(targets=[], lake_root=tmp_path, rate_source=_RATE)
         assert report.targets == 0 and report.bars_written == 0
+        assert report.spot_reads == 0 and report.spot_hits == 0
 
     def test_no_bars_is_an_honest_no_op(self, tmp_path: Path) -> None:
         report = enrich_greeks_for_targets(
@@ -665,3 +670,242 @@ class TestEnrichDriver:
             write_bars=_write,
         )
         assert report.already_current == 1 and report.enriched == 0
+
+
+# ── DEC-GREEKS-SPOT-MEMO-001: sorted targets + capacity-2 spot-read LRU ───────
+
+_NIFTY_21400_CE = "NSE-NIFTY-25Jan24-21400-CE"
+_NIFTY_21600_CE = "NSE-NIFTY-25Jan24-21600-CE"
+_BANKNIFTY_CE = "NSE-BANKNIFTY-25Jan24-46000-CE"
+_RELIANCE_CE = "NSE-RELIANCE-25Jan24-2800-CE"
+_SPOT_BY_UNDERLYING = {
+    "NIFTY": _SPOT,
+    "BANKNIFTY": Decimal("46000"),
+    "RELIANCE": Decimal("2800"),
+}
+
+
+def _target(
+    symbol: str, *, window: tuple[date, date] = _WINDOW, exchange: str = "NSE"
+) -> GreeksEnrichTarget:
+    return GreeksEnrichTarget(exchange=exchange, symbol=symbol, start=window[0], end=window[1])
+
+
+class TestTargetSortKey:
+    """`_target_sort_key` — the (exchange, underlying, start, end, symbol) order."""
+
+    def test_decodable_symbol_keys_on_the_parsed_underlying(self) -> None:
+        assert _target_sort_key(_target(_CE_SYMBOL)) == (
+            "NSE",
+            "NIFTY",
+            _WINDOW[0],
+            _WINDOW[1],
+            _CE_SYMBOL,
+        )
+
+    def test_undecodable_symbol_falls_back_to_the_raw_symbol(self) -> None:
+        assert _target_sort_key(_target("not-a-contract")) == (
+            "NSE",
+            "not-a-contract",
+            _WINDOW[0],
+            _WINDOW[1],
+            "not-a-contract",
+        )
+
+
+class TestSpotJoinMemo:
+    """The capacity-2 LRU over the resolved spot reader — direct unit pins."""
+
+    def _memo(self, capacity: int = 2) -> tuple[_SpotJoinMemo, list[str]]:
+        calls: list[str] = []
+
+        def _reader(_t: GreeksEnrichTarget, p: FnoSymbolParts) -> SpotJoin:
+            calls.append(p.underlying)
+            return SpotJoin({}, None)
+
+        return _SpotJoinMemo(_reader, capacity=capacity), calls
+
+    def _pair(self, symbol: str) -> tuple[GreeksEnrichTarget, FnoSymbolParts]:
+        return _target(symbol), _parts(symbol)
+
+    def test_shared_key_is_one_read_and_the_same_join_instance(self) -> None:
+        memo, calls = self._memo()
+        first = memo.get(*self._pair(_CE_SYMBOL))
+        second = memo.get(*self._pair(_NIFTY_21600_CE))  # same (underlying, window) key
+        assert second is first  # the cached SpotJoin is aliased, never re-read
+        assert calls == ["NIFTY"]
+        assert memo.reads == 1 and memo.hits == 1
+
+    def test_capacity_two_survives_an_a_b_a_pattern(self) -> None:
+        memo, _calls = self._memo(capacity=2)
+        for symbol in (_CE_SYMBOL, _BANKNIFTY_CE, _CE_SYMBOL):
+            memo.get(*self._pair(symbol))
+        assert memo.reads == 2 and memo.hits == 1
+        # The SAME pattern at capacity 1 re-reads A — kills the 2→1 mutant.
+        memo1, _calls1 = self._memo(capacity=1)
+        for symbol in (_CE_SYMBOL, _BANKNIFTY_CE, _CE_SYMBOL):
+            memo1.get(*self._pair(symbol))
+        assert memo1.reads == 3 and memo1.hits == 0
+
+    def test_third_key_evicts_the_least_recently_used(self) -> None:
+        # A,B,A,C,B: the A hit refreshes A's recency, so C evicts B (the LRU),
+        # and the final B is a MISS. Without move_to_end C would evict A and
+        # the final B would HIT (reads 3 / hits 2) — the recency mutant dies.
+        memo, calls = self._memo()
+        for symbol in (_CE_SYMBOL, _BANKNIFTY_CE, _CE_SYMBOL, _RELIANCE_CE, _BANKNIFTY_CE):
+            memo.get(*self._pair(symbol))
+        assert memo.reads == 4 and memo.hits == 1
+        assert calls == ["NIFTY", "BANKNIFTY", "RELIANCE", "BANKNIFTY"]
+
+    def test_eviction_bounds_the_cache_to_capacity(self) -> None:
+        memo, _calls = self._memo()
+        for symbol in (_CE_SYMBOL, _BANKNIFTY_CE, _RELIANCE_CE, _CE_SYMBOL):
+            memo.get(*self._pair(symbol))  # the 3rd key evicted A → A re-reads
+        assert memo.reads == 4 and memo.hits == 0
+
+    def test_raising_read_counts_the_attempt_and_caches_nothing(self) -> None:
+        def _boom(_t: GreeksEnrichTarget, _p: FnoSymbolParts) -> SpotJoin:
+            raise OSError("corrupt spot partition")
+
+        memo = _SpotJoinMemo(_boom)
+        with pytest.raises(OSError, match="corrupt spot partition"):
+            memo.get(*self._pair(_CE_SYMBOL))
+        with pytest.raises(OSError, match="corrupt spot partition"):
+            memo.get(*self._pair(_CE_SYMBOL))  # nothing was cached → re-attempted
+        assert memo.reads == 2 and memo.hits == 0
+
+
+class TestDriverSpotMemo:
+    """The driver end of DEC-GREEKS-SPOT-MEMO-001 — sort + memo + counters."""
+
+    def _counting_read_spot(
+        self,
+    ) -> tuple[list[str], Callable[[GreeksEnrichTarget, FnoSymbolParts], SpotJoin]]:
+        calls: list[str] = []
+
+        def _read(_t: GreeksEnrichTarget, p: FnoSymbolParts) -> SpotJoin:
+            calls.append(p.underlying)
+            return SpotJoin({_BAR_TS: _SPOT_BY_UNDERLYING[p.underlying]}, "INDEX")
+
+        return calls, _read
+
+    def test_chain_sharing_one_window_reads_spot_once(self, tmp_path: Path) -> None:
+        calls, read_spot = self._counting_read_spot()
+        written: dict[str, FnoGreeksBar] = {}
+
+        def _write(t: GreeksEnrichTarget, bars: object) -> int:
+            (written[t.symbol],) = list(bars)  # type: ignore[call-overload]
+            return 1
+
+        report = enrich_greeks_for_targets(
+            targets=[
+                _target(_NIFTY_21400_CE),
+                _target(_CE_SYMBOL),
+                _target(_NIFTY_21600_CE),
+            ],
+            lake_root=tmp_path,
+            rate_source=_RATE,
+            read_bars=lambda _t: [_row(close="200")],
+            read_spot=read_spot,
+            write_bars=_write,
+        )
+        assert calls == ["NIFTY"]  # ONE performed read for the whole chain
+        assert report.spot_reads == 1 and report.spot_hits == 2
+        assert report.enriched == 3 and report.bars_solved == 3
+        for bar in written.values():  # per-target results identical to unmemoised
+            assert bar.iv is not None and bar.spot_at_bar == _SPOT
+
+    def test_distinct_keys_each_read_once(self, tmp_path: Path) -> None:
+        calls, read_spot = self._counting_read_spot()
+        report = enrich_greeks_for_targets(
+            targets=[
+                _target(_CE_SYMBOL),
+                _target(_BANKNIFTY_CE),
+                _target(_RELIANCE_CE),
+            ],
+            lake_root=tmp_path,
+            rate_source=_RATE,
+            read_bars=lambda _t: [_row(close="200")],
+            read_spot=read_spot,
+            write_bars=lambda _t, b: len(list(b)),  # type: ignore[arg-type]
+        )
+        assert sorted(calls) == ["BANKNIFTY", "NIFTY", "RELIANCE"]
+        assert report.spot_reads == 3 and report.spot_hits == 0
+
+    def test_interleaved_targets_are_sorted_for_the_memo(self, tmp_path: Path) -> None:
+        # 3 distinct keys INTERLEAVED around a shared-key pair: without the
+        # sorted() grouping the capacity-2 LRU evicts NIFTY before its second
+        # target arrives (4 reads / 0 hits) — this pins the sort's teeth.
+        calls, read_spot = self._counting_read_spot()
+        report = enrich_greeks_for_targets(
+            targets=[
+                _target(_NIFTY_21400_CE),
+                _target(_BANKNIFTY_CE),
+                _target(_RELIANCE_CE),
+                _target(_NIFTY_21600_CE),
+            ],
+            lake_root=tmp_path,
+            rate_source=_RATE,
+            read_bars=lambda _t: [_row(close="200")],
+            read_spot=read_spot,
+            write_bars=lambda _t, b: len(list(b)),  # type: ignore[arg-type]
+        )
+        assert report.spot_reads == 3 and report.spot_hits == 1
+        assert calls == ["BANKNIFTY", "NIFTY", "RELIANCE"]
+
+    def test_processing_order_is_deterministic(self, tmp_path: Path) -> None:
+        late_window = (date(2024, 1, 5), _WINDOW[1])
+        shuffled = [
+            _target(_RELIANCE_CE),
+            _target(_NIFTY_21600_CE, window=late_window),
+            _target(_CE_SYMBOL),
+            _target(_BANKNIFTY_CE),
+        ]
+        with capture_logs() as logs:
+            enrich_greeks_for_targets(
+                targets=shuffled,
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row(close="200")],
+                read_spot=self._counting_read_spot()[1],
+                write_bars=lambda _t, b: len(list(b)),  # type: ignore[arg-type]
+            )
+        order = [e["symbol"] for e in logs if e["event"] == "greeks_enrich.target_enriched"]
+        # (exchange, underlying, start, end, symbol): BANKNIFTY < NIFTY < RELIANCE,
+        # and within NIFTY the earlier window start sorts first.
+        assert order == [_BANKNIFTY_CE, _CE_SYMBOL, _NIFTY_21600_CE, _RELIANCE_CE]
+
+    def test_pre_read_skips_never_touch_the_counters(self, tmp_path: Path) -> None:
+        report = enrich_greeks_for_targets(
+            targets=[
+                _target(_FUT_SYMBOL),
+                _target("not-a-contract"),
+                _target(_CE_SYMBOL),  # no stored bars → skipped before the read
+            ],
+            lake_root=tmp_path,
+            rate_source=_RATE,
+            read_bars=lambda _t: [],
+            read_spot=lambda _t, _p: SpotJoin({}, None),
+            write_bars=lambda _t, _b: 0,
+        )
+        assert report.futures_skipped == 1 and report.undecodable == 1 and report.no_bars == 1
+        assert report.spot_reads == 0 and report.spot_hits == 0
+
+    def test_raising_spot_reader_quarantines_and_counts_attempts(self, tmp_path: Path) -> None:
+        def _boom(_t: GreeksEnrichTarget, _p: FnoSymbolParts) -> SpotJoin:
+            raise OSError("corrupt spot partition")
+
+        with capture_logs() as logs:
+            report = enrich_greeks_for_targets(
+                targets=[_target(_CE_SYMBOL), _target(_NIFTY_21600_CE)],  # same memo key
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row(close="200")],
+                read_spot=_boom,
+                write_bars=lambda _t, _b: 0,
+            )
+        # A raising read caches nothing, so the shared-key sibling re-attempts:
+        # both targets quarantined, both attempts counted, zero hits.
+        assert report.errored == 2
+        assert report.spot_reads == 2 and report.spot_hits == 0
+        assert sum(1 for e in logs if e["event"] == "greeks_enrich.target_errored") == 2

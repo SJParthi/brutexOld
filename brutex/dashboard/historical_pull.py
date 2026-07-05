@@ -1339,6 +1339,8 @@ def _enrich_greeks_from_minute(
             bars_solved=report.bars_solved,
             bars_null=report.bars_null,
             bars_reused=report.bars_reused,
+            spot_reads=report.spot_reads,
+            spot_hits=report.spot_hits,
         )
     except Exception as exc:
         _LOG.error("fno.greeks_enrich.error", error=str(exc))

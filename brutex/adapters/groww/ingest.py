@@ -74,7 +74,12 @@ from brutex.adapters.error_storm_breaker import (
 )
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.client import client_self_paces
-from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
+from brutex.adapters.groww.errors import (
+    GrowwError,
+    is_rate_limit,
+    is_retryable,
+    steps_timeout_ladder,
+)
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.write_deadline import append_with_deadline
 from brutex.adapters.ingest_common import (
@@ -816,13 +821,18 @@ def _fetch_window_raw(
         except GrowwError as exc:
             if is_retryable(exc):
                 # Feed the swallowed transient to the controller so it adapts: a
-                # rate-limit steps the rate down, a timeout drives the gentle timeout
-                # ladder. A one-off blip is ignored by the controller's threshold.
+                # rate-limit steps the rate down, a NON-auth transient drives the gentle
+                # timeout ladder (`steps_timeout_ladder`, DEC-AUTH-LADDER-EXCLUDE-001) —
+                # a retryable auth-family failure (token-stale / mint-throttle) feeds
+                # NEITHER hook: it is no evidence about candle-endpoint health, so it
+                # must not ease the pull rate (the FAILED record + storm-breaker feed
+                # below stay byte-identical). A one-off blip is ignored by the
+                # controller's threshold.
                 rate_limited = is_rate_limit(exc)
                 if rate_limited:
                     if on_rate_limit is not None:
                         on_rate_limit()
-                elif on_timeout is not None:
+                elif on_timeout is not None and steps_timeout_ladder(exc):
                     on_timeout()
                 retry_window = window
                 _LOG.warning(
