@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -700,12 +700,20 @@ def _patch_blocking_spot(
     return entered, proceed
 
 
-def test_pull_pipeline_gates_movers_while_running_then_releases_ok_true(
+def test_pull_pipeline_fetch_phase_does_not_gate_movers(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """MID-RUN the /movers route is gated (honest `gated: true`, zero candidate
-    computation); after the clean run (prebuild ok=True) the gate is released
-    with ok=True and /movers serves normally again."""
+    """REGRESSION (DEC-MOVERS-GATE-PREBUILD-SCOPE-001): the multi-hour FETCH
+    phases must NOT gate the movers — only the prebuild phase does.
+
+    Fail-before proven: on origin/main this test FAILS — the route called
+    ``_prebuild_gate.begin()`` BEFORE the pipeline work, so mid-SPOT-fetch the
+    gate read ``blocking=True`` and ``/movers`` returned ``gated: true`` (the
+    prior ``test_pull_pipeline_gates_movers_while_running_then_releases_ok_true``
+    pinned exactly that old behaviour and was rewritten into this test). After
+    the fix ``begin()`` fires as the FIRST statement of ``_prebuild_timeframes``,
+    so the fetch phases serve movers normally and the clean run still releases
+    ``ok=True`` with ``runs == 1`` (the prebuild began exactly once)."""
     from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 
     _pin_creds_present(monkeypatch)
@@ -717,38 +725,94 @@ def test_pull_pipeline_gates_movers_while_running_then_releases_ok_true(
             symbols_built=1, total_bars=9, failed=(), failed_count=0, ok=True
         ),
     )
-    compute_calls: list[str] = []
-
-    def _spy_spot(*args: Any, **kwargs: Any) -> Any:
-        compute_calls.append("spot")
-        raise AssertionError("no candidate computation may run while gated")
-
-    monkeypatch.setattr(app_module, "compute_spot_candidates", _spy_spot)
     gate = PrebuildGate()
     with _gated_client(store, monkeypatch, tmp_path, gate) as client:
         resp = client.post("/api/v1/universe/pull-pipeline")
         assert resp.status_code == 200
         try:
             assert entered.wait(timeout=10.0), "the pipeline job never started its spot phase"
-            # MID-RUN: the gate blocks and the movers route answers honestly.
+            # MID-FETCH: the gate is IDLE and the movers route serves normally
+            # (an honest non-gated payload over the empty tmp lake).
+            assert gate.snapshot().blocking is False
             body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
-            assert body["gated"] is True
-            assert "pull pipeline running" in body["note"]
-            assert compute_calls == []  # ZERO lake-reading computation while gated
+            assert "gated" not in body
         finally:
             proceed.set()
         assert _wait_for_job(client)["state"] == "done"
         snap = gate.snapshot()
         assert snap.blocking is False  # released in the job's finally
         assert snap.last_ok is True  # the spied prebuild succeeded
+        assert snap.runs == 1  # begin() fired exactly once — inside the prebuild
+
+
+def test_pull_pipeline_gates_movers_during_prebuild_only(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MID-PREBUILD the /movers route IS gated (honest ``gated: true`` with the
+    ``phase``/``started_at``/``gated_for_s`` fields, ZERO candidate
+    computation); after the clean run the gate is released ok=True and /movers
+    serves normally again (DEC-MOVERS-GATE-PREBUILD-SCOPE-001)."""
+    from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
+
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def _blocking_prebuild(**kwargs: Any) -> PrebuildOutcome:
+        entered.set()
+        assert proceed.wait(timeout=10.0), "test never released the blocking prebuild fake"
+        return PrebuildOutcome(symbols_built=1, total_bars=9, failed=(), failed_count=0, ok=True)
+
+    monkeypatch.setattr(app_module, "run_pipeline_prebuild_guarded", _blocking_prebuild)
+    compute_calls: list[str] = []
+
+    def _spy_spot(*args: Any, **kwargs: Any) -> Any:
+        from brutex.dashboard.movers_snapshot import SpotCandidates
+
+        if not proceed.is_set():
+            # While the prebuild blocks, the gate must intercept BEFORE any scan.
+            compute_calls.append("spot")
+            raise AssertionError("no candidate computation may run while gated")
+        # Post-release the movers route may compute again — honest empty set.
+        return SpotCandidates(snapshots=(), skipped=0, date="2024-06-13")
+
+    monkeypatch.setattr(app_module, "compute_spot_candidates", _spy_spot)
+    gate = PrebuildGate()
+    with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+        assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+        try:
+            assert entered.wait(timeout=10.0), "the pipeline job never reached its prebuild"
+            # MID-PREBUILD: the gate blocks and the movers route answers honestly,
+            # naming the phase + how long it has been gating.
+            assert gate.snapshot().blocking is True
+            body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+            assert body["gated"] is True
+            assert body["phase"] == "prebuild"
+            assert isinstance(body["started_at_epoch"], float)
+            assert isinstance(body["gated_for_s"], float)
+            assert body["gated_for_s"] >= 0.0
+            assert "pull pipeline running" in body["note"]
+            assert "(current stage: prebuild)" in body["note"]
+            assert compute_calls == []  # ZERO lake-reading computation while gated
+        finally:
+            proceed.set()
+        assert _wait_for_job(client)["state"] == "done"
+        snap = gate.snapshot()
+        assert snap.blocking is False  # released in the job's finally
+        assert snap.last_ok is True
         assert snap.runs == 1
+        # And the movers route serves the normal (non-gated) payload again.
+        body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+        assert "gated" not in body
 
 
 def test_pull_pipeline_spot_failure_releases_gate_movers_never_stuck(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A pipeline that STOPS at the spot phase (still-failing windows) still
-    releases the gate (ok=False) — a failed pull can never wedge movers shut."""
+    """A pipeline that STOPS at the spot phase (still-failing windows) never
+    gates at all (the prebuild never ran — DEC-MOVERS-GATE-PREBUILD-SCOPE-001)
+    and the finally still records the honest ok=False release."""
     _pin_creds_present(monkeypatch)
     entered, proceed = _patch_blocking_spot(monkeypatch, still_failed_windows=1)
     gate = PrebuildGate()
@@ -756,13 +820,15 @@ def test_pull_pipeline_spot_failure_releases_gate_movers_never_stuck(
         assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
         try:
             assert entered.wait(timeout=10.0)
-            assert gate.snapshot().blocking is True  # gated while running
+            # The fetch phase never gates (narrowed scope).
+            assert gate.snapshot().blocking is False
         finally:
             proceed.set()
         assert _wait_for_job(client)["state"] == "done"
         snap = gate.snapshot()
         assert snap.blocking is False  # movers NEVER stuck behind a failed pull
         assert snap.last_ok is False  # the prebuild never ran → honest False
+        assert snap.runs == 0  # begin() never fired — the gate covers only the prebuild
         # And the movers route serves the normal (non-gated) payload again.
         body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
         assert "gated" not in body
@@ -791,6 +857,44 @@ def test_pull_pipeline_dry_run_does_not_gate(
             proceed.set()
         assert _wait_for_job(client)["state"] == "done"
         assert gate.snapshot().runs == 0  # begin() was never called
+
+
+def test_pull_pipeline_seeds_discovery_memos_after_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route runs the post-pipeline discovery warm ONCE after the pipeline
+    (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item 1b): the app-module binding is
+    spied — a clean offline run must invoke it exactly once with the app's
+    current write generation + all four memo caches wired (the seeding
+    mechanics themselves are unit-pinned in ``test_discovery_warm.py``)."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    warm_calls: list[dict[str, Any]] = []
+
+    def _spy_warm(**kwargs: Any) -> int:
+        warm_calls.append(dict(kwargs))
+        return 5
+
+    monkeypatch.setattr(app_module, "warm_discovery_memos", _spy_warm)
+    assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert len(warm_calls) == 1, "the discovery warm must run once per pipeline"
+    kwargs = warm_calls[0]
+    assert isinstance(kwargs["generation"], int)
+    for cache_kw in (
+        "db_datasets_cache",
+        "spot_cascade_cache",
+        "fno_cascade_cache",
+        "latest_date_cache",
+    ):
+        assert kwargs[cache_kw] is not None
+    # The symbol_for_id provider is lazy (called inside the warm's guard).
+    # Typed local binding (the production `warm_discovery_memos` signature):
+    # `callable()` on the raw `Any` narrows to `(...) -> object` under pyright,
+    # which would reject the `dict(...)` call below.
+    symbol_for_id_fn: Callable[[], Mapping[str, str]] = kwargs["symbol_for_id_fn"]
+    assert callable(symbol_for_id_fn)
+    assert dict(symbol_for_id_fn()) == {"13": "NIFTY"}
 
 
 def test_pull_pipeline_prebuild_global_stop_fails_job_alerts_and_releases_gate(
