@@ -1851,6 +1851,15 @@ jobs:
           else
             echo "(brutex.dashboard.summary_cache test file not present yet — gate inactive)"
           fi
+          # DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 (#1250): the post-pipeline
+          # discovery warm — re-seeds the five discovery memos (db datasets
+          # triple-walk + spot/F&O cascades + latest-movers-date) off ONE
+          # shared lake walk, best-effort. 100% line+branch on discovery_warm.py.
+          if compgen -G "tests/unit/test_discovery_warm.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.discovery_warm --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_discovery_warm.py
+          else
+            echo "(brutex.dashboard.discovery_warm test file not present yet — gate inactive)"
+          fi
           # DEC-DASHBOARD-REQUEST-LOGGING-001 (#440): per-request structured
           # logging — the high-frequency-poll level policy + the uvicorn
           # access-firehose silencer. 100% line+branch on request_logging.py.

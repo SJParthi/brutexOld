@@ -4,8 +4,12 @@ Proves :class:`brutex.dashboard.movers_cache.MoversSnapshotCache` +
 :func:`~brutex.dashboard.movers_cache.candidate_key`: a clean hit never recomputes,
 a generation bump (a pull) invalidates, the LRU bound is honoured, two concurrent
 cold misses both resolve idempotently to the same value, and a ``compute`` that
-raises propagates without poisoning the cache. Pure (no lake / FastAPI) — the
-cache is the generic speed core, fully exercised with plain closures + threads.
+raises propagates without poisoning the cache. Plus the OPT-IN pull-time
+adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 — the ported #920 pattern:
+stale-serve under pull within ``min(max(base, duration), cap)``, force_fresh
+bypass, probe-error swallow, default byte-identical). Pure (no lake / FastAPI)
+— the cache is the generic speed core, fully exercised with plain closures +
+threads.
 """
 
 from __future__ import annotations
@@ -14,10 +18,13 @@ import threading
 
 import pytest
 from brutex.dashboard.movers_cache import (
+    DEFAULT_ADAPTIVE_BASE_FLOOR_S,
     DEFAULT_MOVERS_CACHE_CAPACITY,
+    MAX_ADAPTIVE_FLOOR_CAP_S,
     MoversSnapshotCache,
     candidate_key,
 )
+from structlog.testing import capture_logs
 
 
 class TestCandidateKey:
@@ -183,6 +190,216 @@ class TestComputeRaises:
         assert cache.size() == 0
         # A subsequent good compute on the SAME key works (in-flight was cleared).
         assert cache.get_or_compute("k", generation=0, compute=lambda: "ok") == "ok"
+
+
+class _TickClock:
+    """A manually-advanced monotonic clock for deterministic floor tests."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _slow_compute(clock: _TickClock, duration: float, value: str) -> str:
+    """Simulate a walk that takes *duration* seconds on the injected clock."""
+    clock.advance(duration)
+    return value
+
+
+class TestAdaptiveFloorOptIn:
+    """The OPT-IN pull-time stale-serve floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001)."""
+
+    def test_stale_served_under_pull_within_floor(self) -> None:
+        """REGRESSION (fail-before proven): on origin/main the constructor has no
+        ``adaptive_floor``/``pull_active_probe`` parameters (this test errors with
+        ``TypeError``) and behaviourally EVERY generation mismatch recomputed
+        immediately — the discovery walk re-fired back-to-back during a pull.
+        After the fix, a mismatch within the floor while the pull runs serves the
+        STALE entry with ONE ``movers_cache.stale_served`` log (stale=True)."""
+        clock = _TickClock()
+        cache = MoversSnapshotCache(
+            pull_active_probe=lambda: True, adaptive_floor=True, clock=clock
+        )
+        # Seed: a 30 s walk at generation 1 → floor = max(2, 30) = 30 s.
+        assert (
+            cache.get_or_compute(
+                "k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1")
+            )
+            == "v1"
+        )
+        clock.advance(10.0)  # 10 s < the 30 s floor
+
+        def _must_not_run() -> str:
+            raise AssertionError("stale-under-pull within floor must not recompute")
+
+        with capture_logs() as logs:
+            served = cache.get_or_compute("k", generation=2, compute=_must_not_run)
+        assert served == "v1"  # the STALE entry, honestly served under the pull
+        events = [e for e in logs if e["event"] == "movers_cache.stale_served"]
+        assert len(events) == 1
+        assert events[0]["stale"] is True
+        assert events[0]["key"] == "k"
+        assert events[0]["entry_generation"] == 1
+        assert events[0]["generation"] == 2
+
+    def test_recomputes_past_floor_even_under_pull(self) -> None:
+        clock = _TickClock()
+        cache = MoversSnapshotCache(
+            pull_active_probe=lambda: True, adaptive_floor=True, clock=clock
+        )
+        cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1"))
+        clock.advance(31.0)  # past the 30 s floor → the walk re-runs even mid-pull
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v2"
+
+    def test_no_pull_recomputes_immediately(self) -> None:
+        # Probe False ⇒ today's behaviour byte-identically (the floor never applies).
+        clock = _TickClock()
+        cache = MoversSnapshotCache(
+            pull_active_probe=lambda: False, adaptive_floor=True, clock=clock
+        )
+        cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1"))
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v2"
+
+    def test_default_cache_never_serves_stale(self) -> None:
+        # The DEFAULT (no opt-in) pin: byte-identical pre-floor behaviour even
+        # with a probe wired — adaptive_floor=False keeps every mismatch fresh.
+        clock = _TickClock()
+        cache = MoversSnapshotCache(pull_active_probe=lambda: True, clock=clock)
+        cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1"))
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v2"
+
+    def test_opt_in_without_probe_never_serves_stale(self) -> None:
+        # adaptive_floor=True but NO probe ⇒ pull state is unknowable ⇒ fresh.
+        clock = _TickClock()
+        cache = MoversSnapshotCache(adaptive_floor=True, clock=clock)
+        cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1"))
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v2"
+
+    def test_probe_exception_swallowed_to_false(self) -> None:
+        def _boom() -> bool:
+            raise RuntimeError("probe blew up")
+
+        clock = _TickClock()
+        cache = MoversSnapshotCache(pull_active_probe=_boom, adaptive_floor=True, clock=clock)
+        cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1"))
+        # The raising probe reads as "no pull" → recompute, never a crash.
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v2"
+
+    def test_force_fresh_bypasses_floor(self) -> None:
+        # The post-pipeline discovery warm runs while the job is still `running`,
+        # so it MUST bypass the floor to land its fresh seed.
+        clock = _TickClock()
+        cache = MoversSnapshotCache(
+            pull_active_probe=lambda: True, adaptive_floor=True, clock=clock
+        )
+        cache.get_or_compute("k", generation=1, compute=lambda: _slow_compute(clock, 30.0, "v1"))
+        clock.advance(1.0)  # deep inside the floor
+        assert (
+            cache.get_or_compute("k", generation=2, compute=lambda: "fresh", force_fresh=True)
+            == "fresh"
+        )
+        # And the seed is now the clean hit at generation 2.
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "later") == "fresh"
+
+    def test_force_fresh_clean_hit_still_serves_cache(self) -> None:
+        # force_fresh bypasses the STALE floor, never the clean-hit fast path.
+        cache = MoversSnapshotCache(
+            pull_active_probe=lambda: True, adaptive_floor=True, clock=_TickClock()
+        )
+        cache.get_or_compute("k", generation=1, compute=lambda: "seed")
+
+        def _must_not_run() -> str:
+            raise AssertionError("clean hit must not recompute even with force_fresh")
+
+        assert (
+            cache.get_or_compute("k", generation=1, compute=_must_not_run, force_fresh=True)
+            == "seed"
+        )
+
+    def test_fast_walk_keeps_base_floor(self) -> None:
+        # duration ≈ 0 ⇒ floor = base (2 s): within 2 s stale-served, past it fresh.
+        clock = _TickClock()
+        cache = MoversSnapshotCache(
+            pull_active_probe=lambda: True, adaptive_floor=True, clock=clock
+        )
+        cache.get_or_compute("k", generation=1, compute=lambda: "v1")
+        clock.advance(DEFAULT_ADAPTIVE_BASE_FLOOR_S - 0.5)
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v1"
+        clock.advance(1.0)  # now past the 2 s base floor
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v2"
+
+    def test_floor_capped_at_max(self) -> None:
+        # A pathological 10 000 s walk is capped at 600 s — bounded staleness.
+        clock = _TickClock()
+        cache = MoversSnapshotCache(
+            pull_active_probe=lambda: True, adaptive_floor=True, clock=clock
+        )
+        cache.get_or_compute(
+            "k", generation=1, compute=lambda: _slow_compute(clock, 10_000.0, "v1")
+        )
+        clock.advance(MAX_ADAPTIVE_FLOOR_CAP_S + 1.0)  # past the cap (< the raw 10 000)
+        assert cache.get_or_compute("k", generation=2, compute=lambda: "v2") == "v2"
+
+    def test_stale_serve_keeps_key_mru(self) -> None:
+        # A stale-served key is marked most-recently-used so the LRU never
+        # evicts the very entry the pull-time floor is protecting.
+        clock = _TickClock()
+        cache = MoversSnapshotCache(
+            capacity=2, pull_active_probe=lambda: True, adaptive_floor=True, clock=clock
+        )
+        cache.get_or_compute("a", generation=1, compute=lambda: _slow_compute(clock, 30.0, "A"))
+        cache.get_or_compute("b", generation=1, compute=lambda: "B")
+        clock.advance(1.0)
+        assert cache.get_or_compute("a", generation=2, compute=lambda: "A2") == "A"  # stale-served
+        cache.get_or_compute("c", generation=2, compute=lambda: "C")  # evicts LRU = "b"
+        assert cache.size() == 2
+        recomputed: list[str] = []
+        cache.get_or_compute("b", generation=1, compute=lambda: recomputed.append("b") or "B2")  # type: ignore[func-returns-value]
+        assert recomputed == ["b"]  # "b" was the evictee — "a" survived its stale serve
+
+    def test_stale_serve_survives_concurrent_eviction(self) -> None:
+        """The stale-serve MRU touch tolerates a CONCURRENT eviction.
+
+        The pull-active probe runs OUTSIDE the cache lock (it takes the pull
+        job's own lock), so another thread can evict the stale entry between
+        the stale decision and the MRU re-touch. The read must still serve the
+        snapshot it captured under the first lock — never a ``KeyError`` on the
+        vanished key, never a recompute (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001).
+        Deterministically driven: the probe itself plays the concurrent writer,
+        inserting a second key into a capacity-1 cache so ``"a"`` is evicted
+        before the stale-serve re-acquires the lock.
+        """
+        clock = _TickClock()
+        holder: dict[str, MoversSnapshotCache] = {}
+        fired: list[bool] = []
+
+        def _evicting_probe() -> bool:
+            if not fired:  # fire exactly once — on the stale-decision probe.
+                fired.append(True)
+                holder["cache"].get_or_compute("b", generation=5, compute=lambda: "B")
+            return True
+
+        cache = MoversSnapshotCache(
+            capacity=1, pull_active_probe=_evicting_probe, adaptive_floor=True, clock=clock
+        )
+        holder["cache"] = cache
+        cache.get_or_compute("a", generation=1, compute=lambda: _slow_compute(clock, 30.0, "A"))
+        clock.advance(1.0)  # deep inside the 30 s floor
+
+        def _must_not_run() -> str:
+            raise AssertionError("stale-under-pull within floor must not recompute")
+
+        with capture_logs() as logs:
+            assert cache.get_or_compute("a", generation=2, compute=_must_not_run) == "A"
+        assert [e["key"] for e in logs if e["event"] == "movers_cache.stale_served"] == ["a"]
+        # The concurrent insert won: "b" is the sole resident entry ("a" gone).
+        assert cache.size() == 1
+        assert cache.get_or_compute("b", generation=5, compute=_must_not_run) == "B"
 
 
 class TestConcurrentMissIsIdempotent:
