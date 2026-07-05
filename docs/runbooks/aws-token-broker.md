@@ -1,5 +1,13 @@
 # Runbook — Shared AWS Parameter-Store token broker (DEC-TOKEN-BROKER-AWS-001)
 
+> **⚠️ Reconcile banner (DEC-AWS-ONLY-CREDS-001, 2026-07-03):** the sections below that
+> describe the `BRUTEX_TOKEN_BROKER_READONLY` opt-in flag and the "degrade to the local
+> disk cache + local mint" fallback are STALE — both were REMOVED
+> (`brutex/adapters/groww/constants.py:348-350`): AWS is now the DEFAULT AND ONLY
+> credential/token source and the broker read is unconditional + **fail-fast** (no env
+> fallback, no file fallback, no local mint, no opt-in flag). The SSM paths / region /
+> IAM sections stay correct. A full rewrite of this runbook is a named follow-up.
+
 Point BruteX at the shared AWS Systems Manager **Parameter Store** so it reads the Groww
 creds **and** the daily access token from **one place** — the same place TickVault reads.
 A **single dedicated Lambda mints** the shared access token; BruteX and TickVault are

@@ -444,7 +444,8 @@ class SweepRunConfig:
         ``HOLD`` is rejected by :func:`run_persisted_sweep`, not here, so the
         config stays a pure data holder).
     condition_bits
-        The condition bit positions (of the 52) to brute-force over; duplicates
+        The condition bit positions (of the 60-condition vocabulary) to
+        brute-force over; duplicates
         are ignored (set semantics) for both the enumeration and the ``k`` bound.
     k
         How many of the chosen conditions each combo requires

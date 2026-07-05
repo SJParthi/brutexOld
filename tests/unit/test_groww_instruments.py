@@ -208,6 +208,74 @@ def test_header_drift_raises() -> None:
         gi.parse_instrument_csv(bad)
 
 
+# ── additive header drift (DEC-INSTRUMENT-HEADER-ADDITIVE-001) ───────────────
+# A purely-ADDITIVE vendor change (extra TRAILING columns after the verified 21)
+# must parse — with ONE loud warning naming the extras — instead of killing the
+# whole universe load. Every OTHER drift (missing / reordered / renamed among
+# the first 21, or an extra that duplicates a known name) still fail-louds.
+def _csv_with_extras(*extras: str, rows: tuple[str, ...] = ()) -> str:
+    header = ",".join((*INSTRUMENT_CSV_COLUMNS, *extras))
+    padded = [f"{row},{','.join('x' for _ in extras)}" for row in rows]
+    return "\n".join([header, *padded]) + "\n"
+
+
+def test_extra_trailing_column_parses_and_warns_once() -> None:
+    text = _csv_with_extras("new_vendor_col", rows=(_NIFTY, _WIPRO))
+    with capture_logs() as logs:
+        pairs = gi.parse_instrument_csv(text)
+    assert {gsym for gsym, _ in pairs} == {"NSE-NIFTY", "NSE-WIPRO"}
+    warnings = [e for e in logs if e["event"] == "groww.instruments.header_extra_columns"]
+    assert len(warnings) == 1
+    assert warnings[0]["extra_columns"] == ["new_vendor_col"]
+    assert warnings[0]["count"] == 1
+
+
+def test_two_extra_trailing_columns_both_named_in_warning() -> None:
+    text = _csv_with_extras("extra_one", "extra_two", rows=(_NIFTY,))
+    with capture_logs() as logs:
+        pairs = gi.parse_instrument_csv(text)
+    assert [gsym for gsym, _ in pairs] == ["NSE-NIFTY"]
+    warnings = [e for e in logs if e["event"] == "groww.instruments.header_extra_columns"]
+    assert len(warnings) == 1
+    assert warnings[0]["extra_columns"] == ["extra_one", "extra_two"]
+    assert warnings[0]["count"] == 2
+
+
+def test_exact_21_column_header_emits_no_extra_columns_warning() -> None:
+    with capture_logs() as logs:
+        pairs = gi.parse_instrument_csv(_csv(_NIFTY))
+    assert [gsym for gsym, _ in pairs] == ["NSE-NIFTY"]
+    assert not [e for e in logs if e["event"] == "groww.instruments.header_extra_columns"]
+
+
+def test_missing_column_among_first_21_raises() -> None:
+    header = ",".join(INSTRUMENT_CSV_COLUMNS[:-1])  # drop the 21st column
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv(header + "\n")
+
+
+def test_reordered_columns_raise() -> None:
+    swapped = list(INSTRUMENT_CSV_COLUMNS)
+    swapped[0], swapped[1] = swapped[1], swapped[0]
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv(",".join(swapped) + "\n")
+
+
+def test_renamed_column_raises() -> None:
+    renamed = list(INSTRUMENT_CSV_COLUMNS)
+    renamed[3] = "groww_sym_v2"  # groww_symbol renamed
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv(",".join(renamed) + "\n")
+
+
+def test_extra_column_duplicating_known_name_raises() -> None:
+    # A trailing duplicate of a known column would make csv.DictReader keep the
+    # LAST occurrence — silently overwriting real cell values — so it is refused.
+    text = _csv_with_extras("lot_size", rows=(_NIFTY,))
+    with pytest.raises(InstrumentFormatError, match="duplicate known"):
+        gi.parse_instrument_csv(text)
+
+
 def test_missing_groww_symbol_raises() -> None:
     with pytest.raises(InstrumentFormatError, match="missing groww_symbol"):
         gi.parse_instrument_row(dict.fromkeys(INSTRUMENT_CSV_COLUMNS, ""))

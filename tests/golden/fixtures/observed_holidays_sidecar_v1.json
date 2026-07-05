@@ -1,0 +1,22 @@
+{
+  "entries": [
+    {
+      "date": "2026-05-12",
+      "detected_at": "2026-07-04T10:00:00+00:00",
+      "evidence": {
+        "clean_success_windows": 1,
+        "failed_windows_touching": 0,
+        "zero_bar_indices": [
+          "NSE/INDEX/NIFTY",
+          "NSE/INDEX/BANKNIFTY",
+          "BSE/INDEX/SENSEX"
+        ]
+      },
+      "label": "observed-not-official",
+      "month": "2026-05"
+    }
+  ],
+  "label": "observed-not-official",
+  "note": "Sessions REMOVED from the derived NSE calendar because the lake OBSERVED zero bars across all 3 engine indices with clean-SUCCESS ledger evidence (DEC-CALENDAR-OBSERVED-SESSIONS-001). Observed, NOT the official NSE circular; an entry never names a holiday. Human-editable escape hatch: deleting an entry (or this file) restores the plain derived calendar.",
+  "version": 1
+}

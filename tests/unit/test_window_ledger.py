@@ -14,6 +14,7 @@ from datetime import UTC, date, datetime
 
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
+    DEMOTED_SETTLE_REASONS,
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
     FAILED,
@@ -659,6 +660,7 @@ class TestPruneSuperseded:
                     _NOW.isoformat(),
                     0,
                     0,
+                    None,
                 )
             ]
         )
@@ -1522,3 +1524,203 @@ class TestRescueLedgerSurface:
         ledger.record(planned, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
         assert ledger.prune_superseded(_plan_index(planned)) == 0
         assert ledger.pruned_keys() == frozenset()
+
+
+class TestBarsNetNew:
+    """DEC-INGEST-BOUNDARY-INTEGRITY-001: the persisted deduped net-new count."""
+
+    def test_record_stores_bars_net_new(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=3, now=_NOW
+        )
+        rec = ledger.records()[0]
+        assert rec.bars == 5  # the input count is UNCHANGED (the >0 gates read it)
+        assert rec.bars_net_new == 3  # the deduped count is stored alongside
+
+    def test_record_default_is_honest_unknown_none(self) -> None:
+        # A caller with no sink result records None — never a fabricated 0.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.records()[0].bars_net_new is None
+
+    def test_round_trip_carries_the_int_and_the_none(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=2, now=_NOW
+        )
+        ledger.record(_key("SENSEX"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        rows = ledger.to_rows()
+        assert [r[13] for r in rows] == [2, None]  # the LAST tuple element
+        restored = WindowLedger.from_rows(rows)
+        assert restored.to_rows() == rows
+        by_symbol = {r.security_id: r for r in restored.records()}
+        assert by_symbol["NIFTY"].bars_net_new == 2
+        assert by_symbol["SENSEX"].bars_net_new is None
+
+    def test_plan_row_is_known_zero(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        assert ledger.records()[0].bars_net_new == 0  # never appended (mirrors bars=0)
+
+    def test_seed_lake_success_is_honest_unknown(self) -> None:
+        # The cold-start seed proves bars EXIST but the original write's dedup
+        # count is unrecorded — None, never fabricated.
+        ledger = WindowLedger()
+        ledger.seed_lake_success(_key(), bars=42, now=_NOW)
+        assert ledger.records()[0].bars_net_new is None
+
+    def test_settle_known_gap_preserves_prior_value(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=5, error_type=None, bars_appended=5, bars_net_new=4, now=_NOW
+        )
+        ledger.settle_known_gap(_key(), now=_LATER, reason="DH-905")
+        assert ledger.records()[0].bars_net_new == 4  # no fetch here — preserved
+
+    def test_settle_known_gap_without_prior_is_none(self) -> None:
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        assert ledger.records()[0].bars_net_new is None
+
+    def test_reopen_skipped_preserves_prior_value(self) -> None:
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")  # SKIPPED, None
+        ledger.record(
+            _key("SENSEX"), raw_bars=0, error_type=None, bars_appended=0, bars_net_new=0, now=_NOW
+        )
+        # Build a SKIPPED row WITH a recorded net-new, then reopen it.
+        other = _key("BANKNIFTY")
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                other, raw_bars=0, error_type=None, bars_appended=0, bars_net_new=0, now=_NOW
+            )
+        assert ledger.reopen_skipped(security_id="BANKNIFTY") == 1
+        reopened = {r.security_id: r for r in ledger.records()}["BANKNIFTY"]
+        assert reopened.status == FAILED
+        assert reopened.bars_net_new == 0  # preserved through the demotion
+
+
+class TestHasWindow:
+    """`has_window` — the cold-start seed's O(1) existence probe
+    (DEC-DATA-HONESTY-ALLFILTERED-SEED-001)."""
+
+    def test_absent_key_reads_false(self) -> None:
+        assert WindowLedger().has_window(_key()) is False
+
+    def test_any_status_reads_true_and_never_mutates(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)  # PLANNED
+        ledger.record(
+            _key("SENSEX"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW
+        )  # EMPTY
+        ledger.record(
+            _key("BANKNIFTY"),
+            raw_bars=0,
+            error_type="GrowwTimeoutError",
+            bars_appended=0,
+            now=_NOW,
+        )  # FAILED
+        before = ledger.records()
+        assert ledger.has_window(_key()) is True
+        assert ledger.has_window(_key("SENSEX")) is True
+        assert ledger.has_window(_key("BANKNIFTY")) is True
+        assert ledger.has_window(_key("INDIAVIX")) is False
+        assert ledger.records() == before  # a probe never writes
+
+    def test_distinct_interval_is_a_distinct_key(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(interval="1minute"), now=_NOW)
+        assert ledger.has_window(_key(interval="1day")) is False
+
+
+class TestDemotedSettleReasons:
+    """`DEMOTED_SETTLE_REASONS` — the canonical demotion reason-tag set the
+    /coverage label keys on (DEC-DATA-HONESTY-ALLFILTERED-SEED-001)."""
+
+    def test_enumerates_exactly_the_channel_tags_plus_fallback(self) -> None:
+        from brutex.data.interior_gap_detect import INTERIOR_GAP
+        from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
+        from brutex.data.session import ALL_FILTERED
+
+        # The three detector tags PLUS "DEGRADED" — record()'s defensive
+        # fallback for a degraded=True call with no reason (latent: both
+        # production spines always pass a concrete tag). Enumerated so a
+        # reason-less demotion settle can never fall through to the
+        # "vendor confirmed no trades" label (wiring-review fold, PR #1158).
+        expected = frozenset({ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"})
+        assert expected == DEMOTED_SETTLE_REASONS
+
+    def test_reasonless_degraded_record_stamps_a_demoted_reason(self) -> None:
+        # The fallback stamp itself is IN the set — the invariant the label
+        # branch relies on: every degraded-channel last_error ∈ the frozenset.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW, degraded=True)
+        rec = ledger.records()[0]
+        assert rec.last_error == "DEGRADED"
+        assert rec.last_error in DEMOTED_SETTLE_REASONS
+
+    def test_expired_window_stamp_is_not_a_demoted_reason(self) -> None:
+        # The two SKIPPED label branches must never collide.
+        assert expired_window_settle_reason(1) not in DEMOTED_SETTLE_REASONS
+
+
+class TestDegradedOldWindowInteraction:
+    """The F&O spine passes BOTH `degraded` (ALL_FILTERED) and `old_window` on one
+    record call — pin the cross-arm interaction (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
+    refuter F-2 fold; single-confirm settle per DEC-OLD-EMPTY-SINGLE-CONFIRM-001)."""
+
+    def test_all_filtered_demotion_then_old_clean_empty_settles_single_confirm(self) -> None:
+        # Pull 1: an all-filtered OLD window demotes FAILED (streak 1) — the
+        # old-window hint is IGNORED for a degraded outcome (EMPTY-only arm).
+        ledger = WindowLedger()
+        s1 = ledger.record(
+            _key(),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason="ALL_FILTERED",
+            old_window=True,
+        )
+        assert s1 == FAILED
+        assert ledger.records()[0].empty_streak == 1
+        # Pull 2: a genuine clean EMPTY on the old window settles SKIPPED off THIS
+        # single observation (single-confirm — the degraded bump was never needed).
+        s2 = ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_LATER,
+            old_window=True,
+        )
+        assert s2 == SKIPPED
+        rec = ledger.records()[0]
+        assert is_expired_window_settle_reason(rec.last_error)
+        # HONEST-envelope pin (documented in record()): the stamp's clean-attempt
+        # COUNT is streak-derived, so the prior DEGRADED bump inflates it to 2
+        # even though only ONE genuine clean EMPTY landed — accepted + pinned.
+        assert rec.last_error == expired_window_settle_reason(2)
+
+    def test_all_filtered_demotion_alone_never_settles_old_window(self) -> None:
+        # A degraded (all-filtered) outcome NEVER rides the old-empty settle arm —
+        # three demotions settle via the degraded threshold, not the expired stamp.
+        ledger = WindowLedger()
+        status = ""
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            status = ledger.record(
+                _key(),
+                raw_bars=2,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="ALL_FILTERED",
+                old_window=True,
+            )
+        assert status == SKIPPED
+        rec = ledger.records()[0]
+        assert rec.last_error == "ALL_FILTERED"  # the demotion reason, never the stamp
+        assert not is_expired_window_settle_reason(rec.last_error)
