@@ -1772,6 +1772,15 @@ def stage_vix(deps: KitDeps, ctx: KitContext) -> StageOutcome:
 
 # ────────────────────────────────────────────────────────────────────────
 # Stage 8 — 1-day derivation + NSE bhavcopy cross-check
+# NOTE (wording reconcile, comment-only): CLAUDE.md's ledger blurb for
+# DEC-1MINUTE-ONLY-DERIVE-1DAY-001 (MIGRATION.md #853) says 'The "Verify vs
+# NSE" bhavcopy cross-check is REMOVED in full' (echoed in the §6 "Candle
+# interval — Track 1 spot" row). That removal covered the PULL-TIME verify
+# flow of DEC-PULL-1DAY-FIRST-001 (#723) — the pre-pull OHLCV-vs-bhavcopy
+# gate on the granularity dropdown. THIS stage deliberately SURVIVES: it is
+# a READ-ONLY, operator-invoked `doctor --live` diagnostic (register row G7,
+# DEC-DOCTOR-LIVE-PROOF-KIT-001) that never gates a pull and never writes
+# production partitions.
 # ────────────────────────────────────────────────────────────────────────
 
 
