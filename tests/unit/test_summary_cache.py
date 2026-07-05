@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import threading
 
+import pytest
 from brutex.dashboard.summary_cache import (
     DEFAULT_TTL_FLOOR_S,
     LAKE_UNIQUENESS,
@@ -975,3 +976,29 @@ def test_cold_waiter_takes_over_after_scan_exception() -> None:
     assert len(errors) == 1  # the leader's exception propagated untouched
     assert results == [[{"call": 1}]]  # the waiter took over with ONE fresh scan
     assert good.calls == 1
+
+
+def test_cold_reentrant_outer_exception_after_inner_success() -> None:
+    """The OUTER cold scan raising AFTER its re-entrant inner succeeded is clean.
+
+    The inner (re-entrant, unregistered) recompute stores an entry and releases
+    the outer's registration on completion; the outer's exception path then
+    finds NOTHING left to release (the ``aborted is None`` arm) — the guard is
+    fully cleared, the inner's payload survives, and no waiter can hang.
+    """
+    cache = SummaryCache(ttl_floor_s=0.0)
+    inner = _CountingRecompute()
+
+    class _Boom(RuntimeError):
+        pass
+
+    def outer_recompute() -> list[dict[str, object]]:
+        cache.get_or_refresh(SPOT, recompute=inner)  # inner stores + releases
+        raise _Boom
+
+    with pytest.raises(_Boom):
+        cache.get_or_refresh(SPOT, recompute=outer_recompute)
+    # The inner's stored payload serves as a clean hit — nothing wedged.
+    follow_up = _CountingRecompute()
+    assert cache.get_or_refresh(SPOT, recompute=follow_up) == [{"call": 1}]
+    assert follow_up.calls == 0
