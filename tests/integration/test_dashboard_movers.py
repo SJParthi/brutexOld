@@ -642,6 +642,112 @@ class TestMoversApi:
         assert Decimal(body["price_gainers"][0]["pct_change"]) == Decimal("10")
         assert {r["symbol"] for r in body["volume"]} == {"NIFTY", "BANKNIFTY"}
 
+    def test_pull_active_probe_prefers_resample_over_stored(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """REGRESSION (DEC-MOVERS-GATE-PREBUILD-SCOPE-001; fail-before proven):
+        on origin/main the route never threaded a pull signal into
+        ``compute_spot_candidates`` — with a pull running, the aligned stored
+        partition was served (``stored_reads == 1``) even when it predated the
+        fresh 1-minute data, so this test's pull-active arm FAILED. Now the
+        route passes ``prefer_resample=_pull_live()``: pull running → the
+        1-minute resample serves (fresh, ``resampled_reads == 1``); idle →
+        stored-first byte-identical."""
+        # Fresh 1-minute session 09:15–09:19 + a STALE stored 5minute partition
+        # whose poisoned close the resample can never produce.
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15 + i, close=str(22000 + i * 10), volume=100 + i)
+                for i in range(5)
+            ],
+        )
+        writer.write(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol="NIFTY",
+            interval="5minute",
+            bars=[_min_bar(hour=9, minute=15, close="99999", volume=1)],
+        )
+        params = {
+            "asset": "spot",
+            "interval": "5minute",
+            "date": "2024-06-13",
+            "time": "09:19",
+        }
+        # A pull IS running (injected probe) → the always-fresh resample serves.
+        pulling = TestClient(
+            build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: True)
+        )
+        body = pulling.get("/api/v1/movers", params=params).json()
+        assert (body["stored_reads"], body["resampled_reads"]) == (0, 1)
+        # No prior-day 1day baseline → the row ranks under volume (no % change).
+        assert body["volume"][0]["ltp"] == "₹22,040.00"  # the FRESH close
+        # No pull → the stored-first read is byte-identical to before (the
+        # stale stored close is served — mid-pull is the only switch window).
+        idle = TestClient(
+            build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: False)
+        )
+        body2 = idle.get("/api/v1/movers", params=params).json()
+        assert (body2["stored_reads"], body2["resampled_reads"]) == (1, 0)
+        assert body2["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+
+    def test_raising_pull_probe_is_swallowed_to_idle_read(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The ``_pull_live`` closure's never-break-a-read guarantee (app.py):
+        an injected pull-active probe that RAISES is swallowed to ``False``
+        (the documented "a raising probe is swallowed" except-arm), so the
+        movers read serves the byte-identical IDLE stored-first path — a 200
+        with ``stored_reads == 1``, never a 500, never a resample switch."""
+        # Same lake shape as the pin above: fresh 1-minute session + a stale
+        # aligned stored 5minute partition whose poisoned close identifies
+        # which read path served the row.
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15 + i, close=str(22000 + i * 10), volume=100 + i)
+                for i in range(5)
+            ],
+        )
+        writer.write(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol="NIFTY",
+            interval="5minute",
+            bars=[_min_bar(hour=9, minute=15, close="99999", volume=1)],
+        )
+
+        def _wedged_probe() -> bool:
+            raise RuntimeError("pull-job probe wedged")
+
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store, pull_active_probe=_wedged_probe)
+        )
+        resp = client.get(
+            "/api/v1/movers",
+            params={
+                "asset": "spot",
+                "interval": "5minute",
+                "date": "2024-06-13",
+                "time": "09:19",
+            },
+        )
+        assert resp.status_code == 200  # the probe error never breaks the read
+        body = resp.json()
+        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves,
+        # byte-identical to the idle arm of the pin above.
+        assert (body["stored_reads"], body["resampled_reads"]) == (1, 0)
+        assert body["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+
     def test_no_date_defaults_to_latest_available_day(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
