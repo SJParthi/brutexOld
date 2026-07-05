@@ -1471,8 +1471,12 @@ def test_pipeline_note_names_daily_opens_substituted() -> None:
 
 
 def test_pipeline_note_zero_substituted_renders_no_clause() -> None:
-    """Zero substitutions keep the note byte-identical — the feature is
-    invisible on a healthy lake (Golden Rule #1 default preservation)."""
+    """Zero substitutions render NO substitution clause (a substring-ABSENCE
+    pin — precise about what it asserts: the clause append is the only note
+    change and is gated on truthiness, so the zero path leaves the note
+    structurally identical to main; the pre-existing note goldens pin the
+    remainder of the string). The feature is invisible on a healthy lake
+    (Golden Rule #1 default preservation)."""
     spot, meta, hist = _clean_phases()
     zero = run_full_pipeline(
         run_spot=spot,

@@ -556,8 +556,8 @@ def materialize_lake_timeframes(
         before=before,
         resample_fn=daily_resample_fn_for(kind),
     )
-    # OBSERVE-ONLY daily-open substitution scan (DEC-DAILY-OPEN-SUBSTITUTION-
-    # FLAG-001) — SPOT only, AFTER the fill so a fill exception short-circuits
+    # OBSERVE-ONLY daily-open substitution scan (DEC-CALENDAR-EXPECTED-BARS-
+    # DAILY-OPEN-001) — SPOT only, AFTER the fill so a fill exception short-circuits
     # identically to before; read-only over the frame already in memory, so
     # the written bars are byte-unchanged (golden-pinned). Guarded inside:
     # a scan error logs + returns 0, never failing the prebuild.

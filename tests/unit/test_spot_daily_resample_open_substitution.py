@@ -22,11 +22,20 @@ suite covers the OBSERVE-ONLY flag over that behavior:
 
 Special-weekend sessions (e.g. the 2026-02-01 Budget Sunday) open at regular
 09:15 hours and need no abstention — deliberately not special-cased.
+
+DRIFT PIN (review fold): main's read-side /completeness counter
+(DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267) counts the SAME
+named concept with deliberately DIFFERENT rules (Muhurat counted there,
+abstained here; strict ``>`` there, ``!=`` here) — the expected disagreement
+is ENCODED by ``test_muhurat_divergence_pin_vs_honesty_counter_1267`` so a
+future silent "reconciliation" of either side fails loudly.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -276,6 +285,21 @@ class TestEmitDailyOpenSubstitutions:
         assert agg[0]["dense"] is False
         assert agg[0]["warns_capped"] is False
 
+    def test_illiquid_above_cap_warns_capped_false(self) -> None:
+        """Mutant killer (review fold): ``warns_capped`` is the DENSE-channel
+        truth — a non-dense symbol emits ZERO per-date WARNs, so even an
+        above-cap count reads ``warns_capped=False`` (nothing existed to cap;
+        claiming True would be exactly the misleading-log lie the field's
+        "the cap never lies" contract forbids — Golden Rule #1). Kills the
+        ``dense and`` → dropped mutant that every count<=20 fixture tolerated."""
+        with capture_logs() as logs:
+            emit_daily_open_substitutions(_scan(25), symbol="NSE-XYZ", dense=False)
+        assert [e for e in logs if e["event"] == "daily_open.substituted"] == []
+        agg = [e for e in logs if e["event"] == "daily_open.substituted_aggregate"]
+        assert len(agg) == 1
+        assert agg[0]["count"] == 25  # the TRUE count still travels
+        assert agg[0]["warns_capped"] is False
+
     def test_zero_count_emits_nothing(self) -> None:
         """A healthy lake's log surface is byte-identical to before the feature."""
         with capture_logs() as logs:
@@ -351,3 +375,85 @@ def test_emit_boundary_around_zero(n: int) -> None:
     with capture_logs() as logs:
         emit_daily_open_substitutions(_scan(n), symbol="S", dense=True)
     assert bool(logs) is (n > 0)
+
+
+# --------------------------------------------------------------------------- #
+# DRIFT PIN vs DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 (MIGRATION.md #1267)
+# --------------------------------------------------------------------------- #
+
+
+def test_muhurat_divergence_pin_vs_honesty_counter_1267(tmp_path: Path) -> None:
+    """The DELIBERATE divergence between the two open-substitution surfaces.
+
+    main ships a read-side daily-open substitution counter
+    (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267 — the
+    per-session CTE in ``db_view.summarize_spot_datasets``, surfaced as the
+    /completeness "Open substituted N/M" column), and this PR ships the
+    prebuild detector — SAME named concept, CONSCIOUSLY different rules (see
+    the ``detect_daily_open_substitutions`` docstring): #1267 COUNTS a
+    Muhurat session (strict ``>`` — any off-canonical open honestly means
+    "the derived daily open is not the 09:15 price"), while this detector
+    ABSTAINS on it (operator mandate — a Muhurat open is off-09:15 BY
+    DESIGN, so a pipeline WARN would be a false positive).
+
+    Over ONE lake holding a 09:16-start non-Muhurat session PLUS the
+    calendar-verified 2025-10-21 afternoon Muhurat (13:45 IST), the two
+    surfaces therefore DISAGREE: /completeness reads 2, the prebuild
+    headline reads 1 (+1 ``muhurat_abstained``). This pin ENCODES that
+    expected disagreement so a future silent "reconciliation" of either side
+    fails loudly — actually aligning the predicates is a named follow-up
+    decision, never a drive-by edit (CLAUDE.md Rule 11 COMMON honesty).
+    """
+    import duckdb
+    from brutex.dashboard.db_view import summarize_spot_datasets
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+
+    regular = date(2025, 10, 20)
+    muhurat = date(2025, 10, 21)
+    # Calendar ground truth, not fabricated here: the abstention keys ONLY on
+    # Muhurat membership, so the fixture pins exactly that membership split.
+    assert regular not in MUHURAT_SESSIONS
+    assert muhurat in MUHURAT_SESSIONS
+
+    def _bars(session_date: date, first_minute: time) -> list[CandleBar]:
+        open_ist = datetime.combine(session_date, first_minute)
+        base_utc = (open_ist - _IST_OFFSET).replace(tzinfo=UTC)
+        return [
+            CandleBar(
+                timestamp=base_utc + timedelta(minutes=i),
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100.5"),
+                volume=10,
+                open_interest=None,
+            )
+            for i in range(3)
+        ]
+
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[*_bars(regular, time(9, 16)), *_bars(muhurat, time(13, 45))],
+    )
+
+    # Surface 1 — the #1267 read-side counter over the REAL lake: the Muhurat
+    # session COUNTS (strict `>` 09:15), so both sessions are substituted.
+    rows = summarize_spot_datasets(duckdb.connect(), tmp_path)
+    row = next(r for r in rows if r["segment"] == "INDEX" and r["interval"] == "1minute")
+    assert row["open_substituted_days"] == 2
+    assert row["session_days"] == 2
+
+    # Surface 2 — THIS PR's prebuild detector over the same sessions: the
+    # Muhurat session ABSTAINS, so only the 09:16 non-Muhurat session flags.
+    frame = _concat(
+        _session_1m(regular, first_minute=time(9, 16), n=3),
+        _session_1m(muhurat, first_minute=time(13, 45), n=3),
+    )
+    scan = detect_daily_open_substitutions(frame, before=_FAR_BEFORE)
+    assert scan.substituted == ((regular, time(9, 16)),)
+    assert scan.count == 1
+    assert scan.muhurat_abstained == 1

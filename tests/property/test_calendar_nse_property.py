@@ -39,9 +39,12 @@ def test_expected_bars_in_valid_range(tf: int) -> None:
 def test_expected_bars_is_exact_ceiling(tf: int) -> None:
     """Session D PR-3 delta (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001):
     pin the EXACT value, not just the 1..375 range — ``ceil(375 / tf)`` via
-    ``Fraction`` (no float division as the oracle-of-the-oracle). Kills a
-    restored-floor mutant AND an over-eager ``//tf + 1`` mutant that the
-    range property alone tolerates."""
+    ``Fraction`` (no float division as the oracle-of-the-oracle). Kills the
+    restored-floor mutant the range property alone tolerates (``375 // tf``
+    stays inside 1..375); an over-eager ``//tf + 1`` mutant already trips the
+    range property at its tf=1 shrink (376 > 375) — this property kills it at
+    EVERY tf, not just the boundary (review-precision wording; the original
+    "both tolerated" claim overstated what the range property missed)."""
     assert expected_bars_per_day_for_tf(tf) == math.ceil(Fraction(SESSION_DURATION_MINUTES, tf))
 
 

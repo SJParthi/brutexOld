@@ -160,11 +160,19 @@ class DailyOpenSubstitutionScan:
         :data:`~brutex.calendars.nse.MUHURAT_SESSIONS` — a Muhurat session's
         open is BY DESIGN not 09:15 (evening 18:00/18:15 for 2020-2024,
         afternoon 13:45 for 2025), so flagging it would be a false positive.
-        Coverage-bounded honesty (Golden Rule #1): the 2026 Muhurat date's
-        timings are NOT yet notified and deliberately absent from the
-        calendar, so a future 2026 Muhurat session WILL flag here (an
-        observe-only WARN, zero behavioral harm) until the official NSE
-        circular lands — never fabricated.
+        Coverage-bounded honesty (Golden Rule #1, review-corrected): the 2026
+        Muhurat date's timings are NOT yet notified and deliberately absent
+        from the calendar — but a MISSING entry can never reach this flag on
+        a production pull: with no calendar session,
+        :func:`brutex.calendars.nse.get_session` returns ``None`` and the
+        calendar-aware ingest filter (DEC-INGEST-BOUNDARY-INTEGRITY-001,
+        MIGRATION.md #1294) DROPS every bar of that date at the ingest
+        boundary (an ALL_FILTERED re-pullable demotion), so the session never
+        enters the lake and this detector never sees it; once the official
+        NSE circular lands and the entry is added, the abstention covers it —
+        the 2026 session flags in NEITHER state. A flag is possible ONLY for
+        bars that bypassed the ingest filter (e.g. hand-placed parquet) —
+        never fabricated, never asserted as a timing.
     """
 
     substituted: tuple[tuple[date, time], ...]
@@ -191,6 +199,28 @@ def detect_daily_open_substitutions(
     minute is ``min(ts)``, never a positional first row. IST is the fixed
     +05:30 offset (:data:`_IST` — the same arithmetic the resampler uses,
     no tz-library drift between scan and write).
+
+    DELIBERATE divergence from the read-side /completeness counter
+    (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267 — the
+    per-session CTE in :func:`brutex.dashboard.db_view.summarize_spot_datasets`,
+    surfaced as the "Open substituted N/M" column + the /universe strip): the
+    two surfaces name the SAME phenomenon with THREE consciously different
+    rules. (1) Muhurat — #1267 COUNTS a Muhurat session (any off-09:15 open
+    honestly means "the derived daily open is not the 09:15 price"); THIS
+    detector ABSTAINS (the operator mandate — a Muhurat open is off-09:15 BY
+    DESIGN, so a pipeline WARN on it would be a false positive). (2) predicate
+    — #1267 uses strict ``>`` 09:15 (a stray pre-09:15 first bar is documented
+    out-of-contract there); this detector uses ``!=`` (a pre-09:15 bar flags,
+    with its real minute in the payload). (3) scope/cutoff — #1267 counts ALL
+    stored sessions of the scored INDEX/CASH ``1minute`` datasets; this
+    detector applies the forming-session ``ist_date < before`` cutoff over
+    every SPOT prebuild target. So the /completeness column and the pipeline
+    ", N daily open(s) substituted" headline CAN legitimately disagree on the
+    same lake (a Muhurat session is the pinned example — the DRIFT-PIN test
+    ``test_muhurat_divergence_pin_vs_honesty_counter_1267`` encodes the
+    expected disagreement, so a silent "reconciliation" of either side fails
+    loudly); actually reconciling the predicates is a named follow-up
+    decision, never a drive-by edit.
 
     Parameters
     ----------
@@ -252,7 +282,11 @@ def emit_daily_open_substitutions(
     is byte-identical to before this feature existed. Pure emitter (may raise
     on a poisoned scan) — production wires it through the guarded
     :func:`observe_daily_open_substitutions`, mirroring the
-    ``emit_underlying_all_empty`` precedent.
+    ``emit_underlying_all_empty`` precedent. The counts emitted here follow
+    THIS module's detector rules — deliberately NOT the /completeness
+    counter's (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267);
+    see :func:`detect_daily_open_substitutions` for the stated three-way
+    divergence.
     """
     if scan.count == 0:
         return
