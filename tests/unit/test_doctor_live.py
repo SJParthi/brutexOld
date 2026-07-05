@@ -802,12 +802,29 @@ class TestStageMaster:
         assert ctx.master is not None
 
     def test_header_drift_fails_m17(self, tmp_path: Path) -> None:
-        drifted = _MASTER_HEADER + ",exchange_flag\n"
+        # DESTRUCTIVE drift (a renamed column among the verified first 21)
+        # still trips M17. The prior fixture used an ADDITIVE trailing extra,
+        # which is now tolerated with a WARNING per
+        # DEC-INSTRUMENT-HEADER-ADDITIVE-001 (see the companion test below).
+        drifted = _master_csv().replace("exchange,", "exch,", 1)
         deps, _box = make_deps(tmp_path, http_get=lambda _u: drifted)
         ctx, _ = make_ctx(tmp_path, deps)
         outcome = dl.stage_master(deps, ctx)
         assert outcome.status == dl.STATUS_FAIL
         assert outcome.lines[0].startswith("FAIL master[M17]: instrument-master header drift — ")
+
+    def test_additive_trailing_column_passes_m17(self, tmp_path: Path) -> None:
+        # DEC-INSTRUMENT-HEADER-ADDITIVE-001 regression pin: a benign trailing
+        # extra column no longer bricks the doctor's master stage — the load
+        # succeeds (warned upstream) and the universe check proceeds normally.
+        lines = _master_csv().splitlines()
+        drifted = "\n".join([lines[0] + ",exchange_flag", *(line + "," for line in lines[1:])])
+        drifted += "\n"
+        deps, _box = make_deps(tmp_path, http_get=lambda _u: drifted)
+        ctx, _ = make_ctx(tmp_path, deps)
+        outcome = dl.stage_master(deps, ctx)
+        assert outcome.status == dl.STATUS_PASS
+        assert outcome.lines[0] == dl.render_diagnostic("master.pass", universe=5, eq=1)
 
     def test_unreachable_fails_r8(self, tmp_path: Path) -> None:
         def _down(_url: str) -> str:

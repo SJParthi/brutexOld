@@ -320,9 +320,11 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "NSE-BANKNIFTY + BSE-SENSEX + NSE-INDIAVIX present"
     ),
     "master.header_drift": (
-        "FAIL master[M17]: instrument-master header drift — {error}. The strict tuple-equality "
-        "check bricks the entire universe load until a code change ships. Fix: file the "
-        "additive-column tolerance change; short-term, pin the master snapshot."
+        "FAIL master[M17]: instrument-master header drift — {error}. A missing/reordered/"
+        "renamed column among the verified first 21 (or a trailing extra duplicating a known "
+        "name) bricks the entire universe load; benign trailing extras are tolerated with a "
+        "WARNING (DEC-INSTRUMENT-HEADER-ADDITIVE-001). Fix: inspect the master CSV header; "
+        "short-term, pin the master snapshot."
     ),
     "master.unreachable": (
         "FAIL master[R8/G4]: cannot reach the instrument master: {error} — network/TLS/proxy "
