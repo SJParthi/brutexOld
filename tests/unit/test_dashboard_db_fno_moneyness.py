@@ -826,7 +826,7 @@ class TestSpotKeyRecovery:
         # Byte-identity on the already-canonical hot path: the exact-key hit
         # returns the same map as before the fix, with ZERO ladder probes and
         # no recovery log.
-        import brutex.dashboard.db_view as db_view_mod
+        from brutex.dashboard import db_view as db_view_mod
 
         _seed_option_lake(tmp_path)
 
