@@ -61,3 +61,45 @@ def test_sweep_all_parser_help_names_the_env_fallbacks() -> None:
         ["sweep-daemon", "--once", "--start", "2024-01-01", "--end", "2024-01-02"]
     )
     assert not hasattr(daemon_args, "sweep_cache_map_mb")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# --acknowledge-sla-overrun (DEC-SLA-LAUNCH-GUARD-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_main_dispatch_threads_sla_acknowledge_false_by_default() -> None:
+    """Unset flag threads as False — the guard REFUSES an over-envelope grid."""
+    with mock.patch.object(cli, "cmd_sweep_all", return_value=0) as sweep_all:
+        rc = cli.main(["sweep-all", "--start", "2024-01-01", "--end", "2024-01-02"])
+    assert rc == 0
+    _, kwargs = sweep_all.call_args
+    assert kwargs["acknowledge_sla_overrun"] is False
+
+
+def test_main_dispatch_threads_sla_acknowledge_true_when_passed() -> None:
+    """--acknowledge-sla-overrun threads verbatim into cmd_sweep_all."""
+    with mock.patch.object(cli, "cmd_sweep_all", return_value=0) as sweep_all:
+        rc = cli.main(
+            [
+                "sweep-all",
+                "--start",
+                "2024-01-01",
+                "--end",
+                "2024-01-02",
+                "--acknowledge-sla-overrun",
+            ]
+        )
+    assert rc == 0
+    _, kwargs = sweep_all.call_args
+    assert kwargs["acknowledge_sla_overrun"] is True
+
+
+def test_sla_acknowledge_is_sweep_all_only() -> None:
+    """The unattended daemon has NO acknowledge flag (it can never override the
+    SLA guard — mirrors the --allow-out-of-scope daemon refusal precedent)."""
+    parser = cli.build_parser()
+    daemon_args = parser.parse_args(
+        ["sweep-daemon", "--once", "--start", "2024-01-01", "--end", "2024-01-02"]
+    )
+    assert not hasattr(daemon_args, "acknowledge_sla_overrun")

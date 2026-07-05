@@ -97,6 +97,37 @@ NEVER mints, it RE-READS the shared token:
   re-pulls LATER — never an infinite loop, never a crash. The reauth cap
   (``max_reauths`` at the call site) still bounds it.
 
+TOKEN-STALE FETCH-LANE PAUSE (DEC-TOKEN-STALE-PAUSE-001) — a dead token PAUSES the
+fetch lane instead of burning window attempts:
+
+* Forensically proven (operator's real overnight run, 2026-07-04): at the 06:00-IST
+  Groww token reset the read-only broker held no fresh token until the external
+  Lambda's 06:05:31 mint. During those 5.5 minutes EVERY fetch raised the retryable
+  :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError`, and the F&O
+  window ladder burned all 3 attempts INSIDE the outage for 111 windows (339 failed
+  calls across 115 windows) — settling them ledger-FAILED, rescued only by the outer
+  until-clean rounds. This recurs on every 06:00-IST crossing (CLAUDE.md §6 token
+  lifetime row).
+* :meth:`SdkRefresher.await_token_recovery` is the sanctioned pause: when the
+  client's reauth branch sees a StillStale re-read, it WAITS (bounded by the shared
+  per-generation deadline :data:`~brutex.adapters.groww.constants.\
+  GROWW_TOKEN_STALE_WAIT_S`, env-tunable) for the fresh token to land, polling every
+  :data:`~brutex.adapters.groww.constants.GROWW_TOKEN_STALE_POLL_S` seconds. It is
+  SINGLE-FLIGHT-AWARE: per tick, exactly ONE waiter (a non-blocking leader lock)
+  re-reads the broker via the EXISTING :meth:`reauth` machinery; every other waiter
+  only polls the in-process generation — N pool threads can never stampede SSM. It
+  logs ONE bounded-cadence ``groww.token.stale_wait`` event per pool and BEATS the
+  progress-beat seam (:func:`~brutex.observability.progress_beat.emit_progress_beat`)
+  each tick so the pull stall watchdog never false-fires during the pause.
+* The deadline is SHARED per generation (anchored at the FIRST stale observation),
+  so a genuinely dead broker degrades to the pre-gate behaviour after ONE bounded
+  wait: once the anchor expires, every subsequent gate entry for that generation
+  fails IMMEDIATELY — the error propagates exactly as before (the window defers
+  FAILED; the until-clean loop stays bounded; the dead-credential escalation of
+  DEC-VENDOR-DOWN-BREAKER-001 still applies). A LOCAL-MINT refresher
+  (``readonly_reread is None``) never raises StillStale — the mint IS the recovery —
+  so the gate never double-waits there by construction.
+
 READ-ONLY COLD START NEVER MINTS (DEC-REAUTH-COLDSTART-READONLY-001) — the read-only
 guard now runs BEFORE any network mint (closes audit finding C-2, MAJOR / auth risk):
 
@@ -124,6 +155,8 @@ guard now runs BEFORE any network mint (closes audit finding C-2, MAJOR / auth r
 
 from __future__ import annotations
 
+import math
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -145,6 +178,10 @@ from brutex.adapters.groww.constants import (
     GROWW_TOKEN_ISSUANCE_RETRY_CAP_S,
     GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
     GROWW_TOKEN_PARAM_ACCESS_TOKEN_ENV,
+    GROWW_TOKEN_STALE_LOG_EVERY_S,
+    GROWW_TOKEN_STALE_POLL_S,
+    GROWW_TOKEN_STALE_WAIT_ENV,
+    GROWW_TOKEN_STALE_WAIT_S,
     resolve_token_param_path,
 )
 from brutex.adapters.groww.deadline import run_with_deadline
@@ -160,8 +197,40 @@ from brutex.adapters.groww.token_cache import (
     load_cached_token,
     store_token,
 )
+from brutex.observability.progress_beat import emit_progress_beat
 
 _LOG = structlog.get_logger("brutex.adapters.groww.reauth")
+
+
+def resolve_token_stale_wait_seconds(raw: str | None = None) -> float:
+    """Resolve the token-stale fetch-lane pause bound: env override, else the default.
+
+    DEC-TOKEN-STALE-PAUSE-001. Reads :data:`~brutex.adapters.groww.constants.\
+    GROWW_TOKEN_STALE_WAIT_ENV` (``BRUTEX_GROWW_TOKEN_STALE_WAIT_S``); falls back to
+    :data:`~brutex.adapters.groww.constants.GROWW_TOKEN_STALE_WAIT_S` when unset,
+    blank, non-numeric, non-finite (``nan``/``inf`` would make the wait ill-defined /
+    unbounded — an infinite pause would re-introduce the very hang the deadline
+    prevents) or NEGATIVE. An explicit ``0`` is honoured — it DISABLES the pause
+    (byte-identical to the pre-gate behaviour: the stale error propagates on the
+    first gate entry), the deliberate operator revert lever. Mirrors the
+    :func:`~brutex.adapters.groww.write_deadline.resolve_write_deadline_seconds`
+    validation shape (CLAUDE.md §11 COMMON shape). O(1).
+
+    Parameters
+    ----------
+    raw
+        The wait value (``None`` reads the env var); a test may pass one directly.
+    """
+    value = os.environ.get(GROWW_TOKEN_STALE_WAIT_ENV) if raw is None else raw
+    if value is None or not value.strip():
+        return GROWW_TOKEN_STALE_WAIT_S
+    try:
+        parsed = float(value)
+    except ValueError:
+        return GROWW_TOKEN_STALE_WAIT_S
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return GROWW_TOKEN_STALE_WAIT_S
+    return parsed
 
 
 def _now_utc() -> datetime:
@@ -301,6 +370,11 @@ class SdkRefresher:
         "_sdk_factory",
         "_sdks",
         "_size",
+        "_stale_anchor_at",
+        "_stale_anchor_gen",
+        "_stale_last_log",
+        "_stale_leader_lock",
+        "_stale_note_lock",
         "_token_cache_load",
         "_token_cache_store",
         "_token_factory",
@@ -343,6 +417,20 @@ class SdkRefresher:
         #: RE-READS the shared token + adopts the Lambda's fresh one instead of minting.
         self._readonly_reread = readonly_reread
         self._lock = threading.Lock()
+        #: TOKEN-STALE fetch-lane pause state (DEC-TOKEN-STALE-PAUSE-001), shared by
+        #: every pool leaf riding this ONE refresher. The LEADER lock elects at most
+        #: one broker re-reader per poll tick (acquired NON-blocking — a follower
+        #: never blocks on it); the NOTE lock guards the per-generation deadline
+        #: anchor + the bounded log cadence (held only for O(1) field reads/writes,
+        #: never across a network call — no lock-order edge with :attr:`_lock`).
+        self._stale_leader_lock = threading.Lock()
+        self._stale_note_lock = threading.Lock()
+        #: Generation the shared stale-wait deadline anchor belongs to (-1 = none).
+        self._stale_anchor_gen = -1
+        #: Monotonic instant the FIRST stale observation for that generation landed.
+        self._stale_anchor_at = 0.0
+        #: Monotonic instant of the last ``groww.token.stale_wait`` log (cadence).
+        self._stale_last_log = float("-inf")
         #: Monotonically rising re-auth counter — starts at 0 for the INITIAL mint;
         #: each successful :meth:`reauth` bumps it, so a caller can prove single-flight.
         self._generation = 0
@@ -673,5 +761,178 @@ class SdkRefresher:
         _LOG.warning("groww.token.reread")
         return (self._build_sdks(fresh_token), fresh_token)
 
+    def await_token_recovery(
+        self,
+        seen_generation: int,
+        *,
+        wait_seconds: float | None = None,
+        poll_seconds: float = GROWW_TOKEN_STALE_POLL_S,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        method: str = "",
+    ) -> int:
+        """PAUSE the calling fetch worker (bounded) until a fresh token is adopted.
 
-__all__ = ["SdkRefresher"]
+        THE TOKEN-STALE GATE (DEC-TOKEN-STALE-PAUSE-001). Called by
+        :meth:`~brutex.adapters.groww.client.GrowwClient._call` when a read-only-broker
+        :meth:`reauth` raised :class:`~brutex.adapters.groww.errors.\
+        GrowwTokenStillStaleError` — the 06:00-IST reset window in which the external
+        Lambda has not minted the fresh shared token yet. Instead of propagating (which
+        burned the window ladder's whole ``max_attempts`` budget inside the outage —
+        the forensically-measured 111 ledger-FAILED windows / 339 wasted calls of the
+        2026-07-04 run), the worker WAITS here until ONE of:
+
+        * **Adoption** — the generation moves past *seen_generation* (this waiter's own
+          leader re-read adopted the Lambda's fresh token, or a sibling's did): the new
+          generation is returned and the caller retries against the refreshed SDK with
+          NO window attempt spent.
+        * **Deadline** — the SHARED per-generation deadline (anchored at the FIRST
+          stale observation for *seen_generation*, so N waiters + repeated ladder
+          re-entries all share ONE bound — a dead broker costs ONE wait, then every
+          subsequent entry fails fast) expires: a fresh
+          :class:`~brutex.adapters.groww.errors.GrowwTokenStillStaleError` is raised
+          and propagates exactly as before the gate existed (the window defers FAILED;
+          the until-clean loop + the DEC-VENDOR-DOWN-BREAKER-001 dead-credential
+          escalation stay intact — a never-minting broker still fails loudly).
+
+        SINGLE-FLIGHT-AWARE (no SSM stampede): per poll tick at most ONE waiter — the
+        non-blocking :attr:`_stale_leader_lock` holder — re-reads the broker, via the
+        EXISTING :meth:`reauth` single-flight machinery (so the re-read also publishes
+        + bumps the generation for everyone); every other waiter only sleeps + polls
+        the in-process generation. Each tick BEATS the progress-beat seam
+        (:func:`~brutex.observability.progress_beat.emit_progress_beat`) so the pull
+        stall watchdog never false-fires during the pause, and ONE bounded-cadence
+        ``groww.token.stale_wait`` structlog event per pool keeps the operator
+        informed (elapsed + deadline; cadence
+        :data:`~brutex.adapters.groww.constants.GROWW_TOKEN_STALE_LOG_EVERY_S`).
+
+        LOCAL-MINT MODE IS UNAFFECTED by construction: a refresher with
+        ``readonly_reread is None`` re-mints synchronously inside :meth:`reauth` and
+        NEVER raises the StillStale shape, so the client's gate (which engages ONLY on
+        that exception class) can never double-wait there. A TERMINAL auth failure (a
+        revoked key) is likewise untouched — it is not a StillStale and never enters
+        this method.
+
+        Parameters
+        ----------
+        seen_generation
+            The generation whose token was just observed stale (the value the caller
+            passed to the failing :meth:`reauth`).
+        wait_seconds
+            The pause bound; ``None`` (production) resolves
+            :func:`resolve_token_stale_wait_seconds` (env-tunable, default
+            :data:`~brutex.adapters.groww.constants.GROWW_TOKEN_STALE_WAIT_S` = 420 s
+            — the observed 331 s worst-case Lambda lag with margin). ``0`` disables
+            the pause (raises on the first deadline check — pre-gate behaviour).
+        poll_seconds
+            Tick cadence between generation polls / leader re-reads.
+        sleep, clock
+            Injected sleeper + MONOTONIC clock (the client passes its own, so tests
+            drive the wait with zero real time).
+        method
+            The originating call label (observability only).
+
+        Returns
+        -------
+        int
+            The live generation after a fresh token was adopted (> *seen_generation*).
+
+        Raises
+        ------
+        GrowwTokenStillStaleError
+            When the shared deadline expires with no fresh token adopted — the honest
+            dead-broker propagation, byte-compatible with the pre-gate error path.
+        GrowwTimeoutError
+            If a leader re-read itself HANGS past the freeze-guard deadline (a wedged
+            SSM read is a DIFFERENT failure from "no fresh token yet" — it propagates
+            retryable, exactly like a hung :meth:`reauth` outside the gate).
+        """
+        bound = resolve_token_stale_wait_seconds() if wait_seconds is None else wait_seconds
+        anchor = self._stale_wait_anchor(seen_generation, clock())
+        while True:
+            current = self.current_generation()
+            if current != seen_generation:
+                return current  # a sibling waiter adopted the fresh token — ride it
+            now = clock()
+            elapsed = now - anchor
+            if elapsed >= bound:
+                message = (
+                    f"token-stale pause exhausted after {elapsed:.0f}s (bound {bound:g}s): "
+                    "the read-only broker still holds no fresh Groww access token — "
+                    "propagating so the window defers FAILED and the until-clean / "
+                    "dead-credential escalation paths apply as before the pause."
+                )
+                raise GrowwTokenStillStaleError(message, safe_message=message)
+            self._stale_wait_note(now=now, elapsed=elapsed, bound=bound, method=method)
+            # Liveness: the pause is deliberate progress, not a hang — beat the
+            # watchdog seam every tick so a paused pull is never falsely killed.
+            emit_progress_beat()
+            sleep(max(0.0, min(poll_seconds, bound - elapsed)))
+            adopted = self._try_leader_reread(seen_generation)
+            if adopted is not None:
+                return adopted
+
+    def _try_leader_reread(self, seen_generation: int) -> int | None:
+        """ONE single-flight-aware broker re-read attempt for this poll tick.
+
+        Elects the leader with a NON-blocking acquire of :attr:`_stale_leader_lock`:
+        a follower returns ``None`` immediately (it keeps polling the generation —
+        never a second SSM read this tick, so N pool threads issue at most ONE broker
+        read per tick between them). The leader delegates to :meth:`reauth` — reusing
+        the existing lock + generation single-flight + freeze-guard verbatim (CLAUDE.md
+        §11 COMMON) — and maps its ``StillStale`` outcome to ``None`` (keep waiting;
+        the CALLER's shared deadline bounds the loop). A successful adoption returns
+        the bumped generation; any OTHER error (a hung-read timeout, a genuinely
+        terminal auth failure from a future refresher shape) propagates unchanged.
+        O(1) per tick.
+        """
+        if not self._stale_leader_lock.acquire(blocking=False):
+            return None  # a sibling waiter is this tick's re-reader — no stampede
+        try:
+            try:
+                return self.reauth(seen_generation)
+            except GrowwTokenStillStaleError:
+                return None  # still stale — keep waiting under the caller's deadline
+        finally:
+            self._stale_leader_lock.release()
+
+    def _stale_wait_anchor(self, seen_generation: int, now: float) -> float:
+        """Return the SHARED deadline anchor for *seen_generation*, creating it once.
+
+        The FIRST gate entry for a generation stamps the anchor (and resets the log
+        cadence so the new outage logs immediately); every later entry — a sibling
+        pool thread, or the SAME window ladder re-entering after a propagated expiry —
+        reuses it, so the whole pool spends AT MOST ONE ``wait_seconds`` pause per
+        stale generation (a dead broker degrades to fail-fast, never a per-attempt
+        re-wait). A generation CHANGE (a successful adoption, then a later 06:00
+        crossing) re-arms the anchor naturally. Lock-guarded O(1).
+        """
+        with self._stale_note_lock:
+            if self._stale_anchor_gen != seen_generation:
+                self._stale_anchor_gen = seen_generation
+                self._stale_anchor_at = now
+                self._stale_last_log = float("-inf")
+            return self._stale_anchor_at
+
+    def _stale_wait_note(self, *, now: float, elapsed: float, bound: float, method: str) -> None:
+        """Log ONE bounded-cadence ``groww.token.stale_wait`` event per pool. O(1).
+
+        However many pool threads are pausing, the shared :attr:`_stale_last_log`
+        stamp (under :attr:`_stale_note_lock`) admits at most one event per
+        :data:`~brutex.adapters.groww.constants.GROWW_TOKEN_STALE_LOG_EVERY_S`
+        interval — the operator sees a heartbeat-paced "the fetch lane is paused,
+        waiting for the fresh token" line, never a per-thread-per-tick storm.
+        """
+        with self._stale_note_lock:
+            if now - self._stale_last_log < GROWW_TOKEN_STALE_LOG_EVERY_S:
+                return
+            self._stale_last_log = now
+        _LOG.warning(
+            "groww.token.stale_wait",
+            method=method,
+            elapsed_s=round(elapsed, 1),
+            deadline_s=bound,
+        )
+
+
+__all__ = ["SdkRefresher", "resolve_token_stale_wait_seconds"]

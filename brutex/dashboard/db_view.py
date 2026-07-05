@@ -35,10 +35,16 @@ from __future__ import annotations
 import math
 import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+
+# ALIASED on purpose — do NOT "simplify" to `time.sleep`: the bare name `time` in this
+# module is `datetime.time` (imported above), so `time.sleep(...)` is a runtime
+# AttributeError. The alias keeps the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001)
+# unambiguous and injectable-for-tests via the `retry_sleep` parameters below.
+from time import sleep as _default_sleep
 from typing import Any, Final, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -48,6 +54,7 @@ import structlog
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
+    TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
@@ -76,10 +83,14 @@ from brutex.data.partition import (
     VALID_INTERVALS,
     VALID_SEGMENTS,
 )
-from brutex.data.session import format_ist_clock
+from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
-from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
+from brutex.data.window_ledger import (
+    DEMOTED_SETTLE_REASONS,
+    EMPTY_TERMINAL_THRESHOLD,
+    is_expired_window_settle_reason,
+)
 from brutex.money import round_money
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
@@ -337,13 +348,20 @@ _IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 #: ``00:00:00`` suffix) in the candle viewer (DEC-DB-CANDLE-DERIVED-001).
 _DAILY_INTERVAL: Final[str] = "1day"
 
+#: The SQL fragment for a bar's **IST wall-clock instant** (a naive TIMESTAMP on
+#: the Indian-market clock). Adds the fixed +05:30 IST offset (330 minutes; India
+#: has no DST — CLAUDE.md §6) to the UTC wall-clock, so it is independent of the
+#: ambient DuckDB session ``TimeZone`` (the operator runs Asia/Kolkata). The ONE
+#: place the 330-minute offset lives — :data:`_IST_DATE_EXPR` derives from it so
+#: no second literal can drift (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+_IST_TS_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')"
+
 #: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
-#: the candle grid renders (:func:`_format_candle_timestamp`). Adds the fixed
-#: +05:30 IST offset (330 minutes; India has no DST — CLAUDE.md §6) to the UTC
-#: wall-clock before truncating, so it is independent of the ambient DuckDB
-#: session ``TimeZone`` (the operator runs Asia/Kolkata). Used by the derived-1day
-#: date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O full-stored-life span.
-_IST_DATE_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')::DATE"
+#: the candle grid renders (:func:`_format_candle_timestamp`). Derived from
+#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant) by truncating to DATE.
+#: Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O
+#: full-stored-life span + the coverage per-session aggregate.
+_IST_DATE_EXPR: Final[str] = f"{_IST_TS_EXPR}::DATE"
 
 #: The SQL fragment for a bar's **UTC calendar date** — the legacy intraday date
 #: bound (byte-identical to the pre-DEC-DB-UX-PACK-001 comparison). Real intraday
@@ -375,6 +393,16 @@ _INTRADAY_BASE_INTERVAL: Final[str] = "1minute"
 #: derived column (DEC-DB-CANDLE-DERIVED-001) is computed ONLY for the bar at
 #: this instant; mirrors ``brutex.data.spot_features._SESSION_OPEN`` (§11 COMMON).
 _SESSION_OPEN_IST: Final[time] = time(9, 15)
+
+#: The canonical session open as minutes-past-midnight-IST (555), DERIVED from the
+#: ONE COMMON :data:`brutex.data.session.SESSION_OPEN` constant — never a fourth
+#: hardcoded 09:15 literal (CLAUDE.md §11 COMMON). The per-session coverage
+#: aggregate (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001) counts a session as
+#: *open-substituted* when its FIRST present 1-minute bar is STRICTLY later than
+#: ``ist_date + this many minutes`` — i.e. the derived 1-day open for that session
+#: is the earliest PRESENT minute's open (``tf_resampler`` ``.first()``), not the
+#: canonical 09:15 IST open price.
+_SESSION_OPEN_MINUTES: Final[int] = SESSION_OPEN.hour * 60 + SESSION_OPEN.minute
 
 #: The two server-computed derived columns appended to every spot candle page
 #: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
@@ -458,6 +486,21 @@ def _ist_date(value: Any) -> str | None:
     if isinstance(value, datetime):
         ist = value.astimezone(_IST) if value.tzinfo is not None else value
         return ist.date().isoformat()
+    return None
+
+
+def _iso_date(value: Any) -> str | None:
+    """Render a DuckDB ``DATE`` cell as ISO ``YYYY-MM-DD``, or ``None`` for SQL NULL.
+
+    The already-IST twin of :func:`_ist_date` for the per-session coverage
+    aggregate (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the folded CTE's
+    ``MIN(ist_date)`` / ``MAX(ist_date)`` are ALREADY IST calendar dates (cast via
+    :data:`_IST_DATE_EXPR`), so no timezone conversion applies — a
+    :class:`~datetime.date` renders as ISO, and the SQL ``NULL`` an empty
+    partition aggregates to yields ``None``.
+    """
+    if isinstance(value, date):
+        return value.isoformat()
     return None
 
 
@@ -882,7 +925,12 @@ def _validate_candle_coords(exchange: str, segment: str, symbol: str, interval: 
         raise ValueError(f"illegal candle symbol {symbol!r}")
 
 
-def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
+def list_candle_datasets(
+    lake_root: Path,
+    *,
+    exclude_segments: frozenset[str] = frozenset(),
+    intervals: Collection[str] | None = None,
+) -> list[dict[str, str]]:
     """Discover which ``(exchange, segment, symbol, interval)`` candle sets exist.
 
     Walks ``<lake_root>/bars/<exchange>/<segment>/<symbol>/<interval>/`` and
@@ -895,6 +943,16 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
     ----------
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    exclude_segments
+        Segment directory names to PRUNE at the walk level — an excluded
+        segment's tree is never even descended (DEC-COMPLETENESS-FNO-SKIP-001:
+        skipping ``FNO`` here avoids walking the ~10⁵-10⁶ per-contract
+        partition dirs a fully-materialised options lake holds). Empty (the
+        default) is byte-identical to the unfiltered walk.
+    intervals
+        When given, only these interval directories are listed (e.g. the spot
+        verdict pair ``("1minute", "1day")``); ``None`` (the default) lists
+        every valid interval.
 
     Returns
     -------
@@ -910,11 +968,13 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
         if exch_dir.name not in VALID_EXCHANGES:
             continue
         for seg_dir in sorted(p for p in exch_dir.iterdir() if p.is_dir()):
-            if seg_dir.name not in VALID_SEGMENTS:
+            if seg_dir.name not in VALID_SEGMENTS or seg_dir.name in exclude_segments:
                 continue
             for sym_dir in sorted(p for p in seg_dir.iterdir() if p.is_dir()):
                 for tf_dir in sorted(p for p in sym_dir.iterdir() if p.is_dir()):
                     if tf_dir.name not in VALID_INTERVALS:
+                        continue
+                    if intervals is not None and tf_dir.name not in intervals:
                         continue
                     if any(tf_dir.rglob("*.parquet")):
                         found.append(
@@ -1192,23 +1252,112 @@ def _execute_candle_page_resilient(
     return out_columns, list(cursor.fetchall())
 
 
-def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+#: The intervals the SPOT coverage/completeness VERDICTS actually read — the
+#: single FETCHED granularity (``1minute``, DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
+#: plus the derived ``1day`` daily anchor. The 19 derived intraday TFs the
+#: prebuild materialises are display-only derivatives of the same 1-minute
+#: base, so scanning them adds nothing to any verdict
+#: (DEC-COMPLETENESS-FNO-SKIP-001, refuter-amended register #12).
+SPOT_VERDICT_INTERVALS: Final[tuple[str, str]] = ("1minute", "1day")
+
+
+def summarize_spot_verdict_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+    """The FNO-pruned, verdict-interval-bounded spot summary scan — the dashboard's scan.
+
+    DEC-COMPLETENESS-FNO-SKIP-001 (mechanization-sweep register #12,
+    refuter-amended): after the pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001
+    #1145) a fully-materialised lake holds ~10⁵-10⁶ F&O contract × interval
+    datasets, and the UNFILTERED :func:`summarize_spot_datasets` walked + read a
+    Parquet-footer DISTINCT-timestamp aggregate for EVERY one of them — the
+    first ``/completeness`` open blocked for tens of minutes. The SPOT verdicts
+    only ever read the ``INDEX``/``CASH`` segments at the fetched ``1minute``
+    (+ the derived ``1day`` anchor), so this ONE wrapper (CLAUDE.md §11 COMMON —
+    both ``/coverage/spot`` and the completeness inputs call it) prunes the
+    ``FNO`` segment at the WALK level (never descended) and bounds the spot
+    intervals to :data:`SPOT_VERDICT_INTERVALS`. The spot rows it returns are
+    byte-identical to the unfiltered scan's spot ``1minute``/``1day`` rows
+    (regression-pinned), so every verdict is unchanged. The ``/coverage`` F&O
+    tabs keep their own scans; :func:`summarize_spot_datasets` itself stays
+    UNFILTERED by default — the F&O ledger⇄lake cold-start reconcile
+    (``load_lake_spans``) depends on the full walk.
+    """
+    return summarize_spot_datasets(
+        conn,
+        lake_root,
+        exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+        intervals=SPOT_VERDICT_INTERVALS,
+    )
+
+
+def summarize_spot_datasets(
+    conn: Any,
+    lake_root: Path,
+    *,
+    session_date_segments: frozenset[str] | None = None,
+    exclude_segments: frozenset[str] = frozenset(),
+    intervals: Collection[str] | None = None,
+) -> list[dict[str, Any]]:
     """Summarise every spot candle dataset in the lake for the coverage page.
 
     Discovers each ``(exchange, segment, symbol, interval)`` partition set via
-    :func:`list_candle_datasets`, then reads ONE aggregate row per set
-    (``COUNT(*)`` + ``MIN`` / ``MAX`` of the bar ``timestamp``) straight from the
-    Parquet lake via DuckDB ``read_parquet`` over the partition glob — no data
-    duplication, the lake stays the single source of truth (CLAUDE.md §11
-    COMMON). Read-only by construction: a single ``SELECT`` aggregate per set, no
-    write path. A click never materialises bar rows — only the three aggregate
-    scalars — so cost is bounded regardless of how many years are stored
-    (DuckDB skips row-groups via Parquet min/max stats).
+    :func:`list_candle_datasets`, then reads ONE aggregate row per set straight
+    from the Parquet lake via DuckDB ``read_parquet`` over the partition glob —
+    no data duplication, the lake stays the single source of truth (CLAUDE.md
+    §11 COMMON). Read-only by construction: a single ``SELECT`` aggregate per
+    set, no write path. A click never materialises bar rows — only the
+    aggregate scalars.
+
+    For a dataset at the ONE fetched spot granularity
+    (:data:`TRACK1_SPOT_INTERVAL`, ``1minute``) in a SCORED spot segment
+    (``INDEX``/``CASH`` — :data:`~brutex.data.partition.SPOT_PROBE_SEGMENTS`,
+    the only segments the completeness projections join; hostile-review perf
+    fold) the aggregate is the folded per-session CTE of
+    DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 — ONE scan (the SAME O(bars) order
+    as the historical 3-scalar aggregate, never a second full-column pass; the
+    #920 hot-path guard) that groups the bars by their IST calendar date
+    (:data:`_IST_DATE_EXPR`) and derives:
+
+    * ``bars`` = ``SUM`` of the per-session DISTINCT-timestamp counts (equal to
+      the historical whole-dataset ``COUNT(DISTINCT "timestamp")`` — a
+      timestamp belongs to exactly one IST date, so the dedup of
+      DEC-LAKE-READ-UNIQUE-001 is preserved);
+    * ``first_date`` / ``last_date`` = ``MIN`` / ``MAX`` of the per-session IST
+      dates (equal to the IST date of the ``MIN`` / ``MAX`` timestamp — the
+      fixed +05:30 offset is monotone);
+    * ``open_substituted_days`` = how many sessions' FIRST present minute
+      (``MIN`` of :data:`_IST_TS_EXPR`) is STRICTLY later than the canonical
+      09:15 IST session open (:data:`_SESSION_OPEN_MINUTES`, derived from the
+      COMMON :data:`brutex.data.session.SESSION_OPEN`) — exactly the sessions
+      whose DERIVED 1-day open is the earliest-present-minute substitute
+      (``tf_resampler`` aggregates a bucket's open with ``.first()``), not the
+      canonical 09:15 price. A session opening exactly at 09:15:00 is NOT
+      counted (strict ``>``). INFORMATIONAL only — no verdict downgrade;
+    * ``session_days`` = the number of distinct IST session dates stored.
+
+    Every NON-``1minute`` dataset (the derived ``1day`` + intraday TFs) AND
+    every non-scored-segment ``1minute`` dataset (the REFERENCE_ONLY F&O
+    contract partitions — unless a segment is explicitly opted in via
+    *session_date_segments*, the DEC-COLDSTART-SEED-INTERIOR-GAP-001
+    extensibility path, in which case it takes the CTE and carries real
+    counts) keeps the historical 3-scalar aggregate byte-identical and carries
+    ``open_substituted_days`` / ``session_days`` as ``None`` — the substitution
+    signal is only meaningful on the fetched granularity the 1-day is derived
+    FROM, and only surfaced where a projection actually consumes it.
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
     stored, NOT whether the full ``2020 → today`` range is complete.
     Partial-date-range detection is an explicit follow-up, not claimed here.
+    ``open_substituted_days`` is a SUBSTITUTION signal, not exclusively "vendor
+    lost data": a genuine late/special open (Muhurat), a sparse reference
+    symbol, and a vendor gap all count — each honestly means the derived daily
+    open is not the canonical 09:15 price. The ``.first()``-parity claim
+    assumes NO bar earlier than the canonical session open is stored for a
+    session (guaranteed by the pre-open exclusion — CLAUDE.md §7, spot bars
+    tick from 09:15:00 IST): a hypothetical BEFORE-open first bar would still
+    be the resampler's ``.first()`` substitute yet is NOT counted by the strict
+    ``>`` (an under-count) — out of contract, deliberately not detected
+    (hostile-review honesty note).
 
     Parameters
     ----------
@@ -1216,6 +1365,24 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         A DuckDB connection (see :func:`table_summary`).
     lake_root
         Top-level lake directory (the parent of ``bars/``).
+    session_date_segments
+        OPT-IN density enrichment (DEC-COLDSTART-SEED-INTERIOR-GAP-001): when a
+        dataset's ``segment`` is in this set AND its ``interval`` is the ONE
+        fetched spot granularity (:data:`TRACK1_SPOT_INTERVAL`, ``1minute`` —
+        a derived ``1day`` must never carry the density signal, or the
+        cold-start seed would leave a never-fetched window permanently
+        unseeded), the SAME single per-session CTE additionally
+        ``array_agg``-s the dataset's DISTINCT IST bar dates and the row gains
+        a ``session_dates`` frozenset — the ledger cold-start's interior-gap
+        density cross-check input. The default ``None`` omits the key (the hot
+        /coverage + /completeness pollers pass nothing).
+    exclude_segments, intervals
+        Optional walk-level pruning, threaded verbatim into
+        :func:`list_candle_datasets` (DEC-COMPLETENESS-FNO-SKIP-001 — the
+        dashboard verdict scans call the pruned
+        :func:`summarize_spot_verdict_datasets`). The defaults are
+        byte-identical to the unfiltered scan, which the F&O ledger⇄lake
+        reconcile (``load_lake_spans``) still requires.
 
     Returns
     -------
@@ -1224,14 +1391,40 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
 
             {"exchange", "segment", "symbol", "interval",
              "bars": <int>, "first_date": <YYYY-MM-DD|None>,
-             "last_date": <YYYY-MM-DD|None>}
+             "last_date": <YYYY-MM-DD|None>,
+             "open_substituted_days": <int|None>, "session_days": <int|None>
+             [, "session_dates": frozenset[date]]}
     """
     rows: list[dict[str, Any]] = []
-    for dataset in list_candle_datasets(lake_root):
+    for dataset in list_candle_datasets(
+        lake_root, exclude_segments=exclude_segments, intervals=intervals
+    ):
         exchange = dataset["exchange"]
         segment = dataset["segment"]
         symbol = dataset["symbol"]
         interval = dataset["interval"]
+        is_fetched_minute = interval == TRACK1_SPOT_INTERVAL
+        # Belt half of the DEC-COLDSTART-SEED-INTERIOR-GAP-001 REVISION-1 gate
+        # (the braces half lives in `seed_enclosed_windows`): session dates are
+        # attached ONLY for an opted-in segment at the FETCHED `1minute`
+        # granularity, so a derived `1day` row never carries the density signal.
+        with_session_dates = (
+            session_date_segments is not None
+            and segment in session_date_segments
+            and is_fetched_minute
+        )
+        # Hostile-review perf fold (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the
+        # folded per-session CTE runs ONLY for the SCORED spot segments
+        # (INDEX/CASH — `SPOT_PROBE_SEGMENTS`, the only segments the completeness
+        # projections join) or a segment explicitly opted into the session-dates
+        # enrichment; the many REFERENCE_ONLY F&O `1minute` contract partitions
+        # keep the historical flat 3-scalar aggregate — their per-session
+        # substitution counts were computed then DISCARDED on the #920-sensitive
+        # /completeness + /coverage hot path. `with_session_dates` ⇒
+        # `use_session_cte`, so an opted-in row can never miss its `array_agg`.
+        use_session_cte = is_fetched_minute and (
+            segment in _SPOT_PROBE_SEGMENTS or with_session_dates
+        )
         # The glob is built from list_candle_datasets coordinates (each already
         # validated against the partition allowlists during discovery), never
         # free user text; the path is given to read_parquet as a bound parameter.
@@ -1241,25 +1434,72 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
+        if use_session_cte:
+            # The ONE folded per-session CTE (DEC-DAILY-OPEN-SUBSTITUTION-
+            # HONESTY-001, shared with the (a)-fix session_dates enrichment) —
+            # a single O(bars) scan, never a second full-column pass (#920).
+            session_expr = ", array_agg(DISTINCT ist_date)" if with_session_dates else ""
+            sql = (
+                "WITH per_session AS ("  # noqa: S608  # nosec B608 - static fragments from hardcoded constants; path bound
+                f"SELECT {_IST_DATE_EXPR} AS ist_date, "
+                f"MIN({_IST_TS_EXPR}) AS first_ist, "
+                f"{distinct_count_sql(('timestamp',))} AS n "
+                "FROM read_parquet(?, union_by_name=true) GROUP BY ist_date) "
+                "SELECT SUM(n), MIN(ist_date), MAX(ist_date), "
+                "COUNT(*) FILTER (WHERE first_ist > ist_date "
+                f"+ INTERVAL '{_SESSION_OPEN_MINUTES} minutes'), "
+                f"COUNT(*){session_expr} FROM per_session"
+            )
+        else:
+            sql = (
+                f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp") '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
+                "FROM read_parquet(?, union_by_name=true)"
+            )
         agg_rows = _aggregate_parquet_resilient(
             conn,
             lake_root / "bars" / exchange / segment / symbol / interval,
-            f'SELECT {distinct_count_sql(("timestamp",))}, MIN("timestamp"), MAX("timestamp") '  # noqa: S608  # nosec B608 - static fragment from hardcoded key columns; path bound
-            "FROM read_parquet(?, union_by_name=true)",
+            sql,
             source=f"spot:{exchange}/{segment}/{symbol}/{interval}",
         )
         agg = agg_rows[0] if agg_rows else None
-        rows.append(
-            {
-                "exchange": exchange,
-                "segment": segment,
-                "symbol": symbol,
-                "interval": interval,
-                "bars": int(agg[0]) if agg else 0,
-                "first_date": _ist_date(agg[1]) if agg else None,
-                "last_date": _ist_date(agg[2]) if agg else None,
-            }
-        )
+        row: dict[str, Any] = {
+            "exchange": exchange,
+            "segment": segment,
+            "symbol": symbol,
+            "interval": interval,
+        }
+        if use_session_cte:
+            # A zero-row partition aggregates the CTE to (NULL, NULL, NULL, 0,
+            # 0[, NULL]) and an all-unreadable one yields no aggregate row at
+            # all — both honestly degrade to 0 bars / no dates / (0, 0) counts,
+            # never a crash / never a fabricated verdict (Golden Rule #1).
+            row["bars"] = int(agg[0]) if agg is not None and agg[0] is not None else 0
+            row["first_date"] = _iso_date(agg[1]) if agg else None
+            row["last_date"] = _iso_date(agg[2]) if agg else None
+            row["open_substituted_days"] = int(agg[3]) if agg else 0
+            row["session_days"] = int(agg[4]) if agg else 0
+        else:
+            row["bars"] = int(agg[0]) if agg else 0
+            row["first_date"] = _ist_date(agg[1]) if agg else None
+            row["last_date"] = _ist_date(agg[2]) if agg else None
+            # The substitution signal is COMPUTED only where the per-session CTE
+            # ran (the fetched 1-minute granularity in a scored/opted-in
+            # segment) — a derived TF row AND an F&O `1minute` contract row each
+            # carry an honest None, never 0 (0 would assert "checked, found
+            # none").
+            row["open_substituted_days"] = None
+            row["session_days"] = None
+        if with_session_dates:
+            # DuckDB `array_agg` over zero rows is SQL NULL (→ None) and an
+            # all-unreadable partition yields no aggregate row at all — both
+            # degrade to an EMPTY set, over which the seed's density check
+            # honestly ABSTAINS (too-few sessions), never a crash / never a
+            # fabricated verdict (Golden Rule #1).
+            raw_sessions = agg[5] if agg else None
+            row["session_dates"] = (
+                frozenset(raw_sessions) if raw_sessions is not None else frozenset()
+            )
+        rows.append(row)
     return rows
 
 
@@ -2992,7 +3232,7 @@ def _decode_option_window(
     return (f"{label} · {segment}", f"{flag}#{code} {strike} {opt_type} · 1m")
 
 
-def window_status_label(status: str, empty_streak: int) -> str:
+def window_status_label(status: str, empty_streak: int, last_error: str | None = None) -> str:
     """The honest, spelled-out meaning of a window's bare *status* — pure, O(1).
 
     DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (empty-vs-failed honesty on
@@ -3003,12 +3243,35 @@ def window_status_label(status: str, empty_streak: int) -> str:
     payload paths (the DuckDB fast path and the legacy pyarrow path) share via
     :func:`_window_row` (CLAUDE.md §11 COMMON — the two can never drift):
 
+    * ``SKIPPED`` carrying an EXPIRED-WINDOW settle stamp
+      (DEC-OLD-EMPTY-SINGLE-CONFIRM-001 — the old-empty single-confirm settle
+      stamps :func:`~brutex.data.window_ledger.expired_window_settle_reason`
+      as ``last_error``) → that stamp verbatim, suffixed ``— settled``: the
+      streak-derived count would LIE (the settle forces the streak to the
+      threshold), so the honest ``"vendor confirmed no trades (1 clean
+      attempt, expired window) — settled"`` comes from the stamp.
     * ``EMPTY`` → ``"vendor confirmed no trades (N clean attempt(s))"`` — N is
       the row's genuine clean-empty streak, floored at 1 (a legacy record with
       no streak column still had at least the one clean attempt that classified
       it EMPTY).
-    * ``SKIPPED`` (terminally-settled empty) → the same, suffixed ``— settled``
-      (the ledger promoted it; no further re-pull).
+    * ``SKIPPED`` carrying a data-completeness DEMOTION reason
+      (:data:`~brutex.data.window_ledger.DEMOTED_SETTLE_REASONS` —
+      ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL`` plus the
+      ``"DEGRADED"`` record()-side reason-less fallback, the #1031
+      degraded channel's accept-gap settle) → ``"completeness gap accepted
+      (<reason>, N flagged attempt(s)) — settled"``
+      (DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the generic "vendor confirmed
+      no trades" wording is factually WRONG for these rows — the vendor
+      RETURNED bars every time; they were boundary-filtered / hole-flagged /
+      truncation-flagged, never a clean no-trades answer. HONEST envelope:
+      the label keys on the row's FINAL ``last_error`` only — degraded and
+      clean-EMPTY bumps share ONE un-provenance'd streak
+      (:meth:`~brutex.data.window_ledger.WindowLedger.record`), so a
+      MIXED-evidence settle attributes all N attempts to the final channel
+      (documented beside the streak arms; a per-channel count needs the named
+      streak-provenance follow-up, NOT claimed).
+    * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
+      ``— settled`` (the ledger promoted it; no further re-pull).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
       no-data; the window stays re-pullable.
     * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
@@ -3017,6 +3280,13 @@ def window_status_label(status: str, empty_streak: int) -> str:
     if status == "EMPTY":
         return f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s))"
     if status == "SKIPPED":
+        if is_expired_window_settle_reason(last_error):
+            return f"{last_error} — settled"
+        if last_error in DEMOTED_SETTLE_REASONS:
+            return (
+                f"completeness gap accepted ({last_error}, "
+                f"{max(int(empty_streak), 1)} flagged attempt(s)) — settled"
+            )
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
@@ -3058,7 +3328,11 @@ def _window_row(
         # DuckDB fast + legacy pyarrow — since both project through this row
         # builder): EMPTY/SKIPPED read "vendor confirmed no trades (N clean
         # attempt(s)[ — settled])", FAILED reads "FAILED (will re-pull)".
-        "status_label": window_status_label(str(record.status), getattr(record, "empty_streak", 0)),
+        "status_label": window_status_label(
+            str(record.status),
+            getattr(record, "empty_streak", 0),
+            getattr(record, "last_error", None),
+        ),
         "bars": record.bars,
         "attempts": record.attempts,
         # The genuine-EMPTY count (window_ledger R1) — surfaces WHY an EMPTY row
@@ -3220,6 +3494,42 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     with _WINDOW_CACHE_LOCK:
         _SPOT_ROLLUP_CACHE[key] = (mtime_ns, rollup)
     return rollup
+
+
+#: Delay before the single torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001). A reader-side
+#: multi-open race against the atomic ledger writer (``os.replace`` landing between the
+#: fast path's independent ``read_parquet`` opens — log-observed as a thrift
+#: ``TProtocolException`` surfacing as a ``duckdb.Error``) clears as soon as every open
+#: sees the SAME replaced file; ~100 ms comfortably outlasts one ``os.replace``.
+_DUCKDB_RETRY_DELAY_S: Final[float] = 0.1
+
+
+def _ledger_stat_fields(ledger_file: Path) -> dict[str, Any]:
+    """Best-effort ledger-Parquet forensics for the torn-read fallback logs.
+
+    Returns ``{"ledger_size": st_size, "ledger_mtime_ns": st_mtime_ns}`` from ONE
+    ``stat`` of *ledger_file*, so a ``window_payload.duckdb_fallback`` /
+    ``phase_progress.duckdb_fallback`` event records WHICH on-disk ledger revision
+    the failed read saw (a mid-pull ``os.replace`` shows up as a moved mtime).
+    NEVER raises — a stat failure (file replaced/removed between the read and the
+    log) yields honest ``None`` fields instead of turning the diagnostic log into
+    a new crash surface (Golden Rule #1).
+
+    Parameters
+    ----------
+    ledger_file
+        The resolved window-ledger Parquet path.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``ledger_size`` / ``ledger_mtime_ns`` ints, or both ``None`` on ``OSError``.
+    """
+    try:
+        st = ledger_file.stat()
+    except OSError:
+        return {"ledger_size": None, "ledger_mtime_ns": None}
+    return {"ledger_size": st.st_size, "ledger_mtime_ns": st.st_mtime_ns}
 
 
 class WindowCountsCache(Protocol):
@@ -3388,6 +3698,7 @@ def phase_progress_payload(
     current_phase: str,
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> list[dict[str, Any]]:
     """The Universe pull's LIVE per-phase progress rows — REUSES the cached window counts.
 
@@ -3411,23 +3722,67 @@ def phase_progress_payload(
     ``None`` the counts are computed directly (used by the pure-fast-path tests); the
     production route always injects the cache. O(1) on a cache hit; on a miss it runs
     ONE ``GROUP BY market, status`` (:func:`_window_counts_total`).
+
+    TORN-READ resilience (DEC-WINDOW-TORN-READ-RETRY-001): a concurrent pull's atomic
+    ``os.replace`` of the ledger Parquet landing between this reader's independent
+    ``read_parquet`` opens surfaces as a transient ``duckdb.Error`` — previously
+    UNGUARDED here, so the 4 s ``/universe/pull-progress`` poll 500'd. The counts read
+    now RETRIES ONCE after :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable
+    for deterministic tests; ``None`` → the real aliased :func:`time.sleep`); a SECOND
+    ``duckdb.Error`` logs an enriched ``phase_progress.duckdb_fallback`` event and
+    returns ``[]`` — the SAME honest empty-phases shape the no-ledger contract already
+    serves, so the route can never 500. HONEST envelope (Golden Rule #10): the retry
+    bounds ONE transient race; a persistently corrupt ledger blanks the phases block
+    for that poll window (strictly better than the prior 500), and only
+    ``duckdb.Error`` is guarded — no row projection exists here, so KeyError/ValueError
+    stay genuine-bug propagation.
     """
     if not ledger_file.is_file():
         return []
     ledger_glob = ledger_file.as_posix()
-    if count_cache is None:
-        counts, _total = _window_counts_total(conn, ledger_glob)
-    else:
-        # Key the cache on the ledger mtime AS WELL as the generation so a
-        # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
-        # invalidates the cached counts — the SAME (generation, mtime) key
-        # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
-        mtime_ns = ledger_file.stat().st_mtime_ns
-        counts, _total = count_cache.get_or_compute(
-            f"window-counts|{ledger_glob}|{mtime_ns}",
-            generation=generation,
-            compute=lambda: _window_counts_total(conn, ledger_glob),
+
+    def _counts() -> dict[str, dict[str, int]]:
+        """ONE counts read — direct or through the injected generation-stamped cache."""
+        if count_cache is None:
+            counts, _total = _window_counts_total(conn, ledger_glob)
+        else:
+            # Key the cache on the ledger mtime AS WELL as the generation so a
+            # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
+            # invalidates the cached counts — the SAME (generation, mtime) key
+            # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
+            mtime_ns = ledger_file.stat().st_mtime_ns
+            counts, _total = count_cache.get_or_compute(
+                f"window-counts|{ledger_glob}|{mtime_ns}",
+                generation=generation,
+                compute=lambda: _window_counts_total(conn, ledger_glob),
+            )
+        return counts
+
+    sleeper = _default_sleep if retry_sleep is None else retry_sleep
+    try:
+        counts = _counts()
+    except duckdb.Error as exc:
+        # Torn read (reader-side multi-open race vs the atomic writer) — retry ONCE.
+        # The retry runs OUTSIDE any lock (the injected cache computes unlocked and
+        # caches NOTHING on a raise — verified against MoversSnapshotCache), so the
+        # second attempt recomputes cleanly and a retried success is cached normally.
+        _LOG.warning(
+            "phase_progress.duckdb_retry",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            **_ledger_stat_fields(ledger_file),
         )
+        sleeper(_DUCKDB_RETRY_DELAY_S)
+        try:
+            counts = _counts()
+        except duckdb.Error as exc2:
+            _LOG.warning(
+                "phase_progress.duckdb_fallback",
+                error=str(exc2),
+                error_type=type(exc2).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+            return []
     return build_phase_progress(counts, current_phase=current_phase)
 
 
@@ -3587,6 +3942,7 @@ def build_window_payload(
     conn: Any = None,
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -3628,6 +3984,16 @@ def build_window_payload(
         PLANNED rows enter the row list.
     limit
         Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``).
+    retry_sleep
+        Injectable sleeper for the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001;
+        deterministic tests). ``None`` → the real aliased :func:`time.sleep`. A
+        transient ``duckdb.Error`` on the fast path (the reader-side multi-open race
+        against the atomic ledger writer) is retried ONCE after
+        :data:`_DUCKDB_RETRY_DELAY_S`; a second failure — or a deterministic
+        ``KeyError``/``ValueError`` shape error, which is never retried — falls back
+        to the legacy pyarrow path exactly as before. HONEST envelope (Golden Rule
+        #10): the retry bounds ONE transient race; a persistently corrupt ledger
+        still costs the legacy fallback as today.
 
     Returns
     -------
@@ -3648,7 +4014,9 @@ def build_window_payload(
     # *conn* (or no Parquet) keeps the legacy pyarrow path below byte-for-byte
     # (back-compat for existing callers + the ``window_status.json`` fallback).
     if conn is not None and ledger_file.is_file():
-        try:
+        sleeper = _default_sleep if retry_sleep is None else retry_sleep
+
+        def _fast_path() -> dict[str, Any]:
             return _build_window_payload_duckdb(
                 conn,
                 ledger_file,
@@ -3660,13 +4028,50 @@ def build_window_payload(
                 count_cache=count_cache,
                 generation=generation,
             )
-        except (duckdb.Error, KeyError, ValueError) as exc:
-            # A wrong-shape / corrupt ledger Parquet (a missing core column → a DuckDB
-            # binder error, or a KeyError on the row projection) must NOT 500 the page:
-            # fall THROUGH to the legacy pyarrow path below, which guards the core columns
-            # and degrades to an empty ledger (the route's "never a 500" promise — the
+
+        try:
+            return _fast_path()
+        except (KeyError, ValueError) as exc:
+            # A wrong-shape / legacy-shape ledger Parquet (a missing core column → the
+            # explicit probe ValueError, or a KeyError on the row projection) is
+            # DETERMINISTIC — a retry would fail identically, so fall straight THROUGH
+            # to the legacy pyarrow path below, which guards the core columns and
+            # degrades to an empty ledger (the route's "never a 500" promise — the
             # fidelity the fast path would otherwise lose, hostile-review MINOR).
-            _LOG.warning("window_payload.duckdb_fallback", error=str(exc))
+            _LOG.warning(
+                "window_payload.duckdb_fallback",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+        except duckdb.Error as exc:
+            # TORN READ (DEC-WINDOW-TORN-READ-RETRY-001): the fast path performs
+            # MULTIPLE independent `read_parquet` opens per request; a concurrent
+            # pull's atomic `os.replace` landing between them yields a footer/data
+            # mismatch surfacing as a duckdb.Error (log-observed as a thrift
+            # TProtocolException — reader-side only, does NOT contradict the #901
+            # atomic-writer guarantee). Transient by nature → retry ONCE after
+            # ~100 ms; the retry runs OUTSIDE any lock (the injected count cache
+            # computes unlocked and caches nothing on a raise), so the second
+            # attempt recomputes cleanly. A second failure falls back to the legacy
+            # path EXACTLY as before — retry-once bounds one race, it is not a
+            # corrupt-ledger cure (Golden Rule #10).
+            _LOG.warning(
+                "window_payload.duckdb_retry",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+            sleeper(_DUCKDB_RETRY_DELAY_S)
+            try:
+                return _fast_path()
+            except (duckdb.Error, KeyError, ValueError) as exc2:
+                _LOG.warning(
+                    "window_payload.duckdb_fallback",
+                    error=str(exc2),
+                    error_type=type(exc2).__name__,
+                    **_ledger_stat_fields(ledger_file),
+                )
     if ledger_file.is_file():
         source = "ledger"
         records: tuple[Any, ...] = _ledger_records_cached(lake_root)
@@ -3999,6 +4404,7 @@ __all__ = [
     "REGISTRY_DB_NAME",
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
+    "SPOT_VERDICT_INTERVALS",
     "WINDOW_PHASES",
     "build_phase_progress",
     "build_window_payload",
@@ -4025,6 +4431,7 @@ __all__ = [
     "spot_window_rollup",
     "summarize_option_datasets",
     "summarize_spot_datasets",
+    "summarize_spot_verdict_datasets",
     "table_summary",
     "window_status_label",
 ]

@@ -15,6 +15,8 @@ signals + lake I/O); its pure supervise-loop core is 100%-tested in
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -178,3 +180,84 @@ def test_child_argv_without_double_dash() -> None:
 def test_child_argv_empty() -> None:
     argv = cli._supervisor_child_argv([])
     assert argv == [sys.executable, "-m", "brutex", "sweep-daemon"]
+
+
+# ── cmd_supervisor production alerter binding (DEC-SUPERVISOR-CRASHLOOP-ALERT-001) ──
+
+
+def test_cmd_supervisor_binds_sweep_alerter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PRODUCTION binding pin (hostile-review MAJOR-2): ``cmd_supervisor``
+    constructs :class:`ProcessSupervisor` with a REAL :class:`SweepAlerter` —
+    deleting the ``alerter=`` argument would revert the whole crash-loop-alert
+    feature to dormant with every other test still green (the exact
+    dormant-wiring failure mode of MIGRATION.md #935 / #1014, whose fixes each
+    added a dedicated wiring test like this one)."""
+    from brutex.notifications.sweep_alerts import SweepAlerter
+    from brutex.orchestrator import supervisor as sup_mod
+
+    captured: dict[str, Any] = {}
+
+    class _FakeSupervisor:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def run(self) -> sup_mod.SupervisorResult:
+            return sup_mod.SupervisorResult(sup_mod.SupervisorOutcome.CLEAN_EXIT, 0, 0)
+
+    # cmd_supervisor imports these names locally from the supervisor module at
+    # call time, so patching the SOURCE module intercepts the construction and
+    # keeps the test free of real signal handlers.
+    monkeypatch.setattr(sup_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(sup_mod, "install_signal_stop", lambda: lambda: False)
+
+    rc = cli.cmd_supervisor(
+        child_args=[],
+        backoff_base_seconds=None,
+        backoff_factor=None,
+        backoff_cap_seconds=None,
+        reset_after_uptime_seconds=None,
+        max_restarts=None,
+        shutdown_grace_seconds=None,
+        lake_root=tmp_path,
+    )
+
+    assert rc == cli.EXIT_OK
+    # THE pin: the alerter is a real SweepAlerter (which also carries the
+    # terminal supervisor_gave_up CRITICAL), not None / not forgotten.
+    assert isinstance(captured["alerter"], SweepAlerter)
+    # And the supervisor is otherwise assembled for production: an audit sink
+    # plus the sweep-daemon subject the alerts name.
+    assert captured["audit"] is not None
+    assert captured["subject"] == "supervisor:sweep-daemon"
+
+
+def test_cmd_supervisor_gave_up_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GAVE_UP verdict surfaces as a loud non-zero exit (EXIT_INTERNAL_ERROR)."""
+    from brutex.orchestrator import supervisor as sup_mod
+
+    class _GaveUpSupervisor:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def run(self) -> sup_mod.SupervisorResult:
+            return sup_mod.SupervisorResult(sup_mod.SupervisorOutcome.GAVE_UP, 3, 1)
+
+    monkeypatch.setattr(sup_mod, "ProcessSupervisor", _GaveUpSupervisor)
+    monkeypatch.setattr(sup_mod, "install_signal_stop", lambda: lambda: False)
+
+    rc = cli.cmd_supervisor(
+        child_args=[],
+        backoff_base_seconds=None,
+        backoff_factor=None,
+        backoff_cap_seconds=None,
+        reset_after_uptime_seconds=None,
+        max_restarts=None,
+        shutdown_grace_seconds=None,
+        lake_root=tmp_path,
+    )
+
+    assert rc == cli.EXIT_INTERNAL_ERROR

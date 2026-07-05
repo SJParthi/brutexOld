@@ -48,7 +48,13 @@ from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ra
 from brutex.metrics.pbo import pbo_probability
 from brutex.metrics.types import ClosedTrade, EquityCurve
 
-__all__ = ["Moments", "ResultMetrics", "compute_metrics", "with_stage4_statistics"]
+__all__ = [
+    "Moments",
+    "ResultMetrics",
+    "compute_metrics",
+    "compute_metrics_from_scalars",
+    "with_stage4_statistics",
+]
 
 #: Number of trades below which moment-based ratios (Sharpe, Sortino,
 #: skewness, kurtosis) are mathematically undefined and returned as
@@ -342,15 +348,16 @@ def _consecutive_runs(trades: Sequence[ClosedTrade]) -> tuple[int, int]:
     return max_losses, max_wins
 
 
-def _empty_metrics(equity: EquityCurve) -> ResultMetrics:
+def _empty_metrics(drawdown: tuple[int, float, int, float]) -> ResultMetrics:
     """Build the metrics row for a zero-trade result.
 
     Every count is zero; every ratio that needs trades is ``None``;
-    money fields are zero. Drawdown is still computed from the equity
-    curve (a flat curve has zero drawdown). This keeps the row
+    money fields are zero. The drawdown family comes from the supplied
+    ``drawdown`` 4-tuple — :func:`_drawdown_stats` output computed by the
+    caller (a flat curve has zero drawdown). This keeps the row
     inf/NaN-free per spec line 746.
     """
-    max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = _drawdown_stats(equity)
+    max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = drawdown
     return ResultMetrics(
         net_pnl_paisa=0,
         total_return_pct=0.0,
@@ -424,6 +431,8 @@ def compute_metrics(
     equity: EquityCurve,
     total_bars: int,
     benchmark_return_pct: float = 0.0,
+    *,
+    drawdown: tuple[int, float, int, float] | None = None,
 ) -> ResultMetrics:
     """Compute every per-result metric in the Track 1 Result Row Schema.
 
@@ -445,6 +454,18 @@ def compute_metrics(
         ``information_ratio`` (spec line 544, "excess vs buy-and-hold").
         Defaults to ``0.0`` (treat raw return as excess) when no
         benchmark is supplied.
+    drawdown
+        Optional precomputed :func:`_drawdown_stats` 4-tuple
+        ``(max_dd_paisa, max_dd_pct, max_dd_duration_bars, ulcer_index)``
+        for ``equity``. ``None`` (the default) computes it here exactly
+        as before — the default path is byte-identical. The injection
+        seam exists for DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1186):
+        the flag-gated sweep tail supplies the bit-identical fused Rust
+        fold's output so the O(N_bars) Python scan is not re-run. A
+        caller-supplied tuple is trusted to BE ``_drawdown_stats``
+        output for this curve; the sweep seam validates the kernel
+        result before injecting (never a fabricated number,
+        Golden Rule #1).
 
     Returns
     -------
@@ -459,16 +480,98 @@ def compute_metrics(
     Notes
     -----
     Spec citations are on each :class:`ResultMetrics` field group and in
-    the inline comments below. Conventions chosen where the spec is
-    silent (zero risk-free rate; per-trade-return Sharpe/Sortino with no
-    annualisation multiplier; population moments) are recorded in
-    DEC-METRICS-001 (MIGRATION.md entry #305).
+    the inline comments of :func:`_compute_metrics_impl` (the shared
+    body — one source of truth, CLAUDE.md §11 COMMON). Conventions
+    chosen where the spec is silent (zero risk-free rate;
+    per-trade-return Sharpe/Sortino with no annualisation multiplier;
+    population moments) are recorded in DEC-METRICS-001 (MIGRATION.md
+    entry #305).
     """
     if total_bars < 1:
         raise ValueError(f"total_bars must be >= 1, got {total_bars}")
+    if drawdown is None:
+        drawdown = _drawdown_stats(equity)
+    return _compute_metrics_impl(
+        trades,
+        total_bars,
+        benchmark_return_pct,
+        start_equity_paisa=equity.start_equity_paisa,
+        span_years=equity.span_years,
+        drawdown=drawdown,
+    )
 
+
+def compute_metrics_from_scalars(
+    trades: Sequence[ClosedTrade],
+    total_bars: int,
+    benchmark_return_pct: float = 0.0,
+    *,
+    start_equity_paisa: int,
+    span_years: float,
+    drawdown: tuple[int, float, int, float],
+) -> ResultMetrics:
+    """Curve-less :func:`compute_metrics`: scalars in place of an :class:`EquityCurve`.
+
+    DEC-SWEEP-RUST-METRICS-001 (MIGRATION.md #1186). :func:`compute_metrics`
+    reads exactly three things from its ``equity`` argument — the
+    ``start_equity_paisa`` denominator, the ``span_years`` annualiser, and
+    the :func:`_drawdown_stats` 4-tuple. The flag-gated sweep tail computes
+    the drawdown family in the fused Rust kernel WITHOUT materialising the
+    ``O(N_bars)`` equity tuple, so this entry accepts those three directly.
+    The body is the SAME :func:`_compute_metrics_impl` the curve entry uses
+    (no duplication, CLAUDE.md §11 COMMON): for equal scalars the two
+    entries are byte-identical by construction.
+
+    Because the :class:`~brutex.metrics.types.EquityCurve` constructor is
+    bypassed, its invariants are RE-ASSERTED here (belt — the sweep seam
+    pre-checks them and falls back to the curve path, which raises the
+    curve's own messages):
+
+    Raises
+    ------
+    ValueError
+        If ``start_equity_paisa <= 0``, ``span_years`` is not a strictly
+        positive finite float, or ``total_bars < 1``.
+    """
+    if start_equity_paisa <= 0:
+        raise ValueError(
+            f"compute_metrics_from_scalars: start_equity_paisa must be > 0, "
+            f"got {start_equity_paisa}"
+        )
+    if not math.isfinite(span_years) or span_years <= 0.0:
+        raise ValueError(f"compute_metrics_from_scalars: span_years must be > 0, got {span_years}")
+    if total_bars < 1:
+        raise ValueError(f"total_bars must be >= 1, got {total_bars}")
+    return _compute_metrics_impl(
+        trades,
+        total_bars,
+        benchmark_return_pct,
+        start_equity_paisa=start_equity_paisa,
+        span_years=span_years,
+        drawdown=drawdown,
+    )
+
+
+def _compute_metrics_impl(
+    trades: Sequence[ClosedTrade],
+    total_bars: int,
+    benchmark_return_pct: float,
+    *,
+    start_equity_paisa: int,
+    span_years: float,
+    drawdown: tuple[int, float, int, float],
+) -> ResultMetrics:
+    """Shared metric body behind :func:`compute_metrics` / the scalar entry.
+
+    The verbatim pre-#1186 :func:`compute_metrics` body with the three
+    ``equity`` reads replaced by the already-extracted scalars and the
+    :func:`_drawdown_stats` call replaced by the supplied ``drawdown``
+    tuple — a pure parameterisation, no behaviour change (the golden +
+    equality tests pin it). Callers validate their own boundary; this
+    body assumes ``total_bars >= 1`` and a valid scalar set.
+    """
     if not trades:
-        return _empty_metrics(equity)
+        return _empty_metrics(drawdown)
 
     # ── Per-trade aggregates (single pass) ───────────────────────────
     net_pnl = 0
@@ -503,10 +606,11 @@ def compute_metrics(
 
     # ── Return metrics (spec lines 532-537) ──────────────────────────
     # total_return_pct: net P&L as a percentage of the starting capital.
-    total_return_pct = 100.0 * net_pnl / equity.start_equity_paisa
+    total_return_pct = 100.0 * net_pnl / start_equity_paisa
     # cagr_pct: annualised geometric growth (spec line 535 "annualized").
-    # ending/starting ratio; start_equity_paisa > 0 by EquityCurve invariant.
-    end_equity = equity.start_equity_paisa + net_pnl
+    # ending/starting ratio; start_equity_paisa > 0 by EquityCurve invariant
+    # (re-asserted by compute_metrics_from_scalars on the curve-less entry).
+    end_equity = start_equity_paisa + net_pnl
     # "< 1" is identical to "<= 0" on ints; phrased this way every comparison
     # mutant of the ruin boundary is observable (at end_equity == 0 the
     # else-branch would compute growth 0.0 -> exactly -100.0 anyway, making a
@@ -516,13 +620,13 @@ def compute_metrics(
         # real number; clamp to -100% (capital fully lost p.a.).
         cagr_pct = -100.0
     else:
-        growth = end_equity / equity.start_equity_paisa
+        growth = end_equity / start_equity_paisa
         # Annualisation explodes for tiny spans (a sub-day backtest annualises
         # to a meaningless magnitude and can raise OverflowError). Guard the
         # overflow and clamp to a finite cap so the row stays inf-free
         # (spec line 746); the Stage-4 z-score clamp [-3, +3] absorbs the rest.
         try:
-            annualised_growth = growth ** (1.0 / equity.span_years)
+            annualised_growth = growth ** (1.0 / span_years)
         except OverflowError:
             annualised_growth = math.inf
         uncapped_cagr = min(100.0 * (annualised_growth - 1.0), _CAGR_CAP_PCT)
@@ -534,7 +638,7 @@ def compute_metrics(
         cagr_pct = max(-100.0, uncapped_cagr)  # pragma: no mutate
 
     # ── Drawdown (spec lines 547-555) ────────────────────────────────
-    max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = _drawdown_stats(equity)
+    max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = drawdown
     max_losses, max_wins = _consecutive_runs(trades)
     # recovery_factor = net profit / MDD (spec line 551). None if MDD == 0.
     recovery_factor = _safe_ratio(float(net_pnl), float(max_dd_paisa))
@@ -564,7 +668,7 @@ def compute_metrics(
     # ── Risk-adjusted return (spec lines 539-545) ────────────────────
     # Return series for the moment-based ratios = per-trade returns as a
     # fraction of starting capital. Zero risk-free rate (DEC-METRICS-001).
-    returns = [t.pnl_paisa / equity.start_equity_paisa for t in trades]
+    returns = [t.pnl_paisa / start_equity_paisa for t in trades]
     moments = _accumulate_moments(returns)
     std_dev = moments.std_dev
     # Sharpe = mean(return) / std(return), no annualisation multiplier

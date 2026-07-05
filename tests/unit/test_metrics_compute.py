@@ -37,6 +37,7 @@ from brutex.metrics.compute import (
     _excess_kurtosis,
     _percentile,
     _skewness,
+    compute_metrics_from_scalars,
     with_stage4_statistics,
 )
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
@@ -1168,3 +1169,118 @@ def test_result_metrics_uses_slots() -> None:
     m = compute_metrics([], _curve([1_000_000]), total_bars=1)
     assert not hasattr(m, "__dict__")
     assert hasattr(ResultMetrics, "__slots__")
+
+
+# ── DEC-SWEEP-RUST-METRICS-001: drawdown injection + curve-less scalars ──
+
+
+def test_compute_metrics_injected_drawdown_equals_default_traded() -> None:
+    """``drawdown=_drawdown_stats(equity)`` is byte-identical to the default.
+
+    The injection seam's contract: supplying the internally-computed tuple
+    changes NOTHING (the flag-OFF sweep path is the ``None`` arm).
+    """
+    trades = [_trade(20_000), _trade(-10_000, mae=10_000)]
+    curve = _curve([1_010_000, 1_010_000, 1_000_000, 1_010_000])
+    default = compute_metrics(trades, curve, total_bars=4)
+    injected = compute_metrics(trades, curve, total_bars=4, drawdown=_drawdown_stats(curve))
+    assert default == injected
+
+
+def test_compute_metrics_injected_drawdown_equals_default_zero_trade() -> None:
+    """The zero-trade branch honours the injected tuple identically."""
+    curve = _curve([1_000_000, 990_000, 1_000_000])
+    default = compute_metrics([], curve, total_bars=3)
+    injected = compute_metrics([], curve, total_bars=3, drawdown=_drawdown_stats(curve))
+    assert default == injected
+
+
+def test_compute_metrics_injected_drawdown_is_actually_used() -> None:
+    """A sentinel tuple flows into the four drawdown fields verbatim.
+
+    Kills the "silently recompute / ignore the parameter" mutant family:
+    the sentinel values are distinct from anything the flat curve yields.
+    """
+    curve = _curve([1_000_000, 1_000_000])
+    sentinel = (12_345, 6.25, 7, 3.5)
+    m = compute_metrics([_trade(10_000)], curve, total_bars=2, drawdown=sentinel)
+    assert m.max_drawdown_paisa == 12_345
+    assert m.max_drawdown_pct == 6.25
+    assert m.max_drawdown_duration_bars == 7
+    assert m.ulcer_index == 3.5
+    # recovery_factor divides by the INJECTED max_dd_paisa.
+    assert m.recovery_factor == 10_000.0 / 12_345.0
+    z = compute_metrics([], curve, total_bars=2, drawdown=sentinel)
+    assert z.max_drawdown_paisa == 12_345
+    assert z.max_drawdown_pct == 6.25
+    assert z.max_drawdown_duration_bars == 7
+    assert z.ulcer_index == 3.5
+
+
+def test_compute_metrics_from_scalars_equals_curve_entry_traded() -> None:
+    """The curve-less entry is byte-identical to ``compute_metrics`` on the
+    same scalars — including a non-trivial benchmark baseline."""
+    trades = [_trade(20_000), _trade(-10_000, mae=10_000), _trade(5_000)]
+    curve = _curve([1_020_000, 1_010_000, 1_015_000], start=1_000_000, span=0.5)
+    via_curve = compute_metrics(trades, curve, 3, 4.0)
+    via_scalars = compute_metrics_from_scalars(
+        trades,
+        3,
+        4.0,
+        start_equity_paisa=1_000_000,
+        span_years=0.5,
+        drawdown=_drawdown_stats(curve),
+    )
+    assert via_curve == via_scalars
+
+
+def test_compute_metrics_from_scalars_equals_curve_entry_zero_trade() -> None:
+    """Zero-trade arm: curve-less entry == curve entry."""
+    curve = _curve([1_000_000, 990_000], start=1_000_000, span=2.0)
+    via_curve = compute_metrics([], curve, total_bars=2)
+    via_scalars = compute_metrics_from_scalars(
+        [],
+        2,
+        start_equity_paisa=1_000_000,
+        span_years=2.0,
+        drawdown=_drawdown_stats(curve),
+    )
+    assert via_curve == via_scalars
+
+
+def test_compute_metrics_from_scalars_rejects_nonpositive_start() -> None:
+    """The bypassed EquityCurve start invariant is re-asserted (belt)."""
+    for start in (0, -1):
+        with pytest.raises(ValueError, match="start_equity_paisa must be > 0"):
+            compute_metrics_from_scalars(
+                [],
+                1,
+                start_equity_paisa=start,
+                span_years=1.0,
+                drawdown=(0, 0.0, 0, 0.0),
+            )
+
+
+def test_compute_metrics_from_scalars_rejects_bad_span() -> None:
+    """The bypassed EquityCurve span invariant is re-asserted (belt)."""
+    for span in (0.0, -1.0, math.nan, math.inf):
+        with pytest.raises(ValueError, match="span_years must be > 0"):
+            compute_metrics_from_scalars(
+                [],
+                1,
+                start_equity_paisa=1_000_000,
+                span_years=span,
+                drawdown=(0, 0.0, 0, 0.0),
+            )
+
+
+def test_compute_metrics_from_scalars_rejects_nonpositive_total_bars() -> None:
+    """``total_bars < 1`` raises the same message as ``compute_metrics``."""
+    with pytest.raises(ValueError, match="total_bars must be >= 1, got 0"):
+        compute_metrics_from_scalars(
+            [],
+            0,
+            start_equity_paisa=1_000_000,
+            span_years=1.0,
+            drawdown=(0, 0.0, 0, 0.0),
+        )

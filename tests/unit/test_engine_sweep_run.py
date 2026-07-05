@@ -2863,3 +2863,191 @@ class TestLazyRunIdDigestPath:
         assert summary.skipped_dedup == 0
         assert summary.persisted > 0
         assert read_completion_sentinel(completion_sentinel_path(store.path)).n_marked == 0
+
+
+class TestLazyRunIdHardening:
+    """DEC-SWEEP-STREAMING-RANK-001 (part 1) — hardening pins ON TOP of #1184.
+
+    Incremental teeth the shipped :class:`TestLazyRunIdDigestPath` suite
+    (PR #1116) does not carry:
+
+    * the DIGEST arm's conflict-prune tallies (the shipped prune pin runs the
+      legacy arm only);
+    * FULL-STRING ``SweepComboError`` equality for the CHUNK-reattribution
+      fingerprint on BOTH arms (the shipped string pin covers only the
+      per-mask metrics tail, digest arm only) — the digest arm recomputes the
+      culprit's run-id lazily inside ``_reattribute_chunk_failure``;
+    * the metrics-tail message pinned on the LEGACY arm too (cross-arm
+      byte-equality of the fail-loud fingerprint);
+    * a tracemalloc PEAK bound proving the digest arm's survivor collection
+      allocates strictly below the legacy arm's per-survivor run-id retention.
+    """
+
+    _DIGEST = "ab12cd34ef56ab12"
+
+    def test_digest_conflict_prune_path(self, tmp_path: Path) -> None:
+        # Digest twin of test_conflict_prune_path: the prune branch runs BEFORE
+        # the bypass_dedup split, so pin its tallies on the digest arm too.
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[BIT_BAR_BULLISH, BIT_BAR_BEARISH, 0], k=2)
+        summary = _run_sweep(tmp_path, "d", bars, cfg, digest=self._DIGEST)
+        assert summary.enumerated == 3  # C(3,2)
+        assert summary.conflict_pruned == 1
+        assert summary.skipped_dedup == 0  # probes bypassed by construction
+
+    def test_tail_error_message_string_equal_on_both_arms(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The metrics-tail fingerprint: legacy-arm literal pin + cross-arm equality.
+
+        The SAME metrics-tail failure forced on both arms must produce the
+        byte-EQUAL message — the digest arm's lazily recomputed run-id lands in
+        the exact bytes of the legacy arm's eager probe-time one — each pinned
+        against the independently recomputed expected literal.
+        """
+        from brutex.engine.sweep_driver import metrics_from_trades as real_tail
+
+        bars = _trending_bars()
+        cfg = _make_config()  # kept order: masks 1, 2, 4, 8, 16
+        boom_mask = 0b100  # the 3rd kept mask
+
+        def _make_tail() -> Callable[..., object]:
+            calls = {"n": 0}
+
+            def _tail(*args: object, **kwargs: object) -> object:
+                calls["n"] += 1
+                if calls["n"] == 3:
+                    raise ValueError("tail boom")
+                return real_tail(*args, **kwargs)  # type: ignore[arg-type]
+
+            return _tail
+
+        messages: dict[str, str] = {}
+        for arm, digest in (("legacy", None), ("digest", self._DIGEST)):
+            monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _make_tail())
+            store = ResultsStore(path=tmp_path / f"{arm}.parquet")
+            with (
+                AuditWriter.open(tmp_path / f"{arm}.jsonl") as audit,
+                pytest.raises(SweepComboError) as excinfo,
+            ):
+                run_persisted_sweep(
+                    bars,
+                    cfg,
+                    store=store,
+                    dedup=_dedup(),
+                    audit=audit,
+                    trial_stats_digest=digest,
+                )
+            assert isinstance(excinfo.value.__cause__, ValueError)
+            assert not store.path.exists()  # nothing flushed — the tuple redoes
+            messages[arm] = str(excinfo.value)
+        expected_rid = TestLazyRunIdDigestPath._expected_run_ids(cfg)[boom_mask]  # pyright: ignore[reportPrivateUsage] — same-module sibling suite (COMMON, no copy)
+        expected = (
+            f"combo 0x{boom_mask:032x} (run_id={expected_rid}) in NIFTY/1m/bull k=1: tail boom"
+        )
+        assert messages["legacy"] == expected
+        assert messages["digest"] == expected
+
+    def test_chunk_culprit_error_message_string_equal_on_both_arms(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pinned STRING equality gate for the chunk-reattribution fingerprint.
+
+        A batch failure re-attributed to the same culprit mask on both arms
+        must name it with the byte-EQUAL ``_combo_error`` string (the digest
+        arm resolves the run-id via the lazy ``run_id_of`` closure inside
+        ``_reattribute_chunk_failure``; the shipped suite never string-pinned
+        this path).
+        """
+        from brutex.engine.sweep_driver import metrics_for_mask as real_metrics
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        boom_mask = 1 << 2
+        monkeypatch.setattr(
+            "brutex.engine.sweep_run.ResidentTradeSim",
+            _chunk_raising_sim(lambda: RuntimeError("batch boom")),
+        )
+
+        def _raising(*args: object, **kwargs: object) -> object:
+            if args[2] == boom_mask:
+                raise ValueError("culprit mask")
+            return real_metrics(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _raising)
+        messages: dict[str, str] = {}
+        for arm, digest in (("legacy", None), ("digest", self._DIGEST)):
+            store = ResultsStore(path=tmp_path / f"{arm}.parquet")
+            with (
+                AuditWriter.open(tmp_path / f"{arm}.jsonl") as audit,
+                pytest.raises(SweepComboError) as excinfo,
+            ):
+                run_persisted_sweep(
+                    bars,
+                    cfg,
+                    store=store,
+                    dedup=_dedup(),
+                    audit=audit,
+                    trial_stats_digest=digest,
+                )
+            assert isinstance(excinfo.value.__cause__, ValueError)
+            messages[arm] = str(excinfo.value)
+        expected_rid = TestLazyRunIdDigestPath._expected_run_ids(cfg)[boom_mask]  # pyright: ignore[reportPrivateUsage] — same-module sibling suite (COMMON, no copy)
+        expected = (
+            f"combo 0x{boom_mask:032x} (run_id={expected_rid}) in NIFTY/1m/bull k=1: culprit mask"
+        )
+        assert messages["legacy"] == expected
+        assert messages["digest"] == expected
+
+    def test_digest_arm_peak_allocations_below_legacy(self, tmp_path: Path) -> None:
+        """Memory regression bound (honestly framed): tracemalloc peaks, digest < legacy.
+
+        2,024 enumerated masks (C(24,3)) with Stage-1B dropping everything
+        (``min_hits`` huge) isolate the survivor-collection cost: no trade sim,
+        no ranking, no finalists. The legacy arm materialises one 64-hex
+        run-id string per survivor (the parallel ``survivor_run_ids`` list +
+        the eager ``run_id_of`` dict, plus its by-design probe/mark work); the
+        digest arm holds bare ints only, so its traced allocation peak must
+        sit at least 48 bytes/survivor BELOW the legacy arm's (a deliberately
+        conservative floor — the id string alone is ~113 bytes). HONEST
+        envelope: this is a tracemalloc (Python-allocator) peak bound over the
+        same fixture, NOT an RSS/absolute-memory claim; the structural
+        laziness pin (``TestLazyRunIdDigestPath.
+        test_digest_path_hashes_exactly_the_finalists`` — exactly
+        ``len(finalists)`` BLAKE3 calls) is the primary net. A warm-up pass
+        per arm absorbs one-time cache/interning allocations.
+        """
+        import gc
+        import tracemalloc
+
+        bars = _trending_bars(n_days=1, per_day=8)
+        cfg = _make_config(condition_bits=list(range(24)), k=3, min_hits=10_000_000)
+
+        def _measure(tag: str, digest: str | None) -> tuple[SweepRunSummary, int]:
+            store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+            dedup = _dedup()
+            with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+                gc.collect()
+                tracemalloc.start()
+                try:
+                    summary = run_persisted_sweep(
+                        bars,
+                        cfg,
+                        store=store,
+                        dedup=dedup,
+                        audit=audit,
+                        trial_stats_digest=digest,
+                    )
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+            return summary, peak
+
+        _measure("warm_legacy", None)  # warm-ups: one-time caches / interning
+        _measure("warm_digest", self._DIGEST)
+        legacy, legacy_peak = _measure("legacy", None)
+        digest, digest_peak = _measure("digest", self._DIGEST)
+        assert legacy.evaluated == digest.evaluated > 1_000  # identical survivor mass
+        assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
+        assert digest_peak < legacy_peak
+        assert legacy_peak - digest_peak > digest.evaluated * 48

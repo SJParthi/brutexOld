@@ -232,7 +232,15 @@ class TestFnoPullSeam:
         """
         order: list[str] = []
         monkeypatch.setattr(hp, "_heal_lake_after_pull", lambda **_kw: order.append("heal"))
-        monkeypatch.setattr(hp, "_enrich_greeks_from_minute", lambda **_kw: order.append("greeks"))
+
+        def _fake_greeks(**_kw: object) -> hp._GreeksEnrichOutcome:
+            # Honour the DEC-GREEKS-ENRICH-OBSERVE-001 return contract — the
+            # seam reads ``greeks_outcome.ok`` for the report + note, so the
+            # order spy must return a real outcome, never ``None``.
+            order.append("greeks")
+            return hp._GreeksEnrichOutcome(ok=True, error=None, errored_targets=0)
+
+        monkeypatch.setattr(hp, "_enrich_greeks_from_minute", _fake_greeks)
         _pull(registry, tmp_lake, dry_run=False)
         assert order[:2] == ["heal", "greeks"]
 

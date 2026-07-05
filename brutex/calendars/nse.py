@@ -10,6 +10,18 @@ Per `docs/TRACK1_BACKTEST_SPEC.md` Phase 1 Validation Gate 1:
 Source-of-truth: NSE/BSE published calendars + India PIB notifications.
 Holidays verified against the published NSE FAOP circulars for each year.
 
+Per-exchange split (DEC-CALENDAR-EXCHANGE-SPLIT-001): the per-year
+``HOLIDAYS_20XX`` frozensets are the COMMON core — every source consulted
+found the NSE and BSE equity-segment holiday calendars IDENTICAL for all
+covered years (2020-2026; secondary-corroborated — the primary exchange
+circular pages were unreachable from this environment, HTTP 403).
+:data:`NSE_HOLIDAYS` / :data:`BSE_HOLIDAYS` layer (currently EMPTY)
+per-exchange divergence sets on top, and every lookup function accepts a
+keyword-only ``exchange`` parameter (``None`` → the exchange-agnostic
+:data:`ALL_HOLIDAYS` union, byte-identical to the pre-split behaviour).
+Muhurat sessions, special weekend sessions, and rebalance events stay SHARED
+(both exchanges run the same special sessions).
+
 Coverage honesty (DEC-CALENDAR-HARDEN-001): the hardcoded holiday list spans
 :data:`HOLIDAY_COVERAGE_FIRST_YEAR`-:data:`HOLIDAY_COVERAGE_LAST_YEAR`
 (inclusive). For a date outside that span :func:`is_holiday` returns ``False``
@@ -33,8 +45,12 @@ out-of-coverage-anchored PDH/PDL / weekly-Fib lookup raises
 silently treating an unknown holiday as a trading day. The 2020 holiday list is
 now ADDED (DEC-CALENDAR-2020-DATA-001) so 2020 — the data-pull floor year — is
 fully covered and the loud-guard now applies to pre-2020 (2019 and earlier)
-weekdays. Other unguarded :func:`is_trading_day` callers (e.g. the dashboard
-pre-open report) remain a deferred opt-in follow-up.
+weekdays. The remaining unguarded production consumers were made LOUD by the
+calendar-correctness pack: the dashboard pre-open report + the doctor probe-day
+walk catch-and-degrade honestly (one ``calendar.coverage_exhausted`` warning),
+the engine trade-sim walkers + the bar-metadata stamper refuse an
+out-of-coverage weekday via the checked variants, and the synthetic generator
+(unguarded by design — it fabricates data) warns once per out-of-coverage call.
 """
 
 from __future__ import annotations
@@ -239,36 +255,81 @@ HOLIDAYS_2025 = frozenset(
     ]
 )
 
+# 2026 list COMPLETED per DEC-CALENDAR-2026-COMPLETE-001 (two independent
+# research rounds, 2026-07-03). Source honesty (Golden Rule #1): the official
+# NSE 2026 trading-holiday circular is REPORTED as **CMTR71775 dated
+# 2025-12-12** by the secondary sources both research rounds consulted (the
+# circular NUMBER is itself a secondary claim — the circular was never read);
+# its PDF (and every other NSE/BSE primary holiday page probed — 19 fetch
+# attempts) returned HTTP 403 from this environment, so NO date below is
+# primary-verified.
+# Every date IS corroborated by BOTH research rounds AND >= 2 independent
+# secondary sources (named inline per date); a date the two rounds disagreed on
+# would have been EXCLUDED and tagged UNVERIFIED — none was (the rounds agreed
+# in full). This FIXES the prior Ram Navami entry 2026-03-27 (Friday — a normal
+# trading day): both rounds independently confirm Ram Navami is Thu 2026-03-26.
+# Buddha Purnima is NOT a 2026 trading holiday (single-source noise refuted:
+# it falls Fri 2026-05-01, coinciding with the Maharashtra Day closure; the
+# "May 12" claim traces to 2025 articles). Weekend-falling published dates are
+# kept in the set per the existing convention (earlier years list them too);
+# each is tagged "(Sat/Sun — already non-trading)".
+#
 # HONESTY NOTE (DEC-HARDENING-LEFTOVERS-001, Golden Rule #1) — vendor-observed
-# Jan-2026 session-count drift, UNVERIFIED: a live Groww pull served **20**
-# distinct Jan-2026 trading sessions while this calendar derives **21**
+# Jan-2026 session-count drift, STILL UNVERIFIED: a live Groww pull served
+# **20** distinct Jan-2026 trading sessions while this calendar derives **21**
 # (22 Jan-2026 weekdays minus the sole listed January holiday, Republic Day
-# 2026-01-26) — implying EXACTLY ONE additional Jan-2026 NSE holiday this list
-# lacks. No source in this repo names that date, so it is deliberately NOT
-# fabricated here (no behavioral change); the gap is closable ONLY by the
-# official NSE 2026 trading-holiday circular or a live vendor probe of the
-# Jan-2026 session dates. (A separately-reported claim that the 2026-02-01
-# Sunday Budget session was "missing" is REFUTED: date(2026, 2, 1) is already a
-# verified entry in SPECIAL_WEEKEND_TRADING_SESSIONS below, added by
-# DEC-CALENDAR-2020-BUDGET-SATURDAY-001.)
+# 2026-01-26). The now-COMPLETED full-year 2026 list contains NO second January
+# holiday (both research rounds confirm: per the secondary reports of the NSE
+# circular dated 2025-12-12,
+# Republic Day is the ONLY January 2026 trading holiday — Makar Sankranti /
+# Pongal are explicitly absent), so the 20-vs-21 drift is now MORE likely a
+# vendor data gap than a missing holiday. No date is fabricated to reconcile
+# it; the drift is closable ONLY by the official circular PDF or a live vendor
+# probe of the Jan-2026 session dates. (A separately-reported claim that the
+# 2026-02-01 Sunday Budget session was "missing" is REFUTED: date(2026, 2, 1)
+# is already a verified entry in SPECIAL_WEEKEND_TRADING_SESSIONS below, added
+# by DEC-CALENDAR-2020-BUDGET-SATURDAY-001.)
+# The SANCTIONED operational closure path for such drift is the OBSERVED
+# overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001, ``calendars/observed_sessions.py``):
+# a REMOVE-ONLY, evidence-gated, ``observed-not-official``-labeled sidecar that
+# subtracts a demonstrably-untraded derived-trading-day from the OPT-IN consumer
+# surfaces — it never adds a session and never names a holiday, so the
+# named-holiday gap here stays closable ONLY by the official circular.
 HOLIDAYS_2026 = frozenset(
     [
-        date(2026, 1, 26),  # Republic Day
-        date(2026, 2, 15),  # Mahashivratri (UNVERIFIED — needs NSE 2026 circular)
-        date(2026, 3, 3),  # Holi (UNVERIFIED)
-        date(2026, 3, 27),  # Ram Navami (UNVERIFIED)
-        date(2026, 4, 3),  # Good Friday (UNVERIFIED)
-        date(2026, 4, 14),  # Dr Ambedkar Jayanti
-        date(2026, 5, 1),  # Maharashtra Day
-        date(2026, 8, 15),  # Independence Day
-        date(2026, 10, 2),  # Gandhi Jayanti
-        # 2026 calendar partially UNVERIFIED — NSE typically publishes
-        # full list in Dec of prior year. Phase 1 Validation Gate 1 must
-        # cross-check against the official NSE circular when available.
+        date(2026, 1, 26),  # Mon  Republic Day (Zerodha holiday calendar; Kotak Neo)
+        date(2026, 2, 15),  # Sun  Mahashivratri (Bajaj AMC; Groww) (Sun — already non-trading)
+        date(2026, 3, 3),  # Tue  Holi (Business Standard 2026-03-03 "shut today"; Samco —
+        # the festival was celebrated Mar 4 but the EXCHANGE holiday is Mar 3 per the circular)
+        date(2026, 3, 21),  # Sat  Id-ul-Fitr (Bajaj AMC; smallcase) (Sat — already non-trading)
+        date(2026, 3, 26),  # Thu  Ram Navami (Angel One; Zerodha; Business Standard — FIXES
+        # the prior wrong 2026-03-27 entry: Mar 27 is a Friday and a normal trading day)
+        date(2026, 3, 31),  # Tue  Mahavir Jayanti (Angel One; Business Standard)
+        date(2026, 4, 3),  # Fri  Good Friday (Zerodha; ClearTax)
+        date(2026, 4, 14),  # Tue  Dr Ambedkar Jayanti (Business Today 2026-04-14; Kotak Neo)
+        date(2026, 5, 1),  # Fri  Maharashtra Day (Groww; Sahi)
+        date(2026, 5, 28),  # Thu  Bakri Id / Id-ul-Adha (Groww; ClearTax)
+        date(2026, 6, 26),  # Fri  Muharram (IndiaIPO; Groww)
+        date(2026, 8, 15),  # Sat  Independence Day (Groww; Swastika) (Sat — already non-trading)
+        date(2026, 9, 14),  # Mon  Ganesh Chaturthi (Groww; Kotak Neo)
+        date(2026, 10, 2),  # Fri  Mahatma Gandhi Jayanti (ClearTax; Zerodha)
+        date(2026, 10, 20),  # Tue  Dussehra / Vijaya Dashami (Kotak Neo; ClearTax)
+        date(2026, 11, 8),  # Sun  Diwali Laxmi Pujan (Sahi; Kotak Neo) (Sun — already
+        # non-trading; the special Muhurat session is announced for this day — see
+        # MUHURAT_SESSIONS below: timings NOT yet notified, so no entry is fabricated)
+        date(2026, 11, 10),  # Tue  Diwali Balipratipada (Sahi; Zerodha)
+        date(2026, 11, 24),  # Tue  Guru Nanak Jayanti (Sahi; Zerodha)
+        date(2026, 12, 25),  # Fri  Christmas (Zerodha; Groww)
     ]
 )
 
-ALL_HOLIDAYS: frozenset[date] = (
+#: The COMMON per-year holiday core shared by BOTH exchanges
+#: (DEC-CALENDAR-EXCHANGE-SPLIT-001). Every source consulted found the NSE and
+#: BSE EQUITY-segment holiday calendars IDENTICAL for every covered year
+#: (2020-2026) — secondary-corroborated only: the BSE primary holiday page
+#: (bseindia.com listholi.aspx, both URL variants) returned HTTP 403 from this
+#: environment, so the identity is NOT primary-verified against a BSE notice.
+_COMMON_HOLIDAYS: Final[frozenset[date]] = (
     HOLIDAYS_2020
     | HOLIDAYS_2021
     | HOLIDAYS_2022
@@ -278,8 +339,42 @@ ALL_HOLIDAYS: frozenset[date] = (
     | HOLIDAYS_2026
 )
 
+#: Holidays observed by NSE but NOT BSE. EMPTY by verified fact, not by
+#: omission (Golden Rule #1): NO citable NSE-vs-BSE divergent equity-segment
+#: holiday exists for 2020-2026 in any source either research round found. Any
+#: FUTURE divergent date added here REQUIRES a citable exchange circular in its
+#: inline comment; an uncitable divergence is noted UNVERIFIED in comments and
+#: NOT encoded.
+NSE_ONLY_HOLIDAYS: Final[frozenset[date]] = frozenset()
+
+#: Holidays observed by BSE but NOT NSE. EMPTY by verified fact — same
+#: citable-circular requirement as :data:`NSE_ONLY_HOLIDAYS` (Golden Rule #1).
+BSE_ONLY_HOLIDAYS: Final[frozenset[date]] = frozenset()
+
+#: The NSE equity-segment holiday set (common core + NSE-only divergences).
+NSE_HOLIDAYS: Final[frozenset[date]] = _COMMON_HOLIDAYS | NSE_ONLY_HOLIDAYS
+
+#: The BSE equity-segment holiday set (common core + BSE-only divergences).
+BSE_HOLIDAYS: Final[frozenset[date]] = _COMMON_HOLIDAYS | BSE_ONLY_HOLIDAYS
+
+#: The union of both exchanges' holiday sets — the exchange-agnostic default
+#: every existing caller keeps (byte-identical to the pre-split ALL_HOLIDAYS:
+#: with both `_ONLY` sets empty, ``NSE_HOLIDAYS == BSE_HOLIDAYS ==
+#: ALL_HOLIDAYS == _COMMON_HOLIDAYS``).
+ALL_HOLIDAYS: frozenset[date] = NSE_HOLIDAYS | BSE_HOLIDAYS
+
 # Diwali Muhurat sessions (one trading hour, evening, separate from regular hours).
-# Source: NSE special-session circulars per year.
+# Source: NSE special-session circulars per year. SHARED by both exchanges
+# (NSE + BSE conduct the same Muhurat session; DEC-CALENDAR-EXCHANGE-SPLIT-001).
+#
+# 2026 is deliberately ABSENT (DEC-CALENDAR-2026-COMPLETE-001, Golden Rule #1):
+# the 2026 Muhurat session is ANNOUNCED for Sunday 2026-11-08 (Diwali Laxmi
+# Pujan, listed in HOLIDAYS_2026 above), but as of 2026-07-03 its TIMINGS are
+# NOT yet notified — multiple sources quote the circular language "timings of
+# Muhurat Trading shall be notified subsequently through a circular" (typically
+# issued in October). ``has_muhurat_session(date(2026, 11, 8))`` therefore
+# honestly reads False until the timing circular lands; fabricating an hour
+# here would be a guess, not data.
 MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
     date(2020, 11, 14): (time(18, 15), time(19, 15)),  # Sat — Diwali (DEC-CALENDAR-2020-DATA-001)
     date(2021, 11, 4): (time(18, 15), time(19, 15)),
@@ -309,11 +404,24 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 #: case and refuse to guess, instead of trusting a silent ``False``. The
 #: spot-anchor consumers (``indicators/prev_day_ohlc.py``,
 #: ``indicators/weekly_anchors.py``) are WIRED to the strict variants
-#: (DEC-CALENDAR-2020-HONEST-001); other unguarded callers
-#: (``dashboard/preopen_report.py``) remain a deferred opt-in follow-up. Per
+#: (DEC-CALENDAR-2020-HONEST-001); the once-deferred unguarded callers
+#: (``dashboard/preopen_report.py``, ``doctor_live.py``, the engine trade-sim
+#: walkers, ``feed/bar_metadata.py``) are now loud too (the
+#: calendar-correctness pack). Per
 #: Golden Rule #1 we do NOT hallucinate holiday dates — the 2 standing-annual
 #: 2020 November dates that could not be pinned to the raw circular are tagged
 #: ``# UNVERIFIED`` rather than presented as confirmed.
+#:
+#: MAINTENANCE — the post-2026 hard horizon (hostile-review operational note,
+#: calendar-correctness pack): the strict consumers (the engine trade-sim
+#: walkers ``engine/trade_sim.py`` / ``engine/rust_trade_sim.py``,
+#: ``feed/bar_metadata.py``, ``dashboard/preopen_report.py``) now RAISE
+#: :class:`HolidayDataUnavailableError` for any weekday bar dated outside this
+#: span — loud-by-design (a sweep surfaces it as ``TUPLE_FAILED`` per
+#: DEC-ENGINE-TUPLE-SKIP-RESILIENT-001), never a silently-fabricated
+#: 09:15/15:20 session. Consequence: ``HOLIDAYS_2027`` MUST be added (from the
+#: official NSE 2027 circular, once published) BEFORE any 2027-dated bar is
+#: pulled or swept, or every 2027 tuple fails loudly.
 HOLIDAY_COVERAGE_FIRST_YEAR: Final[int] = min(h.year for h in ALL_HOLIDAYS)
 HOLIDAY_COVERAGE_LAST_YEAR: Final[int] = max(h.year for h in ALL_HOLIDAYS)
 
@@ -341,8 +449,51 @@ def is_holiday_data_available(d: date) -> bool:
     return HOLIDAY_COVERAGE_FIRST_YEAR <= d.year <= HOLIDAY_COVERAGE_LAST_YEAR
 
 
-def is_holiday(d: date) -> bool:
-    """Return True if ``d`` is in the NSE/BSE published holiday list.
+def holidays_for_exchange(exchange: str) -> frozenset[date]:
+    """Return the holiday set for one exchange (DEC-CALENDAR-EXCHANGE-SPLIT-001).
+
+    Exact-match dispatch: ``"NSE"`` → :data:`NSE_HOLIDAYS`, ``"BSE"`` →
+    :data:`BSE_HOLIDAYS`. The two sets are IDENTICAL for every covered year
+    (2020-2026) per every secondary source consulted (the primary exchange
+    circulars were unreachable from this environment — HTTP 403), so today this
+    is a divergence MECHANISM, not a divergence: the first citable divergent
+    date lands in :data:`NSE_ONLY_HOLIDAYS` / :data:`BSE_ONLY_HOLIDAYS` and
+    every ``exchange=``-threaded caller picks it up with no further change.
+    O(1).
+
+    Parameters
+    ----------
+    exchange
+        ``"NSE"`` or ``"BSE"`` (exact match — no case folding).
+
+    Raises
+    ------
+    ValueError
+        If *exchange* is anything other than ``"NSE"`` or ``"BSE"``.
+    """
+    if exchange == "NSE":
+        return NSE_HOLIDAYS
+    if exchange == "BSE":
+        return BSE_HOLIDAYS
+    raise ValueError(f"unknown exchange {exchange!r}: valid values are 'NSE' and 'BSE'")
+
+
+def _resolve_holiday_set(exchange: str | None) -> frozenset[date]:
+    """Map an optional exchange to its holiday set — the ONE resolution helper.
+
+    ``None`` (the default every pre-split caller implicitly passes) resolves to
+    the exchange-agnostic :data:`ALL_HOLIDAYS` union — byte-identical to the
+    pre-split behaviour; ``"NSE"`` / ``"BSE"`` resolve via
+    :func:`holidays_for_exchange` (anything else raises :class:`ValueError`
+    there). O(1).
+    """
+    if exchange is None:
+        return ALL_HOLIDAYS
+    return holidays_for_exchange(exchange)
+
+
+def is_holiday(d: date, *, exchange: str | None = None) -> bool:
+    """Return True if ``d`` is in the published holiday list.
 
     The list covers ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``
     inclusive (currently 2020-2026). For a date OUTSIDE that span this returns
@@ -350,11 +501,27 @@ def is_holiday(d: date) -> bool:
     means "not a known holiday", NOT "verified trading day". A caller that
     needs the distinction must gate on :func:`is_holiday_data_available` or use
     the strict :func:`is_holiday_checked`. O(1) ``frozenset`` membership.
+
+    Parameters
+    ----------
+    d
+        The calendar date to test.
+    exchange
+        ``None`` (default) tests the exchange-agnostic :data:`ALL_HOLIDAYS`
+        union — byte-identical to the pre-split behaviour; ``"NSE"`` / ``"BSE"``
+        test that exchange's own set (DEC-CALENDAR-EXCHANGE-SPLIT-001; the sets
+        are identical for 2020-2026 per secondary sources — primary circulars
+        unreachable from this environment).
+
+    Raises
+    ------
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"``.
     """
-    return d in ALL_HOLIDAYS
+    return d in _resolve_holiday_set(exchange)
 
 
-def is_holiday_checked(d: date) -> bool:
+def is_holiday_checked(d: date, *, exchange: str | None = None) -> bool:
     """Strict :func:`is_holiday` — raise on an out-of-coverage date.
 
     Identical to :func:`is_holiday` for dates within the covered span, but
@@ -363,13 +530,25 @@ def is_holiday_checked(d: date) -> bool:
     HOLIDAY_COVERAGE_LAST_YEAR]``. A caller that uses THIS variant never
     silently mistakes an unknown date for a confirmed non-holiday; callers that
     keep using the unguarded :func:`is_holiday` retain its back-compat ``False``.
+    The coverage span is shared by both exchanges (one common per-year core).
     O(1).
+
+    Parameters
+    ----------
+    d
+        The calendar date to test.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — see :func:`is_holiday`.
 
     Raises
     ------
     HolidayDataUnavailableError
         If ``d.year`` is outside the covered holiday-list span.
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (raised
+        before the coverage check — an invalid exchange never resolves).
     """
+    holidays = _resolve_holiday_set(exchange)
     if not is_holiday_data_available(d):
         _LOG.warning(
             "calendar.holiday_data_unavailable",
@@ -381,7 +560,7 @@ def is_holiday_checked(d: date) -> bool:
             f"no published NSE/BSE holiday data for {d.isoformat()}: covered span is "
             f"{HOLIDAY_COVERAGE_FIRST_YEAR}-{HOLIDAY_COVERAGE_LAST_YEAR} (inclusive)"
         )
-    return d in ALL_HOLIDAYS
+    return d in holidays
 
 
 #: ``date.weekday()`` returns 5 for Saturday and 6 for Sunday.
@@ -393,19 +572,36 @@ def is_weekend(d: date) -> bool:
     return d.weekday() >= _SATURDAY_WEEKDAY
 
 
-def is_trading_day(d: date) -> bool:
+def is_trading_day(d: date, *, exchange: str | None = None) -> bool:
     """Return True if ``d`` is a trading day.
 
     A trading day is either a regular weekday (Mon-Fri) that is not a
     listed holiday, OR a special weekend session (e.g. Budget Day on a
     Saturday / Sunday — see :data:`SPECIAL_WEEKEND_TRADING_SESSIONS`).
+    Special weekend sessions are SHARED by both exchanges (NSE + BSE run the
+    same Budget-Day sessions), so only the holiday set is exchange-scoped.
+
+    Parameters
+    ----------
+    d
+        The calendar date to test.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — selects the holiday set;
+        see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001).
+
+    Raises
+    ------
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (validated
+        eagerly, before any date-path short-circuit).
     """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
     if is_special_weekend_session(d):
         return True
-    return not is_weekend(d) and not is_holiday(d)
+    return not is_weekend(d) and not is_holiday(d, exchange=exchange)
 
 
-def is_trading_day_checked(d: date) -> bool:
+def is_trading_day_checked(d: date, *, exchange: str | None = None) -> bool:
     """Strict :func:`is_trading_day` — raise on an out-of-coverage date.
 
     Identical to :func:`is_trading_day` within the covered holiday span. For a
@@ -423,11 +619,24 @@ def is_trading_day_checked(d: date) -> bool:
     trading day UNLESS it is an (unknown) holiday, so the strict variant
     refuses rather than silently assume a trading day. O(1).
 
+    Parameters
+    ----------
+    d
+        The calendar date to test.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — selects the holiday set;
+        see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001). Special
+        weekend sessions stay SHARED (both exchanges).
+
     Raises
     ------
     HolidayDataUnavailableError
         If ``d`` is an out-of-coverage WEEKDAY that is not a special session.
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (validated
+        eagerly, before any date-path short-circuit).
     """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
     if is_special_weekend_session(d):
         return True
     if is_weekend(d):
@@ -436,7 +645,7 @@ def is_trading_day_checked(d: date) -> bool:
         return False
     # A weekday: the verdict turns on the holiday list. ``is_holiday_checked``
     # raises for an out-of-coverage date rather than guess "not a holiday".
-    return not is_holiday_checked(d)
+    return not is_holiday_checked(d, exchange=exchange)
 
 
 def has_muhurat_session(d: date) -> bool:
@@ -444,7 +653,7 @@ def has_muhurat_session(d: date) -> bool:
     return d in MUHURAT_SESSIONS
 
 
-def get_session(d: date) -> TradingSession | None:
+def get_session(d: date, *, exchange: str | None = None) -> TradingSession | None:
     """Return the trading session for the given date, or None if no trading.
 
     Resolution order:
@@ -455,7 +664,25 @@ def get_session(d: date) -> TradingSession | None:
        full 09:15-15:30 hours, classified as ``REGULAR``.
     3. Regular weekday session if :func:`is_trading_day` is True.
     4. ``None`` otherwise (weekend / holiday).
+
+    Muhurat + special weekend sessions are SHARED by both exchanges (NSE + BSE
+    run the same special sessions); only the holiday set is exchange-scoped.
+
+    Parameters
+    ----------
+    d
+        The calendar date to resolve.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — selects the holiday set;
+        see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001).
+
+    Raises
+    ------
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (validated
+        eagerly, before any date-path short-circuit).
     """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
     if has_muhurat_session(d):
         open_t, close_t = MUHURAT_SESSIONS[d]
         return TradingSession(
@@ -472,7 +699,7 @@ def get_session(d: date) -> TradingSession | None:
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
-    if not is_trading_day(d):
+    if not is_trading_day(d, exchange=exchange):
         return None
     return TradingSession(
         date=d,
@@ -482,7 +709,7 @@ def get_session(d: date) -> TradingSession | None:
     )
 
 
-def get_session_checked(d: date) -> TradingSession | None:
+def get_session_checked(d: date, *, exchange: str | None = None) -> TradingSession | None:
     """Strict :func:`get_session` — raise on an out-of-coverage date.
 
     Identical to :func:`get_session` within the covered holiday span. For a date
@@ -504,14 +731,27 @@ def get_session_checked(d: date) -> TradingSession | None:
     refuses (via :func:`is_trading_day_checked`) rather than guess a REGULAR
     session. The unguarded :func:`get_session` keeps its byte-identical
     back-compat behaviour (an out-of-coverage weekday reads as a REGULAR
-    session). O(1).
+    session). Muhurat + special weekend sessions are SHARED by both exchanges;
+    only the holiday set is exchange-scoped. O(1).
+
+    Parameters
+    ----------
+    d
+        The calendar date to resolve.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — selects the holiday set;
+        see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001).
 
     Raises
     ------
     HolidayDataUnavailableError
         If ``d`` is an out-of-coverage WEEKDAY that is neither a muhurat nor a
         special-weekend session.
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (validated
+        eagerly, before any date-path short-circuit).
     """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
     if has_muhurat_session(d):
         open_t, close_t = MUHURAT_SESSIONS[d]
         return TradingSession(
@@ -528,7 +768,7 @@ def get_session_checked(d: date) -> TradingSession | None:
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
-    if not is_trading_day_checked(d):
+    if not is_trading_day_checked(d, exchange=exchange):
         return None
     return TradingSession(
         date=d,
@@ -538,18 +778,37 @@ def get_session_checked(d: date) -> TradingSession | None:
     )
 
 
-def trading_days_between(start: date, end: date) -> list[date]:
-    """List of trading days in [start, end] inclusive."""
+def trading_days_between(start: date, end: date, *, exchange: str | None = None) -> list[date]:
+    """List of trading days in [start, end] inclusive.
+
+    Parameters
+    ----------
+    start, end
+        The inclusive date range to scan.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — selects the holiday set;
+        see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001). Special
+        weekend sessions stay SHARED (both exchanges).
+
+    Raises
+    ------
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (validated
+        eagerly, even for an empty range).
+    """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
     days: list[date] = []
     d = start
     while d <= end:
-        if is_trading_day(d):
+        if is_trading_day(d, exchange=exchange):
             days.append(d)
         d += timedelta(days=1)
     return days
 
 
-def trading_days_between_checked(start: date, end: date) -> list[date]:
+def trading_days_between_checked(
+    start: date, end: date, *, exchange: str | None = None
+) -> list[date]:
     """Strict :func:`trading_days_between` — raise on an out-of-coverage weekday.
 
     Identical to :func:`trading_days_between` when every date in ``[start,
@@ -563,16 +822,28 @@ def trading_days_between_checked(start: date, end: date) -> list[date]:
     :func:`trading_days_between` keeps its byte-identical back-compat behaviour.
     O(days).
 
+    Parameters
+    ----------
+    start, end
+        The inclusive date range to scan.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — selects the holiday set;
+        see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001).
+
     Raises
     ------
     HolidayDataUnavailableError
         If any date in ``[start, end]`` is an out-of-coverage WEEKDAY that is
         not a special session.
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (validated
+        eagerly, even for an empty range).
     """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
     days: list[date] = []
     d = start
     while d <= end:
-        if is_trading_day_checked(d):
+        if is_trading_day_checked(d, exchange=exchange):
             days.append(d)
         d += timedelta(days=1)
     return days
@@ -586,11 +857,22 @@ def session_minutes_per_day() -> int:
 def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     """Number of bars expected in a regular session at the given timeframe.
 
+    CEILING division over the 375-minute session
+    (DEC-CALENDAR-BARS-CEIL-001): the resampler oracle
+    :func:`brutex.data.tf_resampler.resample_1m_to_tf` emits
+    ``ceil(375 / tf)`` bars per regular session — session-anchored
+    left-labeled buckets INCLUDING the truncated final bucket (pinned by
+    ``tests/unit/test_tf_resampler_session_bounds.py``). The previous FLOOR
+    division under-counted every timeframe that does not divide 375 (e.g.
+    60m read 6 while the lake actually stores 7 bars, the last labeled
+    15:15 IST covering only 15:15-15:29).
+
     Examples:
     - 1m  -> 375 bars
     - 5m  -> 75 bars
     - 15m -> 25 bars
-    - 60m -> 6 bars (well, 6.25 — partial bar at end)
+    - 30m -> 13 bars (12 full + the truncated 15:00-15:29 final bucket)
+    - 60m -> 7 bars (6 full + the truncated 15:15-15:29 final bucket)
     - 1d  -> 1 bar
 
     Raises
@@ -605,7 +887,7 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
         raise ValueError(f"expected_bars_per_day_for_tf.tf_minutes must be >= 1, got {tf_minutes}")
     if tf_minutes >= SESSION_DURATION_MINUTES:
         return 1
-    return SESSION_DURATION_MINUTES // tf_minutes
+    return -(-SESSION_DURATION_MINUTES // tf_minutes)
 
 
 def is_forced_exit_bar(t: time, tf_minutes: int, forced_exit_seconds: int | None = None) -> bool:

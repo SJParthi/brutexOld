@@ -522,6 +522,10 @@ def _per_symbol_spot(
                 # view what span it holds — None until a 1-minute row is seen.
                 "1minute_start": None,
                 "1minute_end": None,
+                # Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
+                # 0/0 until a 1-minute row is seen — the honest "nothing observed" default.
+                "open_substituted_days": 0,
+                "session_days": 0,
             },
         )
         first = row.get("first_date")
@@ -538,6 +542,11 @@ def _per_symbol_spot(
             entry[interval] = new_verdict
             entry[f"{interval}_start"] = first_s
             entry[f"{interval}_end"] = str(last) if last else None
+            # The substitution count travels WITH the rank-merge WINNING cell
+            # (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001) — a stale drifted
+            # fragment can never clobber the winning partition's count.
+            entry["open_substituted_days"] = int(row.get("open_substituted_days") or 0)
+            entry["session_days"] = int(row.get("session_days") or 0)
     for entry in by_symbol.values():
         entry["overall"] = _overall_spot(entry["1minute"])
     return sorted(by_symbol.values(), key=lambda e: (e["symbol"], e["exchange"]))
@@ -706,15 +715,28 @@ def _spot_dimension_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     The verdict honours the 2020-floor downgrade (DEC-SPOT-COMPLETENESS-2020-FLOOR-001): a
     settled-but-late-start dimension reads ``partial``, not ``full`` — the ``from_2020`` flag
     and the explicit first/last dates disambiguate WHY.
+
+    Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the detail
+    additionally carries ``open_substituted_days`` (how many stored sessions' first present
+    1-minute bar is strictly after the 09:15 IST canonical open — so their DERIVED 1-day open
+    is the earliest-present-minute substitute, not the canonical open price),
+    ``session_days`` (the stored-session denominator) and the ``open_substituted`` flag
+    (``days > 0``). INFORMATIONAL only — the verdict is NEVER downgraded by a substitution
+    (the data exists; only its daily open is a substitute). A row without the counts (a
+    hand-built / legacy shape) defaults to the honest 0/0/False.
     """
     first = row.get("first_date")
     last = row.get("last_date")
     first_s = str(first) if first else None
+    open_substituted_days = int(row.get("open_substituted_days") or 0)
     return {
         "status": _spot_dimension_verdict_with_floor(row.get("completeness"), first_s),
         "first_date": first_s,
         "last_date": str(last) if last else None,
         "from_2020": _from_2020(first_s),
+        "open_substituted_days": open_substituted_days,
+        "session_days": int(row.get("session_days") or 0),
+        "open_substituted": open_substituted_days > 0,
     }
 
 
@@ -725,6 +747,11 @@ def _new_per_symbol_entry(symbol: str, exchange: str, category: str) -> dict[str
         "first_date": None,
         "last_date": None,
         "from_2020": False,
+        # Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
+        # no data ⇒ nothing observed ⇒ the honest 0/0/False defaults.
+        "open_substituted_days": 0,
+        "session_days": 0,
+        "open_substituted": False,
     }
     return {
         "symbol": symbol,
@@ -858,12 +885,18 @@ def _aggregate_spot(per_symbol: list[dict[str, Any]]) -> dict[str, dict[str, int
 
     1-minute is the single fetched granularity (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so there is
     one ``full_1minute`` count per category; the prior ``full_1day`` / ``full_both`` buckets
-    were dropped with the derived 1-day column.
+    were dropped with the derived 1-day column. Additionally sums the per-symbol
+    ``open_substituted_days`` into the category bucket
+    (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001) — the informational "how many stored sessions
+    across this category carry a substituted derived daily open" tally, never a verdict input.
     """
-    agg: dict[str, dict[str, int]] = {cat: {"total": 0, "full_1minute": 0} for cat in CATEGORIES}
+    agg: dict[str, dict[str, int]] = {
+        cat: {"total": 0, "full_1minute": 0, "open_substituted_days": 0} for cat in CATEGORIES
+    }
     for entry in per_symbol:
         bucket = agg[entry["category"]]
         bucket["total"] += 1
+        bucket["open_substituted_days"] += int(entry.get("open_substituted_days") or 0)
         if entry["1minute"] == DIM_FULL:
             bucket["full_1minute"] += 1
     return agg
@@ -1051,6 +1084,10 @@ def scoreboard_to_csv(
                 "Symbol",
                 "Exchange",
                 "1-minute complete?",
+                # Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
+                # informational count of sessions whose derived 1-day open is a substituted
+                # (first-present-minute) price — never a verdict downgrade.
+                "1-minute open-substituted days",
                 "Overall",
             ]
         )
@@ -1061,6 +1098,7 @@ def scoreboard_to_csv(
                     row["symbol"],
                     row["exchange"],
                     row["1minute"],
+                    int(row.get("open_substituted_days") or 0),
                     row["overall"],
                 ]
             )
@@ -1075,6 +1113,10 @@ def scoreboard_to_csv(
                 "1-minute first bar",
                 "1-minute last bar",
                 "1-minute from 2020?",
+                # Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
+                # N substituted-open sessions out of M stored sessions — informational only.
+                "1-minute open-substituted days",
+                "1-minute sessions",
                 "Overall",
             ]
         )
@@ -1090,6 +1132,8 @@ def scoreboard_to_csv(
                     _csv_date(one_min.get("first_date")),
                     _csv_date(one_min.get("last_date")),
                     _csv_yes_no(one_min.get("from_2020")),
+                    int(one_min.get("open_substituted_days") or 0),
+                    int(one_min.get("session_days") or 0),
                     row["overall"],
                 ]
             )
