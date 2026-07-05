@@ -2573,19 +2573,74 @@ class TestSuspiciousEmptyFlag:
         assert [r.underlying for r in scan.suspicious] == ["RELIANCE"]
 
     def test_low_leg_never_planned_sibling_still_flags(self) -> None:
-        # HONEST-residual pin (docstring-documented, accepted): a NEVER-PLANNED sibling —
+        # HONEST-residual pin (docstring-documented): a NEVER-PLANNED sibling —
         # a far-future contract skipped at planning time (fno.window_not_open,
         # DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
-        # IngestReport pair, no failure) — is structurally INVISIBLE to Tier B, so a
+        # IngestReport pair, no failure) — stays structurally INVISIBLE to Tier B, so a
         # 1-clean-empty-near-leg + 1-not-yet-open-far-leg chain STILL flags low_leg=True.
-        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically);
-        # observe-only WARN noise, deliberately not mechanised away.
+        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically).
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: the flag now SELF-DESCRIBES — when the
+        # caller threads never_planned_symbols the report carries never_planned_pairs,
+        # but the flag DECISION is untouched (annotate, NEVER suppress).
         contracts, _ = _empty_chain("BEL", 2)
         pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
         # contracts[1] was never planned: absent from pairs AND from failed_symbols.
         scan = scan_underlying_all_empty(pairs, contracts, [])
         assert scan.suspicious == (
             UnderlyingEmptyReport(underlying="BEL", attempted_pairs=1, stored_bars=0, low_leg=True),
+        )
+        # Threading the planner's omitted set STILL flags — now self-described.
+        annotated = scan_underlying_all_empty(pairs, contracts, [], [contracts[1].symbol])
+        assert annotated.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="BEL",
+                attempted_pairs=1,
+                stored_bars=0,
+                low_leg=True,
+                never_planned_pairs=1,
+            ),
+        )
+
+    def test_never_planned_default_empty_scan_byte_identical(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001 back-compat: an explicit empty
+        # never_planned_symbols yields the EXACT same scan as omitting the param
+        # (every report carries the default never_planned_pairs=0).
+        contracts, pairs = _empty_chain("M&M", 3)
+        assert scan_underlying_all_empty(pairs, contracts, [], []) == scan_underlying_all_empty(
+            pairs, contracts
+        )
+
+    def test_never_planned_unknown_symbol_is_skipped(self) -> None:
+        # An omitted symbol NOT in contract_list is defensively dropped (mirrors the
+        # unknown failed_symbols drop) — the flag + annotation are unaffected.
+        contracts, pairs = _empty_chain("RELIANCE", 1)
+        scan = scan_underlying_all_empty(pairs, contracts, [], ["NSE-GHOST-99-FUT"])
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="RELIANCE",
+                attempted_pairs=1,
+                stored_bars=0,
+                low_leg=True,
+                never_planned_pairs=0,
+            ),
+        )
+
+    def test_never_planned_never_suppresses_tier_a(self) -> None:
+        # A Tier A whole-chain flag with never-planned siblings STILL fires and is
+        # annotated — the count is data, never a suppression lever.
+        contracts, _ = _empty_chain("VEDL", 5)
+        pairs = {(c.symbol, "1day"): _ireport(windows=1, bars=0) for c in contracts[:3]}
+        scan = scan_underlying_all_empty(
+            pairs, contracts, [], [contracts[3].symbol, contracts[4].symbol]
+        )
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="VEDL",
+                attempted_pairs=3,
+                stored_bars=0,
+                low_leg=False,
+                never_planned_pairs=2,
+            ),
         )
 
     def test_tier_a_ignores_nonclean_and_failed_siblings(self) -> None:
@@ -2632,6 +2687,42 @@ class TestSuspiciousEmptyFlag:
         assert warns[0]["underlying"] == repr("WIPRO")
         assert warns[0]["attempted_pairs"] == 1
         assert warns[0]["low_leg"] is True
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: the payload always carries the
+        # annotation key (0 when nothing was omitted by the planner).
+        assert warns[0]["never_planned_pairs"] == 0
+
+    def test_emit_warn_payload_carries_never_planned_pairs(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: a low-leg flag with a never-planned
+        # sibling self-describes in the WARN payload — triage reads low_leg=True +
+        # never_planned_pairs=1 as "probably a far-leg-not-open chain, weigh lower".
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        scan = scan_underlying_all_empty(pairs, contracts, [], [contracts[1].symbol])
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(scan, pull_id="pid-1")
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("BEL")
+        assert warns[0]["low_leg"] is True
+        assert warns[0]["never_planned_pairs"] == 1
+
+    def test_emit_helper_threads_never_planned_symbols(self) -> None:
+        # emit_underlying_all_empty threads never_planned_symbols → scan → WARN payload
+        # (the guarded COMMON helper, used by the production post-drain call site).
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        with capture_logs() as logs:
+            _oi.emit_underlying_all_empty(
+                pairs,
+                contracts,
+                never_planned_symbols=[contracts[1].symbol],
+                pull_id="pid-9",
+            )
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["pull_id"] == "pid-9"
+        assert warns[0]["never_planned_pairs"] == 1
+        assert warns[0]["low_leg"] is True  # annotated, NEVER suppressed
 
     def test_emit_silent_when_clean(self) -> None:
         with capture_logs() as logs:

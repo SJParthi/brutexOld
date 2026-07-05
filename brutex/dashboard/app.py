@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
+from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
 from brutex.adapters.ingest_common import (
     gate_pull_credentials,
     label_synthetic,
@@ -3940,7 +3941,11 @@ def build_app(
         counts as *pulled*; each row's ``completeness`` chip asserts ONLY
         ledger-settledness over planner-planned ranges
         (DEC-SPOT-COVERAGE-COMPLETENESS-001 — partially executes the #397
-        follow-up; a trading-day gap audit is NOT claimed). When no lake root
+        follow-up). A session-density RANGE audit now feeds the
+        ``/completeness`` amber ``settled_partial_range`` chip
+        (DEC-SPOT-PARTIAL-RANGE-CHIP-001 — ``session_days`` rides this same
+        SPOT scan); the PER-WINDOW trading-day gap audit and the options-side
+        range audit remain follow-ups, NOT claimed. When no lake root
         is wired (a store opened without a filesystem path) the payload is an
         empty summary, never a 500.
         """
@@ -4339,6 +4344,30 @@ def build_app(
                 "Content-Disposition": 'attachment; filename="economics_integrity.csv"',
             },
         )
+
+    def _read_parse_skips() -> dict[str, Any] | None:
+        """Read the persisted parse-skip snapshot (``None`` if never loaded)."""
+        raw = _require_store().get_meta(PARSE_SKIPS_META_KEY)
+        if raw is None:
+            return None
+        parsed: dict[str, Any] = json.loads(raw)
+        return parsed
+
+    @app.get("/api/v1/universe/parse-skips")
+    async def api_universe_parse_skips() -> JSONResponse:
+        """GET /api/v1/universe/parse-skips — the green/red master parse-skip verdict.
+
+        DEC-PARSE-SKIP-REPORT-001. Returns the bounded parse-skip snapshot the master
+        load persisted to ``schema_meta``: the malformed in-scope rows the parser
+        skipped-and-counted (DEC-INSTRUMENT-SKIP-NO-GSYM-001), the in-scope
+        denominator, capped sample reasons, and the verdict — GREEN iff
+        ``skipped_count <= max(10, ceil(0.1% of in-scope rows))``. READ-ONLY;
+        ``{"present": false}`` until the master has been loaded once. No store → 503.
+        """
+        snapshot = await run_in_threadpool(_read_parse_skips)
+        if snapshot is None:
+            return JSONResponse({"present": False})
+        return JSONResponse({"present": True, **snapshot})
 
     def _build_lake_census_payload() -> dict[str, Any]:
         """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
