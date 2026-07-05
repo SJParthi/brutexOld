@@ -414,6 +414,20 @@ class TestRunUnit:
         assert result.index == 0
         assert [o.kind for o in result.outcomes] == ["enriched"]
 
+    def test_greeks_worker_uninitialised_context_raises(
+        self, worker_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The defensive guard: a task before the initializer is a LOUD RuntimeError.
+
+        Unreachable through the real executor (``initializer=`` always runs
+        first) — covered directly so the guard carries no coverage pragma.
+        """
+        lake = tmp_path / "lake"
+        targets = _build_two_underlying_lake(lake)
+        units = _build_units(sorted(targets, key=ge._target_sort_key))
+        with pytest.raises(RuntimeError, match="context was not initialised"):
+            _greeks_worker(units[0])
+
 
 class TestParallelDriver:
     """`_run_parallel` + the dispatch — inline in-process executor."""

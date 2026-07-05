@@ -60,12 +60,16 @@ untouched either way), but two concurrent ENRICH passes are LAST-WRITER-WINS —
 never torn, the stamp always agrees with its values, yet the slower pass's
 inputs restate. The intended execution model is single-ENRICH-PASS-per-lake
 (the pass runs once per pull, post-drain) — UNCHANGED by the in-pass process
-pool: the parallel driver's spawn workers write DISJOINT contract symbols by
-construction (all targets of one ``(exchange, underlying)`` whose symbols
-could collide share ONE work unit, processed in sorted order inside one
-worker), so intra-pass workers never contend on a partition and the stored
-bytes are IDENTICAL to the sequential pass (golden-pinned). The driver's own
-structlog events + liveness beats are emitted PARENT-side in sorted order;
+pool: the parallel driver's spawn workers write DISJOINT lake partitions by
+construction (a partition path is exchange+symbol-scoped, and all targets of
+one ``(exchange, underlying)`` whose symbols could collide share ONE work
+unit, processed in sorted order inside one worker — one symbol string listed
+under TWO exchanges rides two units, but those are two disjoint partitions),
+so intra-pass workers never contend on a partition and the stored bytes are
+IDENTICAL to the sequential pass (golden-pinned). The driver's own structlog
+events are emitted PARENT-side in the deterministic sorted fold order; the
+liveness beats fire once pre-dispatch then per COMPLETED unit
+(completion order);
 the DEEP seam logs (read-dedup warnings, ``spot_key_recovered``) fire inside
 per-target processing and therefore emit CHILD-side in parallel mode —
 honest: log parity is driver-events-only, never claimed for the deep seams.
@@ -1381,8 +1385,17 @@ def _run_target(
       ``Exception`` (including ``MemoryError``, the pre-refactor behaviour)
       quarantines to an ``errored`` outcome;
     * the pool worker passes ``(LakeWriteHalt, MemoryError)`` — a raw
-      worker-side OOM must tear the pool down, never blend into a quiet
-      per-target quarantine (the sweep-worker convention).
+      worker-side OOM must abort the WHOLE pass, never blend into a quiet
+      per-target quarantine (the sweep-worker convention). Honest chain: a
+      PICKLABLE ``MemoryError`` does NOT break the pool — the executor
+      pickles it back and it re-raises RAW in the parent (remaining queued
+      units still run: ``Executor.__exit__`` is a plain ``shutdown(wait=True)``
+      with no ``cancel_futures``), landing in the pull wrapper's blanket
+      fence as ``greeks_enrich_ok=False`` (the ``greeks_health`` failure
+      counter observes it; NO CRITICAL alert). Only a hard OOM SIGKILL of
+      the worker process yields ``BrokenProcessPool`` →
+      :class:`~brutex.data.errors.GreeksEnrichPoolBroken` → the CRITICAL
+      pull-halt alert.
     """
     start = target.start.isoformat()
     end = target.end.isoformat()
@@ -1673,7 +1686,8 @@ def _run_unit(
     Per-target failures quarantine to ``errored`` outcomes (never kill the
     pool); a :class:`~brutex.data.errors.LakeWriteHalt` stops the unit
     IMMEDIATELY and crosses as the ``halt_reason`` sentinel; a raw
-    ``MemoryError`` propagates (pool teardown — the honest OOM signal). The
+    ``MemoryError`` propagates (whole-pass abort — the honest OOM signal;
+    see :func:`_run_target` for the exact parent-side chain). The
     per-unit :class:`_SpotJoinMemo` counters ride the result and sum to the
     sequential totals (see :func:`_build_units`).
     """
@@ -1707,7 +1721,7 @@ def _run_unit(
 def _greeks_worker(unit: _GreeksUnit) -> _GreeksUnitResult:
     """The module-level pool task: bind the initializer's context, run the unit."""
     ctx = _GREEKS_WORKER_CTX
-    if ctx is None:  # pragma: no cover — the initializer always runs before a task
+    if ctx is None:
         msg = "greeks worker context was not initialised"
         raise RuntimeError(msg)
     return _run_unit(unit, lake_root=ctx.lake_root, rate_source=ctx.rate_source)
@@ -1747,8 +1761,9 @@ def _run_parallel(
     Liveness (DEC-PIPELINE-STALL-HEARTBEAT-001): the parent beats once before
     dispatch and once per COMPLETED unit — real observed progress only, never
     a timer keepalive that would blind the watchdog to a genuinely hung
-    worker. A unit is one option chain (bounded — minutes, well under the
-    600 s watchdog), so beat silence is bounded by the largest single unit.
+    worker. A unit is one option chain — ALL strikes of one
+    ``(underlying, window)`` — typically bounded well under the 600 s
+    watchdog, so beat silence is bounded by the largest single unit.
 
     Failure model: a unit's ``halt_reason`` (LakeWriteHalt in a worker)
     cancels every QUEUED unit and re-raises ``LakeWriteHalt(reason)`` —
@@ -1760,7 +1775,11 @@ def _run_parallel(
     external kill, hard interpreter crash: NOT distinguishable through the
     public executor API) raises
     :class:`~brutex.data.errors.GreeksEnrichPoolBroken`, which the dashboard
-    job layer recognises as a pull-halt (CRITICAL Telegram alert).
+    job layer recognises as a pull-halt (CRITICAL Telegram alert). A
+    PICKLABLE worker ``MemoryError`` is NOT a pool break: it re-raises RAW
+    here (remaining units finish under the ``with``-exit
+    ``shutdown(wait=True)``) and lands in the pull wrapper's blanket fence
+    as ``greeks_enrich_ok=False`` — see :func:`_run_target`.
     """
     ctx = _GreeksWorkerContext(lake_root=lake_root, rate_source=rate_source)
     pool_size = min(max_workers, len(units))
