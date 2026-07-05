@@ -220,7 +220,6 @@ from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
-from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
