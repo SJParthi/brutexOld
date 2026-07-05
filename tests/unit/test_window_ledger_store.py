@@ -2188,7 +2188,7 @@ class TestDeltaLockedTimestamp:
         # Probe from a SEPARATE fd inside the mint (the #887 held-lock test
         # pattern): a non-blocking flock must FAIL, proving the timestamp is
         # sampled while the append lock is already held.
-        import brutex.data.window_ledger_store as store_module
+        from brutex.data import window_ledger_store as store_module
 
         real_mint = (
             store_module._next_delta_path  # pyright: ignore[reportPrivateUsage] — friend seam
