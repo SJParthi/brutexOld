@@ -953,3 +953,60 @@ def test_vectorized_conversion_writes_byte_identical_lake(
     assert new_files.keys() == legacy_files.keys()
     for rel, content in legacy_files.items():
         assert new_files[rel] == content, f"derived partition diverged: {rel}"
+
+
+def test_prebuild_log_volume_is_o_symbols_not_o_partitions(tmp_path: Path) -> None:
+    """DEC-PREBUILD-LOG-FLOOD-001 pin: a prebuild of N derived partitions emits
+    O(symbols) INFO lines, never O(partitions).
+
+    The 2026-07-04/05 forensics measured 205,609 per-partition
+    ``lake.partition.write`` INFO lines (~132/s) from the prebuild — rolling
+    the 10 MiB × 5 log rotation over in ~26 min and WIPING the fetch phase's
+    rate/429/window-settle audit trail. On the DERIVED write path that event
+    now rides DEBUG (same name + fields), and the surviving INFO record is ONE
+    per-symbol ``lake.derived.write_summary`` aggregate (timeframe count +
+    total bars)."""
+    from structlog.testing import capture_logs
+
+    _write_1m_bars(tmp_path, n=120)
+    with capture_logs() as logs:
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m", "15m", "30m"),
+            include_daily=True,
+            daily_before=date(2021, 1, 5),
+            incremental=False,
+        )
+    partition_writes = [e for e in logs if e["event"] == "lake.partition.write"]
+    # Multiple derived partitions were written (3 intraday TFs + the 1day)…
+    assert len(partition_writes) >= 4
+    # …but EVERY per-partition event is DEBUG on the derived path — zero INFO.
+    assert all(e["log_level"] == "debug" for e in partition_writes)
+    # Exactly ONE per-symbol aggregate INFO carries the forensic fields.
+    summaries = [e for e in logs if e["event"] == "lake.derived.write_summary"]
+    assert len(summaries) == 1
+    assert summaries[0]["log_level"] == "info"
+    assert summaries[0]["symbol"] == _SYMBOL
+    assert summaries[0]["timeframes_written"] == len(result.written) == 4
+    assert summaries[0]["total_bars"] == result.total_bars
+    assert summaries[0]["include_daily"] is True
+
+
+def test_intraday_only_materialize_also_emits_one_summary(tmp_path: Path) -> None:
+    """The non-daily return path emits the SAME single per-symbol aggregate
+    (DEC-PREBUILD-LOG-FLOOD-001 — both completion paths are O(symbols))."""
+    from structlog.testing import capture_logs
+
+    _write_1m_bars(tmp_path, n=120)
+    with capture_logs() as logs:
+        _materialize_5m(tmp_path)
+    summaries = [e for e in logs if e["event"] == "lake.derived.write_summary"]
+    assert len(summaries) == 1
+    assert summaries[0]["log_level"] == "info"
+    assert summaries[0]["include_daily"] is False
+    assert summaries[0]["timeframes_written"] == 1
+    assert [e["log_level"] for e in logs if e["event"] == "lake.partition.write"] == ["debug"]

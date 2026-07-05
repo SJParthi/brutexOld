@@ -657,6 +657,13 @@ class TestAccumulator:
 # Sequential (workers=1) and parallel (workers=4) produce a BIT-FOR-BIT
 # identical result set + ingest audit chain + checkpoint — regardless of
 # worker interleaving. This is the whole point of the PR.
+# Extended (PR-4): the cross-worker-count pin below additionally chains
+# workers ∈ {3, 10, 12} to the workers=4 reference, so byte-identity holds
+# at pool sizes configured ABOVE the AUTO cap too. HONEST scope: with the
+# 4-tuple _grid() the lazy ProcessPoolExecutor materialises at most ~4 EVAL
+# processes, so these rows pin invariance to the configured pool-size
+# PARAMETER — genuine 11-process contention is exercised by the 24-tuple
+# bench driver evidence (DEC-SWEEP-CAP-BENCH-001), not by this in-CI golden.
 
 
 class TestSequentialEqualsParallelGolden:
@@ -706,11 +713,29 @@ class TestSequentialEqualsParallelGolden:
         assert seq_sup == par_sup
         assert len(seq_sup) > 0
 
-    def test_stable_across_repeated_parallel_runs(self, tmp_path: Path) -> None:
-        """Non-determinism stress (short): two parallel runs are byte-identical."""
+    @pytest.mark.parametrize(("workers_a", "workers_b"), [(4, 3), (10, 4), (12, 10)])
+    def test_stable_across_repeated_parallel_runs(
+        self, tmp_path: Path, workers_a: int, workers_b: int
+    ) -> None:
+        """Non-determinism stress (short): two parallel runs are byte-identical.
+
+        The pair rows chain every pinned worker count to the ``workers=4``
+        reference (itself pinned bit-identical to sequential by
+        ``test_parquet_trees_are_byte_identical``), so sequential == 3 == 4 ==
+        10 == 12 holds transitively.  The 10/12 rows (PR-4, ADR-0016 §5
+        pre-cap-raise pin) configure pool sizes that EXCEED the usable cores
+        on shared CI runners; the ``_worker_init`` OMP/RAYON/POLARS=1 pins +
+        the writer-actor's index-ordered reorder heap make the result
+        independent of scheduler interleaving, which is exactly the property
+        any future ``AUTO_SWEEP_WORKERS_CAP`` raise depends on.  HONEST
+        scope: the 4-tuple ``_grid()`` means the lazy pool materialises at
+        most ~4 EVAL processes, so this pins invariance to the configured
+        pool-size PARAMETER — the genuine 11-process-contention digest
+        evidence lives in the bench measurement (DEC-SWEEP-CAP-BENCH-001).
+        """
         grid = _grid()
-        root_a, audit_a, ck_a = _run_parallel(tmp_path / "a", grid, workers=4)
-        root_b, audit_b, ck_b = _run_parallel(tmp_path / "b", grid, workers=3)
+        root_a, audit_a, ck_a = _run_parallel(tmp_path / "a", grid, workers=workers_a)
+        root_b, audit_b, ck_b = _run_parallel(tmp_path / "b", grid, workers=workers_b)
         assert _tree(root_a) == _tree(root_b)
         assert _ingest_lines(audit_a) == _ingest_lines(audit_b)
         assert ck_a == ck_b

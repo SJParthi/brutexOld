@@ -24,10 +24,13 @@ cites ``fastbloom``), the backing implementation is the published
   the next :meth:`add` raises :class:`BloomCapacityExceeded`. Silent FPR
   drift (DEGRADED_MODE) is unacceptable per Rule #5 (O(1) discipline).
 * **MAX_BLOOM_BYTES sizing guard.** Constructor rejects any
-  ``(capacity, fpr_target)`` whose computed bit-array exceeds 16 GiB
-  (CLAUDE.md §8 envelope cap, leaving headroom for indicators + LMDB
-  cache + Python). Larger sweeps must escalate to sharded / mmap'd
-  Bloom or Cuckoo (deferred follow-up).
+  ``(capacity, fpr_target)`` whose computed bit-array exceeds the
+  RAM-derived ceiling — 1/3 of the machine's detected total RAM, the
+  16 GiB DEC-P0-047 floor when RAM is undetectable, or the validated
+  ``BRUTEX_MAX_BLOOM_BYTES`` override (DEC-RAM-BUDGETS-001; exact
+  16 GiB parity on the CLAUDE.md §8 48 GiB box, leaving headroom for
+  indicators + LMDB cache + Python). Larger sweeps must escalate to
+  sharded / mmap'd Bloom or Cuckoo (deferred follow-up).
 * **MIN_FPR_TARGET floor.** ``fpr_target < 1e-9`` is rejected in V1 —
   anything tighter implies sharded work that isn't shipped.
 * **Hash-function agnostic.** :meth:`add` / :meth:`might_contain` take
@@ -107,11 +110,13 @@ from __future__ import annotations
 
 import math
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.hardware_envelope import memory_budget_bytes
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:
@@ -177,12 +182,67 @@ DEFAULT_CAPACITY: Final[int] = 100_000_000
 #: Golden Rule #7 byte-equality tolerance.
 DEFAULT_FPR: Final[float] = 1e-7
 
-#: Hard ceiling on the computed bit-array size. 16 GiB leaves room for
-#: indicator buffers + LMDB cache + Python interpreter inside the 48 GiB
-#: M4 Pro envelope (CLAUDE.md §8). Sweeps that need a larger filter must
-#: escalate to sharded / mmap'd / Cuckoo (deferred). 4-agent Hostile
-#: lens §3 flagged the OOM risk if this guard is absent.
-MAX_BLOOM_BYTES: Final[int] = 16 * 1024**3
+#: The bit-array ceiling FLOOR: 16 GiB — the original DEC-P0-047 hand-picked
+#: value, which left room for indicator buffers + LMDB cache + Python
+#: interpreter inside the 48 GiB M4 Pro envelope (CLAUDE.md §8). Since
+#: DEC-RAM-BUDGETS-001 the LIVE ceiling :data:`MAX_BLOOM_BYTES` is derived
+#: from the machine's detected total RAM; this constant is applied EXACTLY
+#: when RAM detection fails (the honest undetected sentinel — the DEC-P0-047
+#: behavior, bit-for-bit).
+MAX_BLOOM_BYTES_FLOOR: Final[int] = 16 * 1024**3
+
+#: The detected-RAM share the Bloom bit array may claim (DEC-RAM-BUDGETS-001):
+#: ``1/3`` gives EXACT parity with the old 16 GiB constant on the CLAUDE.md §8
+#: 48 GiB reference box (regression-pinned in
+#: ``tests/unit/test_hardware_envelope.py``); a smaller machine derives a
+#: smaller wall (portability — the guard refuses BEFORE an allocation that
+#: box could never hold), a larger one gains headroom. A PORTABILITY choice,
+#: NOT a measured figure (Golden Rule #10).
+MAX_BLOOM_BYTES_FRACTION: Final[float] = 1.0 / 3.0
+
+#: Env knob overriding the derived Bloom bit-array ceiling in bytes (``> 0``);
+#: validated fail-LOUD on garbage (Golden Rule #1).
+MAX_BLOOM_BYTES_ENV: Final[str] = "BRUTEX_MAX_BLOOM_BYTES"
+
+
+def resolve_max_bloom_bytes(environ: Mapping[str, str] | None = None) -> int:
+    """Resolve the Bloom bit-array ceiling (DEC-RAM-BUDGETS-001).
+
+    Delegates to the COMMON :func:`brutex.hardware_envelope.memory_budget_bytes`:
+    a set, non-blank ``BRUTEX_MAX_BLOOM_BYTES`` is the validated explicit
+    override (a non-integer / non-positive value raises ``ValueError``);
+    otherwise the ceiling is ``detected total RAM`` ×
+    :data:`MAX_BLOOM_BYTES_FRACTION`, or :data:`MAX_BLOOM_BYTES_FLOOR`
+    (16 GiB) EXACTLY when RAM is undetectable. Sizing is results-safe by
+    construction — the Bloom is an L1 prefilter over the LMDB exact ground
+    truth and never part of run identity; the ceiling changes only WHEN a
+    construction refuses (:class:`BloomTooLargeError`), never result bytes.
+
+    Parameters
+    ----------
+    environ
+        Injectable environment mapping (tests); ``None`` reads ``os.environ``.
+
+    Raises
+    ------
+    ValueError
+        If the env value is set and not a positive integer.
+    """
+    return memory_budget_bytes(
+        fraction=MAX_BLOOM_BYTES_FRACTION,
+        floor_bytes=MAX_BLOOM_BYTES_FLOOR,
+        env=environ,
+        env_var=MAX_BLOOM_BYTES_ENV,
+    )
+
+
+#: Hard ceiling on the computed bit-array size — RAM-derived ONCE at import
+#: (the once-per-process law; env overrides are read at process start) via
+#: :func:`resolve_max_bloom_bytes`. Sweeps that need a larger filter must
+#: escalate to sharded / mmap'd / Cuckoo (deferred). 4-agent Hostile lens §3
+#: flagged the OOM risk if this guard is absent (DEC-P0-047); the fixed
+#: 16 GiB value it locked is now :data:`MAX_BLOOM_BYTES_FLOOR`.
+MAX_BLOOM_BYTES: Final[int] = resolve_max_bloom_bytes()
 
 #: V1 minimum FPR floor. Below this, the sizing math implies a bit
 #: array that approaches MAX_BLOOM_BYTES for any realistic capacity;
@@ -563,10 +623,14 @@ __all__ = [
     "DEFAULT_CAPACITY",
     "DEFAULT_FPR",
     "MAX_BLOOM_BYTES",
+    "MAX_BLOOM_BYTES_ENV",
+    "MAX_BLOOM_BYTES_FLOOR",
+    "MAX_BLOOM_BYTES_FRACTION",
     "MAX_FPR_TARGET",
     "MIN_FPR_TARGET",
     "BloomCapacityExceeded",
     "BloomConfigError",
     "BloomFilter",
     "BloomTooLargeError",
+    "resolve_max_bloom_bytes",
 ]

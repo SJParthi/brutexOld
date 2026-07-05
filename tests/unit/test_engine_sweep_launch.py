@@ -146,10 +146,25 @@ def test_identity_ceiling_matches_bloom_sizing_inverse() -> None:
     from brutex.orchestrator.bloom import MAX_BLOOM_BYTES
 
     ceiling = launch_bloom_identity_ceiling()
-    # ≈4.097e9 at the launch default fpr 1e-7 (the R2-SL-F1 wall figure).
-    assert 4_000_000_000 < ceiling < 4_200_000_000
+    # The inverse tracks the LIVE (RAM-derived, DEC-RAM-BUDGETS-001) wall.
     expected = int(MAX_BLOOM_BYTES * 8 / (-math.log(LAUNCH_DEDUP_FPR) / math.log(2) ** 2))
     assert ceiling == expected
+
+
+def test_identity_ceiling_at_the_16_gib_floor_is_the_r2_sl_f1_figure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """≈4.097e9 at fpr 1e-7 when the wall sits at the 16 GiB undetected-RAM floor.
+
+    Since DEC-RAM-BUDGETS-001 the live wall is RAM-derived, so the historical
+    absolute figure is pinned deterministically by forcing the floor (the
+    lazy import inside ``launch_bloom_identity_ceiling`` reads the module
+    attribute at CALL time, so the patch is honored).
+    """
+    from brutex.orchestrator.bloom import MAX_BLOOM_BYTES_FLOOR
+
+    monkeypatch.setattr("brutex.orchestrator.bloom.MAX_BLOOM_BYTES", MAX_BLOOM_BYTES_FLOOR)
+    assert 4_000_000_000 < launch_bloom_identity_ceiling() < 4_200_000_000
 
 
 def test_identity_ceiling_looser_fpr_admits_more() -> None:

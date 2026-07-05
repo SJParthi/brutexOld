@@ -2481,6 +2481,116 @@ class TestGreeksEnrichWiring:
         assert "Greeks enrichment FAILED" not in report.note  # quarantines never flip ok
 
 
+class TestGreeksEnrichHaltReRaise:
+    """DEC-GREEKS-PARALLEL-001 (#1188 follow-up (a)): the fenced wrapper carves
+    out the two pull-wide HOST halts — ``LakeWriteHalt`` + the new
+    ``GreeksEnrichPoolBroken`` — and RE-RAISES them out of
+    ``pull_contract_candles`` so they reach ``BackgroundPullJob._run``'s halt
+    handling + the CRITICAL Telegram alert. Every other enrich failure stays
+    fenced (``ok=False``, the pull survives — pinned above)."""
+
+    def _halting_pull(
+        self,
+        registry: RegistryStore,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_lake: Path,
+        exc: BaseException,
+    ) -> None:
+        pytest.importorskip("trading_core")
+        import brutex.data.greeks_enrich as ge
+
+        monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)
+        monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
+
+        def _halt(**_kwargs: object) -> object:
+            raise exc
+
+        monkeypatch.setattr(ge, "enrich_greeks_for_targets", _halt)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        with pytest.raises(type(exc)):
+            pull_contract_candles(
+                registry.list_contracts(underlying="NIFTY"),
+                lake_root=tmp_lake,
+                dry_run=False,
+                intervals=("1day",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+            )
+
+    def test_lake_write_halt_raises_through_the_wrapper(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        """Fails-before/passes-after: pre-fix the blanket ``except Exception``
+        swallowed even a disk-full halt into ``ok=False``."""
+        from brutex.data.errors import LakeWriteHalt
+
+        self._halting_pull(registry, monkeypatch, tmp_lake, LakeWriteHalt("disk_full"))
+        # The _mark_complete HOIST regression: the vendor fetch was fully clean,
+        # so the completion stamps must survive the aborted overlay stage —
+        # otherwise the next pull needlessly re-plans vendor-clean contracts.
+        statuses = _statuses(registry)
+        assert statuses["NSE-NIFTY-25Jan24-21000-CE"] == CANDLE_STATUS_COMPLETE
+        assert statuses["NSE-NIFTY-25Jan24-FUT"] == CANDLE_STATUS_COMPLETE
+
+    def test_pool_broken_raises_through_the_wrapper(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        from brutex.data.errors import GreeksEnrichPoolBroken
+
+        self._halting_pull(registry, monkeypatch, tmp_lake, GreeksEnrichPoolBroken("a worker died"))
+        statuses = _statuses(registry)
+        assert statuses["NSE-NIFTY-25Jan24-21000-CE"] == CANDLE_STATUS_COMPLETE
+
+    def test_done_log_carries_bars_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        """#1188 follow-up (b): the ``fno.greeks_enrich.done`` telemetry now
+        surfaces the non-finite-row skip tally, never only the report field."""
+        pytest.importorskip("trading_core")
+        import brutex.data.greeks_enrich as ge
+
+        def _fake_enrich(**_kwargs: object) -> ge.GreeksEnrichReport:
+            return ge.GreeksEnrichReport(
+                enriched=1,
+                already_current=0,
+                futures_skipped=0,
+                undecodable=0,
+                no_bars=0,
+                errored=0,
+                bars_written=3,
+                bars_solved=2,
+                bars_null=1,
+                bars_reused=0,
+                spot_reads=1,
+                spot_hits=0,
+                bars_skipped=7,
+            )
+
+        monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
+        contract = DerivativeContract(
+            underlying_symbol="NIFTY",
+            expiry=date(2024, 1, 25),
+            symbol="NSE-NIFTY-25Jan24-21000-CE",
+            contract_type="CE",
+            strike=21000.0,
+        )
+        window = (date(2024, 1, 1), date(2024, 1, 20))
+        with capture_logs() as logs:
+            outcome = hp._enrich_greeks_from_minute(
+                rebuilt=cast("list[hp._RebuiltContract]", [(None, contract)]),
+                windows={contract.symbol: window},
+                lake_root=tmp_lake,
+            )
+        assert outcome.ok is True
+        done = [r for r in logs if r["event"] == "fno.greeks_enrich.done"]
+        assert len(done) == 1
+        assert done[0]["bars_skipped"] == 7
+
+
 # ── DEC-WINDOW-LEDGER-RESCUE-001: the lost-ledger rescue actually rescues ─────
 
 
