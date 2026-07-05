@@ -57,6 +57,7 @@ from brutex.data.sink import BarSink, SinkAppendResult
 from brutex.orchestrator.parallel import SerialRunParallel
 from brutex.orchestrator.universe_phases import ItemResult
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 pytest.importorskip("duckdb", reason="RegistryStore needs duckdb")
 
@@ -3114,7 +3115,7 @@ class TestDeepBudgetRealizedTelemetry:
         lake = tmp_path / "lake"
         lake.mkdir()
 
-        def _pull() -> list[dict[str, object]]:
+        def _pull() -> list[EventDict]:
             sdk = _EmptyForSDK(empty_for={deep})
             sink = _RecordingSink()
             with capture_logs() as logs:
