@@ -55,6 +55,7 @@ __all__ = [
     "REOPENED_MARKER",
     "SETTLED_STATUSES",
     "SKIPPED",
+    "SKIPPED_AUDIT_PER_PULL",
     "SUCCESS",
     "LedgerProgress",
     "WindowLedger",
@@ -168,6 +169,18 @@ def is_expired_window_settle_reason(reason: str | None) -> bool:
 #: never re-trip the breaker endlessly on the very windows the operator chose to
 #: re-verify.
 REOPENED_MARKER: str = "REOPENED"
+
+#: Cap on terminally-``SKIPPED`` windows the MECHANIZED per-pull audit re-opens
+#: (DEC-SKIPPED-AUDIT-ROUNDROBIN-001). HONEST BUDGET ARITHMETIC (Golden Rule
+#: #10): at the worst-case AIMD soft floor of 3 r/s an 8-hour pull has
+#: ``3 × 3600 × 8 = 86,400`` fetches, so 25 re-opened windows are
+#: ``25/86,400 ≈ 0.03%`` of that call budget — and since each re-opened window
+#: regains the FULL fresh confirmation budget (up to ~2-3 fetches under the
+#: empty-retry law before it re-settles), the honest per-pull ceiling is
+#: ~50-75 extra fetches ≈ 0.06-0.09%, still negligible. The audit is
+#: round-robin via a persisted cursor (:func:`~brutex.data.window_ledger_store.
+#: run_skipped_audit`), so EVERY skipped window is eventually re-verified.
+SKIPPED_AUDIT_PER_PULL: int = 25
 
 #: The two settled statuses — a window in either is skipped on the next pull.
 _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
@@ -360,6 +373,19 @@ class WindowLedger:
     _reopened: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
+    #: Keys whose row CHANGED since the last delta flush (DEC-LEDGER-DELTA-FLUSH-001).
+    #: Every row-writing mutator (:meth:`plan` insert, :meth:`seed_lake_success`,
+    #: :meth:`record`, :meth:`settle_known_gap`, the :meth:`reopen_skipped` /
+    #: :meth:`audit_reopen_skipped` demotions) stamps its key here — O(1) per stamp —
+    #: so the throttled mid-pull flush can append ONLY the dirtied rows
+    #: (:func:`~brutex.data.window_ledger_store.append_ledger_delta`) instead of
+    #: rewriting the whole O(N) Parquet. :meth:`prune_superseded` deliberately does
+    #: NOT stamp (a delta row cannot express a DELETION — the pull-end full save,
+    #: which carries the ``pruned_keys`` tombstones, is the prune authority). Never
+    #: serialised; cleared per flushed batch via :meth:`clear_dirty`.
+    _dirty: set[tuple[str, str, str, str, str]] = field(
+        default_factory=set, repr=False, compare=False
+    )
     #: Keys :meth:`record` DEMOTED ``SUCCESS`` → ``FAILED`` for a DATA-COMPLETENESS
     #: reason (``degraded=True`` — an interior multi-session hole / trailing
     #: truncation, DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001)
@@ -423,6 +449,7 @@ class WindowLedger:
                 in_pull_fetches=0,  # never fetched — a pure PLANNED row
                 bars_net_new=0,  # nothing appended yet (mirrors bars=0)
             )
+            self._dirty.add(wk)
 
     def seed_lake_success(self, key: WindowKey, *, bars: int, now: datetime) -> bool:
         """Seed *key* as ``SUCCESS`` ONLY if it is ABSENT — the lake cold-start — **O(1)**, atomic.
@@ -458,6 +485,7 @@ class WindowLedger:
                 # honest unknown, never fabricated (DEC-INGEST-BOUNDARY-INTEGRITY-001).
                 bars_net_new=None,
             )
+            self._dirty.add(wk)
             return True
 
     def has_window(self, key: WindowKey) -> bool:
@@ -778,6 +806,7 @@ class WindowLedger:
                 in_pull_fetches=in_pull_fetches,
                 bars_net_new=bars_net_new,
             )
+            self._dirty.add(wk)
             return status
 
     def settle_known_gap(self, key: WindowKey, *, now: datetime, reason: str | None = None) -> str:
@@ -820,6 +849,7 @@ class WindowLedger:
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
                 bars_net_new=bars_net_new,
             )
+            self._dirty.add(wk)
             return SKIPPED
 
     @property
@@ -886,26 +916,95 @@ class WindowLedger:
                 if limit is not None and len(doomed) >= limit:
                     break
                 doomed.append(wk)
-            for wk in doomed:
-                row = self._by_window[wk]
-                self._by_window[wk] = WindowLedgerRecord(
-                    market=row.market,
-                    security_id=row.security_id,
-                    interval=row.interval,
-                    window_start=row.window_start,
-                    window_end=row.window_end,
-                    status=FAILED,
-                    bars=row.bars,
-                    attempts=row.attempts,
-                    last_error=reason,
-                    first_seen_at=row.first_seen_at,
-                    last_attempt_at=row.last_attempt_at,
-                    empty_streak=0,
-                    in_pull_fetches=row.in_pull_fetches,
-                    bars_net_new=row.bars_net_new,  # no fetch here — preserved
-                )
-            self._reopened.update(doomed)
+            self._demote_skipped_locked(doomed, reason=reason)
         return len(doomed)
+
+    def _demote_skipped_locked(
+        self, doomed: list[tuple[str, str, str, str, str]], *, reason: str
+    ) -> None:
+        """Demote each *doomed* ``SKIPPED`` row to a retryable ``FAILED`` — caller holds the lock.
+
+        The ONE demotion body (CLAUDE.md §11 COMMON) shared by the operator
+        :meth:`reopen_skipped` and the mechanized :meth:`audit_reopen_skipped`:
+        status → ``FAILED``, ``empty_streak`` RESET to 0 (the full fresh
+        confirmation budget), *reason* stamped as ``last_error``, tombstoned in
+        ``_reopened`` (the merge-on-save must not resurrect the on-disk
+        ``SKIPPED`` copy) and stamped dirty (DEC-LEDGER-DELTA-FLUSH-001).
+        """
+        for wk in doomed:
+            row = self._by_window[wk]
+            self._by_window[wk] = WindowLedgerRecord(
+                market=row.market,
+                security_id=row.security_id,
+                interval=row.interval,
+                window_start=row.window_start,
+                window_end=row.window_end,
+                status=FAILED,
+                bars=row.bars,
+                attempts=row.attempts,
+                last_error=reason,
+                first_seen_at=row.first_seen_at,
+                last_attempt_at=row.last_attempt_at,
+                empty_streak=0,
+                in_pull_fetches=row.in_pull_fetches,
+                bars_net_new=row.bars_net_new,  # no fetch here — preserved
+            )
+        self._reopened.update(doomed)
+        self._dirty.update(doomed)
+
+    def audit_reopen_skipped(
+        self,
+        *,
+        start_after: tuple[str, str, str, str, str] | None = None,
+        cap: int = SKIPPED_AUDIT_PER_PULL,
+    ) -> tuple[int, tuple[str, str, str, str, str] | None]:
+        """Round-robin re-open of ≤ *cap* terminally-``SKIPPED`` windows — the mechanized audit.
+
+        DEC-SKIPPED-AUDIT-ROUNDROBIN-001 — the mechanized twin of the manual
+        ``brutex reopen-skipped`` (:meth:`reopen_skipped`, which always
+        re-audited the SAME head-of-sort rows under ``--limit``, making
+        round-robin coverage impossible). The selection walks the deterministic
+        ``(market, symbol, interval, start, end)`` sort order STRICTLY AFTER
+        *start_after* (the persisted cursor), WRAPPING to the head when the
+        tail holds fewer than *cap* rows — so successive pulls sweep the whole
+        ``SKIPPED`` population instead of hammering one prefix. Each selected
+        row is demoted through the SAME body as the operator re-open
+        (:meth:`_demote_skipped_locked` — :data:`REOPENED_MARKER` stamped, so
+        the re-verification is breaker-exempt via
+        :meth:`is_expected_empty_recheck`, and the demotion is DATA-SAFE: the
+        stored lake bars are untouched, the idempotent keep-first sink absorbs
+        the re-fetch). See :data:`SKIPPED_AUDIT_PER_PULL` for the honest
+        ≈0.03%-of-call-budget arithmetic (~0.06-0.09% counting the full fresh
+        confirmation budget each re-opened window regains).
+
+        Returns
+        -------
+        tuple[int, tuple | None]
+            ``(reopened_count, new_cursor)`` — *new_cursor* is the LAST key
+            selected in rotation order (the next pull resumes after it), or
+            ``None`` when nothing was selected (no ``SKIPPED`` rows / a
+            non-positive *cap*). O(rows log rows) once per pull start — the
+            :meth:`reopen_skipped` selection envelope, never the per-window
+            hot path.
+        """
+        if cap <= 0:
+            return 0, None
+        with self._lock:
+            skipped_keys = sorted(
+                wk for wk, row in self._by_window.items() if row.status == SKIPPED
+            )
+            if not skipped_keys:
+                return 0, None
+            if start_after is None:
+                selection = skipped_keys[:cap]
+            else:
+                tail = [wk for wk in skipped_keys if wk > start_after]
+                selection = tail[:cap]
+                if len(selection) < cap:
+                    head = [wk for wk in skipped_keys if wk <= start_after]
+                    selection.extend(head[: cap - len(selection)])
+            self._demote_skipped_locked(selection, reason=REOPENED_MARKER)
+            return len(selection), selection[-1]
 
     def reopened_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
         """The keys :meth:`reopen_skipped` demoted this process — thread-safe snapshot.
@@ -1100,6 +1199,90 @@ class WindowLedger:
             current=current,
         )
 
+    @staticmethod
+    def _record_row(
+        r: WindowLedgerRecord,
+    ) -> tuple[
+        str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
+    ]:
+        """One record → the canonical serialised 14-tuple (ONE shape — CLAUDE.md §11)."""
+        return (
+            r.market,
+            r.security_id,
+            r.interval,
+            r.window_start,
+            r.window_end,
+            r.status,
+            r.bars,
+            r.attempts,
+            r.last_error,
+            r.first_seen_at,
+            r.last_attempt_at,
+            r.empty_streak,
+            r.in_pull_fetches,
+            r.bars_net_new,
+        )
+
+    def dirty_rows(
+        self,
+    ) -> list[
+        tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            int,
+            int,
+            str | None,
+            str,
+            str | None,
+            int,
+            int,
+            int | None,
+        ]
+    ]:
+        """Serialise ONLY the rows dirtied since the last :meth:`clear_dirty` — sorted.
+
+        DEC-LEDGER-DELTA-FLUSH-001: the delta append's row source. Emits the SAME
+        14-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
+        restricted to keys stamped by a row-writing mutator since the last cleared
+        batch. A dirty key whose row was meanwhile DELETED (a prune) is silently
+        skipped — a delta cannot express a deletion (the pull-end full save owns
+        prunes). O(dirty log dirty) under the lock; the per-mutation stamp stays O(1).
+        """
+        with self._lock:
+            keys = sorted(k for k in self._dirty if k in self._by_window)
+            return [self._record_row(self._by_window[k]) for k in keys]
+
+    def dirty_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
+        """The keys currently stamped dirty — thread-safe snapshot, O(dirty).
+
+        DEC-LEDGER-DELTA-FLUSH-001: consumed by the full
+        :func:`~brutex.data.window_ledger_store.save_window_ledger` to clear the
+        WHOLE dirty set after a successful full persist (which subsumes every
+        pending delta — nothing is left for the incremental stream to carry).
+        """
+        with self._lock:
+            return frozenset(self._dirty)
+
+    def clear_dirty(self, keys: Iterable[tuple[str, str, str, str, str]]) -> None:
+        """Un-stamp *keys* after their rows were durably delta-appended — O(cleared).
+
+        Called by :func:`~brutex.data.window_ledger_store.append_ledger_delta` ONLY
+        after a successful atomic delta write (a lock-timeout / write failure keeps
+        the keys dirty so the next throttled flush retries them). Honest envelope
+        (Golden Rule #10): a row RE-dirtied between the flush's :meth:`dirty_rows`
+        snapshot and this clear loses its newer state from the delta stream until
+        its NEXT mutation or the pull-end full save — the same bounded-staleness
+        window the flush throttle itself already accepts; the pull-end
+        :func:`~brutex.data.window_ledger_store.save_window_ledger` is always the
+        full authority.
+        """
+        with self._lock:
+            self._dirty.difference_update(keys)
+
     def records(self) -> list[WindowLedgerRecord]:
         """A deterministic, sorted snapshot of every recorded window (atomic)."""
         with self._lock:
@@ -1157,25 +1340,7 @@ class WindowLedger:
         Parquet (written before either existed) still loads (the store fills the
         missing column per-row; an absent ``bars_net_new`` reads ``None``).
         """
-        return [
-            (
-                r.market,
-                r.security_id,
-                r.interval,
-                r.window_start,
-                r.window_end,
-                r.status,
-                r.bars,
-                r.attempts,
-                r.last_error,
-                r.first_seen_at,
-                r.last_attempt_at,
-                r.empty_streak,
-                r.in_pull_fetches,
-                r.bars_net_new,
-            )
-            for r in self.records()
-        ]
+        return [self._record_row(r) for r in self.records()]
 
     @classmethod
     def from_rows(

@@ -54,8 +54,11 @@ Honest envelope (Golden Rule #1 / #10)
   ``1day``-only pull therefore self-heals nothing unless 1-minute was pulled too;
   that is surfaced LOUDLY by the caller, never papered over.
 * **No partial/forming bar.** A session that is not yet complete (its IST date is
-  on/after the ``before`` cutoff — today IST) is DROPPED, so today's still-forming
-  session is never written as a final daily bar (no look-ahead).
+  on/after the ``before`` cutoff) is DROPPED, so a still-forming session is never
+  written as a final daily bar (no look-ahead). The production ``before`` is the
+  session-close-aware :func:`brutex.calendars.nse.daily_derive_cutoff` — today
+  IST while the run day's session is forming, tomorrow once it provably closed
+  or on a non-trading day (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001).
 * **Spot OI is null.** Resampled daily bars carry ``open_interest=None`` — exactly
   what the Groww parser stores for a cash-equity/index daily bar (OI is FNO-only).
 
@@ -477,7 +480,7 @@ def derive_daily_for_targets(
     build_write_1day
         ``(target) -> ((bars) -> bars_written)`` — binds the target's ``1day`` writer.
     before
-        The forming-session cutoff (today IST), forwarded to the resampler.
+        The forming-session cutoff (the caller-resolved IST date), forwarded to the resampler.
     resample_fn
         The 1-minute → daily resampler ``(frame, before) -> list[CandleBar]``.
         Defaults to the spot :func:`resample_1m_to_daily` (OI ``None``); the F&O
@@ -667,7 +670,9 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
         required columns (``ts_utc, open, high, low, close, volume``), sorted
         ascending by ``ts_utc``. An empty frame yields an empty list.
     before
-        The forming-session cutoff (today IST): any session whose IST date is
+        The forming-session cutoff (the caller-resolved IST date — in
+        production :func:`brutex.calendars.nse.daily_derive_cutoff`,
+        DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001): any session whose IST date is
         ``>= before`` is DROPPED so a still-forming session is never emitted as a
         final daily bar (no look-ahead, no partial bar).
 
@@ -760,7 +765,7 @@ def fill_daily_from_minute(
         ``(bars) -> bars_written`` callable persisting the resampled daily bars to
         the ``1day`` partition (the sink snaps prices + merges idempotently).
     before
-        The forming-session cutoff (today IST), forwarded to the resampler.
+        The forming-session cutoff (the caller-resolved IST date), forwarded to the resampler.
     resample_fn
         The 1-minute → daily resampler ``(frame, before) -> list[CandleBar]``.
         Defaults to the spot :func:`resample_1m_to_daily` (OI ``None``); the F&O

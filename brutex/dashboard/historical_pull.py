@@ -70,7 +70,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -114,6 +114,7 @@ from brutex.adapters.ingest_common import (
 from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
+from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
@@ -947,6 +948,8 @@ def _run_phase(
     # each contract's window in the SAME namespace the fetch records under (``groww-future`` /
     # ``groww-option``). A ``None`` ledger (dry-run) skips this entirely — the span read is
     # spent only on a real pull.
+    census_spans: Sequence[dict[str, Any]] = []
+    census_rows: list[tuple[Any, ...]] = []
     if ledger is not None:
         spans = load_lake_spans(lake_root)
         for reconcile_market, reconcile_bucket in by_market.items():
@@ -960,6 +963,13 @@ def _run_phase(
                 market=reconcile_market,
                 contract_windows=contract_windows,
             )
+        # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
+        # capture BOTH sides pre-plan — the SAME already-loaded spans + the
+        # just-reconciled ledger rows — so the post-drain emit below compares a
+        # pre-pull-CONSISTENT pair (this pull's fresh writes/settles can never
+        # false-flag each other against the pre-pull span read). Zero extra I/O.
+        census_spans = spans
+        census_rows = ledger.to_rows()
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
 
     # Honest live F&O progress (DEC-PULL-PROGRESS-HONESTY-001): a THROTTLED, market/
@@ -1215,6 +1225,18 @@ def _run_phase(
         # until durable, so its synchronous tail already records the ledger before this point.
         _drain_fetch_pipeline_in_phase(fetch_pipeline)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+
+    # Observe-only written-vs-settled census (DEC-WRITTEN-SETTLED-CENSUS-001):
+    # one guarded post-drain emit over the PRE-plan snapshot captured above —
+    # DETECT+WARN only (the #1014 wiring pattern), can never break the pull.
+    # A dry-run (no ledger) emits over empty inputs → a silent clean census.
+    emit_written_settled_census(
+        census_rows,
+        census_spans,
+        intervals=(interval,),
+        symbols=selected_symbols,
+        source="fno",
+    )
 
     # FINAL absolute progress push (DEC-PULL-PROGRESS-HONESTY-001): the pipeline is
     # drained above, so every window is ledger-recorded — push the settled filtered
