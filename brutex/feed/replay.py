@@ -275,18 +275,25 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     source of truth for the Arrow → :class:`CandleBar` conversion, reused by the
     lake-reading screener paths — no copy-paste of the conversion.
 
-    Validation (DEC-STORED-DATA-VALIDATION-001): every row runs the full
-    :class:`CandleBar` invariant set — OHLC ordering AND price positivity
-    (``> 0``) / ``volume >= 0`` — so a corrupt stored bar (e.g. a legacy
-    pre-#912 partition holding an internally-ordered NEGATIVE bar) can never
-    silently enter Stage-1A / run identity. A violation raises a LOUD
-    :class:`ValueError` naming *source* (the partition coordinates, when the
-    caller knows them) plus the offending bar's timestamp — the graceful
-    per-symbol error surface the ingest/prebuild quarantines already handle.
-    Cost stays O(1)/bar: the checks are the same per-bar mechanism the
-    ordering validation always used (a fixed handful of comparisons inside
-    ``CandleBar.__post_init__``); the ``try``/``except`` wrapper is zero-cost
-    on the non-raising path (CPython 3.11+ exception tables).
+    Validation (DEC-STORED-DATA-VALIDATION-001): this is the ENGINE READ
+    BOUNDARY (``ReplayFeed._load_bars`` → ``Catalog.get_bars`` → Stage-1A /
+    run identity), so it — NOT the general-purpose :class:`CandleBar`
+    constructor — enforces price POSITIVITY (every OHLC price ``> 0``) on top
+    of the constructor's ordering / ``volume >= 0`` invariants. A corrupt
+    stored bar (e.g. a legacy pre-#912 partition holding an internally-ordered
+    NEGATIVE bar the round-2 audit reproduced as a day_low of −1000) can never
+    silently enter the engine: a non-positive price OR an ordering violation
+    raises a LOUD :class:`ValueError` naming *source* (the partition
+    coordinates, when the caller knows them) plus the offending bar's
+    timestamp — the graceful per-symbol error surface the ingest/prebuild
+    quarantines already handle. Positivity is checked HERE rather than in the
+    constructor because the bar container is legitimately used to hold a
+    non-positive price for downstream corrupt-input classification (the Greeks
+    ``BAD_INPUT`` path, the executor ``require_tradeable_price`` guard, the
+    Rust trade-sim out-of-envelope fallback) — see
+    :func:`brutex.data.models._validate_price_bar`. Cost stays O(1)/bar: four
+    fixed comparisons per row plus the constructor's own; the ``try``/``except``
+    wrapper is zero-cost on the non-raising path (CPython 3.11+ exception tables).
 
     Parameters
     ----------
@@ -313,6 +320,19 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     for ts, o, h, lo, c, v, oi in zip(
         timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
     ):
+        origin = f" in {source}" if source is not None else ""
+        # Engine-boundary POSITIVITY (DEC-STORED-DATA-VALIDATION-001): checked
+        # BEFORE construction so an internally-ORDERED all-negative bar (which
+        # the ordering-only constructor would accept) is refused with the real
+        # defect named, never laundered into Stage-1A / run identity.
+        for price_name, price in (("open", o), ("high", h), ("low", lo), ("close", c)):
+            if price <= 0:
+                raise ValueError(
+                    f"corrupt stored bar{origin} at timestamp {ts!r}: "
+                    f"{price_name}={price} is a non-positive price (a traded Indian "
+                    f"price is never <= 0) — refusing to serve corrupt data to the "
+                    f"engine (DEC-STORED-DATA-VALIDATION-001)"
+                )
         try:
             bars.append(
                 CandleBar(
@@ -326,7 +346,6 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                 )
             )
         except ValueError as exc:
-            origin = f" in {source}" if source is not None else ""
             raise ValueError(
                 f"corrupt stored bar{origin} at timestamp {ts!r}: {exc} — "
                 f"refusing to serve corrupt data to the engine "

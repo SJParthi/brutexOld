@@ -362,91 +362,79 @@ class TestCatalogEntryValidation:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Price positivity (DEC-STORED-DATA-VALIDATION-001) — the L1-a read gate
+# Price positivity is a READ-BOUNDARY concern, NOT a constructor one
+# (DEC-STORED-DATA-VALIDATION-001)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestPricePositivity:
-    """Non-positive prices are rejected by the SHARED per-bar validator.
+class TestConstructorPermitsNonPositivePriceForDownstreamClassifiers:
+    """The bar CONSTRUCTOR deliberately accepts a non-positive price.
 
-    Fails-before (round-2 audit, live-reproduced): an internally-ORDERED
-    all-negative bar (open=-5, high=-1, low=-10, close=-2) satisfied every
-    ordering invariant and passed silently — a legacy pre-#912 stored
-    partition could flow a day_low of -1000 into Stage-1A + run identity.
+    DEC-STORED-DATA-VALIDATION-001 puts the corrupt-stored-bar positivity gate
+    at the ENGINE READ BOUNDARY (``arrow_table_to_bars`` / the prebuild
+    ``price_sanity`` seam), NOT the universal constructor — because legitimate
+    consumers build a non-positive-price bar ON PURPOSE to feed their own
+    corrupt-input classifier (the Greeks ``BAD_INPUT`` / ``BELOW_INTRINSIC``
+    path, the executor ``require_tradeable_price`` guard, the Rust trade-sim
+    out-of-envelope fallback, the columnar-writer round-trip). Rejecting at
+    construction would turn every one of those into dead code. These pins lock
+    the container's permissiveness so a future well-meaning "just add
+    positivity to the constructor" change fails LOUDLY here.
     """
 
-    def test_rejects_ordered_all_negative_bar(self) -> None:
-        # THE audit repro: ordered, yet every price is negative.
-        with pytest.raises(ValueError, match="positive price"):
-            CandleBar(
-                timestamp=_ts(),
-                open=Decimal("-5"),
-                high=Decimal("-1"),
-                low=Decimal("-10"),
-                close=Decimal("-2"),
-                volume=5,
-                open_interest=None,
-            )
+    def test_ordered_all_negative_bar_constructs(self) -> None:
+        # THE audit repro (open=-5, high=-1, low=-10, close=-2) is a VALID
+        # container — it is the READER (arrow_table_to_bars) that rejects it.
+        bar = CandleBar(
+            timestamp=_ts(),
+            open=Decimal("-5"),
+            high=Decimal("-1"),
+            low=Decimal("-10"),
+            close=Decimal("-2"),
+            volume=5,
+            open_interest=None,
+        )
+        assert bar.low == Decimal("-10")
 
-    @pytest.mark.parametrize("field", ["open", "high", "low", "close"])
-    def test_rejects_zero_price_naming_field(self, field: str) -> None:
-        prices: dict[str, Decimal] = {
-            "open": Decimal("100"),
-            "high": Decimal("101"),
-            "low": Decimal("99"),
-            "close": Decimal("100"),
-        }
-        # Zeroing one field may ALSO break ordering — positivity fires FIRST
-        # (pinned below), so the message names the real defect per field.
-        prices[field] = Decimal("0")
-        with pytest.raises(ValueError, match=f"CandleBar.{field} must be a positive price"):
+    def test_zero_price_bar_constructs(self) -> None:
+        # A zero-price bar is the Greeks BAD_INPUT / executor-reject fixture.
+        bar = CandleBar(
+            timestamp=_ts(),
+            open=Decimal("0"),
+            high=Decimal("0"),
+            low=Decimal("0"),
+            close=Decimal("0"),
+            volume=0,
+            open_interest=None,
+        )
+        assert bar.open == Decimal("0")
+
+    def test_option_bar_permits_non_positive_ohlc(self) -> None:
+        bar = _option(
+            open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2")
+        )
+        assert bar.close == Decimal("-2")
+
+    def test_greeks_bar_permits_non_positive_ohlc(self) -> None:
+        bar = _greeks_bar(
+            open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2")
+        )
+        assert bar.open == Decimal("-5")
+
+    def test_ordering_is_still_enforced(self) -> None:
+        # The constructor STILL rejects broken ordering (positive prices).
+        with pytest.raises(ValueError, match="high.*must be >= low|must be in"):
             CandleBar(
                 timestamp=_ts(),
-                open=prices["open"],
-                high=prices["high"],
-                low=prices["low"],
-                close=prices["close"],
+                open=Decimal("100"),
+                high=Decimal("50"),  # high < low
+                low=Decimal("99"),
+                close=Decimal("100"),
                 volume=0,
                 open_interest=None,
-            )
-
-    def test_error_names_the_bar_timestamp(self) -> None:
-        with pytest.raises(ValueError, match="2024-01-25T09:15:00"):
-            CandleBar(
-                timestamp=_ts(),
-                open=Decimal("0"),
-                high=Decimal("0"),
-                low=Decimal("0"),
-                close=Decimal("0"),
-                volume=0,
-                open_interest=None,
-            )
-
-    def test_positivity_fires_before_ordering(self) -> None:
-        # An UN-ordered negative bar reports positivity, not ordering.
-        with pytest.raises(ValueError, match="positive price"):
-            CandleBar(
-                timestamp=_ts(),
-                open=Decimal("-5"),
-                high=Decimal("-10"),  # also high < low — ordering broken too
-                low=Decimal("-1"),
-                close=Decimal("-2"),
-                volume=0,
-                open_interest=None,
-            )
-
-    def test_option_bar_shares_the_positivity_gate(self) -> None:
-        with pytest.raises(ValueError, match="OptionBar.open must be a positive price"):
-            _option(open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2"))
-
-    def test_greeks_bar_shares_the_positivity_gate(self) -> None:
-        with pytest.raises(ValueError, match="FnoGreeksBar.open must be a positive price"):
-            _greeks_bar(
-                open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2")
             )
 
     def test_smallest_tick_price_is_accepted(self) -> None:
-        # 0.05 — the smallest real Indian tick — stays a valid bar.
         tick = Decimal("0.05")
         bar = CandleBar(
             timestamp=_ts(),

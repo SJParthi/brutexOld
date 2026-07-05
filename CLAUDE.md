@@ -20,13 +20,16 @@
 
 _Last updated: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
 MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
-adversarial audit's confirmed defects fixed as ONE change set: (a) the SHARED
-per-bar validator (`data/models.py::_validate_price_bar` — CandleBar /
-FnoGreeksBar / OptionBar) now requires every price > 0, so a zero/negative but
-internally-ORDERED legacy stored bar (reproduced: day_low −1000 into Stage-1A)
-raises LOUDLY at the read boundary; `feed/replay.py::arrow_table_to_bars`
-gains `source=` and names the partition + bar ts on a corrupt row (O(1)/bar,
-bench-neutral). (b) NEW COMMON `brutex/data/price_sanity.py` (ONE vectorized
+adversarial audit's confirmed defects fixed as ONE change set: (a) price
+POSITIVITY is enforced at the ENGINE READ BOUNDARY
+(`feed/replay.py::arrow_table_to_bars`, which gains `source=` + names the
+partition + bar ts on a corrupt row), NOT the universal `CandleBar` constructor
+— a zero/negative but internally-ORDERED legacy stored bar (reproduced: day_low
+−1000 into Stage-1A) now raises LOUDLY when READ into the engine, while the bar
+container stays permissive so the legitimate downstream corrupt-input
+classifiers that build a non-positive bar on purpose (Greeks BAD_INPUT, the
+executor `require_tradeable_price` guard, the Rust trade-sim out-of-envelope
+fallback) keep working (O(1)/bar, bench-neutral). (b) NEW COMMON `brutex/data/price_sanity.py` (ONE vectorized
 positivity+ordering mask) wired at the prebuild's 1-minute read boundary
 (`make_lake_read_1m`) — a high<low 1m bar can no longer LAUNDER into
 self-consistent-looking derived buckets across the 19 TFs + 1day; the raised
@@ -350,7 +353,8 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
   DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
-  the shared per-bar read validator + partition-naming corrupt-bar errors in `arrow_table_to_bars`; the NEW COMMON
+  the ENGINE READ BOUNDARY (`arrow_table_to_bars`, partition-naming corrupt-bar errors) — NOT the general bar
+  constructor, which stays permissive for the Greeks BAD_INPUT / executor-guard / trade-sim-fallback classifiers; the NEW COMMON
   vectorized `brutex/data/price_sanity.py` gate at the prebuild's `make_lake_read_1m` boundary (corrupt symbol
   quarantined + named via the existing `ResampleInputError` machinery, derived TFs not written); the lake census
   scanner's OBSERVE-ONLY `PriceSanityRows` finding over the same per-file pass (healer filters it — never

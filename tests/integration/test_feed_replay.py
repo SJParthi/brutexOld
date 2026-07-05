@@ -466,6 +466,44 @@ class TestCorruptStoredBarRefused:
         with pytest.raises(ValueError, match="corrupt stored bar at"):
             arrow_table_to_bars(table)  # type: ignore[arg-type]
 
+    def test_all_positive_ordering_violation_raises_via_constructor(self) -> None:
+        # All prices POSITIVE but high < low → the positivity loop passes and
+        # the CONSTRUCTOR's ordering guard fires, re-wrapped as a corrupt-bar
+        # error (covers the try/except branch).
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=100.0, high=50.0, low=99.0, close=100.0)
+        with pytest.raises(ValueError, match="corrupt stored bar") as excinfo:
+            arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        message = str(excinfo.value)
+        assert "NSE/INDEX/NSE-NIFTY/1minute" in message
+        assert "positive price" not in message  # NOT a positivity defect
+        assert "high" in message  # the ordering defect, chained from the ctor
+
+    def test_ordering_violation_without_source_raises(self) -> None:
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=100.0, high=50.0, low=99.0, close=100.0)
+        with pytest.raises(ValueError, match="corrupt stored bar at"):
+            arrow_table_to_bars(table)  # type: ignore[arg-type]
+
+    def test_empty_table_returns_empty_list(self) -> None:
+        import pyarrow as pa
+        from brutex.feed.replay import arrow_table_to_bars
+
+        empty = pa.table(
+            {
+                "timestamp": pa.array([], type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array([], type=pa.float64()),
+                "high": pa.array([], type=pa.float64()),
+                "low": pa.array([], type=pa.float64()),
+                "close": pa.array([], type=pa.float64()),
+                "volume": pa.array([], type=pa.int64()),
+                "open_interest": pa.array([], type=pa.int64()),
+            }
+        )
+        assert arrow_table_to_bars(empty) == []  # type: ignore[arg-type]
+
     def test_clean_table_round_trips_unchanged(self) -> None:
         from brutex.feed.replay import arrow_table_to_bars
 

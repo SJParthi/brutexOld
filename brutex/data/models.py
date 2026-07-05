@@ -47,9 +47,26 @@ def _validate_price_bar(
     Raises
     ------
     ValueError
-        Naive timestamp, negative volume / open interest, a non-positive
-        price, or OHLC that is not ``low <= open, close <= high``
-        (``high >= low``).
+        Naive timestamp, negative volume / open interest, or OHLC that is
+        not ``low <= open, close <= high`` (``high >= low``).
+
+    Note
+    ----
+    Price POSITIVITY is deliberately NOT enforced here
+    (DEC-STORED-DATA-VALIDATION-001): a :class:`CandleBar` /
+    :class:`FnoGreeksBar` / :class:`OptionBar` is the general in-memory bar
+    container, and several legitimate CONSUMERS construct a non-positive-price
+    bar ON PURPOSE to feed their OWN corrupt-input classifier — the Greeks
+    engine's ``BAD_INPUT`` / ``BELOW_INTRINSIC`` stamping
+    (DEC-GREEKS-CORRECTNESS-AUDIT-001: "non-positive close → BAD_INPUT"), the
+    executor's ``require_tradeable_price`` guard, the Rust trade-sim
+    out-of-envelope fallback, and the columnar-writer round-trip. Rejecting a
+    non-positive price at CONSTRUCTION would turn every one of those downstream
+    guards into dead code. The corrupt-stored-bar defence the round-2 audit
+    demanded (L1-a) instead lives at the ENGINE READ BOUNDARY
+    (:func:`brutex.feed.replay.arrow_table_to_bars`) + the derived-TF prebuild
+    read boundary (:mod:`brutex.data.price_sanity`), the two seams that feed
+    Stage-1A / run identity — never the universal constructor.
     """
     if timestamp.tzinfo is None:
         raise ValueError(
@@ -59,24 +76,6 @@ def _validate_price_bar(
         raise ValueError(f"{owner}.volume must be non-negative, got {volume}")
     if open_interest is not None and open_interest < 0:
         raise ValueError(f"{owner}.open_interest must be non-negative or None, got {open_interest}")
-    # Price POSITIVITY (DEC-STORED-DATA-VALIDATION-001): a traded Indian price
-    # is never <= 0 (tick >= 0.05 rupees — the same market fact behind
-    # `candle_fields.has_no_price`). Checked BEFORE the ordering checks below,
-    # because an internally-ORDERED all-negative bar (open=-5, high=-1,
-    # low=-10, close=-2) satisfies every ordering invariant and previously
-    # passed this validator SILENTLY — the round-2 audit reproduced a
-    # day_low of -1000 flowing into Stage-1A + run identity from exactly such
-    # a legacy stored bar. Parse-time already screens <= 0 (#912
-    # `has_no_price`), so this closes the READ boundary for pre-#912 legacy
-    # bars. O(1) per bar — four fixed comparisons, mirroring the per-bar
-    # ordering mechanism below.
-    for price_name, price in (("open", open_), ("high", high), ("low", low), ("close", close)):
-        if price <= 0:
-            raise ValueError(
-                f"{owner}.{price_name} must be a positive price, got {price} "
-                f"(bar timestamp {timestamp.isoformat()}) — a traded Indian price "
-                f"is never <= 0; a stored non-positive price is corrupt data"
-            )
     # Price ordering sanity — allow equal (limit-locked bars).
     if high < low:
         raise ValueError(f"{owner}: high ({high}) must be >= low ({low})")
