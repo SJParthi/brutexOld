@@ -19,6 +19,19 @@ the test fails (verified by reverting the route body).
 Same-technique pin for the ``.xlsx`` render offload (the CPU-bound workbook
 serialisation now also rides the threadpool).
 
+DEC-LAKE-UNIQUENESS-OFFLOAD-001 (MIGRATION.md #1302): the same pin for the
+``/api/v1/universe/lake-uniqueness`` census route. A round-5 forensic finding
+(operator's 2026-07-05 run) measured that route at 30-46 s (max 46,615 ms) on a
+~40k-contract lake and flagged it as the last route with >5 s latency. A
+class-sweep of every ``async def`` route in ``app.py`` confirmed the route
+already offloads its ``scan_lake_invariants`` whole-lake walk via
+``run_in_threadpool`` (added at the route's birth in #1074, DEC-LAKE-HEAL-001) —
+so its latency is the scan's OWN O(files) cost, NOT an event-loop block (it never
+wedged the loop, matching the finding's own "did not cause a full blackout"
+note). This test PINS that already-correct offload — the one offloaded lake route
+that previously lacked a dedicated regression — so a future refactor cannot
+silently inline the scan back onto the loop.
+
 Skipped cleanly without the ``[ui]`` extra (matches the sibling dashboard
 suites).
 """
@@ -37,6 +50,7 @@ pytest.importorskip("httpx", reason="TestClient needs httpx")
 
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.instrument_store import InstrumentStore
+from brutex.data.lake_invariants import LakeScanReport
 from fastapi.testclient import TestClient
 
 #: How long the stubbed walk blocks (upper bound; released early on pass).
@@ -193,3 +207,51 @@ def test_preopen_symbols_payload_unchanged_through_offload(
     assert body["symbols"] == [
         {"exchange": "NSE", "segment": "CASH", "symbol": "COALINDIA", "option_pullable": False}
     ]
+
+
+def _empty_scan_report() -> LakeScanReport:
+    """A clean, valid empty scan outcome the real census folders accept.
+
+    The blocking stub returns this so the REAL ``build_lake_census`` +
+    ``census_to_dict`` run on the worker (proving the whole census — not just the
+    scan — rides the threadpool + returns the real payload contract), rather than
+    a bare sentinel that would trip ``build_lake_census``'s attribute reads.
+    """
+    return LakeScanReport(
+        findings=(),
+        files_scanned=0,
+        files_skipped=0,
+        series_scanned=0,
+        option_files_scanned=0,
+        option_files_skipped=0,
+        duration_s=0.0,
+    )
+
+
+def test_lake_uniqueness_scan_runs_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lake-uniqueness census must not wedge the loop (DEC-LAKE-UNIQUENESS-OFFLOAD-001).
+
+    ``GET /api/v1/universe/lake-uniqueness`` offloads its ``scan_lake_invariants``
+    whole-lake walk (measured 30-46 s on a ~40k-contract lake) to the threadpool.
+    This pins that offload: while the scan blocks a worker, a concurrent
+    ``/api/v1/state`` must still complete within budget (a free loop). If a future
+    refactor inlined the scan onto the ``async def`` body, the loop would wedge for
+    the whole hold and this fails — exactly the #1143 preopen regression class.
+    """
+    stub = _BlockingStub(result=_empty_scan_report())
+    monkeypatch.setattr("brutex.dashboard.app.scan_lake_invariants", stub)
+
+    status, payload = _assert_loop_free_while_blocked(
+        client, stub, "/api/v1/universe/lake-uniqueness"
+    )
+    # The offloaded request still returns the real census payload once released:
+    # the REAL build_lake_census + census_to_dict ran on the worker over the
+    # (stubbed-empty) scan, so a resolvable lake root reads present=True with a
+    # zero-finding verdict — never the {"present": False} no-lake gate.
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["present"] is True
+    assert payload["findings_total"] == 0
+    assert payload["files_scanned"] == 0
