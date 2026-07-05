@@ -194,10 +194,12 @@ class ResultRow:
         vocabularies live in their own modules (CLAUDE.md §11 COMMON); the
         producer supplies valid enum values.
     mask_bits
-        The u64 strategy mask — set bits are the required-true atomic conditions
+        The u128 strategy mask (persisted as the ``mask_bits_lo``/``mask_bits_hi``
+        limb columns) — set bits are the required-true atomic conditions
         (``brutex.vocabulary.bits``). Validated ``0 <= mask_bits <= MASK_BITS_MAX``
-        (only the 52 defined condition bits; reserved bits 52..63 rejected), so it
-        always fits Parquet ``Int64``. This is the machine-readable winning combo;
+        (only the ``TOTAL_CONDITIONS`` = 60 defined condition bits; reserved bits
+        60..127 rejected — the validation reads ``TOTAL_CONDITIONS`` so it can
+        never drift again). This is the machine-readable winning combo;
         ``condition_names`` is its human-readable decode (DEC-SWEEP-WINNERS-BY-NAME-001).
     condition_names
         DERIVED (``init=False``) — the matched condition NAMES of ``mask_bits``, in
