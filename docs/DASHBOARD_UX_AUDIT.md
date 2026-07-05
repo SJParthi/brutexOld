@@ -1,7 +1,7 @@
 # Dashboard UX Audit → Fix Record
 
-**Decisions:** DEC-PREBUILD-GIL-VECTORIZE-001 (MIGRATION.md #1303) +
-DEC-DASHBOARD-UX-ANIMATE-001 (MIGRATION.md #1304).
+**Decisions:** DEC-PREBUILD-GIL-VECTORIZE-001 (MIGRATION.md #1313) +
+DEC-DASHBOARD-UX-ANIMATE-001 (MIGRATION.md #1314).
 **Date:** 2026-07-04 · **Branch:** `claude/happy-goldberg-qqqgf6`.
 **Scope law:** read-only dashboard UX (templates + two NEW static assets) plus one
 data-lake write-path vectorization. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX,
@@ -40,8 +40,8 @@ squeeze through — exactly the observed differential.
 
 | Arm | File(s) | Verdict |
 |---|---|---|
-| Vectorize the GIL-held loops | `brutex/data/timeframe_materialize.py`, `brutex/data/spot_daily_resample.py` | **SHIPPED** (DEC-PREBUILD-GIL-VECTORIZE-001, #1303). One COMMON batched converter `frame_to_candle_bars` (CLAUDE.md §11 COMMON — both former loop sites import it); prices rendered to decimal strings INSIDE polars (`cast(String)`, GIL released) + a memoised `str → Decimal` parse; the daily resampler's IST-date classify / forming-session filter / midnight-IST re-stamp became three columnar expressions. **Lake output byte-identical** — proven 3 ways (§5.2). |
-| `POLARS_MAX_THREADS` cap at the CLI dashboard/pull entrypoints | `brutex/cli.py` | **FENCED — NOT SHIPPED.** Re-verified live 2026-07-04: open PRs #1112 (+200/−27 on cli.py), #1131, #1130, #1086, #1085 all touch `brutex/cli.py`. Follow-up recipe in §4.7. The decision was DRAFTED as `DEC-PREBUILD-STARVATION-CAP-001` naming this cap; the 4-agent hostile review found the cap unshipped-but-cited and the decision was RENAMED to what actually shipped (see MIGRATION.md #1303). No ID is reserved for the cap, so code can never again cite an unlanded claim. |
+| Vectorize the GIL-held loops | `brutex/data/timeframe_materialize.py`, `brutex/data/spot_daily_resample.py` | **SHIPPED** (DEC-PREBUILD-GIL-VECTORIZE-001, #1313). One COMMON batched converter `frame_to_candle_bars` (CLAUDE.md §11 COMMON — both former loop sites import it); prices rendered to decimal strings INSIDE polars (`cast(String)`, GIL released) + a memoised `str → Decimal` parse; the daily resampler's IST-date classify / forming-session filter / midnight-IST re-stamp became three columnar expressions. **Lake output byte-identical** — proven 3 ways (§5.2). |
+| `POLARS_MAX_THREADS` cap at the CLI dashboard/pull entrypoints | `brutex/cli.py` | **FENCED — NOT SHIPPED.** Re-verified live 2026-07-04: open PRs #1112 (+200/−27 on cli.py), #1131, #1130, #1086, #1085 all touch `brutex/cli.py`. Follow-up recipe in §4.7. The decision was DRAFTED as `DEC-PREBUILD-STARVATION-CAP-001` naming this cap; the 4-agent hostile review found the cap unshipped-but-cited and the decision was RENAMED to what actually shipped (see MIGRATION.md #1313). No ID is reserved for the cap, so code can never again cite an unlanded claim. |
 | `os.nice(+10)` on the BackgroundPullJob worker thread | `brutex/dashboard/pull_jobs.py` | **FENCED — NOT SHIPPED** (open PRs #1131 #1128 #1124; also on this task's hard-fence list). Follow-up in §4.8. |
 | Subprocess isolation of `run_pipeline_prebuild_guarded` (the true cure) | `brutex/dashboard/*` | **NOT SHIPPED** — operator-deprioritized previously (MIGRATION.md #920 context); re-raised as follow-up §4.10. |
 
@@ -75,7 +75,7 @@ REPORT-only package in §4. Evidence cites the pre-fix template source.
 
 ## 3. What shipped (the FREE surface)
 
-**Data path (DEC-PREBUILD-GIL-VECTORIZE-001, #1303):**
+**Data path (DEC-PREBUILD-GIL-VECTORIZE-001, #1313):**
 `brutex/data/timeframe_materialize.py` (NEW public `frame_to_candle_bars`,
 `make_lake_write_tf._write` refactored onto it) +
 `brutex/data/spot_daily_resample.py` (`resample_1m_to_daily` vectorized).
@@ -83,7 +83,7 @@ F&O daily (`fno_daily_resample`) deliberately NOT touched (outside the approved
 surface; per-contract small) — its parity still rides the FUTURES leg of the new
 integration golden.
 
-**Design system (DEC-DASHBOARD-UX-ANIMATE-001, #1304):**
+**Design system (DEC-DASHBOARD-UX-ANIMATE-001, #1314):**
 - `brutex/dashboard/static/bx-design.css` (NEW) — tokens (palette byte-identical
   to `bx-theme.css`), ONE motion vocabulary (`bxFadeInUp/Down`, `bxShimmer`,
   `bxGradShift`, `bxPulse`, `bxSpin`, `bxCountPop`, `bxFloat`, `bxRowIn`,

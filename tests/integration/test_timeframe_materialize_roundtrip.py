@@ -367,9 +367,10 @@ def test_spot_include_daily_writes_midnight_ist_daily(tmp_path: Path) -> None:
 
 def test_futures_include_daily_and_second_run_adds_zero_net_new(tmp_path: Path) -> None:
     """FUTURES daily-in-prebuild + the rerun-safety pin (CLAUDE.md §2 Rule 7):
-    a second identical materialise adds ZERO net-new bars — the intraday
-    partitions are keep-first byte-identical and the latest-wins derived daily
-    is a silent no-op on identical values."""
+    a second identical materialise adds ZERO net-new bars — the derived
+    intraday partitions AND the derived daily are both latest-wins
+    (DEC-TF-REMAT-LATEST-WINS-001), a silent byte-identical no-op on
+    identical values."""
     _write_fno_1m_bars(tmp_path, n=30)
     before = datetime(2021, 6, 1, tzinfo=UTC).date()
 
@@ -405,6 +406,158 @@ def test_futures_include_daily_and_second_run_adds_zero_net_new(tmp_path: Path) 
         assert p.read_bytes() == bytes_before[p], f"{p} changed on an idempotent rerun"
     for p, rows in rows_before.items():
         assert pl.read_parquet(p.as_posix()).height == rows  # 0 net-new bars
+
+
+# ── Stale partial-day bucket un-freeze (DEC-TF-REMAT-LATEST-WINS-001) ─────────
+
+
+def _read_5m_frame(lake_root: Path, exchange: str, segment: str, symbol: str) -> pl.DataFrame:
+    part = lake_root / "bars" / exchange / segment / symbol / "5minute"
+    return pl.read_parquet(part.as_posix() + "/**/*.parquet").sort("timestamp")
+
+
+def test_rematerialize_replaces_stale_partial_day_bucket(tmp_path: Path) -> None:
+    """REGRESSION (DEC-TF-REMAT-LATEST-WINS-001, audit risk #3): a partial-day
+    bucket materialised mid-day must NOT freeze.
+
+    Before the fix the derived intraday write was keep-first, so a 5m bucket
+    derived from only its first 3 source minutes was stored, and the next
+    re-materialise — which recomputed the CORRECT full-bucket bar — hit the
+    keep-first conflict and was DISCARDED (the stale bucket froze forever).
+    Now the derived intraday write is latest-wins (mirroring the derived
+    ``1day``): the recomputed bucket replaces the stale one, and a further
+    re-materialise of unchanged data is byte-identical (idempotence pin).
+    """
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+    all_bars = [
+        CandleBar(
+            timestamp=_SESSION_OPEN_UTC + timedelta(minutes=i),
+            open=Decimal(str(100.0 + i)),
+            high=Decimal(str(110.0 + i)),
+            low=Decimal(str(90.0 + i)),
+            close=Decimal(str(105.0 + i)),
+            volume=10 + i,
+            open_interest=0,
+        )
+        for i in range(5)
+    ]
+
+    # Mid-day pull: only the first 3 minutes of the 5m bucket exist yet.
+    sink.append(
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        interval="1minute",
+        bars=all_bars[:3],
+    )
+    first = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        incremental=False,
+    )
+    assert first.written["5m"] == 1
+    partial = _read_5m_frame(tmp_path, _EXCHANGE, _SEGMENT, _SYMBOL)
+    assert partial.height == 1
+    assert float(partial.get_column("close")[0]) == float(all_bars[2].close)
+    assert int(partial.get_column("volume")[0]) == sum(b.volume for b in all_bars[:3])
+
+    # The rest of the day lands; the bucket's TRUE bar now spans all 5 minutes.
+    sink.append(
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        interval="1minute",
+        bars=all_bars[3:],
+    )
+    second = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        incremental=False,
+    )
+    assert second.written["5m"] == 1
+    full = _read_5m_frame(tmp_path, _EXCHANGE, _SEGMENT, _SYMBOL)
+    assert full.height == 1, "still exactly one 5m bucket — replaced, never duplicated"
+    # The bucket now reflects the FULL day (fails before the fix: keep-first
+    # discarded the recompute and the stale 3-minute bucket froze).
+    assert float(full.get_column("close")[0]) == float(all_bars[-1].close)
+    assert float(full.get_column("high")[0]) == max(float(b.high) for b in all_bars)
+    assert float(full.get_column("low")[0]) == min(float(b.low) for b in all_bars)
+    assert int(full.get_column("volume")[0]) == sum(b.volume for b in all_bars)
+
+    # Idempotence pin: a third materialise over unchanged 1-minute data is a
+    # byte-identical no-op (CLAUDE.md §2 Rule 7).
+    part_dir = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "5minute"
+    files = sorted(part_dir.rglob("*.parquet"))
+    bytes_before = {p: p.read_bytes() for p in files}
+    third = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        incremental=False,
+    )
+    assert third.written["5m"] == 1
+    files_after = sorted(part_dir.rglob("*.parquet"))
+    assert files_after == files
+    for p in files_after:
+        assert p.read_bytes() == bytes_before[p], f"{p} changed on an idempotent rerun"
+
+
+def test_vendor_1minute_base_stays_keep_first(tmp_path: Path) -> None:
+    """PIN (DEC-TF-REMAT-LATEST-WINS-001 scope guard): the VENDOR 1-minute base
+    keeps its keep-first identity — latest-wins applies ONLY to the DERIVED
+    intraday partitions written by ``make_lake_write_tf``. A conflicting
+    re-append of the same 1-minute timestamp must keep the STORED bar
+    (DEC-LAKE-CONFLICT-KEEPFIRST-001, reproducibility per CLAUDE.md §2 Rule 4).
+    """
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+    original = CandleBar(
+        timestamp=_SESSION_OPEN_UTC,
+        open=Decimal("100.0"),
+        high=Decimal("110.0"),
+        low=Decimal("90.0"),
+        close=Decimal("105.0"),
+        volume=10,
+        open_interest=0,
+    )
+    sink.append(
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        interval="1minute",
+        bars=[original],
+    )
+    conflicting = CandleBar(
+        timestamp=_SESSION_OPEN_UTC,
+        open=Decimal("999.0"),
+        high=Decimal("999.0"),
+        low=Decimal("999.0"),
+        close=Decimal("999.0"),
+        volume=999,
+        open_interest=0,
+    )
+    result = sink.append(
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        interval="1minute",
+        bars=[conflicting],
+    )
+    assert result.bars_net_new == 0, "keep-first: the conflicting bar adds nothing"
+    part = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute"
+    df = pl.read_parquet(part.as_posix() + "/**/*.parquet")
+    assert df.height == 1
+    assert float(df.get_column("close")[0]) == 105.0, "stored vendor bar must win"
 
 
 def test_include_daily_default_before_covers_none_branch(tmp_path: Path) -> None:
