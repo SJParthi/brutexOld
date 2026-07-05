@@ -3124,13 +3124,26 @@ def build_app(
                 # segment tag is threaded through the F&O spine. The operator's from/to
                 # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
                 # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
-                # pair_progress=True (DEC-PIPELINE-STALL-HEARTBEAT-001): the F&O
-                # historical phase has NO ledger-sync driver at this layer, so the
-                # per-pair hook advances the units + cumulative bars open-endedly —
-                # the counters keep moving instead of freezing at the metadata
-                # phase's "45/45 units, 0 bars" while millions of bars stream in.
-                _pull_job.set_phase("historical", pair_progress=True)
+                # open_ended=True (DEC-PULL-PROGRESS-HONESTY-001 — supersedes the
+                # pair_progress=True grow-total pin of DEC-PIPELINE-STALL-HEARTBEAT-001
+                # at THIS site): the F&O phase now drives its units/total from the
+                # THROTTLED market/interval-filtered ledger fold (on_ledger_sync below,
+                # bars=None so the cross-run ledger bars never clobber the live tally),
+                # its BARS from the fetch pipeline's per-window fold (on_bars — real
+                # deltas; the async per-pair report honestly carries 0), and declares
+                # the denominator NON-FINAL (contracts are planned mid-phase) so the
+                # page shows "N units · total unknown" instead of a pinned 100%.
+                _pull_job.set_phase("historical", open_ended=True)
                 _prebuild_gate.set_phase("historical")
+
+                def _hist_ledger_sync(
+                    completed: int, total: int, bars: int, failed: int, current: str
+                ) -> None:
+                    del bars  # cross-run ledger bars ≠ this pull's live bars (on_bars owns them)
+                    _pull_job.sync_from_ledger(
+                        completed=completed, total=total, bars=None, failed=failed, current=current
+                    )
+
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -3146,6 +3159,8 @@ def build_app(
                         until_clean=True,
                         scope_start=fno_scope_start,
                         scope_end=fno_scope_end,
+                        on_bars=_pull_job.add_bars,
+                        on_ledger_sync=_hist_ledger_sync,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:

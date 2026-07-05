@@ -34,6 +34,7 @@ import structlog
 from brutex.adapters.groww.ingest import IngestReport
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from brutex.adapters.groww.fetch_pipeline import FetchPipeline
@@ -105,7 +106,12 @@ def drain_write_consumer(consumer: BatchingWriteConsumer | None) -> None:
         _LOG.exception("pull.write_batch.drain_failed")
 
 
-def build_fetch_pipeline(*, dry_run: bool, lake_root: Path | None = None) -> FetchPipeline | None:
+def build_fetch_pipeline(
+    *,
+    dry_run: bool,
+    lake_root: Path | None = None,
+    on_bars: Callable[[int], None] | None = None,
+) -> FetchPipeline | None:
     """Build the FULL async fetch/process separation pool (DEFAULT ON, kill-switchable).
 
     DEC-GROWW-FETCH-ASYNC-SEPARATION-001 — the operator's core requirement: the fetch
@@ -127,6 +133,12 @@ def build_fetch_pipeline(*, dry_run: bool, lake_root: Path | None = None) -> Fet
     :class:`~brutex.data.errors.LakeWriteHalt` graceful-pull-halt path. When *lake_root* is
     ``None`` (e.g. a build site with no resolved lake root) the pipeline is built WITHOUT a spill
     area — byte-identical to the pre-spill bounded back-pressure behaviour.
+
+    *on_bars* (DEC-PULL-PROGRESS-HONESTY-001) is the optional live-bars progress hook
+    threaded verbatim into the :class:`FetchPipeline` — invoked once per background-folded
+    window with its durable appended-bar delta so a dashboard bars counter can tick live
+    (the async producer's per-pair reports honestly read 0 bars). ``None`` (the default —
+    the spot/CLI build sites) is byte-identical to before.
 
     When *lake_root* is given the pipeline is ALSO wired with a best-effort lake-volume
     KEEPALIVE (:class:`~brutex.data.volume_keepalive.VolumeKeepalive`,
@@ -171,6 +183,7 @@ def build_fetch_pipeline(*, dry_run: bool, lake_root: Path | None = None) -> Fet
             on_stall=_pipeline_stall_alert,
             spill_area=spill_area,
             keepalive=keepalive,
+            on_bars=on_bars,
         )
         _LOG.info(
             "pull.fetch_pipeline.enabled",
