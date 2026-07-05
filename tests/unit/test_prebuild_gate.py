@@ -239,9 +239,11 @@ def test_gated_payload_shape_is_honest_and_empty() -> None:
     assert payload["top_n"] == 100
     assert payload["instrument_count"] == 0
     assert payload["skipped_count"] == 0
-    # DEC-PREBUILD-GATE-HONEST-NOTE-001: the note states the REAL release
-    # condition (prebuild AND movers warm), phase-aware when known.
-    assert "movers stay gated until the final prebuild AND the movers warm" in payload["note"]
+    # DEC-PREBUILD-GATE-HONEST-NOTE-001 + DEC-MOVERS-WARM-UNBLOCK-001: the note
+    # states the REAL release condition (the gate lifts at prebuild completion;
+    # the movers warm continues un-gated in the background), phase-aware when known.
+    assert "movers stay gated until the final prebuild finishes" in payload["note"]
+    assert "movers warm then continues un-gated in the background" in payload["note"]
     # ZERO ranked category lists — the page renders the note, not fabricated rows.
     assert "price_gainers" not in payload
     # The raw ?asset= is LOG-only — never echoed into the payload (no reflected sink).
@@ -354,11 +356,30 @@ def test_set_phase_annotates_and_resets_progress() -> None:
     assert snap.progress_done is None and snap.progress_total is None
 
 
+def test_set_progress_carries_optional_segment_label() -> None:
+    """DEC-MOVERS-WARM-UNBLOCK-001 fix 4: the per-segment i/N names its segment."""
+    gate = PrebuildGate()
+    gate.begin()
+    gate.set_phase("movers")
+    gate.set_progress(6, 9, segment="futures")
+    snap = gate.snapshot()
+    assert (snap.progress_done, snap.progress_total) == (6, 9)
+    assert snap.progress_segment == "futures"
+    # An unlabelled reporter (back-compat positional call) reads None — honest.
+    gate.set_progress(7, 9)
+    assert gate.snapshot().progress_segment is None
+    # A new phase resets the labelled progress too (never a stale carry-over).
+    gate.set_phase("prebuild")
+    snap = gate.snapshot()
+    assert snap.progress_segment is None
+    assert snap.progress_done is None
+
+
 def test_release_clears_phase_elapsed_and_progress() -> None:
     gate = PrebuildGate()
     gate.begin()
     gate.set_phase("historical")
-    gate.set_progress(1, 3)
+    gate.set_progress(1, 3, segment="spot")
     gate.release(True)
     snap = gate.snapshot()
     assert snap.blocking is False
@@ -366,6 +387,7 @@ def test_release_clears_phase_elapsed_and_progress() -> None:
     assert snap.started_at is None
     assert snap.elapsed_s is None
     assert snap.progress_done is None and snap.progress_total is None
+    assert snap.progress_segment is None
 
 
 def test_set_phase_on_idle_gate_is_invisible() -> None:
@@ -373,12 +395,13 @@ def test_set_phase_on_idle_gate_is_invisible() -> None:
     # lands (harmless) but the snapshot exposes NOTHING while idle.
     gate = PrebuildGate()
     gate.set_phase("spot")
-    gate.set_progress(1, 2)
+    gate.set_progress(1, 2, segment="spot")
     snap = gate.snapshot()
     assert snap.blocking is False
     assert snap.phase is None
     assert snap.elapsed_s is None
     assert snap.progress_done is None and snap.progress_total is None
+    assert snap.progress_segment is None
 
 
 def test_gated_payload_carries_phase_elapsed_and_warm_progress() -> None:
@@ -391,6 +414,7 @@ def test_gated_payload_carries_phase_elapsed_and_warm_progress() -> None:
         elapsed_s=4530.5,
         progress_done=5,
         progress_total=27,
+        progress_segment="options",
     )
     payload = gated_movers_payload(
         snap, asset="spot", interval="1day", date="2024-06-13", time=None, top_n=100
@@ -400,6 +424,9 @@ def test_gated_payload_carries_phase_elapsed_and_warm_progress() -> None:
     assert payload["elapsed_s"] == 4530.5
     assert payload["warm_done"] == 5
     assert payload["warm_total"] == 27
+    # DEC-MOVERS-WARM-UNBLOCK-001: the SEGMENT name rides the payload so the
+    # frontend renders "options 5/27", never a bare "5/27" misread as total.
+    assert payload["warm_segment"] == "options"
     assert "(current stage: movers)" in payload["note"]
     # The ticking elapsed NEVER rides the note (the paint-once shell key would
     # otherwise repaint every 5 s poll — DEC-DASHBOARD-JS-PERF-001).
@@ -418,8 +445,9 @@ def test_gated_payload_without_phase_omits_the_stage_clause() -> None:
     assert payload["phase"] is None
     assert payload["elapsed_s"] is None
     assert payload["warm_done"] is None and payload["warm_total"] is None
+    assert payload["warm_segment"] is None
     assert "current stage" not in payload["note"]
-    assert "movers stay gated until the final prebuild AND the movers warm" in payload["note"]
+    assert "movers stay gated until the final prebuild finishes" in payload["note"]
 
 
 def test_live_gate_snapshot_feeds_phase_into_the_payload() -> None:

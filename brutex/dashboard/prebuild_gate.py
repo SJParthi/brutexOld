@@ -1,31 +1,38 @@
 """Movers **prebuild gate** — block the ``/movers`` screens during the PREBUILD phase.
 
-``DEC-PIPELINE-AUTOPREBUILD-001`` (chunk 2 — the movers arm), NARROWED by
-``DEC-MOVERS-GATE-PREBUILD-SCOPE-001``: the one-click pull pipeline's FINAL
-data stage pre-builds every derived timeframe (19 intraday + the derived
-``1day``) for SPOT + FUTURES + OPTIONS
-(:mod:`brutex.dashboard.pipeline_prebuild`). While THAT PHASE is running, the
-movers screens would read derived partitions mid-overwrite, so the gate blocks
-them: the pipeline's ``_prebuild_timeframes`` binding **begins** the gate as
-its FIRST statement (movers return an honest "prebuild in progress" payload
-with ZERO lake reads) and the gate is **released** when the pipeline job ends
-— clean, early-stopped, or raised (the binding site releases in a
-``try/finally``), so a failed pull can NEVER leave the movers blocked forever.
+``DEC-PIPELINE-AUTOPREBUILD-001`` (chunk 2 — the movers arm), since NARROWED at
+BOTH ends. The one-click pull pipeline's FINAL data stage pre-builds every
+derived timeframe (19 intraday + the derived ``1day``) for SPOT + FUTURES +
+OPTIONS (:mod:`brutex.dashboard.pipeline_prebuild`). While THAT PHASE is
+running, the movers screens would read a half-filled lake (stale derived
+partitions mid-overwrite), so the gate blocks them — and ONLY during that
+phase:
 
-The gate's honest meaning is "prebuild in progress" — it deliberately does NOT
-cover the multi-hour fetch phases any more (the original chunk-2 binding
-gated the WHOLE pipeline, blanking the movers for hours of spot/metadata/
-historical fetching whose writes the movers can read live). During the fetch
-phases the spot movers additionally prefer the always-fresh 1-minute resample
-over the prebuilt stored partitions (``movers_snapshot.compute_spot_candidates
-(prefer_resample=True)`` while the pull runs), so an un-gated mid-fetch read
-never serves a stored bucket that predates the freshly-landing 1-minute data.
-Because the pipeline-level ``finally`` releases the gate only when the JOB
-ends, the gated window spans the prebuild AND the movers warm that follows it
-— the honest note states that real release condition
+* START (``DEC-MOVERS-GATE-PREBUILD-SCOPE-001``): the pipeline's
+  ``_prebuild_timeframes`` binding **begins** the gate as its FIRST statement
+  (movers return an honest "prebuild in progress" payload with ZERO lake
+  reads), so the gate deliberately does NOT cover the multi-hour fetch phases
+  (the original chunk-2 binding gated the WHOLE pipeline, blanking the movers
+  for hours of spot/metadata/historical fetching whose writes the movers can
+  read live). During the fetch phases the spot movers additionally prefer the
+  always-fresh 1-minute resample over the prebuilt stored partitions
+  (``movers_snapshot.compute_spot_candidates(prefer_resample=True)`` while the
+  pull runs), so an un-gated mid-fetch read never serves a stored bucket that
+  predates the freshly-landing 1-minute data.
+* END (``DEC-MOVERS-WARM-UNBLOCK-001``): the gate is **released the moment
+  the prebuild outcome is known** (ok or failed — the half-filled-lake hazard
+  the gate exists for ends at prebuild completion, so the movers warm that
+  FOLLOWS runs un-gated in the background as a pure cache accelerator and can
+  never hold ``/movers`` hostage; the 2026-07-04/05 incident held the gate for
+  hours behind 39 slow warm keys) — or when the pipeline stops early / fails
+  for ANY reason (the binding site ALSO releases in a ``try/finally``, the
+  idempotent backstop), so a failed pull can NEVER leave the movers blocked
+  forever.
+
+While blocking, the honest note states that real release condition
 (DEC-PREBUILD-GATE-HONEST-NOTE-001) and the payload names the RUNNING stage
 (:attr:`GateSnapshot.phase`, fed by :meth:`PrebuildGate.set_phase`) plus the
-live movers-warm ``i/N`` (:meth:`PrebuildGate.set_progress` —
+live progress ``i/N`` (:meth:`PrebuildGate.set_progress` —
 DEC-MOVERS-WARM-PROGRESS-001). Duration honesty rides FOUR stamps:
 :attr:`GateSnapshot.started_at` (ISO-8601 UTC — human-readable provenance) +
 :attr:`GateSnapshot.started_at_epoch` (epoch seconds — renderable client-side)
@@ -111,14 +118,17 @@ class GateSnapshot:
         the honest provenance for a note/diagnostic, never fabricated.
     phase
         The gating pipeline's CURRENT phase label
-        (``"pull"``/``"spot"``/``"metadata"``/``"historical"``/``"prebuild"``/
-        ``"movers"`` — DEC-PREBUILD-GATE-HONEST-NOTE-001), or ``None`` when not
-        blocking. Honest: the gate releases only AFTER the movers warm too, so
-        the payload can name WHICH stage is actually running instead of a
-        blanket "prebuild in progress" (under the narrowed scope of
-        DEC-MOVERS-GATE-PREBUILD-SCOPE-001 the only phases observable while
-        blocking are the prebuild + movers-warm tail — the fetch phases never
-        gate).
+        (``"pull"``/``"spot"``/``"metadata"``/``"historical"``/``"prebuild"``
+        — DEC-PREBUILD-GATE-HONEST-NOTE-001), or ``None`` when not blocking,
+        so the payload can name WHICH stage is actually running instead of
+        the old blanket "prebuild in progress". Under the narrowed gate
+        window — begin as the prebuild phase's first statement
+        (DEC-MOVERS-GATE-PREBUILD-SCOPE-001) + release the moment the
+        prebuild outcome is known (DEC-MOVERS-WARM-UNBLOCK-001) — the only
+        phase observable while blocking is the prebuild itself: every
+        fetch-phase annotation lands on a still-idle gate and the
+        ``"movers"`` (warm) annotation lands on an already-released one, so
+        neither is ever visible while blocking.
     started_at
         ISO-8601 UTC instant :meth:`PrebuildGate.begin` was called (``None``
         when not blocking).
@@ -140,6 +150,11 @@ class GateSnapshot:
         :meth:`PrebuildGate.set_progress` via ``warm_movers_snapshots``'s
         ``on_progress`` seam — DEC-MOVERS-WARM-PROGRESS-001); both ``None``
         when the running phase reports no progress.
+    progress_segment
+        The progress's SEGMENT name (``"spot"``/``"futures"``/``"options"`` —
+        DEC-MOVERS-WARM-UNBLOCK-001 honesty: a bare "6/9" read as
+        7-of-9-TOTAL to the operator; the label makes it "futures 6/9"), or
+        ``None`` when the reporter named none / not blocking.
     """
 
     state: str
@@ -152,6 +167,7 @@ class GateSnapshot:
     gated_for_s: float | None = None
     progress_done: int | None = None
     progress_total: int | None = None
+    progress_segment: str | None = None
 
     @property
     def blocking(self) -> bool:
@@ -164,10 +180,15 @@ class PrebuildGate:
 
     Owned by the app instance (built/injected in ``build_app`` — CLAUDE.md §4,
     no module-global mutable state). The ``/pull-pipeline`` background job calls
-    :meth:`begin` when the pull starts and :meth:`release` in a ``try/finally``
-    when the prebuild finishes OR the pipeline stops early/fails — so a crashed
-    pull can never wedge the movers shut. The ``/api/v1/movers`` route reads
-    :meth:`snapshot` per request (O(1) — one lock acquisition, no I/O).
+    :meth:`begin` when its PREBUILD phase starts (the first statement of the
+    ``_prebuild_timeframes`` binding — DEC-MOVERS-GATE-PREBUILD-SCOPE-001, so
+    the multi-hour fetch phases never gate) and :meth:`release` the MOMENT the
+    prebuild outcome is known (DEC-MOVERS-WARM-UNBLOCK-001 — BEFORE the movers
+    warm, which continues un-gated in the background), PLUS unconditionally in
+    a ``try/finally`` (the idempotent backstop) so an early stop / raised phase
+    / crashed pull can never wedge the movers shut. The ``/api/v1/movers``
+    route reads :meth:`snapshot` per request (O(1) — one lock acquisition, no
+    I/O).
     """
 
     def __init__(
@@ -189,15 +210,17 @@ class PrebuildGate:
         self._started_at: str | None = None
         #: Epoch stamp of the current begin (display source) — ``None`` idle.
         self._started_at_epoch: float | None = None
-        self._progress: tuple[int, int] | None = None
+        self._progress: tuple[int, int, str | None] | None = None
 
     def begin(self) -> None:
         """The pipeline's PREBUILD phase started — gate the movers (idempotent; counts runs).
 
         Called as the FIRST statement of the pipeline's ``_prebuild_timeframes``
         binding (DEC-MOVERS-GATE-PREBUILD-SCOPE-001 — the gate covers ONLY the
-        prebuild phase + the movers-warm tail, never the multi-hour fetch
-        phases). A double ``begin`` (defensive — the single-flight job makes it
+        prebuild phase, never the multi-hour fetch phases; the movers warm that
+        follows runs un-gated too, the release having fired the moment the
+        prebuild outcome was known — DEC-MOVERS-WARM-UNBLOCK-001). A double
+        ``begin`` (defensive — the single-flight job makes it
         unreachable in production) keeps the gate blocking, bumps the run
         counter and RE-STAMPS the start clocks to the newest begin; it never
         raises. Stamps the run's start instant (the honest elapsed clock —
@@ -233,15 +256,18 @@ class PrebuildGate:
             self._phase = phase
             self._progress = None
 
-    def set_progress(self, done: int, total: int) -> None:
+    def set_progress(self, done: int, total: int, *, segment: str | None = None) -> None:
         """Record the current phase's coordinate progress (``done``/``total``).
 
         Fed by ``warm_movers_snapshots``'s ``on_progress`` seam
         (DEC-MOVERS-WARM-PROGRESS-001) so the gated movers payload can show
-        ``movers warm i/N`` live. O(1), one lock hold, never raises.
+        ``movers warm i/N`` live. *segment* optionally NAMES which segment the
+        ``i/N`` belongs to (DEC-MOVERS-WARM-UNBLOCK-001 — a bare "6/9" was the
+        per-SEGMENT count, misread as 7-of-9-TOTAL; the payload renders it
+        "futures 6/9"). O(1), one lock hold, never raises.
         """
         with self._lock:
-            self._progress = (done, total)
+            self._progress = (done, total, segment)
 
     def release(self, ok: bool) -> None:
         """The prebuild finished (``ok``) or the pipeline stopped — un-gate movers.
@@ -293,6 +319,7 @@ class PrebuildGate:
                 gated_for_s=gated_for_s,
                 progress_done=progress[0] if progress is not None else None,
                 progress_total=progress[1] if progress is not None else None,
+                progress_segment=progress[2] if progress is not None else None,
             )
 
 
@@ -320,16 +347,19 @@ def gated_movers_payload(
     ``note``) with ``gated: true`` and NO ranked category lists — the page reads
     ``j.gated`` and renders the note, then keeps polling until the gate lifts.
 
-    HONEST NOTE + LIVE STATUS (DEC-PREBUILD-GATE-HONEST-NOTE-001 +
-    DEC-MOVERS-GATE-PREBUILD-SCOPE-001): the old note said "prebuild in
-    progress — movers available when finished", but the gate actually releases
-    only AFTER the movers warm too, and a long stage showed no phase/elapsed at
-    all. The note now states the real release condition, and the payload
-    carries the gate's ``phase`` + ``started_at`` (ISO UTC) +
-    ``started_at_epoch`` (epoch — renderable client-side) + ``elapsed_s`` /
-    ``gated_for_s`` (monotonic deltas) (+ ``warm_done``/``warm_total`` when the
-    movers warm reports progress — DEC-MOVERS-WARM-PROGRESS-001's
-    ``on_progress`` seam) so ``movers.html`` can render "final stage: <phase> —
+    HONEST NOTE + LIVE STATUS (DEC-PREBUILD-GATE-HONEST-NOTE-001, release
+    condition re-stated by DEC-MOVERS-WARM-UNBLOCK-001): the note states the
+    REAL release condition — the gate lifts the moment the FINAL prebuild's
+    outcome is known (the movers warm that follows runs un-gated in the
+    background as a pure accelerator, never a hold on this screen) — and the
+    payload carries the gate's ``phase`` + ``started_at`` (ISO UTC) +
+    ``started_at_epoch`` (epoch — renderable client-side,
+    DEC-MOVERS-GATE-PREBUILD-SCOPE-001) + ``elapsed_s`` / ``gated_for_s``
+    (monotonic deltas)
+    (+ ``warm_done``/``warm_total``/``warm_segment`` when a phase reports
+    progress — DEC-MOVERS-WARM-PROGRESS-001's ``on_progress`` seam; the
+    SEGMENT name makes "6/9" read "futures 6/9", never mistaken for
+    7-of-9-total) so ``movers.html`` can render "final stage: <phase> —
     running Xh Ym (auto-refreshes)" via ``textContent``. The NOTE itself stays
     STABLE per phase (no ticking elapsed inside it) so the page's paint-once
     gated-shell guard (DEC-DASHBOARD-JS-PERF-001) keeps skipping identical
@@ -380,9 +410,11 @@ def gated_movers_payload(
         "gated_for_s": snapshot.gated_for_s,
         "warm_done": snapshot.progress_done,
         "warm_total": snapshot.progress_total,
+        "warm_segment": snapshot.progress_segment,
         "note": (
             f"pull pipeline running{phase_clause} — movers stay gated until the final "
-            "prebuild AND the movers warm both finish, so a half-filled lake is never "
-            "ranked (this screen retries automatically; no action needed)."
+            "prebuild finishes (the movers warm then continues un-gated in the "
+            "background), so a half-filled lake is never ranked (this screen retries "
+            "automatically; no action needed)."
         ),
     }
