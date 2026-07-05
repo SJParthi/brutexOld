@@ -56,6 +56,7 @@ import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -112,6 +113,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
+from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -749,6 +751,18 @@ class BulkSpotReport:
     ledger tally) — the honest-verdict count every verdict kind must surface
     (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001; never "No action needed" over a
     settling pull)."""
+    conflicts: int = 0
+    """Keep-first vendor re-statements recorded across the whole spot pull
+    (DEC-VENDOR-CONFLICT-SURFACE-001 — previously visible ONLY in the
+    ``ingest.conflict.summary`` log lines). The stored bar always won."""
+    vendor_dup_rows_dropped: int = 0
+    """WITHIN-BATCH duplicate vendor rows the writer collapsed across the pull
+    (DEC-VENDOR-CONFLICT-SURFACE-001 — the sum the ``lake.vendor_duplicate_rows``
+    WARNINGs previously swallowed)."""
+    max_close_delta: Decimal | None = None
+    """MAX absolute keep-first close delta across the pull's conflicts — exact
+    Decimal rupees (never float, CLAUDE.md §6 price-unit row); ``None`` when no
+    conflict was recorded."""
 
     @property
     def total_symbols(self) -> int:
@@ -812,6 +826,11 @@ class BulkSpotReport:
             "total_no_data": self.total_no_data,
             "windows_skipped": self.windows_skipped,
             "ledger_load_failed": self.ledger_load_failed,
+            "conflicts": self.conflicts,
+            "vendor_dup_rows_dropped": self.vendor_dup_rows_dropped,
+            # JSON-safe: the exact Decimal renders as its string (never a float
+            # round-trip — CLAUDE.md §4 money rule); None stays null.
+            "max_close_delta": None if self.max_close_delta is None else str(self.max_close_delta),
             "verdict": self.verdict.to_dict(),
             "symbols": [
                 {
@@ -2198,6 +2217,14 @@ def pull_all_spot(
             results.append(
                 SymbolPullResult(symbol=symbol, completed=completed, failed=failed, no_data=no_data)
             )
+        # Vendor-behaviour honesty counters (DEC-VENDOR-CONFLICT-SURFACE-001): the
+        # post-reconcile merged pairs carry the real per-series counts on BOTH the
+        # sync and async paths, so the report-level sums/max-fold are path-invariant.
+        bulk_conflicts = sum(pair.conflicts for pair in merged_pairs.values())
+        bulk_dup_rows = sum(pair.vendor_dup_rows_dropped for pair in merged_pairs.values())
+        bulk_max_delta: Decimal | None = None
+        for pair in merged_pairs.values():
+            bulk_max_delta = fold_max_close_delta(bulk_max_delta, pair.max_close_delta)
         bulk = BulkSpotReport(
             dry_run=dry_run,
             start_date=start.date().isoformat(),
@@ -2207,6 +2234,9 @@ def pull_all_spot(
             auth_cause=final_auth_cause,
             still_failed_windows=final_still_failed,
             quota_exhausted=final_quota_exhausted,
+            conflicts=bulk_conflicts,
+            vendor_dup_rows_dropped=bulk_dup_rows,
+            max_close_delta=bulk_max_delta,
             # Each phase's FIRST pass's settled-window skips (until-clean rounds
             # re-skip the same windows by design — summing passes would double-count).
             windows_skipped=sum(pr.skipped_windows for pr in phase_reports),

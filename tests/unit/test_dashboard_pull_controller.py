@@ -2451,7 +2451,13 @@ class _DeferredPipeline:
         self.pending.append(result)
 
     def fold_totals(
-        self, *, bars_appended: int, conflicts: int, series_key: tuple[str, str]
+        self,
+        *,
+        bars_appended: int,
+        conflicts: int,
+        series_key: tuple[str, str],
+        vendor_dup_rows_dropped: int = 0,
+        max_close_delta: object = None,
     ) -> None:
         """Accept the tail's totals (unused — the test asserts on the lake itself)."""
 
