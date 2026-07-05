@@ -142,3 +142,51 @@ class TestMoversGate:
         body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
         assert "gated" not in body
         assert "price_gainers" in body
+
+
+class TestMoversGatePhaseNote:
+    """Phase-aware gated notes end-to-end (DEC-PIPELINE-PHASE-UI-HONESTY-001).
+
+    Post-merge semantics: main's DEC-PREBUILD-GATE-HONEST-NOTE-001 supersedes
+    the branch's ``_PHASE_NOTES`` map — the gate's OWN ``set_phase`` annotation
+    feeds the gated payload's ``phase`` echo and the "(current stage: …)" note
+    clause, so the gated note still names what is ACTUALLY running instead of a
+    blanket "prebuild in progress" during the fetch phases.
+    """
+
+    def test_gated_note_names_the_injected_phase(
+        self, store: InstrumentStore, gate: PrebuildGate
+    ) -> None:
+        app = build_app(
+            DashboardState(),
+            instrument_store=store,
+            prebuild_gate=gate,
+        )
+        with TestClient(app) as client:
+            gate.begin()
+            gate.set_phase("spot")
+            body = client.get(
+                "/api/v1/movers", params={"asset": "spot", "date": "2024-06-13"}
+            ).json()
+            assert body["gated"] is True
+            assert body["phase"] == "spot"
+            assert "(current stage: spot)" in body["note"]
+            assert "prebuild in progress" not in body["note"]
+            # The phase moves → the very next poll's note moves with it.
+            gate.set_phase("historical")
+            body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+            assert body["phase"] == "historical"
+            assert "(current stage: historical)" in body["note"]
+
+    def test_default_probe_reads_idle_job_as_generic_note(
+        self, client: TestClient, gate: PrebuildGate
+    ) -> None:
+        # No finer phase annotated → begin() opens at the coarse "pull" phase
+        # and the note carries the generic release condition (never a
+        # fabricated finer-stage claim).
+        gate.begin()
+        body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+        assert body["gated"] is True
+        assert body["phase"] == "pull"
+        assert "(current stage: pull)" in body["note"]
+        assert "movers stay gated until the final prebuild finishes" in body["note"]

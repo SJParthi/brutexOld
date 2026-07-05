@@ -1061,6 +1061,7 @@ def build_app(
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
+    pull_phase_probe: Callable[[], str | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
     pull_intent_store: PullIntentStore | None = None,
@@ -1135,6 +1136,18 @@ def build_app(
         (the default) wires the production probe — this app's own
         ``BackgroundPullJob.running``. Injected so tests drive the mid-pull /
         just-finished transitions deterministically.
+    pull_phase_probe
+        Optional pipeline-phase signal (DEC-PIPELINE-PHASE-UI-HONESTY-001). A
+        zero-arg callable returning the pipeline's CURRENT coarse ``set_phase``
+        label (``spot`` / ``metadata`` / ``historical`` / ``movers`` /
+        ``prebuild``; ``""`` = none in flight) — read by BOTH honest-progress
+        surfaces: the gated ``/api/v1/movers`` payload names the phase in its
+        note (never a blanket "prebuild in progress" during the fetch phases),
+        and the ``/api/v1/pull/rate`` verdict reads the amber ``local`` state
+        for the zero-vendor-call LOCAL phases (``prebuild``/``movers``) instead
+        of a red "stalled". ``None`` (the default) wires the production probe —
+        this app's own ``BackgroundPullJob.snapshot().phase``. Injected so
+        tests drive the per-phase projections deterministically.
     liveproof
         Optional :class:`~brutex.doctor_autorun.LiveProofAutorun` — the
         zero-command auto-run of the Mac live-proof kit
@@ -1576,6 +1589,12 @@ def build_app(
             # reads "done"/"idle", never a red "stalled" (the CLI bridge below has no
             # active flag, so its side keeps the tick-freshness fallback).
             panel_pull_active=_pull_active_probe(),
+            # DEC-PIPELINE-PHASE-UI-HONESTY-001: the pipeline's current phase label —
+            # the PANEL side only (the CLI bridge is a separate process with no
+            # pipeline phase). During the zero-vendor-call LOCAL stages
+            # (prebuild/movers) the verdict reads amber "local", never a red
+            # "stalled" off the correctly-flatlined fetch rate.
+            panel_phase=_pull_phase_probe(),
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,
@@ -2122,6 +2141,17 @@ def build_app(
     # tests inject a deterministic probe. Resolved at request time via the route closure.
     _pull_active_probe: Callable[[], bool | None] = (
         pull_active_probe if pull_active_probe is not None else (lambda: _pull_job.running)
+    )
+
+    # The pipeline-phase probe (DEC-PIPELINE-PHASE-UI-HONESTY-001): the production
+    # default reads THIS app's own single-flight job's coarse phase label (an O(1)
+    # lock-guarded PullProgress snapshot — "spot"/"metadata"/"historical"/"movers"/
+    # "prebuild", "" when none is in flight). Read at request time by the gated
+    # /api/v1/movers payload (phase-honest note) and the /api/v1/pull/rate verdict
+    # (amber "local" during the zero-vendor-call prebuild/movers stages); tests
+    # inject a deterministic probe.
+    _pull_phase_probe: Callable[[], str | None] = (
+        pull_phase_probe if pull_phase_probe is not None else (lambda: _pull_job.snapshot().phase)
     )
 
     # Last finished spot pull's verdict dict (DEC-VERDICT-BANNER-001). The
@@ -3093,13 +3123,26 @@ def build_app(
                 # segment tag is threaded through the F&O spine. The operator's from/to
                 # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
                 # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
-                # pair_progress=True (DEC-PIPELINE-STALL-HEARTBEAT-001): the F&O
-                # historical phase has NO ledger-sync driver at this layer, so the
-                # per-pair hook advances the units + cumulative bars open-endedly —
-                # the counters keep moving instead of freezing at the metadata
-                # phase's "45/45 units, 0 bars" while millions of bars stream in.
-                _pull_job.set_phase("historical", pair_progress=True)
+                # open_ended=True (DEC-PULL-PROGRESS-HONESTY-001 — supersedes the
+                # pair_progress=True grow-total pin of DEC-PIPELINE-STALL-HEARTBEAT-001
+                # at THIS site): the F&O phase now drives its units/total from the
+                # THROTTLED market/interval-filtered ledger fold (on_ledger_sync below,
+                # bars=None so the cross-run ledger bars never clobber the live tally),
+                # its BARS from the fetch pipeline's per-window fold (on_bars — real
+                # deltas; the async per-pair report honestly carries 0), and declares
+                # the denominator NON-FINAL (contracts are planned mid-phase) so the
+                # page shows "N units · total unknown" instead of a pinned 100%.
+                _pull_job.set_phase("historical", open_ended=True)
                 _prebuild_gate.set_phase("historical")
+
+                def _hist_ledger_sync(
+                    completed: int, total: int, bars: int, failed: int, current: str
+                ) -> None:
+                    del bars  # cross-run ledger bars ≠ this pull's live bars (on_bars owns them)
+                    _pull_job.sync_from_ledger(
+                        completed=completed, total=total, bars=None, failed=failed, current=current
+                    )
+
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -3115,6 +3158,8 @@ def build_app(
                         until_clean=True,
                         scope_start=fno_scope_start,
                         scope_end=fno_scope_end,
+                        on_bars=_pull_job.add_bars,
+                        on_ledger_sync=_hist_ledger_sync,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:

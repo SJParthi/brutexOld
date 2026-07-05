@@ -34,12 +34,13 @@ is RE-DERIVED over the affected months (latest-wins overwrites the poisoned
 daily bar; F&O passes ``include_oi`` + the OI-carry resampler) and its
 materialised intraday-TF month files are DELETE-and-REBUILT via
 :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes` — an
-in-place re-derive would silently KEEP a poisoned keep-first bucket. Honest
-cost (Golden Rule #10): the TF rebuild reads the symbol's WHOLE 1-minute tree —
-O(symbol-history), NOT month-bounded (a month-bounded TF rebuild is a named
-follow-up); a rebuild failure leaves the months deleted + loudly logged (the
-derive route / gated pre-build rebuilds lazily; ``sweep_preflight`` refuses
-honestly on a missing slice).
+in-place re-derive would silently KEEP a poisoned keep-first bucket. The TF
+rebuild is MONTH-BOUNDED (DEC-TF-REBUILD-MONTH-BOUND-001 — closes the named
+follow-up of the original entry): it reads ONLY the affected months' 1-minute
+partitions (``months=``), sound because an NSE session never crosses a UTC
+month boundary (invariant test-pinned); a rebuild failure leaves the months
+deleted + loudly logged (the pipeline prebuild rebuilds lazily;
+``sweep_preflight`` refuses honestly on a missing slice).
 
 Audit/alert are INJECTED seams (:class:`LakeAuditSink` Protocol + callbacks) so
 ``brutex/data`` gains no ``orchestrator``/``notifications`` module-level edge;
@@ -909,13 +910,21 @@ def _rebuild_tf_months(
     The TF writer is keep-first, so an in-place re-derive would record a
     :class:`~brutex.data.parquet_writer.BarConflict` and KEEP the poisoned
     stored bucket — the affected months' files are therefore quarantine-MOVED
-    from EVERY existing TF interval dir first, then the whole symbol is
-    re-materialised through the EXISTING production driver. Honest cost: the
-    rebuild reads the symbol's WHOLE 1-minute tree (O(symbol-history), NOT
-    month-bounded); a rebuild failure leaves the months deleted + loudly
-    logged (``lake_heal.tf_rebuild_failed``) — lazily rebuildable, never a
-    silently poisoned bucket. :class:`~brutex.data.errors.LakeWriteHalt`
-    propagates (disk-full during recall = graceful halt).
+    from EVERY existing TF interval dir first, then re-materialised through the
+    EXISTING production driver **bounded to those months**
+    (``materialize_lake_timeframes(months=…)``,
+    DEC-TF-REBUILD-MONTH-BOUND-001 — the rebuild read is O(affected-months),
+    no longer the whole O(symbol-history) 1-minute tree; sound because an NSE
+    session never crosses a UTC month boundary, so a month's intraday-TF bars
+    derive fully from that month's own 1-minute partition — invariant pinned by
+    ``test_calendar_nse_utc_month_invariant.py``, byte-equality vs the full
+    rebuild pinned by the roundtrip suite). The quarantine-delete loop is
+    already month-scoped, so writes land only in the deleted months
+    (keep-first makes any overlap a no-op). A rebuild failure leaves the
+    months deleted + loudly logged (``lake_heal.tf_rebuild_failed``) — lazily
+    rebuildable, never a silently poisoned bucket.
+    :class:`~brutex.data.errors.LakeWriteHalt` propagates (disk-full during
+    recall = graceful halt).
     """
     symbol_dir = state.lake_root / BAR_DIR_NAME / exchange / segment / symbol
     tf_labels = [
@@ -952,6 +961,7 @@ def _rebuild_tf_months(
             symbol=symbol,
             kind=kind,
             tfs=tf_labels,
+            months=months,
             # The heal just quarantine-MOVED these months — the rebuild must
             # ALWAYS re-derive and must NOT write a fresh stamp (its tf subset /
             # no-daily shape is not the pipeline's; DEC-PREBUILD-INCREMENTAL-001).

@@ -53,7 +53,7 @@ expansion.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -102,6 +102,8 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.calendars.observed_sessions import load_observed_holidays
+from brutex.dashboard.coverage_reconcile import load_lake_spans
+from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -109,7 +111,9 @@ from brutex.data.window_ledger_store import (
     end_pull_ledger,
     make_live_ledger_flush,
     plan_windows,
+    reconcile_ledger_windows,
     reconcile_ledger_with_lake,
+    run_skipped_audit_guarded,
 )
 from brutex.models import Instrument
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
@@ -1271,6 +1275,8 @@ def make_live_sync(
     *,
     min_interval_s: float = LIVE_SYNC_INTERVAL_S,
     clock: Callable[[], float] | None = None,
+    markets: Collection[str] | None = None,
+    intervals: Collection[str] | None = None,
 ) -> Callable[[], None]:
     """Build a THROTTLED, thread-safe per-window live-sync callback (DEC-SPOT-WINDOW-PROGRESS-001).
 
@@ -1295,6 +1301,13 @@ def make_live_sync(
     *on_ledger_sync* push runs lock-free. A ``None`` *ledger* / *on_ledger_sync* (dry-run /
     non-dashboard) yields a no-op (the CLI / synthetic paths pay nothing). *clock* /
     *min_interval_s* are injectable for deterministic tests.
+
+    *markets* / *intervals* (DEC-PULL-PROGRESS-HONESTY-001): optional SCOPE filters
+    forwarded verbatim to :meth:`~brutex.data.window_ledger.WindowLedger.progress_counts`
+    — the F&O historical phase folds ONLY its own ``groww-option`` / ``groww-future`` ×
+    ``1minute`` windows so the cross-run, cross-market ledger's spot rows never pollute
+    its denominator. ``None`` (the default — the spot pull) is byte-identical to the
+    unfiltered fold.
     """
     if ledger is None or on_ledger_sync is None:
         return lambda: None
@@ -1311,7 +1324,7 @@ def make_live_sync(
                 return
             last_sync[0] = now
             ledger_flush()
-            progress = ledger.progress_counts()
+            progress = ledger.progress_counts(markets=markets, intervals=intervals)
         # The bar numerator is RESOLVED (SUCCESS+SKIPPED+EMPTY), not just settled — a
         # genuine no-data window is done, not "pending" (DEC-EMPTY-RESOLVED-REPORTING-001),
         # so a complete historical pull reads ~100% instead of "stuck / re-pull".
@@ -1906,6 +1919,12 @@ def pull_all_spot(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=auth_failures)
             )
 
+        # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
+        # captured at the minute phase's reconcile below — the SAME already-loaded
+        # spans + the just-reconciled ledger rows, a pre-pull-CONSISTENT pair —
+        # and emitted ONCE post-drain. Empty when that phase never runs.
+        spot_census_spans: list[dict[str, Any]] = []
+        spot_census_rows: list[tuple[Any, ...]] = []
         # Success-path latch for the post-drain L2 lake heal below (DEC-LAKE-HEAL-001):
         # set as the try body's LAST statement, so a phase error leaves it False and
         # the ``finally`` skips the heal (the drains + ledger persist still run).
@@ -1954,9 +1973,16 @@ def pull_all_spot(
                         # never in this phase. Guarded on a non-None ledger (the live
                         # pull; ``begin_pull_ledger`` returns None for a dry-run, which
                         # simply skips the ledger reconcile + plan, mirroring Phase 1).
-                        reconcile_ledger_with_lake(
+                        # The span read is hoisted out of ``reconcile_ledger_with_lake``
+                        # so the SAME loaded spans also feed the written-vs-settled
+                        # census snapshot below (DEC-WRITTEN-SETTLED-CENSUS-001 —
+                        # "reuse the already-loaded spans", zero extra I/O); the
+                        # reconcile itself is byte-identical (`reconcile_ledger_windows`
+                        # is the pure core that wrapper composed).
+                        spot_census_spans = load_lake_spans(lake_root)
+                        reconcile_ledger_windows(
                             ledger,
-                            lake_root,
+                            spot_census_spans,
                             instruments=instruments,
                             intervals=minute_intervals,
                             start=start.date(),
@@ -1964,6 +1990,21 @@ def pull_all_spot(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                         )
+                        # Pre-plan ledger snapshot — pairs with the pre-pull spans
+                        # above so this pull's own settles can never false-flag.
+                        spot_census_rows = ledger.to_rows()
+                        # Mechanized round-robin skipped-window audit
+                        # (DEC-SKIPPED-AUDIT-ROUNDROBIN-001): re-open ≤ 25
+                        # terminally-SKIPPED windows per pull (cursor-rotated,
+                        # once per pull_id, ≈0.03% of the worst-case 8h @ 3 r/s
+                        # call budget) on the pull's OWN ledger — BEFORE plan,
+                        # so the reopened FAILED rows are simply re-fetched by
+                        # this pull's normal spine (breaker-exempt via the
+                        # REOPENED marker; DATA-SAFE by construction). Runs
+                        # AFTER the census snapshot above so the audit's own
+                        # demotions never enter the pre-pull census pair.
+                        # Best-effort: any error is a 0 no-op, never a block.
+                        run_skipped_audit_guarded(ledger, lake_root, pull_id=pid)
                         plan_windows(
                             ledger,
                             instruments=instruments,
@@ -2050,6 +2091,18 @@ def pull_all_spot(
         # 0``. The pipeline is already DRAINED in the finally above, so its totals are final. A
         # no-op (synchronous path) when ``_fetch_pipeline`` is ``None``.
         merged_pairs = _reconcile_pairs_with_pipeline(merged_pairs, _fetch_pipeline)
+        # Observe-only written-vs-settled census (DEC-WRITTEN-SETTLED-CENSUS-001):
+        # one guarded post-drain emit over the pre-plan snapshot captured at the
+        # minute phase's reconcile — DETECT+WARN only (the #1014 wiring pattern),
+        # can never break the pull. A dry-run / skipped minute phase emits over
+        # empty inputs → a silent clean census.
+        emit_written_settled_census(
+            spot_census_rows,
+            spot_census_spans,
+            intervals=minute_intervals,
+            symbols=frozenset(inst.symbol_name for inst in instruments),
+            source="spot",
+        )
         _observe_rate(rate_observer, _rate_controller, adapter, _pull_health_monitor)
         # Groww has NO no-data marker — unlike the previous vendor's no-data 400
         # marker, which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we
