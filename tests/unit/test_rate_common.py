@@ -16,6 +16,7 @@ from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
 from brutex.adapters.rate_common import (
     _GOVERNOR_LOOP_CAP,
     _SMOOTH_LOOP_CAP,
@@ -28,6 +29,9 @@ from brutex.adapters.rate_common import (
     LOG_WINDOW_3600S,
     PER_MIN_WINDOW,
     RATE_LIMIT_STORM_FLOOR_RPS,
+    SMOOTH_PACING_ADAPTIVE,
+    SMOOTH_PACING_OFF,
+    SMOOTH_PACING_ON,
     SNAPSHOT_LOG_INTERVAL_S,
     STEP_DOWN_HITS,
     STEP_DOWN_TIMEOUT_HITS,
@@ -1332,3 +1336,162 @@ class TestTrailingWindowIssueLog:
         ctl.on_success()  # any critical section runs the clock-gap handler first
         assert ctl._issue_newest_sec is None  # ring reset
         assert sum(ctl._issue_buckets) == 0
+
+
+# ── DEC-SMOOTH-PACING-AUTOLATCH-001 — tri-state mode + one-way auto-latch ────────
+
+
+def _adaptive(*, ceiling_rps: float = 8.0) -> tuple[RateController, _Clock, list[float]]:
+    """Build an ADAPTIVE-mode controller with the fake clock + sleep-log harness."""
+    clock = _Clock()
+    slept: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    ctl = RateController(
+        clock=clock,
+        sleep=_sleep,
+        ceiling_rps=ceiling_rps,
+        smooth_pacing_mode=SMOOTH_PACING_ADAPTIVE,
+    )
+    return ctl, clock, slept
+
+
+def _seed_burst(ctl: RateController, *, second: int, count: int) -> None:
+    """Record *count* issues into the observe-only ring's bucket for *second*.
+
+    Drives the EXISTING per-second issue accounting directly (the latch reads
+    that ring; ``pace()`` cannot legally out-issue the token bucket, so the
+    burst shape the operator observed — ``rps_1s_max`` above the AIMD rate —
+    is synthesised at the ring, exactly the evidence surface the latch scans).
+    """
+    with ctl._lock:
+        for _ in range(count):
+            ctl._record_issue_locked(float(second))
+
+
+class TestSmoothPacingModeResolution:
+    def test_default_derives_off_from_the_legacy_bool(self) -> None:
+        ctl = RateController()
+        assert ctl.smooth_pacing_mode == SMOOTH_PACING_OFF
+        assert ctl.smooth_pacing_active is False
+
+    def test_legacy_bool_true_derives_on(self) -> None:
+        ctl = RateController(smooth_pacing=True)
+        assert ctl.smooth_pacing_mode == SMOOTH_PACING_ON
+        assert ctl.smooth_pacing_active is True  # latched from construction
+
+    def test_explicit_mode_wins_over_the_legacy_bool(self) -> None:
+        ctl = RateController(smooth_pacing=True, smooth_pacing_mode=SMOOTH_PACING_OFF)
+        assert ctl.smooth_pacing_mode == SMOOTH_PACING_OFF
+        assert ctl.smooth_pacing_active is False
+
+    def test_adaptive_starts_inactive(self) -> None:
+        ctl, _clock, _slept = _adaptive()
+        assert ctl.smooth_pacing_mode == SMOOTH_PACING_ADAPTIVE
+        assert ctl.smooth_pacing_active is False
+
+    def test_unknown_mode_fails_loud(self) -> None:
+        with pytest.raises(ValueError, match="unknown smooth_pacing_mode"):
+            RateController(smooth_pacing_mode="banana")
+
+
+class TestSmoothPacingAutoLatch:
+    """The one-way ADAPTIVE latch (fail-before: the latch did not exist — a 429
+    burst left ``_smooth_pacing`` False forever on a default-built controller)."""
+
+    def test_latch_fires_on_a_burst_above_current_rps(self) -> None:
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=9)  # 9 issues in one second > 8.0
+        with capture_logs() as logs:
+            ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is True
+        latched = [e for e in logs if e["event"] == "rate.smooth_pacing_latched"]
+        assert len(latched) == 1
+        assert latched[0]["current_rps"] == 8.0
+        assert max(latched[0]["bucket_counts"]) == 9  # the evidence is carried
+
+    def test_latch_does_not_fire_at_or_below_current_rps(self) -> None:
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=8)  # AT the allowed rate — compliant
+        with capture_logs() as logs:
+            ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is False
+        assert not any(e["event"] == "rate.smooth_pacing_latched" for e in logs)
+
+    def test_latch_scans_the_trailing_buckets_not_just_the_current_second(self) -> None:
+        """A 429 lands AFTER request latency — the burst sits 2 s behind and still latches."""
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        burst_second = int(clock.t)
+        _seed_burst(ctl, second=burst_second, count=9)
+        clock.advance(2.0)  # the 429 arrives two seconds after the burst
+        ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is True
+
+    def test_burst_outside_the_scan_window_never_latches(self) -> None:
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=9)
+        clock.advance(10.0)  # far past the 3 s scan window
+        ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is False
+
+    def test_latch_is_one_way_for_the_controller_lifetime(self) -> None:
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=9)
+        with capture_logs() as logs:
+            ctl.on_rate_limit()
+            # Further 429s (no burst evidence at all) never UNLATCH — and never re-log.
+            ctl.on_rate_limit()
+            ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is True
+        assert sum(1 for e in logs if e["event"] == "rate.smooth_pacing_latched") == 1
+
+    def test_off_mode_disables_the_latch_entirely(self) -> None:
+        clock = _Clock()
+        ctl = RateController(clock=clock, sleep=lambda _s: None, ceiling_rps=8.0)  # OFF
+        _seed_burst(ctl, second=int(clock.t), count=9)
+        ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is False  # OFF can never latch
+
+    def test_on_mode_is_already_latched_no_relog(self) -> None:
+        clock = _Clock()
+        ctl = RateController(
+            clock=clock, sleep=lambda _s: None, ceiling_rps=8.0, smooth_pacing_mode=SMOOTH_PACING_ON
+        )
+        _seed_burst(ctl, second=int(clock.t), count=9)
+        with capture_logs() as logs:
+            ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is True
+        assert not any(e["event"] == "rate.smooth_pacing_latched" for e in logs)
+
+    def test_unseeded_ring_never_latches(self) -> None:
+        """A 429 before ANY issue was recorded has no burst evidence — no latch."""
+        ctl, _clock, _slept = _adaptive(ceiling_rps=8.0)
+        ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is False
+
+    def test_latch_rebases_the_spacing_baseline(self) -> None:
+        """The first POST-latch issue admits immediately (the -inf construction baseline)."""
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=9)
+        ctl.on_rate_limit()
+        assert ctl._last_issue_ts == float("-inf")
+        assert ctl._smooth_wait_locked(ctl._clock()) == 0.0
+
+    def test_recent_bucket_counts_zero_span_is_empty(self) -> None:
+        """Degenerate scan spans (0 / negative seconds) read as no evidence."""
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=3)
+        with ctl._lock:
+            assert ctl._recent_bucket_counts_locked(ctl._clock(), 0) == []
+
+    def test_aimd_ladder_and_caps_unchanged_by_the_latch(self) -> None:
+        """The latch only flips the smooth gate — the 429 step-down maths is untouched."""
+        ctl, clock, _slept = _adaptive(ceiling_rps=CEILING_RPS)
+        _seed_burst(ctl, second=int(clock.t), count=int(CEILING_RPS) + 1)
+        for _ in range(STEP_DOWN_HITS):
+            ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is True
+        assert ctl.current_rps == CEILING_RPS - STEP_RPS  # the ladder stepped exactly once

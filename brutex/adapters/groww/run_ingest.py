@@ -70,6 +70,7 @@ from brutex.adapters.groww.errors import (
 )
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
+from brutex.adapters.groww.vendor_floor import VendorFloorLearner
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
@@ -147,7 +148,7 @@ SpotJob = tuple[Instrument, str]
 _DEFAULT_MAX_RETRY_ROUNDS: int = 3
 
 
-def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
+def with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
     """Return *adapter* with its Groww client's ``pace`` hook wired to the shared bucket.
 
     The client's per-attempt ``pace()`` (inside ``GrowwClient._call``) is the ONE
@@ -157,6 +158,13 @@ def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdap
     self-pacing client via
     :func:`~brutex.adapters.groww.client.client_self_paces`), so a fetch is never
     admitted twice against the 500/min governor + AIMD ladder.
+
+    PUBLIC because it is the ONE binding seam for ANY out-of-spine consumer of the
+    pull's adapter: the live pool factory hands every leaf ``_noop_pace``
+    (``live.build_live_pool`` without a ``pace``), so an adapter captured BEFORE
+    this binding fetches UNPACED — the vendor-floor depth probe's blocker fixed by
+    constructing the learner over ``with_paced_client(adapter, pace)`` at the
+    production build sites (DEC-VENDOR-FLOOR-LAZY-PROBE-001 review fold).
 
     A no-op (returns *adapter* unchanged) when there is nothing to wire: an
     unthrottled run (*pace* is ``None``), or any adapter that is not the live
@@ -320,6 +328,7 @@ def run_groww_spot_ingest(
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -434,6 +443,15 @@ def run_groww_spot_ingest(
         gracefully (with the existing #888/#889 Telegram alert) instead of burning
         every remaining window on write-deadline defers. Tests inject a configured
         instance.
+    floor_learner
+        Optional per-pull :class:`~brutex.adapters.groww.vendor_floor.VendorFloorLearner`
+        (DEC-VENDOR-FLOOR-LAZY-PROBE-001), threaded verbatim into every pair's
+        window workers: a confirmed clean-empty window AT the configured history
+        floor triggers ONE bounded, breaker-gated depth probe per symbol per pull
+        (see :func:`~brutex.adapters.groww.ingest.ingest_spot`). ``None`` (the
+        default — dry-run / synthetic / unit-test callers) never probes; ONLY the
+        real-vendor production sites arm it
+        (:func:`~brutex.adapters.groww.vendor_floor.make_vendor_floor_learner`).
 
     Returns
     -------
@@ -463,7 +481,7 @@ def run_groww_spot_ingest(
     # per-window pace then stands down (DEC-RATE-SINGLE-ADMISSION-001). No-op for
     # adapters without a paceable client (fakes) or when unthrottled — those keep
     # the per-window pace as the fallback admission.
-    adapter = _with_paced_client(adapter, pace)
+    adapter = with_paced_client(adapter, pace)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
 
     # Deterministic worklist: one job per (instrument, interval) pair, in the
@@ -524,6 +542,7 @@ def run_groww_spot_ingest(
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=wbreaker,
+                floor_learner=floor_learner,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -734,6 +753,7 @@ def run_groww_spot_ingest_with_retry(
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -787,6 +807,11 @@ def run_groww_spot_ingest_with_retry(
     env-configured breaker (per-pass accounting; no wedge-history leak across passes);
     a volume-wedged trip raises ``LakeWriteHalt("volume_wedged")`` out of this
     function — the pull-wide graceful halt, never a retryable residual.
+    *floor_learner* (DEC-VENDOR-FLOOR-LAZY-PROBE-001) is forwarded verbatim to every
+    pass: ONE instance spans the whole pull's retry rounds, so its single-flight
+    per-symbol probe budget holds across rounds (a retry round re-observing the same
+    boundary-empty window never re-probes). ``None`` (the default) keeps every
+    dry-run / synthetic / test caller un-armed.
 
     Returns
     -------
@@ -826,6 +851,7 @@ def run_groww_spot_ingest_with_retry(
             empty_breaker=empty_breaker,
             storm_breaker=storm_breaker,
             write_breaker=write_breaker,
+            floor_learner=floor_learner,
         )
 
     report = _one_pass()
@@ -853,4 +879,5 @@ __all__ = [
     "SpotJob",
     "run_groww_spot_ingest",
     "run_groww_spot_ingest_with_retry",
+    "with_paced_client",
 ]

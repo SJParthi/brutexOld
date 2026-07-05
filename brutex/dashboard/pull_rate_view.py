@@ -26,7 +26,7 @@ the wall-clock age of its last update, :func:`build_pull_rate_view` derives a
   ``stalled`` verdict the pull-health monitor's ``pull.stalled`` rule encodes
   (achieved r/s below a floor while a pull is ACTIVELY ticking).
 
-## The four flow states (honest, never fabricated)
+## The five flow states (honest, never fabricated)
 
 * ``idle`` — no live tick within ``stale_after_s`` (no pull running / the pull ended a
   while ago): the view ZEROES every live number so the widget shows a dark "idle" light,
@@ -42,6 +42,15 @@ the wall-clock age of its last update, :func:`build_pull_rate_view` derives a
   ``pull_active=True``) NO tick within ``stale_after_s`` at all → a RED light. STALLED
   is NEVER shown when the caller knows no pull is running.
 * ``flowing`` — a recent tick with achieved r/s above the floor → a GREEN light.
+* ``local`` — a pull IS ACTIVE but its CURRENT pipeline phase is LOCAL processing
+  (``phase`` ∈ :data:`LOCAL_PHASES` — the timeframe prebuild + the movers warm, which
+  make ZERO vendor calls by design): an AMBER light labelled
+  ``"local processing — <phase> (no vendor calls)"`` (carried in
+  :attr:`PullRateView.flow_detail`), never the red "stalled" the vendor-rate heuristics
+  would read off the correctly-flatlined fetch rate
+  (DEC-PIPELINE-PHASE-UI-HONESTY-001). Keyed STRICTLY on the phase label — a
+  zero-admission FETCH phase (spot/metadata/historical) still reads STALLED
+  (DEC-RATE-WIDGET-FNO-HONEST-001's pins are untouched).
 
 ``pull_active=None`` (the default) means the caller has NO pull-run signal (e.g. the
 cross-process CLI bridge, which carries no active flag) — the projection then falls back
@@ -107,6 +116,19 @@ FLOW_STALLED: Final[str] = "stalled"
 #: dark light, honest label, never a red "stalled" on a completed pull
 #: (DEC-RATE-STALL-PULL-GATE-001).
 FLOW_DONE: Final[str] = "done"
+#: An ACTIVE pull is in a LOCAL processing phase (zero vendor calls by design) —
+#: an AMBER light, never the red "stalled" the vendor-rate heuristics would read off
+#: the (correctly) flatlined fetch rate (DEC-PIPELINE-PHASE-UI-HONESTY-001).
+FLOW_LOCAL: Final[str] = "local"
+
+#: The pipeline ``set_phase`` labels that are LOCAL processing — zero vendor calls by
+#: design (the timeframe prebuild writes derived partitions from the stored 1-minute;
+#: the movers warm re-ranks cached/lake data): DEC-PIPELINE-AUTOPREBUILD-001's two
+#: post-fetch stages. The FLOW_LOCAL verdict keys STRICTLY on ``phase in LOCAL_PHASES``
+#: (never on "no admissions" / meter absence), so a zero-admission FETCH phase — spot /
+#: metadata / historical — STILL reads STALLED exactly as DEC-RATE-WIDGET-FNO-HONEST-001
+#: pinned (the fake-alive guard is untouched).
+LOCAL_PHASES: Final[frozenset[str]] = frozenset({"prebuild", "movers"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +197,14 @@ class PullRateView:
         The configured per-second ceiling LIMIT (:data:`CEILING_RPS_LIMIT`).
     ceiling_per_min
         The HARD per-minute governor LIMIT (:data:`CEILING_PER_MIN_LIMIT`).
+    flow_detail
+        A human-readable verdict detail for the widget's expanded view
+        (DEC-PIPELINE-PHASE-UI-HONESTY-001). Non-empty ONLY for
+        :data:`FLOW_LOCAL` — ``"local processing — <phase> (no vendor calls)"``,
+        naming the pipeline phase the amber light stands for. Every other flow
+        state carries ``""`` (the widget falls back to the flow-state word), so
+        the pre-existing wire payloads gain one additive field and change no
+        existing value.
     """
 
     flow_state: str
@@ -192,6 +222,7 @@ class PullRateView:
     seconds_since_update: float
     ceiling_rps: float
     ceiling_per_min: int
+    flow_detail: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serialisable mapping (``inf`` ``seconds_since_update`` → ``None``).
@@ -218,6 +249,7 @@ def build_pull_rate_view(
     recent_3600s: int = 0,
     meter_present: bool = True,
     pull_active: bool | None = None,
+    phase: str | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
@@ -268,6 +300,18 @@ def build_pull_rate_view(
         tick within ``stale_after_s`` reads ``stalled`` (an active pull whose rate
         ticks flatlined). ``None`` (the default) = no signal available (the CLI
         bridge) ⇒ the pre-existing tick-freshness heuristic, byte-identical.
+    phase
+        The pipeline's CURRENT coarse ``set_phase`` label
+        (DEC-PIPELINE-PHASE-UI-HONESTY-001), or ``None`` when the caller has no
+        phase signal (the CLI bridge / a non-pipeline pull) — the default,
+        byte-identical to the pre-phase behaviour. When ``pull_active is True``
+        AND ``phase`` ∈ :data:`LOCAL_PHASES` (``prebuild`` / ``movers`` — LOCAL
+        processing, zero vendor calls by design) the verdict is
+        :data:`FLOW_LOCAL` (amber, never ``stalled``) with
+        :attr:`~PullRateView.flow_detail` naming the phase. Keyed STRICTLY on
+        the phase label, NEVER on zero admissions / meter absence — a
+        zero-admission fetch phase (``spot``/``metadata``/``historical``) still
+        reads STALLED exactly as DEC-RATE-WIDGET-FNO-HONEST-001 pinned.
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -290,12 +334,13 @@ def build_pull_rate_view(
 
     tick_fresh = seconds_since_update <= stale_after_s
 
-    def _quiet(flow_state: str, *, stalled: bool) -> PullRateView:
+    def _quiet(flow_state: str, *, stalled: bool, flow_detail: str = "") -> PullRateView:
         """A zeroed (no live numbers) view — the limits + staleness stay real."""
         return PullRateView(
             flow_state=flow_state,
             active=False,
             stalled=stalled,
+            flow_detail=flow_detail,
             req_per_sec_achieved=0.0,
             req_per_sec_allowed=0.0,
             req_per_min=0,
@@ -318,6 +363,23 @@ def build_pull_rate_view(
         # live number is zeroed either way (the last live figures are history, not a
         # current rate — Golden Rule #1).
         return _quiet(FLOW_DONE if tick_fresh else FLOW_IDLE, stalled=False)
+
+    if pull_active is True and phase in LOCAL_PHASES:
+        # An ACTIVE pull in a LOCAL processing phase (DEC-PIPELINE-PHASE-UI-HONESTY-001):
+        # the prebuild / movers-warm stages make ZERO vendor calls by design, so the
+        # vendor-rate heuristics below (measured completed-rate at/below the floor, zero
+        # admissions, or even a stale tick) would read a perfectly healthy local stage as
+        # a red "stalled" — a dishonest alarm. The verdict is AMBER "local" with the
+        # phase named in ``flow_detail``; the live vendor numbers are zeroed (there IS no
+        # vendor traffic to show — Golden Rule #1). Checked BEFORE the tick-freshness
+        # stall so a between-tick gap during a local stage can never read red either.
+        # STRICTLY phase-keyed: a fetch phase (spot/metadata/historical) never lands here,
+        # so every DEC-RATE-WIDGET-FNO-HONEST-001 stall pin below is untouched.
+        return _quiet(
+            FLOW_LOCAL,
+            stalled=False,
+            flow_detail=f"local processing — {phase} (no vendor calls)",
+        )
 
     if not tick_fresh:
         if pull_active is True:
@@ -385,6 +447,7 @@ def build_pull_rate_view_merged(
     panel_recent_3600s: int = 0,
     panel_meter_present: bool = True,
     panel_pull_active: bool | None = None,
+    panel_phase: str | None = None,
     bridge_effective_rps: float | None = None,
     bridge_current_rps: float | None = None,
     bridge_recent_minute: int | None = None,
@@ -456,6 +519,13 @@ def build_pull_rate_view_merged(
         publishes one final ``pull_active=False`` — so a just-finished CLI pull ALSO
         reads ``done``/``idle``. ``None`` remains the honest tick-freshness fallback for
         a pre-v3 / absent / flagless bridge file.
+    panel_phase
+        The dashboard pipeline's CURRENT ``set_phase`` label threaded into the
+        PANEL-side projection only (DEC-PIPELINE-PHASE-UI-HONESTY-001) — the CLI
+        bridge is a separate ``brutex fetch`` process with NO pipeline phase, so
+        its projection NEVER receives a phase (a fresher bridge keeps its
+        byte-identical verdict; ``local`` can only ever come from the
+        dashboard's own pipeline).
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -502,6 +572,7 @@ def build_pull_rate_view_merged(
         recent_3600s=panel_recent_3600s,
         meter_present=panel_meter_present,
         pull_active=panel_pull_active,
+        phase=panel_phase,
         last_update_monotonic=0.0 if math.isfinite(panel_seconds_since_update) else float("-inf"),
         now_monotonic=panel_seconds_since_update
         if math.isfinite(panel_seconds_since_update)
@@ -517,7 +588,9 @@ __all__ = [
     "FLOW_DONE",
     "FLOW_FLOWING",
     "FLOW_IDLE",
+    "FLOW_LOCAL",
     "FLOW_STALLED",
+    "LOCAL_PHASES",
     "STALE_AFTER_S",
     "STALL_RPS_FLOOR",
     "PullRateView",

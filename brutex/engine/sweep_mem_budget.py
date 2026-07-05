@@ -9,7 +9,9 @@ with a bare ``MemoryError``. This module is the PURE planning half of the fix:
 
 * :func:`resolve_bounded_rank_mode` / :func:`resolve_mem_budget_bytes` — the two
   operator env knobs (``BRUTEX_SWEEP_BOUNDED_RANK`` ∈ ``{off, auto, on}``,
-  default ``auto``; ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``, default 8 GiB).
+  default ``auto``; ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``, default RAM-derived
+  per DEC-RAM-BUDGETS-001 — ``total RAM × 1/6`` when detected, the 8 GiB
+  floor when RAM is undetectable).
 * :func:`plan_rank_memory` — ONE deterministic pre-flight decision per tuple,
   taken from the config alone (``n_masks`` is ``C(n, k)``, known before any
   allocation): below budget the plan keeps today's batch path byte-identical;
@@ -46,19 +48,33 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
+from brutex.hardware_envelope import memory_budget_bytes
+
 #: Env knob selecting the bounded-rank mode (``off`` / ``auto`` / ``on``).
 BOUNDED_RANK_MODE_ENV: Final[str] = "BRUTEX_SWEEP_BOUNDED_RANK"
 
 #: Env knob for the rank-region memory budget in bytes (``> 0``).
 MEM_BUDGET_ENV: Final[str] = "BRUTEX_SWEEP_MEM_BUDGET_BYTES"
 
-#: Default rank-region budget: 8 GiB per tuple. A HEURISTIC default for the
-#: CLAUDE.md §8 envelope (48 GB box, ~10 sweep cores → several concurrent
-#: tuples must coexist with the OS + lake caches), NOT a measured limit; the
-#: operator overrides it via ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``. Engaging the
-#: bounded path early is result-safe — bounded and batch rank are pinned
+#: The rank-region budget FLOOR: 8 GiB per tuple — the original hand-picked
+#: HEURISTIC for the CLAUDE.md §8 envelope (48 GB box, ~10 sweep cores →
+#: several concurrent tuples must coexist with the OS + lake caches), NOT a
+#: measured limit. Since DEC-RAM-BUDGETS-001 the DEFAULT budget is derived
+#: from the machine's detected total RAM (:data:`MEM_BUDGET_FRACTION`); this
+#: constant is applied EXACTLY when RAM detection fails (the honest
+#: undetected sentinel — pre-derivation behavior, bit-for-bit). The operator
+#: override stays ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``. Engaging the bounded
+#: path early is result-safe — bounded and batch rank are pinned
 #: bit-identical — so a conservative default only ever trades speed, never bytes.
 DEFAULT_MEM_BUDGET_BYTES: Final[int] = 8 * 1024**3
+
+#: The detected-RAM share the default rank-region budget claims
+#: (DEC-RAM-BUDGETS-001): ``1/6`` gives EXACT parity with the old 8 GiB
+#: constant on the CLAUDE.md §8 48 GiB reference box (regression-pinned in
+#: ``tests/unit/test_hardware_envelope.py``); a smaller machine derives a
+#: smaller budget (portability), a larger one gains headroom. A PORTABILITY
+#: choice, NOT a measured figure (Golden Rule #10).
+MEM_BUDGET_FRACTION: Final[float] = 1.0 / 6.0
 
 #: The batch-path retention MODEL: bytes per kept mask across the
 #: ``(mask, ResultMetrics)`` pair + `rank_combos`' z-term lists. The judged
@@ -121,9 +137,16 @@ def resolve_bounded_rank_mode(environ: Mapping[str, str] | None = None) -> Bound
 def resolve_mem_budget_bytes(environ: Mapping[str, str] | None = None) -> int:
     """Resolve the rank-region byte budget from ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``.
 
-    Unset/blank → :data:`DEFAULT_MEM_BUDGET_BYTES` (8 GiB). A non-integer or
-    non-positive value raises — a broken budget must never silently disable
-    the guard (Golden Rule #1).
+    Delegates to the COMMON :func:`brutex.hardware_envelope.memory_budget_bytes`
+    (DEC-RAM-BUDGETS-001). Resolution order: a set, non-blank env value is the
+    validated explicit override (byte-unchanged #1352 contract — a non-integer
+    or non-positive value raises, a broken budget must never silently disable
+    the guard, Golden Rule #1); unset/blank → the RAM-derived default —
+    ``detected total RAM`` × :data:`MEM_BUDGET_FRACTION` when detection
+    succeeds, else :data:`DEFAULT_MEM_BUDGET_BYTES` (the 8 GiB floor) EXACTLY.
+    RAM detection is cached once per process, so the resolved default is
+    stable for the whole run even though the production runner re-resolves
+    per tuple (no mid-run flapping).
 
     Parameters
     ----------
@@ -133,21 +156,14 @@ def resolve_mem_budget_bytes(environ: Mapping[str, str] | None = None) -> int:
     Raises
     ------
     ValueError
-        If the value is not a positive integer.
+        If the env value is set and not a positive integer.
     """
-    env = os.environ if environ is None else environ
-    raw = env.get(MEM_BUDGET_ENV, "").strip()
-    if not raw:
-        return DEFAULT_MEM_BUDGET_BYTES
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ValueError(
-            f"{MEM_BUDGET_ENV}={raw!r} is not an integer byte count (> 0 required)"
-        ) from None
-    if value <= 0:
-        raise ValueError(f"{MEM_BUDGET_ENV}={value} must be > 0 bytes")
-    return value
+    return memory_budget_bytes(
+        fraction=MEM_BUDGET_FRACTION,
+        floor_bytes=DEFAULT_MEM_BUDGET_BYTES,
+        env=environ,
+        env_var=MEM_BUDGET_ENV,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +386,7 @@ __all__ = [
     "BOUNDED_RANK_MODE_ENV",
     "DEFAULT_MEM_BUDGET_BYTES",
     "MEM_BUDGET_ENV",
+    "MEM_BUDGET_FRACTION",
     "BoundedRankMode",
     "RankMemoryPlan",
     "plan_rank_memory",

@@ -1652,12 +1652,17 @@ def cmd_reopen_skipped(
     )
     from brutex.data.window_ledger_store import (
         ledger_path,
+        list_ledger_deltas,
         load_window_ledger,
         save_window_ledger,
     )
 
     resolved = _resolve_lake_root(lake_root)
-    if not ledger_path(resolved).is_file():
+    # Delta-aware presence gate (P2 fix-round, DEC-REOPEN-DELTA-AWARE-001): a
+    # base-less lake HOLDING deltas (a first pull's mid-flight crash checkpoint,
+    # DEC-LEDGER-DELTA-FLUSH-001) is a LIVE ledger — load_or_migrate treats it
+    # exactly so — hence it must be operable here, not refused as "no ledger".
+    if not (ledger_path(resolved).is_file() or list_ledger_deltas(resolved)):
         print(
             f"[brutex] no window ledger found at {ledger_path(resolved)} — nothing to re-open "
             "(run a pull first, or pass the right --lake-root).",
@@ -3622,6 +3627,7 @@ def cmd_fetch(
             from brutex.adapters.groww.constants import (
                 GROWW_RATE_LIMIT_PER_MIN,
                 GROWW_RATE_LIMIT_RPS_CEILING,
+                resolve_smooth_pacing_mode,
             )
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
@@ -3631,10 +3637,15 @@ def cmd_fetch(
             # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 8×60 = 480 < 500,
             # so the per-second ceiling is the binding gate without fighting the
             # governor; the AIMD ladder still steps DOWN on 429s (raised 5 → 8 on
-            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002).
+            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002). The smooth-pacing mode is
+            # threaded HERE too (DEC-SMOOTH-PACING-AUTOLATCH-001 — the CLI previously
+            # built the controller WITHOUT it, so BRUTEX_GROWW_SMOOTH_PACING was a
+            # dead flag on the `brutex fetch` path): unset ⇒ ADAPTIVE (auto-latch on
+            # burst-evidenced 429s), truthy ⇒ ON, explicit falsy ⇒ OFF.
             _rate = RateController(
                 ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
                 ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+                smooth_pacing_mode=resolve_smooth_pacing_mode(),
             )
             # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
             # controller's own on_rate_limit so a sustained 429 storm also fires a
@@ -4534,9 +4545,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # (the parallel driver's workers use their own raising ``_NoDedup``). The
     # eager ``ComboDedup(OptionDedupIndex(capacity=bloom_capacity_hint(grid),
     # …))`` + LMDB combo-dedup store previously built here were pure dead
-    # weight: up to ~16 GiB of never-read Bloom bit array below the
-    # MAX_BLOOM_BYTES wall, and a BloomTooLargeError launch REFUSAL above it
-    # (~4.1e9 mask identities) for a filter no code path reads.
+    # weight: up to MAX_BLOOM_BYTES (RAM-derived since DEC-RAM-BUDGETS-001;
+    # ~16 GiB at the undetected floor) of never-read Bloom bit array below the
+    # wall, and a BloomTooLargeError launch REFUSAL above it (~4.1e9 mask
+    # identities at that floor) for a filter no code path reads.
     # ``plan_launch_dedup(grid, digest_path=True)`` below returns a no-alloc
     # raising sink instead (a consult would be a real invariant break,
     # surfaced loudly). The mask-grain dedup GUARANTEE is unchanged — it lives
@@ -5664,7 +5676,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # (run_one_tuple always passes trial_stats_digest → bypass_dedup),
             # so the grid-sized ComboDedup(OptionDedupIndex(...)) + LMDB
             # combo-dedup store previously built here were never consulted —
-            # and refused a >~4.1e9-identity recount with BloomTooLargeError.
+            # and refused a recount past the MAX_BLOOM_BYTES identity ceiling
+            # (~4.1e9 at the 16 GiB floor) with BloomTooLargeError.
             # plan_launch_dedup returns the no-alloc raising sink instead.
             with AuditWriter.open(audit_path) as audit:
                 resweep_summary = run_sweep_grid(

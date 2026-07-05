@@ -43,6 +43,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from typing import Final
 
 import structlog
 
@@ -216,6 +217,34 @@ _GOVERNOR_LOOP_CAP: int = 64
 #: pacer fails OPEN (stamps + admits) exactly as the governor's loop cap does.
 _SMOOTH_LOOP_CAP: int = 64
 
+# ── Smooth-pacing MODES (DEC-SMOOTH-PACING-AUTOLATCH-001) ─────────────────────────
+#: Smooth pacing FORCED ON from construction — the prior ``smooth_pacing=True``
+#: behaviour: every issue is spaced ``>= 1/current_rps`` from the previous one.
+SMOOTH_PACING_ON: Final[str] = "on"
+#: Smooth pacing (and the auto-latch) DISABLED entirely — the prior
+#: ``smooth_pacing=False`` behaviour, byte-identical pacing.
+SMOOTH_PACING_OFF: Final[str] = "off"
+#: ADAPTIVE auto-latch: smoothing starts OFF (byte-identical pacing) and ONE-WAY
+#: latches ON — permanently, for the controller's lifetime — the first time
+#: :meth:`RateController.on_rate_limit` observes a 429 WITH measured per-1s burst
+#: evidence: any of the trailing :data:`SMOOTH_LATCH_SCAN_SECONDS` per-second issue
+#: buckets exceeding the then-current allowed ``current_rps``. Evidence-gated, so a
+#: 429 that arrives WITHOUT a local burst (a genuine vendor quota squeeze at an
+#: even issue cadence) never latches — the AIMD ladder alone handles it.
+SMOOTH_PACING_ADAPTIVE: Final[str] = "adaptive"
+#: The valid smooth-pacing mode tokens (an unknown token fails LOUD at construction
+#: — a rate-gate mode is never silently coerced; CLAUDE.md §2 Rule 6).
+_SMOOTH_PACING_MODES: Final[frozenset[str]] = frozenset(
+    {SMOOTH_PACING_ON, SMOOTH_PACING_OFF, SMOOTH_PACING_ADAPTIVE}
+)
+
+#: Trailing per-1s issue buckets the ADAPTIVE latch scans on each 429
+#: (DEC-SMOOTH-PACING-AUTOLATCH-001). A 429 lands AFTER the offending request's
+#: network latency, so the burst that provoked it sits a bucket or two BEHIND the
+#: current second — scanning the last ~3 seconds covers the observed sub-3s
+#: request→429 round-trip envelope while staying O(1) per 429.
+SMOOTH_LATCH_SCAN_SECONDS: Final[int] = 3
+
 #: Sleep/wake clock-gap threshold (DEC-RATE-CLOCK-SLEEPWAKE-001). The controller
 #: paces off ``time.monotonic()`` which, on a laptop, jumps forward by a large delta
 #: when the machine SLEEPS overnight and WAKES (and a rare platform/NTP glitch can even
@@ -288,6 +317,7 @@ class RateController:
         ceiling_rps: float = CEILING_RPS,
         ceiling_per_min: int | None = None,
         smooth_pacing: bool = False,
+        smooth_pacing_mode: str | None = None,
     ) -> None:
         """Build a controller starting at the ceiling rate (default 5 r/s).
 
@@ -320,21 +350,39 @@ class RateController:
             300/500 cap), so existing 5 r/s behaviour is unchanged even when a cap
             is injected.
         smooth_pacing
-            Optional ANTI-BURST gate (DEC-GROWW-SMOOTH-PACING-001). ``False`` (the
-            default) = byte-for-byte backward-compatible: the existing token bucket
-            already absorbs short bursts within its ``1/rate`` cadence, so sub-second
-            micro-bursts (the operator's ``rps_1s_max`` spiking to 8–9 below the AIMD
-            ceiling) can still slip through and trip a vendor 429. When ``True`` a
-            THIRD gate runs FIRST in :meth:`pace`: it enforces a global MINIMUM
-            inter-issue interval of ``1.0 / current_rps`` seconds across ALL workers
-            (a shared ``_last_issue_ts`` under the SAME lock the token math uses), so
-            issuance is spread evenly and the per-second issue count can never exceed
-            the current AIMD rate — no 9-burst. It only ever ADDS spacing: it never
-            raises the per-second ceiling, the 500/min governor, or any AIMD rung —
-            it composes WITH (never bypasses) both existing gates. SAFE-but-UNVERIFIED
-            (Golden Rule #10): the smoothing is provably correct + cannot exceed any
-            cap, but the live 429-reduction benefit is UNVERIFIED pending a live
-            vendor probe — no throughput gain is claimed.
+            LEGACY boolean ANTI-BURST gate (DEC-GROWW-SMOOTH-PACING-001), the
+            back-compat alias consulted ONLY when *smooth_pacing_mode* is ``None``:
+            ``False`` (the default) resolves to :data:`SMOOTH_PACING_OFF` —
+            byte-for-byte backward-compatible pacing with the auto-latch disabled —
+            and ``True`` resolves to :data:`SMOOTH_PACING_ON`. The gate itself is
+            unchanged: when ACTIVE it runs FIRST in :meth:`pace`, enforcing a global
+            MINIMUM inter-issue interval of ``1.0 / current_rps`` seconds across ALL
+            workers (a shared ``_last_issue_ts`` under the SAME lock the token math
+            uses), so issuance is spread evenly and the per-second issue count can
+            never exceed the current AIMD rate — no 9-burst. It only ever ADDS
+            spacing: it never raises the per-second ceiling, the 500/min governor,
+            or any AIMD rung — it composes WITH (never bypasses) both existing
+            gates. SAFE-but-UNVERIFIED (Golden Rule #10): the smoothing is provably
+            correct + cannot exceed any cap, but the live 429-reduction benefit is
+            UNVERIFIED pending a live vendor probe — no throughput gain is claimed.
+        smooth_pacing_mode
+            TRI-STATE smooth-pacing mode (DEC-SMOOTH-PACING-AUTOLATCH-001),
+            overriding the legacy boolean when given: :data:`SMOOTH_PACING_ON`
+            (latched from construction — the legacy ``True``),
+            :data:`SMOOTH_PACING_OFF` (gate AND auto-latch disabled — the legacy
+            ``False``), or :data:`SMOOTH_PACING_ADAPTIVE` — smoothing starts OFF
+            (byte-identical pacing) and :meth:`on_rate_limit` ONE-WAY latches it ON,
+            permanently for this controller's lifetime, the first time a 429 lands
+            WITH measured burst evidence (any of the trailing
+            :data:`SMOOTH_LATCH_SCAN_SECONDS` per-second issue buckets exceeding the
+            then-current allowed ``current_rps`` — the 429 arrives after request
+            latency, so the offending burst sits in the trailing buckets, not the
+            current instant). The latch only ever ADDS spacing on measured evidence;
+            it never unlatches and never touches any cap or AIMD rung. ``None``
+            (default) derives the mode from *smooth_pacing* — every existing caller
+            is byte-identical. An unknown token raises :class:`ValueError`
+            (fail-loud — a rate-gate mode is never silently coerced, CLAUDE.md §2
+            Rule 6).
         """
         self._clock = clock
         self._sleep = sleep
@@ -369,12 +417,26 @@ class RateController:
         #: The integer second (``floor(clock())``) the head bucket currently counts. ``None``
         #: until the FIRST issue is recorded (an all-zero ring reads 0 in every window).
         self._issue_newest_sec: int | None = None
-        #: Optional anti-burst smooth pacing (DEC-GROWW-SMOOTH-PACING-001). ``False``
-        #: ⇒ the smooth gate is skipped ENTIRELY in :meth:`pace` (byte-identical to the
-        #: prior behaviour) and ``_last_issue_ts`` is never read/written. ``True`` ⇒ the
-        #: gate enforces a ``1/current_rps`` minimum interval between consecutive issues
-        #: across all workers, sharing the SAME lock as the token math.
-        self._smooth_pacing: bool = smooth_pacing
+        #: Resolved smooth-pacing MODE (DEC-SMOOTH-PACING-AUTOLATCH-001): the explicit
+        #: *smooth_pacing_mode* wins; ``None`` derives it from the legacy boolean
+        #: (``True`` → ON, ``False`` → OFF — byte-identical for every existing caller).
+        #: An unknown token fails LOUD (a rate-gate mode is never silently coerced).
+        if smooth_pacing_mode is None:
+            smooth_pacing_mode = SMOOTH_PACING_ON if smooth_pacing else SMOOTH_PACING_OFF
+        if smooth_pacing_mode not in _SMOOTH_PACING_MODES:
+            raise ValueError(f"unknown smooth_pacing_mode: {smooth_pacing_mode!r}")
+        self._smooth_mode: str = smooth_pacing_mode
+        #: Anti-burst smooth pacing — the LIVE gate switch (DEC-GROWW-SMOOTH-PACING-001
+        #: + DEC-SMOOTH-PACING-AUTOLATCH-001). ``False`` ⇒ the smooth gate is skipped
+        #: ENTIRELY in :meth:`pace` (byte-identical to the prior behaviour) and
+        #: ``_last_issue_ts`` is never read/written. ``True`` ⇒ the gate enforces a
+        #: ``1/current_rps`` minimum interval between consecutive issues across all
+        #: workers, sharing the SAME lock as the token math. Starts ``True`` only in
+        #: :data:`SMOOTH_PACING_ON` mode; in :data:`SMOOTH_PACING_ADAPTIVE` mode
+        #: :meth:`on_rate_limit` flips it ``True`` ONCE — permanently — on the first
+        #: 429 with measured burst evidence (the one-way auto-latch); in
+        #: :data:`SMOOTH_PACING_OFF` mode it can never become ``True``.
+        self._smooth_pacing: bool = smooth_pacing_mode == SMOOTH_PACING_ON
         #: Last issue instant under smooth pacing — the shared spacing baseline. ``-inf``
         #: so the FIRST issue under smooth mode never waits (any real gap exceeds the
         #: minimum interval). Only ever touched when ``_smooth_pacing`` is True.
@@ -439,6 +501,28 @@ class RateController:
         """The current rate (in ``[TIMEOUT_FLOOR_RPS, CEILING_RPS]``) — thread-safe."""
         with self._lock:
             return self._rps
+
+    @property
+    def smooth_pacing_mode(self) -> str:
+        """The resolved smooth-pacing mode token (DEC-SMOOTH-PACING-AUTOLATCH-001) — O(1).
+
+        One of :data:`SMOOTH_PACING_ON` / :data:`SMOOTH_PACING_OFF` /
+        :data:`SMOOTH_PACING_ADAPTIVE`. Immutable after construction (the ADAPTIVE
+        latch flips :attr:`smooth_pacing_active`, never the mode), so no lock is
+        needed — the read is a plain attribute load.
+        """
+        return self._smooth_mode
+
+    @property
+    def smooth_pacing_active(self) -> bool:
+        """``True`` iff the anti-burst smooth gate is currently ENFORCING — thread-safe.
+
+        ON mode ⇒ always ``True``; OFF mode ⇒ always ``False``; ADAPTIVE mode ⇒
+        ``False`` until the one-way latch fires (then ``True`` for the controller's
+        lifetime — it never unlatches, DEC-SMOOTH-PACING-AUTOLATCH-001).
+        """
+        with self._lock:
+            return self._smooth_pacing
 
     def _handle_clock_gap_locked(self, now: float) -> None:
         """Detect a laptop sleep/wake clock jump; reset rolling state if one occurred — O(1).
@@ -614,6 +698,64 @@ class RateController:
             count += self._issue_buckets[(self._issue_head - offset) % TRAILING_LOG_BUCKETS]
         return count
 
+    def _recent_bucket_counts_locked(self, now: float, seconds: int) -> list[int]:
+        """The trailing *seconds* per-second issue counts, OLDEST → NEWEST (caller holds lock).
+
+        DEC-SMOOTH-PACING-AUTOLATCH-001 — the ADAPTIVE latch's burst evidence. Reads
+        the EXISTING observe-only trailing-hour issue ring
+        (DEC-RATE-MONITOR-EXPAND-001; maintained at issue time in
+        :meth:`_record_issue_locked` — already granular per second, so NO new
+        accounting is added), first advancing the head to ``floor(now)`` so
+        issue-free elapsed seconds read as honest zeros. Returns ``[]`` when the
+        ring is unseeded (no issue ever recorded — there is no burst evidence
+        without issues). O(*seconds*) — a bounded walk, never the whole ring.
+        """
+        if self._issue_newest_sec is None:
+            return []
+        self._advance_issue_ring_locked(math.floor(now))
+        span = min(max(seconds, 0), TRAILING_LOG_BUCKETS)
+        return [
+            self._issue_buckets[(self._issue_head - offset) % TRAILING_LOG_BUCKETS]
+            for offset in range(span - 1, -1, -1)
+        ]
+
+    def _maybe_latch_smooth_locked(self, now: float) -> None:
+        """ONE-WAY latch smooth pacing ON when a 429 carries burst evidence (caller holds lock).
+
+        DEC-SMOOTH-PACING-AUTOLATCH-001. Runs ONLY in :data:`SMOOTH_PACING_ADAPTIVE`
+        mode while not yet latched (ON is latched from construction; OFF disables the
+        latch entirely). Scans the trailing :data:`SMOOTH_LATCH_SCAN_SECONDS`
+        per-second issue buckets — a 429 lands AFTER the offending request's network
+        latency, so the burst that provoked it sits in the trailing buckets, not the
+        current instant — and latches iff ANY bucket's issue count EXCEEDED the
+        then-current allowed ``current_rps`` (strictly ``>``: a bucket AT the allowed
+        rate is compliant issuance, not a burst). Called BEFORE the 429 ladder's
+        step-down mutates ``_rps``, so the comparison reads the rate that was allowed
+        when the burst was issued (an APPROXIMATION when the rate stepped between the
+        burst and the 429 — honest envelope: the ladder steps at most 1 r/s per
+        :data:`STEP_DOWN_WINDOW`, so the drift is bounded at 1 r/s). Emits ONE
+        ``rate.smooth_pacing_latched`` WARNING carrying the evidence (the scanned
+        bucket counts + the current rate); latched state never clears. O(1) — a
+        bounded 3-bucket scan per 429, only until the latch fires.
+        """
+        if self._smooth_mode != SMOOTH_PACING_ADAPTIVE or self._smooth_pacing:
+            return
+        counts = self._recent_bucket_counts_locked(now, SMOOTH_LATCH_SCAN_SECONDS)
+        if not any(count > self._rps for count in counts):
+            return
+        self._smooth_pacing = True
+        # Re-base the spacing baseline to the construction sentinel so the FIRST
+        # smoothed issue admits immediately (no spurious wait against a pre-latch
+        # instant); per-issue spacing binds from that issue onward, exactly as on a
+        # construction-latched (ON-mode) controller.
+        self._last_issue_ts = float("-inf")
+        _LOG.warning(
+            "rate.smooth_pacing_latched",
+            bucket_counts=counts,
+            current_rps=self._rps,
+            scan_seconds=SMOOTH_LATCH_SCAN_SECONDS,
+        )
+
     def pace(self) -> None:
         """Block until every rate gate allows an issue — **O(1)** amortized fast path.
 
@@ -780,6 +922,21 @@ class RateController:
             while self._hits and self._hits[0] < cutoff:
                 self._hits.popleft()
             _LOG.warning("rate.429", current_rps=self._rps, recent_hits=len(self._hits))
+            # ADAPTIVE smooth-pacing auto-latch (DEC-SMOOTH-PACING-AUTOLATCH-001):
+            # BEFORE the ladder below mutates ``_rps``, check the trailing per-1s
+            # issue buckets for a burst above the then-current allowed rate — the
+            # evidence that OUR sub-second micro-burst (not a plain vendor quota
+            # squeeze) provoked this 429 — and one-way latch the smooth gate ON.
+            # A no-op in ON (already latched) / OFF (latch disabled) modes and once
+            # latched. The latch's STATE mutation runs under the controller lock
+            # (no torn state with the token math), but ``pace()``'s gate-0 check
+            # (``if self._smooth_pacing:``) reads the flag OUTSIDE the lock —
+            # honest envelope: a worker already past (or concurrently reading)
+            # that check may issue ONE more unsmoothed request after the flip.
+            # Benign: the flag is a one-way GIL-atomic bool transition, bounded
+            # at one unsmoothed issue per in-flight worker, and every later
+            # ``pace()`` observes the latched state.
+            self._maybe_latch_smooth_locked(now)
             # Two-tier 429 ladder (DEC-DHAN-RATE-STORM-FLOOR-001): reach the soft
             # FLOOR_RPS (3) quickly on a brief burst (STEP_DOWN_HITS=3), but ease BELOW
             # it toward the deep RATE_LIMIT_STORM_FLOOR_RPS (1) ONLY on SUSTAINED
@@ -986,6 +1143,10 @@ __all__ = [
     "LOG_WINDOW_3600S",
     "PER_MIN_WINDOW",
     "RATE_LIMIT_STORM_FLOOR_RPS",
+    "SMOOTH_LATCH_SCAN_SECONDS",
+    "SMOOTH_PACING_ADAPTIVE",
+    "SMOOTH_PACING_OFF",
+    "SMOOTH_PACING_ON",
     "SNAPSHOT_LOG_INTERVAL_S",
     "STEP_DOWN_HITS",
     "STEP_DOWN_TIMEOUT_HITS",

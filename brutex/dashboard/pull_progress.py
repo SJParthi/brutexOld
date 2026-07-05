@@ -88,6 +88,26 @@ class ProgressSnapshot:
         the run: a later heartbeat does NOT clear it (``clear_stalled`` leaves it);
         only ``finish`` / ``fail`` / a fresh ``start`` reset it. The worker is NOT
         killed and the single-flight stays held — auto-restart is a NAMED follow-up.
+    started_at
+        The injected clock's value at the last :meth:`PullProgress.start`
+        (DEC-PULL-PROGRESS-HONESTY-001 — the ETA anchor, ported from the engine's
+        :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` pattern).
+    phase_started_at, phase_base_completed
+        The PHASE-scoped rate baseline: stamped by the FIRST counter mutation after
+        :meth:`PullProgress.start` / :meth:`PullProgress.set_phase`, so
+        :attr:`units_per_sec` measures only THIS phase's marginal progress — a
+        ledger sync that opens on cross-run counts (e.g. thousands of previously
+        settled windows) can never fabricate an instant burst rate.
+    open_ended
+        ``True`` when the phase's unit TOTAL is not final (DEC-PULL-PROGRESS-HONESTY-001,
+        the grow-total percent-pin fix): the F&O historical phase's denominator GROWS as
+        contracts are planned mid-phase, so a percent / linear ETA over it is an
+        illusion. The frontend renders "N units · total unknown" instead of a pinned
+        100%, and :attr:`eta_seconds` reads ``None``. Set by
+        ``set_phase(..., open_ended=True)`` and by any ``advance(grow_total=True)``;
+        STICKY for the rest of the run (a later ``set_phase("prebuild")`` /
+        ``set_phase("movers")`` must NOT clear it — the displayed total stays
+        non-final); cleared only by the next :meth:`PullProgress.start`.
     """
 
     state: str
@@ -104,6 +124,10 @@ class ProgressSnapshot:
     stall_detail: str = ""
     wedged: bool = False
     wedge_detail: str = ""
+    started_at: float = 0.0
+    phase_started_at: float = 0.0
+    phase_base_completed: int = 0
+    open_ended: bool = False
 
     @property
     def percent(self) -> float:
@@ -111,6 +135,51 @@ class ProgressSnapshot:
         if self.total <= 0:
             return 0.0
         return min(100.0, round(self.completed / self.total * 100.0, 1))
+
+    @property
+    def elapsed_seconds(self) -> float:
+        """Seconds between :meth:`PullProgress.start` and the last mutation (clamped ≥ 0)."""
+        elapsed = self.updated_at - self.started_at
+        return elapsed if elapsed > 0.0 else 0.0
+
+    @property
+    def units_per_sec(self) -> float:
+        """Observed PHASE-scoped throughput (units completed / elapsed seconds).
+
+        DEC-PULL-PROGRESS-HONESTY-001 — the pull twin of the engine's
+        ``SweepProgressSnapshot.combos_per_sec``. Measured from the phase baseline
+        (:attr:`phase_base_completed` at :attr:`phase_started_at`), so it reflects only
+        the CURRENT phase's marginal progress. ``0.0`` until at least one unit has
+        completed past the baseline over a positive elapsed span (avoids a
+        divide-by-zero and never fabricates a rate from a cross-run count jump).
+        """
+        progressed = self.completed - self.phase_base_completed
+        span = self.updated_at - self.phase_started_at
+        if span <= 0.0 or progressed <= 0:
+            return 0.0
+        return progressed / span
+
+    @property
+    def eta_seconds(self) -> float | None:
+        """Linear-extrapolation ETA to completion, in seconds — or an honest ``None``.
+
+        DEC-PULL-PROGRESS-HONESTY-001, ported from the engine's
+        ``SweepProgressSnapshot.eta_seconds``. ``None`` when it cannot be estimated
+        (idle / settled, no measured rate, no known total) — AND, the mandatory
+        honesty amendment, whenever the run is :attr:`open_ended` (a grow-total /
+        growing-denominator phase): a linear ETA over a growing denominator is an
+        illusion, so none is shown. Honest envelope: an extrapolation from the
+        CURRENT phase rate, not a guarantee.
+        """
+        if self.state != STATE_RUNNING or self.open_ended or self.total <= 0:
+            return None
+        rate = self.units_per_sec
+        if rate <= 0.0:
+            return None
+        remaining = self.total - self.completed
+        if remaining <= 0:
+            return 0.0
+        return remaining / rate
 
     @property
     def running(self) -> bool:
@@ -139,6 +208,12 @@ class ProgressSnapshot:
             # The operator-facing verdict alias (DEC-PULL-WEDGE-ESCALATE-001): a wedged
             # run requires a process restart to release the single-flight + the worker.
             "restart_required": self.wedged,
+            # DEC-PULL-PROGRESS-HONESTY-001 — ADDITIVE keys only (the integration
+            # suite pins that no existing flat key is ever dropped).
+            "started_at": self.started_at,
+            "units_per_sec": self.units_per_sec,
+            "eta_seconds": self.eta_seconds,
+            "open_ended": self.open_ended,
         }
 
 
@@ -176,6 +251,15 @@ class PullProgress:
         self._stall_detail = ""
         self._wedged = False
         self._wedge_detail = ""
+        # ETA state (DEC-PULL-PROGRESS-HONESTY-001): the run anchor + the PHASE-scoped
+        # rate baseline. ``_baseline_pending`` defers the baseline stamp to the FIRST
+        # counter mutation after start()/set_phase(), so a ledger sync that opens on
+        # cross-run absolute counts never fabricates an instant burst rate.
+        self._started_at = 0.0
+        self._phase_started_at = 0.0
+        self._phase_base_completed = 0
+        self._baseline_pending = False
+        self._open_ended = False
 
     def start(self, *, total: int, detail: str = "") -> None:
         """Begin a job of *total* units — resets all counters to ``running``.
@@ -199,6 +283,31 @@ class PullProgress:
             self._wedged = False
             self._wedge_detail = ""
             self._updated_at = self._clock()
+            now = self._clock()
+            # A fresh run re-anchors the ETA clock + clears the sticky open-ended
+            # marker (DEC-PULL-PROGRESS-HONESTY-001) — the ONLY place that clears it.
+            self._started_at = now
+            self._phase_started_at = now
+            self._phase_base_completed = 0
+            self._baseline_pending = True
+            self._open_ended = False
+            self._updated_at = now
+
+    def _stamp_baseline_locked(self, now: float) -> None:
+        """Stamp the phase rate baseline on the FIRST counter mutation (caller holds the lock).
+
+        DEC-PULL-PROGRESS-HONESTY-001: after :meth:`start` / :meth:`set_phase` the
+        baseline is PENDING; the first :meth:`advance` / :meth:`sync` that lands stamps
+        ``phase_base_completed`` at its OWN post-mutation count and ``phase_started_at``
+        at its own instant. The rate therefore measures from the first observed count
+        ONWARD — a ledger sync that opens on cross-run absolute counts (e.g. 3,000
+        previously settled windows) contributes ZERO to the measured rate instead of an
+        absurd instantaneous burst. O(1).
+        """
+        if self._baseline_pending:
+            self._phase_base_completed = self._completed
+            self._phase_started_at = now
+            self._baseline_pending = False
 
     def advance(
         self,
@@ -224,13 +333,18 @@ class PullProgress:
         the job layer (the pipeline's F&O historical fill), so the units + bars
         tallies keep MOVING instead of freezing at the prior phase's counts.
         Honest: the displayed total is then "units processed so far", not a
-        known denominator (percent reads 100 — no worse than the frozen 45/45
-        it replaces, and the bars/failed tallies are now real).
+        known denominator — and the snapshot is marked :attr:`ProgressSnapshot.open_ended`
+        (DEC-PULL-PROGRESS-HONESTY-001) so the frontend renders "N units · total
+        unknown" instead of the pinned-100% illusion, and ``eta_seconds`` reads
+        ``None`` (a linear ETA over a growing denominator is meaningless).
         """
         with self._lock:
             if grow_total:
                 self._completed += 1
                 self._total = max(self._total, self._completed)
+                # A grow-total consumer is BY DEFINITION open-ended — mark it so the
+                # display never reads the pinned completed/total == 100% as real.
+                self._open_ended = True
             else:
                 self._completed = min(self._total, self._completed + 1)
             self._bars += max(0, bars)
@@ -240,7 +354,9 @@ class PullProgress:
                 self._gaps += 1
             if current:
                 self._current = current
-            self._updated_at = self._clock()
+            now = self._clock()
+            self._updated_at = now
+            self._stamp_baseline_locked(now)
 
     def sync(
         self, *, completed: int, total: int, bars: int | None, failed: int = 0, current: str = ""
@@ -271,6 +387,31 @@ class PullProgress:
             self._failed = max(0, failed)
             if current:
                 self._current = current
+            now = self._clock()
+            self._updated_at = now
+            self._stamp_baseline_locked(now)
+
+    def add_bars(self, delta: int) -> None:
+        """Fold a bars DELTA into the running tally — O(1), thread-safe.
+
+        DEC-PULL-PROGRESS-HONESTY-001 (the frozen-bars fix): the async F&O fetch
+        pipeline's background consumer folds each window's REAL appended-bar count
+        via :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.fold_totals`
+        while the producer-side per-pair hook honestly reports ``bars == 0`` — so the
+        headline bars counter froze at the spot phase's count for the whole F&O
+        phase. This is the O(1) live sink for those deltas: each folded window
+        contributes its delta exactly once (the no-double-count invariant — the
+        sync-mode path adds the per-pair report bars instead, and an async per-pair
+        report is 0). Counts bars PROCESSED (the sink-append input count, the same
+        semantics as the per-pair ``bars_appended`` it replaces), not net-new lake
+        rows. A non-positive *delta* is a no-op tally-wise; a late delta landing
+        after the run settled is DROPPED (never mutates a settled snapshot). Does
+        NOT touch the unit counters or the ETA baseline (bars are not units).
+        """
+        with self._lock:
+            if self._state != STATE_RUNNING:
+                return
+            self._bars += max(0, delta)
             self._updated_at = self._clock()
 
     def set_current(self, current: str) -> None:
@@ -288,7 +429,7 @@ class PullProgress:
             self._current = current
             self._updated_at = self._clock()
 
-    def set_phase(self, phase: str) -> None:
+    def set_phase(self, phase: str, *, open_ended: bool = False) -> None:
         """Set the COARSE pipeline phase currently in flight — O(1).
 
         DEC-UNIVERSE-PER-PHASE-PROGRESS-001. The one-click pipeline's ``_work`` calls
@@ -297,9 +438,23 @@ class PullProgress:
         label — no counter is keyed by it (the per-segment window tallies come from the
         ledger counts), so a stale / empty phase can never fabricate progress. An empty
         string is honoured (it clears the label back to "no phase in flight").
+
+        A phase transition also RE-ARMS the ETA rate baseline
+        (DEC-PULL-PROGRESS-HONESTY-001): the next counter mutation stamps a fresh
+        phase baseline, so one phase's throughput never pollutes the next phase's ETA.
+
+        *open_ended* declares the ENTERING phase's unit total NON-FINAL (the F&O
+        historical phase — its ledger denominator grows as contracts are planned
+        mid-phase). It is STICKY: ``open_ended=True`` sets the marker, but the
+        default ``False`` NEVER clears one already set — a later
+        ``set_phase("prebuild")`` / ``set_phase("movers")`` keeps the honest
+        "total unknown" display (the pinned invariant); only :meth:`start` clears it.
         """
         with self._lock:
             self._phase = phase
+            self._baseline_pending = True
+            if open_ended:
+                self._open_ended = True
             self._updated_at = self._clock()
 
     def mark_stalled(self, detail: str) -> None:
@@ -400,6 +555,10 @@ class PullProgress:
                 stall_detail=self._stall_detail,
                 wedged=self._wedged,
                 wedge_detail=self._wedge_detail,
+                started_at=self._started_at,
+                phase_started_at=self._phase_started_at,
+                phase_base_completed=self._phase_base_completed,
+                open_ended=self._open_ended,
             )
 
 

@@ -173,8 +173,16 @@ def test_to_dict_shape() -> None:
         "wedged": False,
         "wedge_detail": "",
         "restart_required": False,
+        # DEC-PULL-PROGRESS-HONESTY-001 — ADDITIVE ETA / open-ended keys: the FIRST
+        # counter mutation only STAMPS the phase rate baseline (no measured rate
+        # yet), so units_per_sec is an honest 0.0 and eta_seconds an honest None.
+        "started_at": d["started_at"],
+        "units_per_sec": 0.0,
+        "eta_seconds": None,
+        "open_ended": False,
     }
     assert isinstance(d["updated_at"], float)
+    assert isinstance(d["started_at"], float)
 
 
 def test_advance_counts_no_data_gaps_separately_from_failures() -> None:

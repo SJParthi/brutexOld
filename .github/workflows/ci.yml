@@ -682,9 +682,11 @@ jobs:
             pytest --cov=brutex.data.greeks_enrich --cov=brutex.data.spot_join --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_greeks_enrich.py tests/unit/test_data_spot_join.py \
               tests/unit/test_greeks_enrich_audit_regressions.py \
+              tests/unit/test_greeks_enrich_parallel.py \
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
-              tests/golden/test_greeks_enrich_golden.py
+              tests/golden/test_greeks_enrich_golden.py \
+              tests/golden/test_greeks_enrich_parallel_golden.py
           else
             echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
           fi
@@ -1489,6 +1491,15 @@ jobs:
           else
             echo "(brutex.adapters.groww.live test file not present yet — gate inactive)"
           fi
+          # DEC-VENDOR-FLOOR-LAZY-PROBE-001: strict gate on the lazy vendor-depth-floor
+          # learner (probe_depth reuse + mass-empty-breaker gate + schema_meta persist +
+          # pre-floor mass-settle + planning clamp). Injectable probe/store/ledger
+          # fakes, so standalone-gateable with no growwapi/network. 100% line+branch.
+          if compgen -G "tests/unit/test_groww_vendor_floor.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.vendor_floor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_vendor_floor.py
+          else
+            echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
+          fi
           # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
           # modules + the shared candle-field rules. Import-light (pure data /
           # parser over brutex.data.models), so standalone-gateable.
@@ -1722,7 +1733,8 @@ jobs:
             echo "(brutex.dashboard.universe_pull test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_pull_progress.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py
+            # + the ETA/open-ended/add_bars honesty suite (DEC-PULL-PROGRESS-HONESTY-001)
+            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
@@ -1763,6 +1775,7 @@ jobs:
               tests/unit/test_pull_jobs.py \
               tests/unit/test_pull_jobs_singleflight.py \
               tests/unit/test_pull_jobs_wedge.py \
+              tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
               tests/integration/test_dashboard_e2e.py

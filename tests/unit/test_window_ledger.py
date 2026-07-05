@@ -1206,6 +1206,48 @@ class TestProgressCounts:
         second = ledger.progress_counts()
         assert first == second  # absolute fold — re-polling never inflates the counts
 
+    def test_market_and_interval_filters_scope_the_fold(self) -> None:
+        # DEC-PULL-PROGRESS-HONESTY-001: the ledger is CROSS-RUN and CROSS-MARKET,
+        # so the F&O phase's live fold must scope to its own markets × interval —
+        # otherwise the spot windows pollute its denominator (fails-before: the
+        # unfiltered fold below reads total=3). None defaults stay byte-identical.
+        ledger = WindowLedger()
+        spot = WindowKey(
+            market="groww",
+            security_id="NIFTY",
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        option = WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-25Jan24-21000-CE",
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        option_daily = WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-25Jan24-21000-CE",
+            interval="1day",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        ledger.record(spot, raw_bars=999, error_type=None, bars_appended=999, now=_NOW)
+        ledger.record(option, raw_bars=42, error_type=None, bars_appended=42, now=_LATER)
+        ledger.record(option_daily, raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        assert ledger.progress_counts().total == 3  # unfiltered — everything
+        assert ledger.progress_counts(markets=None, intervals=None).total == 3
+        scoped = ledger.progress_counts(
+            markets=frozenset({"groww-option", "groww-future"}), intervals=("1minute",)
+        )
+        assert scoped.total == 1
+        assert scoped.bars == 42  # never the spot 999 nor the 1day 7
+        assert scoped.current == f"{option.security_id} 1minute"
+        # A filter matching nothing folds honestly to all-zero.
+        nothing = ledger.progress_counts(markets=frozenset({"no-such-market"}))
+        assert (nothing.total, nothing.bars, nothing.current) == (0, 0, "")
+
 
 class TestStreakTotal:
     """`streak_total` — the O(N) summed empty_streak fold (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001)."""
@@ -1524,6 +1566,155 @@ class TestRescueLedgerSurface:
         ledger.record(planned, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
         assert ledger.prune_superseded(_plan_index(planned)) == 0
         assert ledger.pruned_keys() == frozenset()
+
+
+class TestDirtyTracking:
+    """DEC-LEDGER-DELTA-FLUSH-001 — the O(1)-per-mutation dirty-key stamps."""
+
+    @staticmethod
+    def _wk(key: WindowKey) -> tuple[str, str, str, str, str]:
+        return (
+            key.market,
+            key.security_id,
+            key.interval,
+            key.start.isoformat(),
+            key.end.isoformat(),
+        )
+
+    def test_fresh_and_restored_ledgers_start_clean(self) -> None:
+        assert WindowLedger().dirty_rows() == []
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.dirty_rows() == []  # a load stamps nothing dirty
+
+    def test_every_row_writing_mutator_stamps(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key("A"), now=_NOW)
+        ledger.seed_lake_success(_key("B"), bars=5, now=_NOW)
+        ledger.record(_key("C"), raw_bars=2, error_type=None, bars_appended=2, now=_NOW)
+        ledger.settle_known_gap(_key("D"), now=_NOW, reason="DH-905")
+        assert {row[1] for row in ledger.dirty_rows()} == {"A", "B", "C", "D"}
+        # An idempotent re-plan of an existing key adds nothing new.
+        ledger.clear_dirty(ledger.dirty_keys())
+        ledger.plan(_key("A"), now=_LATER)
+        assert ledger.dirty_rows() == []
+
+    def test_reopen_demotion_stamps_dirty(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, settle_empty=True
+        )
+        ledger.clear_dirty(ledger.dirty_keys())
+        assert ledger.reopen_skipped() == 1
+        rows = ledger.dirty_rows()
+        assert len(rows) == 1 and rows[0][5] == FAILED and rows[0][8] == REOPENED_MARKER
+
+    def test_dirty_rows_sorted_and_skip_deleted_keys(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("ZEE"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        ledger.record(_key("ACME"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert [row[1] for row in ledger.dirty_rows()] == ["ACME", "ZEE"]  # key order
+        # A dirty key whose row was pruned meanwhile is silently skipped (a
+        # delta cannot express a deletion — the pull-end save owns prunes).
+        with ledger._lock:  # test-only surgical delete
+            del ledger._by_window[self._wk(_key("ACME"))]
+        assert [row[1] for row in ledger.dirty_rows()] == ["ZEE"]
+
+    def test_clear_dirty_clears_exactly_the_given_keys(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("A"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        ledger.record(_key("B"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        ledger.clear_dirty([self._wk(_key("A"))])
+        assert [row[1] for row in ledger.dirty_rows()] == ["B"]
+        assert ledger.dirty_keys() == frozenset({self._wk(_key("B"))})
+
+
+class TestAuditReopenSkipped:
+    """DEC-SKIPPED-AUDIT-ROUNDROBIN-001 — the mechanized ≤cap round-robin re-open."""
+
+    @staticmethod
+    def _skipped_ledger(symbols: list[str]) -> WindowLedger:
+        ledger = WindowLedger()
+        for symbol in symbols:
+            ledger.record(
+                _key(symbol),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                settle_empty=True,
+            )
+        return ledger
+
+    def test_default_cap_is_the_documented_25(self) -> None:
+        from brutex.data.window_ledger import SKIPPED_AUDIT_PER_PULL
+
+        assert SKIPPED_AUDIT_PER_PULL == 25
+
+    def test_head_selection_without_a_cursor(self) -> None:
+        ledger = self._skipped_ledger(["A", "B", "C", "D"])
+        count, cursor = ledger.audit_reopen_skipped(start_after=None, cap=2)
+        assert count == 2
+        assert cursor is not None and cursor[1] == "B"  # last selected in sort order
+        statuses = {r.security_id: r.status for r in ledger.records()}
+        assert statuses == {"A": FAILED, "B": FAILED, "C": SKIPPED, "D": SKIPPED}
+        # The demotion is the SAME body as the operator re-open: marker stamped,
+        # streak reset, merge tombstones + dirty stamps recorded.
+        demoted = [r for r in ledger.records() if r.status == FAILED]
+        assert all(r.last_error == REOPENED_MARKER and r.empty_streak == 0 for r in demoted)
+        assert len(ledger.reopened_keys()) == 2
+
+    def test_round_robin_advances_then_wraps(self) -> None:
+        ledger = self._skipped_ledger(["A", "B", "C"])
+        _count, cursor = ledger.audit_reopen_skipped(start_after=None, cap=2)  # A, B
+        # Model the NEXT pull: a fresh ledger with the same skipped population.
+        nxt = self._skipped_ledger(["A", "B", "C"])
+        count, cursor2 = nxt.audit_reopen_skipped(start_after=cursor, cap=2)
+        assert count == 2
+        statuses = {r.security_id: r.status for r in nxt.records()}
+        # C (after the cursor) then WRAP to A — never the same head prefix twice.
+        assert statuses == {"A": FAILED, "B": SKIPPED, "C": FAILED}
+        assert cursor2 is not None and cursor2[1] == "A"  # last in rotation order
+
+    def test_tail_fills_cap_exactly_without_wrapping(self) -> None:
+        # Branch pin (DEC-SKIPPED-AUDIT-ROUNDROBIN-001): when the strictly-after
+        # tail alone satisfies the cap, the wrap-to-head block is SKIPPED — no
+        # head row is re-selected and the cursor advances within the tail.
+        ledger = self._skipped_ledger(["A", "B", "C", "D"])
+        _count, cursor = ledger.audit_reopen_skipped(start_after=None, cap=1)
+        assert cursor is not None and cursor[1] == "A"
+        # Model the NEXT pull: a fresh ledger with the same skipped population.
+        nxt = self._skipped_ledger(["A", "B", "C", "D"])
+        count, cursor2 = nxt.audit_reopen_skipped(start_after=cursor, cap=2)
+        assert count == 2
+        statuses = {r.security_id: r.status for r in nxt.records()}
+        # Tail [B, C, D] fills cap=2 with [B, C] — A (head) and D untouched.
+        assert statuses == {"A": SKIPPED, "B": FAILED, "C": FAILED, "D": SKIPPED}
+        assert cursor2 is not None and cursor2[1] == "C"
+
+    def test_cursor_past_the_tail_wraps_to_head(self) -> None:
+        ledger = self._skipped_ledger(["A", "B"])
+        _c, tail_cursor = ledger.audit_reopen_skipped(start_after=None, cap=2)
+        assert tail_cursor is not None and tail_cursor[1] == "B"
+        nxt = self._skipped_ledger(["A", "B"])
+        count, cursor = nxt.audit_reopen_skipped(start_after=tail_cursor, cap=1)
+        assert count == 1
+        assert {r.security_id for r in nxt.records() if r.status == FAILED} == {"A"}
+        assert cursor is not None and cursor[1] == "A"
+
+    def test_no_skipped_rows_or_nonpositive_cap_is_a_noop(self) -> None:
+        empty = WindowLedger()
+        assert empty.audit_reopen_skipped(start_after=None, cap=5) == (0, None)
+        ledger = self._skipped_ledger(["A"])
+        assert ledger.audit_reopen_skipped(start_after=None, cap=0) == (0, None)
+        assert ledger.records()[0].status == SKIPPED  # untouched
+
+    def test_reopened_rows_are_breaker_exempt_rechecks(self) -> None:
+        ledger = self._skipped_ledger(["A"])
+        ledger.audit_reopen_skipped(start_after=None, cap=1)
+        assert ledger.is_expected_empty_recheck(_key("A")) is True  # REOPENED marker
+        assert ledger.is_skippable(_key("A")) is False  # the next pull re-fetches
 
 
 class TestBarsNetNew:

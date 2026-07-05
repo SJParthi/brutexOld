@@ -201,7 +201,9 @@ def is_pull_halt(exc: BaseException) -> bool:
     via :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` so the RETRYABLE
     auth-family subclasses NEVER read as a halt / DEC-VENDOR-DOWN-BREAKER-001 — the
     vendor-down error-storm + dead-credential stops, ``GrowwCredentialDeadError`` being
-    the TERMINAL auth escalation the predicate also matches). The error classes are
+    the TERMINAL auth escalation the predicate also matches / the Greeks-enrichment
+    pool-broken halt ``GreeksEnrichPoolBroken`` — a worker process died abruptly,
+    DEC-GREEKS-PARALLEL-001). The error classes are
     imported INSIDE the call — not at module top — so
     :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
     part of the heavy PyO3 chain), and this check only runs on the rare
@@ -218,7 +220,7 @@ def is_pull_halt(exc: BaseException) -> bool:
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import is_terminal_auth_failure
-    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     return isinstance(
@@ -229,6 +231,10 @@ def is_pull_halt(exc: BaseException) -> bool:
             QuotaInvariantError,
             MassEmptySettleHalt,
             VendorDownError,
+            # DEC-GREEKS-PARALLEL-001: a Greeks pool worker died abruptly —
+            # a HOST-resource condition (OOM SIGKILL / crash, honestly not
+            # distinguishable), alerted like a LakeWriteHalt.
+            GreeksEnrichPoolBroken,
         ),
     ) or is_terminal_auth_failure(exc)
 
@@ -918,7 +924,9 @@ class BackgroundPullJob:
         """The incremental coverage counters fed by the write funnel — O(1)."""
         return self._counters
 
-    def set_phase(self, phase: str, *, pair_progress: bool = False) -> None:
+    def set_phase(
+        self, phase: str, *, pair_progress: bool = False, open_ended: bool = False
+    ) -> None:
         """Set the COARSE pipeline phase currently in flight — O(1) passthrough.
 
         DEC-UNIVERSE-PER-PHASE-PROGRESS-001. The one-click pipeline's ``_work`` calls
@@ -929,12 +937,44 @@ class BackgroundPullJob:
 
         *pair_progress* (DEC-PIPELINE-STALL-HEARTBEAT-001, the frozen-counter fix):
         ``True`` declares the ENTERING phase has NO ledger-sync driver, so the per-pair
-        hook advances the counters open-endedly even on a ``ledger_synced`` run (the
-        pipeline's F&O historical phase). Default ``False`` keeps every other phase /
-        caller byte-identical (the ledger sync stays authoritative).
+        hook advances the counters open-endedly even on a ``ledger_synced`` run. Default
+        ``False`` keeps every other phase / caller byte-identical (the ledger sync stays
+        authoritative). The pipeline's F&O historical phase NO LONGER uses it
+        (DEC-PULL-PROGRESS-HONESTY-001 — it now drives absolute market-filtered ledger
+        counts through :meth:`sync_from_ledger` and declares itself *open_ended*
+        instead of pinning percent at 100); the mechanism stays for any phase that
+        genuinely has no ledger at all.
+
+        *open_ended* (DEC-PULL-PROGRESS-HONESTY-001): forwarded to
+        :meth:`~brutex.dashboard.pull_progress.PullProgress.set_phase` — ``True``
+        declares the entering phase's unit total NON-FINAL (the F&O historical
+        phase's ledger denominator grows as contracts are planned mid-phase), so the
+        frontend shows "N units · total unknown" and ETA is suppressed. STICKY:
+        the default ``False`` never clears a marker an earlier phase set.
         """
         self._pair_progress = pair_progress
-        self._progress.set_phase(phase)
+        self._progress.set_phase(phase, open_ended=open_ended)
+
+    def add_bars(self, delta: int) -> None:
+        """Fold a live bars DELTA into the progress tally — O(1), thread-safe.
+
+        DEC-PULL-PROGRESS-HONESTY-001 (the frozen-bars fix): the async F&O fetch
+        pipeline invokes this (via its ``on_bars`` seam) once per background-folded
+        window with the window's REAL appended-bar count — the producer-side per-pair
+        hook honestly reports 0 bars in async mode, so without this the headline bars
+        counter froze at the spot phase's count while millions of option bars
+        streamed in. Delegates to the O(1)
+        :meth:`~brutex.dashboard.pull_progress.PullProgress.add_bars` (each folded
+        window contributes its delta exactly once — the no-double-count invariant),
+        marks any wired summary cache dirty (a durable window landed — the same
+        funnel contract as :meth:`_on_progress`), and beats the stall watchdog
+        (bars landing IS real progress, so a long single-pair stream never
+        false-trips the hung detector).
+        """
+        self._progress.add_bars(delta)
+        if self._summary_cache is not None:
+            self._summary_cache.mark_dirty()
+        self._beat()
 
     def snapshot(self) -> ProgressSnapshot:
         """Return the current O(1) progress snapshot for the polling route."""
