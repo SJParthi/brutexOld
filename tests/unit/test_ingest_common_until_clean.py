@@ -25,6 +25,7 @@ from brutex.adapters.ingest_common import (
     decide_until_clean,
     run_until_clean,
 )
+from structlog.typing import EventDict
 
 
 def _scripted_runner(
@@ -575,7 +576,7 @@ def test_run_until_clean_outstanding_runs_to_budget_when_not_stuck_opted_in() ->
 # ── until_clean.round / until_clean.done observability (DEC-PULL-TELEMETRY-TRIAD-001) ──
 
 
-def _until_clean_events(logs: list[dict[str, object]], event: str) -> list[dict[str, object]]:
+def _until_clean_events(logs: list[EventDict], event: str) -> list[EventDict]:
     """The captured structlog events named *event*."""
     return [e for e in logs if e["event"] == event]
 

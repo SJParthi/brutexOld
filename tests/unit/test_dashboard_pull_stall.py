@@ -36,6 +36,7 @@ from brutex.dashboard.pull_stall import (
     resolve_stall_timeout_seconds,
 )
 from brutex.observability.watchdog import WorkerEvent, WorkerState
+from structlog.typing import EventDict
 
 
 class _FakeClock:
@@ -728,7 +729,7 @@ class TestWatchdogAliveBeat:
     """One throttled INFO per check interval, derived from the EXISTING cadence."""
 
     @staticmethod
-    def _alive(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    def _alive(logs: list[EventDict]) -> list[EventDict]:
         return [e for e in logs if e["event"] == "pull_stall.watchdog_alive"]
 
     def test_first_check_logs_then_throttles_within_interval(self) -> None:
