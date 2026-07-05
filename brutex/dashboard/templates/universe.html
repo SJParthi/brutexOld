@@ -555,23 +555,23 @@
   </div>
 
   <div class="pullbar" role="toolbar" aria-label="Pull controls">
-    <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above. The spot from/to dates below scope the SPOT history phase (blank ⇒ 2020-01-01 → previous trading day); F&amp;O keeps its per-contract default lookback.</div>
+    <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above. The from/to dates below scope the SPOT history phase AND select which F&amp;O expiries are pulled (each in-scope contract keeps its per-contract default window). Left at the defaults (or blank) the pull covers EVERYTHING — 2020-01-01 → previous trading day for spot, ALL expiries including live/unexpired contracts for F&amp;O.</div>
     <div class="pull-row">
-      <!-- The from/to date-range picker is RE-ADDED + properly wired
-           (DEC-UNIVERSE-PULL-DATERANGE-001), resolving the honesty concern of
-           DEC-UNIVERSE-PULL-CONSOLIDATE-001 (which removed an inert picker the
-           route ignored). The ▶ Pull · full pipeline onclick now appends
-           &from_date=/&to_date= ONLY when non-blank; blank ⇒ the canonical
-           default [2020-01-01, previous trading day]. The range scopes the SPOT
-           history phase ONLY — F&O keeps its per-contract default lookback
-           (over-pull safety: a wide explicit range over the whole options chain
-           would pull far too much). The inputs pre-fill from
-           __BRUTEX_DATE_FROM__/__BRUTEX_DATE_TO__ (default_date_range); the To
-           ceiling is today (__BRUTEX_DATE_MAX__). -->
-      <div class="daterange" role="group" aria-label="Spot history date range" id="pipeRange">
-        <label title="Inclusive start date for the SPOT history pull — defaults to 2020-01-01 (Track 1 history floor); clear to fall back to it.">spot&nbsp;from <input type="date" id="pipeFrom" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
+      <!-- The from/to date-range picker (DEC-UNIVERSE-PULL-DATERANGE-001) scopes
+           the SPOT history phase AND selects which F&O expiries are pulled
+           (DEC-FNO-EXPIRY-SCOPE-001 — the window law per contract is untouched).
+           DEC-EXPIRY-SCOPE-LIVE-EDGE-001: the inputs pre-fill from
+           __BRUTEX_DATE_FROM__/__BRUTEX_DATE_TO__ (default_date_range) and carry
+           the SAME value in data-default; pipelineDateQuery() OMITS a param whose
+           value still equals its stamped default, so an untouched picker behaves
+           exactly like a blank one — the default one-click pull stays UNBOUNDED
+           (live/unexpired expiries included). The backend normalizer
+           (normalize_expiry_scope) is authoritative regardless of what the
+           frontend sends. The To ceiling is today (__BRUTEX_DATE_MAX__). -->
+      <div class="daterange" role="group" aria-label="Pull date range (spot history + F&amp;O expiry scope)" id="pipeRange">
+        <label title="Inclusive start date — scopes the SPOT history pull AND the F&amp;O expiry selection. At the default 2020-01-01 (Track 1 history floor) or blank, the lower bound is unbounded.">from <input type="date" id="pipeFrom" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" data-default="__BRUTEX_DATE_FROM__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
         <span class="dr-sep" aria-hidden="true">→</span>
-        <label title="Inclusive end date for the SPOT history pull — defaults to the previous trading day (pick today to include it). F&amp;O is unaffected (per-contract default lookback).">to <input type="date" id="pipeTo" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
+        <label title="Inclusive end date — scopes the SPOT history pull AND the F&amp;O expiry selection. At the default previous trading day (or later, or blank) F&amp;O stays unbounded above: live/unexpired expiries ARE pulled. Pick an EARLIER date to exclude later expiries.">to <input type="date" id="pipeTo" min="2020-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" data-default="__BRUTEX_DATE_TO__" style="background:transparent; color:var(--text); border:none; padding:4px 2px; font:inherit; color-scheme:dark;"></label>
       </div>
       <!-- The static "granularity · 1-minute (1-day derived)" chip is REMOVED
            (DEC-UNIVERSE-UI-POLISH-002): 1-minute is the ONLY granularity
@@ -668,6 +668,18 @@
     <a href="/api/v1/universe/economics-integrity.csv" download
        title="Download the lot_size-per-(underlying,expiry) economics audit as a CSV"
        style="margin-left:10px;color:var(--blue);text-decoration:none;font-size:12px;">⤓ CSV</a>
+  </div>
+
+  <!-- Master parse skips (DEC-PARSE-SKIP-REPORT-001): the malformed in-scope rows the
+       parser skipped-and-counted (DEC-INSTRUMENT-SKIP-NO-GSYM-001). GREEN when the skip
+       count is within max(10, 0.1% of in-scope rows); RED past it (vendor master rot).
+       Reads the schema_meta snapshot the master load persisted. -->
+  <div id="skippanel" role="status" aria-live="polite"
+       style="display:none;margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Master parse skips</b>
+    <span id="skipverdict" style="font-weight:600;"></span>
+    <span id="skipdetail" style="color:var(--muted);"></span>
   </div>
 
   <!-- Lake uniqueness (DEC-LAKE-HEAL-001): the duplicate-census verdict from the ONE
@@ -985,6 +997,22 @@ function spotSeg(label, dim) {
   return '<span class="seg"><span class="k">' + label + '</span> <span class="' + cls + '">'
     + span + " " + flag + "</span></span>";
 }
+/* Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
+   "open subst N/M" — N of the symbol's M stored 1-minute sessions have their FIRST
+   present minute after the 09:15 IST canonical open, so those sessions' DERIVED
+   1-day open is the earliest-present-minute substitute, not the canonical open
+   price. INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
+   Both operands are coerced via Number() BEFORE interpolation so the fragment can
+   only ever carry digits/NaN, never markup (XSS guard). */
+function openSubSeg(dim) {
+  const n = Number((dim && dim.open_substituted_days) || 0);
+  const m = Number((dim && dim.session_days) || 0);
+  if (!(n > 0)) {
+    return '<span class="seg"><span class="k">open subst</span> <span class="dim">—</span></span>';
+  }
+  return '<span class="seg"><span class="k">open subst</span> <span class="warn">'
+    + n + "/" + m + "</span></span>";
+}
 function optSeg(opt) {
   if (!opt || opt.status === "none") {
     return '<span class="seg"><span class="k">opt</span> <span class="dim">—</span></span>';
@@ -1001,9 +1029,10 @@ function covStrip(i) {
   if (!c) return '<div class="cov"><span class="dim">completeness: not pulled yet</span></div>';
   const s = c.spot || {};
   // 1-minute is the SINGLE fetched granularity (1-day is DERIVED from it,
-  // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — only the 1-minute segment is shown.
+  // DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — only the 1-minute segment is shown,
+  // plus its daily-open substitution tally (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
   return '<div class="cov">'
-    + spotSeg("1m", s["1minute"]) + optSeg(c.options)
+    + spotSeg("1m", s["1minute"]) + openSubSeg(s["1minute"]) + optSeg(c.options)
     + "</div>";
 }
 
@@ -1109,6 +1138,37 @@ async function loadEconomicsIntegrity() {
       verdict.style.color = "#f87171";
       detail.textContent = " · " + (m.underlyings_with_lot_revisions || 0) +
         " cross-expiry revisions (informational)";
+    }
+  } catch (e) { /* transient — keep the last shown verdict */ }
+}
+
+async function loadParseSkips() {
+  /* Read-only: the green/red master parse-skip verdict (DEC-PARSE-SKIP-REPORT-001).
+     GREEN when the skipped-and-counted malformed in-scope rows
+     (DEC-INSTRUMENT-SKIP-NO-GSYM-001) are within max(10, 0.1% of in-scope rows);
+     RED past it — genuine vendor master rot. Shows the count + capped sample
+     reasons. Built with textContent ONLY (the universe.html CodeQL XSS guard).
+     Never throws — keeps the last shown verdict on a transient fetch error. */
+  try {
+    const r = await fetch("/api/v1/universe/parse-skips");
+    if (!r.ok) return;
+    const m = await r.json();
+    const panel = document.getElementById("skippanel");
+    const verdict = document.getElementById("skipverdict");
+    const detail = document.getElementById("skipdetail");
+    if (!panel || !m.present) return;
+    panel.style.display = "block";
+    const denom = " of " + (m.in_scope_rows || 0) + " in-scope rows (threshold " +
+      (m.threshold || 0) + ")";
+    if (m.is_green) {
+      verdict.textContent = " ✅ VERIFIED";
+      verdict.style.color = "#4ade80";
+      detail.textContent = " · " + (m.skipped_count || 0) + " skipped" + denom;
+    } else {
+      verdict.textContent = " ❌ " + m.skipped_count + " malformed row(s) skipped";
+      verdict.style.color = "#f87171";
+      const samples = (m.samples || []).slice(0, 3).join(" | ");
+      detail.textContent = denom + (samples ? (" · e.g. " + samples) : "");
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1360,17 +1420,23 @@ function pipelineSelection() {
   if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
   return [];
 }
-// Read the spot from/to pickers (DEC-UNIVERSE-PULL-DATERANGE-001) and append
-// &from_date=/&to_date= ONLY when non-blank, so a blank picker yields the bare
-// route → the server resolves the canonical default [2020-01-01, prev-day]
-// (byte-identical to the pre-picker behaviour). The range scopes the SPOT
-// history + metadata-year grid only; F&O keeps its per-contract default lookback.
+// Read the from/to pickers (DEC-UNIVERSE-PULL-DATERANGE-001) and append
+// &from_date=/&to_date= ONLY when non-blank AND actually CHANGED from the
+// stamped data-default (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): an untouched
+// pre-filled picker behaves exactly like a blank one, so the default one-click
+// pull threads NO dates → the server keeps the F&O expiry scope UNBOUNDED
+// (live/unexpired contracts included) and the spot phase resolves its own
+// canonical [2020-01-01, prev-day] default. A date the operator changed IS
+// sent and scopes the spot window + the F&O expiry selection. The backend
+// normalize_expiry_scope() is authoritative either way.
 function pipelineDateQuery() {
   const fromEl = document.getElementById("pipeFrom");
   const toEl = document.getElementById("pipeTo");
   let q = "";
-  if (fromEl && fromEl.value) q += "&from_date=" + encodeURIComponent(fromEl.value);
-  if (toEl && toEl.value) q += "&to_date=" + encodeURIComponent(toEl.value);
+  if (fromEl && fromEl.value && fromEl.value !== fromEl.dataset.default)
+    q += "&from_date=" + encodeURIComponent(fromEl.value);
+  if (toEl && toEl.value && toEl.value !== toEl.dataset.default)
+    q += "&to_date=" + encodeURIComponent(toEl.value);
   return q;
 }
 const PIPELINE_BTN = document.getElementById("pullPipelineBtn");
@@ -1947,6 +2013,8 @@ async function bootstrap() {
   setInterval(loadMasterIntegrity, 15000);
   loadEconomicsIntegrity();
   setInterval(loadEconomicsIntegrity, 15000);
+  loadParseSkips();
+  setInterval(loadParseSkips, 15000);
   loadLakeUniqueness();
   setInterval(loadLakeUniqueness, 15000);
 }

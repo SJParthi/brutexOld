@@ -148,6 +148,13 @@ DEFAULT_MAX_RESTARTS: Final[int] = 10
 #: after a SIGTERM before escalating to SIGKILL on an operator stop.
 DEFAULT_SHUTDOWN_GRACE_SECONDS: Final[float] = 10.0
 
+#: Default rolling window (seconds) over which abnormal-exit relaunches are
+#: counted for the best-effort crash-loop alert
+#: (DEC-SUPERVISOR-CRASHLOOP-ALERT-001): the count of relaunch timestamps
+#: within this window is handed to the injected alerter, which escalates to
+#: CRITICAL once the count reaches its crash-loop threshold.
+DEFAULT_ALERT_WINDOW_SECONDS: Final[float] = 600.0
+
 #: Default slice (seconds) for the INTERRUPTIBLE child wait: the supervisor polls
 #: ``child.wait_for(poll)`` in slices this long, re-checking the operator-stop
 #: predicate between slices so a SIGTERM arriving while the child is alive is
@@ -218,6 +225,45 @@ StopRequested = Callable[[], bool]
 def _never_stop() -> bool:
     """Default :data:`StopRequested` — the operator never asks to stop."""
     return False
+
+
+class RelaunchAlerter(Protocol):
+    """Structural type for the operator-alert sink the relaunch + give-up branches fire.
+
+    Matched by :class:`brutex.notifications.sweep_alerts.SweepAlerter` (whose
+    :meth:`child_relaunched` decides the WARN-vs-CRITICAL severity from the
+    in-window *relaunch_count*, and whose :meth:`supervisor_gave_up` is the
+    terminal CRITICAL — the sweep is DOWN and nothing will relaunch it) and by
+    any test fake exposing the same two-method surface — so the supervisor
+    never imports the notifications package
+    (DEC-SUPERVISOR-CRASHLOOP-ALERT-001). Best-effort by contract: the
+    supervisor swallows + logs ANY exception the sink raises, so a buggy
+    alerter can never crash or block the relaunch loop or the give-up verdict.
+    """
+
+    def child_relaunched(
+        self,
+        *,
+        child: str,
+        exit_code: int,
+        signal: int | None,
+        relaunch_count: int,
+        detail: str,
+    ) -> bool:
+        """Emit one relaunch alert; return ``True`` iff a live notifier was attempted."""
+        raise NotImplementedError
+
+    def supervisor_gave_up(
+        self,
+        *,
+        child: str,
+        exit_code: int,
+        signal: int | None,
+        restarts: int,
+        max_restarts: int,
+    ) -> bool:
+        """Emit the terminal give-up alert; return ``True`` iff a live notifier was attempted."""
+        raise NotImplementedError
 
 
 class AuditSink(Protocol):
@@ -373,16 +419,30 @@ class ProcessSupervisor:
         predicate between slices. Must be ``> 0``.
     clock
         Monotonic-seconds source (default :func:`time.monotonic`) that times the
-        child's uptime.
+        child's uptime AND stamps the rolling relaunch-alert window — injected,
+        so alert-escalation tests are fully deterministic (no real time reads).
     sleeper
         The injected :data:`Sleeper` used to wait out a backoff (default
         :func:`time.sleep`). Tests inject a fake and never sleep.
+    alerter
+        Optional :class:`RelaunchAlerter` (DEC-SUPERVISOR-CRASHLOOP-ALERT-001).
+        When wired, EVERY abnormal-exit relaunch fires one best-effort
+        ``child_relaunched`` alert carrying the count of relaunches within the
+        rolling ``alert_window_seconds`` window — the alerter escalates to
+        CRITICAL at its crash-loop threshold. ``None`` (the default) is a
+        silent no-op and the relaunch behaviour is byte-unchanged.
+    alert_window_seconds
+        The rolling window (seconds) over which relaunch timestamps are
+        counted for the alert escalation. Must be ``> 0``.
 
     Notes
     -----
-    A buggy audit write is caught + logged and never crashes the supervisor
-    (Golden Rule #10). All non-audit state is O(1) — a single restart counter, a
-    consecutive-crash index, and the last observed exit code.
+    A buggy audit write OR a raising alerter is caught + logged and never
+    crashes the supervisor (Golden Rule #10). All non-audit state is O(1) in
+    the run length — a single restart counter, a consecutive-crash index, the
+    last observed exit code, and a relaunch-timestamp window PRUNED to the
+    rolling window on every relaunch (its size is bounded by the backoff-paced
+    relaunch rate within one window, never by total restarts).
     """
 
     launch: ChildLauncher
@@ -394,6 +454,9 @@ class ProcessSupervisor:
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
     clock: Clock = time.monotonic
     sleeper: Sleeper = time.sleep
+    alerter: RelaunchAlerter | None = None
+    alert_window_seconds: float = DEFAULT_ALERT_WINDOW_SECONDS
+    _relaunch_times: list[float] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.shutdown_grace_seconds <= 0:
@@ -404,6 +467,8 @@ class ProcessSupervisor:
             raise ValueError(
                 f"poll_interval_seconds must be > 0; got {self.poll_interval_seconds!r}"
             )
+        if self.alert_window_seconds <= 0:
+            raise ValueError(f"alert_window_seconds must be > 0; got {self.alert_window_seconds!r}")
 
     def run(self) -> SupervisorResult:
         """Supervise the child until it succeeds, is stopped, or the cap is hit.
@@ -489,6 +554,13 @@ class ProcessSupervisor:
                     restarts,
                     exit_code,
                 )
+                # Terminal give-up CRITICAL (DEC-SUPERVISOR-CRASHLOOP-ALERT-001,
+                # hostile-review MINOR-3 fold): the sweep is DOWN and nothing
+                # will relaunch it — the single most alert-worthy state, so it
+                # must never rely on the in-window relaunch count having reached
+                # the crash-loop bar first (a max_restarts < threshold policy or
+                # a slow, backoff-spaced loop would otherwise give up silently).
+                self._alert_gave_up(exit_code=exit_code, restarts=restarts)
                 return SupervisorResult(SupervisorOutcome.GAVE_UP, restarts, last_exit_code)
 
             delay = self.policy.delay_for(consecutive)
@@ -511,6 +583,12 @@ class ProcessSupervisor:
                 restarts,
                 delay,
             )
+            # Best-effort operator alert (DEC-SUPERVISOR-CRASHLOOP-ALERT-001):
+            # a silently-looping abnormal exit (e.g. an OOM SIGKILL every few
+            # minutes) must reach the operator. Fired AFTER the audit stamp and
+            # BEFORE the backoff sleep; any alerter failure is swallowed +
+            # logged, so relaunch behaviour and exit state stay byte-unchanged.
+            self._alert_relaunch(exit_code=exit_code, uptime=uptime, delay=delay, restarts=restarts)
             if self._sleep_backoff(delay):
                 # An operator stop arrived during the backoff wait — do not
                 # relaunch; nothing to shut down (the child already exited).
@@ -582,6 +660,69 @@ class ProcessSupervisor:
         )
         child.kill()
         return child.wait_for(self.shutdown_grace_seconds)
+
+    def _alert_relaunch(
+        self, *, exit_code: int, uptime: float, delay: float, restarts: int
+    ) -> None:
+        """Fire one best-effort relaunch alert with the rolling in-window count.
+
+        Records this relaunch's timestamp on the injected :attr:`clock`, prunes
+        the window to ``alert_window_seconds``, and hands the in-window count to
+        the injected :class:`RelaunchAlerter` — WHICH owns the WARN-vs-CRITICAL
+        crash-loop escalation decision (3+ in-window relaunches per
+        :data:`brutex.notifications.sweep_alerts.CRASH_LOOP_RELAUNCH_THRESHOLD`).
+        A POSIX death-by-signal (negative ``returncode``) is surfaced as the
+        killing signal number. ANY exception from the alerter is swallowed +
+        logged — an alert can never crash, block, or slow the relaunch loop
+        (Golden Rule #10); with no alerter wired this is a silent no-op that
+        keeps the loop byte-unchanged.
+        """
+        if self.alerter is None:
+            return
+        now = self.clock()
+        self._relaunch_times.append(now)
+        cutoff = now - self.alert_window_seconds
+        self._relaunch_times[:] = [t for t in self._relaunch_times if t > cutoff]
+        detail = f"uptime {uptime:.1f}s, backoff {delay:.1f}s, restart #{restarts} this run"
+        try:
+            self.alerter.child_relaunched(
+                child=self.subject,
+                exit_code=exit_code,
+                signal=-exit_code if exit_code < 0 else None,
+                relaunch_count=len(self._relaunch_times),
+                detail=detail,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort alert seam
+            logger.exception(
+                "supervisor: relaunch alert failed; the relaunch itself proceeds unaffected"
+            )
+
+    def _alert_gave_up(self, *, exit_code: int, restarts: int) -> None:
+        """Fire the terminal give-up alert, best-effort (never changes the verdict).
+
+        Hands the give-up facts to the injected :class:`RelaunchAlerter`'s
+        :meth:`~RelaunchAlerter.supervisor_gave_up` — WHICH owns the CRITICAL
+        severity (the sweep is DOWN; no further relaunches). A POSIX
+        death-by-signal (negative ``returncode``) is surfaced as the killing
+        signal number, mirroring :meth:`_alert_relaunch`. ANY exception from
+        the alerter is swallowed + logged — the give-up verdict, audit stamp,
+        and exit state stay byte-unchanged (Golden Rule #10); with no alerter
+        wired this is a silent no-op.
+        """
+        if self.alerter is None:
+            return
+        try:
+            self.alerter.supervisor_gave_up(
+                child=self.subject,
+                exit_code=exit_code,
+                signal=-exit_code if exit_code < 0 else None,
+                restarts=restarts,
+                max_restarts=self.policy.max_restarts,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort alert seam
+            logger.exception(
+                "supervisor: give-up alert failed; the give-up verdict stands unaffected"
+            )
 
     def _stamp(self, action: str, payload: dict[str, Any]) -> None:
         """Append one hash-chained audit row, best-effort (never crashes the run)."""
@@ -725,6 +866,7 @@ __all__ = [
     "AUDIT_ACTION_GIVE_UP",
     "AUDIT_ACTION_OPERATOR_STOP",
     "AUDIT_ACTION_RESTART",
+    "DEFAULT_ALERT_WINDOW_SECONDS",
     "DEFAULT_BACKOFF_BASE_SECONDS",
     "DEFAULT_BACKOFF_CAP_SECONDS",
     "DEFAULT_BACKOFF_FACTOR",
@@ -739,6 +881,7 @@ __all__ = [
     "Clock",
     "PopenChildProcess",
     "ProcessSupervisor",
+    "RelaunchAlerter",
     "Sleeper",
     "StopRequested",
     "SupervisorOutcome",

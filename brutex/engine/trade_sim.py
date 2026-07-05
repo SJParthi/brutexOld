@@ -86,7 +86,7 @@ import structlog
 from brutex.calendars.nse import (
     IST,
     forced_exit_seconds_for_session,
-    get_session,
+    get_session_checked,
     is_forced_exit_bar,
 )
 
@@ -367,17 +367,27 @@ class TradeSimWalker:
         Returns the bar session's own close − 10min: 15:20 for a regular day,
         the early close − 10min for a half-day / Muhurat session
         (DEC-SESSION-FORCED-EXIT-001). Returns ``None`` when the IST date has no
-        trading session (:func:`~brutex.calendars.nse.get_session` ``None``):
-        ``is_forced_exit_bar`` then falls back to its standard 15:20 boundary, so
-        a bar dated on a non-session day is handled deterministically rather than
+        trading session (:func:`~brutex.calendars.nse.get_session_checked`
+        ``None`` — an IN-COVERAGE holiday / weekend): ``is_forced_exit_bar``
+        then falls back to its standard 15:20 boundary, so a bar dated on a
+        known non-session day is handled deterministically rather than
         crashing — a real, contiguous intraday feed never hits this, but a
-        crafted / malformed feed must not raise.
+        crafted / malformed feed on an IN-COVERAGE date must not raise.
+
+        LOUD out-of-coverage refusal (calendar-correctness pack): a bar dated on
+        a weekday OUTSIDE the published holiday span raises
+        :class:`~brutex.calendars.nse.HolidayDataUnavailableError` (via the
+        strict ``get_session_checked``) instead of silently fabricating a
+        REGULAR 15:20 boundary — a silently-wrong forced-exit classification
+        corrupts a backtest (charter: Correctness first). The engine's tuple
+        isolation (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001) surfaces the raise as a
+        loud ``TUPLE_FAILED``, never a silent wrong number.
 
         Memoises the LAST IST date only (O(1) per bar, O(1) space): a
         chronological feed re-resolves only on the first bar of each new day.
         """
         if bar_day_ist != self._fe_cache_date:
-            session = get_session(bar_day_ist)
+            session = get_session_checked(bar_day_ist)
             self._fe_cache_date = bar_day_ist
             self._fe_cache_seconds = (
                 None if session is None else forced_exit_seconds_for_session(session)

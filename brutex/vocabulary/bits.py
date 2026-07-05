@@ -172,8 +172,13 @@ MASK_WIDTH: Final[int] = 128
 #: bits (``implemented=false``) are 0 here; the evaluator emits 0 for them.
 IMPLEMENTED_MASK: Final[int] = 1152921504606846975
 
-#: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12 — VWAP
-#: position is masked out on 1day; intraday-only).
+#: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12). Relative
+#: to ``IMPLEMENTED_MASK`` it clears the SIX intraday-only bits: the four
+#: Time-of-Day bits 44-47 (``BIT_EARLY_MORNING`` / ``BIT_MID_MORNING`` /
+#: ``BIT_MIDDAY`` / ``BIT_AFTERNOON`` — a 1day bar has no time-of-day bucket)
+#: AND the two VWAP-position bits 52-53 (``BIT_CLOSE_ABOVE_VWAP`` /
+#: ``BIT_CLOSE_BELOW_VWAP`` — the session-anchored VWAP is intraday-only).
+#: Test-pinned exactly in ``tests/unit/test_vocabulary.py``.
 APPLIES_TO_1DAY_MASK: Final[int] = 1139146822934069247
 
 NAME_TO_BIT: Final[dict[str, int]] = {

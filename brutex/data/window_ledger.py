@@ -39,12 +39,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.interior_gap_detect import INTERIOR_GAP
+from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
+from brutex.data.session import ALL_FILTERED
 from brutex.data.window_status import EMPTY, FAILED, SUCCESS, classify_window_status
 
 __all__ = [
     "CONFIRMED_EMPTY_MIN_FETCHES",
+    "DEMOTED_SETTLE_REASONS",
     "EMPTY",
     "EMPTY_TERMINAL_THRESHOLD",
+    "EXPIRED_WINDOW_SETTLE_SUFFIX",
     "FAILED",
     "PLANNED",
     "REOPENED_MARKER",
@@ -54,6 +59,8 @@ __all__ = [
     "LedgerProgress",
     "WindowLedger",
     "WindowLedgerRecord",
+    "expired_window_settle_reason",
+    "is_expired_window_settle_reason",
 ]
 
 #: A window the tiler will attempt this pull — upserted at pull start, no outcome
@@ -85,21 +92,73 @@ SKIPPED: str = "SKIPPED"
 EMPTY_TERMINAL_THRESHOLD: int = 3
 
 #: Minimum CLEAN-EMPTY confirmations an old empty window needs before its empty is
-#: trusted as "confirmed" for the OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001).
-#: ``2`` means the empty was observed at least twice — historically both had to land
-#: WITHIN one pull (the in-pull empty retry re-hit it), which a REDUCED per-strike
-#: empty-retry budget of 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) made STRUCTURALLY
-#: unreachable, so a confirmed-dead deep-OTM strike re-fetched once per pull far past
-#: the point its empty was proven. DEC-DEAD-STRIKE-LEDGER-SETTLE-001 makes the settle
-#: BUDGET-AWARE: confirmations now accumulate ACROSS pulls (``prior.empty_streak`` —
-#: each unit one distinct pull's genuine, unsuppressed clean-EMPTY — plus this pull's
-#: ``in_pull_fetches``), compared against this SAME threshold inside
-#: :meth:`WindowLedger.record`. CANONICAL HOME moved here from
-#: ``brutex.adapters.ingest_common`` (which re-exports it — one source of truth,
-#: CLAUDE.md §11 COMMON) because the ledger applies the cumulative rule and
-#: ``ingest_common`` already imports from ``brutex.data`` (the reverse import would
-#: be a cycle).
+#: trusted as "confirmed" for the in-pull OLD-gap fast-settle HINT computed by the
+#: spines (DEC-OLD-GAP-FAST-SETTLE-001 ``settle_empty``). ``2`` means the empty was
+#: observed at least twice — historically both had to land WITHIN one pull (the
+#: in-pull empty retry re-hit it), which a REDUCED per-strike empty-retry budget of 1
+#: (DEC-FETCH-PER-WINDOW-GUARANTEE-001) made STRUCTURALLY unreachable;
+#: DEC-DEAD-STRIKE-LEDGER-SETTLE-001 then accumulated confirmations ACROSS pulls.
+#: **DEC-OLD-EMPTY-SINGLE-CONFIRM-001 (operator-decreed 2026-07-04) SUPERSEDES both
+#: arms for the LEDGER settle:** an OLD window (``record(old_window=True)``) now
+#: settles ``SKIPPED`` on a SINGLE genuine, unsuppressed clean-EMPTY fetch — the
+#: 2026-07-03 production run spent HOURS in a round-2 until-clean sweep re-confirming
+#: every deep-wing empty this threshold forced. This constant still governs the
+#: spines' in-pull ``settle_empty`` confirmation hint (and stays re-exported from
+#: ``brutex.adapters.ingest_common`` — one source of truth, CLAUDE.md §11 COMMON;
+#: the canonical home is here because ``ingest_common`` already imports from
+#: ``brutex.data``); it no longer gates the ledger's old-window settle.
 CONFIRMED_EMPTY_MIN_FETCHES: int = 2
+
+#: The recognisable tail of an expired-window settle reason
+#: (:func:`expired_window_settle_reason`) — the ONE marker
+#: ``brutex.dashboard.db_view.window_status_label`` keys the honest UI label on
+#: (DEC-OLD-EMPTY-SINGLE-CONFIRM-001; CLAUDE.md §11 COMMON — no second spelling).
+EXPIRED_WINDOW_SETTLE_SUFFIX: str = ", expired window)"
+
+#: Every ``degraded_reason`` tag the data-completeness demotion channel
+#: (:meth:`WindowLedger.record` ``degraded=True``) can stamp as a row's
+#: ``last_error`` — the ONE canonical set (CLAUDE.md §11 COMMON;
+#: DEC-DATA-HONESTY-ALLFILTERED-SEED-001) so the ``/coverage/windows`` label
+#: (:func:`brutex.dashboard.db_view.window_status_label`) can render a
+#: demotion-settled ``SKIPPED`` honestly instead of the "vendor confirmed no
+#: trades" wording (factually WRONG for these rows: the vendor RETURNED bars —
+#: they were boundary-filtered / hole-flagged / truncation-flagged, never a
+#: clean no-trades answer). Each tag's detector module stays its source of
+#: truth; this set only ENUMERATES them beside the channel that stamps them.
+#: ``"DEGRADED"`` is the FOURTH member by convention, not detection: it is the
+#: :meth:`WindowLedger.record` defensive fallback stamped when a caller passes
+#: ``degraded=True`` with no ``degraded_reason`` — unreachable from the current
+#: production spines (both always pass a concrete tag) but, were it ever
+#: stamped, its settle is STILL a demotion settle and must never fall through
+#: to the "vendor confirmed no trades" wording (wiring-review fold, PR #1158).
+DEMOTED_SETTLE_REASONS: frozenset[str] = frozenset(
+    {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"}
+)
+
+
+def expired_window_settle_reason(clean_attempts: int) -> str:
+    """The honest ``last_error`` reason stamped on an expired-window settle — pure.
+
+    DEC-OLD-EMPTY-SINGLE-CONFIRM-001: an OLD window settled ``SKIPPED`` off a
+    single clean-empty must SAY so on the UI — the generic streak-derived label
+    would claim ``3 clean attempt(s)`` (the forced-threshold streak), a lie.
+    ``clean_attempts`` is the genuine count of distinct clean-EMPTY pull
+    observations (``prior.empty_streak + 1``); the normal fresh settle reads
+    exactly the operator-decreed ``"vendor confirmed no trades (1 clean
+    attempt, expired window)"``.
+    """
+    plural = "" if clean_attempts == 1 else "s"
+    return f"vendor confirmed no trades ({clean_attempts} clean attempt{plural}, expired window)"
+
+
+def is_expired_window_settle_reason(reason: str | None) -> bool:
+    """``True`` iff *reason* is an :func:`expired_window_settle_reason` stamp — pure, O(1)."""
+    return (
+        reason is not None
+        and reason.startswith("vendor confirmed no trades (")
+        and reason.endswith(EXPIRED_WINDOW_SETTLE_SUFFIX)
+    )
+
 
 #: The ``last_error`` marker :meth:`WindowLedger.reopen_skipped` stamps on a
 #: re-opened row (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). A ``FAILED`` row carrying
@@ -224,6 +283,17 @@ class WindowLedgerRecord:
     #: each pull (the last pull's count, like ``last_error`` / ``last_attempt_at``) —
     #: NOT cumulative, so a re-run of the SAME pull is bit-identical (Golden Rule #7).
     in_pull_fetches: int = 0
+    #: DEDUPED bars the sink actually NET-ADDED to the lake on the MOST-RECENT
+    #: attempt (DEC-INGEST-BOUNDARY-INTEGRITY-001) — the persisted twin of
+    #: :attr:`~brutex.data.sink.SinkAppendResult.bars_net_new`, which
+    #: DEC-SINK-DEDUP-COUNT-001 (#1031) computed but never persisted. ``bars``
+    #: stays the INPUT batch size the spine appended (several ``>0`` gates read
+    #: it); this is the keep-first-deduped count, so a re-pull whose bars are all
+    #: already stored reads ``bars > 0, bars_net_new == 0``. ``None`` = honestly
+    #: UNKNOWN — a legacy row written before the column existed, or a path with
+    #: no sink result (a lake cold-start seed) — NEVER fabricated to ``0``
+    #: (Golden Rule #1: ``0`` would falsely claim "that pull added nothing new").
+    bars_net_new: int | None = None
 
 
 @dataclass(slots=True)
@@ -290,6 +360,28 @@ class WindowLedger:
     _reopened: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
+    #: Keys :meth:`record` DEMOTED ``SUCCESS`` → ``FAILED`` for a DATA-COMPLETENESS
+    #: reason (``degraded=True`` — an interior multi-session hole / trailing
+    #: truncation, DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001)
+    #: during THIS process's lifetime (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001 ×
+    #: the DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save). The merge-on-save's
+    #: same-key conflict rule prefers the MORE-SETTLED status, so without this
+    #: tombstone a concurrent pull's on-disk ``SUCCESS`` copy (rank 3) would beat
+    #: the demoted ``FAILED`` row (rank 1) on the very next save and SILENTLY UNDO
+    #: the demotion — the window would read settled/skippable forever WITH the
+    #: confirmed gap, exactly the resurrect-from-disk class the ``_reopened``
+    #: tombstones close for the operator re-open. For a key in this set the
+    #: IN-MEMORY row wins the merge outright. The accept-gap ``SKIPPED`` settle at
+    #: the threshold is deliberately NOT tombstoned (it is a legitimately terminal
+    #: rank-3 row a concurrent ``SUCCESS`` may honestly displace) — and a later
+    #: SETTLED re-record of the same key (a genuine complete ``SUCCESS`` re-pull /
+    #: the ``SKIPPED`` settle) DISCARDS its earlier tombstone (the demotion was
+    #: superseded in-process; a re-pullable ``FAILED``/``EMPTY`` re-record keeps
+    #: it — hostile-review fold). Never serialised (per-instance lifetime — the
+    #: window between load and save).
+    _degraded: set[tuple[str, str, str, str, str]] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -329,6 +421,7 @@ class WindowLedger:
                 last_attempt_at=None,
                 empty_streak=0,
                 in_pull_fetches=0,  # never fetched — a pure PLANNED row
+                bars_net_new=0,  # nothing appended yet (mirrors bars=0)
             )
 
     def seed_lake_success(self, key: WindowKey, *, bars: int, now: datetime) -> bool:
@@ -361,8 +454,25 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=0,
                 in_pull_fetches=1,  # the lake proves one successful fetch's data
+                # The historical write's keep-first-deduped count is UNRECORDED —
+                # honest unknown, never fabricated (DEC-INGEST-BOUNDARY-INTEGRITY-001).
+                bars_net_new=None,
             )
             return True
+
+    def has_window(self, key: WindowKey) -> bool:
+        """True iff ANY row exists for *key* (any status) — **O(1)**, atomic, read-only.
+
+        The cold-start seed's existence probe (DEC-DATA-HONESTY-ALLFILTERED-SEED-001):
+        :func:`~brutex.data.window_ledger_store.seed_enclosed_windows` skips its
+        density cross-check + refusal WARNING for a window that already HAS a row,
+        because the only-if-absent :meth:`seed_lake_success` would no-op anyway —
+        without this probe every steady-state reconcile re-warned about windows
+        that were long since fetched/settled. Never mutates anything.
+        """
+        wk = self._key(key)
+        with self._lock:
+            return wk in self._by_window
 
     def is_skippable(self, key: WindowKey) -> bool:
         """Return ``True`` iff *key* is SETTLED (``SUCCESS`` / ``SKIPPED``) — **O(1)**, atomic.
@@ -421,6 +531,7 @@ class WindowLedger:
         degraded: bool = False,
         degraded_reason: str | None = None,
         suppress_settle: bool = False,
+        bars_net_new: int | None = None,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -458,30 +569,43 @@ class WindowLedger:
 
         *old_window* (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) is the pure "vendor data can
         never appear" fact (``window_end`` older than
-        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`), threaded so the
-        old-gap fast-settle can be BUDGET-AWARE: a strike whose in-pull EMPTY-retry
-        budget was REDUCED to 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) can never reach
-        :data:`CONFIRMED_EMPTY_MIN_FETCHES` fetches inside ONE pull, so without this
-        it re-fetched once per pull long after its empty was confirmed. When the
-        classification is ``EMPTY``, the window is old, and the settle is not
-        suppressed, the confirmation count is CUMULATIVE across pulls:
-        ``prior.empty_streak`` (each unit one distinct prior pull's genuine,
-        unsuppressed clean-EMPTY observation — an independent confirmation at least as
-        strong as an in-pull re-fetch) plus this pull's *in_pull_fetches*; crossing
-        :data:`CONFIRMED_EMPTY_MIN_FETCHES` settles ``SKIPPED`` exactly like the
-        one-pull fast-settle (streak forced to the threshold). The data-safety law is
-        untouched ("if uncertain, fetch"): a ``SUCCESS`` resets the streak, a
-        ``FAILED`` (429/timeout) never counts and never settles, a breaker-suppressed
-        empty neither bumps nor settles, a RECENT window (*old_window* ``False``)
-        keeps the conservative across-pull streak, and :meth:`reopen_skipped` resets
-        the streak so an operator re-open regains the full confirmation budget. The
-        default ``False`` is byte-identical to the prior behaviour. HONEST envelope:
-        *in_pull_fetches* counts transient re-attempts too, preserving the
-        already-shipped in-pull generosity (1 transient + 1 clean empty == 2), and on
-        the SPOT spine ``empty_streak`` may include degraded-demotion bumps — but the
-        spot spine never passes *old_window* (its full empty-retry budget always
-        reaches the in-pull confirmation), so the cumulative rule's evidence there is
-        genuine clean-EMPTY pulls only.
+        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`). Since
+        **DEC-OLD-EMPTY-SINGLE-CONFIRM-001** (operator-decreed 2026-07-04, superseding
+        #1172's budget-aware cumulative accumulation) an OLD window settles ``SKIPPED``
+        off a SINGLE genuine, unsuppressed clean-EMPTY fetch in THIS pull — the streak
+        is forced to the threshold and the honest
+        :func:`expired_window_settle_reason` stamp becomes the ``last_error`` (see the
+        settle arm below). The data-safety law is untouched ("if uncertain, fetch"): a
+        ``SUCCESS`` resets the streak, a ``FAILED`` (429/timeout) never counts and
+        never settles, a breaker-suppressed empty neither bumps nor settles, a RECENT
+        window (*old_window* ``False``) keeps the conservative across-pull streak, and
+        :meth:`reopen_skipped` resets the streak so an operator re-open regains the
+        full confirmation budget. The default ``False`` is byte-identical to the prior
+        behaviour. HONEST envelope (DEC-DATA-HONESTY-ALLFILTERED-SEED-001 doc
+        reconcile): BOTH spines' ``empty_streak`` may now include degraded-demotion
+        bumps — the F&O spine passes *degraded* (an ``ALL_FILTERED`` boundary verdict)
+        AND *old_window* on the SAME record call. Because the old-empty settle is
+        single-confirm (it fires off THIS pull's own genuine clean EMPTY), a prior
+        degraded bump can never SUBSTITUTE for clean-EMPTY evidence — but the
+        :func:`expired_window_settle_reason` stamp's clean-attempt COUNT is
+        streak-derived (``prior_streak + 1``), so a prior degraded bump INFLATES that
+        display count by one (e.g. one all-filtered demotion then one clean EMPTY
+        reads "2 clean attempts"). Accepted + regression-pinned: the settle decision
+        is sound (a real clean EMPTY landed), only the count conflates flagged
+        attempts with clean ones; ``brutex reopen-skipped`` stays the recovery.
+        The same no-provenance conflation applies to the THRESHOLD settle over
+        MIXED evidence (correctness-review fold, PR #1158): degraded bumps and
+        clean-EMPTY bumps share this ONE ``empty_streak``, so a mixed-evidence
+        settle labels ALL its attempts by whichever channel landed the FINAL
+        record — two ``ALL_FILTERED`` demotions then one genuine clean EMPTY
+        settle ``SKIPPED`` with ``last_error=None`` ("vendor confirmed no
+        trades (3 clean attempt(s))" though two were boundary-filter
+        demotions), and the symmetric two-clean-empties-then-one-demotion
+        settle reads "3 flagged attempt(s)". Display-only (#1031/#1294
+        pre-existing streak-sharing semantics — the settle itself is sound and
+        ``reopen-skipped`` recovers); an honest per-channel count needs a
+        streak-provenance column — the SAME named follow-up as the expired-stamp
+        inflation above, deliberately NOT claimed here.
 
         *degraded* (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001) is the
         DATA-COMPLETENESS demotion hint: a clean bars-returning fetch whose stored bars
@@ -489,7 +613,8 @@ class WindowLedger:
         complete window, so it must NOT be marked terminal/skippable on a ``SUCCESS``.
         When ``True`` AND the natural classification is ``SUCCESS`` the window is recorded
         ``FAILED`` (re-pullable — exactly like a transient) with *degraded_reason* (a
-        non-secret tag such as ``"INTERIOR_GAP"`` / ``"TRUNCATED"``) stamped as the
+        non-secret tag from :data:`DEMOTED_SETTLE_REASONS` — ``"INTERIOR_GAP"`` /
+        ``"SUSPECTED_PARTIAL"`` / ``"ALL_FILTERED"``) stamped as the
         ``last_error``, and the ``empty_streak`` is BUMPED so the re-pull is BOUNDED: after
         :data:`EMPTY_TERMINAL_THRESHOLD` consecutive degraded pulls the window settles
         ``SKIPPED`` (the gap is accepted after the operator has been warned that many
@@ -500,6 +625,18 @@ class WindowLedger:
         demotion only RE-OPENS the window for completion, never deletes data. ``degraded``
         is IGNORED for a ``FAILED`` (already re-pullable) or an ``EMPTY`` (no bars to be
         incomplete); the default ``False`` is byte-identical to the prior behaviour.
+        Each demoted key is tombstoned in :meth:`degraded_keys`
+        (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001) so the
+        DEC-WINDOW-LEDGER-RESCUE-001 merge-on-save cannot resurrect a concurrent
+        pull's on-disk ``SUCCESS`` copy over the demotion (its more-settled rank
+        would otherwise silently re-mask the confirmed gap on the very next flush)
+        — exactly as :meth:`reopen_skipped` tombstones its ``SKIPPED`` → ``FAILED``
+        demotions. The accept-gap ``SKIPPED`` settle at the threshold is NOT
+        tombstoned (a legitimately terminal row), and a later SETTLED re-record of
+        the same key (a genuine complete ``SUCCESS`` re-pull / the ``SKIPPED``
+        settle) DISCARDS its earlier same-process tombstone — a re-pullable
+        ``FAILED``/``EMPTY`` re-record keeps it (no completeness evidence either
+        way, so the demotion stands).
 
         *suppress_settle* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) marks an ``EMPTY``
         outcome as **UNTRUSTED** — recorded while the pull's mass-empty circuit
@@ -511,6 +648,13 @@ class WindowLedger:
         settle ``SKIPPED`` on this record (both the fast-settle and the streak
         promotion are gated off). IGNORED for ``SUCCESS`` / ``FAILED`` / degraded
         outcomes; the default ``False`` is byte-identical to the prior behaviour.
+
+        *bars_net_new* (DEC-INGEST-BOUNDARY-INTEGRITY-001) is the sink's
+        keep-first-DEDUPED net-new bar count for this append
+        (:attr:`~brutex.data.sink.SinkAppendResult.bars_net_new`), stored
+        alongside ``bars`` (the INPUT batch size, unchanged — the ``>0`` gates
+        keep reading it). ``None`` (the default) records an honest UNKNOWN for a
+        caller with no sink result — never fabricated to ``0``.
         """
         classified = classify_window_status(raw_bars, error_type, degraded=degraded)
         # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
@@ -561,40 +705,57 @@ class WindowLedger:
                 # accept the gap and settle SKIPPED so the pull converges (the operator has
                 # been warned each time; the stored bars are kept).
                 status = SKIPPED
-            elif (
-                classified == EMPTY
-                and not suppress_settle
-                and (
-                    settle_empty
-                    or (
-                        old_window and prior_streak + in_pull_fetches >= CONFIRMED_EMPTY_MIN_FETCHES
-                    )
-                )
-            ):
-                # OLD-gap fast-settle (DEC-OLD-GAP-FAST-SETTLE-001): an in-pull-confirmed
-                # empty window OLD enough that vendor data can never appear is a PERMANENT
-                # gap — settle it SKIPPED in ONE pull, forcing the streak to the threshold
-                # so the persisted row is identical to a normal across-pull settle. Only
-                # ever reached for EMPTY (a SUCCESS/FAILED ignores the hint), so it can
-                # never mask a window with data. RECENT windows (settle_empty False,
-                # old_window False) keep the conservative across-pull streak below. GATED
-                # OFF while the pull's mass-empty breaker is tripped (suppress_settle — a
-                # throttle-shaped empty must never cement,
-                # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
-                #
-                # BUDGET-AWARE arm (DEC-DEAD-STRIKE-LEDGER-SETTLE-001): a reduced
-                # empty-retry budget (1 fetch/pull, DEC-FETCH-PER-WINDOW-GUARANTEE-001)
-                # can never reach CONFIRMED_EMPTY_MIN_FETCHES inside one pull, so the
-                # confirmation count for an OLD window accumulates ACROSS pulls —
-                # ``prior_streak`` (one unit per distinct prior pull's genuine,
-                # unsuppressed clean-EMPTY) + this pull's ``in_pull_fetches``. Two
-                # independent pulls' clean empties meet the same 2-confirmation evidence
-                # bar the one-pull fast-settle demands; anything short of it stays
-                # re-fetchable ("if uncertain, fetch").
+            elif classified == EMPTY and not suppress_settle and (settle_empty or old_window):
+                # OLD-EMPTY SINGLE-CONFIRM (DEC-OLD-EMPTY-SINGLE-CONFIRM-001,
+                # operator-decreed 2026-07-04 — SUPERSEDES the budget-aware
+                # cumulative arm of DEC-DEAD-STRIKE-LEDGER-SETTLE-001 #1172): an
+                # EMPTY window OLD enough that vendor data can never appear
+                # (``old_window`` — ``clamped_end`` older than
+                # OLD_GAP_HORIZON_DAYS) settles SKIPPED off this SINGLE genuine,
+                # unsuppressed clean-empty fetch, in THIS pass — effectively
+                # ``min_fetches = 1`` for expired windows. The 2026-07-03
+                # production run spent HOURS in a round-2 until-clean sweep
+                # re-confirming every deep-wing empty the old 2-confirmation bar
+                # forced. The streak is still FORCED to the threshold (the
+                # persisted row keeps the same settled shape as an across-pull
+                # settle) and the honest reason is stamped as ``last_error`` so
+                # the UI says "1 clean attempt, expired window" instead of the
+                # streak-derived lie. Only ever reached for EMPTY (SUCCESS/FAILED
+                # ignore the hints — data always wins; a 429/timeout is never
+                # evidence), RECENT windows (old_window False) keep the
+                # conservative across-pull streak below, and the arm is GATED OFF
+                # while the pull's mass-empty breaker is tripped (suppress_settle
+                # — a throttle-shaped empty must never cement,
+                # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001; the #1129 breaker + the
+                # #919 all-empty detector remain the systemic-glitch guards, and
+                # ``brutex reopen-skipped`` is the manual recovery).
                 empty_streak = self._threshold
                 status = SKIPPED
+                error_type = expired_window_settle_reason(prior_streak + 1)
             elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
+            if degraded_success and status == FAILED:
+                # Tombstone the demotion (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001):
+                # the merge-on-save must keep this in-memory FAILED outright, or a
+                # concurrent pull's on-disk SUCCESS (more-settled rank) would silently
+                # re-mask the confirmed gap on the very next flush. The guard is exact:
+                # ``degraded_success`` selects the clean-SUCCESS-forced-to-FAILED case,
+                # and ``status == FAILED`` excludes the accept-gap SKIPPED settle above
+                # (legitimately terminal — never wrongly pinned against a SUCCESS).
+                self._degraded.add(wk)
+            elif status in (SUCCESS, SKIPPED):
+                # Hostile-review fold: a later SETTLED outcome for the SAME key — a
+                # genuine complete re-pull (SUCCESS) or the accept-gap settle
+                # (SKIPPED) — SUPERSEDES any earlier same-process demotion, so its
+                # stale tombstone is discarded and the merge's more-settled rule
+                # applies to the new row unconditionally (the "a SKIPPED settle is
+                # never tombstoned" contract now holds even when a prior FAILED
+                # demotion of the same window tombstoned it earlier in this
+                # process). A re-pullable FAILED/EMPTY re-record deliberately KEEPS
+                # the tombstone — a 429/timeout/empty gives NO completeness
+                # evidence, and discarding on it would let a concurrent pull's disk
+                # SUCCESS re-mask the confirmed gap on our own save.
+                self._degraded.discard(wk)
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             if status == SKIPPED and (prior is None or prior.status != SKIPPED):
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): count every
@@ -615,6 +776,7 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
                 in_pull_fetches=in_pull_fetches,
+                bars_net_new=bars_net_new,
             )
             return status
 
@@ -636,6 +798,8 @@ class WindowLedger:
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             bars = prior.bars if prior is not None else 0
             empty_streak = prior.empty_streak if prior is not None else 0
+            # No fetch/append happened here — preserve the prior net-new (like ``bars``).
+            bars_net_new = prior.bars_net_new if prior is not None else None
             if prior is None or prior.status != SKIPPED:
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a known-gap
                 # settle is a newly-SKIPPED window too — the verdict must SAY it.
@@ -654,6 +818,7 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
+                bars_net_new=bars_net_new,
             )
             return SKIPPED
 
@@ -737,6 +902,7 @@ class WindowLedger:
                     last_attempt_at=row.last_attempt_at,
                     empty_streak=0,
                     in_pull_fetches=row.in_pull_fetches,
+                    bars_net_new=row.bars_net_new,  # no fetch here — preserved
                 )
             self._reopened.update(doomed)
         return len(doomed)
@@ -755,6 +921,23 @@ class WindowLedger:
         """
         with self._lock:
             return frozenset(self._reopened)
+
+    def degraded_keys(self) -> frozenset[tuple[str, str, str, str, str]]:
+        """The keys :meth:`record` demoted ``SUCCESS`` → ``FAILED`` — thread-safe snapshot.
+
+        DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001 × DEC-WINDOW-LEDGER-RESCUE-001.
+        Consumed by the merge-on-save
+        (:func:`~brutex.data.window_ledger_store.save_window_ledger`) so a
+        data-completeness demotion (``degraded=True`` — a confirmed interior gap /
+        trailing truncation recorded ``FAILED`` for re-pull) is not resurrected to
+        a concurrent pull's on-disk ``SUCCESS`` copy by the more-settled-status
+        conflict rule (which would silently re-mask the gap); for these keys the
+        in-memory row wins the merge outright. The third instance of the
+        per-decision tombstone shape (:meth:`pruned_keys` / :meth:`reopened_keys`).
+        O(degraded) copy under the lock.
+        """
+        with self._lock:
+            return frozenset(self._degraded)
 
     def prune_superseded(
         self, planned_tiles: Mapping[tuple[str, str, str], Mapping[str, str]]
@@ -928,12 +1111,31 @@ class WindowLedger:
 
     def to_rows(
         self,
-    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]]:
+    ) -> list[
+        tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            int,
+            int,
+            str | None,
+            str,
+            str | None,
+            int,
+            int,
+            int | None,
+        ]
+    ]:
         """Serialise to a deterministic list of plain tuples (for the durable store).
 
-        ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) is the LAST tuple element —
-        appended after ``empty_streak`` exactly as that column was, so a legacy 12-tuple
-        Parquet (written before it existed) still loads (the store fills it per-row).
+        ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) then ``bars_net_new``
+        (DEC-INGEST-BOUNDARY-INTEGRITY-001) were each appended LAST — after
+        ``empty_streak`` exactly as that column was — so a legacy 12/13-tuple
+        Parquet (written before either existed) still loads (the store fills the
+        missing column per-row; an absent ``bars_net_new`` reads ``None``).
         """
         return [
             (
@@ -950,6 +1152,7 @@ class WindowLedger:
                 r.last_attempt_at,
                 r.empty_streak,
                 r.in_pull_fetches,
+                r.bars_net_new,
             )
             for r in self.records()
         ]
@@ -958,7 +1161,22 @@ class WindowLedger:
     def from_rows(
         cls,
         rows: Iterable[
-            tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]
+            tuple[
+                str,
+                str,
+                str,
+                str,
+                str,
+                str,
+                int,
+                int,
+                str | None,
+                str,
+                str | None,
+                int,
+                int,
+                int | None,
+            ]
         ],
         *,
         threshold: int = EMPTY_TERMINAL_THRESHOLD,
@@ -979,6 +1197,7 @@ class WindowLedger:
             last_attempt_at,
             empty_streak,
             in_pull_fetches,
+            bars_net_new,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -995,6 +1214,7 @@ class WindowLedger:
                     last_attempt_at=last_attempt_at,
                     empty_streak=empty_streak,
                     in_pull_fetches=in_pull_fetches,
+                    bars_net_new=bars_net_new,
                 )
             )
         return ledger

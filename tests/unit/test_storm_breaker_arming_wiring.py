@@ -365,3 +365,59 @@ class TestCliCmdFetchArming:
         assert rc == cli.EXIT_OK
         assert captured, "the spine was never reached"
         assert all(b is None for b in captured)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mass-empty breaker CANARY arming — historical_pull._run_phase
+# (DEC-EMPTY-BREAKER-CANARY-001; the same dormant-shipping pin as above)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestBreakerCanaryArming:
+    def test_live_phase_threads_the_built_canary_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REAL pull builds the canary from THIS phase's client + pace and
+        threads it into the spine's ``breaker_health_probe`` kwarg."""
+
+        def _sentinel_probe() -> bool:  # pragma: no cover — identity only
+            return True
+
+        built: list[tuple[object, object]] = []
+
+        def _fake_builder(client: object, *, pace: object = None) -> object:
+            built.append((client, pace))
+            return _sentinel_probe
+
+        captured: list[object] = []
+
+        def spy(*_args: Any, **kwargs: Any) -> GrowwOptionIngestReport:
+            captured.append(kwargs.get("breaker_health_probe"))
+            return GrowwOptionIngestReport(pairs={}, failures=())
+
+        monkeypatch.setattr(historical_pull, "run_groww_option_ingest", spy)
+        monkeypatch.setattr(historical_pull, "make_breaker_canary_probe", _fake_builder)
+        _run_fno_phase(lake_root=tmp_path, dry_run=False)
+        assert len(built) == 1, "the canary is built ONCE per phase"
+        assert captured, "the spine was never reached"
+        assert all(p is _sentinel_probe for p in captured)
+
+    def test_dry_run_threads_none_and_never_builds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run never builds a canary (no vendor call can exist) — None."""
+
+        def _never_build(_client: object, *, pace: object = None) -> object:
+            raise AssertionError("dry-run must never build a canary probe")
+
+        captured: list[object] = []
+
+        def spy(*_args: Any, **kwargs: Any) -> GrowwOptionIngestReport:
+            captured.append(kwargs.get("breaker_health_probe"))
+            return GrowwOptionIngestReport(pairs={}, failures=())
+
+        monkeypatch.setattr(historical_pull, "run_groww_option_ingest", spy)
+        monkeypatch.setattr(historical_pull, "make_breaker_canary_probe", _never_build)
+        _run_fno_phase(lake_root=tmp_path, dry_run=True)
+        assert captured, "the spine was never reached"
+        assert all(p is None for p in captured)
