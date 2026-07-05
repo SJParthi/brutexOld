@@ -1402,14 +1402,20 @@ def _enrich_greeks_from_minute(
     (:func:`~brutex.data.greeks_enrich.resolve_risk_free_source` — fixed 6.5%
     default, ``BRUTEX_RISK_FREE_CSV`` override).
 
-    The WHOLE body is guarded (plan §15.4): any failure — a misconfigured rate
-    CSV, a missing wheel, an unexpected driver error — logs ONE
-    ``fno.greeks_enrich.error`` and returns; it can NEVER fail the pull. The
-    authoritative 1-minute candles are already durable in the lake; the Greeks
-    overlay is a re-derivable convenience layer the NEXT pull re-attempts
-    (stamp-driven, idempotent — Golden Rule #7/#10). Per-contract errors are
-    additionally quarantined inside the driver, so one bad contract never
-    sinks the pass.
+    The body is guarded (plan §15.4) with TWO deliberate exceptions
+    (DEC-GREEKS-PARALLEL-001, the #1188 follow-up (a)): a
+    :class:`~brutex.data.errors.LakeWriteHalt` (disk full / OOM at a lake
+    write) and a :class:`~brutex.data.errors.GreeksEnrichPoolBroken` (a
+    Greeks pool worker died abruptly — a host-resource condition) RE-RAISE so
+    they reach :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._run`'s
+    halt handling and fire the CRITICAL Telegram pull-halt alert. EVERY other
+    failure — a misconfigured rate CSV, a missing wheel, an unexpected driver
+    error — logs ONE ``fno.greeks_enrich.error`` and returns; those can never
+    fail the pull. The authoritative 1-minute candles are already durable in
+    the lake; the Greeks overlay is a re-derivable convenience layer the NEXT
+    pull re-attempts (stamp-driven, idempotent — Golden Rule #7/#10).
+    Per-contract errors are additionally quarantined inside the driver, so
+    one bad contract never sinks the pass.
 
     Returns
     -------
@@ -1420,6 +1426,11 @@ def _enrich_greeks_from_minute(
         ``"ErrorType: message"`` when the whole pass failed — surfaced on the
         report/note by the caller, never only a log line.
     """
+    # Wheel-free at function top (brutex.data.errors imports only brutex.models);
+    # the greeks_enrich import STAYS inside the try — a missing trading_core
+    # wheel must keep hitting the ok=False fence, never crash the pull.
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+
     try:
         from brutex.data.greeks_enrich import (
             GreeksEnrichTarget,
@@ -1463,8 +1474,15 @@ def _enrich_greeks_from_minute(
             bars_reused=report.bars_reused,
             spot_reads=report.spot_reads,
             spot_hits=report.spot_hits,
+            bars_skipped=report.bars_skipped,
         )
         return _GreeksEnrichOutcome(ok=True, error=None, errored_targets=report.errored)
+    except (LakeWriteHalt, GreeksEnrichPoolBroken):
+        # A pull-wide HOST condition (disk full / OOM / a dead pool worker) —
+        # re-raised past the fence so it reaches BackgroundPullJob._run's halt
+        # handling + the CRITICAL Telegram alert (DEC-GREEKS-PARALLEL-001; the
+        # _heal_lake_after_pull convention). Everything else stays fenced below.
+        raise
     except Exception as exc:
         _LOG.error("fno.greeks_enrich.error", error=str(exc))
         return _GreeksEnrichOutcome(
@@ -1814,6 +1832,16 @@ def pull_contract_candles(
     # here (``_derive_daily_from_minute``) is REMOVED — derived data (intraday TFs +
     # the derived ``1day``) is written ONLY by the pipeline's final prebuild phase
     # (brutex.dashboard.pipeline_prebuild), strictly after a fully-successful fetch.
+    # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
+    # "historically complete" once its 1-minute landed clean — the only vendor phase).
+    # Stamped BEFORE the heal/enrich stage (DEC-GREEKS-PARALLEL-001): the fenced
+    # wrapper below now RE-RAISES a pull-wide halt (LakeWriteHalt /
+    # GreeksEnrichPoolBroken), and a cleanly-fetched contract must keep its
+    # completion stamp even when the best-effort overlay stage aborts — otherwise
+    # the next pull needlessly re-plans vendor-clean contracts. Order-safe:
+    # ``_mark_complete`` depends only on (registry, rebuilt, minute.complete).
+    contracts_completed = _mark_complete(registry, rebuilt, minute.complete)
+
     greeks_outcome = _GREEKS_NOT_RUN
     if not dry_run:
         # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
@@ -1823,17 +1851,18 @@ def pull_contract_candles(
         # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
         # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
         # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
-        # underlying spot, at the post-drain seam. Best-effort: NEVER fails the pull
-        # (fully guarded inside); FUT legs never get Greeks; skipped on a dry-run
-        # (nothing was written — the outcome honestly stays "did not run"). The
-        # pass verdict rides the report + note (DEC-GREEKS-ENRICH-OBSERVE-001).
+        # underlying spot, at the post-drain seam. Best-effort with a carved-out
+        # halt path: an ordinary enrich failure NEVER fails the pull (fenced
+        # inside), while a pull-wide HOST halt (LakeWriteHalt /
+        # GreeksEnrichPoolBroken) RE-RAISES to the job layer's CRITICAL alert
+        # (DEC-GREEKS-PARALLEL-001). FUT legs never get Greeks; skipped on a
+        # dry-run (nothing was written — the outcome honestly stays "did not
+        # run"). The pass verdict rides the report + note
+        # (DEC-GREEKS-ENRICH-OBSERVE-001).
         greeks_outcome = _enrich_greeks_from_minute(
             rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root
         )
 
-    # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
-    # "historically complete" once its 1-minute landed clean — the only vendor phase).
-    contracts_completed = _mark_complete(registry, rebuilt, minute.complete)
     note = _build_note(
         dry_run=dry_run,
         contracts_selected=len(rebuilt),
