@@ -4108,6 +4108,43 @@ def test_option_all_future_dropped_window_is_demoted() -> None:
     assert rec.empty_streak == 1
 
 
+def test_option_all_future_dropped_daily_warns_but_never_demotes() -> None:
+    # The derived-1day gate on the F&O spine (the twin of the spot
+    # `test_all_future_dropped_daily_warns_but_never_demotes` pin): a DAILY
+    # window emptied at the future-bar drop stage still records SUCCESS — the
+    # `interval != _DAILY` conjunct in `all_filtered` is LOAD-BEARING new logic
+    # (on main the daily path structurally never assigned the session verdict;
+    # after the boundary-widen ONLY this gate protects daily F&O windows), so
+    # this test exists to KILL the `all_filtered = all_boundary_filtered`
+    # mutant (drop the non-daily gate → the row demotes FAILED+ALL_FILTERED
+    # and this assertion fails). The visibility WARN still fires — never gated.
+    from brutex.data.window_ledger import SUCCESS
+
+    sdk = _FakeSDK(payload=_candles(_FUTURE_TRADING))
+    ledger = WindowLedger()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            ledger=ledger,
+            now_ist=_now,
+        )
+    assert report.bars_appended == 0  # the future phantom never lands
+    rec = ledger.records()[0]
+    assert rec.status == SUCCESS
+    assert rec.last_error is None
+    assert rec.empty_streak == 0
+    warns = [e for e in logs if e["event"] == "ingest.window.all_bars_filtered"]
+    assert len(warns) == 1
+    assert warns[0]["raw_bars"] == 1
+    assert warns[0]["kept_bars"] == 0
+    assert warns[0]["interval"] == "1day"
+
+
 def test_option_all_filtered_warn_carries_window_bounds() -> None:
     # The dedicated grep-able WARNING fires on the F&O spine too, carrying the
     # window bounds (spot-parity triage fields — refuter F-8 fold) + the
