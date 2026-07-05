@@ -74,6 +74,7 @@ from brutex.adapters.empty_circuit_breaker import (
 from brutex.adapters.error_storm_breaker import (
     ErrorStormBreaker,
     VendorDownError,
+    observe_authorisation_failure,
     observe_window_failure,
     observe_window_success,
 )
@@ -92,6 +93,7 @@ from brutex.adapters.groww.contracts import (
 )
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
+    GrowwAuthorisationError,
     GrowwCredentialDeadError,
     GrowwError,
     is_auth_failure,
@@ -498,6 +500,24 @@ def ingest_option_contract(
                 break
             except GrowwError as exc:
                 if not is_retryable(exc):
+                    # AUTHORISATION-storm observation (DEC-GROWW-AUTHZ-QUARANTINE-001):
+                    # feed the terminal authorisation rejection to the per-pull
+                    # breaker's authorisation arm BEFORE the quarantine raise (the
+                    # terminal path previously never observed — only the exhausted
+                    # retryable branch below did). The distinct-symbol unit is the
+                    # UNDERLYING symbol (one underlying's whole multi-contract chain
+                    # reads as ONE symbol, mirroring observe_window_failure). Below
+                    # the threshold: a no-op + the per-contract quarantine raise; at
+                    # the threshold: RAISES GrowwAuthorisationStormError — the
+                    # fleet-wide account-suspension global stop. None (dry-run /
+                    # synthetic / tests) observes nothing.
+                    if isinstance(exc, GrowwAuthorisationError):
+                        observe_authorisation_failure(
+                            storm_breaker,
+                            symbol=contract.underlying_symbol,
+                            window_key=key,
+                            exc=exc,
+                        )
                     raise  # terminal (auth included) → outer quarantine, never swallowed
                 # Transient: feed the controller (a 429 steps the rate down, a NON-auth
                 # transient drives the timeout ladder — `steps_timeout_ladder`,
