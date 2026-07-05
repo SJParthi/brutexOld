@@ -101,7 +101,9 @@ class TestMoversGate:
         gate.begin()
         body = client.get("/api/v1/movers", params={"asset": "spot", "date": "2024-06-13"}).json()
         assert body["gated"] is True
-        assert "movers stay gated until the final prebuild AND the movers warm" in body["note"]
+        # DEC-MOVERS-WARM-UNBLOCK-001: the note states the REAL release condition
+        # — the gate lifts at prebuild completion; the warm continues un-gated.
+        assert "movers stay gated until the final prebuild finishes" in body["note"]
         assert body["instrument_count"] == 0
         assert "price_gainers" not in body  # zero ranked lists, zero lake reads
         assert calls == []  # the spies prove NO candidate computation happened
