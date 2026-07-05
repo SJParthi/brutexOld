@@ -231,11 +231,21 @@ class MaterializeResult:
         latest-wins derived writers (DEC-TF-REMAT-LATEST-WINS-001) would have
         rewritten byte-identically anyway). ``False``
         for every run that actually read + resampled.
+    opens_substituted
+        SPOT-only OBSERVE count (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): how
+        many COMPLETE sessions in this symbol's 1-minute frame had their
+        derived daily open silently substituted (09:15 bar absent — the
+        implicit ``open.first()`` fallback). ``0`` for F&O kinds (never
+        scanned — spot-only by decision), for ``include_daily=False`` runs
+        (no daily bar derived, nothing to observe), and for an
+        ``unchanged=True`` incremental skip (nothing was re-read). Purely
+        observational — the written bars are byte-identical either way.
     """
 
     written: dict[str, int]
     skipped: tuple[str, ...]
     unchanged: bool = False
+    opens_substituted: int = 0
 
     @property
     def total_bars(self) -> int:
@@ -361,6 +371,7 @@ def materialize_lake_timeframes(
     include_daily: bool = False,
     daily_before: date | None = None,
     incremental: bool | None = None,
+    dense_symbol: bool = False,
 ) -> MaterializeResult:
     """SEGMENT-AWARE materialise of ONE lake partition's derived TFs (DEC-PREBUILD-SELECT-001).
 
@@ -415,6 +426,21 @@ def materialize_lake_timeframes(
     NOT an O(1)-total claim (Golden Rule #10). Returns the per-TF written
     counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
     integration-tested by the round-trip tests.
+
+    **Daily-open substitution observe (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001,
+    SPOT + ``include_daily=True`` only):** after the daily derive, the SAME
+    in-memory 1-minute frame is scanned (zero extra I/O) for complete sessions
+    whose 09:15 IST bar is absent — the derived daily open silently
+    substituted the earliest present minute (the implicit ``open.first()``).
+    The count rides :attr:`MaterializeResult.opens_substituted`; the guarded
+    :func:`~brutex.data.spot_daily_resample.observe_daily_open_substitutions`
+    emits the observe-only log events, gated by *dense_symbol* (``True`` = a
+    SPOT INDEX per the #1031 ``Instrument.is_index`` gate → per-session WARNs,
+    capped; ``False`` = count-only aggregate; ignored for F&O kinds — a
+    deep-OTM contract's 09:15-absence is expected illiquidity, so the F&O
+    ``resample_fn`` path is deliberately NOT scanned). STORED BARS ARE
+    BYTE-UNCHANGED — the scan is read-only and runs AFTER the daily fill
+    (golden-pinned).
 
     **Incremental skip (DEC-PREBUILD-INCREMENTAL-001, per-SYMBOL granularity —
     the bounded first step; a per-TF stamp is explicitly future work):** with
@@ -517,7 +543,11 @@ def materialize_lake_timeframes(
         _stamp(last_1m_ist_date=None)
         return result
 
-    from brutex.data.spot_daily_resample import fill_daily_from_minute, make_lake_write_1day
+    from brutex.data.spot_daily_resample import (
+        fill_daily_from_minute,
+        make_lake_write_1day,
+        observe_daily_open_substitutions,
+    )
 
     # Read the 1-minute base ONCE and share the frame between the intraday
     # derivation and the daily derivation (halves the partition I/O).
@@ -533,10 +563,21 @@ def materialize_lake_timeframes(
         before=before,
         resample_fn=daily_resample_fn_for(kind),
     )
+    # OBSERVE-ONLY daily-open substitution scan (DEC-CALENDAR-EXPECTED-BARS-
+    # DAILY-OPEN-001) — SPOT only, AFTER the fill so a fill exception short-circuits
+    # identically to before; read-only over the frame already in memory, so
+    # the written bars are byte-unchanged (golden-pinned). Guarded inside:
+    # a scan error logs + returns 0, never failing the prebuild.
+    opens_substituted = 0
+    if kind is PrebuildKind.SPOT:
+        opens_substituted = observe_daily_open_substitutions(
+            df_1m, before=before, symbol=symbol, dense=dense_symbol
+        )
     _stamp(last_1m_ist_date=_last_ist_date(df_1m))
     return MaterializeResult(
         written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
         skipped=intraday.skipped,
+        opens_substituted=opens_substituted,
     )
 
 

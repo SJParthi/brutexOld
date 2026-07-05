@@ -3351,6 +3351,10 @@ def build_app(
                         symbol=target.symbol,
                         kind=target.kind,
                         include_daily=True,
+                        # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: per-session
+                        # substitution WARNs only for a SPOT INDEX target
+                        # (PrebuildTarget.dense = Instrument.is_index).
+                        dense_symbol=target.dense,
                     )
 
                 nonlocal prebuild_ok

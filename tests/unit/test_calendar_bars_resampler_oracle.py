@@ -62,6 +62,10 @@ class TestCalendarPredictorMatchesResamplerOracle:
     def test_predicted_bars_equal_resampled_bars(self, tf: int) -> None:
         df = _make_full_session()
         out = resample_1m_to_tf(df, tf)
+        # Session D PR-3 delta (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001):
+        # the bucket LABELS are distinct, so height genuinely counts distinct
+        # buckets — a duplicate-label regression cannot fake the oracle.
+        assert out.get_column("ts_utc").n_unique() == out.height
         assert expected_bars_per_day_for_tf(tf) == out.height, (
             f"tf={tf}: calendar predicts {expected_bars_per_day_for_tf(tf)} bars, "
             f"resampler emits {out.height}"
