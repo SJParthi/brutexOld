@@ -87,12 +87,19 @@ class PrebuildTarget:
     kind
         The :class:`~brutex.data.timeframe_materialize.PrebuildKind` selecting
         the resampler pair (intraday + daily).
+    dense
+        ``True`` for a SPOT INDEX underlying (``Instrument.is_index`` — the
+        SAME density gate the #1031 demotion uses): selects per-session
+        ``daily_open.substituted`` WARNs in the observe-only daily-open scan
+        (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001). Contracts and non-index spot
+        keep ``False`` (count-only aggregate). Ignored for F&O kinds.
     """
 
     exchange: str
     segment: str
     symbol: str
     kind: PrebuildKind
+    dense: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +143,18 @@ class PrebuildOutcome:
         when the filesystem is fine-grained, the probe was unavailable, or no
         ``lake_root`` was given. Folded into ``PipelinePullReport``'s
         ``fs_allocation_note`` + note by the pipeline.
+    opens_substituted
+        The observe-only daily-open substitution total
+        (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): (symbol, date) SESSIONS whose
+        derived daily open silently substituted a non-09:15 first minute,
+        summed over the run's SPOT targets
+        (:attr:`~brutex.data.timeframe_materialize.MaterializeResult.opens_substituted`
+        — F&O kinds are never scanned, an honest structural 0). A
+        FULL-HISTORY count recomputed per run over each re-derived symbol's
+        whole 1-minute frame — NOT "new this pull" (a symbol the incremental
+        derive skips as unchanged contributes 0 that run). ``0`` for a
+        guarded whole-run crash (nothing was scanned). Folded into the
+        pipeline completion headline + ``PipelinePullReport``.
     """
 
     symbols_built: int
@@ -146,6 +165,7 @@ class PrebuildOutcome:
     crashed: str | None = None
     fs_note: str | None = None
     unchanged_skips: int = 0
+    opens_substituted: int = 0
 
 
 def run_pipeline_prebuild(
@@ -255,6 +275,7 @@ def run_pipeline_prebuild(
     )
 
     unchanged_skips = 0
+    opens_substituted = 0
 
     def _tracked(target: PrebuildTarget) -> MaterializeResult:
         """Run the injected materialiser, tallying incremental unchanged-skips.
@@ -262,12 +283,17 @@ def run_pipeline_prebuild(
         DEC-PREBUILD-INCREMENTAL-001: an ``unchanged=True`` result read+wrote
         nothing (the symbol's 1-minute source was byte-identical to its stamp)
         — count it so the done-log + pipeline note can report the saved work
-        honestly (never a fake "built 0 bars").
+        honestly (never a fake "built 0 bars"). Also sums the observe-only
+        ``opens_substituted`` count (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001 —
+        SPOT-only by construction; a contract result carries an honest 0).
+        The phases run strictly sequentially (``run_gated_prebuild`` has no
+        threading), so the nonlocal tallies are race-free.
         """
-        nonlocal unchanged_skips
+        nonlocal unchanged_skips, opens_substituted
         result = materialize(target)
         if result.unchanged:
             unchanged_skips += 1
+        opens_substituted += result.opens_substituted
         return result
 
     def _materialize_spot(inst: Instrument) -> MaterializeResult:
@@ -277,6 +303,10 @@ def run_pipeline_prebuild(
                 segment=inst.segment.value,
                 symbol=inst.symbol_name,
                 kind=PrebuildKind.SPOT,
+                # The #1031 density gate: per-session substitution WARNs only
+                # for a SPOT INDEX; a dense non-index stock (RELIANCE) gets the
+                # count-only aggregate — deliberate, mirrors the demotion gate.
+                dense=inst.is_index,
             )
         )
 
@@ -321,6 +351,7 @@ def run_pipeline_prebuild(
         ok=report.ok,
         fs_note=fs_note,
         unchanged_skips=unchanged_skips,
+        opens_substituted=opens_substituted,
     )
     _LOG.info(
         "pipeline.prebuild.done",
@@ -328,6 +359,7 @@ def run_pipeline_prebuild(
         total_bars=outcome.total_bars,
         failed_count=outcome.failed_count,
         unchanged_skips=outcome.unchanged_skips,
+        opens_substituted=outcome.opens_substituted,
         duration_s=round(time.monotonic() - started, 3),
     )
     return outcome

@@ -616,3 +616,104 @@ def test_prebuild_done_log_carries_unchanged_skips() -> None:
     done = [e for e in logs if e["event"] == "pipeline.prebuild.done"]
     assert len(done) == 1
     assert done[0]["unchanged_skips"] == 1
+
+
+# ── daily-open substitution fold (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001) ─────
+
+
+def _equity(name: str) -> Instrument:
+    """A CASH single-stock spot underlying (dense gate must read False)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(name)) & 0xFFFF,
+        symbol_name=name,
+        display_name=name,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+    )
+
+
+class _SubstitutionMaterializer(_FakeMaterializer):
+    """Returns ``opens_substituted`` per the injected map (default 0)."""
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        super().__init__()
+        self.counts = counts
+
+    def __call__(self, target: PrebuildTarget) -> MaterializeResult:
+        self.targets.append(target)
+        return MaterializeResult(
+            written={"5m": self.bars, "1day": 1},
+            skipped=(),
+            opens_substituted=self.counts.get(target.symbol, 0),
+        )
+
+
+def test_prebuild_sums_opens_substituted_across_spot_targets() -> None:
+    mat = _SubstitutionMaterializer({"NSE-NIFTY": 2, "NSE-RELIANCE": 3})
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY"), _equity("NSE-RELIANCE")],
+        cascade=_cascade(),
+        materialize=mat,
+    )
+    assert outcome.opens_substituted == 5
+    assert outcome.ok is True
+
+
+def test_prebuild_zero_opens_substituted_by_default() -> None:
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=_FakeMaterializer(),
+    )
+    assert outcome.opens_substituted == 0
+
+
+def test_prebuild_done_log_carries_opens_substituted() -> None:
+    with capture_logs() as logs:
+        run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=_SubstitutionMaterializer({"NSE-NIFTY": 4}),
+        )
+    done = [e for e in logs if e["event"] == "pipeline.prebuild.done"]
+    assert len(done) == 1
+    assert done[0]["opens_substituted"] == 4
+
+
+def test_prebuild_target_dense_from_is_index() -> None:
+    """The density gate: IDX spot → dense=True; EQ spot → dense=False; every
+    F&O contract target → dense=False (the default — never set for contracts)."""
+    mat = _FakeMaterializer()
+    run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY"), _equity("NSE-RELIANCE")],
+        cascade=_cascade(),
+        materialize=mat,
+    )
+    dense_by_symbol = {t.symbol: t.dense for t in mat.targets}
+    assert dense_by_symbol["NSE-NIFTY"] is True
+    assert dense_by_symbol["NSE-RELIANCE"] is False
+    assert dense_by_symbol["NSE-NIFTY-30Jan25-FUT"] is False
+    assert dense_by_symbol["NSE-NIFTY-30Jan25-20000-CE"] is False
+    assert dense_by_symbol["NSE-NIFTY-30Jan25-20000-PE"] is False
+
+
+def test_guarded_prebuild_crash_outcome_zero_opens_substituted() -> None:
+    """A guarded whole-run crash scanned nothing — the honest 0, never a
+    fabricated count."""
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=lambda: (_ for _ in ()).throw(ValueError("cascade boom")),
+        materialize=_FakeMaterializer(),
+    )
+    assert outcome.crashed == "ValueError"
+    assert outcome.opens_substituted == 0
