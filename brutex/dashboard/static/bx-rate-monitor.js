@@ -9,7 +9,10 @@
  * right of the page (the COLLAPSED default — same small footprint as before, so it does
  * NOT reflow or cover any page content):
  *
- *   - a STALL light: green = flowing, red = stalled, dark = idle (no pull running);
+ *   - a STALL light: green = flowing, red = stalled, amber = local (an ACTIVE pull in a
+ *     zero-vendor-call LOCAL pipeline stage — the timeframe prebuild / movers warm,
+ *     DEC-PIPELINE-PHASE-UI-HONESTY-001 — never a red "stalled" off the correctly-
+ *     flatlined fetch rate), dark = idle (no pull running);
  *   - req/sec  (achieved / allowed, with the 8 r/s ceiling);
  *   - req/min  (rolling-60s issue count, with the 500/min cap);
  *   - req/10min (MEASURED rolling-600s issue count — the new metric);
@@ -99,6 +102,10 @@
       "box-shadow:0 0 7px var(--green,#26D9B0);}" +
       "#" + WIDGET_ID + " .bxrm-dot.stalled{background:var(--red,#FF5C5C);" +
       "box-shadow:0 0 7px var(--red,#FF5C5C);}" +
+      // Amber "local" (DEC-PIPELINE-PHASE-UI-HONESTY-001): an ACTIVE pull in a
+      // zero-vendor-call LOCAL stage (prebuild / movers warm) — not stalled, not idle.
+      "#" + WIDGET_ID + " .bxrm-dot.local{background:var(--yellow,#FFB74D);" +
+      "box-shadow:0 0 7px var(--yellow,#FFB74D);}" +
       "#" + WIDGET_ID + " .bxrm-dot.idle{background:var(--muted,#787B86);}" +
       "#" + WIDGET_ID + " .bxrm-state{margin-left:auto;font-weight:700;}" +
       "#" + WIDGET_ID + " .bxrm-exp{margin-left:6px;color:var(--muted,#787B86);" +
@@ -106,6 +113,7 @@
       "padding:0 4px;}" +
       "#" + WIDGET_ID + " .bxrm-state.flowing{color:var(--green,#26D9B0);}" +
       "#" + WIDGET_ID + " .bxrm-state.stalled{color:var(--red,#FF5C5C);}" +
+      "#" + WIDGET_ID + " .bxrm-state.local{color:var(--yellow,#FFB74D);}" +
       "#" + WIDGET_ID + " .bxrm-state.idle{color:var(--muted,#787B86);}" +
       "#" + WIDGET_ID + " .bxrm-row{display:flex;justify-content:space-between;gap:14px;" +
       "line-height:1.7;}" +
@@ -132,10 +140,13 @@
       "box-shadow:0 0 10px var(--green,#26D9B0);}" +
       "#" + OVERLAY_ID + " .bxrm-card .bxrm-edot.stalled{background:var(--red,#FF5C5C);" +
       "box-shadow:0 0 10px var(--red,#FF5C5C);}" +
+      "#" + OVERLAY_ID + " .bxrm-card .bxrm-edot.local{background:var(--yellow,#FFB74D);" +
+      "box-shadow:0 0 10px var(--yellow,#FFB74D);}" +
       "#" + OVERLAY_ID + " .bxrm-card .bxrm-edot.idle{background:var(--muted,#787B86);}" +
       "#" + OVERLAY_ID + " .bxrm-card .bxrm-estate{font-weight:800;font-size:15px;}" +
       "#" + OVERLAY_ID + " .bxrm-card .bxrm-estate.flowing{color:var(--green,#26D9B0);}" +
       "#" + OVERLAY_ID + " .bxrm-card .bxrm-estate.stalled{color:var(--red,#FF5C5C);}" +
+      "#" + OVERLAY_ID + " .bxrm-card .bxrm-estate.local{color:var(--yellow,#FFB74D);}" +
       "#" + OVERLAY_ID + " .bxrm-card .bxrm-estate.idle{color:var(--muted,#787B86);}" +
       "#" + OVERLAY_ID + " .bxrm-card .bxrm-close{margin-left:auto;cursor:pointer;" +
       "background:none;border:none;color:var(--muted,#787B86);font-size:22px;" +
@@ -370,9 +381,13 @@
       return;
     }
     // "idle" and "done" (pull just finished — DEC-RATE-STALL-PULL-GATE-001) both take
-    // the dark idle styling; the state TEXT still shows the honest backend word.
-    el.classList.remove("flowing", "stalled", "idle");
-    el.classList.add(state === "flowing" || state === "stalled" ? state : "idle");
+    // the dark idle styling; "local" (an active pull in a zero-vendor-call LOCAL stage —
+    // DEC-PIPELINE-PHASE-UI-HONESTY-001) takes the AMBER styling; the state TEXT still
+    // shows the honest backend word.
+    el.classList.remove("flowing", "stalled", "local", "idle");
+    el.classList.add(
+      state === "flowing" || state === "stalled" || state === "local" ? state : "idle"
+    );
   }
 
   function setText(id, value) {
@@ -387,16 +402,24 @@
   function render(data) {
     lastData = data;
     var state = data && typeof data.flow_state === "string" ? data.flow_state : "idle";
+    // flow_detail (DEC-PIPELINE-PHASE-UI-HONESTY-001): non-empty only for the amber
+    // "local" verdict — "local processing — <phase> (no vendor calls)". The compact
+    // pill keeps the short state token; the expanded overlay shows the full detail.
+    var detail =
+      data && typeof data.flow_detail === "string" && data.flow_detail
+        ? data.flow_detail
+        : state;
     setClass(document.getElementById("bxrmDot"), state);
     setClass(document.getElementById("bxrmEDot"), state);
     var stateEl = document.getElementById("bxrmState");
     if (stateEl) {
       stateEl.textContent = state;
+      stateEl.title = detail;
       setClass(stateEl, state);
     }
     var eStateEl = document.getElementById("bxrmEState");
     if (eStateEl) {
-      eStateEl.textContent = state;
+      eStateEl.textContent = detail;
       setClass(eStateEl, state);
     }
 

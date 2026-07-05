@@ -544,3 +544,85 @@ class TestStallGateOnPullCompletion:
             body = c.get("/api/v1/pull/rate").json()
         assert body["flow_state"] == "idle"
         assert body["stalled"] is False
+
+
+class TestLocalPhaseAmber:
+    """Amber 'local' during the zero-vendor-call pipeline stages
+    (DEC-PIPELINE-PHASE-UI-HONESTY-001).
+
+    The route threads the pipeline's coarse phase (the injectable
+    ``pull_phase_probe`` seam; production default = the app's own
+    ``BackgroundPullJob.snapshot().phase``) into the PANEL-side projection, so a
+    healthy prebuild/movers-warm stage reads ``local`` — never the red
+    ``stalled`` the vendor-rate heuristics read off its correctly-flatlined
+    fetch rate. Strictly phase-keyed: the historical fetch phase still stalls.
+    """
+
+    @staticmethod
+    def _fresh_zero_rate_panel() -> DashboardState:
+        """A state whose panel just ticked with a ~0 completed rate (local stage)."""
+        state = DashboardState()
+        make_rate_observer(state)(
+            {"current_rps": 8.0, "recent_hits": 0, "recent_minute": 0, "ceiling_per_min": 500},
+            {"effective_rps": 0.0, "latency_ms_p95": 5.0},
+        )
+        return state
+
+    def _phase_client(self, state: DashboardState, *, phase: str) -> object:
+        pytest.importorskip("fastapi")
+        from brutex.dashboard.app import build_app
+        from fastapi.testclient import TestClient
+
+        return TestClient(
+            build_app(
+                state,
+                pull_active_probe=lambda: True,
+                pull_phase_probe=lambda: phase,
+            )
+        )
+
+    def test_prebuild_phase_reads_local_amber_not_stalled(self) -> None:
+        """Regression (fails before the fix): a healthy prebuild used to read red."""
+        state = self._fresh_zero_rate_panel()
+        # The pre-fix shape: same panel, pull active, NO phase signal → stalled.
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
+            assert c.get("/api/v1/pull/rate").json()["flow_state"] == "stalled"
+        # The fix: the phase probe names the local prebuild stage → amber local.
+        with self._phase_client(state, phase="prebuild") as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "local"
+        assert body["stalled"] is False
+        assert body["flow_detail"] == "local processing — prebuild (no vendor calls)"
+
+    def test_movers_warm_phase_reads_local(self) -> None:
+        state = self._fresh_zero_rate_panel()
+        with self._phase_client(state, phase="movers") as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "local"
+        assert body["flow_detail"] == "local processing — movers (no vendor calls)"
+
+    def test_historical_phase_zero_rate_still_reads_stalled(self) -> None:
+        """THE MANDATED PIN end-to-end: a dead FETCH phase is a real stall."""
+        state = self._fresh_zero_rate_panel()
+        with self._phase_client(state, phase="historical") as c:  # type: ignore[attr-defined]
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "stalled"
+        assert body["stalled"] is True
+        assert body["flow_detail"] == ""
+
+    def test_widget_renders_amber_local_state(self) -> None:
+        """The served widget carries the amber 'local' classes + flow_detail wiring."""
+        state = DashboardState()
+        with _client(state) as c:  # type: ignore[attr-defined]
+            js = c.get("/static/bx-rate-monitor.js").text
+        # Amber CSS for every dot/state twin (compact pill + expanded overlay).
+        assert ".bxrm-dot.local{background:var(--yellow,#FFB74D)" in js
+        assert ".bxrm-state.local{color:var(--yellow,#FFB74D)" in js
+        assert ".bxrm-edot.local{background:var(--yellow,#FFB74D)" in js
+        assert ".bxrm-estate.local{color:var(--yellow,#FFB74D)" in js
+        # setClass whitelists "local" (a new state must never silently render dark).
+        assert 'el.classList.remove("flowing", "stalled", "local", "idle")' in js
+        assert 'state === "flowing" || state === "stalled" || state === "local"' in js
+        # flow_detail reaches the expanded state text (textContent — no HTML sink).
+        assert "data.flow_detail" in js
+        assert "eStateEl.textContent = detail" in js
