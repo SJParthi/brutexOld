@@ -831,7 +831,7 @@ jobs:
           # under the aggregate gate, DEC-COV-CLI-HARNESS-001) / the
           # pragma'd live pull path.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
-            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
           fi
@@ -1669,9 +1669,19 @@ jobs:
           # dedicated test file is now strict-gated above
           # (DEC-ORCH-STRICT-GATES-001, entry #613).
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py
+            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py
           else
             echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          # DEC-LAKE-FOOTPRINT-MEASURED-001 (MIGRATION.md #1253): the measured
+          # lake-footprint multiplier + the pipeline prebuild's PRE-RUN disk
+          # guard (observed schema_meta multiplier, conservative 6.5x
+          # fallback, BRUTEX_PREBUILD_DISK_GUARD=off escape hatch, FAIL-OPEN
+          # closure). NEW module -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_lake_footprint.py" > /dev/null; then
+            pytest --cov=brutex.data.lake_footprint --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lake_footprint.py
+          else
+            echo "(brutex.data.lake_footprint test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/integration/test_strategies_runner.py" > /dev/null; then
             pytest --cov=brutex.strategies.runner --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_strategies_runner.py

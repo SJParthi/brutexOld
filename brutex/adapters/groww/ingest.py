@@ -62,6 +62,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from time import sleep as _time_sleep
 
 import structlog
@@ -102,6 +103,7 @@ from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.partial_window_detect import SUSPECTED_PARTIAL, observe_partial_window
 from brutex.data.session import (
     ALL_FILTERED,
@@ -225,6 +227,20 @@ class IngestReport:
     for the dashboard's "incomplete windows" view).
     """
 
+    vendor_dup_rows_dropped: int = 0
+    """WITHIN-BATCH duplicate vendor rows the writer collapsed across this run's
+    windows (DEC-VENDOR-CONFLICT-SURFACE-001 — the sum of every window's
+    :attr:`~brutex.data.sink.SinkAppendResult.vendor_dup_rows_dropped`). Zero on a
+    clean / skipped pull; previously this count died in the
+    ``lake.vendor_duplicate_rows`` log line."""
+
+    max_close_delta: Decimal | None = None
+    """The MAX absolute keep-first close delta across this run's conflicts —
+    exact Decimal rupees (prices are Decimal, never float; CLAUDE.md §6).
+    ``None`` when no window recorded a conflict (honestly distinct from a real
+    ``Decimal("0")`` delta). MAX-folds across windows/passes via
+    :func:`~brutex.data.parquet_writer.fold_max_close_delta`."""
+
 
 @dataclass(frozen=True, slots=True)
 class _WindowOutcome:
@@ -246,6 +262,12 @@ class _WindowOutcome:
     window: tuple[date, date] | None = None
     #: The retryable error's class name for the per-window WARNING. ``None`` unless transient.
     error_type: str | None = None
+    #: Within-batch duplicate vendor rows the writer collapsed on this window's
+    #: append (DEC-VENDOR-CONFLICT-SURFACE-001; sum-folds across windows).
+    vendor_dup_rows_dropped: int = 0
+    #: MAX absolute keep-first close delta on this window's append (exact
+    #: Decimal; ``None`` = no conflict; max-folds across windows).
+    max_close_delta: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,15 +515,18 @@ def ingest_spot(
 
     def _drain_pass(
         pending: list[tuple[date, date]],
-    ) -> tuple[int, int, int, int, list[tuple[date, date]]]:
+    ) -> tuple[int, int, int, int, int, Decimal | None, list[tuple[date, date]]]:
         """Run ONE fan-out pass over *pending*; sum outcomes + collect failed windows.
 
         A captured terminal GrowwError is re-raised here so the outer quarantine
         behaves exactly as it would with a sequential spine; any other captured
         exception (a real bug) is re-raised too — never swallowed. Returns
-        ``(bars_appended, transient, skipped, conflicts, transient_windows)``.
+        ``(bars_appended, transient, skipped, conflicts, vendor_dup_rows_dropped,
+        max_close_delta, transient_windows)`` — the two vendor-behaviour counters
+        (DEC-VENDOR-CONFLICT-SURFACE-001) sum/max-fold exactly like conflicts.
         """
-        b = t = s = c = 0
+        b = t = s = c = dup = 0
+        delta: Decimal | None = None
         failed: list[tuple[date, date]] = []
         for outcome in runner(_fetch_window, pending):
             # Per-window live-sync ping (DEC-SPOT-WINDOW-PROGRESS-001): the window's ledger
@@ -519,6 +544,8 @@ def ingest_spot(
                 t += result.transient
                 s += result.skipped
                 c += result.conflicts
+                dup += result.vendor_dup_rows_dropped
+                delta = fold_max_close_delta(delta, result.max_close_delta)
                 if result.transient and result.window is not None:
                     failed.append(result.window)
                 continue
@@ -526,7 +553,7 @@ def ingest_spot(
             if exc is None:  # pragma: no cover — a failed outcome always carries exc
                 continue
             raise exc
-        return b, t, s, c, failed
+        return b, t, s, c, dup, delta, failed
 
     # First pass over ALL windows, then bounded in-run auto-retry of ONLY the
     # transiently-failed windows. Counts that accumulate across passes
@@ -534,15 +561,20 @@ def ingest_spot(
     # pass's still-failing count, so ``transient_failures == still_failed_windows``.
     # Worklists are sorted before each pass so the report is deterministic
     # regardless of worker-completion order (Rule #4).
-    bars_appended = skipped = conflicts = transient = 0
+    bars_appended = skipped = conflicts = transient = vendor_dup_rows_dropped = 0
+    max_close_delta: Decimal | None = None
     ever_retried: set[tuple[date, date]] = set()
     pending = windows
     pass_idx = 0
     while True:
-        pass_bars, transient, pass_skipped, pass_conflicts, failed = _drain_pass(pending)
+        pass_bars, transient, pass_skipped, pass_conflicts, pass_dup, pass_delta, failed = (
+            _drain_pass(pending)
+        )
         bars_appended += pass_bars
         skipped += pass_skipped
         conflicts += pass_conflicts
+        vendor_dup_rows_dropped += pass_dup
+        max_close_delta = fold_max_close_delta(max_close_delta, pass_delta)
         failed_sorted = sorted(set(failed))
         if not failed_sorted or pass_idx >= max_retry_passes:
             break
@@ -577,6 +609,8 @@ def ingest_spot(
         conflicts=conflicts,
         retried_windows=len(ever_retried),
         still_failed_windows=transient,
+        vendor_dup_rows_dropped=vendor_dup_rows_dropped,
+        max_close_delta=max_close_delta,
     )
 
 
@@ -718,6 +752,8 @@ def _ingest_one_window(
             bars_appended=result_outcome.bars_appended,
             conflicts=result_outcome.conflicts,
             series_key=series_key,
+            vendor_dup_rows_dropped=result_outcome.vendor_dup_rows_dropped,
+            max_close_delta=result_outcome.max_close_delta,
         )
 
     def _rehydrate(bars: Sequence[CandleBar]) -> None:
@@ -1310,7 +1346,12 @@ def _process_window_tail(
         )
     if on_success is not None:
         on_success()
-    return _WindowOutcome(bars_appended=result.bars_appended, conflicts=window_conflicts)
+    return _WindowOutcome(
+        bars_appended=result.bars_appended,
+        conflicts=window_conflicts,
+        vendor_dup_rows_dropped=result.vendor_dup_rows_dropped,
+        max_close_delta=result.max_close_delta,
+    )
 
 
 __all__ = [

@@ -3111,6 +3111,106 @@ class TestExpiryScope:
         assert after == before, "an out-of-scope expiry's stored bars must never change"
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Vendor-surface threading through the phase result (DEC-VENDOR-CONFLICT-SURFACE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestVendorSurfacePhaseThreading:
+    """The conflict/dup counters reach the phase result on BOTH modes.
+
+    Fail-before proof: on origin/main ``_PhaseResult`` / ``IngestReport`` /
+    ``HistoricalPullReport`` carry none of the three counters — every test
+    below raises ``TypeError`` / ``AttributeError`` there.
+    """
+
+    def test_reconcile_folds_consumer_vendor_surface_into_phase(self) -> None:
+        """ASYNC: the post-drain reconcile re-derives the phase's three counters."""
+        from decimal import Decimal
+
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        pipeline = FetchPipeline(workers=1)
+        try:
+            pipeline.fold_totals(
+                bars_appended=30,
+                conflicts=2,
+                series_key=("SYM-A", "1minute"),
+                vendor_dup_rows_dropped=4,
+                max_close_delta=Decimal("0.10"),
+            )
+            pipeline.fold_totals(
+                bars_appended=10,
+                conflicts=1,
+                series_key=("SYM-B", "1minute"),
+                vendor_dup_rows_dropped=1,
+                max_close_delta=Decimal("44.70"),
+            )
+            phase = hp._PhaseResult(
+                bars=0,
+                windows=4,
+                failed_pairs=0,
+                still_failed_windows=0,
+                auth_aborted=False,
+                complete=frozenset({"SYM-A", "SYM-B"}),
+                clean=True,
+                merged_pairs={
+                    ("SYM-A", "1minute"): IngestReport(
+                        windows=2, bars_appended=0, transient_failures=0
+                    ),
+                    ("SYM-B", "1minute"): IngestReport(
+                        windows=2, bars_appended=0, transient_failures=0
+                    ),
+                },
+                failure_symbols=frozenset(),
+            )
+            out = hp._reconcile_phase_with_pipeline(
+                phase, pipeline, selected_symbols=frozenset({"SYM-A", "SYM-B"})
+            )
+        finally:
+            pipeline.drain()
+        assert out.conflicts == 3
+        assert out.vendor_dup_rows_dropped == 5
+        assert out.max_close_delta == Decimal("44.70")
+        pair_a = out.merged_pairs[("SYM-A", "1minute")]
+        assert pair_a.vendor_dup_rows_dropped == 4
+        assert pair_a.max_close_delta == Decimal("0.10")
+
+    def test_report_to_dict_serializes_delta_as_exact_string(self) -> None:
+        """JSON honesty: the Decimal renders as its string, never a float round-trip."""
+        from decimal import Decimal
+
+        base = {
+            "dry_run": False,
+            "intervals": ("1minute",),
+            "contracts_selected": 1,
+            "contracts_completed": 1,
+            "bars_appended": 10,
+            "windows": 1,
+            "failed_pairs": 0,
+            "still_failed_windows": 0,
+            "auth_aborted": False,
+            "note": "ok",
+            "phase1_clean": True,
+            "phase1_complete": ("C",),
+            "start_dates": {"C": "2024-01-01"},
+            "minute_requested": True,
+            "minute_skipped": False,
+        }
+        with_delta = HistoricalPullReport(
+            **base,  # type: ignore[arg-type]
+            conflicts=25,
+            vendor_dup_rows_dropped=9141,
+            max_close_delta=Decimal("44.70"),
+        )
+        payload = with_delta.to_dict()
+        assert payload["conflicts"] == 25
+        assert payload["vendor_dup_rows_dropped"] == 9141
+        assert payload["max_close_delta"] == "44.70"
+        without = HistoricalPullReport(**base)  # type: ignore[arg-type]
+        assert without.to_dict()["max_close_delta"] is None
+
+
 def test_fno_pull_emits_written_settled_mismatch_warning(
     registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
 ) -> None:

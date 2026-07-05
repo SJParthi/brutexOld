@@ -220,6 +220,7 @@ from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
     census_to_dict,
@@ -3533,7 +3534,24 @@ def build_app(
                         # Allocation probe at the tiny-file writer's start
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
+                        # PRE-RUN disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001):
+                        # skip the whole prebuild gracefully when the lake
+                        # volume can't hold the estimated derived writes
+                        # (observed schema_meta multiplier, 6.5x fallback;
+                        # BRUTEX_PREBUILD_DISK_GUARD=off to override). Fails
+                        # OPEN on any measurement error.
+                        disk_guard=make_disk_guard(
+                            lake_root,
+                            instrument_store.get_meta if instrument_store is not None else None,
+                        ),
                     )
+                    # Post-run observation (best-effort, never raises): persist
+                    # the freshly-materialised lake's OBSERVED multiplier to
+                    # schema_meta so the NEXT pull's guard uses reality instead
+                    # of the fallback. Skipped when the guard blocked (nothing
+                    # changed on disk) or without an instrument store.
+                    if instrument_store is not None and not outcome.disk_guard_blocked:
+                        record_lake_footprint(lake_root, instrument_store.set_meta)
                 finally:
                     # New derived partitions may be on disk (even a partial run —
                     # or one the guard re-raised a global-stop out of — may have
