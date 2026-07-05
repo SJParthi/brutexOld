@@ -1836,6 +1836,50 @@ def test_pull_skips_not_yet_open_contracts_no_fetch_no_ledger(
     assert events == far
 
 
+def test_low_leg_vanish_warn_self_describes_never_planned_siblings(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """The post-drain WARN carries the planner's omitted set as ``never_planned_pairs``.
+
+    DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001 at the PRODUCTION seam: a DEFAULT (no
+    explicit dates) pipeline-wired pull over ONE near CE that fetches CLEANLY EMPTY
+    plus TWO far Sep-2026 siblings skipped at planning time (``fno.window_not_open``
+    — zero vendor calls, zero ledger rows) must STILL flag ``low_leg=True`` (annotate,
+    NEVER suppress) with ``never_planned_pairs == 2`` so triage reads the flag as a
+    probable far-leg-not-open chain.
+    """
+    monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+    _seed_far_expiry_pair(registry)
+    sdk = _EmptyCandleSDK()
+    sink = _RecordingSink()
+    near_ce = next(
+        r
+        for r in registry.list_contracts(underlying="NIFTY")
+        if r.contract_symbol == "NSE-NIFTY-25Jan24-21000-CE"
+    )
+    far = [
+        r for r in registry.list_contracts(underlying="NIFTY") if r.expiry_date == date(2026, 9, 29)
+    ]
+    with capture_logs() as logs:
+        report = pull_contract_candles(
+            [near_ce, *far],
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+            now=_NOW,
+        )
+    assert report.bars_appended == 0
+    assert report.contracts_not_yet_in_window == 2
+    warns = [r for r in logs if r["event"] == "pull.underlying_all_empty"]
+    assert len(warns) == 1
+    assert warns[0]["underlying"] == repr("NIFTY")
+    assert warns[0]["attempted_pairs"] == 1
+    assert warns[0]["low_leg"] is True  # the flag STILL fires — annotation only
+    assert warns[0]["never_planned_pairs"] == 2  # …and now self-describes
+
+
 def test_pull_all_contracts_not_yet_open_is_a_clean_noop(
     registry: RegistryStore, tmp_lake: Path
 ) -> None:
@@ -2167,7 +2211,18 @@ class TestGreeksEnrichWiring:
         assert len(done) == 1
         assert done[0]["futures_skipped"] == 1
         assert done[0]["enriched"] >= 1
+        # DEC-GREEKS-SPOT-MEMO-001: the CE + PE share ONE (underlying, window)
+        # spot coordinate → exactly one performed read, one memo hit, measured
+        # in the done event (the FUT is skipped before the spot read).
+        assert done[0]["spot_reads"] == 1
+        assert done[0]["spot_hits"] == 1
         assert [r for r in logs if r["event"] == "fno.greeks_enrich.error"] == []
+        # DEC-GREEKS-ENRICH-OBSERVE-001: a completed pass reads ok=True on the report
+        # (no whole-pass error, no per-target quarantine, no note clause).
+        assert report.greeks_enrich_ok is True
+        assert report.greeks_enrich_error is None
+        assert report.greeks_targets_errored == 0
+        assert "Greeks enrichment FAILED" not in report.note
         # The CE premium (105 vs spot 21000, strike 21000) SOLVES and is STORED.
         ce = pl.read_parquet(
             tmp_lake / "bars/NSE/FNO/NSE-NIFTY-25Jan24-21000-CE/1minute/2024/01.parquet"
@@ -2186,7 +2241,7 @@ class TestGreeksEnrichWiring:
         sdk = _FakeSDK()
         sink = _RecordingSink()
         with capture_logs() as logs:
-            pull_contract_candles(
+            report = pull_contract_candles(
                 registry.list_contracts(underlying="NIFTY"),
                 lake_root=Path("/unused"),
                 dry_run=True,
@@ -2198,6 +2253,12 @@ class TestGreeksEnrichWiring:
                 now=_NOW,
             )
         assert [r for r in logs if str(r["event"]).startswith("fno.greeks_enrich")] == []
+        # DEC-GREEKS-ENRICH-OBSERVE-001: "did not run" (None) is honestly distinct
+        # from "ran clean" (True) and "failed" (False).
+        assert report.greeks_enrich_ok is None
+        assert report.greeks_enrich_error is None
+        assert report.greeks_targets_errored == 0
+        assert report.to_dict()["greeks_enrich_ok"] is None
 
     def test_enrich_failure_never_fails_the_pull(
         self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
@@ -2231,6 +2292,21 @@ class TestGreeksEnrichWiring:
         assert len(errors) == 1
         assert "misconfigured" in str(errors[0]["error"])
         assert [r for r in logs if r["event"] == "fno.greeks_enrich.done"] == []
+        # DEC-GREEKS-ENRICH-OBSERVE-001: the whole-pass failure is SURFACED on the
+        # report (ok=False + "ErrorType: message") and the note carries the clause.
+        assert report.greeks_enrich_ok is False
+        assert report.greeks_enrich_error is not None
+        assert report.greeks_enrich_error.startswith("RuntimeError:")
+        assert "misconfigured risk-free source" in report.greeks_enrich_error
+        assert report.greeks_targets_errored == 0
+        assert (
+            ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next pull"
+            in report.note
+        )
+        payload = report.to_dict()
+        assert payload["greeks_enrich_ok"] is False
+        assert payload["greeks_enrich_error"] == report.greeks_enrich_error
+        assert payload["greeks_targets_errored"] == 0
 
     def test_target_building_skips_windowless_and_bad_exchange(
         self, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
@@ -2255,6 +2331,8 @@ class TestGreeksEnrichWiring:
                 bars_solved=0,
                 bars_null=0,
                 bars_reused=0,
+                spot_reads=0,
+                spot_hits=0,
             )
 
         monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
@@ -2286,13 +2364,121 @@ class TestGreeksEnrichWiring:
             (None, no_exchange),
         ]
         with capture_logs() as logs:
-            hp._enrich_greeks_from_minute(
+            outcome = hp._enrich_greeks_from_minute(
                 rebuilt=cast("list[hp._RebuiltContract]", rebuilt),
                 windows={good.symbol: window, no_exchange.symbol: window},
                 lake_root=tmp_lake,
             )
         assert captured == [good.symbol]
         assert [r for r in logs if r["event"] == "fno.greeks_enrich.done"] != []
+        # DEC-GREEKS-ENRICH-OBSERVE-001: the completed pass returns an ok outcome.
+        assert outcome == hp._GreeksEnrichOutcome(ok=True, error=None, errored_targets=0)
+
+    def test_per_target_quarantine_never_flips_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        """Per-target quarantines ride ``errored_targets``, never a whole-pass failure.
+
+        DEC-GREEKS-ENRICH-OBSERVE-001 locked semantics: ``ok=True`` means the pass
+        COMPLETED — the driver's per-target ``errored`` tally (one corrupt contract,
+        quarantined inside the driver) is surfaced SEPARATELY and must not fake a
+        whole-pass failure (Golden Rule #1: no illusion in either direction).
+        """
+        pytest.importorskip("trading_core")
+        import brutex.data.greeks_enrich as ge
+
+        def _fake_enrich(*, targets: object, lake_root: Path, rate_source: object) -> object:
+            del targets, lake_root, rate_source
+            return ge.GreeksEnrichReport(
+                enriched=1,
+                already_current=0,
+                futures_skipped=0,
+                undecodable=0,
+                no_bars=0,
+                errored=2,
+                bars_written=1,
+                bars_solved=1,
+                bars_null=0,
+                bars_reused=0,
+                spot_reads=0,
+                spot_hits=0,
+            )
+
+        monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
+        contract = DerivativeContract(
+            underlying_symbol="NIFTY",
+            expiry=date(2024, 1, 25),
+            symbol="NSE-NIFTY-25Jan24-21000-CE",
+            contract_type="CE",
+            strike=21000.0,
+        )
+        rebuilt = [(None, contract)]
+        with capture_logs() as logs:
+            outcome = hp._enrich_greeks_from_minute(
+                rebuilt=cast("list[hp._RebuiltContract]", rebuilt),
+                windows={contract.symbol: (date(2024, 1, 1), date(2024, 1, 20))},
+                lake_root=tmp_lake,
+            )
+        assert outcome.ok is True  # the pass COMPLETED — quarantines never flip ok
+        assert outcome.error is None
+        assert outcome.errored_targets == 2
+        assert [r for r in logs if r["event"] == "fno.greeks_enrich.error"] == []
+
+    def test_per_target_quarantine_tally_reaches_the_report(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        """The NONZERO ``errored_targets`` tally survives to the PUBLIC report.
+
+        Hostile-review fold (SURVIVED mutation probe): hardcoding
+        ``greeks_targets_errored=0`` in the report construction passed every
+        test, because the nonzero tally was pinned only on the private
+        helper's return. This runs the FULL ``pull_contract_candles`` with the
+        same errored=2 driver fake and asserts the last-mile kwarg into the
+        public report — the field's entire purpose.
+        """
+        pytest.importorskip("trading_core")
+        import brutex.data.greeks_enrich as ge
+
+        monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)
+        monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)  # the fixed-6.5% default
+
+        def _fake_enrich(*, targets: object, lake_root: Path, rate_source: object) -> object:
+            del targets, lake_root, rate_source
+            return ge.GreeksEnrichReport(
+                enriched=1,
+                already_current=0,
+                futures_skipped=0,
+                undecodable=0,
+                no_bars=0,
+                errored=2,
+                bars_written=1,
+                bars_solved=1,
+                bars_null=0,
+                bars_reused=0,
+                spot_reads=0,
+                spot_hits=0,
+            )
+
+        monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        report = pull_contract_candles(
+            registry.list_contracts(underlying="NIFTY"),
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+        assert report.greeks_enrich_ok is True  # the pass COMPLETED
+        assert report.greeks_enrich_error is None
+        assert report.greeks_targets_errored == 2  # the tally reaches the report
+        payload = report.to_dict()
+        assert payload["greeks_targets_errored"] == 2
+        assert "Greeks enrichment FAILED" not in report.note  # quarantines never flip ok
 
 
 # ── DEC-WINDOW-LEDGER-RESCUE-001: the lost-ledger rescue actually rescues ─────
@@ -2806,3 +2992,100 @@ class TestExpiryScope:
         assert "NSE-RELIANCE-29Feb24-2800-CE" not in scoped_sdk.candle_symbols
         after = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in stored}
         assert after == before, "an out-of-scope expiry's stored bars must never change"
+
+
+def _write_overlay_sidecar(lake_root: Path, day: str = "2026-05-12") -> frozenset[date]:
+    """Write a minimal valid observed-sessions overlay sidecar under *lake_root*."""
+    import json
+
+    from brutex.calendars.observed_sessions import (
+        OBSERVED_LABEL,
+        OBSERVED_OVERLAY_VERSION,
+        overlay_path,
+    )
+
+    path = overlay_path(lake_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": OBSERVED_OVERLAY_VERSION,
+                "entries": [
+                    {
+                        "date": day,
+                        "detected_at": "2026-07-04T00:00:00+00:00",
+                        "month": day[:7],
+                        "label": OBSERVED_LABEL,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return frozenset({date.fromisoformat(day)})
+
+
+def test_live_pull_threads_observed_holidays(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """DEC-CALENDAR-OBSERVED-SESSIONS-001: the LIVE F&O pull loads the overlay
+    sidecar ONCE and threads it into ``run_groww_option_ingest`` (whose futures
+    partial-window observe consumes it — margin arithmetic only, never planning)."""
+    expected = _write_overlay_sidecar(tmp_lake)
+    seen: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, observed_holidays: object = frozenset(), **_kw: object
+    ) -> GrowwOptionIngestReport:
+        seen.append(observed_holidays)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert seen
+    assert all(observed == expected for observed in seen)
+
+
+def test_dry_run_pull_threads_empty_observed_holidays(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """A dry-run threads the EMPTY overlay even when a sidecar exists on disk."""
+    _write_overlay_sidecar(tmp_lake)
+    seen: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, observed_holidays: object = frozenset(), **_kw: object
+    ) -> GrowwOptionIngestReport:
+        seen.append(observed_holidays)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert seen
+    assert all(observed == frozenset() for observed in seen)

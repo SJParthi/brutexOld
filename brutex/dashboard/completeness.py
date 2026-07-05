@@ -37,10 +37,16 @@ import csv
 import io
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Final
 
 import structlog
 
+from brutex.calendars import (
+    HOLIDAY_COVERAGE_FIRST_YEAR,
+    HOLIDAY_COVERAGE_LAST_YEAR,
+    trading_days_between,
+)
 from brutex.dashboard._csv_utils import FormulaSafeWriter as _FormulaSafeWriter
 from brutex.dashboard.coverage_view import (
     COMPLETENESS_FAILED,
@@ -71,6 +77,21 @@ DIM_FULL: Final[str] = "full"  # ledger-settled: every expected window resolved 
 DIM_PARTIAL: Final[str] = "partial"  # has unfetched PLANNED windows still to pull
 DIM_FAILED: Final[str] = "failed"  # has FAILED windows (transient — a re-pull should retry)
 DIM_NONE: Final[str] = "none"  # no ledger record yet (never pulled)
+#: AMBER (DEC-SPOT-PARTIAL-RANGE-CHIP-001): ledger-SETTLED (nothing pending/failed —
+#: no re-pull is coming) but the STORED RANGE is honestly incomplete — the covered
+#: data misses the Jan-2020 floor OR its session density (distinct IST bar-dates ÷
+#: expected NSE trading sessions over [first, last]) falls below
+#: :data:`SPOT_SESSION_RATIO_FLOOR`. Distinguishable from the pending-windows
+#: ``partial`` (which WILL be re-pulled) so the operator reads "settled, but the
+#: range has holes" instead of a false ``full``.
+DIM_SETTLED_PARTIAL_RANGE: Final[str] = "settled_partial_range"
+
+#: The session-density floor below which a settled-``full`` spot dimension is
+#: downgraded to the amber :data:`DIM_SETTLED_PARTIAL_RANGE` — the covered span's
+#: distinct IST bar-dates must reach ≥ 95% of the NSE trading sessions in
+#: ``[first_date, last_date]``. 0.95 (not 1.0) so a handful of genuinely-empty
+#: vendor sessions never false-ambers a solid symbol.
+SPOT_SESSION_RATIO_FLOOR: Final[float] = 0.95
 
 #: Per-underlying OPTION verdicts (the honest "stable=complete", no fake %).
 OPT_STABLE: Final[str] = "stable"  # all attempted years COMPLETE — the honest "complete"
@@ -319,7 +340,11 @@ _SPOT_VERDICT_RANK: Final[dict[str, int]] = {
     DIM_NONE: 0,
     DIM_FAILED: 1,
     DIM_PARTIAL: 2,
-    DIM_FULL: 3,
+    # The amber settled-but-range-incomplete verdict sits ABOVE the pending-windows
+    # ``partial`` (its ledger is fully settled — strictly more resolved) and BELOW
+    # ``full`` (DEC-SPOT-PARTIAL-RANGE-CHIP-001).
+    DIM_SETTLED_PARTIAL_RANGE: 3,
+    DIM_FULL: 4,
 }
 
 
@@ -430,10 +455,17 @@ def _per_symbol_spot(
         first = row.get("first_date")
         last = row.get("last_date")
         first_s = str(first) if first else None
-        # 2020-floor honesty downgrade: a settled-but-late-start 1-minute dimension reads
-        # ``partial``, not ``full`` (DEC-SPOT-COMPLETENESS-2020-FLOOR-001) — the start date
-        # below shows the operator WHEN it actually begins.
-        new_verdict = _spot_dimension_verdict_with_floor(row.get("completeness"), first_s)
+        last_s = str(last) if last else None
+        # Range-honesty downgrades: a settled-but-late-start OR settled-but-sparse
+        # 1-minute dimension reads the amber ``settled_partial_range``, not ``full``
+        # (DEC-SPOT-COMPLETENESS-2020-FLOOR-001 + DEC-SPOT-PARTIAL-RANGE-CHIP-001)
+        # — the start date below shows the operator WHEN it actually begins.
+        new_verdict = _spot_dimension_verdict_with_floor(
+            row.get("completeness"),
+            first_s,
+            last_date=last_s,
+            session_days=_session_days_of(row),
+        )
         # Rank-merge (DEC-COMPLETENESS-SPOT-KEY-RECOVER-001): when a clean + a drifted partition
         # both resolve to this canonical symbol, keep the STRICTLY-better cell so a stale
         # fragment can never clobber real data (order-independent — see _spot_cell_supersedes).
@@ -583,8 +615,59 @@ def _from_2020(first_date: str | None) -> bool:
     return first_date is not None and first_date < _FROM_2020_EXCLUSIVE_UPPER
 
 
-def _spot_dimension_verdict_with_floor(completeness: str | None, first_date: str | None) -> str:
-    """The spot 1-minute verdict WITH the 2020-floor honesty downgrade applied.
+def _parse_iso_date(value: str | None) -> date | None:
+    """Parse an ISO ``YYYY-MM-DD`` string, or ``None`` for missing/unparseable input."""
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _session_range_audit(
+    first_date: str | None, last_date: str | None, session_days: int | None
+) -> tuple[int | None, float | None]:
+    """Return ``(expected_sessions, session_ratio)`` for the covered span, or abstain.
+
+    DEC-SPOT-PARTIAL-RANGE-CHIP-001 — the session-density arm of the amber
+    ``settled_partial_range`` verdict: ``expected_sessions`` is the number of NSE
+    trading sessions in ``[first_date, last_date]`` inclusive (the LENIENT
+    :func:`~brutex.calendars.trading_days_between` — never the ``_checked``
+    raiser, mirroring the interior-gap detector's out-of-calendar abstain so a
+    boot/holiday edge can never crash or false-amber the page), and
+    ``session_ratio`` = ``session_days / expected_sessions``.
+
+    ABSTAINS — returns ``(None, None)``, no downgrade — when the audit has no
+    honest basis: ``session_days`` absent (a caller without the lake scalar),
+    either date missing/unparseable, the span exits the published holiday
+    coverage (:data:`~brutex.calendars.HOLIDAY_COVERAGE_FIRST_YEAR` /
+    :data:`~brutex.calendars.HOLIDAY_COVERAGE_LAST_YEAR` — an out-of-coverage
+    weekday's verdict would turn on a missing holiday list), or a degenerate
+    zero-session span. Golden Rule #1: abstain, never guess.
+    """
+    if session_days is None:
+        return None, None
+    first = _parse_iso_date(first_date)
+    last = _parse_iso_date(last_date)
+    if first is None or last is None or last < first:
+        return None, None
+    if first.year < HOLIDAY_COVERAGE_FIRST_YEAR or last.year > HOLIDAY_COVERAGE_LAST_YEAR:
+        return None, None
+    expected = len(trading_days_between(first, last))
+    if expected == 0:
+        return None, None
+    return expected, session_days / expected
+
+
+def _spot_dimension_verdict_with_floor(
+    completeness: str | None,
+    first_date: str | None,
+    *,
+    last_date: str | None = None,
+    session_days: int | None = None,
+) -> str:
+    """The spot 1-minute verdict WITH the range-honesty downgrades applied.
 
     DEC-SPOT-COMPLETENESS-2020-FLOOR-001 — the SPOT analog of the options real-years fix
     (DEC-OPTIONS-COMPLETENESS-REAL-YEARS-001, #859). The pull start is the
@@ -595,46 +678,85 @@ def _spot_dimension_verdict_with_floor(completeness: str | None, first_date: str
     those pre-start windows still RESOLVE (the vendor honestly returns empty), so every
     planned window is settled and the base verdict reads ``full``. But ``full`` must mean
     SOLID 2020-floor coverage — data from the START of 2020, the strong evidence the
-    deep-drill brute-force backtest needs. So a ``full`` whose covered range does NOT begin in
-    JANUARY 2020 (``from_2020`` is False — the earliest bar is after January 2020, OR there
-    are no bars at all) is HONESTLY downgraded to ``partial`` (the symbol HAS 1-minute data,
-    just not from the floor). ``partial`` / ``failed`` / ``none`` already carry no positive
-    2020 claim and pass through unchanged. One source of truth (CLAUDE.md §11 COMMON) for BOTH
-    the scoreboard rollup and the per-symbol detail.
+    deep-drill brute-force backtest needs.
+
+    DEC-SPOT-PARTIAL-RANGE-CHIP-001 refines the downgrade TARGET and adds a second
+    arm: a settled ``full`` whose covered range fails the Jan-2020 floor
+    (``from_2020`` False) OR whose session density falls below
+    :data:`SPOT_SESSION_RATIO_FLOOR` (``session_days / expected_sessions < 0.95``
+    over ``[first_date, last_date]`` — see :func:`_session_range_audit`) is
+    downgraded to the distinct AMBER :data:`DIM_SETTLED_PARTIAL_RANGE`, not the
+    pending-windows ``partial`` — a settled-but-range-incomplete symbol (nothing
+    left to re-pull) is now distinguishable from one whose windows are still
+    coming. The session arm ABSTAINS (keeps ``full``) without the lake scalar /
+    dates / calendar coverage. ``partial`` / ``failed`` / ``none`` already carry
+    no positive range claim and pass through unchanged. One source of truth
+    (CLAUDE.md §11 COMMON) for BOTH the scoreboard rollup and the per-symbol
+    detail.
     """
     verdict = _spot_dimension_verdict(completeness)
-    if verdict == DIM_FULL and not _from_2020(first_date):
-        return DIM_PARTIAL
+    if verdict != DIM_FULL:
+        return verdict
+    if not _from_2020(first_date):
+        return DIM_SETTLED_PARTIAL_RANGE
+    _expected, ratio = _session_range_audit(first_date, last_date, session_days)
+    if ratio is not None and ratio < SPOT_SESSION_RATIO_FLOOR:
+        return DIM_SETTLED_PARTIAL_RANGE
     return verdict
 
 
-def _spot_dimension_detail(row: Mapping[str, Any]) -> dict[str, Any]:
-    """One spot dimension's verdict + EXPLICIT first/last bar dates + the ``from_2020`` flag.
+def _session_days_of(row: Mapping[str, Any]) -> int | None:
+    """The row's ``session_days`` lake scalar as an ``int``, or ``None`` when absent.
 
-    The verdict honours the 2020-floor downgrade (DEC-SPOT-COMPLETENESS-2020-FLOOR-001): a
-    settled-but-late-start dimension reads ``partial``, not ``full`` — the ``from_2020`` flag
-    and the explicit first/last dates disambiguate WHY.
+    ``summarize_spot_datasets`` emits it for every SCORED fetched-``1minute``
+    dataset (DEC-SPOT-PARTIAL-RANGE-CHIP-001 / DEC-DAILY-OPEN-SUBSTITUTION-
+    HONESTY-001); a caller feeding pre-scalar rows, a derived-TF row's honest
+    ``None``, or a hand-built test row simply abstains from the session-density
+    arm — never a KeyError, never a fabricated 0.
+    """
+    raw = row.get("session_days")
+    return int(raw) if raw is not None else None
+
+
+def _spot_dimension_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One spot dimension's verdict + EXPLICIT first/last bar dates + the honesty flags.
+
+    The verdict honours BOTH range-honesty downgrades (DEC-SPOT-COMPLETENESS-2020-FLOOR-001
+    + DEC-SPOT-PARTIAL-RANGE-CHIP-001): a settled-but-late-start or settled-but-sparse
+    dimension reads the amber ``settled_partial_range``, not ``full`` — the ``from_2020``
+    flag, the explicit first/last dates and the ``session_days`` / ``expected_sessions`` /
+    ``session_ratio`` trio disambiguate WHY (the ratio pair is ``None`` when the audit
+    abstained — no lake scalar / dates / calendar coverage).
 
     Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the detail
     additionally carries ``open_substituted_days`` (how many stored sessions' first present
     1-minute bar is strictly after the 09:15 IST canonical open — so their DERIVED 1-day open
-    is the earliest-present-minute substitute, not the canonical open price),
-    ``session_days`` (the stored-session denominator) and the ``open_substituted`` flag
-    (``days > 0``). INFORMATIONAL only — the verdict is NEVER downgraded by a substitution
-    (the data exists; only its daily open is a substitute). A row without the counts (a
-    hand-built / legacy shape) defaults to the honest 0/0/False.
+    is the earliest-present-minute substitute, not the canonical open price) and the
+    ``open_substituted`` flag (``days > 0``). INFORMATIONAL only — the verdict is NEVER
+    downgraded by a substitution (the data exists; only its daily open is a substitute). A
+    row without the counts (a hand-built / legacy shape) defaults to the honest 0/0/False —
+    the emitted ``session_days`` key keeps that 0-default display contract while the
+    session-density AUDIT reads the None-aware :func:`_session_days_of` and ABSTAINS on a
+    missing scalar (a fabricated 0 would false-amber every legacy row).
     """
     first = row.get("first_date")
     last = row.get("last_date")
     first_s = str(first) if first else None
+    last_s = str(last) if last else None
+    session_days = _session_days_of(row)
+    expected, ratio = _session_range_audit(first_s, last_s, session_days)
     open_substituted_days = int(row.get("open_substituted_days") or 0)
     return {
-        "status": _spot_dimension_verdict_with_floor(row.get("completeness"), first_s),
+        "status": _spot_dimension_verdict_with_floor(
+            row.get("completeness"), first_s, last_date=last_s, session_days=session_days
+        ),
         "first_date": first_s,
-        "last_date": str(last) if last else None,
+        "last_date": last_s,
         "from_2020": _from_2020(first_s),
-        "open_substituted_days": open_substituted_days,
         "session_days": int(row.get("session_days") or 0),
+        "expected_sessions": expected,
+        "session_ratio": ratio,
+        "open_substituted_days": open_substituted_days,
         "open_substituted": open_substituted_days > 0,
     }
 
@@ -647,9 +769,12 @@ def _new_per_symbol_entry(symbol: str, exchange: str, category: str) -> dict[str
         "last_date": None,
         "from_2020": False,
         # Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
-        # no data ⇒ nothing observed ⇒ the honest 0/0/False defaults.
-        "open_substituted_days": 0,
+        # no data ⇒ nothing observed ⇒ the honest 0/0/False defaults; the session
+        # range audit's ratio pair (DEC-SPOT-PARTIAL-RANGE-CHIP-001) abstains (None).
         "session_days": 0,
+        "expected_sessions": None,
+        "session_ratio": None,
+        "open_substituted_days": 0,
         "open_substituted": False,
     }
     return {

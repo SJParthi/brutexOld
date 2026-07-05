@@ -29,8 +29,6 @@
       var(--bg);
   }
   @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1);} 50% { opacity: .5; transform: scale(.9);} }
   @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
   .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
   .topnav a:hover { color:var(--text-bright); }
@@ -48,8 +46,20 @@
   .topnav a { color:var(--blue); text-decoration:none; }
   .topnav .sep { color:var(--border-strong); }
   .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
-  .live .dot { width:9px; height:9px; border-radius:50%; background:var(--green);
-    box-shadow:0 0 12px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+  /* Truthful heartbeat (DEC-DASHBOARD-UX-ANIMATE-001): the dot starts NEUTRAL
+     grey — bx-design's .bx-live-dot state classes (live-ok / live-warn /
+     live-down) are driven from the REAL per-tick outcome; it never pulses
+     green while the coverage API is down, and it drops to neutral grey when
+     the pull-progress feed itself is unreachable (never a "live" illusion).
+     While a pull is RUNNING the pulse ring speeds up (.pulling below). */
+  .live .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .live .dot.pulling.live-ok::after { animation-duration:.8s; }
+
+  /* Pull-active gradient ribbon (one .bx-ribbon per page): visible ONLY while
+     /api/v1/universe/pull-progress reports state === "running". The [hidden]
+     override is required because .bx-ribbon sets display:block (author CSS
+     beats the UA [hidden] rule). */
+  #pullribbon[hidden] { display:none; }
 
   /* Sub-nav across the three focused coverage pages (DEC-DASHBOARD-COVERAGE-SPLIT-001). */
   .subnav { display:flex; gap:10px; padding:12px 24px; border-bottom:1px solid var(--border);
@@ -67,11 +77,16 @@
   .kpi .v { font-size:24px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
   .kpi .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
   .kpi .v.ok { color:var(--green); }
+  /* KPI skeleton slots: the pre-JS placeholders are shimmer bars that ALWAYS
+     resolve (real value / an honest "—") — never a terminal pending state. */
+  .kpi .v .bx-skel { display:inline-block; width:56px; height:20px; vertical-align:middle; }
   #status { margin-left:auto; font-size:12px; color:var(--muted); }
 
-  .panelwrap { flex:1; padding:14px 24px 24px; animation: fadeInUp .5s ease both; min-height:0; display:flex; }
+  .panelwrap { flex:1; padding:14px 24px 24px; animation: bxFadeInUp .5s var(--ease) both; min-height:0; display:flex; }
   #panel { flex:1; overflow:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
+  /* min-width keeps the 6 columns legible on narrow screens: #panel scrolls
+     horizontally on its own (overflow:auto) so the BODY never x-scrolls. */
+  table { width:100%; min-width:640px; border-collapse:collapse; font-size:13px; }
   thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
     font-weight:700; text-align:left; padding:10px 14px; z-index:1; font-size:11px;
     text-transform:uppercase; letter-spacing:.5px; }
@@ -80,6 +95,16 @@
   .sym { font-weight:700; color:var(--text-bright); }
   .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
   .num { font-variant-numeric:tabular-nums; }
+  .skelwrap { padding:16px; }
+
+  /* Mobile block (was missing — audit 0.5): tighten the KPI band + gutters so
+     the page degrades gracefully instead of overflowing on a phone. */
+  @media (max-width:680px) {
+    .band { gap:16px; padding:12px 16px; }
+    .kpi .v { font-size:20px; }
+    .subnav { padding:10px 16px; }
+    .panelwrap { padding:10px 12px 16px; }
+  }
 
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-001) ── */
   a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
@@ -93,12 +118,19 @@
   }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
+<!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, padding-only
+     widget docking (the fixed rate/liveproof pills can never cover the last
+     table rows), skeleton shimmer, honest state vocabulary, truthful live
+     dot, the pull-active gradient ribbon. Linked AFTER bx-theme (the header
+     authority). -->
+<link rel="stylesheet" href="/static/bx-design.css">
+<script defer src="/static/bx-ui.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
-<body>
+<body data-accent="purple">
   <header>
     <div class="brandmark" aria-hidden="true">B</div>
     <div class="logo">BruteX</div>
@@ -110,12 +142,15 @@
       <span class="sep">·</span>
       <a href="/db">Database</a>
       <span class="sep">·</span>
-      <a href="/coverage" aria-current="page">Coverage</a> <a href="/movers">Movers</a>
+      <a href="/coverage" aria-current="page">Coverage</a>
+      <span class="sep">·</span>
+      <a href="/movers">Movers</a>
+      <span class="sep">·</span>
       <a href="/results">Results</a>
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot"></span><span id="livetxt">polling</span></div>
+    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">polling</span></div>
   </header>
 
   <nav class="subnav">
@@ -126,26 +161,59 @@
   </nav>
 
   <div class="band">
-    <div class="kpi"><span class="v ok" id="ul">—</span><span class="l">underlyings pulled</span></div>
-    <div class="kpi"><span class="v" id="ser">—</span><span class="l">expired-option series</span></div>
-    <div class="kpi"><span class="v" id="barz">—</span><span class="l">option bars</span></div>
+    <div class="kpi"><span class="v" id="ul"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">underlyings pulled</span></div>
+    <div class="kpi"><span class="v" id="ser"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">expired-option series</span></div>
+    <div class="kpi"><span class="v" id="barz"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">option bars</span></div>
     <span id="status"></span>
   </div>
+  <!-- Pull-active strip: shown ONLY while a pull is running (state the page
+       already fetches from /api/v1/universe/pull-progress each tick). -->
+  <div id="pullribbon" class="bx-ribbon" hidden aria-hidden="true"></div>
 
   <div class="panelwrap">
-    <div id="panel"><div class="empty">loading…</div></div>
+    <div id="panel" aria-busy="true">
+      <!-- Skeleton shimmer, NOT a "loading…" literal: poll() ALWAYS resolves
+           this to data / an honest empty state / an honest error state
+           (fetchWithTimeout bounds a hung request at 12 s). -->
+      <div class="skelwrap" aria-hidden="true">
+        <span class="bx-skel bx-skel-row" style="width:38%"></span>
+        <span class="bx-skel bx-skel-row"></span>
+        <span class="bx-skel bx-skel-row"></span>
+        <span class="bx-skel bx-skel-row" style="width:86%"></span>
+        <span class="bx-skel bx-skel-row"></span>
+        <span class="bx-skel bx-skel-row" style="width:72%"></span>
+        <span class="bx-skel bx-skel-row"></span>
+        <span class="bx-skel bx-skel-row" style="width:64%"></span>
+      </div>
+    </div>
   </div>
 
 <script>
 /* ── BruteX expired-options coverage (DEC-OPTIONS-COVERAGE-LAKE-001) ──
    Reads straight from the lake via /api/v1/coverage/options (per-underlying
    series + bars, present-in-lake = pulled). Every interpolated string is
-   escaped before innerHTML (XSS). */
+   escaped before innerHTML (XSS).
+
+   DEC-DASHBOARD-UX-ANIMATE-001 layer (state honesty + polish only — every
+   rendered VALUE string is byte-identical): the initial paint is a skeleton
+   shimmer that ALWAYS resolves — "loading…" is banned as a terminal state;
+   fetches ride BXUI.fetchWithTimeout (12 s deadline, plain-fetch fallback
+   only until the deferred bx-ui.js executes) so a hung endpoint mid-pull
+   rejects into the catch instead of pending forever; an error BEFORE any
+   data renders an honest .bx-state error card with Retry, an error AFTER
+   data keeps the last real table (the header verdict carries the failure);
+   the heartbeat dot tells the truth (green = live, grey = pull-progress feed
+   down, red = coverage API down); while a pull is RUNNING the .bx-ribbon
+   gradient strip shows + the dot pulse speeds up; KPIs settle with a
+   change-only count-up pop (the FINAL exact string is written synchronously
+   via textContent — DOM text is never mid-tween). */
 const panel = document.getElementById("panel");
 const ulEl = document.getElementById("ul");
 const serEl = document.getElementById("ser");
 const barzEl = document.getElementById("barz");
 const liveTxt = document.getElementById("livetxt");
+const liveDot = document.getElementById("livedot");
+const ribbon = document.getElementById("pullribbon");
 
 function esc(s) {
   return String(s == null ? "" : s)
@@ -157,9 +225,50 @@ function esc(s) {
 }
 function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 
+/* Truthful heartbeat driver: "ok" | "warn" | "down" | "" (neutral grey). */
+function setDot(state) {
+  liveDot.classList.remove("live-ok", "live-warn", "live-down");
+  if (state) liveDot.classList.add("live-" + state);
+}
+
+/* Deadline-guarded fetch: a dead/hung endpoint rejects into the caller's
+   catch. bx-ui.js is deferred, so only the very first tick can fall back to
+   bare fetch — every later 4 s tick is guarded. */
+function doFetch(url) {
+  return window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
+}
+
+/* KPI writes ride the shared change-only count-up when available (final
+   exact string synchronously via textContent + a transform-only settle pop;
+   identical value = zero DOM writes, zero re-animation — skip-render-memo
+   friendly). */
+function setKpi(el, s) {
+  s = String(s);
+  if (window.BXUI) { BXUI.countUp(el, s); }
+  else if (el.textContent !== s) { el.textContent = s; }
+}
+
+/* True once the panel has resolved to REAL content (table or honest empty) —
+   an error after that keeps the last data instead of wiping it. */
+let hasResolved = false;
+
 function renderRows(rows) {
   if (!rows.length) {
-    panel.innerHTML = '<div class="empty">no expired-option data in the lake yet — add credentials, then pull an instrument\'s options chain on /universe</div>';
+    /* Honest empty state (same copy as always) — illustrated, with the CTA
+       to /universe where the pull lives. */
+    if (window.BXUI) {
+      BXUI.emptyState(panel, {
+        icon: "⛓️",
+        title: "no expired-option data in the lake yet",
+        hint: "add credentials, then pull an instrument's options chain on /universe",
+        ctaText: "Open /universe →",
+        ctaHref: "/universe"
+      });
+    } else {
+      panel.innerHTML = '<div class="empty">no expired-option data in the lake yet — add credentials, then pull an instrument\'s options chain on /universe</div>';
+    }
+    hasResolved = true;
+    panel.setAttribute("aria-busy", "false");
     return;
   }
   const body = rows.map(r =>
@@ -177,6 +286,50 @@ function renderRows(rows) {
     + "<th>Underlying</th><th>Exchange</th><th>Series</th><th>Bars</th>"
     + "<th>First date</th><th>Last date</th>"
     + "</tr></thead><tbody>" + body + "</tbody></table>";
+  hasResolved = true;
+  panel.setAttribute("aria-busy", "false");
+  /* Row entrance stagger, gated on the render signature: the skip-render
+     memo already guarantees an identical payload never re-renders, so rows
+     only animate when the DATA actually changed (capped; extras instant). */
+  if (window.BXUI) {
+    const tb = panel.querySelector("tbody");
+    if (tb) BXUI.stagger(tb, lastCoverageTxt, { rows: true, cap: 16 });
+  }
+}
+
+/* Honest failure: red dot + ribbon off; before ANY data has rendered the
+   skeleton resolves to a real error card with Retry (never a stuck pending
+   state); after data has rendered the last real table is KEPT and the
+   header verdict ("error N" / "offline") carries the failure. */
+function showFetchError(status, offline) {
+  setDot("down");
+  ribbon.hidden = true;
+  liveDot.classList.remove("pulling");
+  if (hasResolved) return;
+  panel.setAttribute("aria-busy", "false");
+  if (window.BXUI) {
+    BXUI.errorCard(panel, { status: status || undefined, offline: offline, retry: poll });
+  } else {
+    /* pre-BXUI very first tick: still an honest terminal state (the 4 s
+       interval keeps retrying), built via textContent. */
+    panel.textContent = "";
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = offline
+      ? "server unreachable — retrying"
+      : "couldn't load — error " + status + " — retrying";
+    panel.appendChild(d);
+  }
+}
+
+/* Pull-active visuals: the gradient ribbon + the fast dot pulse show ONLY
+   while pull-progress reports running; dotState is "ok" when the progress
+   feed answered, "" (neutral grey — never a "live" green illusion) when the
+   feed itself is down. */
+function setPullState(running, dotState) {
+  ribbon.hidden = !running;
+  liveDot.classList.toggle("pulling", !!running);
+  setDot(dotState);
 }
 
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the coverage
@@ -193,31 +346,42 @@ let lastRowCount = 0;
 
 async function poll() {
   try {
-    const r = await fetch("/api/v1/coverage/options");
-    if (!r.ok) { lastCoverageTxt = null; liveTxt.textContent = "error " + r.status; return; }
+    const r = await doFetch("/api/v1/coverage/options");
+    if (!r.ok) {
+      lastCoverageTxt = null;
+      liveTxt.textContent = "error " + r.status;
+      showFetchError(r.status, false);
+      return;
+    }
     const txt = await r.text();
     if (txt !== lastCoverageTxt) {
       lastCoverageTxt = txt;
       const body = JSON.parse(txt);
       lastHeadline = body.headline || {};
       lastRowCount = (body.rows || []).length;
-      ulEl.textContent = lastHeadline.underlyings ?? "—";
-      serEl.textContent = num(lastHeadline.series);
-      barzEl.textContent = num(lastHeadline.total_bars);
+      setKpi(ulEl, lastHeadline.underlyings ?? "—");
+      /* Value-aware KPI color: green only for a real non-zero count — a
+         zero on an empty lake must not read "good" (audit 4.A.3). */
+      ulEl.classList.toggle("ok", Number(lastHeadline.underlyings || 0) > 0);
+      setKpi(serEl, num(lastHeadline.series));
+      setKpi(barzEl, num(lastHeadline.total_bars));
       renderRows(body.rows || []);
     }
     const h = lastHeadline;
     let running = false;
+    let prOk = false;
     try {
-      const pr = await fetch('/api/v1/universe/pull-progress');
-      if (pr.ok) running = ((await pr.json()).state || "") === "running";
+      const pr = await doFetch('/api/v1/universe/pull-progress');
+      if (pr.ok) { prOk = true; running = ((await pr.json()).state || "") === "running"; }
     } catch (e) { running = false; }
     liveTxt.textContent = running
       ? "pulling · " + num(h.series) + " series · " + num(h.total_bars) + " bars"
       : "live · " + lastRowCount + " underlyings";
+    setPullState(running, prOk ? "ok" : "");
   } catch (e) {
     lastCoverageTxt = null;
     liveTxt.textContent = "offline";
+    showFetchError(0, true);
   }
 }
 

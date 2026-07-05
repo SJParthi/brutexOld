@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from brutex.dashboard import pull_jobs
@@ -1071,3 +1072,117 @@ def test_pair_progress_phase_advances_open_ended_counters() -> None:
 
     assert job.start(work, total=45, ledger_synced=True) is True
     assert job.snapshot().state == STATE_DONE
+
+
+# ── the on_finally completion hook (DEC-PULL-INTENT-RESUME-001) ───────────────
+
+
+class _OrderGuard:
+    """A single-flight guard double appending "released" to a shared order log."""
+
+    def __init__(self, order: list[str]) -> None:
+        self._order = order
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> None:
+        self._order.append("released")
+
+
+class TestOnFinally:
+    """`start(on_finally=…)` — the durable pull-intent clear hook: fires on the
+    worker's success AND failure, inside the run-identity gate, strictly BEFORE
+    the cross-process single-flight release; best-effort (a raising hook is
+    swallowed and the release still happens); `None` is byte-identical."""
+
+    def test_fires_once_on_success(self) -> None:
+        job = _job()
+        fired: list[str] = []
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: fired.append("f"))
+        assert started is True
+        assert job.snapshot().state == STATE_DONE
+        assert fired == ["f"]
+
+    def test_fires_once_on_failure(self) -> None:
+        job = _job()
+        fired: list[str] = []
+
+        def work(_on_progress: ProgressHook) -> None:
+            raise RuntimeError("boom")
+
+        started = job.start(work, total=1, on_finally=lambda: fired.append("f"))
+        assert started is True
+        assert job.snapshot().state == STATE_ERROR
+        assert fired == ["f"], "the intent clear must fire on failure too (worker exited)"
+
+    def test_none_hook_is_byte_identical(self) -> None:
+        job = _job()
+        assert job.start(lambda _h: None, total=1, on_finally=None) is True
+        assert job.snapshot().state == STATE_DONE
+        assert job.running is False
+
+    def test_fires_before_singleflight_release(self, tmp_path: Path) -> None:
+        # Trap #5 ordering: a peer process acquiring the freed flock must never
+        # see a live intent — the hook runs BEFORE the guard's __exit__.
+        order: list[str] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+        )
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: order.append("finally"))
+        assert started
+        assert order == ["finally", "released"]
+
+    def test_raising_hook_is_swallowed_and_release_continues(self, tmp_path: Path) -> None:
+        order: list[str] = []
+
+        def _boom_hook() -> None:
+            order.append("finally")
+            raise RuntimeError("clear exploded")
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+        )
+        assert job.start(lambda _h: None, total=1, on_finally=_boom_hook) is True
+        assert order == ["finally", "released"], "the release still happens after a raising hook"
+        assert job.running is False
+        # The job is reusable — a fresh start succeeds after the raising hook.
+        assert job.start(lambda _h: None, total=1) is True
+
+    def test_superseded_run_does_not_fire_on_finally(self) -> None:
+        # The hook sits INSIDE the identity gate: a stale worker whose watchdog
+        # was superseded must never clear a NEWER run's intent.
+        captured: list[Callable[[], None]] = []
+        fired: list[str] = []
+        newer = PullWatchdog(
+            on_hung=lambda _e: None,
+            timeout_seconds=30.0,
+            spawn=_noop_spawn,
+            clock=_ticking_clock(),
+        )
+
+        def factory(_on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            return PullWatchdog(
+                on_hung=_on_hung,
+                timeout_seconds=30.0,
+                spawn=_noop_spawn,
+                clock=_ticking_clock(),
+            )
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+            watchdog_factory=factory,
+        )
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: fired.append("f"))
+        assert started is True
+        job._running = True  # pyright: ignore[reportPrivateUsage]
+        job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
+        captured[0]()  # drain the stale worker → its finally hits the ->exit branch
+        assert fired == [], "a superseded worker must not fire the newer run's clear"

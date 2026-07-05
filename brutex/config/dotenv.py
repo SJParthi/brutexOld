@@ -1,10 +1,12 @@
 """Minimal, dependency-free ``.env`` loader — env persistence (GAP C6).
 
 The operator runs the overnight pull on a MacBook (M4 Pro). Every BruteX knob
-is a ``BRUTEX_*`` process env var — credentials (``BRUTEX_GROWW_API_KEY`` /
-``BRUTEX_GROWW_TOTP_SECRET``), pool/pacing flags
-(``BRUTEX_GROWW_SMOOTH_PACING``, ``BRUTEX_LAKE_ROOT`` …). Without a ``.env``
-those vanish on every shell/reboot, so the operator must re-export them by hand.
+is a ``BRUTEX_*`` process env var — pool/pacing flags
+(``BRUTEX_GROWW_SMOOTH_PACING``), the lake location (``BRUTEX_LAKE_ROOT``),
+AWS token-broker overrides (``BRUTEX_TOKEN_PARAM_*`` /
+``BRUTEX_TOKEN_AWS_REGION``) … Without a ``.env`` those vanish on every
+shell/reboot, so the operator must re-export them by hand. (Groww credentials
+are NOT env vars — AWS-SSM-only, DEC-AWS-ONLY-CREDS-001.)
 
 This module loads a ``.env`` file (repo root → cwd → ``~/.brutex/.env``) ONCE at
 process bootstrap, **without ever overriding an env var that is already set** —

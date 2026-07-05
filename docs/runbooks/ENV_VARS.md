@@ -77,36 +77,51 @@ The runtime file records the currently-running pipeline's `pid`,
 
 ---
 
-## 5. Groww adapter — live data-pull credentials (DEC-GROWW-DHAN-REVERT-001, ADR-0002)
+## 5. Groww adapter — live data-pull credentials (AWS-SSM-only, DEC-AWS-ONLY-CREDS-001; ADR-0009)
 
-The live vendor is **Groww** (CLAUDE.md §6). The pull authenticates with TOTP —
-a Groww API key plus a TOTP shared secret that mints the 6-digit per-session code,
-read from the environment (file fallback: the saved-credentials store in
-`brutex.config.credentials`):
+The live vendor is **Groww** (CLAUDE.md §6). The pull authenticates with TOTP,
+but the api-key, TOTP shared secret AND the daily access token all live ONLY in
+**AWS Systems Manager Parameter Store** (SecureStrings, region `ap-south-1`) —
+DEC-AWS-ONLY-CREDS-001 (MIGRATION.md #1065) removed the secret env vars, the
+saved-credentials file AND the in-app credentials page; the AWS read is
+unconditional and **fail-fast** (no env fallback, no file fallback, no webpage).
+The env vars below are **non-secret overrides** of the SSM parameter paths /
+region only:
 
 | Env var | Default | Allowed | Module |
 |---|---|---|---|
-| `BRUTEX_GROWW_API_KEY` | — (required for a live pull) | Groww API key from the Groww trade-api console | `brutex.adapters.groww.auth` |
-| `BRUTEX_GROWW_TOTP_SECRET` | — (required for a live pull) | Groww TOTP shared secret (used to mint the 6-digit code) | `brutex.adapters.groww.auth` |
+| `BRUTEX_TOKEN_AWS_REGION` | `ap-south-1` (a non-blank `AWS_REGION` is honoured as a secondary override) | AWS region name | `brutex.adapters.groww.constants` |
+| `BRUTEX_TOKEN_PARAM_API_KEY` | `/tickvault/prod/groww/api-key` | SSM SecureString path | `brutex.config.credentials_aws` |
+| `BRUTEX_TOKEN_PARAM_TOTP_SECRET` | `/tickvault/prod/groww/totp-secret` | SSM SecureString path | `brutex.config.credentials_aws` |
+| `BRUTEX_TOKEN_PARAM_ACCESS_TOKEN` | `/tickvault/prod/groww/access-token` | SSM SecureString path | `brutex.adapters.groww.token_store_aws` |
 
-**Auth model:** TOTP. The API key plus the TOTP shared secret mint a fresh 6-digit
-code that is exchanged for a per-session access token; there is no long-lived JWT,
-client id, or renew-token step. See CLAUDE.md §6 (verified Groww facts).
+**Auth model:** TOTP. The api-key plus the TOTP shared secret (both read from
+SSM `GetParameter WithDecryption=True`) mint a fresh 6-digit code that is
+exchanged for a per-session access token; the shared daily token is minted by a
+single dedicated Lambda (BruteX is a strictly READ-ONLY consumer —
+`docs/runbooks/aws-token-broker.md`, `docs/TOKEN_BROKER_CONTRACT.md`). See
+CLAUDE.md §6 (verified Groww facts).
 
-**Adaptive rate limiter (live Groww pull):** throttled by the **[3..5] r/s**
-adaptive token bucket in `brutex.adapters.groww.rate_control` (starts at 5, steps
-5→4→3 on HTTP 429; cap = the 5 r/s Data-API limit, `constants.py:86`
-`DATA_RATE_LIMIT_RPS=5`, 100,000/day). These bounds are **code constants, not env vars.**
+> **⚠️ Rate-facts reconcile (2026-07-03):** earlier revisions of this section
+> described a `[3..5] r/s` bucket capped by `DATA_RATE_LIMIT_RPS=5` +
+> `100,000/day` in `brutex.adapters.groww.rate_control` — ALL retired. The
+> live pull paces with `brutex.adapters.rate_common.RateController` at the
+> operator-directed **8 r/s** ceiling (`GROWW_RATE_LIMIT_RPS_CEILING`,
+> DEC-GROWW-RATE-CEILING-8-002) under a **500 req/min hard governor, NO daily
+> quota** (DEC-GROWW-RATE-PERMIN-001) — CLAUDE.md §2 Rule 6. These bounds are
+> **code constants, not env vars.**
 
 **Honest envelope (Golden Rule #10):** the legacy
-`brutex.orchestrator.adaptive_rate_limiter` ([4..8] r/s) still reads the
-vendor-neutral `BRUTEX_RATE_MIN_RPS` / `_MAX_RPS` / `_INITIAL_RPS` /
-`_STEP_DOWN_HITS` / `_STEP_DOWN_WINDOW` / `_STEP_UP_CLEAN_WINDOW` /
-`_RECHECK_INTERVAL` vars (`adaptive_rate_limiter.py:50-56`), and `brutex.wipe`
+`brutex.orchestrator.adaptive_rate_limiter` (the retired [3..5] r/s design)
+still reads the vendor-neutral `BRUTEX_RATE_MIN_RPS` / `_MAX_RPS` /
+`_INITIAL_RPS` / `_STEP_DOWN_HITS` / `_STEP_DOWN_WINDOW` /
+`_STEP_UP_CLEAN_WINDOW` / `_RECHECK_INTERVAL` vars
+(`adaptive_rate_limiter.py:59-65`), and `brutex.wipe`
 reads `BRUTEX_TOKEN_PATH` (`wipe.py:42`) — these are residue **NOT on the
-live Groww pull path** (which uses `rate_control` above). Retiring/renaming that
-module is a tracked follow-up (DEC-DHAN-DOC-RECONCILE-001). A live pull needs ONLY
-the two `BRUTEX_GROWW_*` vars above.
+live Groww pull path** (which uses `rate_common` above). Retiring/renaming that
+module is a tracked follow-up (DEC-DHAN-DOC-RECONCILE-001). A live pull needs
+usable AWS credentials (profile/role) + the seeded SSM parameters — no
+`BRUTEX_*` secret env vars.
 
 ---
 
@@ -161,5 +176,6 @@ typos).
 * DEC-M4PRO-ABSOLUTE-001 (#236) — strict-bool decoder pattern
 * DEC-TELEGRAM-WIRING-001 (#238) — Telegram env-var layout
 * DEC-PORTS-001 — port config layout
-* DEC-GROWW-DHAN-REVERT-001 (ADR-0002) — live vendor contract; §5 Groww auth contract
+* DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009) — live vendor contract
+* DEC-AWS-ONLY-CREDS-001 (MIGRATION #1065) — §5 AWS-SSM-only credential contract
 * DEC-VENDOR-PIVOT-001 — prior broker wipe (historical; superseded by the current vendor)

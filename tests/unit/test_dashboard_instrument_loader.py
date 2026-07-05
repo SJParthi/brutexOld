@@ -26,6 +26,7 @@ from __future__ import annotations
 # Whitebox tests of the cache-first TTL helper (_ntm_cache_ttl_seconds) read
 # module-private names by design (DEC-P0-017 convention).
 # pyright: reportPrivateUsage=false
+import json
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
@@ -295,6 +296,12 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
     ei = result["economics_integrity"]
     assert ei["is_green"] is True and ei["total_legs"] == 1
     assert store.get_meta("economics_integrity") is not None
+    # Parse-skip honesty (DEC-PARSE-SKIP-REPORT-001): a clean master reads green with
+    # zero skips over the 4 in-scope rows; persisted to schema_meta for the panel.
+    ps = result["parse_skips"]
+    assert ps["is_green"] is True and ps["skipped_count"] == 0
+    assert ps["in_scope_rows"] == 4 and ps["samples"] == []
+    assert store.get_meta("instrument_parse_skips.report") is not None
 
 
 def test_default_run_id_factory(tmp_path: Path) -> None:
@@ -400,6 +407,47 @@ def test_load_report_carries_security_id_collisions(tmp_path: Path) -> None:
     assert groww_events[0]["security_id_collisions"] == 1
 
 
+def test_load_persists_parse_skip_report_for_dirty_master(tmp_path: Path) -> None:
+    """A master with malformed in-scope rows persists an HONEST parse-skip report.
+
+    DEC-PARSE-SKIP-REPORT-001 regression: before the report, the skip accounting
+    (DEC-INSTRUMENT-SKIP-NO-GSYM-001) was logged then DISCARDED — the load result
+    and schema_meta carried nothing, so master rot was invisible outside /logs.
+    One junk row (blank groww_symbol) stays GREEN (within max(10, 0.1%)); the
+    count + sample reason land on BOTH the load result and the persisted snapshot.
+    """
+    junk = _row(
+        exchange="BSE",
+        exchange_token="93",
+        name="BSE FOCUSED IT",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    store = _store(tmp_path)
+    with capture_logs() as logs:
+        result = load_instrument_master(
+            store,
+            http_get=lambda _url: _csv([*_ROWS, junk]),
+            run_id_factory=lambda: "test-skips",
+            constituent_opener=_empty_opener,
+            constituent_cache_dir=tmp_path / "cache",
+        )
+    ps = result["parse_skips"]
+    assert ps["skipped_count"] == 1
+    assert ps["in_scope_rows"] == 5  # 4 parsed + 1 skipped
+    assert ps["threshold"] == 10
+    assert ps["is_green"] is True  # 1 <= max(10, ceil(0.1% of 5))
+    assert len(ps["samples"]) == 1 and "groww_symbol" in ps["samples"][0]
+    assert ps["run_id"] == "test-skips"
+    # Persisted to schema_meta (read by GET /api/v1/universe/parse-skips).
+    raw = store.get_meta("instrument_parse_skips.report")
+    assert raw is not None
+    assert json.loads(raw)["skipped_count"] == 1
+    # One structlog counts line from the persist hook.
+    events = _events(logs, "universe.load.parse_skips")
+    assert len(events) == 1 and events[0]["is_green"] is True
+
+
 def test_idx_same_token_collision_intercepted_at_build_index(tmp_path: Path) -> None:
     """An IDX identity collision is caught UPSTREAM — the store never sees it.
 
@@ -479,6 +527,9 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     # Empty master → economics audit green with zero legs (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
     ei = result.pop("economics_integrity")
     assert ei["is_green"] is True and ei["total_legs"] == 0
+    # Empty master → zero skips over zero in-scope rows, green (DEC-PARSE-SKIP-REPORT-001).
+    ps = result.pop("parse_skips")
+    assert ps["is_green"] is True and ps["skipped_count"] == 0 and ps["in_scope_rows"] == 0
     assert result == {
         "parsed": 0,
         "persisted": 0,
