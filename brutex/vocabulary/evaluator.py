@@ -1,4 +1,4 @@
-"""The 52-condition evaluator — a thin marshalling shim over the shared Rust core.
+"""The 60-condition evaluator — a thin marshalling shim over the shared Rust core.
 
 Takes an `IndicatorSnapshot` (all per-bar indicator values) plus proximity
 parameters and prior-bar history, and returns a u128 bitmask where bit `i` is set
@@ -6,7 +6,8 @@ iff condition `i` is true. The vocabulary currently occupies bits 0..59 (60
 conditions), with headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
 
 Per `docs/TRACK1_VOCABULARY.md` definitions. As of `DEC-SHARED-CORE-001`
-Phase 2b (`docs/MIGRATION.md` #441) the 52-condition logic itself lives ONCE, in
+Phase 2b (`docs/MIGRATION.md` #441) the condition logic itself (52 then, 60 now
+— DEC-VOCAB-U128-CODEGEN-001 grew the vocabulary) lives ONCE, in
 the Rust `trading-core` crate (`rust/trading-core/`), and is consumed by BOTH
 BruteX (this repo, via the PyO3 `trading_core` wheel) AND TickVault (native
 Rust). This module no longer reimplements the conditions — it marshals the
@@ -120,7 +121,7 @@ class PriorBarHistory:
             self.flags = self.flags[-self.prior_n :]
 
 
-# ────── The 52-condition evaluator (delegates to the shared Rust core) ──────
+# ────── The 60-condition evaluator (delegates to the shared Rust core) ──────
 
 
 def evaluate_atoms(
@@ -128,7 +129,7 @@ def evaluate_atoms(
     proximity: ProximityParams,
     prior_history: PriorBarHistory,
 ) -> int:
-    """Evaluate all 52 atomic conditions on one bar via the Rust `trading-core`.
+    """Evaluate all 60 atomic conditions on one bar via the Rust `trading-core`.
 
     Marshals the pre-built indicator levels into the flat primitive ABI and
     delegates to `trading_core.evaluate_with_levels`. The pivot/fib levels are

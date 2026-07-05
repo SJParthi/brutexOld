@@ -2,7 +2,7 @@
 
 Implements the 5-stage funnel from `docs/TRACK1_BACKTEST_SPEC.md`:
 
-  Stage 1A — precompute 52 atomic conditions per bar per (instr × TF)
+  Stage 1A — precompute 60 atomic conditions per bar per (instr × TF)
   Stage 1B — coarse Sharpe filter + drop bottom 50%
   Stage 2  — full backtest on survivors (~33B trials)
   Stage 2.5 — Bayesian adaptive early-stop
@@ -13,10 +13,11 @@ Implements the 5-stage funnel from `docs/TRACK1_BACKTEST_SPEC.md`:
 ## Build status (2026-06-03)
 
 Currently exposes:
-- ``combo_mask`` — u64 bitmask iteration + evaluation primitives
-  (Stage-2 supermask kernel facade)
+- ``combo_mask`` — bitmask iteration + evaluation primitives (u64-limb —
+  bits 0..59 fit u64 today; the u128 mask law + the two-limb fallback are
+  documented in ``combo_mask.py``) (Stage-2 supermask kernel facade)
 - ``stage1a`` — the Stage-1A bitset-matrix builder: drives the existing
-  52-condition :func:`brutex.vocabulary.evaluator.evaluate_atoms` across a
+  60-condition :func:`brutex.vocabulary.evaluator.evaluate_atoms` across a
   ``(instrument, interval)`` bar feed to produce the per-bar ``bar_bits``
   matrix the supermask kernel consumes (DEC-ENGINE-DRIVER-001).
 - ``results_store`` — the deterministic sweep→Parquet results sink keyed by

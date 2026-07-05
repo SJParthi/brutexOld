@@ -20,6 +20,7 @@ fakes (return a ``MaterializeResult`` or raise). No lake / DuckDB / FastAPI.
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from brutex.dashboard.fno_cascade import FnoContract, build_fno_cascade
@@ -615,6 +616,134 @@ def test_empty_selection_runs_three_empty_phases() -> None:
     assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
     assert all(p.attempted == () for p in report.phases)
     assert report.total_bars == 0
+
+
+# ── corrupt Parquet month-file quarantine (DEC-PREBUILD-CORRUPT-SKIP-001) ──
+
+
+def test_spot_corrupt_parquet_month_file_is_quarantined_not_run_abort(tmp_path: Path) -> None:
+    """REGRESSION PIN (DEC-PREBUILD-CORRUPT-SKIP-001): a genuinely corrupt
+    stored Parquet month file for ONE symbol raises a REAL
+    ``polars.exceptions.ComputeError`` — before the fix that unwound
+    ``run_gated_prebuild`` entirely (crashed=ComputeError, symbols_built=0);
+    now THAT symbol is quarantined, logged in ``failed``, and every healthy
+    symbol + every later phase still runs."""
+    pl = pytest.importorskip("polars")
+
+    garbage = tmp_path / "2025" / "01.parquet"
+    garbage.parent.mkdir(parents=True)
+    garbage.write_bytes(b"NOT A PARQUET FILE \x00\xff garbage bytes")
+
+    def materialize_spot(inst: Instrument) -> MaterializeResult:
+        if inst.symbol_name == "CORRUPT":
+            pl.read_parquet(garbage)  # raises the real ComputeError
+            raise AssertionError("unreachable — the read above must raise")
+        return _ok(5)
+
+    report = run_gated_prebuild(
+        underlyings=[_spot("GOOD-A"), _spot("CORRUPT"), _spot("GOOD-B")],
+        materialize_spot=materialize_spot,
+        futures_contracts_for=_no_contracts,
+        materialize_future=_raise_contract,
+    )
+
+    spot = report.phases[0]
+    assert spot.attempted == ("GOOD-A", "CORRUPT", "GOOD-B")
+    assert spot.succeeded == ("GOOD-A", "GOOD-B")  # the healthy symbols still built
+    assert [s for s, _ in spot.failed] == ["CORRUPT"]
+    assert spot.failed[0][1].startswith("ComputeError:")
+    # Non-halting: the run RETURNED and the later phases still ran.
+    assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
+
+
+def test_futures_contract_polars_error_is_quarantined() -> None:
+    pl = pytest.importorskip("polars")
+
+    def materialize_future(contract: str) -> MaterializeResult:
+        if contract == "FUT-CORRUPT":
+            raise pl.exceptions.ComputeError("could not read parquet")
+        return _ok(7)
+
+    report = run_gated_prebuild(
+        underlyings=[_spot("NSE-NIFTY")],
+        materialize_spot=lambda _i: _ok(3),
+        futures_contracts_for=lambda _i: ["FUT-OK", "FUT-CORRUPT"],
+        materialize_future=materialize_future,
+    )
+
+    futures = report.phases[1]
+    assert futures.succeeded == ("FUT-OK",)
+    assert futures.failed == (("FUT-CORRUPT", "ComputeError: could not read parquet"),)
+    assert [p.phase for p in report.phases] == ["spot", "futures", "options"]
+
+
+def test_futures_discovery_polars_error_is_quarantined() -> None:
+    pl = pytest.importorskip("polars")
+
+    def futures_for(_inst: Instrument) -> list[str]:
+        raise pl.exceptions.ComputeError("corrupt cascade partition")
+
+    report = run_gated_prebuild(
+        underlyings=[_spot("NSE-NIFTY")],
+        materialize_spot=lambda _i: _ok(3),
+        futures_contracts_for=futures_for,
+        materialize_future=_raise_contract,
+    )
+
+    futures = report.phases[1]
+    assert futures.failed == (("NSE-NIFTY", "ComputeError: corrupt cascade partition"),)
+
+
+def test_per_symbol_set_wheel_free_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wheel-free contract: with polars ABSENT, ``_per_symbol_data_errors()``
+    falls back to the documented ``(OSError,)``-based tuple (no PolarsError can
+    exist there — nothing lost) and the quarantine still works at except time."""
+    import sys
+
+    from brutex.dashboard.gated_prebuild import (
+        _per_symbol_data_errors,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    monkeypatch.setitem(sys.modules, "polars", None)  # `import polars` → ModuleNotFoundError
+
+    from brutex.data.errors import ResampleInputError
+
+    assert _per_symbol_data_errors() == (ValueError, ResampleInputError, OSError)
+
+    # The except sites still quarantine through the fallback tuple.
+    def materialize_spot(inst: Instrument) -> MaterializeResult:
+        if inst.symbol_name == "BAD":
+            raise ValueError("no stored 1minute bars")
+        return _ok(5)
+
+    report = run_gated_prebuild(
+        underlyings=[_spot("BAD"), _spot("GOOD")],
+        materialize_spot=materialize_spot,
+        futures_contracts_for=_no_contracts,
+        materialize_future=_raise_contract,
+    )
+    spot = report.phases[0]
+    assert spot.succeeded == ("GOOD",)
+    assert spot.failed == (("BAD", "ValueError: no stored 1minute bars"),)
+
+
+def test_per_symbol_set_pins_global_stop_and_bugs_outside() -> None:
+    """Set-level pin: PolarsError IS quarantined; LakeWriteHalt (global stop)
+    and genuine bugs (KeyError/TypeError) are NOT — complementing the
+    end-to-end propagation tests above."""
+    pl = pytest.importorskip("polars")
+
+    from brutex.dashboard.gated_prebuild import (
+        _per_symbol_data_errors,  # pyright: ignore[reportPrivateUsage]
+    )
+    from brutex.data.errors import LakeWriteHalt
+
+    members = _per_symbol_data_errors()
+    assert pl.exceptions.PolarsError in members
+    assert OSError in members
+    assert not issubclass(LakeWriteHalt, members)
+    assert not issubclass(KeyError, members)
+    assert not issubclass(TypeError, members)
 
 
 # ── report projections ────────────────────────────────────────────────────

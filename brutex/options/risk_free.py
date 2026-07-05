@@ -38,6 +38,7 @@ import math
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 
@@ -271,6 +272,33 @@ class CsvRateSource:
     rates: tuple[float, ...]
     source: str
 
+    def __post_init__(self) -> None:
+        """Validate the curve eagerly — every construction path, not just the loader.
+
+        DEC-GREEKS-CORRECTNESS-AUDIT-001 (RF-2): a hand-built instance used to
+        bypass the ``[0, 1)`` band (only :func:`load_risk_free_csv` validated),
+        so a rogue ``rate=-0.5`` could flow into a Greeks solve and be STORED.
+        The invariants checked here — parallel ``dates``/``rates``, strictly
+        ascending dates, every rate through :func:`_validate_rate` — are exactly
+        what the blessed loader already produces, so the blessed path is
+        byte-unchanged (fail-fast only for out-of-contract constructions).
+        """
+        if len(self.dates) != len(self.rates):
+            msg = (
+                f"csv source {self.source}: {len(self.dates)} dates but "
+                f"{len(self.rates)} rates (parallel tuples required)"
+            )
+            raise RiskFreeError(msg)
+        for earlier, later in pairwise(self.dates):
+            if later <= earlier:
+                msg = (
+                    f"csv source {self.source}: dates must be strictly ascending, "
+                    f"got {earlier} then {later}"
+                )
+                raise RiskFreeError(msg)
+        for i, rate in enumerate(self.rates):
+            _validate_rate(rate, context=f"csv source {self.source} rates[{i}]")
+
     def rate_on(self, on_date: date) -> RiskFreeRate | None:
         """Step-function lookup: latest row with ``row date <= on_date``.
 
@@ -321,15 +349,20 @@ def load_risk_free_csv(path: Path) -> CsvRateSource:
     Raises
     ------
     RiskFreeError
-        If the file is missing, the header is wrong, any row is malformed
+        If the file is missing or not decodable as UTF-8 (e.g. a UTF-16 /
+        binary Excel save), the header is wrong, any row is malformed
         (bad date / yield / tenor, out-of-range converted rate, duplicate
         date), or the file carries zero data rows (an empty curve is a
         configuration defect — fail fast, never a silent always-``None``).
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        msg = f"cannot read risk-free CSV {path}: {exc}"
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError (a UTF-16 / binary / Excel-saved file) maps into
+        # the SAME loud RiskFreeError as an I/O failure, so the documented
+        # "broken CSV → RiskFreeError" contract is total
+        # (DEC-GREEKS-CORRECTNESS-AUDIT-001 RF-3).
+        msg = f"cannot read risk-free CSV {path} (I/O or encoding failure): {exc}"
         raise RiskFreeError(msg) from exc
 
     reader = csv.reader(text.splitlines())

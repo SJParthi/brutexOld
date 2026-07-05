@@ -1,17 +1,27 @@
-"""Adaptive token-bucket rate limiter for the vendor Data API.
+"""Adaptive token-bucket rate limiter — the COMMON pacing core reused by the vendor adapter.
 
-Defaults vendor-tuned per ``CLAUDE.md §2 rule 6`` + §6 (DEC-P0-030, PR #50c):
-the Groww Data API caps at 5 req/s + 100,000/day; effective adapter cap is
-3 r/s (5 × 0.6 safety factor, within the ``[3..5]`` r/s envelope);
-downshift to 1.5 r/s on consecutive 429s. Integrated with
-:class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`
-for the per-day 100K ceiling.
+Vendor facts (CLAUDE.md §2 Rule 6 + §6, current): Groww backtesting
+(``get_historical_candles``) runs under an operator-confirmed HARD
+**500 req/min** governor and has **NO daily quota** (DEC-GROWW-RATE-PERMIN-001,
+2026-06-13, not vendor-documented); the per-SECOND cap is **UNVERIFIED**
+(``GROWW_RATE_LIMIT_RPS_UNVERIFIED`` — an open Phase-0 probe gate). Production
+pacing is owned by :class:`~brutex.adapters.rate_common.RateController` (AIMD
+per-second ladder, operator-directed 8 r/s ceiling
+``GROWW_RATE_LIMIT_RPS_CEILING`` + the 500/min governor), which REUSES this
+bucket as its single shared token stream (CLAUDE.md §11 COMMON — no
+re-implementation of the token math); the production rate is injected via
+``initial_rps`` / :meth:`AdaptiveTokenBucket.set_rate`. This module's OWN
+defaults (3.0 / 1.5 r/s below, DEC-P0-030, PR #50c) date from the RETIRED
+prior-vendor "5 req/s + 100,000/day" model and govern only the direct
+env-var path, not the production pull.
 
 ## Contract
 
 * **Start at ``DEFAULT_INITIAL_RPS`` req/s** (= 3.0; the
-  ``BRUTEX_OHLC_RATE_LIMIT_RPS`` env-var default — 60% of the
-  verified 5 req/s data-API cap per CLAUDE.md §6).
+  ``BRUTEX_OHLC_RATE_LIMIT_RPS`` env-var default — a historic 60%-of-5
+  tuning, DEC-P0-030; today it merely coincides with the AIMD soft floor.
+  The Groww per-second cap is UNVERIFIED per CLAUDE.md §6; production
+  injects its own rate via ``RateController``).
 * **Auto-downshift to ``DEFAULT_DOWNSHIFT_RPS`` req/s** (= 1.5) after
   ``DEFAULT_DOWNSHIFT_TRIGGER`` (= 3) consecutive 429 / rate-limit
   exception hits inside ``DEFAULT_DOWNSHIFT_WINDOW`` (= 60) seconds.
@@ -24,9 +34,13 @@ for the per-day 100K ceiling.
   always gets through eventually.
 * **Optional daily quota gate.** When constructed with a
   ``DailyQuotaTracker``, :meth:`acquire` consults the tracker AFTER
-  bucket success — if the daily 100K is exhausted, raises
+  bucket success — if the tracker's daily limit is exhausted, raises
   :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` which
   the adapter maps to ``Outcome.FATAL`` (halt the phase, no auto-retry).
+  DORMANT in production: Groww backtesting has NO daily quota
+  (operator-confirmed 2026-06-13, DEC-GROWW-RATE-PERMIN-001), so both
+  live build sites construct the controller with ``quota_tracker=None``
+  (``dashboard/pull_controller.py`` + ``cli.py``).
 
 ## Design
 
@@ -67,9 +81,10 @@ from brutex.models import BruteXError
 # Constants (tuned per FR-ING-017)
 # ────────────────────────────────────────────────────────────────────────
 
-#: Default steady-state rate (req/s). 60% of the verified 5 r/s data-API
-#: cap per CLAUDE.md §2 rule 6 + §6. Was 15.0 (calibrated for the deleted
-#: broker's 25 r/s); retuned to 3.0 in DEC-P0-030 (PR #50c).
+#: Default steady-state rate (req/s). A historic 60%-of-5 tuning from the
+#: RETIRED prior-vendor model (the Groww per-second cap is UNVERIFIED per
+#: CLAUDE.md §6). Was 15.0 (calibrated for the deleted broker's 25 r/s);
+#: retuned to 3.0 in DEC-P0-030 (PR #50c).
 DEFAULT_INITIAL_RPS: Final[float] = 3.0
 
 #: Rate we downshift to after consecutive 429s. Was 10.0 (broker-tuned);
@@ -93,14 +108,13 @@ DEFAULT_UPSHIFT_RECOVERY: Final[float] = 120.0
 #: dropping below the steady-state rate.
 DEFAULT_BURST: Final[int] = 5
 
-#: Legacy hard cap (5 r/s) carried over from the pre-pivot adapter — it
-#: coincides with the verified 5 r/s data-API cap. Kept as the
-#: defense-in-depth ceiling in :meth:`AdaptiveTokenBucket.__post_init__`
-#: per DEC-P0-031 (PR #50d, Agent 2 §D). ``initial_rps > _LEGACY_HARD_CAP_RPS``
-#: raises :class:`RateLimiterError` so direct-kwarg construction can't
-#: bypass the env-layer clamp. The Groww adapter ships its own adaptive
-#: [3..5] r/s state machine (the :class:`RateController` in
-#: ``brutex/adapters/rate_common.py``).
+#: Legacy hard cap (5 r/s) carried over from the pre-pivot adapter — a
+#: RETIRED prior-vendor figure (the Groww per-second cap is UNVERIFIED per
+#: CLAUDE.md §6). The ``initial_rps <= _LEGACY_HARD_CAP_RPS`` defense-in-depth
+#: clamp proposed per DEC-P0-031 (PR #50d, Agent 2 §D) was DEFERRED and never
+#: landed (see the ``__post_init__`` NOTE) — the production
+#: :class:`RateController` in ``brutex/adapters/rate_common.py`` relies on the
+#: clamp's ABSENCE to run its operator-directed 8 r/s ceiling; do not add it.
 _LEGACY_HARD_CAP_RPS: Final[float] = 5.0
 
 #: Safety cap on the refill-loop inside :meth:`AdaptiveTokenBucket.acquire`.
@@ -229,13 +243,13 @@ class AdaptiveTokenBucket:
         if self.initial_rps <= 0:
             raise RateLimiterError(f"initial_rps must be > 0, got {self.initial_rps}")
         # NOTE: Defense-in-depth clamp `initial_rps <= _LEGACY_HARD_CAP_RPS`
-        # (Agent 2 §D from PR #50d pre-impl review) is intentionally
-        # DEFERRED to PR #51. Today there are ZERO production callers
-        # of AdaptiveTokenBucket (only test fixtures, per Agent 4
-        # PR #50c verification). The env-layer clamp in
-        # brutex/config/runtime.py protects the env-var path. When
-        # PR #51 ships the first production caller (Phase 2 Groww
-        # adapter), the __post_init__ clamp will land alongside it.
+        # (Agent 2 §D from PR #50d pre-impl review) was intentionally
+        # DEFERRED and never landed. The production caller is
+        # `rate_common.RateController` (the shared live-pull pacer), which
+        # RELIES on the clamp's ABSENCE to run the operator-directed 8 r/s
+        # ceiling (GROWW_RATE_LIMIT_RPS_CEILING, DEC-GROWW-RATE-CEILING-8-002).
+        # Do NOT add the deferred clamp — it would raise RateLimiterError
+        # on the live pull.
         if self.downshift_rps <= 0:
             raise RateLimiterError(f"downshift_rps must be > 0, got {self.downshift_rps}")
         if self.downshift_rps >= self.initial_rps:

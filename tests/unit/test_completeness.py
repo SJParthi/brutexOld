@@ -9,9 +9,11 @@ skips, sorting, and the cell-status drift guard against ``coverage_ledger``.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import math
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from brutex.calendars import trading_days_between
 from brutex.dashboard.completeness import (
     CATEGORY_EQUITY,
     CATEGORY_INDEX,
@@ -20,6 +22,7 @@ from brutex.dashboard.completeness import (
     DIM_FULL,
     DIM_NONE,
     DIM_PARTIAL,
+    DIM_SETTLED_PARTIAL_RANGE,
     OPT_CONTRACTS_BY_DESIGN_NOTE,
     OPT_FAILED,
     OPT_GROWING,
@@ -27,13 +30,17 @@ from brutex.dashboard.completeness import (
     OPT_PARTIAL,
     OPT_STABLE,
     RECONCILE_MISMATCH_EVENT,
+    SPOT_SESSION_RATIO_FLOOR,
     SymbolReconcileReport,
     _aggregate_options,
     _contracts_note,
     _option_verdict,
     _overall_spot,
     _resolve_spot_category,
+    _session_days_of,
+    _session_range_audit,
     _spot_cell_supersedes,
+    _spot_dimension_verdict_with_floor,
     build_completeness_scoreboard,
     categorize_instruments,
     log_symbol_reconcile_from_board,
@@ -67,11 +74,14 @@ def _spot_row(
     segment: str = "CASH",
     first_date: str | None = None,
     last_date: str | None = None,
+    session_days: int | None = None,
 ) -> dict[str, Any]:
     # Production rows from ``summarize_spot_datasets`` always carry ``segment``; the
     # reconciliation diagnostic filters on it (spot segments only — F&O ``1minute``
     # contract partitions are NOT scored underlyings). Default ``CASH`` keeps every
-    # pre-existing row a scored spot symbol.
+    # pre-existing row a scored spot symbol. ``session_days`` (the
+    # DEC-SPOT-PARTIAL-RANGE-CHIP-001 lake scalar) defaults ``None`` so pre-scalar
+    # rows exercise the session-audit ABSTAIN path.
     return {
         "symbol": symbol,
         "exchange": exchange,
@@ -80,6 +90,7 @@ def _spot_row(
         "completeness": completeness,
         "first_date": first_date,
         "last_date": last_date,
+        "session_days": session_days,
     }
 
 
@@ -119,7 +130,13 @@ def test_symbol_full_when_one_minute_settled() -> None:
     [row] = board["spot"]["per_symbol"]
     assert row["1minute"] == DIM_FULL and row["overall"] == DIM_FULL
     assert "1day" not in row  # the 1-day column is gone from the per-symbol view
-    assert board["spot"]["by_category"][CATEGORY_INDEX] == {"total": 1, "full_1minute": 1}
+    assert board["spot"]["by_category"][CATEGORY_INDEX] == {
+        "total": 1,
+        "full_1minute": 1,
+        # Re-baselined for DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001: hand-built rows
+        # carry no substitution counts -> the honest 0 default.
+        "open_substituted_days": 0,
+    }
 
 
 def test_symbol_partial_when_one_minute_pending() -> None:
@@ -128,7 +145,7 @@ def test_symbol_partial_when_one_minute_pending() -> None:
     [row] = board["spot"]["per_symbol"]
     assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
     agg = board["spot"]["by_category"][CATEGORY_EQUITY]
-    assert agg == {"total": 1, "full_1minute": 0}
+    assert agg == {"total": 1, "full_1minute": 0, "open_substituted_days": 0}
 
 
 def test_symbol_failed_when_one_minute_failed() -> None:
@@ -147,17 +164,24 @@ def test_symbol_none_when_no_ledger_record() -> None:
 
 def test_symbol_partial_when_settled_but_data_starts_after_2020() -> None:
     """DEC-SPOT-COMPLETENESS-2020-FLOOR-001 — a 1-minute series whose windows are all settled
-    but whose earliest bar is LATE (a late listing / late data, e.g. JIOFIN 2023-08-21) is
-    HONESTLY downgraded ``full`` → ``partial``: it does NOT hold the solid 2020-floor history the
-    deep-drill brute-force backtest needs, and is excluded from the FULL 1-minute count."""
+    but whose earliest bar is LATE (a late listing / late data, e.g. JIOFIN 2023-08-21) does
+    NOT hold the solid 2020-floor history the deep-drill brute-force backtest needs and is
+    excluded from the FULL 1-minute count. Since DEC-SPOT-PARTIAL-RANGE-CHIP-001 the downgrade
+    target is the distinct AMBER ``settled_partial_range`` (settled — nothing re-pulls — but
+    the range is honestly incomplete), no longer the pending-windows ``partial``."""
     rows = [_spot_row("NSE-JIOFIN", "1minute", COMPLETENESS_SETTLED, first_date="2023-08-21")]
     board = build_completeness_scoreboard(rows, {"NSE-JIOFIN": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
+    assert row["1minute"] == DIM_SETTLED_PARTIAL_RANGE
+    assert row["overall"] == DIM_SETTLED_PARTIAL_RANGE
     # the actually-covered start is carried so the operator SEES why it is partial.
     assert row["1minute_start"] == "2023-08-21"
     # a late-start symbol does NOT inflate the FULL 1-minute count.
-    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {"total": 1, "full_1minute": 0}
+    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {
+        "total": 1,
+        "full_1minute": 0,
+        "open_substituted_days": 0,
+    }
 
 
 def test_symbol_partial_when_settled_but_no_first_date() -> None:
@@ -167,7 +191,8 @@ def test_symbol_partial_when_settled_but_no_first_date() -> None:
     rows = [_spot_row("NSE-EMPTY", "1minute", COMPLETENESS_SETTLED)]  # first_date defaults None
     board = build_completeness_scoreboard(rows, {"NSE-EMPTY": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
+    assert row["1minute"] == DIM_SETTLED_PARTIAL_RANGE
+    assert row["overall"] == DIM_SETTLED_PARTIAL_RANGE
 
 
 def test_within_2020_late_start_is_partial_january_floor() -> None:
@@ -181,9 +206,16 @@ def test_within_2020_late_start_is_partial_january_floor() -> None:
     cats = {"NSE-TATACONSUM": CATEGORY_EQUITY, "NSE-MAXHEALTH": CATEGORY_EQUITY}
     board = build_completeness_scoreboard(rows, cats, [], {})
     verdicts = {r["symbol"]: r["1minute"] for r in board["spot"]["per_symbol"]}
-    assert verdicts == {"NSE-TATACONSUM": DIM_PARTIAL, "NSE-MAXHEALTH": DIM_PARTIAL}
+    assert verdicts == {
+        "NSE-TATACONSUM": DIM_SETTLED_PARTIAL_RANGE,
+        "NSE-MAXHEALTH": DIM_SETTLED_PARTIAL_RANGE,
+    }
     # neither within-2020-late symbol counts toward the FULL 1-minute total.
-    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {"total": 2, "full_1minute": 0}
+    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {
+        "total": 2,
+        "full_1minute": 0,
+        "open_substituted_days": 0,
+    }
 
 
 def test_january_2020_boundary_full_vs_partial() -> None:
@@ -197,7 +229,7 @@ def test_january_2020_boundary_full_vs_partial() -> None:
     cats = {"NSE-JANEND": CATEGORY_EQUITY, "NSE-FEB1": CATEGORY_EQUITY}
     board = build_completeness_scoreboard(rows, cats, [], {})
     verdicts = {r["symbol"]: r["1minute"] for r in board["spot"]["per_symbol"]}
-    assert verdicts == {"NSE-JANEND": DIM_FULL, "NSE-FEB1": DIM_PARTIAL}
+    assert verdicts == {"NSE-JANEND": DIM_FULL, "NSE-FEB1": DIM_SETTLED_PARTIAL_RANGE}
 
 
 def test_per_symbol_detail_downgrades_late_start_to_partial() -> None:
@@ -215,9 +247,193 @@ def test_per_symbol_detail_downgrades_late_start_to_partial() -> None:
     ]
     out = per_symbol_completeness(rows, {"NSE-TMPV": CATEGORY_EQUITY}, [], {})
     minute = out["NSE-TMPV"]["spot"]["1minute"]
-    assert minute["status"] == DIM_PARTIAL and minute["from_2020"] is False
+    assert minute["status"] == DIM_SETTLED_PARTIAL_RANGE and minute["from_2020"] is False
     assert minute["first_date"] == "2025-10-24" and minute["last_date"] == "2026-06-19"
-    assert out["NSE-TMPV"]["spot"]["overall"] == DIM_PARTIAL
+    assert out["NSE-TMPV"]["spot"]["overall"] == DIM_SETTLED_PARTIAL_RANGE
+
+
+# ── settled_partial_range — the session-density arm (DEC-SPOT-PARTIAL-RANGE-CHIP-001) ──
+
+
+def _span_with_sessions(n: int) -> tuple[date, date]:
+    """The shortest span from 2024-01-01 holding exactly *n* NSE trading sessions."""
+    start = date(2024, 1, 1)
+    end = start
+    while len(trading_days_between(start, end)) < n:
+        end += timedelta(days=1)
+    return start, end
+
+
+def test_session_range_audit_full_density_ratio_one() -> None:
+    start, end = _span_with_sessions(20)
+    expected, ratio = _session_range_audit(start.isoformat(), end.isoformat(), 20)
+    assert expected == 20 and ratio == 1.0
+
+
+def test_session_ratio_exactly_at_floor_stays_full() -> None:
+    # 19/20 = 0.95 exactly — NOT below the floor → the settled verdict stays full.
+    start, end = _span_with_sessions(20)
+    verdict = _spot_dimension_verdict_with_floor(
+        COMPLETENESS_SETTLED,
+        "2020-01-01",
+        last_date="2020-01-31",
+        session_days=None,
+    )
+    assert verdict == DIM_FULL  # abstain baseline (no scalar)
+    expected = len(trading_days_between(date(2020, 1, 1), date(2020, 1, 31)))
+    at_floor = math.ceil(SPOT_SESSION_RATIO_FLOOR * expected)
+    assert (
+        _spot_dimension_verdict_with_floor(
+            COMPLETENESS_SETTLED,
+            "2020-01-01",
+            last_date="2020-01-31",
+            session_days=at_floor,
+        )
+        == DIM_FULL
+    )
+    # One session fewer breaches the floor → the AMBER settled_partial_range.
+    assert (
+        _spot_dimension_verdict_with_floor(
+            COMPLETENESS_SETTLED,
+            "2020-01-01",
+            last_date="2020-01-31",
+            session_days=at_floor - 1,
+        )
+        == DIM_SETTLED_PARTIAL_RANGE
+    )
+    # The exact 0.95 boundary on a clean 20-session span: 19/20 full, 18/20 amber.
+    _exp2, ratio_at = _session_range_audit(start.isoformat(), end.isoformat(), 19)
+    assert ratio_at == SPOT_SESSION_RATIO_FLOOR
+    _exp3, ratio_below = _session_range_audit(start.isoformat(), end.isoformat(), 18)
+    assert ratio_below is not None and ratio_below < SPOT_SESSION_RATIO_FLOOR
+
+
+def test_floor_fail_now_reads_amber_not_partial() -> None:
+    # DEC-SPOT-PARTIAL-RANGE-CHIP-001: the Jan-2020-floor fail is a SETTLED range
+    # problem, so its downgrade target is the amber verdict, no longer DIM_PARTIAL.
+    verdict = _spot_dimension_verdict_with_floor(COMPLETENESS_SETTLED, "2023-08-21")
+    assert verdict == DIM_SETTLED_PARTIAL_RANGE
+    assert verdict != DIM_PARTIAL
+
+
+def test_session_audit_abstains_keep_full() -> None:
+    # Every abstain shape keeps the settled verdict FULL (never a guessed amber):
+    base = {"completeness": COMPLETENESS_SETTLED}
+    # (a) no lake scalar;
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date="2026-01-30", session_days=None
+        )
+        == DIM_FULL
+    )
+    # (b) missing last_date;
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date=None, session_days=1
+        )
+        == DIM_FULL
+    )
+    # (c) unparseable last_date;
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date="not-a-date", session_days=1
+        )
+        == DIM_FULL
+    )
+    # (d) span exits the published holiday coverage (out-of-calendar ABSTAIN);
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date="2031-01-05", session_days=1
+        )
+        == DIM_FULL
+    )
+    # (e) reversed span.
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-15", last_date="2020-01-02", session_days=1
+        )
+        == DIM_FULL
+    )
+
+
+def test_session_range_audit_zero_expected_abstains() -> None:
+    # A weekend-only span has ZERO trading sessions → (None, None), never a divide.
+    assert _session_range_audit("2024-01-06", "2024-01-07", 0) == (None, None)
+
+
+def test_session_days_of_row_helper() -> None:
+    assert _session_days_of({"session_days": 3}) == 3
+    assert _session_days_of({"session_days": 0}) == 0
+    assert _session_days_of({}) is None
+    assert _session_days_of({"session_days": None}) is None
+
+
+def test_scoreboard_sparse_settled_range_reads_amber() -> None:
+    # End-to-end through the scoreboard fold: a settled Jan-2020-anchored symbol whose
+    # lake holds only 3 session-days over a multi-month span reads the amber
+    # settled_partial_range — and is excluded from the FULL 1-minute count.
+    rows = [
+        _spot_row(
+            "NSE-SPARSE",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2020-03-31",
+            session_days=3,
+        )
+    ]
+    board = build_completeness_scoreboard(rows, {"NSE-SPARSE": CATEGORY_EQUITY}, [], {})
+    [row] = board["spot"]["per_symbol"]
+    assert row["1minute"] == DIM_SETTLED_PARTIAL_RANGE
+    # ``open_substituted_days`` rides every by_category bucket since the merged
+    # DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 (0 here — no substitution observed).
+    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {
+        "total": 1,
+        "full_1minute": 0,
+        "open_substituted_days": 0,
+    }
+
+
+def test_per_symbol_detail_exposes_session_honesty_fields() -> None:
+    # The /universe per-symbol map carries session_days / expected_sessions /
+    # session_ratio so the operator SEES the density behind the amber verdict.
+    rows = [
+        _spot_row(
+            "NSE-SPARSE",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2020-03-31",
+            session_days=3,
+        )
+    ]
+    out = per_symbol_completeness(rows, {"NSE-SPARSE": CATEGORY_EQUITY}, [], {})
+    minute = out["NSE-SPARSE"]["spot"]["1minute"]
+    assert minute["status"] == DIM_SETTLED_PARTIAL_RANGE
+    assert minute["session_days"] == 3
+    expected = len(trading_days_between(date(2020, 1, 1), date(2020, 3, 31)))
+    assert minute["expected_sessions"] == expected
+    assert minute["session_ratio"] == 3 / expected
+    # An abstaining row (no scalar) exposes honest Nones, never fabricated zeros.
+    rows2 = [_spot_row("NSE-OK", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
+    out2 = per_symbol_completeness(rows2, {"NSE-OK": CATEGORY_EQUITY}, [], {})
+    minute2 = out2["NSE-OK"]["spot"]["1minute"]
+    assert minute2["status"] == DIM_FULL
+    assert minute2["expected_sessions"] is None and minute2["session_ratio"] is None
+
+
+def test_amber_rank_sits_between_partial_and_full() -> None:
+    # _spot_cell_supersedes rank regression (order-independence with the new verdict):
+    # full > settled_partial_range > partial > failed > none.
+    assert _spot_cell_supersedes(DIM_FULL, "2020-01-01", DIM_SETTLED_PARTIAL_RANGE, "2020-01-01")
+    assert not _spot_cell_supersedes(
+        DIM_SETTLED_PARTIAL_RANGE, "2020-01-01", DIM_FULL, "2020-01-01"
+    )
+    assert _spot_cell_supersedes(DIM_SETTLED_PARTIAL_RANGE, "2020-01-01", DIM_PARTIAL, "2020-01-01")
+    assert not _spot_cell_supersedes(
+        DIM_PARTIAL, "2020-01-01", DIM_SETTLED_PARTIAL_RANGE, "2020-01-01"
+    )
+    assert _spot_cell_supersedes(DIM_SETTLED_PARTIAL_RANGE, "2020-01-01", DIM_FAILED, "2020-01-01")
 
 
 def test_unmapped_symbol_and_derived_interval_skipped() -> None:
@@ -739,9 +955,11 @@ def test_scoreboard_csv_full_board_has_all_sections_and_rows() -> None:
     assert f"{CATEGORY_INDEX},1,1" in lines
     # equity: 1-minute pending → full_1minute=0.
     assert f"{CATEGORY_EQUITY},1,0" in lines
-    # The per-symbol detail rows are present with their 1-minute + overall verdicts.
-    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{DIM_FULL},{DIM_FULL}" in lines
-    assert f"{CATEGORY_EQUITY},NSE-RELIANCE,NSE,{DIM_PARTIAL},{DIM_PARTIAL}" in lines
+    # The per-symbol detail rows are present with their 1-minute + overall verdicts —
+    # plus the informational open-substituted-days column (0 for these hand-built rows;
+    # DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{DIM_FULL},0,{DIM_FULL}" in lines
+    assert f"{CATEGORY_EQUITY},NSE-RELIANCE,NSE,{DIM_PARTIAL},0,{DIM_PARTIAL}" in lines
     # The per-underlying option detail row carries status + summed counts + the years +
     # the (empty, for a stable/has-contracts row) by-design Notes column.
     assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{OPT_STABLE},50,10000,2024," in lines
@@ -774,7 +992,9 @@ def test_scoreboard_csv_escapes_comma_in_symbol() -> None:
     detail = [
         r
         for r in _csv.reader(StringIO(csv_text))
-        if len(r) == 5 and r[1] == "NSE-A,B"  # the per-symbol detail row (now 5 columns)
+        # the per-symbol detail row (now 6 columns — the open-substituted column was
+        # added by DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001)
+        if len(r) == 6 and r[1] == "NSE-A,B"
     ]
     assert detail and detail[0][1] == "NSE-A,B"
 
@@ -792,7 +1012,7 @@ def test_scoreboard_csv_prefixes_formula_injection_symbol() -> None:
     from io import StringIO
 
     detail = [
-        r for r in _csv.reader(StringIO(csv_text)) if len(r) == 5 and r[1].endswith("HYPERLINK(0)")
+        r for r in _csv.reader(StringIO(csv_text)) if len(r) == 6 and r[1].endswith("HYPERLINK(0)")
     ]
     assert detail and detail[0][1] == "'=HYPERLINK(0)"  # the safe (quoted) value round-trips
 
@@ -827,18 +1047,193 @@ def test_scoreboard_csv_with_per_symbol_enriches_spot_detail_with_dates() -> Non
     # The dropped 1-day headers are gone.
     assert "1-day first bar" not in csv_text and "1-day from 2020?" not in csv_text
 
-    # Enriched spot detail rows now have 8 columns: cat, symbol, exch, 1m verdict, 1m first,
-    # 1m last, 1m from-2020, overall.
-    rows = [r for r in _csv.reader(StringIO(csv_text)) if len(r) == 8]
+    # Enriched spot detail rows now have 10 columns: cat, symbol, exch, 1m verdict, 1m first,
+    # 1m last, 1m from-2020, 1m open-substituted days, 1m sessions, overall
+    # (the two substitution columns added by DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+    assert "1-minute open-substituted days" in csv_text and "1-minute sessions" in csv_text
+    rows = [r for r in _csv.reader(StringIO(csv_text)) if len(r) == 10]
     by_symbol = {r[1]: r for r in rows}
     # NIFTY: dated 2020→2026, from_2020 = yes (covers _csv_date truthy + _csv_yes_no True).
     nifty = by_symbol["NSE-NIFTY"]
     assert nifty[4] == "2020-01-01" and nifty[5] == "2026-06-18" and nifty[6] == "yes"
-    assert nifty[7] == DIM_FULL  # overall = 1-minute verdict
+    assert nifty[7] == "0" and nifty[8] == "0"  # hand-built rows carry no counts → honest 0/0
+    assert nifty[9] == DIM_FULL  # overall = 1-minute verdict
     # FINNIFTY: 1-minute no-record → EMPTY date cells + no (covers _csv_date falsy +
     # _csv_yes_no False).
     finnifty = by_symbol["NSE-FINNIFTY"]
     assert finnifty[4] == "" and finnifty[5] == "" and finnifty[6] == "no"
+
+
+# ---------------------------------------------------------------------------
+# DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 — the per-day open-substitution count:
+# how many stored 1-minute sessions have their FIRST present minute strictly after
+# the 09:15 IST canonical open, so the DERIVED 1-day open (tf_resampler `.first()`)
+# is a substituted first-present-minute price. INFORMATIONAL only — verdict stays
+# ``full``; the count merely travels through every completeness projection.
+# ---------------------------------------------------------------------------
+
+
+def _sub_row(
+    symbol: str,
+    completeness: str,
+    *,
+    first_date: str | None = "2020-01-01",
+    open_substituted_days: int = 0,
+    session_days: int = 0,
+) -> dict[str, Any]:
+    """A ``1minute`` spot row carrying the summarize-side substitution counts."""
+    row = _spot_row(symbol, "1minute", completeness, first_date=first_date)
+    row["open_substituted_days"] = open_substituted_days
+    row["session_days"] = session_days
+    return row
+
+
+def test_per_symbol_spot_row_carries_open_substitution_counts_regression() -> None:
+    # FAILS-BEFORE / PASSES-AFTER: pre-fix the scoreboard row had NO substitution keys
+    # (KeyError below), so a missing-09:15 session's substituted derived daily open was
+    # invisible on the completeness surface.
+    rows = [_sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=3, session_days=100)]
+    board = build_completeness_scoreboard(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+    [row] = board["spot"]["per_symbol"]
+    assert row["open_substituted_days"] == 3
+    assert row["session_days"] == 100
+
+
+def test_open_substitution_is_informational_verdict_stays_full() -> None:
+    # The design's explicit invariant: a substitution NEVER downgrades the verdict —
+    # a settled, Jan-2020-floor symbol with substituted opens still reads ``full``
+    # (the data exists; only its derived daily open is a substitute).
+    rows = [_sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=5, session_days=50)]
+    board = build_completeness_scoreboard(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+    [row] = board["spot"]["per_symbol"]
+    assert row["1minute"] == DIM_FULL and row["overall"] == DIM_FULL
+    assert row["open_substituted_days"] == 5
+
+
+def test_open_substitution_counts_travel_with_rank_merge_winner() -> None:
+    # REGRESSION (the design's rank-merge trap): when a clean partition and a stale
+    # drifted fragment both resolve to one canonical symbol, the substitution count
+    # must follow the rank-merge WINNING cell — a later-scanned WORSE fragment must
+    # NOT clobber the winner's count. Order-independent (both scan orders).
+    winner = _sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=2, session_days=50)
+    loser = _sub_row(
+        "NSE-NIFTY",
+        COMPLETENESS_NO_RECORD,
+        first_date=None,
+        open_substituted_days=9,
+        session_days=9,
+    )
+    for ordering in ([winner, loser], [loser, winner]):
+        board = build_completeness_scoreboard(ordering, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+        [row] = board["spot"]["per_symbol"]
+        assert row["1minute"] == DIM_FULL
+        assert row["open_substituted_days"] == 2  # the WINNING cell's count, both orders
+        assert row["session_days"] == 50
+
+
+def test_per_symbol_spot_defaults_zero_counts_for_legacy_rows() -> None:
+    # A hand-built / legacy row WITHOUT the summarize-side keys defaults to the honest
+    # 0/0 — never a KeyError, never a fabricated count.
+    rows = [_spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
+    board = build_completeness_scoreboard(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+    [row] = board["spot"]["per_symbol"]
+    assert row["open_substituted_days"] == 0
+    assert row["session_days"] == 0
+
+
+def test_aggregate_spot_sums_open_substituted_days_per_category() -> None:
+    # FAILS-BEFORE (key absent): the by_category bucket sums the per-symbol counts —
+    # the informational category-level tally, never a verdict input.
+    rows = [
+        _sub_row("NSE-A", COMPLETENESS_SETTLED, open_substituted_days=2, session_days=10),
+        _sub_row("NSE-B", COMPLETENESS_SETTLED, open_substituted_days=3, session_days=10),
+        _sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=1, session_days=10),
+    ]
+    cats = {"NSE-A": CATEGORY_EQUITY, "NSE-B": CATEGORY_EQUITY, "NSE-NIFTY": CATEGORY_INDEX}
+    board = build_completeness_scoreboard(rows, cats, [], {})
+    assert board["spot"]["by_category"][CATEGORY_EQUITY]["open_substituted_days"] == 5
+    assert board["spot"]["by_category"][CATEGORY_INDEX]["open_substituted_days"] == 1
+
+
+def test_per_symbol_detail_carries_open_substitution_fields() -> None:
+    # FAILS-BEFORE (keys absent): the /universe per-symbol detail carries the counts
+    # + the ``open_substituted`` flag (days > 0) for the 1-minute dimension.
+    rows = [_sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=4, session_days=80)]
+    detail = per_symbol_completeness(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+    one_min = detail["NSE-NIFTY"]["spot"]["1minute"]
+    assert one_min["open_substituted_days"] == 4
+    assert one_min["session_days"] == 80
+    assert one_min["open_substituted"] is True
+    # …and the verdict is NOT downgraded by the substitution (informational only).
+    assert one_min["status"] == DIM_FULL
+
+
+def test_per_symbol_detail_zero_counts_flag_false() -> None:
+    # The flag is ``days > 0`` — a clean symbol reads 0/M with ``open_substituted`` False.
+    rows = [_sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=0, session_days=80)]
+    detail = per_symbol_completeness(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+    one_min = detail["NSE-NIFTY"]["spot"]["1minute"]
+    assert one_min["open_substituted_days"] == 0
+    assert one_min["session_days"] == 80
+    assert one_min["open_substituted"] is False
+
+
+def test_new_per_symbol_entry_seeds_open_substitution_defaults() -> None:
+    # An options-only symbol (no spot row at all) gets the honest no-data defaults —
+    # 0/0/False — from the ``_new_per_symbol_entry`` seed.
+    records = [_cov("RELIANCE", 2024, STATUS_COMPLETE, expiries=4, contracts=100)]
+    detail = per_symbol_completeness([], {}, records, {"RELIANCE": CATEGORY_EQUITY})
+    one_min = detail["RELIANCE"]["spot"]["1minute"]
+    assert one_min["open_substituted_days"] == 0
+    assert one_min["session_days"] == 0
+    assert one_min["open_substituted"] is False
+
+
+def test_per_symbol_detail_rank_merge_keeps_winner_counts() -> None:
+    # The /universe detail applies the SAME rank-merge: a stale drifted fragment's
+    # counts never clobber the winning cell's (order-independent).
+    winner = _sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=1, session_days=40)
+    loser = _sub_row(
+        "NSE-NIFTY",
+        COMPLETENESS_FAILED,
+        first_date=None,
+        open_substituted_days=7,
+        session_days=7,
+    )
+    for ordering in ([winner, loser], [loser, winner]):
+        detail = per_symbol_completeness(ordering, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+        one_min = detail["NSE-NIFTY"]["spot"]["1minute"]
+        assert one_min["status"] == DIM_FULL
+        assert one_min["open_substituted_days"] == 1
+        assert one_min["session_days"] == 40
+
+
+def test_scoreboard_csv_compact_detail_carries_open_substituted_column() -> None:
+    # FAILS-BEFORE (header absent): the compact (per_symbol=None) DETAIL-spot section
+    # carries the informational count column from the scoreboard row itself.
+    rows = [_sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=3, session_days=60)]
+    board = build_completeness_scoreboard(rows, {"NSE-NIFTY": CATEGORY_INDEX}, [], {})
+    csv_text = scoreboard_to_csv(board)
+    assert "1-minute open-substituted days" in csv_text
+    assert f"{CATEGORY_INDEX},NSE-NIFTY,NSE,{DIM_FULL},3,{DIM_FULL}" in csv_text.splitlines()
+
+
+def test_scoreboard_csv_enriched_carries_real_substitution_counts() -> None:
+    # FAILS-BEFORE (headers absent): the enriched DETAIL-spot section carries BOTH the
+    # "N substituted" and "M sessions" columns from the per-symbol detail map.
+    import csv as _csv
+    from io import StringIO
+
+    rows = [_sub_row("NSE-NIFTY", COMPLETENESS_SETTLED, open_substituted_days=3, session_days=60)]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX}
+    board = build_completeness_scoreboard(rows, cats, [], {})
+    psmap = per_symbol_completeness(rows, cats, [], {})
+    csv_text = scoreboard_to_csv(board, per_symbol=psmap)
+    assert "1-minute open-substituted days" in csv_text and "1-minute sessions" in csv_text
+    detail = {r[1]: r for r in _csv.reader(StringIO(csv_text)) if len(r) == 10}
+    nifty = detail["NSE-NIFTY"]
+    assert nifty[7] == "3" and nifty[8] == "60"  # N substituted / M sessions
+    assert nifty[9] == DIM_FULL  # verdict stays full — informational only
 
 
 # ---------------------------------------------------------------------------

@@ -56,7 +56,12 @@ class LakeWriteHalt(DataLakeError):
     #1). The half-written temp file is always cleaned up before this is raised.
 
     ``reason`` is a non-secret machine token: ``"disk_full"`` (an ``OSError`` with
-    errno ``ENOSPC``) or ``"out_of_memory"`` (a ``MemoryError``).
+    errno ``ENOSPC``), ``"out_of_memory"`` (a ``MemoryError``), or
+    ``"volume_wedged"`` (the lake volume failed its keepalive write-probe for
+    longer than the ``BRUTEX_VOLUME_WEDGE_HALT_S`` bound — a spun-down / wedged
+    external volume; raised FROM THE PRODUCER THREAD at the
+    :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.submit` wedge gate,
+    DEC-VOLUME-KEEPALIVE-001).
     """
 
     def __init__(self, reason: str) -> None:

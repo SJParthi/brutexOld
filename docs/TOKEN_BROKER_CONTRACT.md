@@ -1,5 +1,12 @@
 # Shared AWS Parameter-Store Token-Broker Contract (DEC-TOKEN-BROKER-AWS-001)
 
+> **⚠️ Reconcile banner (DEC-AWS-ONLY-CREDS-001, 2026-07-03):** the "Enable flag"
+> (`BRUTEX_TOKEN_BROKER_READONLY`) + "LOCAL disk cache + local mint" clauses below are
+> STALE — both were REMOVED (`brutex/adapters/groww/constants.py:348-350`): the broker
+> read is now unconditional + fail-fast for every consumer (AWS is the SOLE
+> credential/token source). The parameter paths, read/write conventions and IAM contract
+> stay correct. A full contract-doc refresh is a named follow-up.
+
 > **Status:** authoritative interop spec. **Owner:** BruteX. **Consumers:** BruteX
 > (Python, `brutex/adapters/groww/token_store_aws.py` + `brutex/config/credentials_aws.py`)
 > **and** TickVault (its own repo) — both READ-ONLY — plus a single dedicated **Lambda

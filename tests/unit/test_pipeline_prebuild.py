@@ -20,6 +20,7 @@ over an in-memory dataset list. No lake / DuckDB / FastAPI.
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from brutex.dashboard.fno_cascade import FnoCascadeIndex, build_fno_cascade
@@ -30,6 +31,7 @@ from brutex.dashboard.pipeline_prebuild import (
     run_pipeline_prebuild,
     run_pipeline_prebuild_guarded,
 )
+from brutex.data.fs_probe import AllocationProbe
 from brutex.data.timeframe_materialize import MaterializeResult, PrebuildKind
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from structlog.testing import capture_logs
@@ -153,6 +155,118 @@ def test_prebuild_empty_instruments_is_clean_zero() -> None:
     )
 
 
+# ── the clean-set exclusion (DEC-PREBUILD-CLEANSET-001) ─────────────────────
+
+
+def test_prebuild_exclude_filters_spot_and_its_contracts() -> None:
+    """An excluded underlying is skipped ENTIRELY — its spot partition AND its
+    FUTURES + OPTIONS contract discovery — while the clean sibling still builds
+    (the decouple: one quarantined symbol never starves the rest)."""
+    mat = _FakeMaterializer()
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY"), _spot("NSE-BANKNIFTY")],
+            cascade=_cascade(),
+            materialize=mat,
+            exclude_symbols=frozenset({"NIFTY"}),  # the BARE historical-fold form
+        )
+    # Only the clean BANKNIFTY spot built — no NIFTY spot, future, or option.
+    assert [t.symbol for t in mat.targets] == ["NSE-BANKNIFTY"]
+    assert outcome == PrebuildOutcome(
+        symbols_built=1, total_bars=4, failed=(), failed_count=0, ok=True
+    )
+    started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started[0]["excluded_symbols"] == 1  # the honest payload extension
+    assert started[0]["spot_symbols"] == 1  # scope named AFTER the exclusion
+    # A partial exclusion is NOT the fully-quarantined degrade — no warning.
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_excluded"]
+
+
+def test_prebuild_exclude_matches_the_prefixed_symbol_name_form() -> None:
+    """The exclusion keys on the COMMON ``underlying_match_tokens`` — the spot
+    quarantine's ``symbol_name`` form (``NSE-NIFTY``) matches too, so both
+    quarantine-name shapes (spot-prefixed + historical-bare) exclude."""
+    mat = _FakeMaterializer()
+    run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY"), _spot("NSE-BANKNIFTY")],
+        cascade=_cascade(),
+        materialize=mat,
+        exclude_symbols=frozenset({"NSE-NIFTY"}),
+    )
+    assert [t.symbol for t in mat.targets] == ["NSE-BANKNIFTY"]
+
+
+def test_prebuild_empty_exclusion_is_behaviour_identical() -> None:
+    """The default empty set (a clean pull) is behaviour-identical to the
+    pre-cleanset prebuild — same targets, same outcome."""
+    mat_default = _FakeMaterializer()
+    outcome_default = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")], cascade=_cascade(), materialize=mat_default
+    )
+    mat_explicit = _FakeMaterializer()
+    outcome_explicit = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=mat_explicit,
+        exclude_symbols=frozenset(),
+    )
+    assert outcome_explicit == outcome_default
+    assert mat_explicit.targets == mat_default.targets
+
+
+def test_prebuild_all_excluded_degrades_to_honest_zero_ok_with_warning() -> None:
+    """FULLY-QUARANTINED pull (empty clean set): the run degrades honestly —
+    a LOUD ``pipeline.prebuild.all_excluded`` warning, then a COMPLETED
+    ``ok=True`` 0-built outcome (nothing clean to derive over is not a crash;
+    the quarantined names are already headlined by the pipeline note)."""
+    mat = _FakeMaterializer()
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY"), _spot("NSE-BANKNIFTY")],
+            cascade=_cascade(),
+            materialize=mat,
+            exclude_symbols=frozenset({"NIFTY", "BANKNIFTY"}),
+        )
+    assert outcome == PrebuildOutcome(
+        symbols_built=0, total_bars=0, failed=(), failed_count=0, ok=True
+    )
+    assert mat.targets == []  # ZERO materialise calls
+    warned = [e for e in logs if e["event"] == "pipeline.prebuild.all_excluded"]
+    assert len(warned) == 1
+    assert warned[0]["excluded_symbols"] == 2
+    started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started[0]["spot_symbols"] == 0
+    assert started[0]["excluded_symbols"] == 2
+
+
+def test_prebuild_unmatched_exclusion_token_filters_nothing() -> None:
+    """HONEST ENVELOPE: a raw undecodable CONTRACT symbol in the exclusion set
+    matches no underlying token — it filters nothing (the underlying is
+    unknown, never guessed) and the full scope still builds."""
+    mat = _FakeMaterializer()
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=mat,
+        exclude_symbols=frozenset({"RELIANCE25JAN3000CE"}),
+    )
+    assert outcome.symbols_built == 4  # spot + future + both options — untouched
+
+
+def test_guarded_prebuild_forwards_exclude_symbols() -> None:
+    """The route-facing guard forwards the exclusion set verbatim."""
+    mat = _FakeMaterializer()
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY"), _spot("NSE-BANKNIFTY")],
+        cascade_or_error=_cascade,
+        materialize=mat,
+        exclude_symbols=frozenset({"NSE-NIFTY"}),
+    )
+    assert [t.symbol for t in mat.targets] == ["NSE-BANKNIFTY"]
+    assert outcome.symbols_built == 1
+    assert outcome.ok is True
+
+
 # ── quarantine + rollup ─────────────────────────────────────────────────────
 
 
@@ -205,6 +319,7 @@ def test_prebuild_emits_started_phase_done_and_done_logs() -> None:
     assert started[0]["spot_symbols"] == 1
     assert started[0]["futures_contracts"] == 1
     assert started[0]["options_contracts"] == 2
+    assert started[0]["excluded_symbols"] == 0  # DEC-PREBUILD-CLEANSET-001: 0 on a clean pull
     phase_done = [e for e in logs if e["event"] == "pipeline.prebuild.phase_done"]
     assert [e["phase"] for e in phase_done] == ["spot", "futures", "options"]
     assert all({"attempted", "succeeded", "failed", "total_bars"} <= set(e) for e in phase_done)
@@ -360,3 +475,245 @@ def test_guarded_prebuild_threads_segment_and_source() -> None:
         )
     assert {t.segment for t in mat.targets if t.kind is not PrebuildKind.SPOT} == {"FNO9"}
     assert any(e["event"] == "pipeline.prebuild.done" for e in logs)
+
+
+# ── lake-root allocation probe (DEC-LAKE-FS-PROBE-001) ───────────────────────
+
+
+def test_prebuild_probes_lake_root_and_carries_fs_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A given ``lake_root`` is allocation-probed ONCE; a COARSE note rides the
+    outcome + the ``pipeline.prebuild.started`` log (DEC-LAKE-FS-PROBE-001)."""
+    probed: list[Path] = []
+
+    def _fake_probe(root: Path) -> AllocationProbe:
+        probed.append(root)
+        return AllocationProbe(
+            allocation_unit_bytes=131072, coarse=True, note="COARSE filesystem allocation (fake)"
+        )
+
+    monkeypatch.setattr(
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity", _fake_probe
+    )
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NIFTY")],
+            cascade=_cascade(),
+            materialize=_FakeMaterializer(),
+            lake_root=tmp_path / "lake",
+        )
+    assert probed == [tmp_path / "lake"]
+    assert outcome.fs_note == "COARSE filesystem allocation (fake)"
+    (started,) = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started["fs_allocation"] == "COARSE filesystem allocation (fake)"
+
+
+def test_prebuild_fine_allocation_reads_ok_in_started_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fine-grained probe (note None) keeps ``fs_allocation="ok"`` + fs_note None."""
+    monkeypatch.setattr(
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity",
+        lambda _root: AllocationProbe(allocation_unit_bytes=4096, coarse=False, note=None),
+    )
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NIFTY")],
+            cascade=_cascade(),
+            materialize=_FakeMaterializer(),
+            lake_root=tmp_path / "lake",
+        )
+    assert outcome.fs_note is None
+    (started,) = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started["fs_allocation"] == "ok"
+
+
+def test_prebuild_without_lake_root_never_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEFAULT-PRESERVATION: ``lake_root=None`` skips the probe entirely."""
+
+    def _must_not_probe(_root: Path) -> AllocationProbe:  # pragma: no cover — must NOT be called
+        raise AssertionError("no lake_root ⇒ no probe")
+
+    monkeypatch.setattr(
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity", _must_not_probe
+    )
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NIFTY")], cascade=_cascade(), materialize=_FakeMaterializer()
+    )
+    assert outcome.fs_note is None
+
+
+def test_guarded_prebuild_threads_lake_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guarded route seam passes ``lake_root`` through to the composer."""
+    probed: list[Path] = []
+
+    def _fake_probe(root: Path) -> AllocationProbe:
+        probed.append(root)
+        return AllocationProbe(allocation_unit_bytes=131072, coarse=True, note="coarse (fake)")
+
+    monkeypatch.setattr(
+        "brutex.dashboard.pipeline_prebuild.probe_allocation_granularity", _fake_probe
+    )
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NIFTY")],
+        cascade_or_error=_cascade,
+        materialize=_FakeMaterializer(),
+        lake_root=tmp_path / "lake",
+    )
+    assert probed == [tmp_path / "lake"]
+    assert outcome.fs_note == "coarse (fake)"
+
+
+# ── incremental unchanged-skip counting (DEC-PREBUILD-INCREMENTAL-001) ──────
+
+
+class _UnchangedMaterializer:
+    """Marks the given symbols as incremental unchanged-skips (zero writes)."""
+
+    def __init__(self, unchanged: set[str]) -> None:
+        self.unchanged = unchanged
+
+    def __call__(self, target: PrebuildTarget) -> MaterializeResult:
+        if target.symbol in self.unchanged:
+            return MaterializeResult(written={}, skipped=(), unchanged=True)
+        return MaterializeResult(written={"5m": 3, "1day": 1}, skipped=())
+
+
+def test_prebuild_counts_unchanged_skips_honestly() -> None:
+    # 1 spot + 1 FUT + 2 options; the FUT + one option are unchanged-skipped.
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=_UnchangedMaterializer({"NSE-NIFTY-30Jan25-FUT", "NSE-NIFTY-30Jan25-20000-CE"}),
+    )
+    assert outcome.unchanged_skips == 2
+    assert outcome.symbols_built == 4  # a skipped symbol is still current + counted built
+    assert outcome.total_bars == 8  # only the two FULL derives wrote bars
+    assert outcome.ok is True
+
+
+def test_prebuild_zero_unchanged_skips_by_default() -> None:
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=_FakeMaterializer(),
+    )
+    assert outcome.unchanged_skips == 0
+
+
+def test_prebuild_done_log_carries_unchanged_skips() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=_UnchangedMaterializer({"NSE-NIFTY-30Jan25-FUT"}),
+        )
+    done = [e for e in logs if e["event"] == "pipeline.prebuild.done"]
+    assert len(done) == 1
+    assert done[0]["unchanged_skips"] == 1
+
+
+# ── daily-open substitution fold (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001) ─────
+
+
+def _equity(name: str) -> Instrument:
+    """A CASH single-stock spot underlying (dense gate must read False)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(name)) & 0xFFFF,
+        symbol_name=name,
+        display_name=name,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+    )
+
+
+class _SubstitutionMaterializer(_FakeMaterializer):
+    """Returns ``opens_substituted`` per the injected map (default 0)."""
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        super().__init__()
+        self.counts = counts
+
+    def __call__(self, target: PrebuildTarget) -> MaterializeResult:
+        self.targets.append(target)
+        return MaterializeResult(
+            written={"5m": self.bars, "1day": 1},
+            skipped=(),
+            opens_substituted=self.counts.get(target.symbol, 0),
+        )
+
+
+def test_prebuild_sums_opens_substituted_across_spot_targets() -> None:
+    mat = _SubstitutionMaterializer({"NSE-NIFTY": 2, "NSE-RELIANCE": 3})
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY"), _equity("NSE-RELIANCE")],
+        cascade=_cascade(),
+        materialize=mat,
+    )
+    assert outcome.opens_substituted == 5
+    assert outcome.ok is True
+
+
+def test_prebuild_zero_opens_substituted_by_default() -> None:
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=_FakeMaterializer(),
+    )
+    assert outcome.opens_substituted == 0
+
+
+def test_prebuild_done_log_carries_opens_substituted() -> None:
+    with capture_logs() as logs:
+        run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=_SubstitutionMaterializer({"NSE-NIFTY": 4}),
+        )
+    done = [e for e in logs if e["event"] == "pipeline.prebuild.done"]
+    assert len(done) == 1
+    assert done[0]["opens_substituted"] == 4
+
+
+def test_prebuild_target_dense_from_is_index() -> None:
+    """The density gate: IDX spot → dense=True; EQ spot → dense=False; every
+    F&O contract target → dense=False (the default — never set for contracts)."""
+    mat = _FakeMaterializer()
+    run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY"), _equity("NSE-RELIANCE")],
+        cascade=_cascade(),
+        materialize=mat,
+    )
+    dense_by_symbol = {t.symbol: t.dense for t in mat.targets}
+    assert dense_by_symbol["NSE-NIFTY"] is True
+    assert dense_by_symbol["NSE-RELIANCE"] is False
+    assert dense_by_symbol["NSE-NIFTY-30Jan25-FUT"] is False
+    assert dense_by_symbol["NSE-NIFTY-30Jan25-20000-CE"] is False
+    assert dense_by_symbol["NSE-NIFTY-30Jan25-20000-PE"] is False
+
+
+def test_guarded_prebuild_crash_outcome_zero_opens_substituted() -> None:
+    """A guarded whole-run crash scanned nothing — the honest 0, never a
+    fabricated count."""
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=lambda: (_ for _ in ()).throw(ValueError("cascade boom")),
+        materialize=_FakeMaterializer(),
+    )
+    assert outcome.crashed == "ValueError"
+    assert outcome.opens_substituted == 0

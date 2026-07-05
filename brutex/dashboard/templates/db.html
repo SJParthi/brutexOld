@@ -5,21 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Database</title>
 <style>
-  :root {
-    /* v28-hybrid locked palette (TRACK1_DASHBOARD_DESIGN.md §3) */
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    /* DEC-DASHBOARD-UI-POLISH-002 design tokens (mirror /universe) */
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* Design tokens come from the SHARED sheets linked below (bx-theme.css +
+     bx-design.css — one :root, one motion vocabulary; DEC-DASHBOARD-UX-ANIMATE-001).
+     The page's byte-duplicate :root block was deleted (A-DB-4): every token this
+     page consumes (palette, --r-*, --ease, --gutter) is declared there with
+     identical values, so nothing renders differently. */
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
   body {
@@ -30,12 +20,11 @@
       radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
       var(--bg);
   }
-  @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
-
+  /* fadeInDown/fadeInUp/gradShift keyframe duplicates deleted — the shared
+     bxFadeInDown/bxFadeInUp/bxGradShift set (bx-theme.css) is the one vocabulary. */
   header {
-    display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
+    display:flex; align-items:center; gap:14px; padding:16px var(--gutter);
+    border-bottom:1px solid var(--border); animation: bxFadeInDown .5s ease both;
     /* DASH-UX D2: sticky, frosted header so the nav + db-path never scroll away
        and content slides under it (DEC-DASHBOARD-DB-UX-001). */
     position:sticky; top:0; z-index:6;
@@ -51,19 +40,18 @@
     background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:6px 10px; }
 
   /* DEC-DASHBOARD-UI-POLISH-002: animated brand mark + class-driven nav (mirror /universe) */
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
   .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center;
     font-size:16px; color:#0A0D11; font-weight:900;
     background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%;
-    box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
+    box-shadow:0 4px 14px rgba(91,141,239,.35); animation:bxGradShift 8s var(--ease) infinite; }
   .topnav a { color:var(--muted); text-decoration:none; padding:6px 10px;
     border-radius:var(--r-sm); transition:.16s var(--ease); line-height:1; white-space:nowrap; }
   .topnav a:hover { color:var(--text-bright); }
   .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3);
     box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
 
-  .band { display:flex; align-items:center; gap:12px; padding:12px 24px; flex-wrap:wrap;
-    border-bottom:1px solid var(--border); animation: fadeInDown .6s .05s ease both; }
+  .band { display:flex; align-items:center; gap:12px; padding:12px var(--gutter); flex-wrap:wrap;
+    border-bottom:1px solid var(--border); animation: bxFadeInDown .6s .05s ease both; }
   .band label { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
   select, button {
     background:var(--surface); color:var(--text); border:1px solid var(--border-strong);
@@ -71,8 +59,10 @@
   }
   select:hover, button:hover { border-color:var(--blue); }
 
-  .wrap { flex:1; display:grid; grid-template-columns:280px 1fr; gap:14px;
-    padding:14px 24px 24px; min-height:0; animation: fadeInUp .5s ease both; }
+  /* Fluid sidebar (A-DB-6): scales with the viewport instead of a fixed 280px
+     sliver on ultrawides; gutters ride the shared --gutter token (A-DB-5). */
+  .wrap { flex:1; display:grid; grid-template-columns:clamp(240px,18vw,340px) 1fr; gap:14px;
+    padding:14px var(--gutter) var(--gutter); min-height:0; animation: bxFadeInUp .5s ease both; }
 
   /* ── Left: table list ── */
   #tables { background:var(--surface); border:1px solid var(--border); border-radius:14px;
@@ -81,13 +71,20 @@
     letter-spacing:1px; color:var(--muted); }
   .tbl { display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:10px;
     cursor:pointer; border:1px solid transparent; transition:.16s; }
-  .tbl:hover { background:var(--surface-2); box-shadow:0 0 22px rgba(91,141,239,.18); }
+  .tbl:hover { background:var(--surface-2); box-shadow:0 0 22px rgba(91,141,239,.18);
+    transform:translateY(-1px); }
   .tbl.sel { background:var(--surface-3); border-color:var(--blue); }
   .tbl .nm { font-weight:700; font-family:"SF Mono",Menlo,Consolas,monospace; font-size:13px; }
   .tbl .badge { margin-left:auto; font-size:11px; font-weight:700; padding:2px 9px;
     border-radius:20px; color:var(--green); background:rgba(38,217,176,.13);
     font-family:"SF Mono",Menlo,Consolas,monospace; }
   .tbl .badge.zero { color:var(--muted); background:rgba(120,123,134,.13); }
+  /* Lake/registry badge tints as classes (A-DB-8) — replaces the five
+     copy-pasted inline style="" strings on the sidebar rows. */
+  .tbl .badge.b-purple { color:var(--purple); background:rgba(157,123,255,.13); }
+  .tbl .badge.b-blue   { color:var(--blue);   background:rgba(91,141,239,.13); }
+  .tbl .badge.b-green  { color:var(--green);  background:rgba(74,222,128,.13); }
+  .tbl .badge.b-yellow { color:var(--yellow); background:rgba(255,183,77,.13); }
 
   /* ── Right: rows grid ── */
   #data { background:var(--surface); border:1px solid var(--border); border-radius:14px;
@@ -178,7 +175,6 @@
   .expchip { color:var(--yellow); background:rgba(255,183,77,.13); }
   .frow { display:flex; align-items:center; gap:6px; }
   .frow .rm { color:var(--red); padding:6px 10px; }
-  .qerr { color:var(--red); font-size:12px; }
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-002, extends #497) ── */
   /* Keyboard focus rings (TAB-only — never on mouse click) + reduce-motion honoured,
      the same safe a11y polish shipped to /universe + /coverage in #497; additive,
@@ -209,13 +205,17 @@
 </style>
 <link rel="stylesheet" href="/static/bx-datepicker.css">
 <link rel="stylesheet" href="/static/bx-theme.css">
+<!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens + skeleton/state
+     components + the padding-only widget dock. Linked AFTER bx-theme (cascade order). -->
+<link rel="stylesheet" href="/static/bx-design.css">
+<script defer src="/static/bx-ui.js"></script>
 <script defer src="/static/bx-datepicker.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
-<body>
+<body data-accent="purple">
   <header>
     <div class="brandmark" aria-hidden="true">B</div>
     <div class="logo">BruteX</div>
@@ -244,7 +244,7 @@
   </div>
 
   <div class="wrap">
-    <div id="tables"><h3>Tables</h3><div class="empty">loading…</div></div>
+    <div id="tables"><h3>Tables</h3><div class="bx-skel-grid" aria-hidden="true"><span class="bx-skel bx-skel-row"></span><span class="bx-skel bx-skel-row"></span><span class="bx-skel bx-skel-row"></span><span class="bx-skel bx-skel-row"></span><span class="bx-skel bx-skel-row"></span><span class="bx-skel bx-skel-row"></span></div></div>
     <div id="data"><div class="empty emptyart"><div class="art">🗄️</div><div>Select a table on the left to browse its <b>columns &amp; sample rows</b>.</div></div></div>
   </div>
 
@@ -399,6 +399,85 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
+/* ── Shared loading/terminal-state helpers (DEC-DASHBOARD-UX-ANIMATE-001) ──
+   THE LAW: "loading…" is banned as a terminal state. Every full-view fetch
+   paints a shimmer skeleton (with a 10 s honesty watchdog) and RESOLVES to
+   data, an honest .bx-state empty card, or an honest .bx-state error card
+   with a Retry button. Fetches ride BXUI.fetchWithTimeout (12 s deadline)
+   when the shared helper is loaded, so a hung endpoint always lands in the
+   catch instead of pending forever. Markup is built from STATIC strings +
+   esc()'d dynamics through the page's existing render pipeline — no new
+   innerHTML sink class (the skeleton/error builders REPLACE six old
+   "loading…"/"error N" sinks); the Retry buttons are served by ONE delegated
+   listener each on #tables/#data, so re-renders never re-attach handlers. */
+const LAKE_BUSY_NOTE = "still working — the lake is busy (a pull/prebuild may be running)";
+function bxFetch(url) {
+  return (window.BXUI && BXUI.fetchWithTimeout) ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
+}
+function skelGridHtml(rows, cols) {
+  let cells = "";
+  for (let i = 0; i < rows * cols; i++) {
+    cells += '<span class="bx-skel bx-skel-cell" style="animation-delay:' + ((i % cols) * 40) + 'ms"></span>';
+  }
+  return '<div class="bx-skel-grid" aria-hidden="true" style="grid-template-columns:repeat('
+    + cols + ',minmax(0,1fr))">' + cells + '</div>';
+}
+/* Full-view pending state: shimmer ghost grid + the 10 s "lake busy" watchdog
+   caption (appended ONLY while the skeleton is still attached — a resolved
+   view never grows a stale caption). Grid-only updates keep the lighter
+   #dbgrid.is-loading dim (DEC-DB-UNIVERSE-O1-LATENCY-001) — not this. */
+function showSkeleton(panel) {
+  panel.innerHTML = skelGridHtml(9, 4);
+  const ghost = panel.querySelector(".bx-skel-grid");
+  setTimeout(() => {
+    if (!ghost || !panel.contains(ghost)) return;  /* already resolved */
+    const cap = document.createElement("div");
+    cap.className = "bx-skel-caption";
+    const dot = document.createElement("span");
+    dot.className = "bx-live-dot live-warn";
+    const txt = document.createElement("span");
+    txt.textContent = LAKE_BUSY_NOTE;
+    cap.appendChild(dot);
+    cap.appendChild(txt);
+    panel.appendChild(cap);
+  }, 10000);
+}
+/* Honest error card (status/detail esc()'d) + Retry (delegated listener). */
+function bxErrorHtml(err) {
+  return '<div class="bx-state error"><div class="ico">⚠</div>'
+    + '<div class="headline">couldn\'t load — ' + esc(err) + '</div>'
+    + '<div class="hint">the server may be busy (a pull/prebuild may be running)</div>'
+    + '<button type="button" class="bx-btn bx-state-retry">↻ Retry</button></div>';
+}
+/* Honest offline / timed-out card — distinguished from "no data" (never a
+   fake empty state on a network drop). A BXUI timeout carries its own honest
+   hint ("request timed out after 12000ms — the server may be busy…"). */
+function bxOfflineHtml(e) {
+  const hint = (e && e.timeout && e.message) ? e.message : "check the connection, then retry";
+  return '<div class="bx-state offline"><div class="ico">📡</div>'
+    + '<div class="headline">offline — couldn\'t reach the server</div>'
+    + '<div class="hint">' + esc(hint) + '</div>'
+    + '<button type="button" class="bx-btn bx-state-retry">↻ Retry</button></div>';
+}
+/* Honest empty-state card: the ORIGINAL empty-copy string as the hint, plus an
+   optional static CTA link (only ever the app-relative "/universe" literal). */
+function bxEmptyHtml(text, icon, ctaHref, ctaText) {
+  return '<div class="bx-state empty"><div class="ico">' + (icon || "📭") + '</div>'
+    + '<div class="hint">' + esc(text) + '</div>'
+    + (ctaHref ? '<a class="bx-btn bx-btn-primary" href="' + ctaHref + '">' + esc(ctaText || "Open") + '</a>' : "")
+    + '</div>';
+}
+/* Re-invoke the current view's runner (the Retry button target). Grid-only
+   (true) is safe for both shapes: with #dbgrid present it patches in place,
+   without it the runner falls back to the full render. */
+function rerunCurrent() {
+  if (mode === "candles") { if (cstate.key) runCandleQuery(true); else selectCandles(cstate.kind || "spot"); }
+  else if (mode === "registry") runRegistryQuery(true);
+  else if (mode === "ledger") runLedgerQuery(true);
+  else if (selected) runTableQuery(selected, true);
+  else loadTables();
+}
+
 /* Animated count-up from 0 → target for the row-count badges. */
 function countUp(el, target) {
   target = Number(target) || 0;
@@ -417,8 +496,8 @@ function countUp(el, target) {
 
 async function loadTables() {
   try {
-    const r = await fetch("/api/v1/db/tables");
-    if (!r.ok) { tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">error ' + r.status + '</div>'; return; }
+    const r = await bxFetch("/api/v1/db/tables");
+    if (!r.ok) { tablesEl.innerHTML = '<h3>Tables</h3>' + bxErrorHtml("error " + r.status); return; }
     const body = await r.json();
     const tables = body.tables || [];
     counts = {};
@@ -444,7 +523,7 @@ async function loadTables() {
        the lake `kind` it browses. */
     const candleRow = '<div class="tbl" data-candles="spot">'
       + '<span class="nm">📈 candles</span>'
-      + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">spot</span>'
+      + '<span class="badge b-purple">spot</span>'
       + '</div>';
     /* DEC-FNO-CANDLE-LAKE-001: the F&O (futures + options) candle lake is its OWN
        first-class, clickable row — the SAME bars/<exch>/FNO/<contract>/<interval>/
@@ -453,7 +532,7 @@ async function loadTables() {
        and browses through the IDENTICAL segment=FNO candle query path. */
     const fnoRow = '<div class="tbl" data-candles="fno">'
       + '<span class="nm">📊 F&amp;O candles</span>'
-      + '<span class="badge" style="color:var(--blue);background:rgba(91,141,239,.13)">FNO</span>'
+      + '<span class="badge b-blue">FNO</span>'
       + '</div>';
     /* DEC-DASHBOARD-UX-POLISH-001: the expired-options lake is HIDDEN from the
        browsable Candle-lake list per operator request — it is a documented
@@ -468,7 +547,7 @@ async function loadTables() {
        lifecycle.) */
     const ledgerRow = '<div class="tbl" data-ledger="window_ledger">'
       + '<span class="nm">🪟 window ledger</span>'
-      + '<span class="badge" style="color:var(--green);background:rgba(74,222,128,.13)">windows</span>'
+      + '<span class="badge b-green">windows</span>'
       + '</div>';
     /* The F&O expiries+contracts REGISTRY lives in a SEPARATE `registry.duckdb`
        cache (DEC-DERIV-METADATA-HISTORICAL-SPLIT-001 PR-1), a sibling of the lean
@@ -478,37 +557,50 @@ async function loadTables() {
        PR populates it — the badge starts blank and fills from the route's counts. */
     const expiriesRow = '<div class="tbl" data-registry="expiries">'
       + '<span class="nm">📅 expiries</span>'
-      + '<span class="badge" style="color:var(--blue);background:rgba(91,141,239,.13)">registry</span>'
+      + '<span class="badge b-blue">registry</span>'
       + '</div>';
     const contractsRow = '<div class="tbl" data-registry="contracts">'
       + '<span class="nm">🔗 contracts</span>'
-      + '<span class="badge" style="color:var(--yellow);background:rgba(255,183,77,.13)">registry</span>'
+      + '<span class="badge b-yellow">registry</span>'
       + '</div>';
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
       + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow + fnoRow
       + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow
       + '<h3 style="margin-top:14px">F&amp;O registry</h3>' + expiriesRow + contractsRow;
     tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
-    tablesEl.querySelectorAll(".tbl[data-table]").forEach(el => {
-      el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
-    });
-    tablesEl.querySelectorAll(".tbl[data-candles]").forEach(el => {
-      el.addEventListener("click", () => selectCandles(el.getAttribute("data-candles")));
-    });
-    tablesEl.querySelectorAll(".tbl[data-ledger]").forEach(el => {
-      el.addEventListener("click", () => selectLedger(el.getAttribute("data-ledger")));
-    });
-    tablesEl.querySelectorAll(".tbl[data-registry]").forEach(el => {
-      el.addEventListener("click", () => selectRegistry(el.getAttribute("data-registry")));
-    });
+    /* First-render-only entrance stagger (capped): the render-signature memo
+       inside BXUI.stagger means an identical rebuild never re-animates. */
+    if (window.BXUI) BXUI.stagger(tablesEl, tableRows, { cap: 16 });
     if (mode === "candles") markCandles();
     else if (mode === "registry") markRegistry(rstate.kind);
     else if (mode === "ledger") markLedger("window_ledger");
     else if (selected) markSelected(selected);
   } catch (e) {
-    tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">offline</div>';
+    tablesEl.innerHTML = '<h3>Tables</h3>' + bxOfflineHtml(e);
   }
 }
+
+/* Delegated Retry for the sidebar's error/offline cards (never re-attached). */
+tablesEl.addEventListener("click", (ev) => {
+  if (ev.target.closest(".bx-state-retry")) loadTables();
+});
+
+/* Delegated sidebar clicks (DEC-DASHBOARD-JS-PERF-001): ONE listener on #tables
+   attached at boot — loadTables rebuilds the row markup freely (boot + every
+   Refresh) with NO per-row listener re-attachment (the old four
+   querySelectorAll/forEach loops). Mirrors the delegated copy handler on #data. */
+tablesEl.addEventListener("click", (ev) => {
+  const row = ev.target.closest(".tbl");
+  if (!row) return;
+  const table = row.getAttribute("data-table");
+  if (table) { selectTable(table); return; }
+  const lake = row.getAttribute("data-candles");
+  if (lake) { selectCandles(lake); return; }
+  const ledger = row.getAttribute("data-ledger");
+  if (ledger) { selectLedger(ledger); return; }
+  const registry = row.getAttribute("data-registry");
+  if (registry) selectRegistry(registry);
+});
 
 function markSelected(name) {
   /* Highlight the selected DuckDB master-table row; a null name can't
@@ -551,54 +643,57 @@ function ledgerHeadHtml(body) {
 function ledgerGridHtml(body) {
   const total = Number(body.total || 0);
   if (total === 0) {
-    return '<div class="empty">no ' + esc(_LEDGER_LABEL)
-      + ' yet — pull a symbol on /universe, then it appears here</div>';
+    return bxEmptyHtml("no " + _LEDGER_LABEL + " yet — pull a symbol on /universe, then it appears here",
+      "🪟", "/universe", "Open /universe");
   }
   return gridAndPager(body.columns || [], body.rows || [], total,
     Number(body.offset || 0), Number(body.limit || 100));
 }
 
-function wireLedgerPager(body) {
-  const off = Number(body.offset || 0), lim = Number(body.limit || 100);
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { lstate.offset = Math.max(0, off - lim); runLedgerQuery(true); });
-  if (next) next.addEventListener("click", () => { lstate.offset = off + lim; runLedgerQuery(true); });
+function setLedgerPager(body) {
+  setGridPager(body, 100, (off) => { lstate.offset = off; runLedgerQuery(true); });
 }
 
 function renderLedgerView(body) {
   dataEl.innerHTML = ledgerHeadHtml(body) + '<div id="dbgrid">' + ledgerGridHtml(body) + '</div>';
-  wireLedgerPager(body);
+  setLedgerPager(body);
 }
 
 function updateLedgerGrid(body) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderLedgerView(body); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = ledgerGridHtml(body);
+  /* tbody-only swap when the column set is unchanged (DEC-DASHBOARD-JS-PERF-001);
+     any shape change falls back to the full grid rebuild. */
+  if (!patchGridRows(grid, body.columns || [], body.rows || [],
+      Number(body.total || 0), Number(body.offset || 0))) {
+    grid.innerHTML = ledgerGridHtml(body);
+  }
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = (body.columns || []).length + " cols · "
     + Number(body.total || 0).toLocaleString() + " rows";
-  wireLedgerPager(body);
+  setLedgerPager(body);
 }
 
 async function runLedgerQuery(gridOnly) {
   const partial = gridOnly && document.getElementById("dbgrid");
   if (partial) document.getElementById("dbgrid").classList.add("is-loading");
-  else dataEl.innerHTML = '<div class="empty">loading ' + _LEDGER_LABEL + '…</div>';
+  else showSkeleton(dataEl);
   const url = "/api/v1/db/window-ledger?limit=" + encodeURIComponent(limitSel.value)
     + "&offset=" + encodeURIComponent(lstate.offset);
   try {
-    const r = await fetch(url);
+    const r = await bxFetch(url);
     const body = await r.json();
     if (!r.ok) {
-      const msg = '<div class="empty qerr">error ' + r.status + '</div>';
-      if (partial) document.getElementById("dbgrid").innerHTML = msg; else dataEl.innerHTML = msg;
+      const msg = bxErrorHtml("error " + r.status);
+      if (partial) { const g = document.getElementById("dbgrid"); g.classList.remove("is-loading"); g.innerHTML = msg; }
+      else dataEl.innerHTML = msg;
       return;
     }
     if (partial) updateLedgerGrid(body); else renderLedgerView(body);
   } catch (e) {
     /* Honest "offline" on a mid-page network drop, not a "no data" empty state. */
-    const off = '<div class="empty">offline</div>';
+    const off = bxOfflineHtml(e);
     if (partial) { const g = document.getElementById("dbgrid"); if (g) { g.classList.remove("is-loading"); g.innerHTML = off; } }
     else dataEl.innerHTML = off;
   }
@@ -644,47 +739,50 @@ function registryGridHtml(body) {
   if (total === 0) {
     /* An honest empty state: the note (when present) names WHY — no registry
        pulled yet — never an invented row (Golden Rule #1). */
-    const emptyMsg = body.note ? esc(body.note)
-      : "no " + esc(registryLabel()) + " yet — pull expiries + contracts first";
-    return '<div class="empty">' + emptyMsg + '</div>';
+    const emptyMsg = body.note ? body.note
+      : "no " + registryLabel() + " yet — pull expiries + contracts first";
+    return bxEmptyHtml(emptyMsg, "📭", "/universe", "Open /universe");
   }
   return gridAndPager(body.columns || [], body.rows || [], total,
     Number(body.offset || 0), Number(body.limit || 100));
 }
 
-function wireRegistryPager(body) {
-  const off = Number(body.offset || 0), lim = Number(body.limit || 100);
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { rstate.offset = Math.max(0, off - lim); runRegistryQuery(true); });
-  if (next) next.addEventListener("click", () => { rstate.offset = off + lim; runRegistryQuery(true); });
+function setRegistryPager(body) {
+  setGridPager(body, 100, (off) => { rstate.offset = off; runRegistryQuery(true); });
 }
 
 function renderRegistryView(body) {
   dataEl.innerHTML = registryHeadHtml(body) + '<div id="dbgrid">' + registryGridHtml(body) + '</div>';
-  wireRegistryPager(body);
+  setRegistryPager(body);
 }
 
 function updateRegistryGrid(body) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderRegistryView(body); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = registryGridHtml(body);
+  /* tbody-only swap when the column set is unchanged (DEC-DASHBOARD-JS-PERF-001);
+     any shape change falls back to the full grid rebuild. */
+  if (!patchGridRows(grid, body.columns || [], body.rows || [],
+      Number(body.total || 0), Number(body.offset || 0))) {
+    grid.innerHTML = registryGridHtml(body);
+  }
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = (body.columns || []).length + " cols · "
     + Number(body.total || 0).toLocaleString() + " rows";
-  wireRegistryPager(body);
+  setRegistryPager(body);
 }
 
 async function runRegistryQuery(gridOnly) {
   const partial = gridOnly && document.getElementById("dbgrid");
   if (partial) document.getElementById("dbgrid").classList.add("is-loading");
-  else dataEl.innerHTML = '<div class="empty">loading ' + esc(registryLabel()) + '…</div>';
+  else showSkeleton(dataEl);
   try {
-    const r = await fetch(registryUrl());
+    const r = await bxFetch(registryUrl());
     const body = await r.json();
     if (!r.ok) {
-      const msg = '<div class="empty qerr">error ' + r.status + '</div>';
-      if (partial) document.getElementById("dbgrid").innerHTML = msg; else dataEl.innerHTML = msg;
+      const msg = bxErrorHtml("error " + r.status);
+      if (partial) { const g = document.getElementById("dbgrid"); g.classList.remove("is-loading"); g.innerHTML = msg; }
+      else dataEl.innerHTML = msg;
       return;
     }
     /* Backfill the registry nav badges from the route's counts (the cache may be
@@ -694,7 +792,7 @@ async function runRegistryQuery(gridOnly) {
   } catch (e) {
     /* A mid-page network drop is an HONEST "offline", NOT a "no data" empty state
        (hostile-review MINOR-1/2) — mirror the candle path. */
-    const off = '<div class="empty">offline</div>';
+    const off = bxOfflineHtml(e);
     if (partial) { const g = document.getElementById("dbgrid"); if (g) { g.classList.remove("is-loading"); g.innerHTML = off; } }
     else dataEl.innerHTML = off;
   }
@@ -727,10 +825,45 @@ function updateRegistryBadges(counts) {
    lists and their helper were deleted with the COLUMNS strip. */
 
 /* Shared grid + Prev/Next pager HTML (used by both table + candle views).
-   The pager buttons get ids dbprev/dbnext; each view wires its own offset. */
-function gridAndPager(cols, rows, total, off, lim, note) {
+   The pager buttons get ids dbprev/dbnext; every view publishes its page window
+   into the ONE delegated pager via setGridPager (DEC-DASHBOARD-JS-PERF-001).
+   The builder is split into pure pieces (table-open / thead / tbody rows /
+   pager) so a grid-only update can swap JUST the tbody in place; concatenated,
+   the pieces produce the SAME esc()'d HTML the old single-string builder did
+   (plus the data-cols stamp on the <table> open tag). */
+function gridTableOpen(cols) {
+  /* The <table> open tag carries its rendered column list (JSON, esc()'d) so a
+     grid-only update can prove "same columns" against the LIVE DOM before doing
+     the narrower tbody-only patch — the DOM is the source of truth, so an error
+     or empty repaint can never leave a stale match behind. */
+  return '<table data-cols="' + esc(JSON.stringify(cols)) + '">';
+}
+function gridTheadHtml(cols) {
+  return '<thead><tr>' + cols.map(c => {
+    const t = colType(c);
+    return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
+  }).join("") + '</tr></thead>';
+}
+function gridRowsHtml(cols, rows) {
+  return rows.map(row =>
+    '<tr>' + row.map((cell, i) =>
+      cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
+    ).join("") + '</tr>'
+  ).join("");
+}
+function gridRangeText(from, to, total) {
+  return from.toLocaleString() + '–' + to.toLocaleString() + ' / ' + total.toLocaleString();
+}
+function gridPagerHtml(total, off, rowCount) {
   const from = total === 0 ? 0 : off + 1;
-  const to = off + rows.length;
+  const to = off + rowCount;
+  const hasPrev = off > 0, hasNext = to < total;
+  return '<div class="pager">'
+    + '<button id="dbprev"' + (hasPrev ? "" : " disabled") + '>‹ Prev</button>'
+    + '<span class="prange">' + gridRangeText(from, to, total) + '</span>'
+    + '<button id="dbnext"' + (hasNext ? "" : " disabled") + '>Next ›</button></div>';
+}
+function gridAndPager(cols, rows, total, off, lim, note) {
   let html = "";
   if (!rows.length) {
     /* Schema-when-empty: when the table has no rows BUT the backend returned its
@@ -738,34 +871,54 @@ function gridAndPager(cols, rows, total, off, lim, note) {
        columns exist, plus the honest note. With no columns at all, the plain
        "no rows" message. Never fabricates a data row (Golden Rule #1). */
     if (cols.length) {
-      const thead = '<thead><tr>' + cols.map(c => {
-        const t = colType(c);
-        return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
-      }).join("") + '</tr></thead>';
-      html += '<div class="gridwrap"><table>' + thead + '</table></div>';
+      html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols) + '</table></div>';
       html += '<div class="empty">' + esc(note || "no rows on this page") + '</div>';
     } else {
       html += '<div class="empty">no rows on this page</div>';
     }
   } else {
-    const thead = '<thead><tr>' + cols.map(c => {
-      const t = colType(c);
-      return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
-    }).join("") + '</tr></thead>';
-    const tbody = '<tbody>' + rows.map(row =>
-      '<tr>' + row.map((cell, i) =>
-        cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
-      ).join("") + '</tr>'
-    ).join("") + '</tbody>';
-    html += '<div class="gridwrap"><table>' + thead + tbody + '</table></div>';
+    html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols)
+      + '<tbody>' + gridRowsHtml(cols, rows) + '</tbody></table></div>';
   }
-  const hasPrev = off > 0, hasNext = to < total;
-  html += '<div class="pager">'
-    + '<button id="dbprev"' + (hasPrev ? "" : " disabled") + '>‹ Prev</button>'
-    + '<span class="prange">' + from.toLocaleString() + '–' + to.toLocaleString()
-    + ' / ' + total.toLocaleString() + '</span>'
-    + '<button id="dbnext"' + (hasNext ? "" : " disabled") + '>Next ›</button></div>';
+  html += gridPagerHtml(total, off, rows.length);
   return html;
+}
+
+/* In-place grid patch (DEC-DASHBOARD-JS-PERF-001): when #dbgrid already shows a
+   data table whose column set matches the incoming page, swap ONLY the tbody
+   rows (the SAME esc()'d row strings gridAndPager builds — narrower target) and
+   patch the pager buttons' disabled state + the range text via textContent, so
+   the .gridwrap scroll container (and its horizontal scroll position) survives
+   the paging click. Returns false when the shapes differ — no table/tbody yet,
+   an empty page, a column-set change — so the caller falls back to today's full
+   grid.innerHTML rebuild; error/empty states always take the full-rebuild path. */
+function patchGridRows(grid, cols, rows, total, off) {
+  if (!rows.length || !cols.length || !(total > 0)) return false;
+  const table = grid.querySelector(".gridwrap > table");
+  if (!table || table.getAttribute("data-cols") !== JSON.stringify(cols)) return false;
+  const tbody = table.querySelector("tbody");
+  const prev = grid.querySelector("#dbprev"), next = grid.querySelector("#dbnext");
+  const range = grid.querySelector(".pager .prange");
+  if (!tbody || !prev || !next || !range) return false;
+  tbody.innerHTML = gridRowsHtml(cols, rows);
+  const to = off + rows.length;
+  prev.disabled = !(off > 0);
+  next.disabled = !(to < total);
+  range.textContent = gridRangeText(off + 1, to, total);
+  return true;
+}
+
+/* ONE delegated Prev/Next pager (DEC-DASHBOARD-JS-PERF-001): every grid render /
+   update PUBLISHES its page window + rerun callback here instead of re-attaching
+   click listeners to the freshly-built #dbprev/#dbnext (the old per-render
+   wire*Pager helpers — a missed re-wire meant a silently dead pager). The
+   delegated listener on #data (attached once at boot, mirroring the delegated
+   copy handler) reads this state on each click. */
+const pagerState = { off: 0, lim: 100, onPage: null };
+function setGridPager(body, defLim, onPage) {
+  pagerState.off = body ? Number(body.offset || 0) : 0;
+  pagerState.lim = body ? Number(body.limit || defLim) : defLim;
+  pagerState.onPage = onPage;
 }
 
 /* ── Table mode (structured query) ── */
@@ -780,7 +933,7 @@ async function selectTable(name) {
   if (!qstate[name]) qstate[name] = { allCols: [], filters: [], orderBy: "", desc: false };
   if (!qstate[name].allCols.length) {
     try {
-      const rc = await fetch(DB_API + "/columns/" + encodeURIComponent(name));
+      const rc = await bxFetch(DB_API + "/columns/" + encodeURIComponent(name));
       if (rc.ok) qstate[name].allCols = (await rc.json()).columns || [];
     } catch (e) { /* offline — controls degrade to none */ }
   }
@@ -805,16 +958,16 @@ function buildTableUrl(name) {
 async function runTableQuery(name, gridOnly) {
   const partial = gridOnly && document.getElementById("dbgrid");
   if (partial) document.getElementById("dbgrid").classList.add("is-loading");  /* keep the grid, just dim it */
-  else dataEl.innerHTML = '<div class="empty">loading ' + esc(name) + '…</div>';
+  else showSkeleton(dataEl);
   try {
-    const r = await fetch(buildTableUrl(name));
+    const r = await bxFetch(buildTableUrl(name));
     const body = await r.json();
     const errMsg = r.ok ? null : (body.detail || ("error " + r.status));
     if (partial) updateTableGrid(name, r.ok ? body : null, errMsg);
     else renderTableView(name, r.ok ? body : null, errMsg);
   } catch (e) {
     if (partial) updateTableGrid(name, null, "offline");
-    else dataEl.innerHTML = '<div class="empty">offline</div>';
+    else dataEl.innerHTML = bxOfflineHtml(e);
   }
 }
 
@@ -860,15 +1013,11 @@ function tableHeadHtml(name, body) {
   return '<div class="datahead"><span class="dt">' + esc(name) + '</span><span class="sub">' + esc(sub) + '</span></div>';
 }
 function tableGridHtml(body, err) {
-  return err
-    ? '<div class="empty qerr">' + esc(err) + '</div>'
-    : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 50), body && body.note);
+  if (err) return err === "offline" ? bxOfflineHtml(null) : bxErrorHtml(err);
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 50), body && body.note);
 }
-function wireTablePager(name, body) {
-  const off = body ? Number(body.offset || 0) : 0, lim = body ? Number(body.limit || 50) : 50;
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { dbOffset = Math.max(0, off - lim); runTableQuery(name, true); });
-  if (next) next.addEventListener("click", () => { dbOffset = off + lim; runTableQuery(name, true); });
+function setTablePager(name, body) {
+  setGridPager(body, 50, (off) => { dbOffset = off; runTableQuery(name, true); });
 }
 
 /* FULL render: head + control bar + grid container. Used on a fresh table
@@ -885,19 +1034,22 @@ function renderTableView(name, body, err) {
   document.querySelectorAll("#filters .rm").forEach((b, i) => b.addEventListener("click", () => { readControlsInto(name); st.filters.splice(i, 1); renderTableView(name, body, err); }));
   const ap = document.getElementById("applyq");
   if (ap) ap.addEventListener("click", () => { readControlsInto(name); dbOffset = 0; runTableQuery(name, true); });
-  wireTablePager(name, body);
+  setTablePager(name, body);
 }
 
-/* GRID-ONLY update: replace #dbgrid + refresh the row-count sub; the control bar
-   stays put (DEC-DB-UNIVERSE-O1-LATENCY-001). */
+/* GRID-ONLY update: patch the tbody in place when the column set is unchanged
+   (DEC-DASHBOARD-JS-PERF-001), else replace #dbgrid; refresh the row-count sub;
+   the control bar stays put (DEC-DB-UNIVERSE-O1-LATENCY-001). */
 function updateTableGrid(name, body, err) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderTableView(name, body, err); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = tableGridHtml(body, err);
+  const patched = !err && !!body && patchGridRows(grid, body.columns || [], body.rows || [],
+    Number(body.total || 0), Number(body.offset || 0));
+  if (!patched) grid.innerHTML = tableGridHtml(body, err);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? ((body.columns || []).length + " cols · " + Number(body.total || 0).toLocaleString() + " rows match") : "";
-  wireTablePager(name, body);
+  setTablePager(name, body);
 }
 
 /* ── Candle mode (Parquet lake via read_parquet) ── */
@@ -935,8 +1087,7 @@ async function selectCandles(kind) {
   markCandles();
   const isOpt = cstate.kind === "option";
   const isFno = cstate.kind === "fno";
-  const lakeLabel = isOpt ? "expired-option" : isFno ? "F&O candle" : "candle";
-  dataEl.innerHTML = '<div class="empty">loading ' + lakeLabel + ' datasets…</div>';
+  showSkeleton(dataEl);
   /* F&O uses the lazy symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001);
      SPOT uses the symbol→interval cascade (DEC-DB-SPOT-CASCADE-001) — both O(1)
      tiny payloads, not a flat thousand/750-row dropdown. Only the expired-options
@@ -944,17 +1095,19 @@ async function selectCandles(kind) {
   if (isFno) { await loadFnoCascade(); return; }
   if (!isOpt) { await loadSpotCascade(); return; }
   try {
-    const r = await fetch("/api/v1/db/candles/datasets");
+    const r = await bxFetch("/api/v1/db/candles/datasets");
+    /* An HTTP error is an ERROR, never a fake "no data yet" empty (Golden Rule #1). */
+    if (!r.ok) { renderCandleView(null, "error " + r.status); return; }
     const body = await r.json();
     /* Only the expired-options lake reaches here (spot + F&O returned early to their
        cascades) — tag each so buildCandleUrl() picks the option query route. */
     cstate.datasets = (body.options || []).map(d => ({ kind: "option", ...d }));
     if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
     if (cstate.datasets.length) runCandleQuery(false);
-    else renderCandleView(null,
-      "No expired-option data yet — pull an instrument's options on /universe first.");
+    else renderCandleView(null, null, { kind: "empty",
+      text: "No expired-option data yet — pull an instrument's options on /universe first." });
   } catch (e) {
-    dataEl.innerHTML = '<div class="empty">offline</div>';
+    dataEl.innerHTML = bxOfflineHtml(e);
   }
 }
 
@@ -963,7 +1116,7 @@ async function selectCandles(kind) {
    build the (interval) dataset descriptors so curDataset()/buildCandleUrl() work
    exactly as for spot — the cascade is purely the picker, the query path is shared. */
 async function _fnoFetch(url) {
-  try { const r = await fetch(url); return r.ok ? await r.json() : null; }
+  try { const r = await bxFetch(url); return r.ok ? await r.json() : null; }
   catch (e) { return null; }
 }
 async function loadFnoCascade() {
@@ -971,23 +1124,28 @@ async function loadFnoCascade() {
   cstate.fno = { unds: (body && body.underlyings) || [],
                  und: "", exps: [], exp: "", counts: [], cons: [], con: "" };
   cstate.datasets = []; cstate.key = null;
+  /* A failed fetch (500 / offline / timeout) is an ERROR card with Retry —
+     never the false "No F&O candle data yet" empty (Golden Rule #1). */
+  if (body === null) { renderCandleView(null, "couldn't load the F&O underlyings"); return; }
   if (!cstate.fno.unds.length) {
-    renderCandleView(null, "No F&O candle data yet — pull an instrument's futures/options history on /universe first.");
+    renderCandleView(null, null, { kind: "empty",
+      text: "No F&O candle data yet — pull an instrument's futures/options history on /universe first." });
     return;
   }
-  renderCandleView(null, "pick an underlying → expiry → contract");
+  renderCandleView(null, null, { kind: "prompt", text: "pick an underlying → expiry → contract" });
 }
 async function onFnoUnderlyingChange(und) {
   cstate.fno.und = und; cstate.fno.exp = ""; cstate.fno.exps = []; cstate.fno.counts = [];
   cstate.fno.con = ""; cstate.fno.cons = []; cstate.datasets = []; cstate.key = null;
   if (und) {
     const body = await _fnoFetch("/api/v1/db/fno/expiries?underlying=" + encodeURIComponent(und));
+    if (body === null) { renderCandleView(null, "couldn't load the expiries"); return; }
     cstate.fno.exps = (body && body.expiries) || [];
     /* Per-expiry "listed N with data M" rows, aligned with `expiries`
        (DEC-DB-UX-PACK-001 Feature 6). */
     cstate.fno.counts = (body && body.expiry_counts) || [];
   }
-  renderCandleView(null, "pick an expiry");
+  renderCandleView(null, null, { kind: "prompt", text: "pick an expiry" });
 }
 async function onFnoExpiryChange(exp) {
   cstate.fno.exp = exp; cstate.fno.con = ""; cstate.fno.cons = [];
@@ -995,9 +1153,10 @@ async function onFnoExpiryChange(exp) {
   if (exp) {
     const body = await _fnoFetch("/api/v1/db/fno/contracts?underlying="
       + encodeURIComponent(cstate.fno.und) + "&expiry=" + encodeURIComponent(exp));
+    if (body === null) { renderCandleView(null, "couldn't load the contracts"); return; }
     cstate.fno.cons = (body && body.contracts) || [];
   }
-  renderCandleView(null, "pick a contract");
+  renderCandleView(null, null, { kind: "prompt", text: "pick a contract" });
 }
 /* A contract carries its available intervals; materialise ONE fno dataset
    descriptor per interval so the shared candle query path can address it, then
@@ -1005,7 +1164,7 @@ async function onFnoExpiryChange(exp) {
 function onFnoContractChange(symbol) {
   cstate.fno.con = symbol;
   const con = cstate.fno.cons.find(c => c.symbol === symbol) || null;
-  if (!con) { cstate.datasets = []; cstate.key = null; renderCandleView(null, "pick a contract"); return; }
+  if (!con) { cstate.datasets = []; cstate.key = null; renderCandleView(null, null, { kind: "prompt", text: "pick a contract" }); return; }
   cstate.datasets = (con.intervals || []).map(iv => ({
     kind: "fno", exchange: con.exchange, segment: "FNO", symbol: con.symbol, interval: iv,
     underlying: cstate.fno.und, expiry: cstate.fno.exp,
@@ -1015,7 +1174,7 @@ function onFnoContractChange(symbol) {
      contract); fall back to the first available interval otherwise. */
   const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
-  if (cstate.key) runCandleQuery(false); else renderCandleView(null, "pick a contract");
+  if (cstate.key) runCandleQuery(false); else renderCandleView(null, null, { kind: "prompt", text: "pick a contract" });
 }
 
 /* ── SPOT symbol→interval cascade (DEC-DB-SPOT-CASCADE-001) ──
@@ -1030,11 +1189,15 @@ async function loadSpotCascade() {
   const body = await _fnoFetch("/api/v1/db/spot/symbols");
   cstate.spot = { syms: (body && body.symbols) || [], sym: "" };
   cstate.datasets = []; cstate.key = null;
+  /* A failed fetch is an ERROR card with Retry — never the false "No spot
+     candle data yet" empty (Golden Rule #1). */
+  if (body === null) { renderCandleView(null, "couldn't load the spot symbols"); return; }
   if (!cstate.spot.syms.length) {
-    renderCandleView(null, "No spot candle data yet — pull an instrument's timeframes on /universe first.");
+    renderCandleView(null, null, { kind: "empty",
+      text: "No spot candle data yet — pull an instrument's timeframes on /universe first." });
     return;
   }
-  renderCandleView(null, "pick a symbol → interval");
+  renderCandleView(null, null, { kind: "prompt", text: "pick a symbol → interval" });
 }
 /* A symbol carries its available STORED intervals; materialise ONE spot dataset
    descriptor per interval so the shared candle query path can address it, then
@@ -1042,13 +1205,13 @@ async function loadSpotCascade() {
 function onSpotSymbolChange(key) {
   cstate.spot.sym = key;
   const s = cstate.spot.syms.find(x => _spotKey(x) === key) || null;
-  if (!s) { cstate.datasets = []; cstate.key = null; renderCandleView(null, "pick a symbol"); return; }
+  if (!s) { cstate.datasets = []; cstate.key = null; renderCandleView(null, null, { kind: "prompt", text: "pick a symbol" }); return; }
   cstate.datasets = (s.intervals || []).map(iv => ({
     kind: "spot", exchange: s.exchange, segment: s.segment, symbol: s.symbol, interval: iv }));
   cstate.offset = 0;
   const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
-  if (cstate.key) runCandleQuery(false); else renderCandleView(null, "pick a symbol");
+  if (cstate.key) runCandleQuery(false); else renderCandleView(null, null, { kind: "prompt", text: "pick a symbol" });
 }
 
 function buildCandleUrl() {
@@ -1080,18 +1243,18 @@ function buildCandleUrl() {
    does the full render once, because the option-vs-spot column set can change. */
 async function runCandleQuery(gridOnly) {
   const u = buildCandleUrl();
-  if (!u) { renderCandleView(null, "pick a dataset"); return; }
+  if (!u) { renderCandleView(null, null, { kind: "prompt", text: "pick a dataset" }); return; }
   const partial = gridOnly && document.getElementById("dbgrid");
   if (partial) document.getElementById("dbgrid").classList.add("is-loading");  /* keep the grid, just dim it */
-  else dataEl.innerHTML = '<div class="empty">loading candles…</div>';
+  else showSkeleton(dataEl);
   const paint = partial ? updateCandleGrid : renderCandleView;
   try {
-    const r = await fetch(u);
+    const r = await bxFetch(u);
     const body = await r.json();
     paint(r.ok ? body : null, r.ok ? null : (body.detail || ("error " + r.status)));
   } catch (e) {
     if (partial) updateCandleGrid(null, "offline");
-    else dataEl.innerHTML = '<div class="empty">offline</div>';
+    else dataEl.innerHTML = bxOfflineHtml(e);
   }
 }
 
@@ -1257,21 +1420,26 @@ function candleHeadHtml(body) {
    "observed" — no vendor registry chain), a small muted note flags that the step —
    and so the moneyness depth — may be overestimated on a sparsely-pulled expiry;
    a registry-confident page (or a spot page, which has no such field) shows none. */
-function candleGridHtml(body, err) {
-  if (err) return '<div class="empty qerr">' + esc(err) + '</div>';
+function candleGridHtml(body, err, notice) {
+  if (err) return err === "offline" ? bxOfflineHtml(null) : bxErrorHtml(err);
+  /* A notice is NOT an error: a "pick a …" cascade prompt renders as a plain
+     neutral line; an honest "No … yet" empty renders as the .bx-state.empty
+     card with a CTA to /universe — the copy strings are byte-unchanged. */
+  if (notice) {
+    return notice.kind === "empty"
+      ? bxEmptyHtml(notice.text, "📭", "/universe", "Open /universe")
+      : '<div class="empty">' + esc(notice.text) + '</div>';
+  }
   const stepNote = body.strike_step_confidence === "observed"
     ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
     : "";
   return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote;
 }
 
-/* Wire the Prev/Next pager (lives INSIDE #dbgrid, so it is re-wired on every
-   grid update — the only listeners a grid-only update needs to re-attach). */
-function wireCandlePager(body) {
-  const off = body ? Number(body.offset || 0) : 0, lim = body ? Number(body.limit || 100) : 100;
-  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
-  if (prev) prev.addEventListener("click", () => { cstate.offset = Math.max(0, off - lim); runCandleQuery(true); });
-  if (next) next.addEventListener("click", () => { cstate.offset = off + lim; runCandleQuery(true); });
+/* Publish the candle page window into the ONE delegated Prev/Next pager
+   (DEC-DASHBOARD-JS-PERF-001) — no per-render listener re-attachment. */
+function setCandlePager(body) {
+  setGridPager(body, 100, (off) => { cstate.offset = off; runCandleQuery(true); });
 }
 
 /* FULL render: head + control bar + grid container. Used on entering candle mode
@@ -1279,9 +1447,9 @@ function wireCandlePager(body) {
    listeners (auto-apply dates/sort, dataset change) are wired ONCE here;
    paging/sort/date changes afterwards update only #dbgrid via updateCandleGrid —
    leaving the controls (and their date pickers) untouched. */
-function renderCandleView(body, err) {
+function renderCandleView(body, err, notice) {
   dataEl.innerHTML = candleHeadHtml(body) + candleControlsHtml()
-    + '<div id="dbgrid">' + candleGridHtml(body, err) + '</div>';
+    + '<div id="dbgrid">' + candleGridHtml(body, err, notice) + '</div>';
   setRangeChip(body);
   const dir = document.getElementById("cdir"); if (dir) dir.value = cstate.desc ? "desc" : "asc";
   /* AUTO-APPLY (DEC-DB-UX-PACK-001 Feature 2): the date inputs + the sort select
@@ -1314,28 +1482,40 @@ function renderCandleView(body, err) {
     const pick = cstate.datasets.find(x => x.interval === cintv.value);
     if (pick) { cstate.key = dsKey(pick); cstate.offset = 0; runCandleQuery(false); }
   });
-  wireCandlePager(body);
+  setCandlePager(body);
 }
 
-/* GRID-ONLY update: replace #dbgrid + refresh the "N bars match" sub; the control
-   bar (incl. the date pickers) is left in place, so no datepicker MutationObserver
-   re-scan / rebuild fires on a paging click (DEC-DB-UNIVERSE-O1-LATENCY-001). */
+/* GRID-ONLY update: patch the tbody in place when the column set is unchanged
+   (DEC-DASHBOARD-JS-PERF-001), else replace #dbgrid; refresh the "N bars match"
+   sub; the control bar (incl. the date pickers) is left in place, so no
+   datepicker MutationObserver re-scan / rebuild fires on a paging click
+   (DEC-DB-UNIVERSE-O1-LATENCY-001). */
 function updateCandleGrid(body, err) {
   const grid = document.getElementById("dbgrid");
   if (!grid) { renderCandleView(body, err); return; }  /* defensive: no container → full */
   grid.classList.remove("is-loading");
-  grid.innerHTML = candleGridHtml(body, err);
+  /* The honesty step-note (DEC-MONEYNESS-REGISTRY-STEP-001) renders OUTSIDE the
+     table, so the tbody-only patch also requires its presence to be unchanged —
+     a confidence flip falls back to the full rebuild, never a stale note. */
+  const wantNote = !!(body && body.strike_step_confidence === "observed");
+  const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote")
+    && patchGridRows(grid, body.columns || [], body.rows || [],
+      Number(body.total || 0), Number(body.offset || 0));
+  if (!patched) grid.innerHTML = candleGridHtml(body, err);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
   setRangeChip(body);
-  wireCandlePager(body);
+  setCandlePager(body);
 }
 
 limitSel.addEventListener("change", () => {
   if (mode === "candles") { cstate.offset = 0; runCandleQuery(true); }
   else if (mode === "registry") { rstate.offset = 0; runRegistryQuery(true); }
   else if (mode === "ledger") { lstate.offset = 0; runLedgerQuery(true); }
-  else if (selected) selectTable(selected);
+  /* Table mode takes the SAME grid-only path as its three siblings
+     (DEC-DASHBOARD-JS-PERF-001): the control bar + qstate filters stay put —
+     the old selectTable() call tore down + rebuilt the whole view. */
+  else if (selected) { dbOffset = 0; runTableQuery(selected, true); }
 });
 refreshBtn.addEventListener("click", () => {
   loadTables();
@@ -1345,10 +1525,30 @@ refreshBtn.addEventListener("click", () => {
   else if (selected) selectTable(selected);
 });
 
+/* Delegated Prev/Next pager clicks (DEC-DASHBOARD-JS-PERF-001): ONE listener on
+   #data attached at boot serves every view family — the buttons re-render freely
+   (full rebuild OR in-place disabled-state patch) and are never re-wired. A
+   disabled button never dispatches a click; the guard is defensive. */
+dataEl.addEventListener("click", (ev) => {
+  const b = ev.target.closest("#dbprev, #dbnext");
+  if (!b || b.disabled || typeof pagerState.onPage !== "function") return;
+  const off = b.id === "dbnext"
+    ? pagerState.off + pagerState.lim
+    : Math.max(0, pagerState.off - pagerState.lim);
+  pagerState.onPage(off);
+});
+
 /* DASH-UX D2: click any data cell to copy its value (DEC-DASHBOARD-DB-UX-001).
    Delegated on #data so it survives every grid re-render; null cells are
    skipped. navigator.clipboard is feature-detected (absent on insecure/old
    contexts) — the green flash + toast still confirm the interaction. */
+/* Delegated Retry for the data panel's error/offline cards (DEC-DASHBOARD-UX-
+   ANIMATE-001): re-invokes the CURRENT view's runner — never re-attached across
+   re-renders, mirroring the delegated pager above. */
+dataEl.addEventListener("click", (ev) => {
+  if (ev.target.closest(".bx-state-retry")) rerunCurrent();
+});
+
 dataEl.addEventListener("click", (ev) => {
   const td = ev.target.closest("td");
   if (!td || td.classList.contains("nullcell")) return;
@@ -1362,7 +1562,15 @@ dataEl.addEventListener("click", (ev) => {
   showCopyToast();
 });
 
-loadTables();
+/* Boot after DOMContentLoaded so the deferred shared helpers (bx-ui.js) are
+   guaranteed loaded — every boot fetch then rides the 12 s timeout. A missing
+   helper file degrades gracefully (bxFetch falls back to plain fetch). */
+function boot() {
+  if (window.BXUI) BXUI.initVisibilityPause();
+  loadTables();
+}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+else boot();
 </script>
 </body>
 </html>
