@@ -57,10 +57,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from brutex.calendars.nse import IST, is_holiday_data_available, is_trading_day
+from brutex.calendars.nse import IST, is_holiday_data_available
+from brutex.calendars.observed_sessions import is_trading_day_observed
 
 __all__ = [
     "INTERIOR_GAP",
@@ -71,6 +73,7 @@ __all__ = [
     "InteriorGapVerdict",
     "classify_interior_gap",
     "classify_interior_gap_dates",
+    "interior_gap_runs",
     "observe_interior_gap",
 ]
 
@@ -149,38 +152,75 @@ def _tunable_sessions(env_var: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def _largest_interior_session_gap(covered: Sequence[date]) -> int:
-    """Longest contiguous run of bar-less TRADING sessions strictly between *covered* dates.
+def _interior_barless_runs(
+    covered: Sequence[date], observed: AbstractSet[date] = frozenset()
+) -> list[tuple[date, date, int]]:
+    """Every MAXIMAL contiguous run of bar-less TRADING sessions strictly between *covered* dates.
 
-    *covered* is the sorted, de-duplicated set of IST trading dates that carry bars.
-    Walks the calendar from the FIRST covered date to the LAST and counts the longest
-    maximal run of trading sessions that have NO bar — only sessions BETWEEN the first
-    and last covered date are considered (the interior), so a leading/trailing edge can
-    never contribute. O(trading days in the bracketed span); the span is bounded by one
-    contract window. Returns ``0`` when fewer than two covered sessions exist.
+    The ONE shared run-walker (CLAUDE.md §11 COMMON —
+    :func:`_largest_interior_session_gap` and :func:`interior_gap_runs` both
+    derive from it, so the fetch-time classifier and the cold-start seed gate can
+    never drift). *covered* is the sorted, de-duplicated set of IST trading dates
+    that carry bars. Walks the calendar from the FIRST covered date to the LAST
+    and emits one ``(run_first, run_last, run_sessions)`` per maximal run of
+    trading sessions with NO bar — ``run_first`` / ``run_last`` are the run's
+    first/last bar-less trading dates (both INCLUSIVE), ``run_sessions`` its
+    trading-session length. Only sessions BETWEEN the first and last covered date
+    are considered (the interior), so a leading/trailing edge can never
+    contribute; a non-trading day never breaks a run (only a COVERED trading
+    session does). An *observed* overlay day (DEC-CALENDAR-OBSERVED-SESSIONS-001)
+    is NOT a session, so an observed holiday can never inflate a hole —
+    remove-only: subtracting sessions can only SHRINK a run, never grow it.
+    O(trading days in the bracketed span). Returns ``[]`` when fewer than two
+    covered sessions exist (no interior to bracket).
     """
     if len(covered) < _MIN_BRACKETING_SESSIONS:
-        return 0
+        return []
     have = set(covered)
-    largest = 0
+    runs: list[tuple[date, date, int]] = []
+    run_first: date | None = None
+    run_last: date | None = None
     run = 0
     cursor = covered[0] + timedelta(days=1)
     last = covered[-1]
     while cursor < last:
-        if is_trading_day(cursor):
+        if is_trading_day_observed(cursor, observed=observed):
             if cursor in have:
+                if run_first is not None and run_last is not None:
+                    runs.append((run_first, run_last, run))
+                run_first = None
+                run_last = None
                 run = 0
             else:
+                if run_first is None:
+                    run_first = cursor
+                run_last = cursor
                 run += 1
-                largest = max(largest, run)
         cursor += timedelta(days=1)
-    return largest
+    if run_first is not None and run_last is not None:
+        runs.append((run_first, run_last, run))
+    return runs
+
+
+def _largest_interior_session_gap(
+    covered: Sequence[date], observed: AbstractSet[date] = frozenset()
+) -> int:
+    """Longest contiguous run of bar-less TRADING sessions strictly between *covered* dates.
+
+    Contract UNCHANGED (DEC-INTERIOR-GAP-DETECT-001) — now a thin ``max`` over the
+    shared run-walker :func:`_interior_barless_runs` (bit-identical output for
+    every input, pinned by the existing classifier suite + the runs/largest
+    parity property test). Returns ``0`` when fewer than two covered sessions
+    exist or the interior is continuous.
+    """
+    return max((n for _, _, n in _interior_barless_runs(covered, observed)), default=0)
 
 
 def classify_interior_gap_dates(
     *,
     covered_dates: Iterable[date],
     tolerance_sessions: int | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> InteriorGapVerdict:
     """Classify a set of covered IST dates as :data:`INTERIOR_GAP` or :data:`NO_INTERIOR_GAP`.
 
@@ -201,6 +241,10 @@ def classify_interior_gap_dates(
     tolerance_sessions
         Override the interior-hole tolerance (trading sessions). ``None`` reads
         :data:`INTERIOR_GAP_TOLERANCE_SESSIONS` (env-tunable).
+    observed
+        Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+        remove-only; default empty = byte-identical back-compat). An overlaid
+        date is not a session, so it never counts toward an interior hole.
 
     Returns
     -------
@@ -241,7 +285,7 @@ def classify_interior_gap_dates(
             reason="out_of_calendar_coverage",
         )
 
-    largest = _largest_interior_session_gap(covered)
+    largest = _largest_interior_session_gap(covered, observed)
     if largest > tolerance:
         return InteriorGapVerdict(
             verdict=INTERIOR_GAP,
@@ -259,10 +303,74 @@ def classify_interior_gap_dates(
     )
 
 
+def interior_gap_runs(
+    *,
+    covered_dates: Iterable[date],
+    tolerance_sessions: int | None = None,
+    observed: AbstractSet[date] = frozenset(),
+) -> tuple[tuple[date, date], ...] | None:
+    """The CONFIRMED interior-hole runs of ONE dataset's covered-date set — pure.
+
+    The DATASET-wide twin of :func:`classify_interior_gap_dates` for the
+    cold-start seed's continuity gate (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
+    upgrading DEC-COLDSTART-SEED-INTERIOR-GAP-001's per-window check): the seed
+    computes the runs ONCE over a whole dataset's distinct IST bar dates, then
+    refuses any candidate window that INTERSECTS a confirmed run — closing the
+    two per-window blind spots that DEC documented as non-goals (a hole
+    STRADDLING a window boundary reads as two sub-tolerance leading/trailing
+    edges per window; a window ENTIRELY inside a giant hole has too few in-range
+    dates to classify at all). Shares the run-walker
+    (:func:`_interior_barless_runs`), the tolerance (same
+    ``BRUTEX_INTERIOR_GAP_TOLERANCE_SESSIONS`` knob — ONE tunable for fetch-time
+    and seed-time, CLAUDE.md §11 COMMON) and the abstain rules with the
+    classifier, so those THREE dimensions can never drift. HONEST (Golden Rule
+    #10): the *observed* drift overlay is NOT one of them — it is a per-call
+    argument, and the seed chokepoint currently calls without it while the
+    fetch-time detector passes ``observed=observed_holidays``
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001); the overlay is remove-only, so that
+    divergence is conservative-only for the seed (a run can only read LONGER —
+    see ``seed_enclosed_windows``'s honest-residuals note).
+
+    Returns
+    -------
+    ``None``
+        ABSTAIN — a covered end lies outside the NSE holiday-list coverage
+        (the SAME :func:`~brutex.calendars.nse.is_holiday_data_available`
+        abstain as :func:`classify_interior_gap_dates`: outside coverage a
+        weekday holiday would inflate a spurious run — never guess, Golden
+        Rule #1). The caller must treat this as "no signal", never "no hole".
+    ``()``
+        NO confirmed run — the interior is continuous, every hole is within
+        tolerance, or fewer than two covered sessions exist (no interior).
+    runs
+        One ``(run_first, run_last)`` per maximal bar-less run whose
+        trading-session length is STRICTLY MORE than the tolerance — both dates
+        INCLUSIVE bar-less trading dates, ascending.
+    """
+    tolerance = (
+        tolerance_sessions
+        if tolerance_sessions is not None
+        else _tunable_sessions(
+            "BRUTEX_INTERIOR_GAP_TOLERANCE_SESSIONS", INTERIOR_GAP_TOLERANCE_SESSIONS
+        )
+    )
+    covered = sorted(set(covered_dates))
+    if len(covered) < _MIN_BRACKETING_SESSIONS:
+        return ()
+    if not (is_holiday_data_available(covered[0]) and is_holiday_data_available(covered[-1])):
+        return None
+    return tuple(
+        (run_first, run_last)
+        for run_first, run_last, run_sessions in _interior_barless_runs(covered, observed)
+        if run_sessions > tolerance
+    )
+
+
 def classify_interior_gap(
     *,
     bar_timestamps: Sequence[datetime],
     tolerance_sessions: int | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> InteriorGapVerdict:
     """Classify one SUCCESS window as :data:`INTERIOR_GAP` or :data:`NO_INTERIOR_GAP`.
 
@@ -283,6 +391,10 @@ def classify_interior_gap(
     tolerance_sessions
         Override the interior-hole tolerance (trading sessions). ``None`` reads
         :data:`INTERIOR_GAP_TOLERANCE_SESSIONS` (env-tunable).
+    observed
+        Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+        remove-only; default empty = byte-identical back-compat). An overlaid
+        date is not a session, so it never counts toward an interior hole.
 
     Returns
     -------
@@ -292,6 +404,7 @@ def classify_interior_gap(
     return classify_interior_gap_dates(
         covered_dates=(ts.astimezone(IST).date() for ts in bar_timestamps),
         tolerance_sessions=tolerance_sessions,
+        observed=observed,
     )
 
 
@@ -311,6 +424,7 @@ def observe_interior_gap(
     symbol: str,
     interval: str,
     pull_id: str | None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> InteriorGapVerdict | None:
     """WARN if a SUCCESS window has a confirmed interior multi-session hole; return the verdict.
 
@@ -330,7 +444,7 @@ def observe_interior_gap(
     wiring; see the module docstring).
     """
     try:
-        verdict = classify_interior_gap(bar_timestamps=bar_timestamps)
+        verdict = classify_interior_gap(bar_timestamps=bar_timestamps, observed=observed)
         if verdict.is_interior_gap():
             log.warning(  # type: ignore[attr-defined]
                 INTERIOR_GAP_WINDOW_EVENT,

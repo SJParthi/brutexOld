@@ -426,8 +426,11 @@ class TestColdStartSeedInteriorGap:
             assert seeded == 1
             skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
             assert len(skips) == 1
-            gap = skips[0]["largest_gap_sessions"]
-            assert isinstance(gap, int) and gap > 5
+            # DEC-DATA-HONESTY-ALLFILTERED-SEED-001: the refusal WARN now names the
+            # confirmed run's inclusive bar-less bounds instead of a bare length.
+            gap_first = date.fromisoformat(str(skips[0]["gap_first"]))
+            gap_last = date.fromisoformat(str(skips[0]["gap_last"]))
+            assert date(2020, 1, 1) < gap_first <= gap_last < date(2020, 1, 28)
 
             # The un-seeded gappy window is minted PLANNED (re-pullable, self-heals via
             # the fetch-time detector); the seeded clean row stays settled.
@@ -1043,6 +1046,7 @@ _LEDGER_COLS = [
     "last_attempt_at",
     "empty_streak",
     "in_pull_fetches",
+    "bars_net_new",
 ]
 
 
@@ -1079,7 +1083,12 @@ class TestWindowLedgerApi:
             end=date(2021, 4, 1),
         )
         ledger.record(
-            key, raw_bars=5, error_type=None, bars_appended=5, now=datetime(2026, 6, 9, tzinfo=UTC)
+            key,
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            bars_net_new=4,
+            now=datetime(2026, 6, 9, tzinfo=UTC),
         )
         # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
         save_window_ledger(ledger, tmp_path)
@@ -1091,9 +1100,12 @@ class TestWindowLedgerApi:
         assert row[1] == "NIFTY"  # security_id
         assert row[5] == "SUCCESS"  # status
         assert row[6] == 5  # bars
-        # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): the last column,
-        # 1 for this first-try SUCCESS — the /db grid surfaces the in-pull retry too.
+        # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): 1 for this
+        # first-try SUCCESS — the /db grid surfaces the in-pull retry too.
         assert row[12] == 1
+        # bars_net_new (idx 13, DEC-INGEST-BOUNDARY-INTEGRITY-001): the last column —
+        # the sink's keep-first-DEDUPED net-new count, persisted + surfaced on /db.
+        assert row[13] == 4
         # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
         assert row[9] == "2026-06-09 05:30:00"
         assert "+00:00" not in str(row[9])  # the raw UTC offset is gone

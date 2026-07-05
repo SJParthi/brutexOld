@@ -31,11 +31,13 @@ pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
+from brutex.dashboard.greeks_health import DEFAULT_GREEKS_FAILURE_THRESHOLD
 from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 app_module = importlib.import_module("brutex.dashboard.app")
 
@@ -194,6 +196,55 @@ def test_underlying_form_resolves_whole_chain(
         "NSE-NIFTY-25Jan24-21000-PE",
         "NSE-NIFTY-25Jan24-FUT",
     }
+
+
+def test_pull_historical_work_feeds_greeks_health_counter(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The /pull-historical ``_work`` closure REALLY feeds ``GreeksEnrichHealth``.
+
+    Hostile-review MAJOR fold (the shipped-DORMANT failure mode of #935/#1014):
+    deleting the ``_greeks_health.observe`` call in the /pull-historical
+    ``_work`` body left every test green. This drives the REAL route +
+    background job ``threshold`` times with a failing Greeks whole-pass
+    verdict and asserts exactly ONE ``pull.greeks_enrich_failing`` WARNING
+    fires through the production binding (the sibling pipeline-route test
+    covers the /pull-pipeline binding + the reset/re-arm arc).
+    """
+    _pin_creds_present(monkeypatch)
+    _seed_registry(_lake_root(store))
+
+    def _failing_pull(contracts: Sequence[ContractRow], **kwargs: Any) -> HistoricalPullReport:
+        return HistoricalPullReport(
+            dry_run=kwargs["dry_run"],
+            intervals=tuple(kwargs["intervals"]),
+            contracts_selected=len(contracts),
+            contracts_completed=len(contracts),
+            bars_appended=0,
+            windows=len(contracts),
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="offline fake",
+            phase1_clean=True,
+            phase1_complete=tuple(c.contract_symbol for c in contracts),
+            start_dates={},
+            minute_requested="1minute" in kwargs["intervals"],
+            minute_skipped=False,
+            greeks_enrich_ok=False,
+            greeks_enrich_error="RuntimeError: broken risk-free source",
+        )
+
+    monkeypatch.setattr(app_module, "pull_contract_candles", _failing_pull)
+    with capture_logs() as logs:
+        for _ in range(DEFAULT_GREEKS_FAILURE_THRESHOLD):
+            resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
+            assert resp.status_code == 200
+            assert _wait_for_job(client)["state"] == "done"
+    breaches = [r for r in logs if r["event"] == "pull.greeks_enrich_failing"]
+    assert len(breaches) == 1  # ONE warning at the OK→BREACH crossing, not per pull
+    assert breaches[0]["consecutive"] == DEFAULT_GREEKS_FAILURE_THRESHOLD
+    assert breaches[0]["last_error"] == "RuntimeError: broken risk-free source"
 
 
 def test_expiry_narrows_to_chain(

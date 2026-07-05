@@ -435,10 +435,39 @@ def parse_instrument_csv_with_report(
     a :class:`ParseSkipReport` (count + in-scope denominator + capped samples)
     so the dashboard load can persist + surface it instead of discarding it.
     The WARNING log is byte-identical to the pre-report behaviour.
+
+    Additive-drift tolerance (DEC-INSTRUMENT-HEADER-ADDITIVE-001): a purely
+    ADDITIVE vendor change — one or more EXTRA columns appended AFTER the
+    verified 21 — is accepted (parsing keys on the known 21 column names, so
+    trailing extras are inert) and surfaced as ONE loud
+    ``groww.instruments.header_extra_columns`` WARNING naming the extras, so
+    a benign 22nd column can never again kill the whole universe load. Every
+    OTHER drift still fail-louds exactly as before: a missing, reordered, or
+    renamed column among the first 21 raises :class:`InstrumentFormatError`,
+    and so does an extra column that DUPLICATES a known name (``DictReader``
+    would let the trailing duplicate silently overwrite the real cell —
+    corrupted values, worse than a refusal; Golden Rule #1).
     """
     reader = csv.DictReader(StringIO(text))
-    if tuple(reader.fieldnames or ()) != INSTRUMENT_CSV_COLUMNS:
+    fields = tuple(reader.fieldnames or ())
+    known = len(INSTRUMENT_CSV_COLUMNS)
+    if fields[:known] != INSTRUMENT_CSV_COLUMNS:
         raise InstrumentFormatError(f"Groww instrument header drift: got {reader.fieldnames!r}")
+    extra_columns = fields[known:]
+    if extra_columns:
+        duplicated = [col for col in extra_columns if col in INSTRUMENT_CSV_COLUMNS]
+        if duplicated:
+            raise InstrumentFormatError(
+                f"Groww instrument header drift: extra trailing column(s) duplicate known "
+                f"column name(s) {duplicated!r} — a duplicate would silently overwrite the "
+                f"real cell values (csv.DictReader keeps the LAST occurrence); refusing. "
+                f"Full header: {reader.fieldnames!r}"
+            )
+        _LOG.warning(
+            "groww.instruments.header_extra_columns",
+            extra_columns=list(extra_columns),
+            count=len(extra_columns),
+        )
     parsed: list[tuple[str, Instrument]] = []
     skipped: list[str] = []
     for row in reader:
