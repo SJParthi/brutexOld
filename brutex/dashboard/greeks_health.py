@@ -1,9 +1,12 @@
 """Consecutive-failure health counter for the post-pull Greeks-enrichment pass.
 
 DEC-GREEKS-ENRICH-OBSERVE-001 — the pass-level twin of the per-window
-``empty_streak``: the Greeks pass is fully guarded ("can NEVER fail the pull"),
-so a persistently broken enrichment (a bad risk-free CSV, a missing wheel) used
-to surface only as one swallowed log line per pull. This tiny INJECTED object
+``empty_streak``: the Greeks pass is fenced (an ordinary enrich failure can
+never fail the pull; since DEC-GREEKS-PARALLEL-001 the two pull-wide HOST
+halts — ``LakeWriteHalt`` / ``GreeksEnrichPoolBroken`` — deliberately RE-RAISE
+past the fence and fire their own CRITICAL alert, so THAT pass records neither
+ok nor fail here), so a persistently broken enrichment (a bad risk-free CSV, a
+missing wheel) used to surface only as one swallowed log line per pull. This tiny INJECTED object
 (constructed once in ``build_app`` and threaded to the pull job closures — no
 module-global mutable state, CLAUDE.md §4) counts CONSECUTIVE whole-pass
 failures across pulls and emits ONE structlog WARNING
