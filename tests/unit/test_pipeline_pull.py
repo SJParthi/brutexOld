@@ -45,6 +45,7 @@ def _outcome(
     crashed: str | None = None,
     fs_note: str | None = None,
     unchanged_skips: int = 0,
+    opens_substituted: int = 0,
 ) -> PrebuildOutcome:
     """Build a :class:`PrebuildOutcome` (the run_prebuild contract's REAL dataclass)."""
     count = len(failed) if failed_count is None else failed_count
@@ -57,6 +58,7 @@ def _outcome(
         crashed=crashed,
         fs_note=fs_note,
         unchanged_skips=unchanged_skips,
+        opens_substituted=opens_substituted,
     )
 
 
@@ -1449,3 +1451,47 @@ def test_pipeline_note_omits_skip_clause_when_none_skipped() -> None:
         run_prebuild=_PrebuildSpy(_outcome(symbols_built=5, total_bars=40)),
     )
     assert "unchanged symbol(s) skipped" not in report.note
+
+
+# ── daily-open substitution headline + report (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001) ──
+
+
+def test_pipeline_note_names_daily_opens_substituted() -> None:
+    """The completion headline names the observe-only substitution total."""
+    spot, meta, hist = _clean_phases()
+    report = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=_PrebuildSpy(_outcome(symbols_built=5, total_bars=40, opens_substituted=4)),
+    )
+    assert ", 4 daily open(s) substituted" in report.note
+    assert report.prebuild_opens_substituted == 4
+    assert report.to_dict()["prebuild_opens_substituted"] == 4
+
+
+def test_pipeline_note_zero_substituted_renders_no_clause() -> None:
+    """Zero substitutions keep the note byte-identical — the feature is
+    invisible on a healthy lake (Golden Rule #1 default preservation)."""
+    spot, meta, hist = _clean_phases()
+    zero = run_full_pipeline(
+        run_spot=spot,
+        run_metadata=meta,
+        run_historical=hist,
+        run_prebuild=_PrebuildSpy(_outcome(symbols_built=5, total_bars=40)),
+    )
+    assert "daily open(s) substituted" not in zero.note
+    assert zero.prebuild_opens_substituted == 0
+    assert zero.to_dict()["prebuild_opens_substituted"] == 0
+
+
+def test_pipeline_report_substituted_none_when_prebuild_not_run() -> None:
+    """No prebuild injected → the field is honestly ``None`` (did not run),
+    never a fabricated 0 (ran, observed nothing)."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+    )
+    assert report.prebuild_opens_substituted is None
+    assert report.to_dict()["prebuild_opens_substituted"] is None

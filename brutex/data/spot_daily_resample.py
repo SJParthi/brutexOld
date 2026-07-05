@@ -74,13 +74,14 @@ provenance — a resample made zero vendor calls). The raw lake builders
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
+from brutex.calendars.nse import SESSION_OPEN_IST, has_muhurat_session
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition import MONTHS_PER_YEAR
 from brutex.data.timeframes import DAILY_TF_MINUTES
@@ -105,21 +106,201 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _LOG = structlog.get_logger("brutex.data.spot_daily_resample")
 
 __all__ = [
+    "MAX_OPEN_SUBSTITUTION_WARNS",
     "DailyDeriveReport",
     "DailyDeriveTarget",
     "DailyFillResult",
+    "DailyOpenSubstitutionScan",
     "DailyReconcileReport",
     "DailyResampleWindow",
     "derive_daily_for_targets",
+    "detect_daily_open_substitutions",
+    "emit_daily_open_substitutions",
     "fill_daily_from_minute",
     "ist_span_partition_files",
     "ist_span_partition_months",
     "make_lake_read_1m_window",
     "make_lake_write_1day",
+    "observe_daily_open_substitutions",
     "plan_daily_resample_windows",
     "reconcile_daily_from_minute",
     "resample_1m_to_daily",
 ]
+
+#: Cap on per-(symbol, date) ``daily_open.substituted`` WARN lines per symbol
+#: per scan (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001; precedent: the #919
+#: silent-vanish logger's cap of 20). The aggregate event ALWAYS carries the
+#: TRUE count, so the cap never lies (Golden Rule #1).
+MAX_OPEN_SUBSTITUTION_WARNS: Final[int] = 20
+
+
+@dataclass(frozen=True, slots=True)
+class DailyOpenSubstitutionScan:
+    """Result of one :func:`detect_daily_open_substitutions` pass — pure data.
+
+    Attributes
+    ----------
+    substituted
+        ``((ist_date, first_minute_ist), ...)`` ascending by date — the
+        COMPLETE sessions (``ist_date < before``) whose earliest stored
+        1-minute bar is NOT exactly 09:15:00 IST
+        (:data:`~brutex.calendars.nse.SESSION_OPEN_IST`). For each, the derived
+        daily ``open`` silently substituted that first-present minute's open
+        (the implicit ``open.first()`` in
+        :func:`~brutex.data.tf_resampler.resample_1m_to_tf` — no coded branch).
+        The predicate is ``!= 09:15`` exactly: a stray PRE-09:15 bar (should
+        not survive the ingest session filter) also flags, with the actual
+        first minute in the payload — never silently trusted. Muhurat sessions
+        are EXCLUDED (see ``muhurat_abstained``).
+    sessions
+        COMPLETE sessions examined (post-``before``-cutoff, INCLUDING the
+        Muhurat-abstained ones).
+    muhurat_abstained
+        Sessions skipped because the date is in
+        :data:`~brutex.calendars.nse.MUHURAT_SESSIONS` — a Muhurat session's
+        open is BY DESIGN not 09:15 (evening 18:00/18:15 for 2020-2024,
+        afternoon 13:45 for 2025), so flagging it would be a false positive.
+        Coverage-bounded honesty (Golden Rule #1): the 2026 Muhurat date's
+        timings are NOT yet notified and deliberately absent from the
+        calendar, so a future 2026 Muhurat session WILL flag here (an
+        observe-only WARN, zero behavioral harm) until the official NSE
+        circular lands — never fabricated.
+    """
+
+    substituted: tuple[tuple[date, time], ...]
+    sessions: int
+    muhurat_abstained: int
+
+    @property
+    def count(self) -> int:
+        """Number of substituted sessions (the TRUE total, never capped)."""
+        return len(self.substituted)
+
+
+def detect_daily_open_substitutions(
+    df_1m: pl.DataFrame, *, before: date
+) -> DailyOpenSubstitutionScan:
+    """Scan a 1-minute frame for sessions whose derived daily open is substituted.
+
+    Pure + read-only (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001): one O(sessions)
+    group-by over the frame ALREADY in memory — zero extra lake I/O, and the
+    frame is never mutated (stored bars stay byte-unchanged; golden-pinned).
+    Applies the SAME forming-session cutoff :func:`resample_1m_to_daily` uses
+    (``ist_date < before``), so the scan flags ONLY sessions that were actually
+    written as final daily bars. Order-independent: the per-session first
+    minute is ``min(ts)``, never a positional first row. IST is the fixed
+    +05:30 offset (:data:`_IST` — the same arithmetic the resampler uses,
+    no tz-library drift between scan and write).
+
+    Parameters
+    ----------
+    df_1m
+        The symbol's stored 1-minute bars (the resampler's ``ts_utc`` column
+        is the only one read; naive timestamps are treated as UTC — the lake
+        convention). An empty frame yields an all-zero scan.
+    before
+        The forming-session cutoff (today IST) — sessions on/after it are
+        neither flagged nor counted (they were not written as daily bars).
+    """
+    # Local import keeps polars out of this module's import graph for callers
+    # that only need the dataclasses (mirrors resample_1m_to_daily).
+    import polars as pl
+
+    if df_1m.is_empty():
+        return DailyOpenSubstitutionScan(substituted=(), sessions=0, muhurat_abstained=0)
+    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    firsts = (
+        df_1m.select(ist.alias("_ist"))
+        .with_columns(pl.col("_ist").dt.date().alias("_ist_date"))
+        .filter(pl.col("_ist_date") < before)
+        .group_by("_ist_date")
+        .agg(pl.col("_ist").min().alias("_first_ist"))
+        .sort("_ist_date")
+    )
+    substituted: list[tuple[date, time]] = []
+    muhurat_abstained = 0
+    for row in firsts.iter_rows(named=True):
+        ist_date: date = row["_ist_date"]
+        first_minute: time = row["_first_ist"].time()
+        if has_muhurat_session(ist_date):
+            # A Muhurat session opens off-09:15 BY DESIGN — abstain, counted.
+            muhurat_abstained += 1
+            continue
+        if first_minute != SESSION_OPEN_IST:
+            substituted.append((ist_date, first_minute))
+    return DailyOpenSubstitutionScan(
+        substituted=tuple(substituted),
+        sessions=firsts.height,
+        muhurat_abstained=muhurat_abstained,
+    )
+
+
+def emit_daily_open_substitutions(
+    scan: DailyOpenSubstitutionScan, *, symbol: str, dense: bool
+) -> None:
+    """Emit the observe-only substitution log events for one symbol's scan.
+
+    Log taxonomy (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001):
+
+    * ``daily_open.substituted`` — WARN per (symbol, date), ONLY for a DENSE
+      (index) symbol, capped at :data:`MAX_OPEN_SUBSTITUTION_WARNS` per scan.
+    * ``daily_open.substituted_aggregate`` — once per symbol when
+      ``scan.count > 0``: WARN for dense, INFO (count-only) for illiquid —
+      the operator-mandated aggregate path; ALWAYS carries the TRUE count.
+
+    A zero-substitution scan emits NOTHING — the log surface of a healthy lake
+    is byte-identical to before this feature existed. Pure emitter (may raise
+    on a poisoned scan) — production wires it through the guarded
+    :func:`observe_daily_open_substitutions`, mirroring the
+    ``emit_underlying_all_empty`` precedent.
+    """
+    if scan.count == 0:
+        return
+    if dense:
+        for session_date, first_minute in scan.substituted[:MAX_OPEN_SUBSTITUTION_WARNS]:
+            _LOG.warning(
+                "daily_open.substituted",
+                symbol=symbol,
+                session_date=session_date.isoformat(),
+                first_minute_ist=first_minute.strftime("%H:%M"),
+            )
+    log = _LOG.warning if dense else _LOG.info
+    log(
+        "daily_open.substituted_aggregate",
+        symbol=symbol,
+        dense=dense,
+        count=scan.count,
+        sessions=scan.sessions,
+        muhurat_abstained=scan.muhurat_abstained,
+        warns_capped=dense and scan.count > MAX_OPEN_SUBSTITUTION_WARNS,
+    )
+
+
+def observe_daily_open_substitutions(
+    df_1m: pl.DataFrame, *, before: date, symbol: str, dense: bool
+) -> int:
+    """Detect + emit in ONE guarded call — the production entry point.
+
+    OBSERVE-ONLY by construction (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001): the
+    WHOLE detect+emit pass runs inside one ``try/except``, so an unexpected
+    detector/emitter error (a dtype quirk, a poisoned frame) can NEVER fail
+    the prebuild that hosts it — it logs ``daily_open.substitution_log_error``
+    and returns ``0`` (an honest "not observed", never a fabricated count).
+    Mirrors :func:`brutex.adapters.groww.option_ingest.emit_underlying_all_empty`'s
+    scan-AND-log guard discipline. Returns the substituted-session count for
+    :attr:`~brutex.data.timeframe_materialize.MaterializeResult.opens_substituted`.
+    """
+    try:
+        scan = detect_daily_open_substitutions(df_1m, before=before)
+        emit_daily_open_substitutions(scan, symbol=symbol, dense=dense)
+    except Exception as exc:  # pylint: disable=broad-except - observe-only, must never break the prebuild
+        _LOG.warning(
+            "daily_open.substitution_log_error",
+            symbol=symbol,
+            error=repr(exc),
+        )
+        return 0
+    return scan.count
 
 
 @dataclass(frozen=True, slots=True)

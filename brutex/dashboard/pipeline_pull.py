@@ -357,6 +357,18 @@ class PipelinePullReport:
         30-300 GB of pure slack; named here AND in the note so the operator
         sees it before the disk fills. ``None`` when the filesystem is
         fine-grained, the probe was unavailable, or the phase did not run.
+    prebuild_opens_substituted
+        The prebuild's observe-only daily-open substitution total
+        (DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001 —
+        :attr:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome.opens_substituted`):
+        (symbol, date) SESSIONS whose derived daily open silently substituted
+        a non-09:15 first minute, summed over the prebuild's SPOT targets
+        (F&O contracts are never scanned — spot-only by decision). ``None``
+        when the prebuild did not run. HONEST semantics: a FULL-HISTORY
+        count recomputed per run over each re-derived symbol's whole
+        1-minute frame — a permanent historical gap re-reports on every run
+        that re-derives the symbol (an unchanged-source incremental skip
+        contributes 0), so the number is honest volume, not "new this pull".
     quarantined_symbols
         The deduped, sorted names of symbols a phase QUARANTINED per-symbol
         without stopping the chain (:func:`derive_quarantined_symbols` — spot
@@ -383,6 +395,7 @@ class PipelinePullReport:
     prebuild_failed: tuple[str, ...] = ()
     prebuild_crashed: str | None = None
     fs_allocation_note: str | None = None
+    prebuild_opens_substituted: int | None = None
     quarantined_symbols: tuple[str, ...] = ()
     quarantined_count: int = 0
 
@@ -417,6 +430,7 @@ class PipelinePullReport:
             "prebuild_failed": list(self.prebuild_failed),
             "prebuild_crashed": self.prebuild_crashed,
             "fs_allocation_note": self.fs_allocation_note,
+            "prebuild_opens_substituted": self.prebuild_opens_substituted,
             "quarantined_symbols": list(self.quarantined_symbols),
             "quarantined_count": self.quarantined_count,
             "spot": self.spot.to_dict() if self.spot is not None else None,
@@ -501,6 +515,12 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         # DEC-PREBUILD-INCREMENTAL-001: name the incremental saving honestly —
         # these symbols were verified UNCHANGED and skipped, not built-with-0.
         clause += f", {prebuild.unchanged_skips} unchanged symbol(s) skipped (incremental)"
+    if prebuild.opens_substituted:
+        # DEC-DAILY-OPEN-SUBSTITUTION-FLAG-001: the observe-only daily-open
+        # substitution total is named in the headline (sessions whose derived
+        # daily open fell back to a non-09:15 first minute — full-history,
+        # recomputed per run). Zero keeps the note byte-identical.
+        clause += f", {prebuild.opens_substituted} daily open(s) substituted"
     if prebuild.failed:
         shown = ", ".join(prebuild.failed[:_NOTE_FAILURE_NAMES])
         more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))
@@ -801,6 +821,9 @@ def run_full_pipeline(
         prebuild_failed=prebuild.failed if prebuild is not None else (),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
+        prebuild_opens_substituted=(
+            prebuild.opens_substituted if prebuild is not None else None
+        ),
         quarantined_symbols=quarantined,
         quarantined_count=quarantined_count,
     )
