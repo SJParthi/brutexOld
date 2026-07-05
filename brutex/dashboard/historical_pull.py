@@ -132,7 +132,7 @@ from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    from brutex.dashboard.pull_controller import SessionRateController
+    from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
 
 #: The ONLY granularity fetched from Groww for an F&O contract
 #: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the heavy ``1minute`` fill. ``1day`` is DERIVED
@@ -862,6 +862,8 @@ def _run_phase(
     run_parallel: RunParallel | None,
     write_pool: WriteConsumer | None,
     fetch_pipeline: FetchPipeline | None,
+    on_bars: Callable[[int], None] | None = None,
+    on_ledger_sync: OnLedgerSync | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
 
@@ -912,6 +914,29 @@ def _run_phase(
                 contract_windows=contract_windows,
             )
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
+
+    # Honest live F&O progress (DEC-PULL-PROGRESS-HONESTY-001): a THROTTLED, market/
+    # interval-FILTERED absolute fold of the pull's own ledger, pushed to the caller's
+    # on_ledger_sync per per-pair tick (≤ once per LIVE_SYNC_INTERVAL_S). REUSES the
+    # COMMON make_live_sync (the spot spine's proven throttle — CLAUDE.md §11 COMMON;
+    # lazy import mirrors register_pull_meter's ordering-decoupled style). The flush
+    # side is a no-op lambda — the per-pair wrapper below already runs the throttled
+    # make_live_ledger_flush, and progress_counts reads the in-memory ledger directly.
+    # A dry-run (no ledger) or an unwired caller keeps the byte-identical no-op.
+    def _no_sync() -> None:
+        """No-op live sync (dry-run / unwired caller) — byte-identical to before."""
+
+    live_sync: Callable[[], None] = _no_sync
+    if ledger is not None and on_ledger_sync is not None:
+        from brutex.dashboard.pull_controller import make_live_sync
+
+        live_sync = make_live_sync(
+            ledger,
+            lambda: None,
+            on_ledger_sync,
+            markets=frozenset(by_market),
+            intervals=(interval,),
+        )
     # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): bind the per-contract
     # capture-hook factory to the lake root on the LIVE path so every F&O window
     # records a hash of EXACTLY what Groww sent. Skipped for a dry-run (no real
@@ -939,11 +964,22 @@ def _run_phase(
     breaker_canary = None if dry_run else make_breaker_canary_probe(client, pace=pace)
 
     def _progress(label: str, bars: int, failed: bool) -> None:
-        """Forward to the caller's hook + flush the ledger (either side optional)."""
+        """Forward to the caller's hook + flush the ledger (either side optional).
+
+        DEC-PULL-PROGRESS-HONESTY-001: also forwards the pair's report *bars* to
+        *on_bars* — REAL in SYNC mode (no pipeline; the only bars source there) and
+        an honest 0 in ASYNC mode (the pipeline consumer folds the real deltas via
+        its own ``on_bars`` seam), so each bar is counted EXACTLY once in both
+        modes — and fires the throttled, F&O-scope-filtered ledger sync so the
+        units denominator tracks the pull's own windows instead of pinning at 100%.
+        """
         if on_progress is not None:
             on_progress(label, bars, failed)
+        if on_bars is not None:
+            on_bars(bars)
         if flush is not None:
             flush()
+        live_sync()
 
     passes: list[_PassResult] = []
     # Merged per-pair reports + quarantined symbols across ALL rounds/buckets (last-round-wins),
@@ -1123,6 +1159,14 @@ def _run_phase(
         # until durable, so its synchronous tail already records the ledger before this point.
         _drain_fetch_pipeline_in_phase(fetch_pipeline)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+
+    # FINAL absolute progress push (DEC-PULL-PROGRESS-HONESTY-001): the pipeline is
+    # drained above, so every window is ledger-recorded — push the settled filtered
+    # counts ONCE, unthrottled (the last throttled tick may predate the final windows;
+    # the spot spine does the same final push in pull_all_spot). Idempotent absolute fold.
+    if ledger is not None and on_ledger_sync is not None:
+        final = ledger.progress_counts(markets=frozenset(by_market), intervals=(interval,))
+        on_ledger_sync(final.resolved, final.total, final.bars, final.failed, final.current)
 
     # bars/windows SUM across rounds (round N re-appends only newly-fetched windows — the
     # keep-first sink + ledger skip make double-counting impossible); the residual reflects
@@ -1358,14 +1402,20 @@ def _enrich_greeks_from_minute(
     (:func:`~brutex.data.greeks_enrich.resolve_risk_free_source` — fixed 6.5%
     default, ``BRUTEX_RISK_FREE_CSV`` override).
 
-    The WHOLE body is guarded (plan §15.4): any failure — a misconfigured rate
-    CSV, a missing wheel, an unexpected driver error — logs ONE
-    ``fno.greeks_enrich.error`` and returns; it can NEVER fail the pull. The
-    authoritative 1-minute candles are already durable in the lake; the Greeks
-    overlay is a re-derivable convenience layer the NEXT pull re-attempts
-    (stamp-driven, idempotent — Golden Rule #7/#10). Per-contract errors are
-    additionally quarantined inside the driver, so one bad contract never
-    sinks the pass.
+    The body is guarded (plan §15.4) with TWO deliberate exceptions
+    (DEC-GREEKS-PARALLEL-001, the #1188 follow-up (a)): a
+    :class:`~brutex.data.errors.LakeWriteHalt` (disk full / OOM at a lake
+    write) and a :class:`~brutex.data.errors.GreeksEnrichPoolBroken` (a
+    Greeks pool worker died abruptly — a host-resource condition) RE-RAISE so
+    they reach :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._run`'s
+    halt handling and fire the CRITICAL Telegram pull-halt alert. EVERY other
+    failure — a misconfigured rate CSV, a missing wheel, an unexpected driver
+    error — logs ONE ``fno.greeks_enrich.error`` and returns; those can never
+    fail the pull. The authoritative 1-minute candles are already durable in
+    the lake; the Greeks overlay is a re-derivable convenience layer the NEXT
+    pull re-attempts (stamp-driven, idempotent — Golden Rule #7/#10).
+    Per-contract errors are additionally quarantined inside the driver, so
+    one bad contract never sinks the pass.
 
     Returns
     -------
@@ -1376,6 +1426,11 @@ def _enrich_greeks_from_minute(
         ``"ErrorType: message"`` when the whole pass failed — surfaced on the
         report/note by the caller, never only a log line.
     """
+    # Wheel-free at function top (brutex.data.errors imports only brutex.models);
+    # the greeks_enrich import STAYS inside the try — a missing trading_core
+    # wheel must keep hitting the ok=False fence, never crash the pull.
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+
     try:
         from brutex.data.greeks_enrich import (
             GreeksEnrichTarget,
@@ -1419,8 +1474,15 @@ def _enrich_greeks_from_minute(
             bars_reused=report.bars_reused,
             spot_reads=report.spot_reads,
             spot_hits=report.spot_hits,
+            bars_skipped=report.bars_skipped,
         )
         return _GreeksEnrichOutcome(ok=True, error=None, errored_targets=report.errored)
+    except (LakeWriteHalt, GreeksEnrichPoolBroken):
+        # A pull-wide HOST condition (disk full / OOM / a dead pool worker) —
+        # re-raised past the fence so it reaches BackgroundPullJob._run's halt
+        # handling + the CRITICAL Telegram alert (DEC-GREEKS-PARALLEL-001; the
+        # _heal_lake_after_pull convention). Everything else stays fenced below.
+        raise
     except Exception as exc:
         _LOG.error("fno.greeks_enrich.error", error=str(exc))
         return _GreeksEnrichOutcome(
@@ -1446,6 +1508,8 @@ def pull_contract_candles(
     run_parallel: RunParallel | None = None,
     scope_start: date | None = None,
     scope_end: date | None = None,
+    on_bars: Callable[[int], None] | None = None,
+    on_ledger_sync: OnLedgerSync | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -1546,6 +1610,30 @@ def pull_contract_candles(
         default window law over the standard envelope). ``None``/``None`` (the
         default) is byte-identical to the unscoped pull. Distinct from
         *from_date*/*to_date*, which reshape every contract's fetch WINDOW.
+    on_bars
+        Optional LIVE bars-delta hook ``(bars_appended_delta) -> None``
+        (DEC-PULL-PROGRESS-HONESTY-001, the frozen-bars fix). Fired once per
+        durable window from BOTH modes without double-counting: in ASYNC mode the
+        fetch pipeline's background consumer invokes it per
+        :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.fold_totals`
+        (the producer-side per-pair report carries 0 bars); in SYNC mode
+        (kill-switch / no pipeline) the per-pair progress wrapper forwards the
+        pair's REAL report bars (and in async mode that same forward adds the
+        honest 0). Counts bars PROCESSED (sink-append input, the report's
+        ``bars_appended`` semantics), not net-new lake rows. ``None`` (default)
+        is byte-identical.
+    on_ledger_sync
+        Optional THROTTLED absolute-progress callback
+        ``(resolved, total, bars, failed, current) -> None``
+        (DEC-PULL-PROGRESS-HONESTY-001, the honest-denominator fix): fed from the
+        pull's own WindowLedger via the COMMON
+        :func:`~brutex.dashboard.pull_controller.make_live_sync`, FILTERED to this
+        pull's F&O scope (``groww-option`` / ``groww-future`` × ``1minute``) so the
+        cross-run, cross-market ledger's spot rows never pollute the denominator.
+        Honest envelope: the F&O denominator still GROWS mid-phase (contracts are
+        planned per market bucket), so the dashboard marks the phase *open_ended* —
+        this feeds real moving counts, it does NOT claim a final total. ``None``
+        (default — CLI / tests) is byte-identical.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -1597,7 +1685,11 @@ def pull_contract_candles(
         drain_write_consumer as _drain_write_consumer,
     )
 
-    fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
+    # The live-bars hook rides the pipeline's fold seam (DEC-PULL-PROGRESS-HONESTY-001):
+    # the background consumer folds each window's REAL durable bar count, so invoking
+    # on_bars there is the ONLY per-window truth in async mode (the producer-side
+    # per-pair report honestly carries 0 bars).
+    fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root, on_bars=on_bars)
     # The fetch_pipeline SUBSUMES the Lever-1 write-only decouple (DEC-FETCH-WRITE-OVERLAP-LEVER1-001):
     # it owns the ENTIRE tail (incl. ``sink.append``), so the batched ``write_pool`` is built ONLY when
     # the pipeline is OFF (the kill-switch / dry-run path) — never BOTH. This makes the pipeline's
@@ -1679,6 +1771,8 @@ def pull_contract_candles(
             run_parallel=run_parallel,
             write_pool=write_pool,
             fetch_pipeline=fetch_pipeline,
+            on_bars=on_bars,
+            on_ledger_sync=on_ledger_sync,
         )
     finally:
         # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute lake
@@ -1738,6 +1832,16 @@ def pull_contract_candles(
     # here (``_derive_daily_from_minute``) is REMOVED — derived data (intraday TFs +
     # the derived ``1day``) is written ONLY by the pipeline's final prebuild phase
     # (brutex.dashboard.pipeline_prebuild), strictly after a fully-successful fetch.
+    # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
+    # "historically complete" once its 1-minute landed clean — the only vendor phase).
+    # Stamped BEFORE the heal/enrich stage (DEC-GREEKS-PARALLEL-001): the fenced
+    # wrapper below now RE-RAISES a pull-wide halt (LakeWriteHalt /
+    # GreeksEnrichPoolBroken), and a cleanly-fetched contract must keep its
+    # completion stamp even when the best-effort overlay stage aborts — otherwise
+    # the next pull needlessly re-plans vendor-clean contracts. Order-safe:
+    # ``_mark_complete`` depends only on (registry, rebuilt, minute.complete).
+    contracts_completed = _mark_complete(registry, rebuilt, minute.complete)
+
     greeks_outcome = _GREEKS_NOT_RUN
     if not dry_run:
         # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
@@ -1747,17 +1851,18 @@ def pull_contract_candles(
         # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
         # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
         # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
-        # underlying spot, at the post-drain seam. Best-effort: NEVER fails the pull
-        # (fully guarded inside); FUT legs never get Greeks; skipped on a dry-run
-        # (nothing was written — the outcome honestly stays "did not run"). The
-        # pass verdict rides the report + note (DEC-GREEKS-ENRICH-OBSERVE-001).
+        # underlying spot, at the post-drain seam. Best-effort with a carved-out
+        # halt path: an ordinary enrich failure NEVER fails the pull (fenced
+        # inside), while a pull-wide HOST halt (LakeWriteHalt /
+        # GreeksEnrichPoolBroken) RE-RAISES to the job layer's CRITICAL alert
+        # (DEC-GREEKS-PARALLEL-001). FUT legs never get Greeks; skipped on a
+        # dry-run (nothing was written — the outcome honestly stays "did not
+        # run"). The pass verdict rides the report + note
+        # (DEC-GREEKS-ENRICH-OBSERVE-001).
         greeks_outcome = _enrich_greeks_from_minute(
             rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root
         )
 
-    # ``candle_status=complete`` keys on the 1-minute completion set (a contract is
-    # "historically complete" once its 1-minute landed clean — the only vendor phase).
-    contracts_completed = _mark_complete(registry, rebuilt, minute.complete)
     note = _build_note(
         dry_run=dry_run,
         contracts_selected=len(rebuilt),

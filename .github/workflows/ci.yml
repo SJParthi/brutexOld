@@ -703,9 +703,11 @@ jobs:
             pytest --cov=brutex.data.greeks_enrich --cov=brutex.data.spot_join --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_greeks_enrich.py tests/unit/test_data_spot_join.py \
               tests/unit/test_greeks_enrich_audit_regressions.py \
+              tests/unit/test_greeks_enrich_parallel.py \
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
-              tests/golden/test_greeks_enrich_golden.py
+              tests/golden/test_greeks_enrich_golden.py \
+              tests/golden/test_greeks_enrich_parallel_golden.py
           else
             echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
           fi
@@ -1745,7 +1747,8 @@ jobs:
             echo "(brutex.dashboard.universe_pull test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_pull_progress.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py
+            # + the ETA/open-ended/add_bars honesty suite (DEC-PULL-PROGRESS-HONESTY-001)
+            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
@@ -1781,6 +1784,7 @@ jobs:
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
               tests/unit/test_pull_jobs_singleflight.py \
+              tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
               tests/integration/test_dashboard_e2e.py
