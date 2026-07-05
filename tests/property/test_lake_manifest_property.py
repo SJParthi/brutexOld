@@ -118,8 +118,16 @@ def test_manifest_projection_matches_plain_filter(
     exclude: frozenset[str],
     interval_filter: list[str] | None,
 ) -> None:
-    """``_datasets_from_manifest`` == a plain Python filter over canonical rows."""
-    projected = _datasets_from_manifest(rows, exclude_segments=exclude, intervals=interval_filter)
+    """``_datasets_from_manifest`` == a plain Python filter over canonical rows.
+
+    The projection's real input domain is ``load_manifest_datasets``'s output —
+    already DEDUPED keep-first + validated — so the property feeds the same
+    canonical form (a raw duplicated list is collapsed by the loader, never
+    handed to the projection).
+    """
+    projected = _datasets_from_manifest(
+        _canonical(rows), exclude_segments=exclude, intervals=interval_filter
+    )
     expected = [
         {
             "kind": "spot",
