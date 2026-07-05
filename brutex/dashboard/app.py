@@ -2068,6 +2068,7 @@ def build_app(
                 dry_run=dry_run,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
+                floor_store=instrument_store,
             )
         except Exception as exc:  # surface the REAL reason, never swallow it
             # A blank "no data returned" 400 was hiding the actual failure
@@ -2366,6 +2367,7 @@ def build_app(
                 auto_retry=True,
                 until_clean=True,
                 on_ledger_sync=_ledger_sync,
+                floor_store=instrument_store,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -3094,6 +3096,7 @@ def build_app(
                     auto_retry=True,
                     until_clean=True,
                     on_ledger_sync=_ledger_sync,
+                    floor_store=instrument_store,
                 )
 
             def _run_metadata() -> MetadataPullReport:
@@ -3760,6 +3763,7 @@ def build_app(
                 session_rate=_session_rate,
                 auto_retry=True,
                 until_clean=until_clean,
+                floor_store=instrument_store,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report

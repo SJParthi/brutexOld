@@ -1514,6 +1514,15 @@ jobs:
           else
             echo "(brutex.adapters.groww.live test file not present yet — gate inactive)"
           fi
+          # DEC-VENDOR-FLOOR-LAZY-PROBE-001: strict gate on the lazy vendor-depth-floor
+          # learner (probe_depth reuse + mass-empty-breaker gate + schema_meta persist +
+          # pre-floor mass-settle + planning clamp). Injectable probe/store/ledger
+          # fakes, so standalone-gateable with no growwapi/network. 100% line+branch.
+          if compgen -G "tests/unit/test_groww_vendor_floor.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.vendor_floor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_vendor_floor.py
+          else
+            echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
+          fi
           # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
           # modules + the shared candle-field rules. Import-light (pure data /
           # parser over brutex.data.models), so standalone-gateable.

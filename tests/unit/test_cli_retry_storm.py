@@ -2040,3 +2040,60 @@ def test_cmd_fetch_live_threads_loaded_overlay(
     assert rc == cli.EXIT_OK
     assert captured
     assert all(observed == expected for observed in captured)
+
+
+def test_cmd_fetch_real_pull_controller_receives_smooth_pacing_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI build site threads the TRI-STATE smooth-pacing mode into its controller.
+
+    DEC-SMOOTH-PACING-AUTOLATCH-001 regression — fail-before: on origin/main the
+    CLI `brutex fetch` path built its ``RateController`` WITHOUT any smooth-pacing
+    argument (``BRUTEX_GROWW_SMOOTH_PACING`` was a dead flag there), so the
+    captured kwargs carried no ``smooth_pacing_mode`` and this assertion failed.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from brutex.adapters import rate_common
+    from brutex.adapters.groww.constants import GROWW_SMOOTH_PACING_ENV
+    from brutex.adapters.rate_common import SMOOTH_PACING_ADAPTIVE, RateController
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    captured: list[str | None] = []
+
+    class _RecordingController(RateController):
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs.get("smooth_pacing_mode"))  # type: ignore[arg-type]
+            super().__init__(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delenv(GROWW_SMOOTH_PACING_ENV, raising=False)
+    monkeypatch.setattr(rate_common, "RateController", _RecordingController)
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_build_live_groww_spot",
+        lambda lake, catalog=None: (
+            _RealVendorSpotAdapter(bars_per_window=1),
+            ParquetBarSink(writer=ParquetWriter(lake_root=lake), catalog=catalog),
+        ),
+    )
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=2,
+        auto_retry=False,
+    )
+    assert rc == cli.EXIT_OK
+    # The unset default resolves ADAPTIVE and the CLI controller RECEIVED it.
+    assert captured == [SMOOTH_PACING_ADAPTIVE]

@@ -171,7 +171,7 @@ class ClientPool:
         """Return a new pool with *pace* rebound on EVERY leaf (shared meter preserved).
 
         The :class:`~brutex.adapters.groww.client.GrowwClientProtocol` seam
-        (:func:`~brutex.adapters.groww.run_ingest._with_paced_client`) wires the shared rate
+        (:func:`~brutex.adapters.groww.run_ingest.with_paced_client`) wires the shared rate
         bucket into the client's internal fast-retry AFTER the adapter is built; for a pool
         that must re-fan into ALL K leaves, not just one. Each leaf's ``with_pace`` is a
         :func:`dataclasses.replace` that keeps the shared ``meter`` (``compare=False``), so

@@ -27,14 +27,20 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from brutex.adapters.groww.adapter import GrowwMarketAdapter
+from brutex.adapters.groww.client import GrowwClient
+from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
 from brutex.adapters.groww.errors import GrowwAuthError, GrowwBadRequestError
 from brutex.adapters.groww.fetch_pipeline import RawFetchResult
+from brutex.adapters.groww.instruments import load_index_from_csv
+from brutex.adapters.groww.vendor_floor import VendorFloorLearner, vendor_floor_key
 from brutex.adapters.ingest_common import (
     SETTLED_SKIPPED_OPERATOR_THRESHOLD,
     SyntheticSpotAdapter,
     synthetic_spot_bars,
 )
 from brutex.adapters.protocol import MarketAdapter
+from brutex.dashboard import pull_controller
 from brutex.dashboard.pull_controller import (
     GROWW_FETCH_INTERVALS,
     GROWW_HISTORY_FLOOR,
@@ -55,6 +61,7 @@ from brutex.dashboard.pull_controller import (
     resolve_pull_symbols,
     resolve_pull_targets,
 )
+from brutex.data.instrument_store import open_instrument_store
 from brutex.data.models import CandleBar
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -2832,6 +2839,236 @@ class TestSkippedAuditWired:
             self._pull(tmp_path)  # a NEW pull_id → audits again, nothing left
         audits = [log for log in logs if log["event"] == "pull.skipped_audit"]
         assert [a["reopened"] for a in audits] == [1, 0]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Vendor-floor learner wiring (DEC-VENDOR-FLOOR-LAZY-PROBE-001 review folds)
+# ────────────────────────────────────────────────────────────────────────
+#
+# BLOCKER pin: the live pool leaves carry a NO-OP pace (`build_live_pool`
+# without a `pace`), and the session RateController is bound only via
+# `run_ingest.with_paced_client` INSIDE the spine — so a learner built over the
+# RAW adapter probed UNPACED (outside the 8 r/s ceiling + 500/min governor).
+# Both build sites must construct the learner over
+# `with_paced_client(adapter, pace)`; these tests pin that BEHAVIORALLY (the
+# storm-breaker arming-wiring pattern: patch the maker in the site's namespace,
+# capture the adapter it receives, assert the pace identity), because the
+# build-site ternary is a single statement — 100% line+branch held even when
+# the paced wrap was missing.
+#
+# MINOR pin: the load→clamp→plan composition over a REAL InstrumentStore
+# (`schema_meta` set_meta/get_meta — runtime Protocol conformance, not just
+# mypy) end-to-end through a real pull: the clamped symbol's 1-minute fetches
+# start at the learned floor, the other symbol keeps the full range, and the
+# 1-day phase stays unclamped.
+
+_VF_HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
+
+
+def _vf_csv_row(**over: str) -> str:
+    cells = dict.fromkeys(INSTRUMENT_CSV_COLUMNS, "")
+    cells.update(over)
+    return ",".join(cells[c] for c in INSTRUMENT_CSV_COLUMNS)
+
+
+_VF_NIFTY_ROW = _vf_csv_row(
+    exchange="NSE",
+    exchange_token="NIFTY",
+    trading_symbol="NIFTY",
+    groww_symbol="NSE-NIFTY",
+    name="NIFTY 50",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_VF_INDEX = load_index_from_csv("\n".join([_VF_HEADER, _VF_NIFTY_ROW]) + "\n")
+
+
+class _VFEmptySDK:
+    """``GrowwSDK``-shaped fake — every historical-candle window clean-empty."""
+
+    def get_historical_candles(self, **_kwargs: object) -> Mapping[str, object]:
+        return {"candles": []}
+
+    def get_expiries(self, **_kwargs: object) -> Mapping[str, object]:
+        return {}
+
+    def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
+        return {}
+
+
+def _vf_groww_adapter() -> GrowwMarketAdapter:
+    return GrowwMarketAdapter(
+        client=GrowwClient(sdk=_VFEmptySDK(), sleep=lambda _s: None),
+        index=_VF_INDEX,
+    )
+
+
+def _vf_fake_runtime(pace_hook: Callable[[], None]) -> Callable[..., object]:
+    """A `_live_rate_runtime` stand-in returning a REAL pace hook (live-pull shape)."""
+
+    def _runtime(_use_live_rate: bool, _session_rate: object = None) -> object:
+        return ((pace_hook, None, None, None), None, None)
+
+    return _runtime
+
+
+class TestVendorFloorPacedWiring:
+    def test_bulk_learner_is_built_over_the_paced_adapter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BLOCKER regression (pull_all_spot): the learner's adapter is the PACED
+        replica — its client's `pace` IS the session hook, never the raw adapter."""
+        captured: list[MarketAdapter] = []
+
+        def _pace_hook() -> None:  # identity-comparable (a plain function, not a bound method)
+            return None
+
+        def _recording_maker(
+            adapter: MarketAdapter,
+            *,
+            history_floor: date,
+            today: date,
+            store: object = None,
+        ) -> VendorFloorLearner | None:
+            del history_floor, today, store
+            captured.append(adapter)
+            return None  # spine accepts a None learner — the probe itself is off
+
+        raw = _vf_groww_adapter()
+        monkeypatch.setattr(pull_controller, "make_vendor_floor_learner", _recording_maker)
+        monkeypatch.setattr(pull_controller, "_live_rate_runtime", _vf_fake_runtime(_pace_hook))
+        pull_all_spot(
+            [_index("NIFTY")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2026-02-01",
+            to_date="2026-02-15",
+            adapter_factory=lambda _root, _insts: (raw, NullBarSink()),
+        )
+        assert len(captured) == 1
+        paced = captured[0]
+        assert paced is not raw  # a rebuilt paced replica, never the raw pool adapter
+        assert isinstance(paced, GrowwMarketAdapter)
+        assert isinstance(paced.client, GrowwClient)
+        assert paced.client.pace is _pace_hook  # every probe fetch admits through the bucket
+
+    def test_bulk_dry_run_never_builds_a_learner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The arming gate: a dry-run threads None and never even calls the maker."""
+
+        def _never_maker(*_a: object, **_kw: object) -> VendorFloorLearner:
+            raise AssertionError("make_vendor_floor_learner must not run for a dry-run")
+
+        monkeypatch.setattr(pull_controller, "make_vendor_floor_learner", _never_maker)
+        report = pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert report.total_symbols == 1
+
+    def test_single_symbol_learner_is_built_over_the_paced_adapter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BLOCKER regression (pull_candles): the single-symbol twin of the bulk pin."""
+        captured: list[MarketAdapter] = []
+
+        def _pace_hook() -> None:
+            return None
+
+        def _recording_maker(
+            adapter: MarketAdapter,
+            *,
+            history_floor: date,
+            today: date,
+            store: object = None,
+        ) -> VendorFloorLearner | None:
+            del history_floor, today, store
+            captured.append(adapter)
+            return None
+
+        raw = _vf_groww_adapter()
+        monkeypatch.setattr(pull_controller, "make_vendor_floor_learner", _recording_maker)
+        monkeypatch.setattr(pull_controller, "_live_rate_runtime", _vf_fake_runtime(_pace_hook))
+        pull_candles(
+            _index("NIFTY"),
+            lake_root=tmp_path,
+            from_date="2026-02-01",
+            to_date="2026-02-15",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (raw, NullBarSink()),
+        )
+        assert len(captured) == 1
+        paced = captured[0]
+        assert paced is not raw
+        assert isinstance(paced, GrowwMarketAdapter)
+        assert isinstance(paced.client, GrowwClient)
+        assert paced.client.pace is _pace_hook
+
+
+class _WindowRecordingAdapter(SyntheticSpotAdapter):
+    """A synthetic adapter recording every fetched ``(symbol, interval, start, end)``."""
+
+    calls: list[tuple[str, str, date, date]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        # The parent is a FROZEN slots dataclass — its generated __setattr__
+        # refuses plain assignment, so the recorder list is attached via
+        # object.__setattr__ (the dataclass-sanctioned escape hatch).
+        object.__setattr__(self, "calls", [])
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        self.calls.append((symbol, interval, start, end))  # list.append is GIL-atomic
+        return super().fetch_ohlcv(
+            symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
+        )
+
+
+class TestVendorFloorPlanningClampEndToEnd:
+    def test_persisted_floor_clamps_minute_fetches_via_a_real_instrument_store(
+        self, tmp_path: Path
+    ) -> None:
+        """MINOR regression: the load→clamp→plan→fetch composition runs END-TO-END
+        with a REAL ``InstrumentStore`` as the ``floor_store`` (runtime Protocol
+        conformance + the symbol_name keying proven, not just statically):
+
+        * the symbol with a persisted ``groww.vendor_floor.<symbol_name>`` plans +
+          FETCHES its 1-minute range from the learned floor;
+        * the other symbol keeps the full requested range;
+        * the 1-DAY phase stays UNCLAMPED (the ``symbol_windows`` seam is
+          sub-daily-only per ``_resolve_spot_window``).
+        """
+        adapter = _WindowRecordingAdapter()
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        with open_instrument_store(tmp_path / "master.duckdb") as store:
+            store.set_meta(vendor_floor_key("13"), "2026-02-08")
+            report = pull_all_spot(
+                [_index("13"), _index("25")],
+                lake_root=lake,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2026-02-01",
+                to_date="2026-02-15",
+                intervals=_BOTH_INTERVALS,
+                adapter_factory=_real_bulk_factory(adapter),
+                floor_store=store,
+            )
+        minute_13 = [(s, e) for sym, iv, s, e in adapter.calls if sym == "13" and iv == "1minute"]
+        minute_25 = [(s, e) for sym, iv, s, e in adapter.calls if sym == "25" and iv == "1minute"]
+        daily_13 = [(s, e) for sym, iv, s, e in adapter.calls if sym == "13" and iv == "1day"]
+        assert minute_13 and minute_25 and daily_13
+        # The learned floor clamps ONLY symbol 13's 1-minute planning start.
+        assert min(s for s, _ in minute_13) == date(2026, 2, 8)
+        # The clamp narrows ONLY the start — both symbols share the tiler's
+        # (to_date + 1 day) fetch end.
+        assert max(e for _, e in minute_13) == max(e for _, e in minute_25) == date(2026, 2, 16)
+        # The other symbol keeps the full requested range.
+        assert min(s for s, _ in minute_25) == date(2026, 2, 1)
+        # The 1-day phase is NEVER clamped (daily anchor stays full-range).
+        assert min(s for s, _ in daily_13) == date(2026, 2, 1)
+        assert report.total_failed == 0
 
 
 # ────────────────────────────────────────────────────────────────────────

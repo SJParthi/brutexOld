@@ -100,7 +100,7 @@ def test_base_exception_still_releases_the_in_flight_meter_slot() -> None:
 
 
 def test_replace_preserves_the_same_meter_instance() -> None:
-    # `_with_paced_client` rebuilds the client via dataclasses.replace to wire `pace`;
+    # `with_paced_client` rebuilds the client via dataclasses.replace to wire `pace`;
     # the meter MUST stay the SAME instance so the live pull + the dashboard read ONE
     # aggregate, never two fragmented per-client meters (the invisibility this fixes).
     from dataclasses import replace
@@ -520,7 +520,7 @@ class TestCallDeadline:
 def test_with_pace_rebinds_pace_and_preserves_meter() -> None:
     """`with_pace` returns a NEW client with pace rebound, sharing the SAME meter (immutable).
 
-    The GrowwClientProtocol seam `_with_paced_client` uses to wire the shared rate bucket
+    The GrowwClientProtocol seam `with_paced_client` uses to wire the shared rate bucket
     after the adapter is built (DEC-GROWW-CLIENT-POOL-001) — a `dataclasses.replace`, so the
     original is untouched and the achieved-rate meter (compare=False) carries through.
     """
