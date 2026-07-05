@@ -248,6 +248,17 @@ function renderSpot(rows) {
   // operator sees in ONE view which dimension is partial AND its actual date range.
   const rng = (s, e) =>
     (s || e) ? '<span class="rng">' + esc(s || "?") + " → " + esc(e || "?") + "</span>" : "—";
+  // Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
+  // "Open substituted: N/M" — N of the M stored sessions have their FIRST present
+  // 1-minute bar after the 09:15 IST canonical open, so those sessions' DERIVED
+  // 1-day open is the earliest-present-minute substitute, not the canonical open
+  // price. INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
+  // Both operands are coerced via Number() BEFORE interpolation so the fragment
+  // can only ever carry digits/NaN, never markup (XSS guard).
+  const osub = (n, m) => {
+    const N = Number(n || 0), M = Number(m || 0);
+    return N > 0 ? '<span class="chip partial">' + N + "/" + M + "</span>" : "—";
+  };
   const body = rows.map((r) =>
     "<tr>"
     + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
@@ -255,13 +266,16 @@ function renderSpot(rows) {
     + "<td>" + esc(r.category) + "</td>"
     + "<td>" + chip(r["1minute"]) + "</td>"
     + "<td>" + rng(r["1minute_start"], r["1minute_end"]) + "</td>"
+    + "<td>" + osub(r.open_substituted_days, r.session_days) + "</td>"
     + "<td>" + chip(r.overall) + "</td>"
     + "</tr>"
   ).join("");
   spotPanel.innerHTML =
     "<table><thead><tr>"
     + "<th>Symbol</th><th>Exchange</th><th>Category</th>"
-    + "<th>1-minute</th><th>1-minute covered</th><th>Overall</th>"
+    + "<th>1-minute</th><th>1-minute covered</th>"
+    + '<th title="sessions whose first stored minute is after the 09:15 IST open — their derived 1-day open is a substituted price (informational)">Open substituted</th>'
+    + "<th>Overall</th>"
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 

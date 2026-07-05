@@ -247,13 +247,24 @@ GROWW_HTTP_READ_TIMEOUT_S: Final[float] = 30.0
 #: ceiling. :func:`~brutex.adapters.groww.write_deadline.append_with_deadline` runs
 #: ``sink.append`` under this deadline so a hang raises a TRANSIENT
 #: :class:`~brutex.data.errors.WriteDeadlineExceeded` — the ingest spines DEFER that one
-#: window (record FAILED → re-pull next round) and the fetch lane is FREED. This bounds the
-#: WRITE itself (the merge/render/fsync/replace), DISTINCT from
-#: :data:`~brutex.data.partition_lock.DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS` (which bounds
-#: only the ``flock`` ACQUIRE before the write). 90 s is GENEROUS — a merely-SLOW
-#: deep-month merge (hundreds of ms typical; pathological deep partitions a few seconds)
-#: always completes well within it, but a true hang trips it in bounded time, far under the
-#: 600 s pull watchdog. NOT a vendor-documented limit; operator-tunable via
+#: window (record FAILED → re-pull next round) and the fetch lane is FREED. This deadline
+#: wraps the WHOLE ``sink.append`` — the ``flock`` ACQUIRE (bounded by
+#: :data:`~brutex.data.partition_lock.DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS`) PLUS the
+#: merge/render/fsync/replace — so the ORDERING INVARIANT
+#: (DEC-WRITE-DEADLINE-LOCK-ORDER-001) is: the lock-acquire default MUST stay strictly
+#: BELOW this value with real margin (75 s < 90 s, 15 s margin). When the lock bound sat
+#: ABOVE this deadline (the prior 120 s default), the lock bound was UNREACHABLE — this
+#: deadline abandoned the write thread at 90 s while it still blocked in the ``flock``
+#: poll loop, leaking the thread + lock fd instead of taking the clean
+#: :class:`~brutex.data.errors.PartitionLockTimeout` defer path. The ordering is pinned
+#: by ``tests/unit/test_write_deadline_lock_order.py`` (the two constants deliberately
+#: live in their own modules — ``brutex.data`` never imports ``brutex.adapters``); the
+#: env overrides (``BRUTEX_GROWW_WRITE_DEADLINE_S`` / ``BRUTEX_PARTITION_LOCK_TIMEOUT_S``)
+#: CAN re-invert it at runtime, which ``append_with_deadline`` WARNs about once per
+#: process at use time. 90 s is GENEROUS — a merely-SLOW deep-month merge (hundreds of ms
+#: typical; pathological deep partitions a few seconds) always completes well within it,
+#: but a true hang trips it in bounded time, far under the 600 s pull watchdog. NOT a
+#: vendor-documented limit; operator-tunable via
 #: :func:`~brutex.adapters.groww.write_deadline.resolve_write_deadline_seconds`
 #: (env ``BRUTEX_GROWW_WRITE_DEADLINE_S``).
 GROWW_WRITE_DEADLINE_S: Final[float] = 90.0
@@ -401,6 +412,45 @@ GROWW_TOKEN_ISSUANCE_RETRY_ATTEMPTS: Final[int] = 3
 GROWW_TOKEN_ISSUANCE_RETRY_BASE_S: Final[float] = 1.0
 #: Per-attempt cap (seconds) for the cold-start issuance back-off sleep.
 GROWW_TOKEN_ISSUANCE_RETRY_CAP_S: Final[float] = 4.0
+
+# ── Token-stale fetch-lane PAUSE (DEC-TOKEN-STALE-PAUSE-001) ──────────────────
+#: Wall-clock bound (seconds) the fetch lane WAITS for the read-only token broker
+#: to hold a fresh token before a :class:`~brutex.adapters.groww.errors.\
+#: GrowwTokenStillStaleError` is allowed to propagate. Forensically calibrated:
+#: the operator's real 2026-07-04 overnight run measured the 06:00-IST reset →
+#: external-Lambda mint lag at 5 m 31 s (331 s) — during which the F&O window
+#: ladder burned all its attempts on 111 windows (339 failed calls) that the
+#: until-clean rounds then had to rescue. 420 s (7 min) covers that observed
+#: worst case with margin while staying WELL under the 600 s pull watchdog; the
+#: wait additionally beats the progress-beat seam so the watchdog can never
+#: false-fire during it. A dead broker still fails LOUDLY: once the (shared,
+#: per-generation) deadline expires the error propagates exactly as before —
+#: the window defers FAILED and the dead-credential escalation
+#: (DEC-VENDOR-DOWN-BREAKER-001) still applies. HONEST trade (Golden Rule
+#: #10): because the whole pool spends AT MOST ONE such pause per stale
+#: generation, a GENUINELY dead broker's ``GrowwCredentialDeadError``
+#: escalation is DELAYED by at most one :data:`GROWW_TOKEN_STALE_WAIT_S`
+#: (~420 s — the worst-case time-to-halt moves from the breaker's ~600 s
+#: streak-span floor to ~1020 s wall-clock) — deliberate, bounded, and
+#: disclosed, bought so a HEALTHY 06:00 rotation never burns window
+#: attempts. Cosmetic side-effect: a worker sleeping in the pause still
+#: holds its in-flight call-meter slot (``meter.start`` fired before the
+#: auth error surfaced), so the ``in_flight`` gauge reads elevated during a
+#: pause; the achieved-rps completed-rate is NOT inflated (a paused attempt
+#: never records ``completed``). NOT a vendor limit — an operator-tunable
+#: pause bound (env :data:`GROWW_TOKEN_STALE_WAIT_ENV`).
+GROWW_TOKEN_STALE_WAIT_S: Final[float] = 420.0
+#: Env override for :data:`GROWW_TOKEN_STALE_WAIT_S` (float seconds; ``0``
+#: explicitly DISABLES the pause — byte-identical to the pre-gate behaviour;
+#: blank / non-numeric / non-finite / negative falls back to the default).
+GROWW_TOKEN_STALE_WAIT_ENV: Final[str] = "BRUTEX_GROWW_TOKEN_STALE_WAIT_S"  # noqa: S105  # env var name, not a secret
+#: Poll cadence (seconds) between fresh-token checks during the stale-wait.
+#: ONE waiter per pool (the leader) does ONE broker re-read per tick — never a
+#: per-thread SSM stampede; the others only poll the in-process generation.
+GROWW_TOKEN_STALE_POLL_S: Final[float] = 5.0
+#: Bounded structlog cadence (seconds) for the ``groww.token.stale_wait`` event
+#: — ONE event per pool per interval, however many threads are waiting.
+GROWW_TOKEN_STALE_LOG_EVERY_S: Final[float] = 30.0
 
 # ── Shared token broker (DEC-TOKEN-BROKER-AWS-001 / DEC-AWS-ONLY-CREDS-001) ───
 # The operator's FINAL design: the Groww api_key, TOTP secret AND the daily minted
@@ -566,6 +616,10 @@ __all__ = [
     "GROWW_TOKEN_PARAM_TOTP_SECRET_ENV",
     "GROWW_TOKEN_RESET_HOUR_ENV",
     "GROWW_TOKEN_RESET_HOUR_IST",
+    "GROWW_TOKEN_STALE_LOG_EVERY_S",
+    "GROWW_TOKEN_STALE_POLL_S",
+    "GROWW_TOKEN_STALE_WAIT_ENV",
+    "GROWW_TOKEN_STALE_WAIT_S",
     "GROWW_WRITE_DEADLINE_S",
     "INDIA_VIX_SYMBOL",
     "INSTRUMENT_CSV_COLUMNS",

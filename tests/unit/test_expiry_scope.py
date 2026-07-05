@@ -18,6 +18,7 @@ from brutex.adapters.groww.expiry_scope import (
     expiry_in_scope,
     log_expiry_scope_summary,
     log_out_of_scope_expiries,
+    normalize_expiry_scope,
     partition_contracts_by_scope,
 )
 from brutex.data.registry_store import ContractRow
@@ -321,3 +322,116 @@ def test_scope_summary_default_scope_emits_nothing() -> None:
     with capture_logs() as logs:
         log_expiry_scope_summary(part, scope_start=None, scope_end=None)
     assert logs == []
+
+
+# ── normalize_expiry_scope — the live-edge law (DEC-EXPIRY-SCOPE-LIVE-EDGE-001) ──
+
+_ENVELOPE_END = date(2026, 7, 3)  # the request-time "previous day" default bound
+_FLOOR = date(2020, 1, 1)  # GROWW_HISTORY_FLOOR (CLAUDE.md §3)
+
+
+def _normalize(start: date | None, end: date | None) -> tuple[date | None, date | None]:
+    return normalize_expiry_scope(start, end, envelope_end=_ENVELOPE_END, floor=_FLOOR)
+
+
+def test_normalize_default_shaped_bounds_lift_to_unbounded() -> None:
+    """The picker's untouched pre-fill (floor → prev-day) lifts to (None, None).
+
+    THE live-edge bug (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): the default one-click
+    pull sent exactly these bounds, so ``scope_end = prev-day`` scoped OUT every
+    live/unexpired contract. Default-shaped in ⇒ unbounded out.
+    """
+    assert _normalize(_FLOOR, _ENVELOPE_END) == (None, None)
+
+
+def test_normalize_scope_end_equal_to_envelope_end_lifts() -> None:
+    """Boundary: ``scope_end == envelope_end`` lifts (>= is the law)."""
+    assert _normalize(None, _ENVELOPE_END) == (None, None)
+
+
+def test_normalize_scope_end_after_envelope_end_lifts() -> None:
+    """An explicit 'today' (or any later) pick also lifts — never a narrower scope."""
+    assert _normalize(None, _ENVELOPE_END + timedelta(days=1)) == (None, None)
+
+
+def test_normalize_scope_end_one_day_before_envelope_is_kept() -> None:
+    """Boundary teeth: prev-day − 1 is a GENUINE narrowing — passes through."""
+    kept = _ENVELOPE_END - timedelta(days=1)
+    assert _normalize(None, kept) == (None, kept)
+
+
+def test_normalize_scope_start_at_floor_lifts() -> None:
+    """``scope_start == floor`` is the default pre-fill — lifted to None."""
+    assert _normalize(_FLOOR, None) == (None, None)
+
+
+def test_normalize_scope_start_below_floor_lifts() -> None:
+    """A pre-2020 pick is default-equivalent (nothing predates the floor)."""
+    assert _normalize(date(2019, 6, 1), None) == (None, None)
+
+
+def test_normalize_scope_start_one_day_after_floor_is_kept() -> None:
+    """Boundary teeth: floor + 1 day is a genuine narrowing — kept."""
+    kept = _FLOOR + timedelta(days=1)
+    assert _normalize(kept, None) == (kept, None)
+
+
+def test_normalize_genuinely_narrowed_range_passes_through_unchanged() -> None:
+    """#1146 permutation-preservation: a narrowed range scopes exactly as today."""
+    start, end = date(2021, 3, 1), date(2022, 4, 15)
+    assert _normalize(start, end) == (start, end)
+
+
+def test_normalize_both_none_is_identity_and_silent() -> None:
+    """The blank pull is byte-identical: (None, None) in ⇒ (None, None) out, no log."""
+    with capture_logs() as logs:
+        assert _normalize(None, None) == (None, None)
+    assert [e for e in logs if e["event"] == "fno.expiry_scope.live_edge_unbounded"] == []
+
+
+def test_normalize_kept_range_emits_no_log() -> None:
+    """A genuinely narrowed range is not a lift — no live-edge log fires."""
+    with capture_logs() as logs:
+        _normalize(date(2021, 3, 1), date(2022, 4, 15))
+    assert [e for e in logs if e["event"] == "fno.expiry_scope.live_edge_unbounded"] == []
+
+
+def test_normalize_lift_logs_raw_vs_effective() -> None:
+    """The one live-edge log names the raw AND effective bounds + the envelope."""
+    with capture_logs() as logs:
+        _normalize(_FLOOR, _ENVELOPE_END)
+    (event,) = [e for e in logs if e["event"] == "fno.expiry_scope.live_edge_unbounded"]
+    assert event["raw_start"] == "2020-01-01"
+    assert event["raw_end"] == "2026-07-03"
+    assert event["effective_start"] is None
+    assert event["effective_end"] is None
+    assert event["envelope_end"] == "2026-07-03"
+    assert event["floor"] == "2020-01-01"
+
+
+def test_normalize_partial_lift_end_only_logs_and_keeps_start() -> None:
+    """Only the default-shaped bound lifts; the narrowed one is kept + named raw."""
+    with capture_logs() as logs:
+        result = _normalize(date(2021, 3, 1), _ENVELOPE_END)
+    assert result == (date(2021, 3, 1), None)
+    (event,) = [e for e in logs if e["event"] == "fno.expiry_scope.live_edge_unbounded"]
+    assert event["raw_start"] == "2021-03-01"
+    assert event["effective_start"] == "2021-03-01"
+    assert event["effective_end"] is None
+
+
+def test_normalize_lifted_default_keeps_live_expiry_in_scope() -> None:
+    """END-TO-END teeth: the normalized default scope keeps a LIVE expiry pulled.
+
+    Before the fix the default bounds excluded an expiry after prev-day; after
+    normalization the partition keeps the live contract IN SCOPE with zero
+    out-of-scope groups.
+    """
+    live = _row("NIFTY", _ENVELOPE_END + timedelta(days=20))
+    start, end = _normalize(_FLOOR, _ENVELOPE_END)
+    part = partition_contracts_by_scope([live], scope_start=start, scope_end=end)
+    assert part.in_scope == (live,)
+    assert part.out_by_expiry == {}
+    # Regression contrast: the RAW default bounds would have scoped it OUT.
+    raw = partition_contracts_by_scope([live], scope_start=_FLOOR, scope_end=_ENVELOPE_END)
+    assert raw.in_scope == ()

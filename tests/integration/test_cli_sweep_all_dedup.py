@@ -25,6 +25,10 @@ and drives ``cli.cmd_sweep_all`` for real:
   the grid fires ``cli._emit_pull_halt_alert`` exactly once then re-raises
   (the cmd_fetch DEC-TELEGRAM-PULL-HALT-001 pattern); a clean run fires only
   ``sweep_complete``; ``KeyboardInterrupt`` never alerts.
+* **DEC-SLA-LAUNCH-GUARD-001 — SLA launch guard.** An over-envelope
+  projection REFUSES the launch (``EXIT_USER_ERROR``, honest message, zero
+  artifacts); ``--acknowledge-sla-overrun`` proceeds with the loud warning;
+  a malformed / NaN ``BRUTEX_SWEEP_PER_TUPLE_SECONDS`` is a clean user error.
 """
 
 from __future__ import annotations
@@ -306,6 +310,87 @@ def test_cmd_sweep_all_clean_run_fires_no_halt_alert(
     assert len(completed) == 1
 
 
+def test_cmd_sweep_all_small_grid_auto_resolves_sequential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0016 small-grid fallback END-TO-END: a real tiny sweep runs 1 worker.
+
+    With ``BRUTEX_SWEEP_WORKERS`` UNSET on a (simulated) 14-core box — where the
+    AUTO count alone would be 8 — the launcher threads the grid's real
+    ``count_sweep_tuples`` into ``resolve_sweep_workers``, the tiny grid
+    (``tuple_count < 2 × auto``) resolves to 1, and the SEQUENTIAL
+    ``run_supervised_grid`` path runs; the parallel driver is never dispatched.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.delenv("BRUTEX_SWEEP_WORKERS", raising=False)
+    monkeypatch.delenv("BRUTEX_SWEEP_SMALL_GRID_FACTOR", raising=False)
+    # resolve_sweep_workers defaults its probe to os.cpu_count AT CALL TIME, so
+    # this patch is honored — a 14-core box, auto = 8 (the fallback's teeth:
+    # without the small-grid rule this run WOULD dispatch the parallel driver).
+    monkeypatch.setattr("os.cpu_count", lambda: 14)
+
+    sequential_runs: list[bool] = []
+    real = sweep_supervisor.run_supervised_grid
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        sequential_runs.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sweep_supervisor, "run_supervised_grid", _spy)
+
+    def _never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a small grid must never dispatch the parallel driver")
+
+    monkeypatch.setattr(sweep_parallel, "run_parallel_grid", _never)
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps")
+
+    assert rc == 0
+    assert sequential_runs == [True]  # exactly one sequential grid run
+    out = capsys.readouterr().out
+    assert "parallel mode" not in out  # the parallel banner never printed
+    assert "sweep-all done" in out
+
+
+def test_cmd_sweep_all_big_grid_auto_dispatches_parallel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0016 AUTO path END-TO-END: a big-enough grid actually goes parallel.
+
+    The exact inverse of the small-grid test above (review MINOR-2): with
+    ``BRUTEX_SWEEP_WORKERS`` UNSET on a (simulated) 4-core box (auto = 2,
+    small-grid threshold = 2 × 2 = 4), a REAL 4-tuple grid (2 directions ×
+    2 k-values — exactly AT the strict boundary, so NOT small) dispatches the
+    PARALLEL driver through ``cmd_sweep_all`` for real; the sequential
+    ``run_supervised_grid`` is poisoned to fail the test if entered. A future
+    regression at the composition point (e.g. the resolver called before the
+    grid exists → a wrong ``tuple_count`` demoting everything to sequential)
+    trips the poison.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.delenv("BRUTEX_SWEEP_WORKERS", raising=False)
+    monkeypatch.delenv("BRUTEX_SWEEP_SMALL_GRID_FACTOR", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 4)  # auto = 2 → threshold 4
+
+    def _never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a big grid on the AUTO path must dispatch the parallel driver")
+
+    monkeypatch.setattr(sweep_supervisor, "run_supervised_grid", _never)
+
+    rc = _sweep_all(
+        lake_root,
+        catalog_path,
+        tmp_path / "sweeps",
+        directions="BUY,SELL",
+        k="2,3",  # 2 × 2 = 4 tuples == 2·auto → NOT small (strict `<` boundary)
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "parallel mode — 2 workers" in out  # the AUTO count, not an env override
+    assert "sweep-all done" in out
+
+
 def test_cmd_sweep_all_keyboard_interrupt_never_alerts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,3 +409,89 @@ def test_cmd_sweep_all_keyboard_interrupt_never_alerts(
         _sweep_all(lake_root, catalog_path, tmp_path / "sweeps")
 
     assert fired == []
+
+
+# ────────────────────────────────────────────────────────────────────────
+# SLA-honesty launch guard wiring (DEC-SLA-LAUNCH-GUARD-001)
+#
+# ``cmd_sweep_all`` is pragma-no-cover, so — exactly like the dedup/abort
+# tests above — these are the HONEST functional validation of the guard's
+# production wiring (hostile-review MAJOR-1): a mutation swapping the
+# REFUSED branch, or deleting the guard block, fails here.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_sweep_all_sla_guard_refuses_over_envelope_grid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An over-envelope projection REFUSES the launch with the honest message —
+    EXIT_USER_ERROR, no sweep artifacts, no false abort alert."""
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    fired: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", fired.append)
+    # 1 tuple × 1e7 s ≈ 115 days ≫ the §8 4-day envelope.
+    monkeypatch.setenv("BRUTEX_SWEEP_PER_TUPLE_SECONDS", "1e7")
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    rc = _sweep_all(lake_root, catalog_path, results_root)
+
+    assert rc == cli.EXIT_USER_ERROR
+    captured = capsys.readouterr()
+    assert "REFUSED" in captured.err
+    assert "BRUTEX_SWEEP_PER_TUPLE_SECONDS" in captured.err
+    assert "does NOT certify" in captured.err  # never claims the §8 SLA either way
+    assert "sweep-all done" not in captured.out  # the sweep never launched …
+    assert not (results_root / "audit").exists()  # … and wrote nothing
+    assert fired == []  # a refusal is not an abort — never a false alert
+
+
+def test_sweep_all_sla_acknowledge_proceeds_with_loud_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--acknowledge-sla-overrun proceeds past the same projection, LOUDLY."""
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_PER_TUPLE_SECONDS", "1e7")
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps", acknowledge_sla_overrun=True)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "SLA OVERRUN ACKNOWLEDGED" in out  # the loud warning …
+    assert "sweep-all done" in out  # … and the sweep genuinely ran
+
+
+def test_sweep_all_sla_malformed_env_is_clean_user_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A mistyped calibration knob is EXIT_USER_ERROR naming the env var —
+    no traceback, no false abort alert (mirrors the cache-knob env test)."""
+    lake_root, catalog_path = _persist(tmp_path)
+    fired: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", fired.append)
+    monkeypatch.setenv("BRUTEX_SWEEP_PER_TUPLE_SECONDS", "not-a-number")
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps")
+
+    assert rc == cli.EXIT_USER_ERROR
+    assert "BRUTEX_SWEEP_PER_TUPLE_SECONDS" in capsys.readouterr().err
+    assert fired == []
+
+
+def test_sweep_all_sla_nan_env_is_clean_user_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A NaN override — which bypasses a bare "> 0" check — is refused as the
+    SAME clean user-config error (hostile-review MINOR-1 regression)."""
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_PER_TUPLE_SECONDS", "nan")
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps")
+
+    assert rc == cli.EXIT_USER_ERROR
+    err = capsys.readouterr().err
+    assert "BRUTEX_SWEEP_PER_TUPLE_SECONDS" in err
+    assert "nan days" not in err  # never a silently-poisoned projection

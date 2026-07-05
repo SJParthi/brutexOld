@@ -80,11 +80,16 @@ def test_spot_date_range_picker_is_readded_and_wired() -> None:
     onclick appends ``&from_date=`` / ``&to_date=`` ONLY when non-blank.
     """
     html = _render_universe_html()
-    # The two spot date inputs + their range container are present.
-    assert 'id="pipeFrom"' in html, "the spot from-date input must be present"
-    assert 'id="pipeTo"' in html, "the spot to-date input must be present"
-    assert 'aria-label="Spot history date range"' in html, "the daterange group must be present"
-    # The pre-fill / ceiling tokens are SUBSTITUTED (no raw token leaks).
+    # The two date inputs + their range container are present (the aria-label
+    # honestly names BOTH scoping roles — DEC-EXPIRY-SCOPE-LIVE-EDGE-001 killed
+    # the "spot only" lie).
+    assert 'id="pipeFrom"' in html, "the from-date input must be present"
+    assert 'id="pipeTo"' in html, "the to-date input must be present"
+    assert 'aria-label="Pull date range (spot history + F&amp;O expiry scope)"' in html, (
+        "the daterange group must be present with the honest two-role label"
+    )
+    # The pre-fill / ceiling tokens are SUBSTITUTED (no raw token leaks) —
+    # including the data-default stamps (str.replace fills every occurrence).
     assert "__BRUTEX_DATE_FROM__" not in html, "no unfilled from-date token may leak"
     assert "__BRUTEX_DATE_TO__" not in html, "no unfilled to-date token may leak"
     assert "__BRUTEX_DATE_MAX__" not in html, "no unfilled max token may leak"
@@ -96,6 +101,39 @@ def test_spot_date_range_picker_is_readded_and_wired() -> None:
     assert '"&to_date=" + encodeURIComponent(toEl.value)' in html, (
         "to_date is appended only when the input is non-blank"
     )
+
+
+def test_date_pickers_stamp_defaults_and_omit_unchanged_values() -> None:
+    """DEC-EXPIRY-SCOPE-LIVE-EDGE-001 frontend: default-equal picks are OMITTED.
+
+    Each picker carries a ``data-default`` stamped with the SAME pre-fill value,
+    and ``pipelineDateQuery()`` skips a param whose value still equals its
+    stamped default — so an untouched picker behaves exactly like a blank one
+    and the default one-click pull threads NO dates (the F&O expiry scope stays
+    unbounded; live/unexpired contracts are pulled). The lying "spot only" copy
+    is gone.
+    """
+    from brutex.dashboard.pull_controller import default_date_range
+
+    html = _render_universe_html()
+    # data-default stamped on BOTH inputs with the pre-fill value.
+    from_iso, to_iso = default_date_range()
+    assert f'value="{from_iso}" data-default="{from_iso}"' in html, (
+        "pipeFrom must stamp its pre-fill as data-default"
+    )
+    assert f'value="{to_iso}" data-default="{to_iso}"' in html, (
+        "pipeTo must stamp its pre-fill as data-default"
+    )
+    # pipelineDateQuery omits a value equal to its stamped default.
+    assert "fromEl.value !== fromEl.dataset.default" in html, (
+        "from_date must be omitted when still at its stamped default"
+    )
+    assert "toEl.value !== toEl.dataset.default" in html, (
+        "to_date must be omitted when still at its stamped default"
+    )
+    # The honest copy: the lead names BOTH roles + the unbounded default.
+    assert "select which F&amp;O expiries are pulled" in html
+    assert "including live/unexpired contracts" in html
 
 
 def test_pull_button_is_selection_aware() -> None:

@@ -8,16 +8,17 @@ Enforces the O(1) decree (CLAUDE.md §2 r5 / §12) for the store's two hot paths
   (dict membership + insert), independent of the current row count.
 
 Mirrors ``tests/bench/test_lmdb_membership_o1.py``: empirical ratio at 10k vs 1k
-with CI-jitter headroom (5× on shared CI). ``get`` (a dict probe on an
-already-resident store) keeps the raw strict 1.1× via :func:`ratio_ceiling`.
-``append`` routes its M4-Pro strict ceiling through
+with CI-jitter headroom (5× on shared CI). BOTH ``get`` and ``append`` route
+their M4-Pro strict ceiling through
 :func:`tests.bench._o1_tiers.cache_tier_ceiling` (the DEC-O1-CACHE-TIER-001
-measured 3× cache allowance): inserting fresh rows into a 10k-deep store touches
-a larger allocated working set than a 1k-deep one, so the amortised insert
-crosses a CPU cache tier into DRAM (~1.3–2.5× measured, a cache-cliff not an
-O(n) regression) — the same allowance the throughput canary routes its 1M-elem
-paths through (DEC-O1-BENCH-GATE-COMPLETE-001). A scan regression would blow the
-ratio well past 3× and fail.
+measured 3× cache allowance): a 10k-row store's working set crosses a CPU cache
+tier that a 1k-row one does not, so the amortised probe/insert picks up a small
+constant memory-hierarchy factor (a cache-cliff not an O(n) regression) — the
+same allowance the throughput canary routes its 1M-elem paths through
+(DEC-O1-BENCH-GATE-COMPLETE-001). ``get`` was rerouted from the raw strict 1.1×
+after a measured singleton overshoot on the quiet M4-Pro runner
+(DEC-O1-CACHE-TIER-MARGINAL-001; see the in-test comment). A scan regression
+would blow the ratio well past 3× and fail.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from pathlib import Path
 
 from brutex.engine.results_store import ResultRow, ResultsStore
 
-from tests.bench._o1_tiers import cache_tier_ceiling, ratio_ceiling
+from tests.bench._o1_tiers import cache_tier_ceiling
 
 _SMALL = 1_000
 _LARGE = 10_000
@@ -101,7 +102,17 @@ class TestGetIsO1:
         t_small = _time(_SMALL)
         t_large = _time(_LARGE)
         ratio = t_large / max(t_small, 1.0)
-        assert ratio < ratio_ceiling(5.0), (
+        # DEC-O1-CACHE-TIER-MARGINAL-001: routed through cache_tier_ceiling
+        # (3.0× on M4-Pro strict, 5× shared CI) after a measured singleton
+        # overshoot of the raw strict 1.1×: 1.134× (t_1k=31ns → t_10k=35ns)
+        # on the quiet M4-Pro runner, 2026-07-04, PR #1085 head 291605e (job
+        # 85094686407) — a PR touching neither this module nor ResultsStore —
+        # and PASSED on the immediate rerun (job 85094981848), proving
+        # dict-probe memory-hierarchy noise across the 1k→10k cache-tier
+        # boundary, not a scan (same physics as DEC-O1-CACHE-TIER-001 for the
+        # append sibling below). A genuine O(n) scan reads 10×+, far above
+        # the 3.0× tier, so the O(1) oracle keeps real teeth.
+        assert ratio < cache_tier_ceiling(5.0), (
             f"ResultsStore.get ratio {ratio:.2f}× (10k vs 1k) exceeds 5× — "
             f"lookup may have regressed to a scan. "
             f"t_1k={t_small:.0f}ns, t_10k={t_large:.0f}ns."

@@ -46,6 +46,7 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from structlog.testing import capture_logs
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
@@ -772,6 +773,32 @@ def test_previous_trading_day_steps_over_weekend_and_holiday() -> None:
     assert _previous_trading_day(date(2024, 1, 29)) == date(2024, 1, 25)
 
 
+def test_previous_trading_day_coverage_exhausted_warns_and_returns_none() -> None:
+    # Calendar-correctness pack: the OLD silent behaviour is GONE — walking back
+    # from the 2020-01-01 pull floor reaches 2019-12-31 (a Tuesday OUTSIDE the
+    # published holiday span), which the unguarded calendar silently read as a
+    # trading day. The walk now uses the STRICT is_trading_day_checked, emits
+    # ONE calendar.coverage_exhausted warning, and returns None (prev-close
+    # honestly ABSENT — never a guessed session, never a crash).
+    with capture_logs() as logs:
+        assert _previous_trading_day(date(2020, 1, 1)) is None
+    events = [log for log in logs if log["event"] == "calendar.coverage_exhausted"]
+    assert len(events) == 1
+    assert events[0]["probe_day"] == "2019-12-31"
+    assert events[0]["report_day"] == "2020-01-01"
+
+
+def test_daily_prev_close_contiguous_absent_when_coverage_exhausted() -> None:
+    # The degraded-but-honest boundary: a lake that DOES hold a daily bar before
+    # the 2020-01-01 floor cannot have its prior SESSION verified (the calendar
+    # coverage ends going back at 2020), so the anchor reads absent and the row
+    # is skipped — correct-or-absent, never a wrong number, never a 500.
+    with capture_logs():
+        prior, day = date(2019, 12, 31), date(2020, 1, 1)
+        daily = {prior: Decimal("630"), day: Decimal("640")}
+        assert _daily_prev_close_contiguous(daily, [prior, day], day) is None
+
+
 def test_build_day_basis_skips_row_when_prior_session_missing(tmp_path: Path) -> None:
     # The daily mirror of the JUBLINGREA bug (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-
     # DAILY-001): the immediately-preceding trading session's 1-DAY bar (Wed
@@ -1212,3 +1239,71 @@ class TestReportFilename:
             basis="day",
             symbols=["///"],
         )
+
+
+# ── observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001) ──────────
+
+
+def _write_overlay(lake: Path, day: str) -> None:
+    import json
+
+    from brutex.calendars.observed_sessions import (
+        OBSERVED_LABEL,
+        OBSERVED_OVERLAY_VERSION,
+        overlay_path,
+    )
+
+    path = overlay_path(lake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": OBSERVED_OVERLAY_VERSION,
+                "entries": [
+                    {
+                        "date": day,
+                        "detected_at": "2026-07-04T00:00:00+00:00",
+                        "month": day[:7],
+                        "label": OBSERVED_LABEL,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_previous_trading_day_observed_subtraction() -> None:
+    # An overlaid Tuesday 2026-05-12 is NOT a session — the walk steps over it
+    # to Monday 2026-05-11 (remove-only; default empty = byte-identical).
+    assert _previous_trading_day(date(2026, 5, 13)) == date(2026, 5, 12)
+    assert _previous_trading_day(
+        date(2026, 5, 13), observed=frozenset({date(2026, 5, 12)})
+    ) == date(2026, 5, 11)
+
+
+def test_build_daily_basis_overlay_recovers_row(tmp_path: Path) -> None:
+    """An observed holiday between two daily bars no longer reads as a data hole.
+
+    Daily bars exist on 2026-05-11 + 2026-05-13; 2026-05-12 (the calendar prior
+    session of 05-13) has none. WITHOUT the overlay the contiguity rule skips the
+    row (correct-or-absent). WITH the sidecar flagging 05-12 the prior session IS
+    05-11, its bar is present -> the row anchors and is emitted.
+    """
+    _write(
+        tmp_path,
+        "DRIFTED",
+        "1day",
+        [
+            _bar(datetime(2026, 5, 11, 3, 45, tzinfo=UTC), open_="100", close="110"),
+            _bar(datetime(2026, 5, 13, 3, 45, tzinfo=UTC), open_="120", close="125"),
+        ],
+    )
+    datasets = [("NSE", "CASH", "DRIFTED")]
+    start, end = date(2026, 5, 1), date(2026, 5, 31)
+    without = build_preopen_rows(_conn(), tmp_path, datasets=datasets, start=start, end=end)
+    assert [r.day for r in without] == []  # skipped: 05-12 reads as a missing bar
+    _write_overlay(tmp_path, "2026-05-12")
+    with_overlay = build_preopen_rows(_conn(), tmp_path, datasets=datasets, start=start, end=end)
+    assert [r.day for r in with_overlay] == [date(2026, 5, 13)]
+    assert with_overlay[0].prev_close == Decimal("110")

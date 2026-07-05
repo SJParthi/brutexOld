@@ -97,7 +97,14 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Final
 
+import structlog
+
 from brutex.models import BruteXError
+
+#: Structured logger — the canary-probe verdicts
+#: (``empty_breaker.canary_vendor_healthy`` / ``empty_breaker.canary_probe_error``,
+#: DEC-EMPTY-BREAKER-CANARY-001).
+_LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "EMPTY_BREAKER_CONSECUTIVE_ENV",
@@ -293,6 +300,21 @@ class EmptySettleBreaker:
         so it is observed but never counted toward a trip. ``None`` (the honest
         default — no reliable listing-date source exists today) counts every
         empty window not covered by the per-call ``expected`` hint.
+    health_probe
+        Optional zero-arg VENDOR-HEALTH canary (DEC-EMPTY-BREAKER-CANARY-001):
+        consulted ONCE, single-flight, at the moment a trip rule first fires.
+        The production wiring fetches ONE known-liquid canary window (the
+        NIFTY spot last sessions — costs 1 vendor call) via the existing
+        client. ``True`` (the canary returned DATA) means the vendor answers
+        with data RIGHT NOW, so the accumulated clean-empties are genuine
+        no-data — the breaker does NOT halt (one
+        ``empty_breaker.canary_vendor_healthy`` log; the settle law governs
+        the empties) and its trip EVIDENCE resets, so a LATER real throttle
+        must re-accumulate a full evidence window before the canary is probed
+        again (bounded: ≤ 1 canary call per evidence cycle). ``False`` — or a
+        raising probe — halts exactly as an un-probed trip does today.
+        ``None`` (the default — every existing caller) is byte-identical to
+        the pre-canary behaviour: a trip rule halts immediately.
     """
 
     consecutive_limit: int = EMPTY_BREAKER_CONSECUTIVE_LIMIT
@@ -302,6 +324,7 @@ class EmptySettleBreaker:
     fraction_min_series: int = EMPTY_BREAKER_FRACTION_MIN_SERIES
     enabled: bool = True
     expected_empty: Callable[[str, date], bool] | None = None
+    health_probe: Callable[[], bool] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     _observed: int = field(default=0, repr=False)
     _empties: int = field(default=0, repr=False)
@@ -326,6 +349,10 @@ class EmptySettleBreaker:
     #: that already landed data this pull (the throttle signature; cleared by
     #: any data window).
     _run_post_data: int = field(default=0, repr=False)
+    #: ``True`` while the vendor-health canary is IN FLIGHT (single-flight —
+    #: exactly ONE worker probes; siblings keep counting but neither trip nor
+    #: settle until the verdict lands). DEC-EMPTY-BREAKER-CANARY-001.
+    _probe_inflight: bool = field(default=False, repr=False)
 
     @property
     def tripped(self) -> bool:
@@ -352,12 +379,16 @@ class EmptySettleBreaker:
         at fetch time), so a settle computed BEFORE the trip but recorded AFTER
         it (an async-pipeline queued tail, or a sibling in-flight worker) is
         still suppressed — "stop settling" holds pull-wide the instant the
-        breaker trips. A disabled breaker always allows.
+        breaker trips. Settling is ALSO paused while the vendor-health canary
+        is in flight (DEC-EMPTY-BREAKER-CANARY-001 — a trip candidate exists;
+        if the canary comes back UNHEALTHY those settles would have been
+        poison; a suppressed window merely stays retryable, never lost). A
+        disabled breaker always allows.
         """
         if not self.enabled:
             return True
         with self._lock:
-            return not self._tripped
+            return not (self._tripped or self._probe_inflight)
 
     def observe_data(self, series: str) -> None:
         """Record a data-bearing window for *series* — **O(1)**, resets the run.
@@ -405,7 +436,12 @@ class EmptySettleBreaker:
         cannot forget the halt, and an already-tripped breaker keeps raising on
         EVERY further empty observation — expected or not — so every in-flight
         worker stops promptly. The raise happens OUTSIDE the lock. **O(1)** per
-        call.
+        call (plus, at most once per evidence cycle, the injected canary's ONE
+        vendor call — DEC-EMPTY-BREAKER-CANARY-001: when a trip rule first
+        fires WITH a :attr:`health_probe` wired, the halt verdict is deferred
+        to the canary — see :meth:`_resolve_trip_with_canary`; siblings
+        observing during the probe keep counting but neither trip nor raise
+        until the verdict lands).
         """
         if not self.enabled:
             return
@@ -413,6 +449,7 @@ class EmptySettleBreaker:
             self.expected_empty is not None and self.expected_empty(symbol, window_end)
         )
         halt: MassEmptySettleHalt | None = None
+        probe: Callable[[], bool] | None = None
         with self._lock:
             self._observed += 1
             if not self._tripped and not provable:
@@ -424,8 +461,17 @@ class EmptySettleBreaker:
                     self._run_post_data += 1
                 else:
                     self._series_leading[series] = self._series_leading.get(series, 0) + 1
-                self._trip_rule = self._tripping_rule_locked()
-                self._tripped = bool(self._trip_rule)
+                if not self._probe_inflight:
+                    self._trip_rule = self._tripping_rule_locked()
+                    if self._trip_rule and self.health_probe is not None:
+                        # Canary seam (DEC-EMPTY-BREAKER-CANARY-001): a trip
+                        # candidate with a wired probe defers the verdict to ONE
+                        # vendor-health fetch — single-flight (this worker runs
+                        # it OUTSIDE the lock; siblings see _probe_inflight).
+                        self._probe_inflight = True
+                        probe = self.health_probe
+                    else:
+                        self._tripped = bool(self._trip_rule)
             if self._tripped:
                 halt = MassEmptySettleHalt(
                     empty_windows=self._empties,
@@ -435,6 +481,82 @@ class EmptySettleBreaker:
                 )
         if halt is not None:
             raise halt
+        if probe is not None:
+            self._resolve_trip_with_canary(probe)
+
+    def _resolve_trip_with_canary(self, probe: Callable[[], bool]) -> None:
+        """Run the ONE canary fetch and turn its verdict into halt-or-continue.
+
+        DEC-EMPTY-BREAKER-CANARY-001. Runs OUTSIDE the counter lock (it is a
+        network call). A HEALTHY canary (data returned) proves the vendor
+        answers with data right now, so the accumulated clean-empties are
+        genuine no-data, not a throttle: log
+        ``empty_breaker.canary_vendor_healthy`` and RESET the trip evidence —
+        the pull continues (the ledger settle law governs the genuine empties),
+        and a later REAL throttle must re-accumulate a full evidence window
+        before the canary is probed again (≤ 1 canary call per cycle). An
+        UNHEALTHY canary (empty, or a raising probe — an erroring canary is
+        NOT health evidence) latches the trip and raises
+        :class:`MassEmptySettleHalt` exactly as an un-probed trip does.
+        """
+        try:
+            healthy = bool(probe())
+        except Exception as exc:  # pylint: disable=broad-except — a raising canary is NOT health evidence
+            _LOG.warning(
+                "empty_breaker.canary_probe_error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                note="canary probe raised — treated as vendor-unhealthy (halting)",
+            )
+            healthy = False
+        halt: MassEmptySettleHalt | None = None
+        with self._lock:
+            self._probe_inflight = False
+            if healthy:
+                _LOG.warning(
+                    "empty_breaker.canary_vendor_healthy",
+                    trip_rule=self._trip_rule,
+                    observed_windows=self._observed,
+                    empty_windows=self._empties,
+                    consecutive_empties=self._consecutive,
+                    note=(
+                        "the canary window returned DATA — the vendor is healthy, the "
+                        "accumulated clean-empties are genuine no-data (not a throttle); "
+                        "NOT halting — the settle law governs the empties; trip evidence "
+                        "resets"
+                    ),
+                )
+                self._reset_evidence_locked()
+            else:
+                self._tripped = True
+                halt = MassEmptySettleHalt(
+                    empty_windows=self._empties,
+                    observed_windows=self._observed,
+                    consecutive_empties=self._consecutive,
+                    trip_rule=self._trip_rule,
+                )
+        if halt is not None:
+            raise halt
+
+    def _reset_evidence_locked(self) -> None:
+        """Clear the trip evidence after a HEALTHY canary — caller holds the lock.
+
+        The canary proved the counted empties genuine at that instant, so they
+        are no longer throttle evidence: the observed/empty/consecutive
+        counters, both series floors, the run composition, and the leading
+        prefixes all reset (a later real throttle rebuilds them from zero —
+        bounding the canary to one call per evidence cycle).
+        ``_series_seen_data`` is KEPT: "this series landed data this pull" is
+        still true, so the post-data throttle signature stays armed.
+        """
+        self._trip_rule = ""
+        self._observed = 0
+        self._empties = 0
+        self._consecutive = 0
+        self._series_counted.clear()
+        self._run_series.clear()
+        self._run_post_data = 0
+        self._series_leading.clear()
 
     def _tripping_rule_locked(self) -> str:
         """Evaluate both trip rules; return the tripping rule's name or ``""`` — **O(1)**.
@@ -491,6 +613,7 @@ def _resolve_fraction(env_name: str, default: float) -> float:
 def resolve_empty_breaker(
     *,
     expected_empty: Callable[[str, date], bool] | None = None,
+    health_probe: Callable[[], bool] | None = None,
 ) -> EmptySettleBreaker:
     """Build a FRESH per-pass breaker from env config (or the documented defaults).
 
@@ -501,7 +624,10 @@ def resolve_empty_breaker(
     never disable the protection by accident — only the explicit
     :data:`EMPTY_BREAKER_ENABLED_ENV` off switch can). *expected_empty* threads
     a caller's provable expected-empty knowledge (the F&O runner passes its
-    confirmed-deep far-OTM strike set). **O(1)**.
+    confirmed-deep far-OTM strike set); *health_probe* threads the vendor-health
+    canary (DEC-EMPTY-BREAKER-CANARY-001 — the dashboard F&O pull wires a
+    one-call NIFTY-spot canary; ``None`` keeps today's trip-halts-immediately
+    behaviour byte-identical). **O(1)**.
     """
     raw_enabled = os.environ.get(EMPTY_BREAKER_ENABLED_ENV)
     enabled = raw_enabled is None or raw_enabled.strip().lower() not in OFF_ENV_VALUES
@@ -519,4 +645,5 @@ def resolve_empty_breaker(
         ),
         enabled=enabled,
         expected_empty=expected_empty,
+        health_probe=health_probe,
     )
