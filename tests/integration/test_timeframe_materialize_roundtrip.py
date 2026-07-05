@@ -16,7 +16,7 @@ derived bars preserve the per-bucket carry-last OI (never dropped, never faked).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -574,3 +574,196 @@ def test_include_daily_default_before_covers_none_branch(tmp_path: Path) -> None
         include_daily=True,
     )
     assert result.written[DAILY_TF_LABEL] == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-PREBUILD-GIL-VECTORIZE-001 — the batched frame→CandleBar conversion
+# (`frame_to_candle_bars` + the vectorized spot-daily filter/re-stamp) must
+# produce a BYTE-IDENTICAL lake vs the verbatim legacy per-row loops.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _legacy_bars_from_frame(frame: pl.DataFrame) -> list[CandleBar]:
+    """Verbatim pre-change `make_lake_write_tf._write` per-row conversion."""
+    has_oi = "open_interest" in frame.columns
+
+    def _oi(row: dict[str, object]) -> int:
+        if not has_oi:
+            return 0
+        value = row["open_interest"]
+        return 0 if value is None else int(value)  # type: ignore[call-overload]
+
+    return [
+        CandleBar(
+            timestamp=row["ts_utc"],
+            open=Decimal(str(row["open"])),
+            high=Decimal(str(row["high"])),
+            low=Decimal(str(row["low"])),
+            close=Decimal(str(row["close"])),
+            volume=int(row["volume"]),
+            open_interest=_oi(row),
+        )
+        for row in frame.iter_rows(named=True)
+    ]
+
+
+def _legacy_spot_daily_bars(df_1m: pl.DataFrame, *, before) -> list[CandleBar]:  # type: ignore[no-untyped-def]
+    """Verbatim pre-change `resample_1m_to_daily` per-row filter + re-stamp."""
+    from datetime import timezone
+
+    from brutex.data.tf_resampler import resample_1m_to_tf
+    from brutex.data.timeframes import DAILY_TF_MINUTES
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    if df_1m.is_empty():
+        return []
+    daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
+    bars: list[CandleBar] = []
+    for row in daily.iter_rows(named=True):
+        ist_date = row["ts_utc"].astimezone(ist).date()
+        if ist_date >= before:
+            continue
+        stamp_utc = datetime(ist_date.year, ist_date.month, ist_date.day, tzinfo=ist).astimezone(
+            UTC
+        )
+        bars.append(
+            CandleBar(
+                timestamp=stamp_utc,
+                open=Decimal(str(row["open"])),
+                high=Decimal(str(row["high"])),
+                low=Decimal(str(row["low"])),
+                close=Decimal(str(row["close"])),
+                volume=int(row["volume"]),
+                open_interest=None,
+            )
+        )
+    return bars
+
+
+def _hash_lake_parquet(lake_root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(lake_root)): p.read_bytes() for p in sorted(lake_root.rglob("*.parquet"))
+    }
+
+
+def _seed_boundary_1m(lake_root: Path, *, segment: str, symbol: str, with_oi: bool) -> None:
+    """Seed a month-boundary + IST-date-roll 1-minute partition (2 UTC months)."""
+    bars: list[CandleBar] = []
+    for day_start, base in (
+        (datetime(2021, 1, 29, 3, 45, tzinfo=UTC), Decimal("14020.75")),
+        (datetime(2021, 2, 1, 3, 45, tzinfo=UTC), Decimal("14100.35")),
+    ):
+        for i in range(75):
+            px = base + Decimal(i % 37) * Decimal("0.05")
+            oi = None if (with_oi and i % 9 == 0) else (i * 3 if with_oi else 0)
+            bars.append(
+                CandleBar(
+                    timestamp=day_start + timedelta(minutes=i),
+                    open=px,
+                    high=px + Decimal("1.35"),
+                    low=px - Decimal("2.15"),
+                    close=px + Decimal("0.6"),
+                    volume=10 + 7 * i,
+                    open_interest=oi,
+                )
+            )
+    # An 18:31 UTC bar: its IST calendar date ROLLS to the next day (00:01 IST).
+    bars.append(
+        CandleBar(
+            timestamp=datetime(2021, 1, 31, 18, 31, tzinfo=UTC),
+            open=Decimal("14022.8"),
+            high=Decimal("14023.15"),
+            low=Decimal("14021.7"),
+            close=Decimal("14022.95"),
+            volume=6,
+            open_interest=0,
+        )
+    )
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    sink.append(exchange="NSE", segment=segment, symbol=symbol, interval="1minute", bars=bars)
+
+
+@pytest.mark.parametrize(
+    ("kind", "segment", "symbol", "with_oi"),
+    [
+        (PrebuildKind.SPOT, "INDEX", "NIFTY", False),
+        (PrebuildKind.FUTURES, "FNO", "NIFTY-Jul2021-FUT", True),
+    ],
+)
+def test_vectorized_conversion_writes_byte_identical_lake(
+    tmp_path: Path, kind: PrebuildKind, segment: str, symbol: str, with_oi: bool
+) -> None:
+    """Golden byte-equality: production (batched) lake == legacy (per-row) lake.
+
+    Seeds the SAME month-boundary/IST-roll 1-minute data into two lakes; lake A
+    is materialised by the production `materialize_lake_timeframes` (the batched
+    `frame_to_candle_bars` path, incl. the vectorized spot daily); lake B is
+    written through the SAME sink but with bars built by the VERBATIM legacy
+    per-row loops. Every derived parquet must be byte-for-byte identical
+    (DEC-PREBUILD-GIL-VECTORIZE-001, Golden Rule #7).
+    """
+    from brutex.data.timeframe_materialize import (
+        INTRADAY_TF_INTERVALS,
+        daily_resample_fn_for,
+        intraday_resampler_for,
+        make_lake_read_1m,
+    )
+
+    before = date(2026, 7, 4)
+    lake_new = tmp_path / "new"
+    lake_legacy = tmp_path / "legacy"
+    for lake in (lake_new, lake_legacy):
+        _seed_boundary_1m(lake, segment=segment, symbol=symbol, with_oi=with_oi)
+
+    # Production path (batched conversion).
+    result = materialize_lake_timeframes(
+        lake_root=lake_new,
+        exchange="NSE",
+        segment=segment,
+        symbol=symbol,
+        kind=kind,
+        include_daily=True,
+        daily_before=before,
+    )
+    assert result.written[DAILY_TF_LABEL] >= 1
+
+    # Legacy path: same read + same resamplers + same sink, per-row conversion.
+    df_1m = make_lake_read_1m(
+        lake_root=lake_legacy,
+        exchange="NSE",
+        segment=segment,
+        symbol=symbol,
+        with_open_interest=kind is not PrebuildKind.SPOT,
+    )()
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_legacy))
+    for tf, frame in intraday_resampler_for(kind)(df_1m).items():
+        interval = INTRADAY_TF_INTERVALS.get(tf)
+        if interval is None:
+            continue
+        sink.append(
+            exchange="NSE",
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            bars=_legacy_bars_from_frame(frame),
+        )
+    if kind is PrebuildKind.SPOT:
+        daily_bars = _legacy_spot_daily_bars(df_1m, before=before)
+    else:
+        # The F&O daily derivation was NOT touched by the vectorization — the
+        # real resampler IS the legacy behaviour for this leg.
+        daily_bars = daily_resample_fn_for(kind)(df_1m, before)
+    sink.append(
+        exchange="NSE",
+        segment=segment,
+        symbol=symbol,
+        interval="1day",
+        bars=daily_bars,
+        merge_mode="latest-wins",
+    )
+
+    new_files = _hash_lake_parquet(lake_new)
+    legacy_files = _hash_lake_parquet(lake_legacy)
+    assert new_files.keys() == legacy_files.keys()
+    for rel, content in legacy_files.items():
+        assert new_files[rel] == content, f"derived partition diverged: {rel}"

@@ -30,7 +30,6 @@
   }
   @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1);} 50% { opacity: .5; transform: scale(.9);} }
   @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
   .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
   .topnav a:hover { color:var(--text-bright); }
@@ -47,8 +46,11 @@
   .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
   .topnav a { color:var(--blue); text-decoration:none; }
   .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
-  .live .dot { width:9px; height:9px; border-radius:50%; background:var(--green);
-    box-shadow:0 0 12px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+  /* Truthful heartbeat (DEC-DASHBOARD-UX-ANIMATE-001, fix R-2): the dot is
+     NEUTRAL grey until the leaderboard fetch resolves — bx-design's
+     .bx-live-dot state classes (live-ok / live-warn / live-down) drive the
+     color from the REAL outcome; it never pulses green while offline. */
+  .live .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
 
   .controls { display:flex; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border);
     animation: fadeInDown .6s .04s ease both; flex-wrap:wrap; align-items:flex-end; }
@@ -70,10 +72,13 @@
     gap:16px; padding:18px 24px 6px; animation: fadeInUp .5s ease both; align-content:start; }
   .card { display:flex; flex-direction:column; gap:6px;
     background:linear-gradient(160deg,var(--surface),var(--surface-2));
-    border:1px solid var(--border-strong); border-radius:16px; padding:16px 18px; }
+    border:1px solid var(--border-strong); border-radius:16px; padding:16px 18px;
+    transition:transform .18s var(--ease), border-color .18s var(--ease), box-shadow .18s var(--ease); }
+  .card:hover { transform:translateY(-3px); border-color:var(--border-strong); box-shadow:var(--elev-2); }
   .card .v { font-size:24px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
   .card .v.warn { color:var(--yellow); }
   .card .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .cards .bx-skel-card { border-radius:16px; }
 
   .sectiontitle { padding:14px 24px 2px; font-size:12px; color:var(--muted);
     text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
@@ -92,7 +97,10 @@
   .sym { font-weight:700; color:var(--text-bright); }
   .num { font-variant-numeric:tabular-nums; text-align:right; }
   .pnl.pos { color:var(--green); } .pnl.neg { color:var(--red); }
-  .cond { color:var(--text); font-size:12px; max-width:420px; }
+  /* Fix R-6: a very long conditions string clips with an ellipsis (the full
+     text stays in the DOM textContent AND in the title tooltip — CSS-only). */
+  .cond { color:var(--text); font-size:12px; display:inline-block; max-width:420px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
   .cond.none { color:var(--muted); font-style:italic; }
   .erabanner { display:none; margin:12px 24px 0; padding:10px 14px; border:1px solid var(--yellow);
     border-radius:var(--r-md); background:rgba(255,183,77,.09); color:var(--yellow);
@@ -120,12 +128,17 @@
   }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
+<!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, .bx-wrap fluid
+     centered layout, padding-only widget docking (the fixed rate/liveproof pills
+     never cover the last rows), skeletons + honest state cards, truthful dots. -->
+<link rel="stylesheet" href="/static/bx-design.css">
+<script defer src="/static/bx-ui.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
-<body>
+<body data-accent="blue">
   <header>
     <div class="brandmark" aria-hidden="true">B</div>
     <div class="logo">BruteX</div>
@@ -139,8 +152,10 @@
       <a href="/results" aria-current="page">Results</a>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot"></span><span id="livetxt">loading</span></div>
+    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">loading</span></div>
   </header>
+
+  <main class="bx-wrap">
 
   <div class="controls">
     <div class="ctl">
@@ -180,10 +195,26 @@
        message is set via textContent (never innerHTML — the repo XSS law). -->
   <div class="erabanner" id="eraBanner" role="alert"></div>
 
-  <div class="cards" id="cards"></div>
+  <!-- Pre-JS shimmer ghosts (never a terminal state: load() always resolves the
+       cards + panel to data / an honest empty hero / an honest error card). -->
+  <div class="cards" id="cards">
+    <div class="bx-skel bx-skel-card" aria-hidden="true"></div>
+    <div class="bx-skel bx-skel-card" aria-hidden="true"></div>
+    <div class="bx-skel bx-skel-card" aria-hidden="true"></div>
+    <div class="bx-skel bx-skel-card" aria-hidden="true"></div>
+  </div>
   <div id="status"></div>
 
-  <div class="panelwrap"><div class="panel" id="panel"><div class="empty">loading…</div></div></div>
+  <div class="panelwrap"><div class="panel" id="panel">
+    <div class="bx-skel-grid" aria-hidden="true">
+      <span class="bx-skel bx-skel-row"></span>
+      <span class="bx-skel bx-skel-row"></span>
+      <span class="bx-skel bx-skel-row"></span>
+      <span class="bx-skel bx-skel-row"></span>
+      <span class="bx-skel bx-skel-row"></span>
+      <span class="bx-skel bx-skel-row"></span>
+    </div>
+  </div></div>
 
   <div class="foot">
     Read-only view of the per-tuple sweep stores under <code>&lt;lake&gt;/sweeps</code>
@@ -194,16 +225,28 @@
     page displays the results, it does not run the engine.
   </div>
 
+  </main>
+
 <script>
 /* ── BruteX Sweep Leaderboard (DEC-DASHBOARD-RESULTS-PAGE-001) ──
    Read-only: fetches /api/v1/sweep/leaderboard on open + on every filter change /
    manual Refresh and renders the ranked sweep winners as a click-to-sort table, with
-   an honest empty-state when no sweep has been run yet. Escape-before-innerHTML (XSS). */
+   an honest empty-state when no sweep has been run yet. Escape-before-innerHTML (XSS).
+
+   DEC-DASHBOARD-UX-ANIMATE-001 layer (styling/state only — every rendered VALUE is
+   byte-identical, DEC-SURFACE-TRIAL-001): skeleton shimmer while pending (via the
+   shared BXUI helpers, with plain-text fallbacks if bx-ui.js ever fails to load),
+   fetch timeout so a hung endpoint can never leave a stuck placeholder, an honest
+   .bx-state.error card with Retry on any failure (fix R-1), a truthful live dot
+   (fix R-2), change-only count-up settle pops on the KPI cards (final exact string
+   set synchronously), first-fresh-data-only row entrance stagger, and a delegated
+   thead sort listener (one listener on the persistent #panel, no per-th rebinding). */
 const cardsEl = document.getElementById("cards");
 const eraBanner = document.getElementById("eraBanner");
 const panel = document.getElementById("panel");
 const statusEl = document.getElementById("status");
 const liveTxt = document.getElementById("livetxt");
+const liveDot = document.getElementById("livedot");
 const fInstrument = document.getElementById("fInstrument");
 const fTf = document.getElementById("fTf");
 const fDirection = document.getElementById("fDirection");
@@ -213,6 +256,9 @@ const fTop = document.getElementById("fTop");
 let ROWS = [];               // the current leaderboard rows (already ranked server-side)
 let sortKey = "rank";        // active client-side sort column
 let sortAsc = true;          // ascending? (rank ascends by default — best first)
+let cardVals = null;         // the 4 persistent KPI value <span>s (built once)
+let animateRows = false;     // stagger rows ONLY on fresh data (never on a sort re-render)
+let renderSeq = 0;           // monotonic stagger signature
 
 function esc(s) {
   return String(s == null ? "" : s)
@@ -238,6 +284,13 @@ function pct(v) {
   return (n * 100).toLocaleString("en-US", { maximumFractionDigits: 2 }) + "%";
 }
 
+/* Truthful heartbeat driver (fix R-2): "ok" green pulse ONLY on a live payload,
+   "warn" amber (stale — a poll failed but the last real table is kept), "down"
+   red static, anything else = neutral grey (e.g. an honest "no data"). */
+function setDot(state) {
+  if (window.BXUI) { BXUI.setDotState(liveDot, state); }
+}
+
 /* The sortable columns: key → (header label, cell renderer). The server already
    ranked by the chosen metric; client-side sort re-orders the fetched page only. */
 const COLS = [
@@ -254,20 +307,101 @@ const COLS = [
   ["total_trades", "Trades", (r) => num(r.total_trades)],
   ["conditions", "Matched conditions", (r) =>
     r.conditions
-      ? '<span class="cond">' + esc(r.conditions) + "</span>"
+      ? '<span class="cond" title="' + esc(r.conditions) + '">' + esc(r.conditions) + "</span>"
       : '<span class="cond none">(no conditions — enters every bar)</span>'],
 ];
 const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_ratio",
   "profit_factor", "win_rate", "total_trades"]);
 
+/* The 4 KPI cards: label + formatter. Values are the SAME num() strings as ever
+   (DEC-SURFACE-TRIAL-001) — countUp writes the final exact string synchronously
+   and only plays a transform-only settle pop when the value CHANGED. */
+const CARD_DEFS = [
+  ["combos ranked", (b) => num(b.total_rows)],
+  ["shown", (b) => num((b.rows || []).length)],
+  ["sweep files", (b) => num(b.store_count)],
+  ["skipped (unreadable)", (b) => num(b.skipped)],
+];
+
+function ensureCards() {
+  if (cardVals) return;
+  cardVals = [];
+  cardsEl.textContent = "";
+  for (const [label] of CARD_DEFS) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const v = document.createElement("span");
+    v.className = "v";
+    const l = document.createElement("span");
+    l.className = "l";
+    l.textContent = label;
+    card.appendChild(v);
+    card.appendChild(l);
+    cardsEl.appendChild(card);
+    cardVals.push(v);
+  }
+}
+
+function setCardValue(i, txt) {
+  if (window.BXUI) { BXUI.countUp(cardVals[i], txt); }
+  else if (cardVals[i].textContent !== txt) { cardVals[i].textContent = txt; }
+}
+
 function renderCards(board) {
-  const html =
-    '<div class="card"><span class="v">' + num(board.total_rows) + '</span><span class="l">combos ranked</span></div>'
-    + '<div class="card"><span class="v">' + num((board.rows || []).length) + '</span><span class="l">shown</span></div>'
-    + '<div class="card"><span class="v">' + num(board.store_count) + '</span><span class="l">sweep files</span></div>'
-    + '<div class="card"><span class="v' + (board.skipped ? " warn" : "") + '">' + num(board.skipped)
-      + '</span><span class="l">skipped (unreadable)</span></div>';
-  cardsEl.innerHTML = html;
+  ensureCards();
+  CARD_DEFS.forEach(([, fmt], i) => setCardValue(i, fmt(board)));
+  cardVals[3].classList.toggle("warn", !!board.skipped);
+}
+
+/* Honest unknown: a failed FIRST load leaves no fabricated zeros — the cards
+   read "—" until real data arrives (a later failure keeps the last real data). */
+function renderCardsUnknown() {
+  ensureCards();
+  for (let i = 0; i < CARD_DEFS.length; i++) setCardValue(i, "—");
+  cardVals[3].classList.remove("warn");
+}
+
+/* Shimmer while a FRESH load is pending ("Loading…" is banned as a terminal
+   state: load() always resolves this to data / empty hero / error card). */
+function paintPending() {
+  if (!window.BXUI) return; /* the static pre-JS skeletons already shimmer */
+  if (!cardVals) {
+    BXUI.clear(cardsEl);
+    for (let i = 0; i < 4; i++) {
+      const ghost = BXUI.el("div", "bx-skel bx-skel-card");
+      ghost.setAttribute("aria-hidden", "true");
+      cardsEl.appendChild(ghost);
+    }
+  }
+  BXUI.skeleton(panel, 8, 5, {
+    watchdogMs: 10000,
+    watchdogText: "still working — the lake is busy (a pull/prebuild may be running)",
+  });
+}
+
+/* Fix R-1: any failure resolves to an HONEST state — never a stuck placeholder.
+   A failure AFTER a successful render keeps the last real table (amber dot +
+   a "stale" note in the header) instead of blanking it. */
+function failState(label, opts) {
+  if (ROWS.length) {
+    liveTxt.textContent = label + " · showing last data";
+    setDot("warn");
+    return;
+  }
+  liveTxt.textContent = label;
+  setDot("down");
+  renderCardsUnknown();
+  if (window.BXUI) {
+    BXUI.errorCard(panel, {
+      status: opts && opts.status,
+      offline: !!(opts && opts.offline),
+      title: opts && opts.title,
+      hint: opts && opts.hint,
+      retry: load,
+    });
+  } else {
+    panel.textContent = "couldn't load the leaderboard (" + label + ") — use ⟳ Refresh to retry.";
+  }
 }
 
 /* Fill a <select> with options, preserving the current value when still valid. */
@@ -291,9 +425,22 @@ function sortRows() {
 
 function renderTable() {
   if (!ROWS.length) {
-    panel.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">&#128202;</span>'
-      + "No sweeps yet — run one from the dashboard (the “🚀 Run Sweep” button), "
-      + "then the ranked combo winners appear here.</div>";
+    /* The honest "no sweeps yet" hero (copy preserved; CTA links to /reports
+       where the 🚀 Run Sweep button lives). Static strings only. */
+    if (window.BXUI) {
+      BXUI.emptyState(panel, {
+        icon: "📊",
+        title: "No sweeps yet",
+        hint: "run one from the dashboard (the “🚀 Run Sweep” button), "
+          + "then the ranked combo winners appear here.",
+        ctaText: "🚀 Run a sweep — open Reports",
+        ctaHref: "/reports",
+      });
+    } else {
+      panel.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">&#128202;</span>'
+        + "No sweeps yet — run one from the dashboard (the “🚀 Run Sweep” button), "
+        + "then the ranked combo winners appear here.</div>";
+    }
     return;
   }
   sortRows();
@@ -305,17 +452,31 @@ function renderTable() {
     "<tr>" + COLS.map(([, , render]) => "<td>" + render(r) + "</td>").join("") + "</tr>"
   ).join("");
   panel.innerHTML = "<table><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
-  panel.querySelectorAll("thead th").forEach((th) => {
-    th.onclick = () => {
-      const k = th.dataset.k;
-      if (k === sortKey) { sortAsc = !sortAsc; } else { sortKey = k; sortAsc = k === "rank"; }
-      renderTable();
-    };
-  });
+  /* Entrance stagger on FRESH data only — a sort click re-renders instantly
+     (first-render-only guard: the flag is armed by load(), consumed here). */
+  if (animateRows) {
+    animateRows = false;
+    if (window.BXUI) {
+      const tb = panel.querySelector("tbody");
+      if (tb) BXUI.stagger(tb, String(++renderSeq), { rows: true, cap: 16 });
+    }
+  }
 }
+
+/* Delegated sort (one listener on the persistent #panel — no per-th onclick
+   rebinding on every render; movers' proven pattern). */
+panel.addEventListener("click", (ev) => {
+  const t = ev.target;
+  const th = t && t.closest ? t.closest("th[data-k]") : null;
+  if (!th || !panel.contains(th)) return;
+  const k = th.dataset.k;
+  if (k === sortKey) { sortAsc = !sortAsc; } else { sortKey = k; sortAsc = k === "rank"; }
+  renderTable();
+});
 
 async function load() {
   liveTxt.textContent = "loading";
+  if (!ROWS.length) paintPending();
   const params = new URLSearchParams();
   if (fInstrument.value) params.set("instrument", fInstrument.value);
   if (fTf.value) params.set("tf", fTf.value);
@@ -325,9 +486,10 @@ async function load() {
   if (!isFinite(top) || top < 1) top = 50;
   if (top > 500) top = 500;
   params.set("top", String(top));
+  const url = "/api/v1/sweep/leaderboard?" + params.toString();
   try {
-    const r = await fetch("/api/v1/sweep/leaderboard?" + params.toString());
-    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
+    const r = await (window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url));
+    if (!r.ok) { failState("error " + r.status, { status: r.status }); return; }
     const board = await r.json();
     renderCards(board);
     /* Snapshot-era honesty (DEC-RESULTS-SURFACE-HONESTY-001): when the ranked
@@ -350,6 +512,7 @@ async function load() {
     fillSelect(fDirection, board.directions);
     ROWS = (board.rows || []).slice();
     sortKey = "rank"; sortAsc = true;
+    animateRows = ROWS.length > 0;
     renderTable();
     statusEl.textContent = board.available
       ? num((board.rows || []).length) + " of " + num(board.total_rows) + " combos shown · ranked by "
@@ -361,15 +524,31 @@ async function load() {
           : "")
       : "no sweep has been run yet — run one from the dashboard";
     liveTxt.textContent = board.available ? "live · " + num((board.rows || []).length) + " rows" : "no data";
+    setDot(board.available ? "ok" : "");
   } catch (e) {
-    liveTxt.textContent = "offline";
+    if (e && e.timeout) {
+      failState("timed out", { title: "request timed out", hint: String(e.message || "") });
+    } else {
+      failState("offline", { offline: true });
+    }
   }
 }
 
 [fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });
 fTop.onchange = load;
 document.getElementById("refreshBtn").onclick = load;
-load();
+/* First load waits for DOMContentLoaded so the deferred bx-ui.js helpers are
+   available (defer scripts run before DOMContentLoaded); everything above also
+   degrades gracefully if the helper file ever fails to load. */
+function boot() {
+  if (window.BXUI) BXUI.initVisibilityPause();
+  load();
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}
 </script>
 </body>
 </html>
