@@ -46,6 +46,7 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from structlog.testing import capture_logs
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
@@ -770,6 +771,32 @@ def test_previous_trading_day_steps_over_weekend_and_holiday() -> None:
     assert _previous_trading_day(date(2026, 6, 8)) == date(2026, 6, 5)  # Mon → Fri
     # Republic Day (Fri 2024-01-26) + the weekend are stepped over → Thu 01-25.
     assert _previous_trading_day(date(2024, 1, 29)) == date(2024, 1, 25)
+
+
+def test_previous_trading_day_coverage_exhausted_warns_and_returns_none() -> None:
+    # Calendar-correctness pack: the OLD silent behaviour is GONE — walking back
+    # from the 2020-01-01 pull floor reaches 2019-12-31 (a Tuesday OUTSIDE the
+    # published holiday span), which the unguarded calendar silently read as a
+    # trading day. The walk now uses the STRICT is_trading_day_checked, emits
+    # ONE calendar.coverage_exhausted warning, and returns None (prev-close
+    # honestly ABSENT — never a guessed session, never a crash).
+    with capture_logs() as logs:
+        assert _previous_trading_day(date(2020, 1, 1)) is None
+    events = [log for log in logs if log["event"] == "calendar.coverage_exhausted"]
+    assert len(events) == 1
+    assert events[0]["probe_day"] == "2019-12-31"
+    assert events[0]["report_day"] == "2020-01-01"
+
+
+def test_daily_prev_close_contiguous_absent_when_coverage_exhausted() -> None:
+    # The degraded-but-honest boundary: a lake that DOES hold a daily bar before
+    # the 2020-01-01 floor cannot have its prior SESSION verified (the calendar
+    # coverage ends going back at 2020), so the anchor reads absent and the row
+    # is skipped — correct-or-absent, never a wrong number, never a 500.
+    with capture_logs():
+        prior, day = date(2019, 12, 31), date(2020, 1, 1)
+        daily = {prior: Decimal("630"), day: Decimal("640")}
+        assert _daily_prev_close_contiguous(daily, [prior, day], day) is None
 
 
 def test_build_day_basis_skips_row_when_prior_session_missing(tmp_path: Path) -> None:

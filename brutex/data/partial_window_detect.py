@@ -52,8 +52,9 @@ that. The flag fires ONLY on a strong **TRUNCATION** signal, never on sparsity:
   trailing sessions (a holiday cluster, a vendor publish-lag day) never trip it.
 * Explicitly EXCLUDED (each returns :data:`NOT_TRUNCATED`):
   - an EMPTY window (no stored bars — already handled by the EMPTY status);
-  - an OUT-OF-CALENDAR-COVERAGE window — when ``window_end`` or the last bar falls
-    in a year OUTSIDE the NSE holiday list's covered span
+  - an OUT-OF-CALENDAR-COVERAGE window — when ``window_end``, the last bar, OR
+    *today* (the live-edge anchor also walks the calendar) falls in a year
+    OUTSIDE the NSE holiday list's covered span
     (:func:`brutex.calendars.nse.is_holiday_data_available`,
     ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]``). Outside that
     span :func:`~brutex.calendars.nse.is_trading_day` would silently count a
@@ -302,10 +303,18 @@ def classify_partial_window(
     # ``[HOLIDAY_COVERAGE_FIRST_YEAR, HOLIDAY_COVERAGE_LAST_YEAR]`` (currently 2020-2026).
     # OUTSIDE that span ``is_trading_day`` would silently count a weekday holiday (Holi /
     # Good Friday) as a session, inflating the missing-session count into a SPURIOUS flag.
-    # When either the window end OR the last bar falls in an uncovered year we honestly
-    # ABSTAIN (Golden Rule #1 — surface the gap, never guess), reusing the COMMON
+    # When either the window end OR the last bar — or TODAY itself (the live-edge anchor:
+    # ``last_completed_session_on_or_before(today)`` + the ``sessions_between`` horizon
+    # count both walk the calendar up to *now*, so an uncovered current year would
+    # inflate the horizon and shrink the live-edge exclusion; the today-anchor gap the
+    # calendar-correctness audit found) — falls in an uncovered year we honestly ABSTAIN
+    # (Golden Rule #1 — surface the gap, never guess), reusing the COMMON
     # ``is_holiday_data_available`` rather than a hardcoded year range.
-    if not (is_holiday_data_available(window_end) and is_holiday_data_available(last_bar_date)):
+    if not (
+        is_holiday_data_available(window_end)
+        and is_holiday_data_available(last_bar_date)
+        and is_holiday_data_available(today)
+    ):
         return PartialWindowVerdict(
             verdict=NOT_TRUNCATED,
             last_bar_date=last_bar_date,

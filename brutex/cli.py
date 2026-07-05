@@ -5792,8 +5792,9 @@ def _expiry_series_candidates(
         that is also that week's weekly matches BOTH series (the same
         physical contract). Empty when the expiry is unresolvable: not on the
         calendar as seen from *on_date*, beyond the Far selector, or
-        *on_date* precedes the recorded calendar history (pre-2021) — the
-        caller then rejects honestly (NO_DATA), never guesses.
+        *on_date* precedes the recorded calendar history (pre-2020 —
+        DEC-EXPIRY-REGIME-2020-001, MIGRATION.md #1178(c)) — the caller
+        then rejects honestly (NO_DATA), never guesses.
     """
     from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
 
@@ -5819,8 +5820,9 @@ def _expiry_series_candidates(
             cursor = monthly + timedelta(days=1)
     except ValueError:
         # *on_date* precedes the expiry calendar's recorded history (e.g. a
-        # 2020 signal vs the 2021-01-01 table start) — unresolvable; the
-        # caller rejects, never guesses (Golden Rule #1).
+        # 2019 signal vs the 2020-01-01 floor — DEC-EXPIRY-REGIME-2020-001,
+        # MIGRATION.md #1178(c)) — unresolvable; the caller rejects, never
+        # guesses (Golden Rule #1).
         return ()
     return tuple(candidates)
 
