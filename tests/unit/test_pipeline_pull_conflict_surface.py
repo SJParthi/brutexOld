@@ -195,7 +195,7 @@ class TestConflictAlertSeam:
 class TestDiskGuardHeadline:
     """DEC-LAKE-FOOTPRINT-MEASURED-001: the SKIPPED prebuild is named + warms nothing."""
 
-    def _guarded_outcome(self) -> PrebuildOutcome:
+    def _guarded_outcome(self, _excluded: frozenset[str]) -> PrebuildOutcome:
         return PrebuildOutcome(
             symbols_built=0,
             total_bars=0,
@@ -235,7 +235,7 @@ class TestDiskGuardHeadline:
             run_spot=_spot,
             run_metadata=_metadata,
             run_historical=lambda: _composite(_hist()),
-            run_prebuild=lambda: PrebuildOutcome(
+            run_prebuild=lambda _excluded: PrebuildOutcome(
                 symbols_built=1, total_bars=10, failed=(), failed_count=0, ok=True
             ),
         )
