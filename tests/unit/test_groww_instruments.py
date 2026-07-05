@@ -348,6 +348,91 @@ def test_all_in_scope_rows_malformed_yields_empty_not_raise() -> None:
     assert gi.parse_instrument_csv(_csv(focused_it, _COMMODITY)) == []
 
 
+# ── ParseSkipReport (DEC-PARSE-SKIP-REPORT-001): the skip data is RETURNED, ──
+# not just logged-then-discarded, so the dashboard can persist + surface it.
+def _junk_row(token: str) -> str:
+    """An in-scope IDX row with a blank groww_symbol → always skipped."""
+    return _row(exchange="BSE", exchange_token=token, instrument_type="IDX", segment="CASH")
+
+
+def test_parse_with_report_counts_skips_and_denominator() -> None:
+    parsed, report = gi.parse_instrument_csv_with_report(
+        _csv(_NIFTY, _junk_row("93"), _WIPRO, _junk_row("94"), _COMMODITY)
+    )
+    assert {gsym for gsym, _ in parsed} == {"NSE-NIFTY", "NSE-WIPRO"}
+    # The MCX COMMODITY row is out-of-scope FILTERED, never a "skip".
+    assert report.skipped_count == 2
+    assert report.in_scope_rows == 4  # 2 parsed + 2 skipped
+    assert len(report.samples) == 2
+    assert all("groww_symbol" in reason for reason in report.samples)
+
+
+def test_parse_with_report_clean_master_zero_skips() -> None:
+    parsed, report = gi.parse_instrument_csv_with_report(_csv(_NIFTY, _WIPRO))
+    assert len(parsed) == 2
+    assert report == gi.ParseSkipReport(skipped_count=0, in_scope_rows=2, samples=())
+
+
+def test_parse_wrapper_back_compat_identical_rows() -> None:
+    # The old signature returns EXACTLY the with_report parsed list — clean AND dirty.
+    dirty = _csv(_NIFTY, _junk_row("93"), _WIPRO)
+    assert gi.parse_instrument_csv(dirty) == gi.parse_instrument_csv_with_report(dirty)[0]
+    clean = _csv(_NIFTY, _WIPRO)
+    assert gi.parse_instrument_csv(clean) == gi.parse_instrument_csv_with_report(clean)[0]
+
+
+def test_parse_with_report_header_drift_still_raises() -> None:
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv_with_report("not,the,groww,header\n")
+
+
+def test_parse_with_report_samples_capped() -> None:
+    junk = [_junk_row(str(1000 + i)) for i in range(gi.PARSE_SKIP_SAMPLE_CAP + 5)]
+    _parsed, report = gi.parse_instrument_csv_with_report(_csv(*junk))
+    assert report.skipped_count == gi.PARSE_SKIP_SAMPLE_CAP + 5
+    assert len(report.samples) == gi.PARSE_SKIP_SAMPLE_CAP
+
+
+def test_parse_with_report_warning_log_unchanged() -> None:
+    # Regression: the DEC-INSTRUMENT-SKIP-NO-GSYM-001 WARNING is byte-identical —
+    # same event, same count, same 3-sample cap — via BOTH entry points.
+    dirty = _csv(_NIFTY, *(_junk_row(str(2000 + i)) for i in range(5)))
+    for entry in (gi.parse_instrument_csv, gi.parse_instrument_csv_with_report):
+        with capture_logs() as logs:
+            entry(dirty)
+        warns = [e for e in logs if e["event"] == "instrument_master.skipped_unparseable_rows"]
+        assert len(warns) == 1
+        assert warns[0]["count"] == 5
+        assert len(warns[0]["samples"]) == 3
+
+
+@pytest.mark.parametrize(
+    ("in_scope", "threshold"),
+    [
+        (0, 10),  # absolute floor on a tiny/empty master
+        (9_999, 10),  # ceil(9.999) = 10 — floor and fraction meet
+        (10_000, 10),  # ceil(10.0) = 10
+        (10_001, 11),  # ceil(10.001) = 11 — never rounds a breach down
+        (162_000, 162),  # the real-master scale: 0.1% of ~162k rows
+    ],
+)
+def test_parse_skip_threshold(in_scope: int, threshold: int) -> None:
+    assert gi.parse_skip_threshold(in_scope) == threshold
+
+
+def test_parse_skip_verdict_boundary() -> None:
+    # GREEN at exactly the threshold; RED one past it (the boundary law).
+    at = gi.ParseSkipReport(skipped_count=10, in_scope_rows=100, samples=())
+    past = gi.ParseSkipReport(skipped_count=11, in_scope_rows=100, samples=())
+    assert gi.parse_skip_verdict(at) is True
+    assert gi.parse_skip_verdict(past) is False
+    # The 0.1% arm: 200 skips on a 200k-row master (threshold 200) is GREEN, 201 RED.
+    big_at = gi.ParseSkipReport(skipped_count=200, in_scope_rows=200_000, samples=())
+    big_past = gi.ParseSkipReport(skipped_count=201, in_scope_rows=200_000, samples=())
+    assert gi.parse_skip_verdict(big_at) is True
+    assert gi.parse_skip_verdict(big_past) is False
+
+
 # ── is_in_scope_row branches ────────────────────────────────────────────────
 @pytest.mark.parametrize(
     ("row", "in_scope"),
