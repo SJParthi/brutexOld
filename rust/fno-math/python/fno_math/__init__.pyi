@@ -111,6 +111,21 @@ def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
     ...
 
+def sweep_drawdown_stats(
+    n_bars: int,
+    start_equity_paisa: int,
+    exits: list[tuple[int, int]],
+) -> tuple[int, float, int, float]:
+    """Fused per-mask equity fold + drawdown scan (DEC-SWEEP-RUST-METRICS-001).
+
+    `exits` is `(exit_bar_idx, pnl_paisa)` per closed trade. Returns
+    `(max_dd_paisa, max_dd_pct, max_dd_duration_bars, ulcer_index)` exactly as
+    `brutex.metrics.compute._drawdown_stats` returns them (percentages ×100),
+    bit-identical inside the `start + Σ|pnl| ≤ 2**52` exactness envelope the
+    Python wrapper pre-guards. Raises `ValueError` outside the envelope.
+    """
+    ...
+
 class ResidentBars:
     """Resident bar buffer — holds `bar_bits` Rust-side across batch calls.
 

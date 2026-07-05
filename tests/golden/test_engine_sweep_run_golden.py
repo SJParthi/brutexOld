@@ -282,3 +282,92 @@ def test_golden_sell_direction_wired_equals_fallback(
     assert (tmp_path / "sell_wired.parquet").read_bytes() == (
         tmp_path / "sell_fallback.parquet"
     ).read_bytes()
+
+
+# ────── DEC-SWEEP-RUST-METRICS-001 — Rust-metrics-tail dual-arm gates ──────
+#
+# The Phase-B flag (`BRUTEX_SWEEP_RUST_METRICS`, default OFF) swaps the
+# per-mask drawdown scan onto the fused Rust kernel. The pinned literals above
+# were generated on the pure-Python tail and stay UNCHANGED — the ON arm
+# reproducing them IS the dual-arm proof at the strongest (byte) level. The
+# default-OFF arm is every OTHER test in this file (byte-identical by
+# construction — the flag is never set there).
+
+
+def test_golden_rust_metrics_on_arm_is_byte_identical_and_engages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag ON reproduces the Python-era hash AND genuinely runs the kernel.
+
+    Without the engaged assertion a stale wheel would silently serve Python
+    on both arms — bit-identical results proving nothing about the kernel
+    (the vacuous-gate trap, Golden Rule #10)."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    from brutex.engine.rust_metrics import reset_observability_memo_for_tests
+
+    wired = _run(tmp_path, "a")  # default OFF — the reference bytes
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
+    reset_observability_memo_for_tests()
+    with capture_logs() as logs:
+        rust_arm = _run(tmp_path, "b")
+    engaged = [e for e in logs if e["event"] == "sweep_rust_metrics.engaged"]
+    assert len(engaged) == 1  # the metrics kernel actually served masks
+    assert wired.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert rust_arm.store_content_hash == _GOLDEN_CONTENT_HASH
+    # The whole summary tally set matches across arms, not just the hash.
+    assert (rust_arm.enumerated, rust_arm.evaluated, rust_arm.ranked, rust_arm.persisted) == (
+        wired.enumerated,
+        wired.evaluated,
+        wired.ranked,
+        wired.persisted,
+    )
+    assert rust_arm.skipped_dedup == wired.skipped_dedup
+    assert rust_arm.conflict_pruned == wired.conflict_pruned
+    assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
+
+
+def test_golden_rust_metrics_domain_invalid_poison_is_refused_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A domain-invalid kernel result is REFUSED at runtime — the sweep lands
+    on the pinned Python-era bytes (never adopts the poison) and says so."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    import math
+
+    import fno_math
+    from brutex.engine.rust_metrics import reset_observability_memo_for_tests
+
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
+    monkeypatch.setattr(
+        fno_math,
+        "sweep_drawdown_stats",
+        lambda n_bars, start, exits: (0, math.nan, 0, 0.0),
+    )
+    reset_observability_memo_for_tests()
+    with capture_logs() as logs:
+        summary = _run(tmp_path, "a")
+    refused = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_result_refused"]
+    assert len(refused) == 1
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
+
+
+def test_golden_rust_metrics_domain_valid_poison_moves_the_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverted engagement teeth: a domain-VALID poisoned kernel result
+    flows into the persisted rows, so the store hash MOVES off the pinned
+    literal — proving the ON arm consumes the kernel output end-to-end (were
+    the seam secretly recomputing in Python, this test would fail)."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    import fno_math
+    from brutex.engine.rust_metrics import reset_observability_memo_for_tests
+
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
+    monkeypatch.setattr(
+        fno_math,
+        "sweep_drawdown_stats",
+        lambda n_bars, start, exits: (77_777, 61.803, 3, 27.182),
+    )
+    reset_observability_memo_for_tests()
+    summary = _run(tmp_path, "a")
+    assert summary.store_content_hash != _GOLDEN_CONTENT_HASH

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
     from brutex.adapters.groww.fetch_pipeline import FetchPipeline
     from brutex.data.sink import BarSink
+    from brutex.data.volume_keepalive import VolumeKeepalive
     from brutex.data.write_consumer import BatchingWriteConsumer
 
 __all__ = [
@@ -139,15 +140,32 @@ def build_fetch_pipeline(
     (the async producer's per-pair reports honestly read 0 bars). ``None`` (the default —
     the spot/CLI build sites) is byte-identical to before.
 
+    When *lake_root* is given the pipeline is ALSO wired with a best-effort lake-volume
+    KEEPALIVE (:class:`~brutex.data.volume_keepalive.VolumeKeepalive`,
+    DEC-VOLUME-KEEPALIVE-001): a 30 s 1-byte write+fsync probe under the lake root whose
+    wedge signal PAUSES :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.submit`
+    (so the producer never reaches the unbounded spill ``fsync`` on a spun-down / wedged
+    volume) and escalates to a :class:`~brutex.data.errors.LakeWriteHalt`
+    (``volume_wedged``) after the wedge-halt bound. Construction is guarded by its OWN
+    ``try/except`` (:func:`_build_volume_keepalive`) — a keepalive failure degrades to
+    ``None`` and the pipeline still builds. HONEST envelope: the synchronous kill-switch
+    path (``BRUTEX_GROWW_FETCH_PIPELINE=off``) gets NO keepalive — but it also has NO
+    spill, and its inline write tail is already 90 s-bounded
+    (DEC-FETCH-HUNG-WRITE-DEADLINE-001), so no unbounded producer hang exists there; the
+    keepalive covers the ASYNC pipeline's producer-side spill gap only.
+
     Returns ``None`` (the byte-identical synchronous path — no thread, no queue) when: the
     kill-switch is set (``BRUTEX_GROWW_FETCH_PIPELINE`` is an explicit falsy token), this is a
     ``dry_run`` (no real writes), or construction fails (guarded — binding the pipeline can
     NEVER crash the pull). The caller OWNS the pipeline's lifetime and MUST
     :func:`drain_fetch_pipeline` it in its ``finally`` BEFORE saving the window ledger (so
-    every queued window is processed + ledger-recorded before the flush).
+    every queued window is processed + ledger-recorded before the flush);
+    :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.drain` also stops the
+    keepalive daemon on every exit path.
     """
     if dry_run:
         return None
+    keepalive: VolumeKeepalive | None = None
     try:
         from brutex.adapters.groww.fetch_pipeline import (
             FetchPipeline,
@@ -159,17 +177,59 @@ def build_fetch_pipeline(
         if size is None:
             return None
         spill_area = None if lake_root is None else FetchSpillArea.under_lake_root(lake_root)
+        keepalive = _build_volume_keepalive(lake_root)
         pipeline = FetchPipeline(
-            workers=size, on_stall=_pipeline_stall_alert, spill_area=spill_area, on_bars=on_bars
+            workers=size,
+            on_stall=_pipeline_stall_alert,
+            spill_area=spill_area,
+            keepalive=keepalive,
+            on_bars=on_bars,
         )
         _LOG.info(
             "pull.fetch_pipeline.enabled",
             workers=size,
             spill=None if spill_area is None else str(spill_area.spill_dir),
+            keepalive=None if keepalive is None else str(keepalive.probe_path),
         )
         return pipeline
     except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
         _LOG.exception("pull.fetch_pipeline.build_failed")
+        if keepalive is not None:
+            # The pipeline itself failed to build AFTER the keepalive started — stop the
+            # daemon so a failed build never leaks a live ``volume-keepalive`` thread
+            # (``stop`` is idempotent + never raises into this handler).
+            keepalive.stop()
+        return None
+
+
+def _build_volume_keepalive(lake_root: Path | None) -> VolumeKeepalive | None:
+    """Build + start the lake-volume keepalive daemon, best-effort (DEC-VOLUME-KEEPALIVE-001).
+
+    Returns a STARTED :class:`~brutex.data.volume_keepalive.VolumeKeepalive` probing
+    ``<lake_root>/.volume-keepalive``, or ``None`` when: *lake_root* is ``None`` (no
+    volume to watch — e.g. a build site with no resolved lake root), the
+    ``BRUTEX_VOLUME_KEEPALIVE=off`` kill-switch is set, or construction/start fails
+    (guarded — a keepalive error is logged ``pull.volume_keepalive.build_failed`` and
+    can NEVER block or crash the pull; the fetch pipeline still builds without it).
+    A dry-run never reaches here (:func:`build_fetch_pipeline` returns ``None`` first),
+    so a dry-run spins no daemon. The :class:`FetchPipeline` OWNS the returned
+    keepalive's stop (its ``drain`` stops the daemon on every exit path).
+    """
+    if lake_root is None:
+        return None
+    try:
+        from brutex.data.volume_keepalive import (
+            VolumeKeepalive,
+            resolve_volume_keepalive_enabled,
+        )
+
+        if not resolve_volume_keepalive_enabled():
+            return None
+        keepalive = VolumeKeepalive.under_lake_root(lake_root)
+        keepalive.start()
+        return keepalive
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the pull
+        _LOG.exception("pull.volume_keepalive.build_failed")
         return None
 
 

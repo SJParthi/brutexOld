@@ -117,6 +117,7 @@ from brutex.data.errors import LakeWriteHalt
 
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
+    from brutex.data.volume_keepalive import VolumeKeepalive
 
 
 def _is_pool_isolatable(exc: BaseException) -> bool:
@@ -423,6 +424,7 @@ class FetchPipeline:
         on_stall: Callable[[float], None] | None = None,
         drain_join_timeout_seconds: float = _DEFAULT_DRAIN_JOIN_TIMEOUT_SECONDS,
         spill_area: FetchSpillArea | None = None,
+        keepalive: VolumeKeepalive | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         on_bars: Callable[[int], None] | None = None,
     ) -> None:
@@ -451,6 +453,17 @@ class FetchPipeline:
             spill cap; past the cap it falls back to the bounded back-pressure (preferring a
             slowdown to an OOM). ``None`` (the default / a dry-run) keeps the pure bounded
             back-pressure — byte-identical to the pre-spill path.
+        keepalive
+            Optional lake-volume wedge signal
+            (:class:`~brutex.data.volume_keepalive.VolumeKeepalive`,
+            DEC-VOLUME-KEEPALIVE-001). When given, :meth:`submit` PAUSES at its
+            gate while the keepalive reads the volume as WEDGED (so the producer
+            never reaches the unbounded spill ``fsync`` on a wedged volume) and
+            escalates to a :class:`~brutex.data.errors.LakeWriteHalt`
+            (``volume_wedged``) FROM THE PRODUCER THREAD once the wedge outlasts
+            the keepalive's ``halt_after_s``; :meth:`drain` stops the daemon on
+            every exit path. ``None`` (the default / a dry-run / the kill-switch)
+            is byte-identical to today.
         monotonic
             Injected monotonic clock (tests pass a fake to drive the watchdog deterministically).
         on_bars
@@ -479,6 +492,12 @@ class FetchPipeline:
         self._on_stall = on_stall
         self._drain_join_timeout_seconds = drain_join_timeout_seconds
         self._spill_area = spill_area
+        self._keepalive = keepalive
+        # Wedge-pause edge latch (DEC-VOLUME-KEEPALIVE-001): ONE loud
+        # ``fetch_pipeline.paused_wedged`` WARNING per wedge episode, re-armed when a
+        # paused producer observes the recovery — never per paused ``submit`` call.
+        self._pause_fired = False
+        self._pause_lock = threading.Lock()
         self._monotonic = monotonic
         self._on_bars = on_bars
         # `object` poison-pill sentinel: a unique instance per pipeline so a stray
@@ -490,9 +509,13 @@ class FetchPipeline:
         # Per-shard OVERFLOW deque of SPILLED windows (DEC-FETCH-NONBLOCKING-HANDOFF-001). When a
         # shard's bounded queue is FULL the producer spills the window's bars to disk + appends the
         # TINY handle here (a Path + int), so the fetch lane returns immediately instead of blocking
-        # on a slow write. The deque is unbounded in COUNT but bounded in MEMORY: the real bytes
-        # live on disk, gated by the spill area's byte cap (a full cap re-applies the bounded
-        # back-pressure — no OOM). The consumer drains its queue FIRST, then this overflow (FIFO).
+        # on a slow write. The deque is bounded in BOTH count AND memory
+        # (DEC-FETCH-SPILL-COUNT-CAP-001): the bulk bytes live on disk gated by the spill area's
+        # BYTE cap, and each resident handle graph (frozen tail + closures) counts against the
+        # spill area's WINDOW-COUNT cap — the byte cap alone could not bound a tiny/empty-window
+        # flood (a 2-byte "[]" payload per empty window). Hitting EITHER cap re-applies the
+        # bounded, stop/drain-aware back-pressure (no OOM, no dropped window). The consumer drains
+        # its queue FIRST, then this overflow (FIFO).
         self._overflow: list[collections.deque[RawFetchResult]] = [
             collections.deque() for _ in range(workers)
         ]
@@ -698,8 +721,16 @@ class FetchPipeline:
         re-fetches next pull, idempotent keep-first) before retrying — so a wedged-consumer queue
         can NEVER block the fetch lane forever, the window is never dropped while the pull is
         live, and no-OOM is intact.
+
+        When a :class:`~brutex.data.volume_keepalive.VolumeKeepalive` is wired
+        (DEC-VOLUME-KEEPALIVE-001), submit additionally PAUSES at the gate — BEFORE the
+        in-flight accounting and BEFORE any spill write — while the lake volume reads as
+        WEDGED, and escalates to a :class:`~brutex.data.errors.LakeWriteHalt`
+        (``volume_wedged``) from THIS producer thread once the wedge outlasts the
+        keepalive's ``halt_after_s`` (see :meth:`_pause_if_wedged`).
         """
         self._raise_if_stopped()
+        self._pause_if_wedged()
         # Count the window in flight BEFORE the (possibly blocking) put, so the watchdog sees
         # work pending even while the producer is back-pressured on a full queue. The matching
         # ``_mark_completed`` (success OR fail-fast drop) keeps in-flight = submitted − completed
@@ -795,6 +826,58 @@ class FetchPipeline:
             exc = self._exc
             if exc is not None:
                 raise exc
+
+    def _pause_if_wedged(self) -> None:
+        """PAUSE the producer at the submit gate while the lake volume is WEDGED.
+
+        DEC-VOLUME-KEEPALIVE-001 layers 2+3, the honest fallback to the best-effort
+        keepalive prevention (the daemon only OBSERVES — it cannot raise into the
+        pull, so the escalation is raised HERE, on the producer thread). While the
+        keepalive's ``wedged`` event is set this loops on a bounded wait, so:
+
+        * the producer never reaches the CONFIRMED-unbounded spill ``fsync``
+          (:meth:`_spill_full_window` → ``try_spill``'s producer-thread
+          ``atomic_write_via``) against a wedged volume — a deliberate throughput
+          SACRIFICE while the volume is down, self-recovering within one wait cycle
+          of the keepalive clearing;
+        * a peer pool halt still releases the pause (:meth:`_raise_if_stopped`
+          re-check + the ``_stopped`` event wait wakes immediately on a trip);
+        * a pull-end :meth:`drain` never deadlocks behind the pause — the window
+          RETURNS into the normal enqueue/drop logic (the ``_draining`` fallback
+          there drops it fail-fast; unsettled ledger row → re-fetched next pull);
+        * a wedge outlasting the keepalive's ``halt_after_s`` escalates: the pool is
+          tripped and a :class:`~brutex.data.errors.LakeWriteHalt` with reason
+          ``volume_wedged`` is raised FROM THIS PRODUCER THREAD, riding the spines'
+          ``_GLOBAL_STOP_ERRORS`` → graceful halt + the existing CRITICAL pull-halt
+          alert (no new alert plumbing).
+
+        One ``fetch_pipeline.paused_wedged`` WARNING per wedge episode (edge-latched;
+        re-armed when a paused producer observes the recovery). A ``None`` keepalive
+        (the default) is byte-identical to today. O(1) per healthy submit.
+        """
+        keepalive = self._keepalive
+        if keepalive is None or not keepalive.wedged.is_set():
+            return
+        with self._pause_lock:
+            if not self._pause_fired:
+                self._pause_fired = True
+                _LOG.warning(
+                    "fetch_pipeline.paused_wedged",
+                    halt_after_seconds=keepalive.halt_after_s,
+                )
+        while keepalive.wedged.is_set():
+            self._raise_if_stopped()
+            if self._draining.is_set():
+                return
+            if keepalive.wedged_seconds() >= keepalive.halt_after_s:
+                halt = LakeWriteHalt("volume_wedged")
+                self._trip(halt)
+                raise halt
+            # Wait on the STOP event (not a bare sleep) so a peer trip wakes the
+            # pause immediately; the timeout re-polls the wedge state.
+            self._stopped.wait(_CONSUMER_GET_POLL_SECONDS)
+        with self._pause_lock:
+            self._pause_fired = False
 
     def _run_consumer(self, shard: int) -> None:
         """Drain shard *shard*'s queue (then its OVERFLOW), processing each window's tail.
@@ -1013,6 +1096,23 @@ class FetchPipeline:
         else:
             _LOG.warning("fetch_pipeline.consumer_failed", error_type=type(exc).__name__)
 
+    def _stop_keepalive(self) -> None:
+        """Stop the wired volume-keepalive daemon (guarded, idempotent, drain-side).
+
+        DEC-VOLUME-KEEPALIVE-001 lifecycle: the pipeline OWNS the keepalive's stop —
+        called from :meth:`drain` so no ``volume-keepalive`` thread outlives the pull
+        on ANY exit path (clean drain, early idle return, or a captured-halt
+        re-raise). A stop failure is logged and swallowed: tearing down the observer
+        can never block the pull's ``finally``.
+        """
+        keepalive = self._keepalive
+        if keepalive is None:
+            return
+        try:
+            keepalive.stop()
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort teardown, never blocks drain
+            _LOG.exception("fetch_pipeline.keepalive_stop_failed")
+
     def drain(self) -> None:
         """Flush every queued window's tail, then stop + join all consumers; re-raise on halt.
 
@@ -1040,8 +1140,13 @@ class FetchPipeline:
         threads) is a no-op.
         """
         # Signal the drain FIRST so a consumer whose poison could not be enqueued (full queue,
-        # wedged peer) exits via its timed get once its own queue empties.
+        # wedged peer) exits via its timed get once its own queue empties. Setting ``_draining``
+        # also releases any producer paused at the wedge gate (``_pause_if_wedged``).
         self._draining.set()
+        # Stop the volume-keepalive daemon on EVERY drain path (the early idle return, the
+        # normal join path, AND the captured-halt re-raise below) — ONE call here covers all
+        # three; idempotent + guarded so a stop failure never blocks the drain.
+        self._stop_keepalive()
         if not any(t.is_alive() for t in self._threads):
             self._watchdog_stop.set()
             self._watchdog.join(timeout=self._drain_join_timeout_seconds)

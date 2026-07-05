@@ -37,6 +37,13 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.rust_metrics import (
+    FLAT_DRAWDOWN_STATS,
+    drawdown_stats_via_kernel,
+    exceeds_exact_equity_envelope,
+    sweep_rust_metrics_enabled,
+    warn_fallback_once,
+)
 from brutex.engine.stage1a import (
     DEFAULT_WF_STEP_DAYS,
     DEFAULT_WF_TEST_DAYS,
@@ -49,7 +56,7 @@ from brutex.engine.stage1a import (
 from brutex.engine.trade_sim import simulate_trades
 from brutex.feed.errors import LookAheadError
 from brutex.feed.lookahead import LookAheadBarrier, LookAheadReport, verify_with_barrier
-from brutex.metrics.compute import ResultMetrics, compute_metrics
+from brutex.metrics.compute import ResultMetrics, compute_metrics, compute_metrics_from_scalars
 from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.ranking import MIN_TRADES, RankedCombo, passes_gates, rank_combos
 from brutex.strategies.types import Side
@@ -65,9 +72,11 @@ _MINUTES_PER_YEAR: Final[float] = 365.25 * 24.0 * 60.0
 #: Hard ceiling on the masks a single :func:`rank_sweep_over_bits` will enumerate
 #: without an explicit opt-in — the honest "this is a BIG sweep, raise the cap on
 #: purpose" guardrail (Golden Rule #10, no-illusion limits). For scale:
-#: ``C(52,3)=22,100``; ``C(52,4)=270,725``; ``C(52,5)=2,598,960`` — so the default
-#: admits a full-vocab K≤4 sweep and forces a conscious choice beyond that, rather
-#: than silently launching a multi-million-combo run.
+#: ``C(60,3)=34,220``; ``C(60,4)=487,635``; ``C(60,5)=5,461,512`` — so the default
+#: admits a full-vocab K≤3 sweep and forces a conscious choice beyond that (K=4
+#: over the full 60 already exceeds the cap and is loudly REFUSED — pinned by
+#: ``test_default_bits_k4_hits_loud_refusal_cap``), rather than silently
+#: launching a multi-100k-combo run.
 DEFAULT_MAX_COMBOS: Final[int] = 100_000
 
 
@@ -170,7 +179,7 @@ def evaluate_combo(
     bars
         Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
     required_mask
-        The u64 strategy mask (which of the 52 conditions must fire). ``0`` enters
+        The strategy mask (which of the 60 conditions must fire). ``0`` enters
         on every bar.
     direction
         :data:`~brutex.strategies.types.Side.BUY` (long) or ``Side.SELL`` (short).
@@ -290,11 +299,107 @@ def metrics_from_trades(
     DEC-SWEEP-RUST-TRADESIM-WIRE-001 — the resident Rust kernel batch-simulates
     the trades, then each mask's stream flows through THIS identical tail, so
     the wired chain is byte-identical to :func:`metrics_for_mask`'s).
+
+    **Flag-gated Rust metrics tail (DEC-SWEEP-RUST-METRICS-001, default
+    OFF).** With ``BRUTEX_SWEEP_RUST_METRICS`` set truthy, the drawdown
+    family is computed by the fused Rust equity-fold + scan
+    (``fno_math.sweep_drawdown_stats``) via
+    :func:`_metrics_from_trades_via_kernel`, bit-identical to this Python
+    tail inside its exactness envelope; ANY envelope/kernel miss falls back
+    to the verbatim path below (same results, same error contracts — wheel
+    state and flag state can never change behaviour). Because this seam is
+    COMMON, the flag arms EVERY consumer together (sweep, walk-forward,
+    validation, Stage 3) — safe precisely because the arms are bit-identical
+    (golden + property pinned). OFF (the default) never touches the kernel
+    machinery: one env read, then the pre-#1186 path byte-for-byte.
     """
+    if sweep_rust_metrics_enabled():
+        metrics = _metrics_from_trades_via_kernel(
+            bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+        )
+        if metrics is not None:
+            return metrics
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
     return compute_metrics(trades, equity, total_bars=len(bars))
+
+
+def _metrics_from_trades_via_kernel(
+    bars: Sequence[CandleBar],
+    trades: Sequence[ClosedTrade],
+    *,
+    start_equity_paisa: int,
+    tf_minutes: int,
+) -> ResultMetrics | None:
+    """ON-arm metrics tail: fused Rust drawdown + curve-less compute_metrics.
+
+    Mirrors :func:`build_equity_curve`'s semantics WITHOUT materialising the
+    ``O(N_bars)`` equity tuple: the SAME last-wins ``ts_to_index``
+    comprehension maps each trade's ``exit_ts`` to its bar index (bars have
+    unique timestamps by that function's contract — on a malformed duplicate
+    both arms use the identical dict, so they cannot diverge), the SAME span
+    expression computes ``span_years``, and the fused kernel folds
+    ``start + Σ realized`` while scanning the drawdown family — bit-identical
+    to ``_drawdown_stats`` inside the 2⁵² exactness envelope (see
+    :mod:`brutex.engine.rust_metrics`). A zero-trade mask short-circuits to
+    the analytically-exact :data:`~brutex.engine.rust_metrics.FLAT_DRAWDOWN_STATS`
+    with NO FFI call (the dominant share of the profiled fixture tail).
+
+    Returns ``None`` whenever the Python tail must serve instead:
+
+    * a CONTRACT input (empty ``bars``, non-positive ``start_equity_paisa``
+      or ``tf_minutes``, an ``exit_ts`` that is no bar timestamp) — the
+      Python tail then raises its OWN exact error, so messages/types are
+      byte-identical on both arms and are never duplicated here;
+    * the exactness envelope is exceeded, or the kernel is
+      unavailable/raises/returns a refused result (each logged once by
+      :mod:`brutex.engine.rust_metrics`) — the Python tail then computes the
+      bit-identical result.
+
+    Honest envelope (Golden Rule #10): the ``ts_to_index`` build keeps an
+    ``O(N_bars)`` Python dict per traded mask (``ClosedTrade`` carries
+    timestamps, not indices); the win is the equity fold + drawdown scan +
+    curve materialisation, a constant factor — the tail stays
+    ``O(kept · N_bars)`` per tuple.
+    """
+    if not bars or start_equity_paisa <= 0:
+        return None
+    if exceeds_exact_equity_envelope(start_equity_paisa, trades):
+        warn_fallback_once("equity_envelope_exceeded", n_trades=len(trades))
+        return None
+    span_seconds = (bars[-1].timestamp - bars[0].timestamp).total_seconds()
+    span_years = span_seconds / (_MINUTES_PER_YEAR * 60.0)
+    if span_years <= 0.0:
+        span_years = tf_minutes / _MINUTES_PER_YEAR
+    if span_years <= 0.0:
+        # Only reachable for tf_minutes <= 0 — the Python tail raises the
+        # exact EquityCurve span invariant error for it.
+        return None
+    if not trades:
+        drawdown = FLAT_DRAWDOWN_STATS
+    else:
+        ts_to_index = {bar.timestamp: i for i, bar in enumerate(bars)}
+        exits: list[tuple[int, int]] = []
+        for trade in trades:
+            idx = ts_to_index.get(trade.exit_ts)
+            if idx is None:
+                # The Python tail raises build_equity_curve's exact ValueError
+                # (whose message feeds _combo_error's fingerprint) — fall
+                # through rather than reproduce the message here.
+                return None
+            exits.append((idx, trade.pnl_paisa))
+        kernel_stats = drawdown_stats_via_kernel(len(bars), start_equity_paisa, exits)
+        if kernel_stats is None:
+            return None
+        drawdown = kernel_stats
+    return compute_metrics_from_scalars(
+        trades,
+        len(bars),
+        start_equity_paisa=start_equity_paisa,
+        span_years=span_years,
+        drawdown=drawdown,
+    )
 
 
 def sweep_masks(
@@ -434,7 +539,7 @@ def rank_sweep_over_bits(
     enumerates exactly ``C(len(set(condition_bits)), k)`` masks — every ``k``-subset
     of the chosen conditions, via
     :func:`~brutex.engine.combo_mask.iter_masks_k_of_bits` (an ARBITRARY subset of
-    the 52, e.g. only the pivot + Fibonacci bits — not the contiguous prefix that
+    the 60, e.g. only the pivot + Fibonacci bits — not the contiguous prefix that
     :func:`~brutex.engine.combo_mask.iter_masks_k_of_n` enumerates) — then ranks them
     with :func:`rank_sweep`. The head of the returned leaderboard is the
     top-performing combo for this ``(instrument, TF, direction, params)``.
@@ -450,8 +555,8 @@ def rank_sweep_over_bits(
     bars
         Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
     condition_bits
-        The condition bit positions (of the 52) to brute-force over, each in
-        ``[0, 64)``. Duplicates are ignored.
+        The condition bit positions (of the 60-condition vocabulary) to
+        brute-force over, each in ``[0, 64)``. Duplicates are ignored.
     k
         How many of the chosen conditions each combo requires (``0 <= k <= n``,
         where ``n`` is the unique-bit count).

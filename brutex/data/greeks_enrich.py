@@ -45,14 +45,27 @@ fetch), month-file-bounded via
 O(lake-depth)); the per-bar IV solve is the kernel's bounded O(1)-per-call
 (NOT an O(1)-total claim). Reads afterwards are plain O(1)-per-bar column
 projections. Re-runs are idempotent: a bar whose stored provenance stamp
-matches the current inputs AND solved cleanly is REUSED without recompute, an
-identical restate is detected pre-write (no partition rewrite at all), and the
-``latest-wins`` merge corrects any stale overlay (Golden Rule #7).
+matches the current inputs AND solved cleanly AND whose stored
+``rate_used`` / ``spot_at_bar`` / style equal this pass's values is REUSED
+without recompute (the value-hardened gate of
+DEC-GREEKS-CORRECTNESS-AUDIT-001 — the stamp alone cannot see a rate/spot
+VALUE change), an identical restate is detected pre-write (no partition
+rewrite at all), and the ``latest-wins`` merge corrects any stale overlay
+(Golden Rule #7).
+
+Concurrency (honest envelope, DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3):
+the pass is WRITE-serialised via the per-partition flock and safe against a
+concurrent KEEP-FIRST vendor pull (raw OHLCV identity untouched either way),
+but two concurrent ENRICH passes are LAST-WRITER-WINS — never torn, the
+stamp always agrees with its values, yet the slower pass's inputs restate.
+The intended execution model is single-enricher-per-lake (the pass runs once
+per pull, post-drain).
 """
 
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -61,12 +74,15 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
 from brutex.data.spot_daily_resample import ist_span_partition_files
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
+from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.greeks import T_FLOOR_YEARS, GreeksInputError, compute_greeks
 from brutex.options.risk_free import (
@@ -86,6 +102,7 @@ if TYPE_CHECKING:
 _LOG = structlog.get_logger("brutex.data.greeks_enrich")
 
 __all__ = [
+    "DEGENERATE_TIME_VALUE_REL",
     "EXPIRY_HOUR_IST",
     "EXPIRY_MINUTE_IST",
     "GREEKS_FORMULA_VERSION",
@@ -114,6 +131,7 @@ __all__ = [
     "expiry_instant_utc",
     "pack_greeks_provenance",
     "rate_source_id_for",
+    "read_spot_join_with_recovery",
     "resolve_risk_free_source",
     "t_years_act365",
     "unpack_greeks_provenance",
@@ -122,7 +140,13 @@ __all__ = [
 #: Formula version frozen into every stored tuple. Bump when the kernel maths /
 #: overlay semantics change — the staleness key that turns a formula revision
 #: into a positive re-enrich signal (plan §15.3 "why the stamp is MANDATORY").
-GREEKS_FORMULA_VERSION: Final[int] = 1
+#: v2 = the DEC-GREEKS-CORRECTNESS-AUDIT-001 round (degenerate time-value
+#: pre-screen + value-hardened reuse + 2dp spot snap): every v1 stored bar —
+#: incl. the IVX-1 at-floor artifacts — recomputes + restamps on the next
+#: enrich pass over its window. HONEST envelope: that pass reaches only
+#: contracts still inside a live pull window; expired contracts keep v1
+#: stamps until a bulk re-enrich surface exists (named follow-up).
+GREEKS_FORMULA_VERSION: Final[int] = 2
 
 #: Rate-source ids packed into the provenance stamp (bits 8-11).
 RATE_SOURCE_ID_NONE: Final[int] = 0
@@ -153,6 +177,18 @@ STATUS_NO_RATE: Final[int] = 4
 STATUS_BAD_INPUT: Final[int] = 5
 STATUS_BELOW_INTRINSIC: Final[int] = 6
 
+#: Human-readable name per packed status — the ``null_reasons`` telemetry
+#: labels (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-6).
+_STATUS_NAMES: Final[dict[int, str]] = {
+    STATUS_OK: "ok",
+    STATUS_NO_SPOT: "no_spot",
+    STATUS_NO_SOLUTION: "no_solution",
+    STATUS_AT_EXPIRY: "at_expiry",
+    STATUS_NO_RATE: "no_rate",
+    STATUS_BAD_INPUT: "bad_input",
+    STATUS_BELOW_INTRINSIC: "below_intrinsic",
+}
+
 #: NSE / BSE F&O contracts expire at the 15:30 IST market close of the expiry
 #: date (CLAUDE.md §7 trading hours) — the expiry INSTANT the ``T`` convention
 #: anchors on.
@@ -163,6 +199,20 @@ EXPIRY_MINUTE_IST: Final[int] = 30
 #: (its ``T``-floor is "600 s in Act/365 years"; theta is per Act/365 day).
 SECONDS_PER_YEAR_ACT365: Final[float] = 365.0 * 86400.0
 
+#: Relative degenerate-time-value band of the BELOW_INTRINSIC pre-screen
+#: (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-1). Mirrors the kernel's
+#: ``VERIFY_REL_TOL`` (``rust/trading-core/src/greeks/mod.rs`` — the 1e-9
+#: relative round-trip verification tolerance, whose discounted-space image is
+#: exactly ``1e-9 · close``): a premium within this band of the discounted
+#: no-arb floor carries ~zero time value, so the kernel would "verify" ANY
+#: sigma across a huge indeterminacy band (measured up to [0.001, 0.29]) and
+#: return one arbitrary member. Such bars are refused as honest
+#: :data:`STATUS_BELOW_INTRINSIC` NULLs instead — never an arbitrary stored
+#: IV. Preflight-validated on BOTH sides (CE and PE: 0 escapes, 0 over-screens
+#: over 292,500 production-shaped combos; the smallest genuine one-tick time
+#: value sits ~5000x above the band).
+DEGENERATE_TIME_VALUE_REL: Final[float] = 1e-9
+
 #: Fixed +05:30 IST (no DST) — the same offset the vendor parser uses.
 _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
 
@@ -171,6 +221,14 @@ _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
 #: close-snapshot per plan §15.10 and lands with the resample-consuming
 #: Phase-3 surfaces, NOT here.
 _MINUTE_INTERVAL: Final[str] = "1minute"
+
+#: Capacity of the per-pass LRU memo over the resolved spot reader
+#: (DEC-GREEKS-SPOT-MEMO-001). With targets sorted so identical spot
+#: coordinates are adjacent, 2 covers the active (underlying, window) key plus
+#: one boundary neighbour; each cached :class:`~brutex.data.spot_join.SpotJoin`
+#: holds one window's close map, so the memory envelope is O(2 windows) —
+#: deliberately NOT raised (unbounded would hold every underlying's map).
+_SPOT_MEMO_CAPACITY: Final[int] = 2
 
 # Bit layout of the packed Int32 provenance stamp. The INPUT-defining fields
 # (formula/rate/q/T — bits 0-19) decide staleness; style + status (bits 20-26)
@@ -239,19 +297,45 @@ def pack_greeks_provenance(
 ) -> int:
     """Pack the provenance fields into the stored Int32 stamp.
 
-    Every field is masked into its documented bit band; the result always fits
-    a non-negative signed Int32 (27 used bits), so the
+    Every field is validated LOUDLY against its documented bit band BEFORE
+    packing (DEC-GREEKS-CORRECTNESS-AUDIT-001 PROV-2): the old silent
+    ``&``-mask made an out-of-band value (e.g. a future
+    ``RISK_FREE_SOURCE_VERSION = 17``) collide bit-identically with an
+    in-band stamp — the wrong failure mode for a STALENESS key, whose one job
+    is to never alias two different input sets. An in-band call packs the
+    byte-identical integer it always did (27 used bits < 2^31, so the
     :class:`~brutex.data.models.FnoGreeksBar` range validation can never fire
-    for a stamp built here.
+    for a stamp built here).
+
+    Raises
+    ------
+    ValueError
+        When any field lies outside its bit band (negative, or above the
+        band's mask) — naming the field, the value, and the band width.
     """
+    for name, value, mask in (
+        ("formula_version", formula_version, _FORMULA_MASK),
+        ("rate_source_id", rate_source_id, _RATE_SOURCE_MASK),
+        ("rate_version", rate_version, _RATE_VERSION_MASK),
+        ("q_bias_id", q_bias_id, _Q_BIAS_MASK),
+        ("tte_convention_id", tte_convention_id, _TTE_MASK),
+        ("style_flag", style_flag, _STYLE_MASK),
+        ("status", status, _STATUS_MASK),
+    ):
+        if not 0 <= value <= mask:
+            msg = (
+                f"greeks provenance {name}={value} outside its "
+                f"{mask.bit_length()}-bit band [0, {mask}]"
+            )
+            raise ValueError(msg)
     return (
-        ((formula_version & _FORMULA_MASK) << _FORMULA_SHIFT)
-        | ((rate_source_id & _RATE_SOURCE_MASK) << _RATE_SOURCE_SHIFT)
-        | ((rate_version & _RATE_VERSION_MASK) << _RATE_VERSION_SHIFT)
-        | ((q_bias_id & _Q_BIAS_MASK) << _Q_BIAS_SHIFT)
-        | ((tte_convention_id & _TTE_MASK) << _TTE_SHIFT)
-        | ((style_flag & _STYLE_MASK) << _STYLE_SHIFT)
-        | ((status & _STATUS_MASK) << _STATUS_SHIFT)
+        (formula_version << _FORMULA_SHIFT)
+        | (rate_source_id << _RATE_SOURCE_SHIFT)
+        | (rate_version << _RATE_VERSION_SHIFT)
+        | (q_bias_id << _Q_BIAS_SHIFT)
+        | (tte_convention_id << _TTE_SHIFT)
+        | (style_flag << _STYLE_SHIFT)
+        | (status << _STATUS_SHIFT)
     )
 
 
@@ -317,6 +401,15 @@ def expiry_instant_utc(expiry: date) -> datetime:
 def t_years_act365(bar_ts: datetime, expiry_at: datetime) -> float:
     """Time to expiry in Act/365 calendar years — the locked ``T`` convention.
 
+    ``T`` anchors on the bar-LABEL instant (the minute OPEN) while the solved
+    premium is the minute CLOSE — up to 60 s later
+    (DEC-GREEKS-CORRECTNESS-AUDIT-001 B76-3, a standard convention stated
+    honestly): the measured IV bias envelope of the 60 s skew is up to
+    ~−4.7% relative on the LAST tradable expiry-day minutes, ~−0.8% at 1 h
+    to expiry, and < 0.15% beyond ~6 h — negligible at ≥ 1 day. Changing the
+    anchor would be a formula revision (a ``GREEKS_FORMULA_VERSION`` / TTE
+    bump + bulk re-enrich), deliberately NOT done in the audit round.
+
     Negative when the bar sits at/after the expiry instant (the caller stamps
     :data:`STATUS_AT_EXPIRY`; such bars should not exist upstream —
     ``drop_bars_after`` already drops post-expiry-date bars — but the guard is
@@ -356,14 +449,32 @@ class EnrichStats:
         :data:`STATUS_OK` — restated verbatim, no recompute (the O(1)
         stamp-compare skip of plan §15.4).
     changed
-        Bars whose overlay DIFFERS from what is stored — ``0`` means the whole
-        target is already current and no write is needed at all.
+        Bars whose overlay DIFFERS from what is stored — ``0`` means the
+        whole target is already OVERLAY-current and the pass issues no write.
+        Honest scope note (CTR-4): "no write needed" is an overlay claim, not
+        a disk-hygiene one — repair of a physically-duplicated (poisoned)
+        partition is owned by the dedicated lake healer
+        (:mod:`brutex.data.lake_heal`, DEC-LAKE-HEAL-001), never manufactured
+        by the enricher skipping/forcing writes.
+    skipped
+        Rows dropped by the non-finite price screen (a NaN / inf OHLC field,
+        DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-2) — NO bar is built for them, so
+        the ``latest-wins`` merge leaves the stored raw row untouched (never a
+        fabricated bar, never a whole-contract quarantine). Defaults to ``0``
+        so a stats object built without the field reads as "no rows skipped".
+    null_reasons
+        The per-status breakdown of ``nulls`` this pass: sorted
+        ``(status_name, count)`` pairs, non-zero counts only (CTR-6 — the
+        telemetry that surfaces a whole-chain ``no_spot``). The driver logs
+        it as a dict on ``greeks_enrich.target_enriched``. Defaults empty.
     """
 
     solved: int
     nulls: int
     reused: int
     changed: int
+    skipped: int = 0
+    null_reasons: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,13 +498,35 @@ class GreeksEnrichReport:
         Option targets with no stored 1-minute bars in the window (honest
         no-op — nothing to enrich, never an invented bar).
     errored
-        Targets quarantined by a per-target error (corrupt slice / write
-        failure) — one bad contract never sinks the pass (plan §15.4).
+        Targets quarantined by a PER-CONTRACT error (corrupt slice / write
+        failure) — one bad contract never sinks the pass (plan §15.4). This
+        counts per-contract quarantines ONLY: a pull-wide
+        :class:`~brutex.data.errors.LakeWriteHalt` (disk full / OOM)
+        re-raises out of the pass instead of inflating this tally
+        (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-2). A quarantined target may
+        still have durably landed SOME month partitions before its error
+        (the sink writes months sequentially, each atomically) — those bars
+        are excluded from every tally here and self-heal on the next pass.
     bars_written
-        Total bars carried in the ``latest-wins`` writes.
+        Total bars carried in the ``latest-wins`` writes of the targets
+        counted under ``enriched`` — partitions durably landed by a target
+        that then ERRORED are honestly NOT included (see ``errored``).
     bars_solved, bars_null, bars_reused
-        Bar-level tallies summed across the written targets (the ``no_spot``
-        tally the plan asks for is ``bars_null`` broken down in the logs).
+        Bar-level tallies summed across the written targets. The per-reason
+        breakdown of ``bars_null`` (the ``no_spot`` tally the plan asks for)
+        is the ``null_reasons`` dict each ``greeks_enrich.target_enriched``
+        log line carries (:attr:`EnrichStats.null_reasons`) — the report
+        itself keeps only the total.
+    spot_reads, spot_hits
+        Underlying spot window reads actually PERFORMED vs reads AVOIDED by
+        the capacity-2 LRU memo over the resolved spot reader
+        (DEC-GREEKS-SPOT-MEMO-001) — the measured redundant-read counters
+        surfaced in ``fno.greeks_enrich.done`` (a measurement, never a
+        wall-clock claim; Golden Rule #10).
+    bars_skipped
+        Rows dropped by the non-finite price screen, summed across EVERY read
+        target (including ``already_current`` ones — a skip is tallied even
+        when nothing else changed). Defaults to ``0`` for pre-audit callers.
     """
 
     enriched: int
@@ -406,6 +539,9 @@ class GreeksEnrichReport:
     bars_solved: int
     bars_null: int
     bars_reused: int
+    spot_reads: int
+    spot_hits: int
+    bars_skipped: int = 0
 
     @property
     def targets(self) -> int:
@@ -484,9 +620,17 @@ def enrich_option_bars(
     """Compute the Greeks overlay for one option contract's bars — pure core.
 
     Per bar (each *rows* mapping carries the 7 physical columns plus the
-    nullable stored overlay): reuse the stored overlay when its stamp already
-    matches the current inputs with :data:`STATUS_OK` (no recompute); else
-    derive ``T`` (Act/365 to 15:30 IST expiry), join the same-minute spot,
+    nullable stored overlay): reuse the stored overlay ONLY when its stamp
+    matches the current inputs with :data:`STATUS_OK` **and** its stored
+    ``rate_used`` / ``spot_at_bar`` equal the values this pass would solve
+    with — the spot compared after the 2dp ``round_money`` snap, i.e. the
+    exact solve input — **and** its style flag matches (the value-hardened
+    gate of DEC-GREEKS-CORRECTNESS-AUDIT-001 — a stamp cannot represent a
+    rate/spot VALUE change under unchanged source kinds). Anything else recomputes:
+    a coverage-shrunk rate CSV or a vanished spot minute honestly DEMOTES a
+    previously-OK bar to :data:`STATUS_NO_RATE` / :data:`STATUS_NO_SPOT` on
+    the recompute — never a frozen stale Greek. For a recompute, derive ``T``
+    (Act/365 to 15:30 IST expiry), join the same-minute spot,
     look up the stamped rate, pre-screen the honest-NULL families
     (:data:`STATUS_AT_EXPIRY` / :data:`STATUS_NO_SPOT` / :data:`STATUS_NO_RATE`
     / :data:`STATUS_BELOW_INTRINSIC`), and only then solve
@@ -514,22 +658,85 @@ def enrich_option_bars(
     rate_by_date: dict[date, RiskFreeRate | None] = {}
 
     bars: list[FnoGreeksBar] = []
-    solved = nulls = reused = changed = 0
+    solved = nulls = reused = changed = skipped = 0
+    reasons: dict[int, int] = {}
     for row in rows:
         ts = utc_instant(row["timestamp"])  # type: ignore[arg-type]
         stored_overlay = _overlay_of_row(row)
         stored_pid = row.get("greeks_provenance_id")
         open_, high, low, close = _row_price_fields(row)
+        if not all(p.is_finite() for p in (open_, high, low, close)):
+            # A NaN / inf OHLC field cannot even build the honest-NULL bar
+            # (FnoGreeksBar refuses non-finite prices), so the row is SKIPPED
+            # — no bar, no write; the stored raw row stays untouched under the
+            # latest-wins merge and the REST of the contract still enriches
+            # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-2 — the old behaviour
+            # quarantined the WHOLE contract on every pass).
+            skipped += 1
+            _LOG.warning(
+                "greeks_enrich.bar_skipped_nonfinite",
+                underlying=parts.underlying,
+                expiry=parts.expiry.isoformat(),
+                strike=str(strike),
+                option_type=option_type,
+                ts=ts.isoformat(),
+            )
+            continue
         volume = int(row["volume"])  # type: ignore[call-overload]
         raw_oi = row.get("open_interest")
         oi = None if raw_oi is None else int(raw_oi)  # type: ignore[call-overload]
 
+        # Hoisted ABOVE the reuse gate (DEC-GREEKS-CORRECTNESS-AUDIT-001):
+        # the gate value-checks the CURRENT rate + spot, so both lookups must
+        # exist before the reuse decision. The explicit two-step memo replaces
+        # the old ``setdefault`` form, whose default argument evaluated
+        # ``rate_on`` eagerly on EVERY bar (RF-5 — the memo was dead code).
+        bar_date = (ts + timedelta(hours=5, minutes=30)).date()
+        if bar_date not in rate_by_date:
+            rate_by_date[bar_date] = rate_source.rate_on(bar_date)
+        rate = rate_by_date[bar_date]
+        spot = spot_by_ts.get(ts)
+        if spot is not None and (not spot.is_finite() or spot <= 0):
+            # A non-finite / non-positive JOIN spot is unusable — degrade to
+            # the honest NO_SPOT NULL (never a stored NaN spot, never a
+            # whole-contract quarantine; DEC-GREEKS-CORRECTNESS-AUDIT-001
+            # IVX-2's NaN-spot arm).
+            _LOG.warning(
+                "greeks_enrich.spot_invalid",
+                underlying=parts.underlying,
+                ts=ts.isoformat(),
+                spot=str(spot),
+            )
+            spot = None
+
         if isinstance(stored_pid, int):
             stored = unpack_greeks_provenance(stored_pid)
-            if (stored_pid & _INPUTS_MASK) == current_inputs and stored.status == STATUS_OK:
-                # Already solved under the CURRENT inputs — restate verbatim
-                # (Greeks are a pure function of the immutable bar + spot;
-                # the keep-first 1-minute OHLCV can never have changed).
+            if (
+                (stored_pid & _INPUTS_MASK) == current_inputs
+                and stored.status == STATUS_OK
+                and stored.style_flag == style_flag
+                and rate is not None
+                and _as_float(row.get("rate_used")) == rate.rate
+                and spot is not None
+                and _as_decimal(row.get("spot_at_bar")) == round_money(spot)
+            ):
+                # Already solved under the CURRENT inputs — restate verbatim.
+                # The stamp bits alone are NOT sufficient: the spot 1-minute
+                # lake is MUTABLE post DEC-LAKE-HEAL-001 (heal/quarantine/
+                # re-derive rewrites), and a rate VALUE can move under an
+                # unchanged source kind (a revised BRUTEX_RISK_FREE_CSV, a
+                # re-configured fixed rate) with no stamp bit to show for it.
+                # Reuse therefore additionally requires the stored
+                # ``rate_used`` / ``spot_at_bar`` to EQUAL the values this
+                # pass would solve with, and the style flag to match; any
+                # mismatch falls through to the honest recompute below, which
+                # re-solves or DEMOTES (NO_RATE / NO_SPOT) and lets the
+                # latest-wins write heal the lake. The spot is compared
+                # AFTER the 2dp ``round_money`` snap because the SNAPPED spot
+                # IS the recompute's solve input (`_compute_bar` snaps first,
+                # SPOTJOIN-3) — value-identical to recomputing, and a legacy
+                # non-2dp spot partition keeps the O(reuse) fast path instead
+                # of re-solving every bar on every pass (review fold).
                 bars.append(
                     FnoGreeksBar(
                         timestamp=ts,
@@ -554,10 +761,7 @@ def enrich_option_bars(
                 reused += 1
                 continue
 
-        bar_date = (ts + timedelta(hours=5, minutes=30)).date()
-        rate = rate_by_date.setdefault(bar_date, rate_source.rate_on(bar_date))
         t_years = t_years_act365(ts, expiry_at)
-        spot = spot_by_ts.get(ts)
         bar = _compute_bar(
             ts=ts,
             open_=open_,
@@ -575,13 +779,22 @@ def enrich_option_bars(
             source_id=source_id,
         )
         bars.append(bar)
-        if unpack_greeks_provenance(bar.greeks_provenance_id or 0).status == STATUS_OK:
+        status = unpack_greeks_provenance(bar.greeks_provenance_id or 0).status
+        if status == STATUS_OK:
             solved += 1
         else:
             nulls += 1
+            reasons[status] = reasons.get(status, 0) + 1
         if _overlay_of_bar(bar) != stored_overlay:
             changed += 1
-    return bars, EnrichStats(solved=solved, nulls=nulls, reused=reused, changed=changed)
+    return bars, EnrichStats(
+        solved=solved,
+        nulls=nulls,
+        reused=reused,
+        changed=changed,
+        skipped=skipped,
+        null_reasons=tuple(sorted((_STATUS_NAMES[s], c) for s, c in reasons.items())),
+    )
 
 
 def _as_float(value: object) -> float | None:
@@ -646,8 +859,25 @@ def _compute_bar(
     style_flag: int,
     source_id: int,
 ) -> FnoGreeksBar:
-    """Price one bar's overlay through the pre-screen + the shared kernel."""
+    """Price one bar's overlay through the pre-screen + the shared kernel.
+
+    The join spot is snapped to the 2-decimal tick grid ONCE here
+    (:func:`~brutex.money.round_money`, ``ROUND_HALF_UP`` —
+    DEC-GREEKS-CORRECTNESS-AUDIT-001 SPOTJOIN-3), so the stored
+    ``spot_at_bar`` is byte-identical to what the lake writer's boundary snap
+    would store and the changed-comparison converges even against a legacy
+    non-2dp spot partition (pre-fix: a never-ending ``enriched=1`` rewrite
+    loop). The snap applies to ``spot_at_bar``/the solve input ONLY — never
+    to any Greek, ``iv``, ``t_years_used`` or ``rate_used``
+    (DEC-MONEY-2DP-001 forbids rounding statistics). The kernel's admission
+    verdict (``GreeksResult.admissible``) is deliberately NOT stored this
+    round — it is exactly re-derivable downstream as ``abs(delta) >= 0.02
+    and vega * 100 >= 1e-6`` over the stored columns.
+    """
     import math
+
+    if spot is not None:
+        spot = round_money(spot)
 
     def _null(status: int, *, with_spot: Decimal | None) -> FnoGreeksBar:
         return _null_bar(
@@ -674,11 +904,23 @@ def _compute_bar(
     if spot is None:
         # No underlying spot minute — NEVER a carried-forward/next-bar spot.
         return _null(STATUS_NO_SPOT, with_spot=None)
-    if float(close) < _no_arb_floor(
+    if close <= 0:
+        # A finite zero/negative premium is a BAD INPUT regardless of
+        # moneyness — checked BEFORE the parity floor so a deep-ITM zero
+        # close no longer mislabels as BELOW_INTRINSIC
+        # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3; the NO_RATE / AT_EXPIRY /
+        # NO_SPOT precedence above is unchanged).
+        return _null(STATUS_BAD_INPUT, with_spot=spot)
+    floor = _no_arb_floor(
         is_call=is_call, spot=float(spot), strike=strike_f, rate=rate.rate, t_years=t_years
-    ):
-        # Below the DISCOUNTED parity floor — a negative time value has no IV
-        # root; never fed to the solver, never a spurious root (plan §15.8).
+    )
+    if float(close) <= floor + DEGENERATE_TIME_VALUE_REL * float(close):
+        # At/below the DISCOUNTED parity floor, or within the kernel's own
+        # 1e-9-relative verification band of it: a negative time value has no
+        # IV root, and a ~zero time value has NO DETERMINED root (the kernel
+        # would "verify" an arbitrary sigma from a wide indeterminacy band —
+        # the IVX-1 artifact). Never fed to the solver, never a spurious /
+        # arbitrary root (plan §15.8; DEC-GREEKS-CORRECTNESS-AUDIT-001).
         return _null(STATUS_BELOW_INTRINSIC, with_spot=spot)
     forward = float(spot) * math.exp(rate.rate * t_years)
     try:
@@ -722,6 +964,62 @@ def _compute_bar(
     )
 
 
+#: Back-compat private alias — the FIX-7 candidate ladder MOVED VERBATIM to its
+#: COMMON pure home :func:`brutex.data.lake_keys.spot_recovery_candidates`
+#: (DEC-DB-MONEYNESS-KEY-RECOVER-001) so the ``/db`` per-bar moneyness
+#: spot-join shares ONE candidate builder with this enrichment (CLAUDE.md §11
+#: COMMON — never copy-paste). The sourced alias map + the
+#: ``BRUTEX_FNO_INDEX_ALIASES`` env override live there now
+#: (``lake_keys.FNO_INDEX_ALIASES_ENV``); semantics are byte-identical.
+_spot_recovery_candidates = spot_recovery_candidates
+
+
+def read_spot_join_with_recovery(
+    lake_root: Path, target: GreeksEnrichTarget, parts: FnoSymbolParts
+) -> SpotJoin:
+    """The DEFAULT spot reader: exact key first, then the drift-recovery ladder.
+
+    Probes ``parts.underlying`` exactly (zero extra I/O and NO log on the hot
+    path); ONLY when that join comes back EMPTY does it try the
+    :func:`_spot_recovery_candidates` rungs in order, returning the FIRST
+    candidate with any joined spot minute and emitting ONE
+    ``greeks_enrich.spot_key_recovered`` info naming both keys
+    (DEC-GREEKS-CORRECTNESS-AUDIT-001 SPOTJOIN-2 — pre-fix, a
+    ``MIDCPNIFTY`` chain over a ``NIFTYMIDSELECT``-keyed spot dir stamped the
+    WHOLE chain NO_SPOT + STYLE_UNKNOWN forever). The exercise style is
+    stamped from the WINNING probe's segment (the returned
+    :class:`~brutex.data.spot_join.SpotJoin` carries it). Ladder exhaustion
+    returns the original empty join — the honest NO_SPOT, never a fabricated
+    spot.
+    """
+
+    def _probe(underlying: str) -> SpotJoin:
+        return spot_close_by_ts_window(
+            lake_root,
+            exchange=target.exchange,
+            underlying=underlying,
+            interval=_MINUTE_INTERVAL,
+            start=target.start,
+            end=target.end,
+        )
+
+    join = _probe(parts.underlying)
+    if join.close_by_ts:
+        return join
+    for candidate in _spot_recovery_candidates(parts.underlying, target.exchange):
+        recovered = _probe(candidate)
+        if recovered.close_by_ts:
+            _LOG.info(
+                "greeks_enrich.spot_key_recovered",
+                symbol=target.symbol,
+                underlying=parts.underlying,
+                recovered_key=candidate,
+                segment=recovered.segment,
+            )
+            return recovered
+    return join
+
+
 def _style_for_segment(segment: str | None) -> int:
     """Map the spot-join probe segment to the packed exercise-style flag."""
     if segment == "INDEX":
@@ -738,7 +1036,13 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
     — O(pulled-window), never O(lake-depth)) and SCHEMA-TOLERANT per file: a
     legacy 7-column partition gains ``None``-filled overlay columns, an
     enriched 17-column partition passes its stored overlay through — so a
-    mixed tree (e.g. a crash mid-enrich) can never break the pass. Rows are
+    mixed tree (e.g. a crash mid-enrich) can never break the pass. Each month
+    file is additionally bounded to its OWN UTC ``(year, month)`` — the lake
+    partitions by UTC month (``partition_for_timestamp``; the
+    DEC-LAKE-HEAL-001 "foreign row" invariant), so a #911-class poisoned
+    duplicate sitting in a FOREIGN month file can never win the keep-first
+    dedup and be re-written into a canonical partition by the latest-wins
+    enrich write (DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-1). Rows are
     filtered to the half-open IST date window ``[start, end)`` and sorted
     ascending.
     """
@@ -760,6 +1064,15 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
                 ).alias(name)
                 for name in missing
             )
+        # Bound the file to its OWN UTC month — the path is constructed by
+        # ist_span_partition_files as <base>/<yyyy>/<mm>.parquet, so the
+        # file's canonical (year, month) is recoverable from it exactly.
+        file_path = Path(file)
+        year = int(file_path.parent.name)
+        month = int(file_path.stem)
+        df = df.filter(
+            (pl.col("timestamp").dt.year() == year) & (pl.col("timestamp").dt.month() == month)
+        )
         frames.append(df.select(*base_columns, *GREEKS_OVERLAY_FIELDS))
     merged = pl.concat(frames)
     # Keep-FIRST read dedup BEFORE the sort (DEC-LAKE-READ-UNIQUE-001): a
@@ -789,6 +1102,12 @@ def write_option_greeks(
     restate is a byte-identical no-op, and the RAW OHLCV keep-first identity
     of the vendor spine is untouched (the writer's ``_bar_values_equal`` stays
     OHLCV+OI-only).
+
+    Concurrency (DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3): the flock
+    serialises each write's read-modify-write, so this is safe against a
+    concurrent keep-first VENDOR writer; two concurrent ENRICH passes are
+    last-writer-wins (single-enricher-per-lake execution model — the pass
+    runs once per pull).
     """
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
@@ -803,6 +1122,86 @@ def write_option_greeks(
         merge_mode="latest-wins",
     )
     return result.bars_appended
+
+
+def _target_sort_key(target: GreeksEnrichTarget) -> tuple[str, str, date, date, str]:
+    """Deterministic total order grouping targets that share one spot read.
+
+    ``(exchange, underlying, start, end, symbol)`` — the leading four fields
+    are EXACTLY the :class:`_SpotJoinMemo` key, so after sorting every target
+    sharing one spot window sits adjacent and the capacity-2 LRU reaches
+    O(distinct keys) reads (registry order gives NO adjacency guarantee —
+    the fetch phase's FUT-first market sort never reaches the enrich targets).
+    The underlying comes from :func:`~brutex.data.fno_symbol.parse_fno_symbol`;
+    an undecodable symbol falls back to the raw symbol (sorting by the raw
+    symbol alone would interleave strike/expiry tokens lexically across one
+    chain). The trailing ``symbol`` makes the order total + deterministic.
+    """
+    parts = parse_fno_symbol(target.symbol)
+    underlying = parts.underlying if parts is not None else target.symbol
+    return (target.exchange, underlying, target.start, target.end, target.symbol)
+
+
+class _SpotJoinMemo:
+    """Capacity-bounded LRU memo over the RESOLVED spot reader (DEC-GREEKS-SPOT-MEMO-001).
+
+    Keyed by ``(target.exchange, parts.underlying, target.start, target.end)``
+    — precisely the coordinates
+    :func:`~brutex.data.spot_join.spot_close_by_ts_window` reads by — so every
+    CE/PE strike of one (underlying, expiry) chain (all sharing the identical
+    resolved window) costs ONE spot read instead of ~2×strikes byte-identical
+    month-file scans. Wraps the RESOLVED reader (injected OR the default
+    :func:`read_spot_join_with_recovery`) so the memo is seam-testable —
+    memoising INCLUDES the DEC-GREEKS-CORRECTNESS-AUDIT-001 drift-recovery
+    ladder, which is safe because the ladder is a deterministic function of
+    exactly the memo key (``(exchange, underlying, start, end)`` — the env
+    alias override is read per probe but stable within a pass), so a memoised
+    recovered join is the byte-identical join a fresh probe would return.
+
+    Correctness-safe by construction: the enrich pass writes ONLY FNO option
+    partitions — nothing writes SPOT partitions mid-pass — and a
+    :class:`~brutex.data.spot_join.SpotJoin` is consumed read-only, so a
+    memoised instance is safely aliased across targets. A future IN-PASS spot
+    writer must invalidate this memo (pinning that assumption here).
+
+    Attributes
+    ----------
+    reads
+        Spot window reads actually PERFORMED (memo misses; a RAISING read
+        still counts — the attempt was made and nothing is cached, so the
+        per-target quarantine stays honest).
+    hits
+        Reads AVOIDED by the memo.
+    """
+
+    __slots__ = ("_cache", "_capacity", "_reader", "hits", "reads")
+
+    def __init__(
+        self,
+        reader: Callable[[GreeksEnrichTarget, FnoSymbolParts], SpotJoin],
+        *,
+        capacity: int = _SPOT_MEMO_CAPACITY,
+    ) -> None:
+        self._reader = reader
+        self._capacity = capacity
+        self._cache: OrderedDict[tuple[str, str, date, date], SpotJoin] = OrderedDict()
+        self.reads = 0
+        self.hits = 0
+
+    def get(self, target: GreeksEnrichTarget, parts: FnoSymbolParts) -> SpotJoin:
+        """The window's :class:`SpotJoin` — cached on a hit, read-then-cached on a miss."""
+        key = (target.exchange, parts.underlying, target.start, target.end)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            self.hits += 1
+            return cached
+        self.reads += 1
+        join = self._reader(target, parts)
+        self._cache[key] = join
+        if len(self._cache) > self._capacity:
+            self._cache.popitem(last=False)
+        return join
 
 
 def enrich_greeks_for_targets(
@@ -827,6 +1226,19 @@ def enrich_greeks_for_targets(
     (Golden Rule #7). All lake I/O is injectable for tests; the defaults are
     the real window-bounded readers/writer.
 
+    Processing order (DEC-GREEKS-SPOT-MEMO-001): targets are enriched in the
+    deterministic sorted order ``(exchange, underlying, start, end, symbol)``
+    — NOT caller order — so targets sharing one spot window are adjacent and
+    the capacity-2 :class:`_SpotJoinMemo` over the RESOLVED ``read_spot``
+    (injected OR default) collapses a chain's ~2×strikes identical spot scans
+    to one read per distinct ``(exchange, underlying, window)`` key. HONEST
+    envelope: spot I/O is O(distinct (exchange, underlying, window)) reads per
+    pass, NOT O(1) total — per-expiry windows are distinct keys by design; the
+    performed/avoided counts are reported as ``spot_reads`` / ``spot_hits``.
+    ``read_spot`` must therefore be a pure function of ``(target.exchange,
+    parts.underlying, target.start, target.end)`` — the memo key — never of
+    the individual contract symbol.
+
     Durability / crash-resumability: each partition write is the atomic
     flock-guarded tmp→fsync→``os.replace`` spine, so a crash mid-pass leaves
     every partition either fully old or fully new (never corrupt); the next
@@ -836,16 +1248,7 @@ def enrich_greeks_for_targets(
     spot_reader = (
         read_spot
         if read_spot is not None
-        else (
-            lambda t, parts: spot_close_by_ts_window(
-                lake_root,
-                exchange=t.exchange,
-                underlying=parts.underlying,
-                interval=_MINUTE_INTERVAL,
-                start=t.start,
-                end=t.end,
-            )
-        )
+        else (lambda t, parts: read_spot_join_with_recovery(lake_root, t, parts))
     )
     writer = (
         write_bars
@@ -853,9 +1256,10 @@ def enrich_greeks_for_targets(
         else (lambda t, b: write_option_greeks(lake_root, t, b))
     )
 
+    memo = _SpotJoinMemo(spot_reader)
     enriched = already_current = futures_skipped = undecodable = no_bars = errored = 0
-    bars_written = bars_solved = bars_null = bars_reused = 0
-    for target in targets:
+    bars_written = bars_solved = bars_null = bars_reused = bars_skipped = 0
+    for target in sorted(targets, key=_target_sort_key):
         # Liveness beat per contract (DEC-PIPELINE-STALL-HEARTBEAT-001): the Greeks
         # enrichment pass runs minutes-to-hours AFTER the last fetch heartbeat, so
         # without this the pull stall watchdog false-declared a HEALTHY pipeline HUNG
@@ -874,7 +1278,7 @@ def enrich_greeks_for_targets(
             if not rows:
                 no_bars += 1
                 continue
-            join = spot_reader(target, parts)
+            join = memo.get(target, parts)
             bars, stats = enrich_option_bars(
                 rows,
                 parts=parts,
@@ -882,6 +1286,7 @@ def enrich_greeks_for_targets(
                 rate_source=rate_source,
                 style_flag=_style_for_segment(join.segment),
             )
+            bars_skipped += stats.skipped
             if stats.changed == 0:
                 already_current += 1
                 continue
@@ -899,9 +1304,19 @@ def enrich_greeks_for_targets(
                 bars=written,
                 solved=stats.solved,
                 nulls=stats.nulls,
+                null_reasons=dict(stats.null_reasons),
                 reused=stats.reused,
                 style=_style_for_segment(join.segment),
             )
+        except LakeWriteHalt:
+            # A pull-wide global stop (disk full / OOM) fails EVERY remaining
+            # write identically — re-raised BEFORE the per-target quarantine
+            # so the pass never keeps solving + write-hammering N-1 doomed
+            # contracts (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-2). The FENCED
+            # `_enrich_greeks_from_minute` wrapper catches everything and
+            # logs ONE `fno.greeks_enrich.error` — the pull itself can never
+            # fail from this re-raise.
+            raise
         except Exception as exc:
             errored += 1
             _LOG.warning(
@@ -923,4 +1338,7 @@ def enrich_greeks_for_targets(
         bars_solved=bars_solved,
         bars_null=bars_null,
         bars_reused=bars_reused,
+        spot_reads=memo.reads,
+        spot_hits=memo.hits,
+        bars_skipped=bars_skipped,
     )

@@ -74,13 +74,14 @@ provenance — a resample made zero vendor calls). The raw lake builders
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
+from brutex.calendars.nse import SESSION_OPEN_IST, has_muhurat_session
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition import MONTHS_PER_YEAR
 from brutex.data.timeframes import DAILY_TF_MINUTES
@@ -105,21 +106,236 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _LOG = structlog.get_logger("brutex.data.spot_daily_resample")
 
 __all__ = [
+    "MAX_OPEN_SUBSTITUTION_WARNS",
     "DailyDeriveReport",
     "DailyDeriveTarget",
     "DailyFillResult",
+    "DailyOpenSubstitutionScan",
     "DailyReconcileReport",
     "DailyResampleWindow",
     "derive_daily_for_targets",
+    "detect_daily_open_substitutions",
+    "emit_daily_open_substitutions",
     "fill_daily_from_minute",
+    "frame_to_candle_bars",
     "ist_span_partition_files",
     "ist_span_partition_months",
     "make_lake_read_1m_window",
     "make_lake_write_1day",
+    "observe_daily_open_substitutions",
     "plan_daily_resample_windows",
     "reconcile_daily_from_minute",
     "resample_1m_to_daily",
 ]
+
+#: Cap on per-(symbol, date) ``daily_open.substituted`` WARN lines per symbol
+#: per scan (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001; precedent: the #919
+#: silent-vanish logger's cap of 20). The aggregate event ALWAYS carries the
+#: TRUE count, so the cap never lies (Golden Rule #1).
+MAX_OPEN_SUBSTITUTION_WARNS: Final[int] = 20
+
+
+@dataclass(frozen=True, slots=True)
+class DailyOpenSubstitutionScan:
+    """Result of one :func:`detect_daily_open_substitutions` pass — pure data.
+
+    Attributes
+    ----------
+    substituted
+        ``((ist_date, first_minute_ist), ...)`` ascending by date — the
+        COMPLETE sessions (``ist_date < before``) whose earliest stored
+        1-minute bar is NOT exactly 09:15:00 IST
+        (:data:`~brutex.calendars.nse.SESSION_OPEN_IST`). For each, the derived
+        daily ``open`` silently substituted that first-present minute's open
+        (the implicit ``open.first()`` in
+        :func:`~brutex.data.tf_resampler.resample_1m_to_tf` — no coded branch).
+        The predicate is ``!= 09:15`` exactly: a stray PRE-09:15 bar (should
+        not survive the ingest session filter) also flags, with the actual
+        first minute in the payload — never silently trusted. Muhurat sessions
+        are EXCLUDED (see ``muhurat_abstained``).
+    sessions
+        COMPLETE sessions examined (post-``before``-cutoff, INCLUDING the
+        Muhurat-abstained ones).
+    muhurat_abstained
+        Sessions skipped because the date is in
+        :data:`~brutex.calendars.nse.MUHURAT_SESSIONS` — a Muhurat session's
+        open is BY DESIGN not 09:15 (evening 18:00/18:15 for 2020-2024,
+        afternoon 13:45 for 2025), so flagging it would be a false positive.
+        Coverage-bounded honesty (Golden Rule #1, review-corrected): the 2026
+        Muhurat date's timings are NOT yet notified and deliberately absent
+        from the calendar — but a MISSING entry can never reach this flag on
+        a production pull: with no calendar session,
+        :func:`brutex.calendars.nse.get_session` returns ``None`` and the
+        calendar-aware ingest filter (DEC-INGEST-BOUNDARY-INTEGRITY-001,
+        MIGRATION.md #1294) DROPS every bar of that date at the ingest
+        boundary (an ALL_FILTERED re-pullable demotion), so the session never
+        enters the lake and this detector never sees it; once the official
+        NSE circular lands and the entry is added, the abstention covers it —
+        the 2026 session flags in NEITHER state. A flag is possible ONLY for
+        bars that bypassed the ingest filter (e.g. hand-placed parquet) —
+        never fabricated, never asserted as a timing.
+    """
+
+    substituted: tuple[tuple[date, time], ...]
+    sessions: int
+    muhurat_abstained: int
+
+    @property
+    def count(self) -> int:
+        """Number of substituted sessions (the TRUE total, never capped)."""
+        return len(self.substituted)
+
+
+def detect_daily_open_substitutions(
+    df_1m: pl.DataFrame, *, before: date
+) -> DailyOpenSubstitutionScan:
+    """Scan a 1-minute frame for sessions whose derived daily open is substituted.
+
+    Pure + read-only (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): one O(sessions)
+    group-by over the frame ALREADY in memory — zero extra lake I/O, and the
+    frame is never mutated (stored bars stay byte-unchanged; golden-pinned).
+    Applies the SAME forming-session cutoff :func:`resample_1m_to_daily` uses
+    (``ist_date < before``), so the scan flags ONLY sessions that were actually
+    written as final daily bars. Order-independent: the per-session first
+    minute is ``min(ts)``, never a positional first row. IST is the fixed
+    +05:30 offset (:data:`_IST` — the same arithmetic the resampler uses,
+    no tz-library drift between scan and write).
+
+    DELIBERATE divergence from the read-side /completeness counter
+    (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267 — the
+    per-session CTE in :func:`brutex.dashboard.db_view.summarize_spot_datasets`,
+    surfaced as the "Open substituted N/M" column + the /universe strip): the
+    two surfaces name the SAME phenomenon with THREE consciously different
+    rules. (1) Muhurat — #1267 COUNTS a Muhurat session (any off-09:15 open
+    honestly means "the derived daily open is not the 09:15 price"); THIS
+    detector ABSTAINS (the operator mandate — a Muhurat open is off-09:15 BY
+    DESIGN, so a pipeline WARN on it would be a false positive). (2) predicate
+    — #1267 uses strict ``>`` 09:15 (a stray pre-09:15 first bar is documented
+    out-of-contract there); this detector uses ``!=`` (a pre-09:15 bar flags,
+    with its real minute in the payload). (3) scope/cutoff — #1267 counts ALL
+    stored sessions of the scored INDEX/CASH ``1minute`` datasets; this
+    detector applies the forming-session ``ist_date < before`` cutoff over
+    every SPOT prebuild target. So the /completeness column and the pipeline
+    ", N daily open(s) substituted" headline CAN legitimately disagree on the
+    same lake (a Muhurat session is the pinned example — the DRIFT-PIN test
+    ``test_muhurat_divergence_pin_vs_honesty_counter_1267`` encodes the
+    expected disagreement, so a silent "reconciliation" of either side fails
+    loudly); actually reconciling the predicates is a named follow-up
+    decision, never a drive-by edit.
+
+    Parameters
+    ----------
+    df_1m
+        The symbol's stored 1-minute bars (the resampler's ``ts_utc`` column
+        is the only one read; naive timestamps are treated as UTC — the lake
+        convention). An empty frame yields an all-zero scan.
+    before
+        The forming-session cutoff (today IST) — sessions on/after it are
+        neither flagged nor counted (they were not written as daily bars).
+    """
+    # Local import keeps polars out of this module's import graph for callers
+    # that only need the dataclasses (mirrors resample_1m_to_daily).
+    import polars as pl
+
+    if df_1m.is_empty():
+        return DailyOpenSubstitutionScan(substituted=(), sessions=0, muhurat_abstained=0)
+    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    firsts = (
+        df_1m.select(ist.alias("_ist"))
+        .with_columns(pl.col("_ist").dt.date().alias("_ist_date"))
+        .filter(pl.col("_ist_date") < before)
+        .group_by("_ist_date")
+        .agg(pl.col("_ist").min().alias("_first_ist"))
+        .sort("_ist_date")
+    )
+    substituted: list[tuple[date, time]] = []
+    muhurat_abstained = 0
+    for row in firsts.iter_rows(named=True):
+        ist_date: date = row["_ist_date"]
+        first_minute: time = row["_first_ist"].time()
+        if has_muhurat_session(ist_date):
+            # A Muhurat session opens off-09:15 BY DESIGN — abstain, counted.
+            muhurat_abstained += 1
+            continue
+        if first_minute != SESSION_OPEN_IST:
+            substituted.append((ist_date, first_minute))
+    return DailyOpenSubstitutionScan(
+        substituted=tuple(substituted),
+        sessions=firsts.height,
+        muhurat_abstained=muhurat_abstained,
+    )
+
+
+def emit_daily_open_substitutions(
+    scan: DailyOpenSubstitutionScan, *, symbol: str, dense: bool
+) -> None:
+    """Emit the observe-only substitution log events for one symbol's scan.
+
+    Log taxonomy (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001):
+
+    * ``daily_open.substituted`` — WARN per (symbol, date), ONLY for a DENSE
+      (index) symbol, capped at :data:`MAX_OPEN_SUBSTITUTION_WARNS` per scan.
+    * ``daily_open.substituted_aggregate`` — once per symbol when
+      ``scan.count > 0``: WARN for dense, INFO (count-only) for illiquid —
+      the operator-mandated aggregate path; ALWAYS carries the TRUE count.
+
+    A zero-substitution scan emits NOTHING — the log surface of a healthy lake
+    is byte-identical to before this feature existed. Pure emitter (may raise
+    on a poisoned scan) — production wires it through the guarded
+    :func:`observe_daily_open_substitutions`, mirroring the
+    ``emit_underlying_all_empty`` precedent. The counts emitted here follow
+    THIS module's detector rules — deliberately NOT the /completeness
+    counter's (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267);
+    see :func:`detect_daily_open_substitutions` for the stated three-way
+    divergence.
+    """
+    if scan.count == 0:
+        return
+    if dense:
+        for session_date, first_minute in scan.substituted[:MAX_OPEN_SUBSTITUTION_WARNS]:
+            _LOG.warning(
+                "daily_open.substituted",
+                symbol=symbol,
+                session_date=session_date.isoformat(),
+                first_minute_ist=first_minute.strftime("%H:%M"),
+            )
+    log = _LOG.warning if dense else _LOG.info
+    log(
+        "daily_open.substituted_aggregate",
+        symbol=symbol,
+        dense=dense,
+        count=scan.count,
+        sessions=scan.sessions,
+        muhurat_abstained=scan.muhurat_abstained,
+        warns_capped=dense and scan.count > MAX_OPEN_SUBSTITUTION_WARNS,
+    )
+
+
+def observe_daily_open_substitutions(
+    df_1m: pl.DataFrame, *, before: date, symbol: str, dense: bool
+) -> int:
+    """Detect + emit in ONE guarded call — the production entry point.
+
+    OBSERVE-ONLY by construction (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): the
+    WHOLE detect+emit pass runs inside one ``try/except``, so an unexpected
+    detector/emitter error (a dtype quirk, a poisoned frame) can NEVER fail
+    the prebuild that hosts it — it logs ``daily_open.substitution_log_error``
+    and returns ``0`` (an honest "not observed", never a fabricated count).
+    Mirrors :func:`brutex.adapters.groww.option_ingest.emit_underlying_all_empty`'s
+    scan-AND-log guard discipline. Returns the substituted-session count for
+    :attr:`~brutex.data.timeframe_materialize.MaterializeResult.opens_substituted`.
+    """
+    try:
+        scan = detect_daily_open_substitutions(df_1m, before=before)
+        emit_daily_open_substitutions(scan, symbol=symbol, dense=dense)
+    except Exception as exc:  # pylint: disable=broad-except - observe-only, must never break the prebuild
+        _LOG.warning(
+            "daily_open.substitution_log_error",
+            symbol=symbol,
+            error=repr(exc),
+        )
+        return 0
+    return scan.count
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +532,123 @@ def derive_daily_for_targets(
     return DailyDeriveReport(derived=derived, no_minute=no_minute, errored=errored, bars=bars)
 
 
+def frame_to_candle_bars(
+    frame: pl.DataFrame,
+    *,
+    absent_open_interest: int | None = 0,
+) -> list[CandleBar]:
+    """Batched resampled-frame → :class:`~brutex.data.models.CandleBar` conversion.
+
+    The COMMON (CLAUDE.md §11) replacement for the per-row
+    ``frame.iter_rows(named=True)`` → ``CandleBar(Decimal(str(...)) × 4)`` loops
+    the derived-TF writer and the spot daily resampler each carried
+    (DEC-PREBUILD-GIL-VECTORIZE-001). Why: the pipeline prebuild runs INSIDE
+    the dashboard server process, and that per-row conversion was the largest
+    GIL-held pure-Python section of the prebuild (stack-sampled during the
+    blank-``GET /`` starvation diagnosis at the two former loop sites —
+    ``timeframe_materialize.py:516-527`` and ``spot_daily_resample.py:359-370``
+    pre-fix), stealing event-loop time from uvicorn while polars saturated the
+    cores. This batched form extracts each column ONCE (columnar, C-level)
+    instead of building a Python dict per row, renders the four price columns
+    to their shortest-round-trip decimal strings INSIDE polars
+    (``cast(String)`` — GIL released; numerically ``Decimal``-equal to Python's
+    ``str(float)`` per the DEC-LAKE-WRITE-VECTORIZE-001 byte-contract analysis
+    in :mod:`brutex.data.parquet_writer`, which pinned the same seed for the
+    write-side snap), and memoises the ``str → Decimal`` parse (2dp-snapped
+    lake prices repeat heavily across resample buckets; ``Decimal`` is
+    immutable, so sharing instances is value-safe).
+
+    Lives HERE — the import-graph LEAF of the pair (:mod:`~brutex.data.
+    timeframe_materialize` already imports this module for the daily-derive
+    seam) — and is re-exported from :mod:`brutex.data.timeframe_materialize`
+    for its original callers; it was moved from that module to break the
+    ``spot_daily_resample ↔ timeframe_materialize`` import cycle the shared
+    helper introduced (CodeQL ``py/cyclic-import``,
+    DEC-PREBUILD-GIL-VECTORIZE-001 follow-through).
+
+    BYTE-IDENTICAL lake output (Golden Rule #7): every constructed bar compares
+    equal to the legacy per-row form — same instants, ``Decimal`` values
+    numerically equal to ``Decimal(str(x))`` (polars may emit a different digit
+    STRING for the same value, e.g. ``0.00001`` vs ``1e-05`` — numerically
+    equal, and the sink's ``round_money`` 2dp snap keys off the numeric value
+    only) — pinned by the golden byte-equality regression over seeded lakes.
+    HONEST envelope (Golden Rule #10): this is a BATCHED construction, not a
+    bar-object elimination — the irreducible per-bar ``CandleBar`` (validated,
+    frozen) + Python ``datetime`` objects remain, so the measured win is the
+    dict/str/Decimal overhead (~25-30 % of the conversion), NOT an
+    order-of-magnitude cut; the sink write path is byte-unchanged. This
+    decision ships ONLY the vectorization — the diagnosis's other lever, a
+    ``POLARS_MAX_THREADS`` cap at the dashboard/pull entrypoints (set before
+    the first polars import, never on the engine/sweep path, which pins its
+    OWN per-worker cap in :mod:`brutex.engine.sweep_parallel`), is NOT
+    implemented anywhere: ``brutex/cli.py`` is fenced by open PRs, so the cap
+    is a REPORTED follow-up and polars core saturation during a prebuild
+    remains (starvation REDUCED, not eliminated).
+
+    Parameters
+    ----------
+    frame
+        A resampled frame with columns ``ts_utc, open, high, low, close,
+        volume`` and optionally ``open_interest``.
+    absent_open_interest
+        The ``open_interest`` used when the frame has NO OI column, and for a
+        present-but-null OI value. ``0`` is the derived-intraday-TF/spot lake
+        convention (the legacy ``_oi`` helper's contract); the spot daily
+        resampler passes ``None`` (spot/index daily bars carry no OI).
+    """
+    # Local imports keep the module import graph free of polars + the bar model
+    # for callers that only need the dataclasses (module discipline, §11).
+    from decimal import Decimal
+
+    import polars as pl
+
+    from brutex.data.models import CandleBar
+
+    if frame.height == 0:
+        return []
+
+    timestamps = frame.get_column("ts_utc").to_list()
+    opens, highs, lows, closes = (
+        frame.get_column(column).cast(pl.String).to_list()
+        for column in ("open", "high", "low", "close")
+    )
+    volumes = frame.get_column("volume").to_list()
+    open_interests: list[int | None]
+    if "open_interest" in frame.columns:
+        # Present-but-null OI maps to *absent_open_interest* (the legacy `_oi`
+        # contract: the lake stored 0 for spot, so 0 is the consistent absent
+        # value on the intraday path).
+        open_interests = [
+            absent_open_interest if value is None else int(value)
+            for value in frame.get_column("open_interest").to_list()
+        ]
+    else:
+        open_interests = [absent_open_interest] * frame.height
+
+    decimal_memo: dict[str, Decimal] = {}
+
+    def to_decimal(text: str) -> Decimal:
+        value = decimal_memo.get(text)
+        if value is None:
+            value = decimal_memo[text] = Decimal(text)
+        return value
+
+    return [
+        CandleBar(
+            timestamp=ts,
+            open=to_decimal(open_text),
+            high=to_decimal(high_text),
+            low=to_decimal(low_text),
+            close=to_decimal(close_text),
+            volume=int(volume),
+            open_interest=open_interest,
+        )
+        for ts, open_text, high_text, low_text, close_text, volume, open_interest in zip(
+            timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
+        )
+    ]
+
+
 def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar]:
     """Resample a 1-minute :class:`polars.DataFrame` to **midnight-IST** daily bars.
 
@@ -345,9 +678,10 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
         ``df_1m``, ascending by timestamp. Prices stay full-precision ``Decimal``
         (the lake-write sink snaps to the 2-dp tick grid, DEC-SPOT-PRICE-2DP-001).
     """
-    # Local import keeps polars out of this module's import graph for callers that
+    # Local imports keep polars out of this module's import graph for callers that
     # only need the dataclasses (CLAUDE.md §11 lazy dep, mirrors the materialiser).
-    from brutex.data.models import CandleBar
+    import polars as pl
+
     from brutex.data.tf_resampler import resample_1m_to_tf
 
     if df_1m.is_empty():
@@ -355,29 +689,38 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
 
     daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
 
-    bars: list[CandleBar] = []
-    for row in daily.iter_rows(named=True):
-        ist_date = row["ts_utc"].astimezone(_IST).date()
-        if ist_date >= before:
-            # Still-forming / incomplete session — never written as a final bar.
-            continue
-        # Re-stamp to midnight IST (== 18:30 UTC of the prior calendar day) so the
-        # UTC instant is byte-identical to a vendor-parsed "00:00:00 IST" daily bar.
-        stamp_utc = datetime(ist_date.year, ist_date.month, ist_date.day, tzinfo=_IST).astimezone(
-            UTC
+    # VECTORIZED filter + re-stamp (DEC-PREBUILD-GIL-VECTORIZE-001 — the former
+    # per-row `iter_rows` → `astimezone(_IST)` → `CandleBar(Decimal(str(...))×4)`
+    # loop was one of the two GIL-held prebuild sections starving the dashboard
+    # event loop; byte-identical output, see `frame_to_candle_bars`):
+    #
+    # 1. IST calendar date = the bar's instant shifted by the fixed +05:30 offset
+    #    (`_IST` — India has no DST, so a duration shift IS the timezone
+    #    conversion), then `.dt.date()` — identical to the former per-row
+    #    `row["ts_utc"].astimezone(_IST).date()`.
+    # 2. Still-forming / incomplete session (`ist_date >= before`) is DROPPED —
+    #    never written as a final bar (same guard, now a columnar filter).
+    # 3. Re-stamp to midnight IST (== 18:30 UTC of the prior calendar day): the
+    #    IST date at 00:00, tagged UTC, shifted BACK by the same offset — the
+    #    same UTC instant `datetime(y, m, d, tzinfo=_IST).astimezone(UTC)`
+    #    produced, so a resampled daily bar stays byte-identical to a
+    #    vendor-parsed "00:00:00 IST" one (the dedup identity; proven by the
+    #    vectorize regression tests).
+    ist_offset = _IST.utcoffset(None)  # timedelta(+05:30) — the ONE IST definition
+    complete = (
+        daily.with_columns((pl.col("ts_utc") + ist_offset).dt.date().alias("_ist_date"))
+        .filter(pl.col("_ist_date") < before)
+        .with_columns(
+            (
+                pl.col("_ist_date").cast(pl.Datetime("us")).dt.replace_time_zone("UTC") - ist_offset
+            ).alias("ts_utc")
         )
-        bars.append(
-            CandleBar(
-                timestamp=stamp_utc,
-                open=Decimal(str(row["open"])),
-                high=Decimal(str(row["high"])),
-                low=Decimal(str(row["low"])),
-                close=Decimal(str(row["close"])),
-                volume=int(row["volume"]),
-                open_interest=None,
-            )
-        )
-    return bars
+        # Select exactly the converter's input columns — also drops `_ist_date`
+        # and any OI column (spot/index daily bars carry `open_interest=None`
+        # regardless, the legacy loop's unconditional contract).
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+    )
+    return frame_to_candle_bars(complete, absent_open_interest=None)
 
 
 def resample_1m_to_daily_default(df_1m: pl.DataFrame, before: date) -> list[CandleBar]:

@@ -229,12 +229,30 @@ let rowsData = [];
    lifts — no manual refresh needed. Cleared on every non-gated load. */
 let gateTimer = null;
 const GATE_RETRY_MS = 5000;
+/* Gated-shell paint-once guard (DEC-DASHBOARD-JS-PERF-001): while the gate holds,
+   each 5 s retry used to rebuild the whole thead + empty tbody just to redisplay
+   the SAME "prebuild in progress" shell. The shell is now painted ONCE per
+   (asset, note) key — the asset is in the key so a tab switch mid-gate still
+   repaints the new column set — and later identical retries refresh only the
+   cheap #asof/#noteText textContent lines (same pixels). */
+let wasGated = false;
+let lastGatedKey = null;
 /* The full payload from the last successful fetch — it holds EVERY category list
    for the current coordinate (date/timeframe/time/exchange/top_n/expiry/track), so
    switching the sub-filter pill is a pure client-side re-render with NO server
    round-trip (DEC-MOVERS-O1-LATENCY-001). Reset to null on a failed/preview fetch
    so a pill switch then falls back to a real fetch. */
 let lastPayload = null;
+/* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): "params|bodyText"
+   signature of the last fully-rendered NON-gated payload. A repeat fetch that
+   round-trips to the byte-identical body for the SAME coordinate (repeat
+   ↻ Refresh — the server-side MoversSnapshotCache returns identical JSON per
+   write-generation) skips the thead/tbody rebuild: the DOM already shows exactly
+   this snapshot. CLIENT-side compare only (no backend generation field on the
+   wire — the generation echo is a reported follow-up); nulled on gated/failed
+   loads so recovery always repaints, and the skip is additionally gated behind
+   `state.sort.idx === null` so a client-sorted view is never involved. */
+let lastRenderSig = null;
 
 /* Clearly-labelled SAMPLE rows so the page shows the layout standalone (no backend). NOT real data. */
 const SAMPLE = {
@@ -271,14 +289,10 @@ function applyCategory() {
 }
 function renderPills() {
   $("pills").innerHTML = ASSETS[state.asset].cats.map(([k,l]) => `<span class="pill ${k===state.category?'on':''}" data-cat="${k}">${l}</span>`).join("");
-  $("pills").querySelectorAll(".pill").forEach(p => p.onclick = () => {
-    /* A metric-pill switch resets the client-side column sort to the new tab's
-       server ranking (DEC-MOVERS-SORT-RESET-001) — otherwise a manual VOLUME sort
-       persisted across pill switches (the asset-tab handler already resets it).
-       renderHead() clears the stale ▼ arrow + the `sorted` highlight. */
-    state.category = p.dataset.cat; state.sort = {idx:null,dir:1};
-    renderPills(); renderHead(); applyCategory();
-  });
+  /* Pill clicks are DELEGATED — one listener on #pills, attached once at init
+     (onPillsClick), surviving this innerHTML swap by construction — so this
+     function only rebuilds markup on asset switches; it wires no handlers and
+     never recurses into itself (DEC-DASHBOARD-JS-PERF-001). */
   /* Expiry applies to futures/options only — hidden for spot. */
   const derivAsset = (state.asset==="futures" || state.asset==="options");
   $("expiry").style.display = derivAsset ? "" : "none";
@@ -293,13 +307,34 @@ function renderHead() {
     const arrow = state.sort.idx===i ? (state.sort.dir>0?" ▲":" ▼") : "";
     return `<th data-i="${i}" class="${state.sort.idx===i?'sorted':''}">${label}${arrow}</th>`;
   }).join("");
-  $("head").querySelectorAll("th").forEach(th => th.onclick = () => {
-    const i = +th.dataset.i;
-    state.sort = { idx:i, dir: (state.sort.idx===i ? -state.sort.dir : 1) };
-    renderHead(); renderRows();
+  /* th sort clicks are DELEGATED — one listener on the #head row, attached once
+     at init (onHeadClick), surviving this innerHTML rebuild by construction —
+     so no per-th handler re-wiring per render (DEC-DASHBOARD-JS-PERF-001). */
+}
+/* updateHeadSort(): move the ▲/▼ arrow + the `sorted` class on the EXISTING th
+   nodes IN PLACE (textContent-only — the labels are static per asset from
+   ASSETS[..].cols, so the result is provably identical to a full renderHead()
+   rebuild: the thead content is fully derived from that static config +
+   state.sort). renderHead() stays the full-rebuild fallback whenever the column
+   SHAPE can change (asset-tab switch / every load()). DEC-DASHBOARD-JS-PERF-001. */
+function updateHeadSort() {
+  const cols = ASSETS[state.asset].cols;
+  $("head").querySelectorAll("th").forEach((th, i) => {
+    const arrow = state.sort.idx===i ? (state.sort.dir>0?" ▲":" ▼") : "";
+    th.classList.toggle("sorted", state.sort.idx===i);
+    th.textContent = (cols[i] ? cols[i][0] : "") + arrow;
   });
 }
 function numify(v){ const n = parseFloat(String(v ?? "").replace(/[₹,%\s]/g,"").replace(/,/g,"")); return isNaN(n)?null:n; }
+/* Compact elapsed formatter for the gated status line (DEC-PREBUILD-GATE-HONEST-NOTE-001):
+   seconds → "42s" / "7m 05s" / "2h 14m". Null/invalid reads "0s" (honest floor). */
+function fmtElapsed(s){
+  const n = Math.max(0, Math.floor(Number(s) || 0));
+  const h = Math.floor(n/3600), m = Math.floor((n%3600)/60), sec = n%60;
+  if (h > 0) return `${h}h ${String(m).padStart(2,"0")}m`;
+  if (m > 0) return `${m}m ${String(sec).padStart(2,"0")}s`;
+  return `${sec}s`;
+}
 function renderRows() {
   const cols = ASSETS[state.asset].cols;
   let data = rowsData.slice();
@@ -371,7 +406,11 @@ async function load() {
   try {
     const r = await fetch("/api/v1/movers?"+p.toString());
     if (!r.ok) throw new Error("HTTP "+r.status);
-    const j = await r.json();
+    /* Read the body as TEXT first so an identical repeat payload is detectable
+       client-side (DEC-DASHBOARD-JS-PERF-001 — the backend echoes no generation
+       field; that echo is a reported follow-up, NOT added here). */
+    const bodyText = await r.text();
+    const j = JSON.parse(bodyText);
     if (j.gated) {
       /* Prebuild gate (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the pipeline is
          still writing the derived partitions the movers read — render the honest
@@ -379,15 +418,46 @@ async function load() {
          dynamic string — the repo's XSS-guard convention) with an empty grid,
          and schedule an auto-retry so the screen recovers when the gate lifts. */
       lastPayload = null;  /* a pill switch must re-fetch, never re-render the gated shell. */
+      lastRenderSig = null;  /* the gate lift must always repaint the real table. */
       rowsData = [];
-      renderHead(); renderRows();
-      $("asof").textContent = `as-of ${(j.date||"")} — gated`;
-      $("noteText").textContent = j.note || "prebuild in progress — movers available when finished.";
+      const gatedKey = state.asset + "|" + (j.phase || "") + "|" + (j.note || "");
+      if (!(wasGated && gatedKey === lastGatedKey)) {
+        /* Paint the empty gated shell ONCE per (asset, phase, note); each identical
+           5 s retry skips the thead/tbody rebuild and only refreshes the textContent
+           lines below — same pixels (DEC-DASHBOARD-JS-PERF-001). The ticking elapsed
+           rides the cheap #asof textContent line, never a shell repaint. */
+        renderHead(); renderRows();
+      }
+      wasGated = true; lastGatedKey = gatedKey;
+      /* Honest live status (DEC-PREBUILD-GATE-HONEST-NOTE-001): name the running
+         final stage + how long the pipeline has been at it (+ the movers-warm i/N
+         when reported), instead of a bare "gated". textContent only — never
+         innerHTML for server strings (DEC-DASHBOARD-XSS-HARDENING-001). */
+      let gatedStatus = `as-of ${(j.date||"")} — gated`;
+      if (j.phase) {
+        const warm = (j.warm_total != null && j.warm_done != null)
+          ? ` — movers warm ${j.warm_done}/${j.warm_total}` : "";
+        gatedStatus = `final stage: ${j.phase}${warm} — running ${fmtElapsed(j.elapsed_s)} (auto-refreshes)`;
+      }
+      $("asof").textContent = gatedStatus;
+      $("noteText").textContent = j.note || "pull pipeline running — movers gated until the prebuild and movers warm finish.";
       clearTimeout(gateTimer);
       gateTimer = setTimeout(load, GATE_RETRY_MS);
       return;
     }
     clearTimeout(gateTimer);
+    wasGated = false; lastGatedKey = null;
+    /* Skip-render-when-unchanged (skipUnchangedRender guard): byte-identical body
+       for the byte-identical coordinate — the DOM (and rowsData/lastPayload)
+       already show exactly this snapshot; restore the note (set to "Loading…"
+       above) and stop. Guarded to the no-client-sort state so a manually sorted
+       view never takes this path (DEC-DASHBOARD-JS-PERF-001). */
+    const sig = p.toString() + "|" + bodyText;
+    if (state.sort.idx === null && sig === lastRenderSig) {
+      $("noteText").textContent = (j.note||"");
+      return;
+    }
+    lastRenderSig = sig;
     lastPayload = j;  /* cache: sub-filter switches now re-render from this, no refetch. */
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
@@ -395,12 +465,42 @@ async function load() {
     $("noteText").textContent = (j.note||"");
   } catch (e) {
     lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
+    lastRenderSig = null;  /* a recovered fetch must always repaint over the preview. */
+    wasGated = false; lastGatedKey = null;
     rowsData = SAMPLE[state.asset] || SAMPLE.spot;
     renderHead(); renderRows();
     $("asof").innerHTML = `<span class="preview-badge">PREVIEW · sample layout</span>`;
     $("noteText").textContent = "preview of the layout with sample rows — run the dashboard for real movers data (click any column to sort).";
   }
 }
+/* Delegated pill clicks — ONE listener on #pills, attached once; it survives
+   renderPills' innerHTML swaps by construction (DEC-DASHBOARD-JS-PERF-001).
+   A metric-pill switch resets the client-side column sort to the new tab's
+   server ranking (DEC-MOVERS-SORT-RESET-001) — otherwise a manual VOLUME sort
+   persisted across pill switches (the asset-tab handler already resets it).
+   updateHeadSort() clears the stale ▼ arrow + the `sorted` highlight IN PLACE;
+   the `.on` class moves in place too (the pill SET only changes on an asset
+   switch, which still rebuilds via renderPills). */
+function onPillsClick(e) {
+  const pl = e.target.closest(".pill");
+  if (!pl) return;
+  state.category = pl.dataset.cat; state.sort = {idx:null,dir:1};
+  $("pills").querySelectorAll(".pill").forEach(x => x.classList.toggle("on", x === pl));
+  if ($("head").firstChild) updateHeadSort(); else renderHead();
+  applyCategory();
+}
+$("pills").addEventListener("click", onPillsClick);
+/* Delegated sort clicks — ONE listener on the #head row, attached once; it
+   survives renderHead's innerHTML rebuilds by construction. The arrow moves
+   IN PLACE via updateHeadSort() (no thead rebuild per sort click). */
+function onHeadClick(e) {
+  const th = e.target.closest("th");
+  if (!th || th.dataset.i === undefined) return;
+  const i = +th.dataset.i;
+  state.sort = { idx:i, dir: (state.sort.idx===i ? -state.sort.dir : 1) };
+  updateHeadSort(); renderRows();
+}
+$("head").addEventListener("click", onHeadClick);
 $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
   $("tabs").querySelectorAll(".tab").forEach(x=>x.classList.remove("on")); t.classList.add("on");
   state.asset = t.dataset.asset; state.category = ASSETS[state.asset].cats[0][0]; state.sort = {idx:null,dir:1};
@@ -408,7 +508,15 @@ $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
 });
 $("interval").onchange = () => { fillTimes(); load(); };
 $("time").onchange = () => { state.time = $("time").value; load(); };
-["exchange","expiry","track","topn","date","minvol"].forEach(id => $(id).onchange = load);
+/* ~200 ms trailing debounce for the two NUMBER inputs (DEC-DASHBOARD-JS-PERF-001):
+   a spinner run fires a discrete `change` per click — debouncedLoad coalesces the
+   burst into ONE fetch. The selects + date keep the immediate load (a single
+   discrete user action; nothing to coalesce). This page has no free-text filter. */
+const DEBOUNCE_MS = 200;
+let debounceTimer = null;
+function debouncedLoad() { clearTimeout(debounceTimer); debounceTimer = setTimeout(load, DEBOUNCE_MS); }
+["exchange","expiry","track","date"].forEach(id => $(id).onchange = load);
+["topn","minvol"].forEach(id => $(id).onchange = debouncedLoad);
 $("refresh").onclick = load;
 fillTimes(); renderPills(); load();
 </script>

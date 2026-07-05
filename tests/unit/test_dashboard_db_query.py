@@ -19,6 +19,9 @@ from typing import Any
 import duckdb
 import pytest
 from brutex.dashboard.db_view import (
+    _IST_DATE_EXPR,
+    _IST_TS_EXPR,
+    _SESSION_OPEN_MINUTES,
     ALLOWED_OPERATORS,
     CANDLE_COLUMNS,
     FNO_GREEKS_COLUMN_TYPES,
@@ -36,6 +39,7 @@ from brutex.dashboard.db_view import (
     _intraday_last_close_by_date,
     _intraday_open_by_date,
     _intraday_prev_close_by_page_date,
+    _iso_date,
     _ist_date,
     _page_ist_dates,
     _prev_trading_close,
@@ -1811,8 +1815,73 @@ def test_summarize_spot_datasets_reports_bars_and_date_span(
             "bars": 2,
             "first_date": "2024-03-01",
             "last_date": "2024-03-02",
+            # Re-baselined golden (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the fixture's
+            # bars sit at 09:15 UTC = 14:45 IST, i.e. AFTER the 09:15 IST canonical open,
+            # so BOTH stored sessions carry a substituted derived daily open.
+            "open_substituted_days": 2,
+            "session_days": 2,
         }
     ]
+
+
+def test_summarize_spot_datasets_session_days_counts_distinct_ist_dates(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # DEC-SPOT-PARTIAL-RANGE-CHIP-001: ``session_days`` counts DISTINCT IST calendar
+    # dates (not bars, not UTC dates). Three bars: two on the SAME IST date (one of
+    # them crossing the UTC boundary — 2024-03-01 20:30 UTC is 2024-03-02 02:00 IST)
+    # plus one on a second IST date → bars=3 but session_days=2.
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _bar(datetime(2024, 3, 1, 20, 30, tzinfo=UTC), "100.4"),  # IST 2024-03-02
+            _bar(datetime(2024, 3, 2, 9, 15, tzinfo=UTC), "100.8"),  # IST 2024-03-02
+            _bar(datetime(2024, 3, 4, 9, 15, tzinfo=UTC), "101.0"),  # IST 2024-03-04
+        ],
+    )
+    [row] = summarize_spot_datasets(store.connection, tmp_path)
+    assert row["bars"] == 3
+    assert row["session_days"] == 2
+    assert row["first_date"] == "2024-03-02" and row["last_date"] == "2024-03-04"
+
+
+def test_summarize_spot_datasets_session_days_ambient_timezone_robust(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Regression (DEC-SPOT-SESSION-DAYS-IST-TZ-001): ``session_days`` must count
+    # IST dates via the COMMON _IST_DATE_EXPR (AT TIME ZONE 'UTC' BEFORE the
+    # +05:30 shift), NOT a bare CAST-to-DATE on the TIMESTAMPTZ column, which
+    # resolves in the ambient DuckDB session TimeZone. Under a negative-offset
+    # zone (America/Adak, UTC-10 pre-DST) the buggy expression dated the NSE
+    # session-open bar 2024-03-01 03:45 UTC to 2024-02-29 while the session-close
+    # bar 2024-03-01 09:59 UTC dated to 2024-03-01 — ONE session counted as TWO
+    # session_days, inflating density and masking a genuinely sparse symbol from
+    # the amber settled_partial_range verdict.
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), "100.4"),  # 09:15 IST open
+            _bar(datetime(2024, 3, 1, 9, 59, tzinfo=UTC), "100.8"),  # 15:29 IST close
+        ],
+    )
+    conn = store.connection
+    (original_tz,) = conn.execute("SELECT current_setting('TimeZone')").fetchall()[0]
+    conn.execute("SET TimeZone = 'America/Adak'")
+    try:
+        [row] = summarize_spot_datasets(conn, tmp_path)
+    finally:
+        conn.execute(f"SET TimeZone = '{original_tz}'")
+    assert row["bars"] == 2
+    assert row["session_days"] == 1  # ONE NSE session, in EVERY ambient zone
+    assert row["first_date"] == "2024-03-01" and row["last_date"] == "2024-03-01"
 
 
 def test_summarize_spot_datasets_multiple_sets(store: InstrumentStore, tmp_path: Path) -> None:
@@ -1843,6 +1912,11 @@ def test_summarize_spot_datasets_skips_one_corrupt_file(
             "bars": 2,
             "first_date": "2024-03-01",
             "last_date": "2024-03-02",
+            # Both fixture sessions open at 14:45 IST (> 09:15) — substituted; the
+            # resilient readable-subset re-run computes the SAME per-session CTE
+            # (re-baselined, DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+            "open_substituted_days": 2,
+            "session_days": 2,
         }
     ]
     skips = [e for e in logs if e["event"] == "coverage.parquet_skip"]
@@ -1871,11 +1945,394 @@ def test_summarize_spot_datasets_all_unreadable_reports_zero(
             "bars": 0,
             "first_date": None,
             "last_date": None,
+            # An all-unreadable partition honestly degrades the substitution counts to
+            # (0, 0) — nothing observed (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+            "open_substituted_days": 0,
+            "session_days": 0,
         }
     ]
     unreadable = [e for e in logs if e["event"] == "coverage.parquet_unreadable"]
     assert len(unreadable) == 1
     assert unreadable[0]["source"] == "spot:NSE/CASH/NSE-NIFTY/1minute"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Opt-in session-date enrichment (DEC-COLDSTART-SEED-INTERIOR-GAP-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+#: The three INDEX `1minute` bar instants of the enrichment fixture — the last one
+#: crosses IST midnight (20:30 UTC → 02:00 IST NEXT day), pinning the SQL IST cast
+#: against the Python `_ist_date` twin.
+_SESSION_FIXTURE_TS = (
+    datetime(2024, 3, 1, 9, 15, tzinfo=UTC),
+    datetime(2024, 3, 22, 9, 15, tzinfo=UTC),
+    datetime(2024, 3, 1, 20, 30, tzinfo=UTC),  # IST calendar date 2024-03-02
+)
+
+
+def _write_session_fixture(lake_root: Path) -> None:
+    """An INDEX `1minute` + INDEX `1day` + CASH `1minute` lake for the enrichment tests."""
+    writer = ParquetWriter(lake_root=lake_root)
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_bar(ts, "100.4") for ts in _SESSION_FIXTURE_TS],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="RELIANCE",
+        interval="1minute",
+        bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+    )
+
+
+def test_summarize_spot_datasets_default_carries_no_session_dates(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # FAILS-BEFORE trivially (the key never existed) + pins the hot-path contract
+    # FOREVER: the default (poller) read is BYTE-IDENTICAL — no `session_dates`
+    # key on ANY row, INDEX included (the enrichment is strictly opt-in).
+    _write_session_fixture(tmp_path)
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    assert len(rows) == 3
+    assert all("session_dates" not in row for row in rows)
+
+
+def test_summarize_spot_datasets_session_dates_on_index_1minute_only(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The opted-in read attaches `session_dates` to the INDEX `1minute` row ONLY:
+    # the derived INDEX `1day` row must NEVER carry it (REVISION 1 — a derived
+    # window must never be density-gated) and CASH stays span-only.
+    _write_session_fixture(tmp_path)
+    rows = summarize_spot_datasets(
+        store.connection, tmp_path, session_date_segments=frozenset({"INDEX"})
+    )
+    by_key = {(r["segment"], r["interval"]): r for r in rows}
+    index_minute = by_key[("INDEX", "1minute")]
+    # GOLDEN IST parity: the SQL cast agrees with the Python `_ist_date` twin for
+    # every bar — including the 20:30 UTC bar whose IST calendar date rolls over.
+    expected = {_ist_date(ts) for ts in _SESSION_FIXTURE_TS}
+    assert {d.isoformat() for d in index_minute["session_dates"]} == expected
+    assert date(2024, 3, 2) in index_minute["session_dates"]  # the rolled-over IST date
+    assert isinstance(index_minute["session_dates"], frozenset)
+    assert "session_dates" not in by_key[("INDEX", "1day")]
+    assert "session_dates" not in by_key[("CASH", "1minute")]
+    # The enriched aggregate leaves the historical 3 scalars byte-identical.
+    plain = {
+        (r["segment"], r["interval"]): r
+        for r in summarize_spot_datasets(store.connection, tmp_path)
+    }
+    for key, row in by_key.items():
+        assert {k: v for k, v in row.items() if k != "session_dates"} == plain[key]
+
+
+def test_summarize_spot_datasets_session_dates_all_unreadable_is_empty_set(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # An all-unreadable INDEX `1minute` partition degrades to an EMPTY session set
+    # (over which the seed's density check honestly abstains), never a crash.
+    _write_session_fixture(tmp_path)
+    dataset_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute"
+    for parquet in dataset_dir.rglob("*.parquet"):
+        parquet.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs():
+        rows = summarize_spot_datasets(
+            store.connection, tmp_path, session_date_segments=frozenset({"INDEX"})
+        )
+    by_key = {(r["segment"], r["interval"]): r for r in rows}
+    index_minute = by_key[("INDEX", "1minute")]
+    assert index_minute["bars"] == 0
+    assert index_minute["session_dates"] == frozenset()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001)
+# ────────────────────────────────────────────────────────────────────────
+# 09:15 IST (the canonical NSE/BSE session open) == 03:45 UTC on the SAME date.
+
+
+def _write_index_minutes(lake_root: Path, bars: list[CandleBar], *, symbol: str = "NIFTY") -> None:
+    """Write one INDEX ``1minute`` dataset from explicit bars (the substitution fixtures)."""
+    ParquetWriter(lake_root=lake_root).write(
+        exchange="NSE", segment="INDEX", symbol=symbol, interval="1minute", bars=bars
+    )
+
+
+def _index_minute_row(store: InstrumentStore, lake_root: Path) -> dict[str, Any]:
+    """The NIFTY INDEX ``1minute`` summary row (the substitution tests' subject)."""
+    rows = summarize_spot_datasets(store.connection, lake_root)
+    return next(r for r in rows if r["segment"] == "INDEX" and r["interval"] == "1minute")
+
+
+def test_open_substitution_zero_when_first_minute_exactly_0915_boundary(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # BOUNDARY pin (strict `>`): a session whose FIRST present minute is EXACTLY the
+    # canonical 09:15:00 IST open is NOT counted — its derived 1-day open IS the
+    # canonical open price, no substitution happened.
+    _write_index_minutes(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), "100.4"),  # 09:15:00 IST exactly
+            _bar(datetime(2024, 3, 1, 3, 46, tzinfo=UTC), "100.5"),
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), "100.6"),  # 09:15:00 IST exactly
+        ],
+    )
+    row = _index_minute_row(store, tmp_path)
+    assert row["open_substituted_days"] == 0
+    assert row["session_days"] == 2
+
+
+def test_missing_0915_session_counts_open_substituted_regression(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # FAILS-BEFORE / PASSES-AFTER (the fix (c) bug): a session whose real 09:15 IST
+    # minute is ABSENT (vendor gap) gets a derived 1-day open silently substituted
+    # from its earliest present minute (tf_resampler `.first()`) with NO signal —
+    # pre-fix the summary row carried NO substitution keys at all (KeyError here),
+    # so the completeness surface could not expose it.
+    _write_index_minutes(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), "100.4"),  # canonical 09:15 open
+            _bar(datetime(2024, 3, 4, 3, 46, tzinfo=UTC), "100.5"),  # first minute 09:16 IST
+        ],
+    )
+    row = _index_minute_row(store, tmp_path)
+    assert row["open_substituted_days"] == 1
+    assert row["session_days"] == 2
+
+
+def test_late_special_open_session_counts_as_substituted(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # A genuine late/special open (e.g. a 10:00 IST special session) ALSO counts —
+    # honestly: its derived daily open is still not the canonical 09:15 price. The
+    # count is a SUBSTITUTION signal, not exclusively "vendor lost data". Mixed
+    # sessions: exact-open (not counted) + 09:16 (counted) + 10:00 (counted) → 2/3.
+    _write_index_minutes(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), "100.4"),  # 09:15 IST — canonical
+            _bar(datetime(2024, 3, 4, 3, 46, tzinfo=UTC), "100.5"),  # 09:16 IST — substituted
+            _bar(datetime(2024, 3, 5, 4, 30, tzinfo=UTC), "100.6"),  # 10:00 IST — substituted
+        ],
+    )
+    row = _index_minute_row(store, tmp_path)
+    assert row["open_substituted_days"] == 2
+    assert row["session_days"] == 3
+
+
+def test_open_substitution_empty_partition_reports_zero_zero(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # A discovered-but-ZERO-ROW 1minute partition aggregates the per-session CTE to
+    # SQL NULLs → the honest (bars=0, no dates, 0/0 counts), never a crash.
+    target = tmp_path / "bars" / "NSE" / "INDEX" / "EMPTYIDX" / "1minute" / "2024"
+    target.mkdir(parents=True)
+    store.connection.execute(
+        'COPY (SELECT CAST(NULL AS TIMESTAMPTZ) AS "timestamp" WHERE 1=0) '
+        f"TO '{(target / '03.parquet').as_posix()}'"
+    )
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    [row] = rows
+    assert row["symbol"] == "EMPTYIDX"
+    assert row["bars"] == 0
+    assert row["first_date"] is None and row["last_date"] is None
+    assert row["open_substituted_days"] == 0
+    assert row["session_days"] == 0
+
+
+def test_open_substitution_none_for_derived_1day_but_counted_for_1minute(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # FAILS-BEFORE (keys absent): the substitution columns exist on EVERY summary row,
+    # but they are COMPUTED only for the ONE fetched granularity (TRACK1_SPOT_INTERVAL,
+    # 1minute) — a derived `1day` (or intraday-TF) row carries an honest None, never a
+    # fabricated 0 ("checked, found none"). The CASH 1minute row is counted too (CASH
+    # is a SCORED spot segment — SPOT_PROBE_SEGMENTS; the hostile-review perf fold
+    # gates the CTE on the scored segments, not on the interval alone).
+    _write_session_fixture(tmp_path)  # INDEX 1minute + INDEX 1day + CASH 1minute
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    by_key = {(r["segment"], r["interval"]): r for r in rows}
+    one_day = by_key[("INDEX", "1day")]
+    assert one_day["open_substituted_days"] is None
+    assert one_day["session_days"] is None
+    # CASH 1minute (RELIANCE, one 14:45-IST-first session) is counted: 1/1.
+    cash_minute = by_key[("CASH", "1minute")]
+    assert cash_minute["open_substituted_days"] == 1
+    assert cash_minute["session_days"] == 1
+    # INDEX 1minute: 14:45-first ×2 counted; the 02:00-IST-first rolled-over session
+    # opens BEFORE 09:15 → NOT counted (the under-boundary side of the strict `>`).
+    index_minute = by_key[("INDEX", "1minute")]
+    assert index_minute["open_substituted_days"] == 2
+    assert index_minute["session_days"] == 3
+
+
+def test_open_substitution_none_for_fno_1minute_reference_partition(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Hostile-review perf fold: a REFERENCE_ONLY F&O `1minute` contract partition
+    # keeps the historical flat 3-scalar aggregate on the default (hot-path) read —
+    # its per-session substitution counts were computed then DISCARDED on the
+    # #920-sensitive /completeness + /coverage pollers (the scored projections join
+    # only INDEX/CASH). The row carries honest None counts, never a fabricated 0,
+    # and its bars/first/last stay byte-identical to any 1minute read.
+    _write_fno(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 46, tzinfo=UTC), "100.4"),  # 09:16 IST first
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), "100.6"),
+        ],
+        symbol="NIFTY24MAYFUT",
+    )
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    [row] = rows
+    assert row["segment"] == "FNO"
+    assert row["interval"] == "1minute"
+    assert row["bars"] == 2
+    assert row["first_date"] == "2024-03-01"
+    assert row["last_date"] == "2024-03-04"
+    assert row["open_substituted_days"] is None
+    assert row["session_days"] is None
+    assert "session_dates" not in row
+
+
+def test_fno_segment_opted_in_session_dates_takes_cte_and_counts(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The DEC-COLDSTART-SEED-INTERIOR-GAP-001 extensibility path: a segment
+    # EXPLICITLY opted in via `session_date_segments` takes the per-session CTE
+    # even outside the scored spot segments — the row carries real substitution
+    # counts AND its `session_dates` (`with_session_dates` ⇒ `use_session_cte`,
+    # so an opted-in row can never miss its array_agg — the IndexError hazard the
+    # gate refactor had to preserve against).
+    _write_fno(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 46, tzinfo=UTC), "100.4"),  # 09:16 IST first
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), "100.6"),  # 09:15 IST exactly
+        ],
+        symbol="NIFTY24MAYFUT",
+    )
+    rows = summarize_spot_datasets(
+        store.connection, tmp_path, session_date_segments=frozenset({"FNO"})
+    )
+    [row] = rows
+    assert row["open_substituted_days"] == 1
+    assert row["session_days"] == 2
+    assert row["session_dates"] == frozenset({date(2024, 3, 1), date(2024, 3, 4)})
+
+
+def test_folded_cte_matches_prechange_flat_aggregate_golden(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # GOLDEN (the fix (c) single-scan fold): the per-session CTE's dataset-level
+    # bars / first_date / last_date are BYTE-EQUAL to the pre-change flat 3-scalar
+    # aggregate — including across an IST midnight rollover (the 20:30 UTC bar) —
+    # so folding the substitution count into ONE scan changed no historical value.
+    _write_session_fixture(tmp_path)
+    row = _index_minute_row(store, tmp_path)
+    glob = (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute").as_posix() + "/**/*.parquet"
+    flat = store.connection.execute(
+        'SELECT COUNT(DISTINCT "timestamp"), MIN("timestamp"), MAX("timestamp") '
+        "FROM read_parquet(?, union_by_name=true)",
+        [glob],
+    ).fetchone()
+    assert flat is not None
+    assert row["bars"] == int(flat[0])
+    assert row["first_date"] == _ist_date(flat[1])
+    assert row["last_date"] == _ist_date(flat[2])
+
+
+def test_ist_ts_expr_is_the_one_offset_source() -> None:
+    # COMMON pin: `_IST_DATE_EXPR` derives from `_IST_TS_EXPR` (one 330-minute literal —
+    # no second offset can drift), and the session-open minutes derive from the ONE
+    # canonical `brutex.data.session.SESSION_OPEN` (09:15 → 555), never a 4th literal.
+    from brutex.data.session import SESSION_OPEN
+
+    assert f"{_IST_TS_EXPR}::DATE" == _IST_DATE_EXPR
+    assert _SESSION_OPEN_MINUTES == SESSION_OPEN.hour * 60 + SESSION_OPEN.minute == 555
+
+
+def test_iso_date_renders_date_and_none() -> None:
+    # The CTE returns already-IST DATE cells: a date renders ISO; SQL NULL → None;
+    # a non-date cell (defensive) → None.
+    assert _iso_date(date(2024, 3, 1)) == "2024-03-01"
+    assert _iso_date(None) is None
+    assert _iso_date("2024-03-01") is None
+
+
+def test_resample_math_unchanged_daily_open_substitution_oracle(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # BUG-REGRESSION ORACLE (fix (c) is read-side ONLY): for a session missing its
+    # 09:15 IST minute, the 1m→daily resampler STILL substitutes the earliest present
+    # minute's open (tf_resampler.py `.first()` — deliberately UNCHANGED by this fix),
+    # while the completeness surface now REPORTS the substitution. Detection with NO
+    # resample-math change.
+    pl = pytest.importorskip("polars")
+    from brutex.data.tf_resampler import resample_1m_to_tf
+
+    # Session 2024-03-04 IST: first present minute 09:16 IST (03:46 UTC) — 09:15 absent.
+    df_1m = pl.DataFrame(
+        {
+            "ts_utc": [datetime(2024, 3, 4, 3, 46), datetime(2024, 3, 4, 3, 47)],
+            "open": [200.5, 201.0],
+            "high": [201.5, 202.0],
+            "low": [200.0, 200.5],
+            "close": [201.0, 201.5],
+            "volume": [10, 10],
+        },
+        schema={
+            "ts_utc": pl.Datetime,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+    )
+    daily = resample_1m_to_tf(df_1m, 375)  # the daily bucket
+    assert daily.height == 1
+    # The derived daily open IS the substituted 09:16 open — byte-identical to the
+    # pre-change resampler (this fix never touches the math).
+    assert daily.get_column("open")[0] == 200.5
+    # …and the SAME session, written to a real lake, is now REPORTED substituted.
+    _write_index_minutes(
+        tmp_path,
+        [
+            _ocbar(
+                datetime(2024, 3, 4, 3, 46, tzinfo=UTC),
+                open_="200.5",
+                high="201.5",
+                low="200.0",
+                close="201.0",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 3, 47, tzinfo=UTC),
+                open_="201.0",
+                high="202.0",
+                low="200.5",
+                close="201.5",
+            ),
+        ],
+    )
+    row = _index_minute_row(store, tmp_path)
+    assert row["open_substituted_days"] == 1
+    assert row["session_days"] == 1
 
 
 # ────────────────────────────────────────────────────────────────────────

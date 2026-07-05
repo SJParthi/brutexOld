@@ -436,11 +436,23 @@ def pull_historical_for_underlyings(
         if historical.expiries_out_of_scope
         else ""
     )
+    # DEC-GREEKS-ENRICH-OBSERVE-001: a WHOLE-pass Greeks-enrichment failure is NAMED
+    # in the composite note (the overlay is re-derivable — the next pull re-attempts
+    # it), never a swallowed log line. Per-target quarantines never flip the verdict.
+    # The clause carries the same <ErrorType> class as the historical note
+    # (hostile-review fold — one uniform operator-facing string).
+    greeks_suffix = (
+        f", Greeks enrichment FAILED "
+        f"({(historical.greeks_enrich_error or 'error').split(':', 1)[0]}) "
+        "— overlay re-attempted next pull"
+        if historical.greeks_enrich_ok is False
+        else ""
+    )
     note = (
         f"refreshed metadata for {len(tradable)} underlying(s) "
         f"({metadata.contracts_persisted} contract(s)), then pulled "
         f"{historical.contracts_completed}/{historical.contracts_selected} contract(s)"
-        f"{skipped_suffix} ({historical.bars_appended} bar(s)){scope_suffix}"
+        f"{skipped_suffix} ({historical.bars_appended} bar(s)){scope_suffix}{greeks_suffix}"
     )
     return CompositePullReport(
         dry_run=dry_run,
