@@ -27,6 +27,7 @@ from brutex.notifications.sweep_alerts import SweepAlerter
 from brutex.notifications.telegram import TelegramEvent
 from brutex.observability.metrics import MetricRegistry
 from brutex.observability.pull_health import (
+    WARN_DWELL_SAMPLES,
     DwellProvider,
     PullHealthMonitor,
 )
@@ -147,7 +148,9 @@ class TestRules:
         assert monitor.state_of("pull.achieved_below_allowed") == SLAState.OK
 
     def test_achieved_below_allowed_fires_and_clears(self) -> None:
-        monitor, cb, _ = _monitor()
+        # warn_dwell=1 — this test pins the single-tick rule MATH, not the dwell
+        # (DEC-PULL-HEALTH-WARN-DWELL-001 gives the rule a 5-sample dwell by default).
+        monitor, cb, _ = _monitor(warn_dwell=1)
         # achieved/allowed = 1.0/5.0 = 0.2 < 0.6 → breach. in_flight 4 keeps pool busy,
         # low latency, zero hits → only this rule fires.
         monitor.observe(
@@ -163,7 +166,8 @@ class TestRules:
         assert len(cb.calls) == 1
 
     def test_pool_idle_high_fires(self) -> None:
-        monitor, cb, _ = _monitor(pool_size=4)
+        # warn_dwell=1 — pins the single-tick idle-fraction MATH, not the dwell.
+        monitor, cb, _ = _monitor(pool_size=4, warn_dwell=1)
         # in_flight 1 / pool 4 → idle 0.75 > 0.5. Keep achieved high so only this fires.
         monitor.observe(
             {"current_rps": 5.0, "recent_hits": 0},
@@ -198,8 +202,9 @@ class TestRules:
         monitor.observe(ctrl, stalled)
         monitor.observe(ctrl, stalled)
         assert monitor.state_of("pull.stalled") == SLAState.OK
-        # NOTE: a stalled effective_rps ALSO breaches achieved_below_allowed — that is
-        # expected (a stall IS below the ratio). We only assert the stalled rule here.
+        # NOTE: a stalled effective_rps also breaches the achieved ratio, but that WARN
+        # rule is itself dwell-gated (warn_dwell default 5 — DEC-PULL-HEALTH-WARN-DWELL-001)
+        # so the 3 ticks here never fire it. We only assert the stalled rule.
         # Third stalled sample: dwell satisfied → breach.
         monitor.observe(ctrl, stalled)
         assert monitor.state_of("pull.stalled") == SLAState.BREACH
@@ -235,6 +240,151 @@ class TestRules:
             "stall→recover→stall must page pull.stalled TWICE; "
             f"got {len(stalled_pages)} (fails-before: 1)"
         )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# WARN-rule startup dwell (DEC-PULL-HEALTH-WARN-DWELL-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+# The real cold-start shape ~1s into a pull: the controller starts AT the 8 r/s
+# ceiling while the CallMeter's fixed-10s-divisor effective_rps has barely ramped
+# (ratio ≤ 0.1 < 0.6) and the 4-wide pool has not fanned out (in_flight 1 → idle
+# 0.75 > 0.5) — BOTH warn rules breach on this very first tick without the dwell.
+_COLD_CTRL = {"current_rps": 8.0, "recent_hits": 0}
+_COLD_METER = {"effective_rps": 0.1, "latency_ms_p95": 50.0, "in_flight": 1}
+
+# Breaches ONLY pull.achieved_below_allowed (ratio 1.0/5.0 = 0.2 < 0.6; pool full,
+# low latency, no 429s, effective 1.0 > the 0.5 stalled floor).
+_ACHIEVED_BREACH_CTRL = {"current_rps": 5.0, "recent_hits": 0}
+_ACHIEVED_BREACH_METER = {"effective_rps": 1.0, "latency_ms_p95": 100.0, "in_flight": 4}
+
+# Breaches ONLY pull.pool_idle_high (idle 1 − 1/4 = 0.75 > 0.5; achieved 4.8/5.0 healthy).
+_IDLE_BREACH_METER = {"effective_rps": 4.8, "latency_ms_p95": 100.0, "in_flight": 1}
+
+
+class TestWarnDwell:
+    """The two cold-start-prone WARN rules must dwell ``WARN_DWELL_SAMPLES`` ticks.
+
+    Regression for DEC-PULL-HEALTH-WARN-DWELL-001: the first ``observe()`` on a
+    ~1s-old pool deterministically breached ``pull.achieved_below_allowed`` (the
+    CallMeter fixed-divisor ramp) and near-deterministically breached
+    ``pull.pool_idle_high`` (pool not yet fanned out) → two scary Telegram WARNs at
+    EVERY pull start. The fix wraps both rules in the existing :class:`DwellProvider`
+    (``samples=warn_dwell``, default :data:`WARN_DWELL_SAMPLES`); a sustained genuine
+    breach STILL fires (sample 5+), a transient 1–4-sample breach never does, and
+    recovery keeps the no-dwell immediacy of DEC-PULL-STALLED-REFIRE-001.
+    """
+
+    def test_warn_dwell_samples_default_is_five(self) -> None:
+        """Pin the constant — a silent default change must be a conscious decision."""
+        assert WARN_DWELL_SAMPLES == 5
+
+    def test_cold_start_first_observe_fires_no_warn(self) -> None:
+        """THE regression teeth: one cold-start tick on a DEFAULT monitor fires nothing.
+
+        Fails-before: on origin/main both rules flipped BREACH on this single
+        observe and ``cb.calls`` carried two WARN entries.
+        """
+        monitor, cb, _ = _monitor(pool_size=4)
+        monitor.observe(_COLD_CTRL, _COLD_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.OK
+        assert monitor.state_of("pull.pool_idle_high") == SLAState.OK
+        assert cb.calls == []
+
+    def test_sustained_achieved_below_allowed_fires_after_dwell(self) -> None:
+        """A GENUINE sustained under-achievement still fires — at the 5th sample."""
+        monitor, cb, _ = _monitor(pool_size=4)
+        for _ in range(WARN_DWELL_SAMPLES - 1):
+            monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        # 4 consecutive breaching ticks: dwell not yet satisfied → still OK, no alert.
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.OK
+        assert cb.calls == []
+        # The 5th tick satisfies the dwell → one breach edge, exactly one callback.
+        monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.BREACH
+        assert [c[0] for c in cb.calls] == ["pull.achieved_below_allowed"]
+
+    def test_sustained_pool_idle_high_fires_after_dwell(self) -> None:
+        """A GENUINELY idle pool still fires — at the 5th sample."""
+        monitor, cb, _ = _monitor(pool_size=4)
+        for _ in range(WARN_DWELL_SAMPLES - 1):
+            monitor.observe(_HEALTHY_CTRL, _IDLE_BREACH_METER)
+        assert monitor.state_of("pull.pool_idle_high") == SLAState.OK
+        assert cb.calls == []
+        monitor.observe(_HEALTHY_CTRL, _IDLE_BREACH_METER)
+        assert monitor.state_of("pull.pool_idle_high") == SLAState.BREACH
+        assert [c[0] for c in cb.calls] == ["pull.pool_idle_high"]
+
+    def test_warn_dwell_resets_on_healthy_sample(self) -> None:
+        """One healthy tick resets the streak — 4+4 breaching ticks never fire.
+
+        Kills a streak-reset-removal mutant: without the reset, the 8 breaching
+        ticks below total ≥ 5 and the rule would (wrongly) fire.
+        """
+        monitor, cb, _ = _monitor(pool_size=4)
+        for _ in range(4):
+            monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        monitor.observe(_HEALTHY_CTRL, _HEALTHY_METER)  # healthy → streak resets
+        for _ in range(4):
+            monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.OK
+        assert cb.calls == []
+        # One more breaching tick completes a FRESH 5-streak → now it fires.
+        monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.BREACH
+
+    def test_warn_rule_recovers_and_refires(self) -> None:
+        """Breach → recover (immediately, no dwell) → sustained re-breach pages again.
+
+        Pins the DEC-PULL-STALLED-REFIRE-001 asymmetric-recovery semantics on the
+        WARN rules: recovery has no dwell, and each episode re-fires its own edge.
+        """
+        monitor, cb, _ = _monitor(pool_size=4)
+        for _ in range(WARN_DWELL_SAMPLES):
+            monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.BREACH
+        # ONE healthy tick clears it immediately (recovery has no dwell).
+        monitor.observe(_HEALTHY_CTRL, _HEALTHY_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.OK
+        # Episode 2: 5 sustained breaching ticks → a SECOND edge.
+        for _ in range(WARN_DWELL_SAMPLES):
+            monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.BREACH
+        achieved = [c for c in cb.calls if c[0] == "pull.achieved_below_allowed"]
+        assert len(achieved) == 2
+
+    def test_ratio_exactly_at_threshold_is_healthy_and_recovers(self) -> None:
+        """ratio == 0.6 exactly is NOT a breach — it surfaces and fires recovery.
+
+        Kills a ``<`` → ``<=`` mutant in the achieved dwell lambda: at-threshold the
+        predicate must read False so the REAL value is surfaced (recovery edge); a
+        ``<=`` mutant would keep building the streak (``None``) and the state would
+        stick at BREACH below.
+        """
+        monitor, _, _ = _monitor(pool_size=4)
+        for _ in range(WARN_DWELL_SAMPLES):
+            monitor.observe(_ACHIEVED_BREACH_CTRL, _ACHIEVED_BREACH_METER)
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.BREACH
+        # ratio = 3.0/5.0 = 0.6 exactly → predicate False → real value → recovery.
+        monitor.observe(
+            {"current_rps": 5.0, "recent_hits": 0},
+            {"effective_rps": 3.0, "latency_ms_p95": 100.0, "in_flight": 4},
+        )
+        assert monitor.state_of("pull.achieved_below_allowed") == SLAState.OK
+
+    def test_idle_exactly_at_threshold_is_healthy_and_recovers(self) -> None:
+        """idle == 0.5 exactly is NOT a breach — kills a ``>`` → ``>=`` mutant."""
+        monitor, _, _ = _monitor(pool_size=4)
+        for _ in range(WARN_DWELL_SAMPLES):
+            monitor.observe(_HEALTHY_CTRL, _IDLE_BREACH_METER)
+        assert monitor.state_of("pull.pool_idle_high") == SLAState.BREACH
+        # idle = 1 − 2/4 = 0.5 exactly → predicate False → real value → recovery.
+        monitor.observe(
+            _HEALTHY_CTRL,
+            {"effective_rps": 4.8, "latency_ms_p95": 100.0, "in_flight": 2},
+        )
+        assert monitor.state_of("pull.pool_idle_high") == SLAState.OK
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -332,7 +482,8 @@ class TestGaugeMirroring:
 class TestBestEffort:
     def test_on_degraded_raise_is_swallowed(self) -> None:
         cb = RecordingDegraded(raise_on_call=True)
-        monitor, _, _ = _monitor(cb)
+        # warn_dwell=1 so the single breaching observe below reaches the callback.
+        monitor, _, _ = _monitor(cb, warn_dwell=1)
         # A breaching snapshot fires the (raising) callback — must NOT propagate.
         monitor.observe(
             {"current_rps": 5.0, "recent_hits": 0},
@@ -380,7 +531,10 @@ class TestSweepAlerterWiring:
             alerter.pull_degraded(rule=rule, achieved=achieved, allowed=allowed, detail=detail)
 
         registry = MetricRegistry()
-        monitor = PullHealthMonitor(registry=registry, on_degraded=on_degraded, pool_size=4)
+        # warn_dwell=1 — this test pins the alert WIRING, not the dwell.
+        monitor = PullHealthMonitor(
+            registry=registry, on_degraded=on_degraded, pool_size=4, warn_dwell=1
+        )
         # Breach achieved_below_allowed → exactly one Telegram event.
         monitor.observe(
             {"current_rps": 5.0, "recent_hits": 0},
@@ -422,8 +576,9 @@ threading.Barrier` so they all fire ``observe()`` at once, then assert the breac
         threads each firing one stalled tick simultaneously, the streak must advance by
         exactly one per tick (no torn read), so the breach edge fires once and the
         ``on_degraded`` callback records exactly one ``pull.stalled`` entry — even though
-        a stalled snapshot ALSO breaches ``pull.achieved_below_allowed`` (counted
-        separately, still once).
+        a stalled snapshot ALSO breaches ``pull.achieved_below_allowed`` (now itself
+        dwell-gated at ``warn_dwell`` default 5 per DEC-PULL-HEALTH-WARN-DWELL-001, so
+        its single edge fires at tick 5 of the 8 — counted separately, still once).
         """
         threads = 8
         cb = RecordingDegraded()
@@ -450,7 +605,8 @@ threading.Barrier` so they all fire ``observe()`` at once, then assert the breac
         assert monitor.state_of("pull.stalled") == SLAState.BREACH
         stalled_calls = [c for c in cb.calls if c[0] == "pull.stalled"]
         assert len(stalled_calls) == 1, f"pull.stalled fired {len(stalled_calls)}× (expected 1)"
-        # The co-breached achieved-below-allowed rule also flipped exactly once (one edge).
+        # The co-breached achieved-below-allowed rule also flipped exactly once (one
+        # edge, at its own warn_dwell=5 streak — tick 5 of the 8 barrier ticks).
         achieved_calls = [c for c in cb.calls if c[0] == "pull.achieved_below_allowed"]
         assert len(achieved_calls) == 1
 

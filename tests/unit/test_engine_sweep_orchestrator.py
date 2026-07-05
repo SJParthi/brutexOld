@@ -663,7 +663,10 @@ class TestRunSweepGridResilientSkip:
         def _always_raise(*_args: object, **_kwargs: object) -> object:
             raise RuntimeError("corrupt window")
 
-        monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _always_raise)
+        # The wired per-mask METRICS TAIL (DEC-SWEEP-RUST-TRADESIM-WIRE-001) —
+        # raising here produces the real fingerprinted SweepComboError exactly
+        # as the pre-wiring per-mask metrics_for_mask seam did.
+        monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _always_raise)
 
         with AuditWriter.open(tmp_path / "grid.jsonl") as audit:
             summary = run_sweep_grid(

@@ -80,7 +80,9 @@ def test_keyboard_interrupt_mid_grid_aborts_not_a_tuple_skip(
     """A Ctrl-C from the 2nd tuple's eval loop aborts the whole grid (bare raise)."""
     pytest.importorskip("polars")
     # The canonical definition lives in sweep_driver; sweep_run re-imports it.
-    from brutex.engine.sweep_driver import metrics_for_mask as real_metrics
+    # Since DEC-SWEEP-RUST-TRADESIM-WIRE-001 the wired eval loop's per-mask seam
+    # is the METRICS TAIL (`metrics_from_trades`), not `metrics_for_mask`.
+    from brutex.engine.sweep_driver import metrics_from_trades as real_tail
 
     bars = _trending_bars()
     grid = SweepGridConfig(
@@ -101,19 +103,19 @@ def test_keyboard_interrupt_mid_grid_aborts_not_a_tuple_skip(
     tuples = list(iter_sweep_tuples(grid))
     assert [t.instrument for t in tuples] == ["NIFTY", "BANKNIFTY"]
 
-    # Wrap the REAL per-mask metric so the FIRST tuple (NIFTY) runs the genuine
-    # pipeline, but the SECOND tuple (BANKNIFTY) raises KeyboardInterrupt the
-    # moment its eval loop touches metrics_for_mask — exactly an operator Ctrl-C
-    # landing mid-combo.
+    # Wrap the REAL per-mask metrics TAIL so the FIRST tuple (NIFTY) runs the
+    # genuine pipeline, but the SECOND tuple (BANKNIFTY) raises
+    # KeyboardInterrupt the moment its eval loop touches the per-mask tail —
+    # exactly an operator Ctrl-C landing mid-combo.
     instrument_box: dict[str, str] = {}
 
     def _patched_metrics(*args: object, **kwargs: object) -> object:
         if instrument_box.get("current") == "BANKNIFTY":
             raise KeyboardInterrupt("operator ctrl-c")
-        return real_metrics(*args, **kwargs)  # type: ignore[arg-type]
+        return real_tail(*args, **kwargs)  # type: ignore[arg-type]
 
     # String target avoids the re-export attr check (as the unit tests do).
-    monkeypatch.setattr("brutex.engine.sweep_run.metrics_for_mask", _patched_metrics)
+    monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _patched_metrics)
 
     root = tmp_path / "results"
     audit_path = tmp_path / "grid.jsonl"

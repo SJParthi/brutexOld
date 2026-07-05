@@ -197,12 +197,19 @@ class TestCoverageApi:
         # row without the raw code comments (the operator-reported confusion).
         assert "How to read a row" in win.text
         assert "in-pull" in win.text
-        # DEC-FETCHES-COL-HONESTY-001: the column is RELABELLED "EMPTY-retries" and the
-        # legend states it is NOT the total vendor calls — the deeper timeout/429 in-call
-        # retry ladder a FAILED window burns is not counted, so the operator cannot read
-        # the column as "barely retried".
-        assert "EMPTY-retries" in win.text
+        # DEC-FETCHES-COL-RENAME-001: the column is RELABELLED "In-pull retries" (the
+        # #924 "EMPTY-retries" name was itself a mislabel — the in_pull_fetches counter
+        # ALSO counts transient 429/timeout re-attempts, option_ingest.py's inner retry
+        # loop bumps it on every GrowwError retry) and the legend still states it is NOT
+        # the total vendor calls — the deeper timeout/429 in-call retry ladder a FAILED
+        # window burns is not counted, so the operator cannot read the column as
+        # "barely retried".
+        assert "In-pull retries" in win.text
+        assert "EMPTY-retries" not in win.text
         assert "NOT the total vendor calls" in win.text
+        # Context-aware honesty: the legend explains a FAILED row's depth is the
+        # transient-retry depth, an EMPTY row's the empty-retry depth.
+        assert "transient" in win.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
@@ -254,6 +261,11 @@ class TestSpotCoverageApi:
                 "bars": 2,
                 "first_date": "2024-03-01",
                 "last_date": "2024-03-02",
+                # Re-baselined (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): both fixture
+                # sessions' first stored minute is 14:45 IST (> the 09:15 open) — the
+                # substitution counts pass through the /coverage/spot payload.
+                "open_substituted_days": 2,
+                "session_days": 2,
                 "completeness": "no_ledger_record",
                 "windows_settled": None,
                 "windows_pending": None,
@@ -313,6 +325,231 @@ class TestSpotCoverageApi:
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
         body = client.get("/api/v1/coverage/spot").json()
         assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
+
+
+def _index_inst(symbol: str) -> Instrument:
+    """A REAL index instrument on the ``INDEX`` segment (DEC-INDEX-SEGMENT-PK-FIX-001)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+class TestColdStartSeedInteriorGap:
+    """DEC-COLDSTART-SEED-INTERIOR-GAP-001 end-to-end over a REAL lake (REVISION 2):
+    the INDEX partitions are written by the actual ``ParquetWriter`` and the density
+    branch is driven through the REAL ``load_lake_spans`` DuckDB read — a green suite
+    can never sit over a dead feature."""
+
+    def test_gappy_index_window_not_seeded_and_completeness_not_full(self, tmp_path: Path) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: pre-fix the gappy NIFTY window was span-seeded
+        # SUCCESS on the lost-ledger cold-start (skippable forever) and /completeness
+        # read the symbol "full" — the interior 18-session hole was masked. Post-fix
+        # the window is left un-seeded → PLANNED → an honest "partial" on the board.
+        from datetime import timedelta
+
+        from brutex.calendars.nse import is_trading_day
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import (
+            plan_windows,
+            reconcile_ledger_with_lake,
+            save_window_ledger,
+        )
+
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_index_inst("NIFTY"), _index_inst("BANKNIFTY")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-coldstart-gap",
+                csv_source_sha256="0" * 64,
+            )
+            writer = ParquetWriter(lake_root=tmp_path)
+            # GAPPY: real bars at BOTH ends of the window (2020-01-01 + 2020-01-28, both
+            # NSE trading days) with an 18-trading-session interior hole between them.
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=[
+                    _bar(datetime(2020, 1, 1, 4, 5, tzinfo=UTC), "100.4"),
+                    _bar(datetime(2020, 1, 28, 4, 5, tzinfo=UTC), "100.9"),
+                ],
+            )
+            # CLEAN: a bar on EVERY trading session of the same window — the control
+            # proving the density gate never false-skips a healthy dataset.
+            clean_days = []
+            cursor = date(2020, 1, 1)
+            while cursor <= date(2020, 1, 28):
+                if is_trading_day(cursor):
+                    clean_days.append(cursor)
+                cursor += timedelta(days=1)
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="BANKNIFTY",
+                interval="1minute",
+                bars=[
+                    _bar(datetime(d.year, d.month, d.day, 4, 5, tzinfo=UTC), "99.9")
+                    for d in clean_days
+                ],
+            )
+
+            ledger = WindowLedger()
+            start, end = date(2020, 1, 1), date(2020, 1, 29)  # ONE sub-daily tile
+            instruments = [_index_inst("NIFTY"), _index_inst("BANKNIFTY")]
+            with capture_logs() as logs:
+                seeded = reconcile_ledger_with_lake(
+                    ledger,
+                    tmp_path,
+                    instruments=instruments,
+                    intervals=("1minute",),
+                    start=start,
+                    end=end,
+                    market=GROWW_COVERAGE_MARKET,
+                )
+            # The clean window cold-start-seeded; the gappy one did NOT — and said so.
+            assert seeded == 1
+            skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
+            assert len(skips) == 1
+            # DEC-DATA-HONESTY-ALLFILTERED-SEED-001: the refusal WARN now names the
+            # confirmed run's inclusive bar-less bounds instead of a bare length.
+            gap_first = date.fromisoformat(str(skips[0]["gap_first"]))
+            gap_last = date.fromisoformat(str(skips[0]["gap_last"]))
+            assert date(2020, 1, 1) < gap_first <= gap_last < date(2020, 1, 28)
+
+            # The un-seeded gappy window is minted PLANNED (re-pullable, self-heals via
+            # the fetch-time detector); the seeded clean row stays settled.
+            plan_windows(
+                ledger,
+                instruments=instruments,
+                intervals=("1minute",),
+                start=start,
+                end=end,
+                market=GROWW_COVERAGE_MARKET,
+            )
+            status_by_symbol = {(r.security_id, r.status) for r in ledger.records()}
+            assert ("NIFTY", "PLANNED") in status_by_symbol
+            assert ("BANKNIFTY", "SUCCESS") in status_by_symbol
+            save_window_ledger(ledger, tmp_path)
+
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
+            spot_rows = {r["symbol"]: r for r in client.get("/api/v1/coverage/spot").json()["rows"]}
+            assert spot_rows["NIFTY"]["completeness"] == "pending"
+            assert spot_rows["NIFTY"]["windows_pending"] == 1
+            assert spot_rows["BANKNIFTY"]["completeness"] == "settled"
+            board = client.get("/api/v1/completeness/scoreboard").json()
+            per_symbol = {r["symbol"]: r for r in board["spot"]["per_symbol"]}
+            # The mask is CLOSED: the gappy symbol reads an honest NOT-full verdict
+            # (pre-fix it read "full" — settled ledger + Jan-2020 first bar).
+            assert per_symbol["NIFTY"]["1minute"] == "partial"
+            # No false-red on the healthy control (settled + Jan-2020 start → full).
+            assert per_symbol["BANKNIFTY"]["1minute"] == "full"
+
+
+class TestDailyOpenSubstitutionHonesty:
+    """DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 end-to-end over a REAL lake: a session
+    whose 09:15 IST minute is ABSENT gets its derived 1-day open silently substituted
+    from the earliest present minute (tf_resampler ``.first()`` — deliberately
+    unchanged); the completeness surface now REPORTS the substitution on every
+    projection (scoreboard JSON + /universe map + CSV + /coverage/spot pass-through)
+    while the verdict honestly stays ``full`` (informational, never a downgrade)."""
+
+    def test_missing_0915_session_surfaces_on_every_completeness_projection(
+        self, tmp_path: Path
+    ) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: pre-fix none of these payloads carried ANY
+        # substitution field — the missing-09:15 session was invisible everywhere.
+        from datetime import date as _date
+
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import (
+            reconcile_ledger_with_lake,
+            save_window_ledger,
+        )
+
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_index_inst("NIFTY")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-open-subst",
+                csv_source_sha256="0" * 64,
+            )
+            # Three consecutive Jan-2020 trading sessions (the 2020 floor, so the verdict
+            # can read a genuine "full"): 01+03 open at the canonical 09:15 IST (03:45 UTC);
+            # 02's 09:15 minute is MISSING — its first stored minute is 09:16 IST.
+            ParquetWriter(lake_root=tmp_path).write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=[
+                    _bar(datetime(2020, 1, 1, 3, 45, tzinfo=UTC), "100.4"),
+                    _bar(datetime(2020, 1, 2, 3, 46, tzinfo=UTC), "100.5"),  # 09:16 IST first
+                    _bar(datetime(2020, 1, 3, 3, 45, tzinfo=UTC), "100.6"),
+                ],
+            )
+            # Settle the fetch window (the cold-start seed over the continuous 3-session
+            # span) so the ledger-backed verdict is a genuine "full" — proving end-to-end
+            # that the substitution is INFORMATIONAL, never a verdict downgrade.
+            ledger = WindowLedger()
+            seeded = reconcile_ledger_with_lake(
+                ledger,
+                tmp_path,
+                instruments=[_index_inst("NIFTY")],
+                intervals=("1minute",),
+                start=_date(2020, 1, 1),
+                end=_date(2020, 1, 4),
+                market=GROWW_COVERAGE_MARKET,
+            )
+            assert seeded == 1
+            save_window_ledger(ledger, tmp_path)
+
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
+            # /coverage/spot — the {**row} pass-through.
+            (spot_row,) = client.get("/api/v1/coverage/spot").json()["rows"]
+            assert spot_row["open_substituted_days"] == 1
+            assert spot_row["session_days"] == 3
+
+            # /api/v1/completeness/scoreboard — per-symbol row + per-category sum,
+            # verdict stays "full" (settled + Jan-2020 floor + informational count).
+            board = client.get("/api/v1/completeness/scoreboard").json()
+            (row,) = board["spot"]["per_symbol"]
+            assert row["symbol"] == "NIFTY"
+            assert row["1minute"] == "full" and row["overall"] == "full"
+            assert row["open_substituted_days"] == 1
+            assert row["session_days"] == 3
+            assert board["spot"]["by_category"]["index"]["open_substituted_days"] == 1
+
+            # /api/v1/universe/completeness — the per-symbol detail map.
+            detail = client.get("/api/v1/universe/completeness").json()
+            one_min = detail["NIFTY"]["spot"]["1minute"]
+            assert one_min["status"] == "full"
+            assert one_min["open_substituted_days"] == 1
+            assert one_min["session_days"] == 3
+            assert one_min["open_substituted"] is True
+
+            # The CSV report — enriched DETAIL-spot section carries N + M.
+            csv_text = client.get("/api/v1/completeness/scoreboard.csv").text
+            assert "1-minute open-substituted days" in csv_text
+            assert "1-minute sessions" in csv_text
+            assert "index,NIFTY,NSE,full,2020-01-01,2020-01-03,yes,1,3,full" in (
+                csv_text.splitlines()
+            )
 
 
 class TestWindowStatusApi:
@@ -567,13 +804,15 @@ class TestCompletenessScoreboard:
             bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
         )
         calls = {"n": 0}
-        real = _app_module.summarize_spot_datasets
+        # DEC-COMPLETENESS-FNO-SKIP-001: the shared scan is now the FNO-pruned
+        # verdict wrapper (same cache entry, same sharing law).
+        real = _app_module.summarize_spot_verdict_datasets
 
         def _counting(conn: object, lake: Path) -> list[dict[str, Any]]:
             calls["n"] += 1
             return real(conn, lake)
 
-        monkeypatch.setattr(_app_module, "summarize_spot_datasets", _counting)
+        monkeypatch.setattr(_app_module, "summarize_spot_verdict_datasets", _counting)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         # Three reads that each USED to re-run the full scan; now they share one.
         first = client.get("/api/v1/completeness/scoreboard")
@@ -679,6 +918,52 @@ class TestCompletenessScoreboard:
         assert entry["stray_lake_symbols"] == [repr("NSE-M&M")]
         assert entry["unmatched_scored_symbols"] == [repr("M&M")]
 
+    def test_sparse_settled_range_reads_amber_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SPOT-PARTIAL-RANGE-CHIP-001 end-to-end: a SETTLED symbol whose real lake
+        holds only 3 session-days over a 3-month span reads the amber
+        ``settled_partial_range`` on the /completeness scoreboard — the ``session_days``
+        scalar rides the real ``summarize_spot_datasets`` scan, the ledger rollup is
+        settled (nothing left to re-pull), yet the range density (3 / ~60 sessions)
+        honestly fails the 0.95 floor. Pre-fix this read a false ``full``."""
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("SPARSECO")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-sparse",
+                csv_source_sha256="0" * 64,
+            )
+            # A REAL sparse lake: Jan-2020-anchored (the floor passes) but only 3 distinct
+            # session dates across Jan→Mar 2020 (one write per month partition).
+            writer = ParquetWriter(lake_root=tmp_path)
+            for ts, close in [
+                (datetime(2020, 1, 1, 9, 15, tzinfo=UTC), "100.4"),
+                (datetime(2020, 2, 3, 9, 15, tzinfo=UTC), "100.8"),
+                (datetime(2020, 3, 31, 9, 15, tzinfo=UTC), "101.00"),
+            ]:
+                writer.write(
+                    exchange="NSE",
+                    segment="CASH",
+                    symbol="SPARSECO",
+                    interval="1minute",
+                    bars=[_bar(ts, close)],
+                )
+            # A fully-SETTLED ledger rollup for the cell (5 settled, 0 pending, 0 failed) —
+            # the base verdict is ``full``; only the range audit can downgrade it.
+            monkeypatch.setattr(
+                _app_module,
+                "spot_window_rollup",
+                lambda _lake: {("SPARSECO", "1minute"): (5, 0, 0)},
+            )
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
+            body = client.get("/api/v1/completeness/scoreboard").json()
+        per_symbol = {row["symbol"]: row for row in body["spot"]["per_symbol"]}
+        assert per_symbol["SPARSECO"]["1minute"] == "settled_partial_range"
+        assert per_symbol["SPARSECO"]["1minute_start"] == "2020-01-01"
+        # …and it does NOT inflate the FULL 1-minute aggregate.
+        assert body["spot"]["by_category"]["equity"]["full_1minute"] == 0
+
     def test_reconcile_diagnostic_silent_when_lake_key_matches_scored(self, tmp_path: Path) -> None:
         """The clean counterpart: when the lake partition key EQUALS the scored ``symbol_name``
         (``M&M`` on both sides) the symbol scores normally and NO reconciliation WARNING fires —
@@ -761,6 +1046,7 @@ _LEDGER_COLS = [
     "last_attempt_at",
     "empty_streak",
     "in_pull_fetches",
+    "bars_net_new",
 ]
 
 
@@ -797,7 +1083,12 @@ class TestWindowLedgerApi:
             end=date(2021, 4, 1),
         )
         ledger.record(
-            key, raw_bars=5, error_type=None, bars_appended=5, now=datetime(2026, 6, 9, tzinfo=UTC)
+            key,
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            bars_net_new=4,
+            now=datetime(2026, 6, 9, tzinfo=UTC),
         )
         # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
         save_window_ledger(ledger, tmp_path)
@@ -809,9 +1100,12 @@ class TestWindowLedgerApi:
         assert row[1] == "NIFTY"  # security_id
         assert row[5] == "SUCCESS"  # status
         assert row[6] == 5  # bars
-        # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): the last column,
-        # 1 for this first-try SUCCESS — the /db grid surfaces the in-pull retry too.
+        # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): 1 for this
+        # first-try SUCCESS — the /db grid surfaces the in-pull retry too.
         assert row[12] == 1
+        # bars_net_new (idx 13, DEC-INGEST-BOUNDARY-INTEGRITY-001): the last column —
+        # the sink's keep-first-DEDUPED net-new count, persisted + surfaced on /db.
+        assert row[13] == 4
         # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
         assert row[9] == "2026-06-09 05:30:00"
         assert "+00:00" not in str(row[9])  # the raw UTC offset is gone

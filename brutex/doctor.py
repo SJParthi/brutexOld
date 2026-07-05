@@ -26,24 +26,31 @@ Currently implemented checks
    ``~/.brutex/runtime.json`` if present and confirms it parses.
    Absent file is reported as ``SKIP`` (no live run is a valid
    state, not a failure).
-3. **Wheel-source freshness** (R2-CC-G1). Compares the INSTALLED
-   ``trading_core`` wheel (compiled-symbol surface +
-   ``__build_crate_version__``) against the in-repo expected
-   fingerprint ``rust/trading-core/python/trading_core/EXPECTED_BUILD.json``.
+3. **Wheel-source freshness** (R2-CC-G1 for ``trading_core``;
+   DEC-FNOMATH-WHEEL-FRESHNESS-001 extends the SAME common check to
+   the ``fno_math`` trade-sim wheel, urgent since
+   DEC-SWEEP-RUST-TRADESIM-WIRE-001 #1182 wired ``ResidentSweepSim``
+   unflagged into the sweep hot path). ONE generic helper
+   (:func:`_check_one_wheel_freshness` over :class:`_WheelSpec`)
+   compares each INSTALLED wheel (compiled-symbol surface +
+   ``__build_crate_version__``) against its in-repo expected
+   fingerprint (``rust/<crate>/python/<package>/EXPECTED_BUILD.json``).
    A mismatch is a non-fatal ``WARN`` with an actionable rebuild
-   message; ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips THIS STAGE ONLY.
+   message; ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips BOTH wheel stages
+   ONLY (one escape hatch, deliberately shared).
    HONEST reachability envelope (Golden Rule #10): via the ``brutex``
-   CLI this stage's WARN teeth are the drift classes that still
+   CLI these stages' WARN teeth are the drift classes that still
    IMPORT (crate-version mismatch, unexpected extra symbols, a
    stale/malformed fingerprint). A wheel missing a re-exported
-   SYMBOL never reaches this stage through the CLI — the
-   ``trading_core`` shim's UNCONDITIONAL import-time handshake (no
-   env escape; see its ``__init__.py`` for why one could not help)
-   raises its own actionable ImportError first, because
-   ``brutex.cli`` transitively imports ``trading_core`` at module
-   import. That ImportError IS the operator remedy for the
-   symbol-stale class; this stage's "not importable" WARN arm is
-   reachable only from programmatic ``run_doctor`` embeddings.
+   SYMBOL never reaches these stages through the CLI — each shim's
+   UNCONDITIONAL import-time handshake (no env escape; see the
+   respective ``__init__.py`` for why one could not help) raises its
+   own actionable ImportError first, because ``brutex.cli``
+   transitively imports both wheels at module import
+   (``brutex.vocabulary`` → ``trading_core``; ``brutex.math`` →
+   ``fno_math``). That ImportError IS the operator remedy for the
+   symbol-stale class; the "not importable" WARN arm is reachable
+   only from programmatic ``run_doctor`` embeddings.
 
 Future checks (tracked for follow-up PRs, NOT in this PR)
 ---------------------------------------------------------
@@ -61,6 +68,7 @@ coverage is a ratchet on top of this scaffold.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sys
@@ -517,35 +525,83 @@ def check_lake_uniqueness(lake_root: Path) -> CheckResult:
         )
 
 
-def check_wheel_freshness(
+@dataclass(frozen=True)
+class _WheelSpec:
+    """One compiled-wheel freshness target for :func:`_check_one_wheel_freshness`.
+
+    The COMMON descriptor (Golden Rule #11) that lets ONE generic check body
+    serve every PyO3 wheel BruteX ships — ``trading_core`` (R2-CC-G1) and
+    ``fno_math`` (DEC-FNOMATH-WHEEL-FRESHNESS-001) today; a future kernel is
+    one more spec, zero copy-paste.
+
+    Attributes
+    ----------
+    check_name
+        The :class:`CheckResult` stage name (``"wheel_freshness"`` for
+        trading_core is preserved verbatim for back-compat with existing
+        consumers/tests; the fno_math stage is ``"wheel_freshness_fno_math"``).
+    package
+        Importable shim package name (e.g. ``"trading_core"``).
+    compiled_submodule
+        The private compiled submodule name inside the package (e.g.
+        ``"_trading_core"``) — the installed ``.so`` this stage fingerprints.
+    crate_dir
+        Repo-relative crate directory for the actionable rebuild hint
+        (e.g. ``"rust/trading-core"``).
+    """
+
+    check_name: str
+    package: str
+    compiled_submodule: str
+    crate_dir: str
+
+
+_TRADING_CORE_WHEEL = _WheelSpec(
+    check_name="wheel_freshness",
+    package="trading_core",
+    compiled_submodule="_trading_core",
+    crate_dir="rust/trading-core",
+)
+
+_FNO_MATH_WHEEL = _WheelSpec(
+    check_name="wheel_freshness_fno_math",
+    package="fno_math",
+    compiled_submodule="_fno_math",
+    crate_dir="rust/fno-math",
+)
+
+
+def _check_one_wheel_freshness(
+    spec: _WheelSpec,
     fingerprint_file: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CheckResult:
-    """Wheel-source freshness handshake for the trading_core wheel (R2-CC-G1).
+    """Wheel-source freshness handshake for ONE compiled wheel.
 
-    Run identity records ``code_commit_sha`` + ``trading_core.__version__``,
+    Run identity records ``code_commit_sha`` + the wheel's ``__version__``,
     but nothing bound the installed ``.so`` to the source tree: a run could
     record commit X while executing commit-W Rust kernels, silently. This
-    stage compares the INSTALLED ``trading_core`` (compiled-symbol surface +
+    stage compares the INSTALLED package (compiled-symbol surface +
     ``__build_crate_version__``) against the in-repo expected fingerprint
-    (``rust/trading-core/python/trading_core/EXPECTED_BUILD.json``).
+    (``EXPECTED_BUILD.json`` next to the installed package, which IS the
+    repo copy under ``maturin develop``).
 
-    * ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` in ``env`` → SKIP. This skips THIS
-      DOCTOR STAGE ONLY — it is NOT an escape for the ``trading_core`` shim's
+    * ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` in ``env`` → SKIP. This skips the
+      DOCTOR wheel stages ONLY — it is NOT an escape for a shim's
       import-time symbol handshake, and it cannot unbrick a symbol-stale
       install (nothing can, short of the rebuild: the shim's re-export
       from-import would fail on the missing symbol regardless).
-    * ``trading_core`` not importable (or its own import-time symbol
-      handshake raised) → WARN with the rebuild instruction. HONEST
-      reachability (Golden Rule #10): this arm is reachable ONLY from a
-      programmatic :func:`run_doctor` / :func:`check_wheel_freshness` call
-      (tests, embeddings). Through the ``brutex`` CLI it can never execute —
-      ``brutex.cli`` transitively imports ``trading_core`` at module import
-      (via ``brutex.vocabulary``), so a symbol-stale wheel kills the process
-      with the shim's own actionable ImportError before any doctor stage
-      runs. That ImportError names the missing symbols + the same rebuild
-      command, so the operator remedy is identical — but it is a hard
-      import failure, NOT this advisory WARN.
+    * Package not importable (or its own import-time symbol handshake
+      raised) → WARN with the rebuild instruction. HONEST reachability
+      (Golden Rule #10): this arm is reachable ONLY from a programmatic
+      :func:`run_doctor` / check call (tests, embeddings). Through the
+      ``brutex`` CLI it can never execute — ``brutex.cli`` transitively
+      imports both wheels at module import (``brutex.vocabulary`` →
+      ``trading_core``; ``brutex.math`` → ``fno_math``), so a symbol-stale
+      wheel kills the process with the shim's own actionable ImportError
+      before any doctor stage runs. That ImportError names the missing
+      symbols + the same rebuild command, so the operator remedy is
+      identical — but it is a hard import failure, NOT this advisory WARN.
     * No fingerprint file (e.g. a wheel-only install with no repo checkout)
       → SKIP with an honest "not checkable" detail.
     * Version or symbol-set mismatch → **WARN (non-fatal)** with an
@@ -559,52 +615,43 @@ def check_wheel_freshness(
     a stale wheel that dropped/added a symbol or changed crate version. They
     do NOT catch same-version, symbol-compatible BEHAVIORAL drift (Rust
     source changed, version + symbols unchanged) — closing that needs a
-    ``build.rs`` source-content digest baked into the wheel, the named
-    follow-up (out of this change's scope). Likewise, a NON-editable wheel
-    install whose default fingerprint ships inside the wheel itself
-    self-snapshots at build time; the check has teeth when the fingerprint
-    read is the repo checkout's (the editable/`maturin develop` layout).
-
-    Parameters
-    ----------
-    fingerprint_file
-        Explicit path to the expected-fingerprint JSON. ``None`` = the
-        ``EXPECTED_BUILD.json`` next to the installed ``trading_core``
-        package (which IS the repo copy under ``maturin develop``).
-    env
-        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    source-content digest baked into the wheel, the named follow-up (out of
+    this change's scope); the CI golden/parity suites remain the correctness
+    proof for that class. Likewise, a NON-editable wheel install whose
+    default fingerprint ships inside the wheel itself self-snapshots at
+    build time; the check has teeth when the fingerprint read is the repo
+    checkout's (the editable/`maturin develop` layout).
     """
     env_map: Mapping[str, str] = os.environ if env is None else env
     if env_map.get("BRUTEX_SKIP_WHEEL_FRESHNESS") == "1":
         return CheckResult(
-            name="wheel_freshness",
+            name=spec.check_name,
             status="SKIP",
             detail="skipped via BRUTEX_SKIP_WHEEL_FRESHNESS=1",
         )
 
-    rebuild_hint = "rebuild via `maturin develop --release` in rust/trading-core"
+    rebuild_hint = f"rebuild via `maturin develop --release` in {spec.crate_dir}"
     try:
-        import trading_core
-
+        package = importlib.import_module(spec.package)
         # Friend access to the compiled submodule: the whole point of this
         # stage is fingerprinting the installed .so itself, not the shim.
-        # ONE import style only (CodeQL py/import-and-import-from) — a plain
-        # submodule import still raises ImportError on a missing/stale .so,
-        # so the WARN arm below is behavior-identical.
-        import trading_core._trading_core as compiled  # pyright: ignore[reportPrivateUsage]
+        # Dynamic import (ONE style — CodeQL py/import-and-import-from) still
+        # raises ImportError on a missing/stale .so, so the WARN arm below is
+        # behavior-identical for both wheels.
+        compiled = importlib.import_module(f"{spec.package}.{spec.compiled_submodule}")
     except ImportError as exc:
         return CheckResult(
-            name="wheel_freshness",
+            name=spec.check_name,
             status="WARN",
-            detail=f"trading_core wheel not importable ({exc}) — {rebuild_hint}",
+            detail=f"{spec.package} wheel not importable ({exc}) — {rebuild_hint}",
         )
 
     target = fingerprint_file
     if target is None:
-        target = Path(str(trading_core.__file__)).parent / "EXPECTED_BUILD.json"
+        target = Path(str(package.__file__)).parent / "EXPECTED_BUILD.json"
     if not target.exists():
         return CheckResult(
-            name="wheel_freshness",
+            name=spec.check_name,
             status="SKIP",
             detail=f"no expected-fingerprint file at {target} — freshness not checkable",
         )
@@ -617,7 +664,7 @@ def check_wheel_freshness(
             raise TypeError("crate_version must be a str and symbols a list")
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         return CheckResult(
-            name="wheel_freshness",
+            name=spec.check_name,
             status="WARN",
             detail=f"fingerprint file malformed ({target.name}): {exc}",
         )
@@ -625,7 +672,7 @@ def check_wheel_freshness(
     expected_symbols = set(expected_symbol_list)
     installed_symbols = {a for a in dir(compiled) if not a.startswith("_") or a == "__version__"}
     installed_version = getattr(
-        trading_core, "__build_crate_version__", "<absent — shim predates R2-CC-G1>"
+        package, "__build_crate_version__", "<absent — shim predates the handshake>"
     )
 
     problems: list[str] = []
@@ -639,25 +686,74 @@ def check_wheel_freshness(
         problems.append(f"installed .so exposes unexpected symbol(s) {unexpected}")
     if problems:
         return CheckResult(
-            name="wheel_freshness",
+            name=spec.check_name,
             status="WARN",
             detail=(
-                f"installed trading_core wheel is STALE vs {target.name}: "
+                f"installed {spec.package} wheel is STALE vs {target.name}: "
                 f"{'; '.join(problems)} — {rebuild_hint}"
             ),
         )
     # HONEST residual gap (Golden Rule #10): a PASS here means version +
     # symbol surface match — it does NOT prove behavioral freshness of a
-    # same-version, symbol-compatible rebuild (build.rs digest = follow-up).
+    # same-version, symbol-compatible rebuild (source digest = follow-up).
     return CheckResult(
-        name="wheel_freshness",
+        name=spec.check_name,
         status="PASS",
         detail=(
-            f"installed trading_core {installed_version} matches {target.name} "
+            f"installed {spec.package} {installed_version} matches {target.name} "
             f"({len(expected_symbols)} symbols; version+symbol check only — "
             "same-version behavioral drift not detectable)"
         ),
     )
+
+
+def check_wheel_freshness(
+    fingerprint_file: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel-source freshness handshake for the trading_core wheel (R2-CC-G1).
+
+    Thin binding of the COMMON :func:`_check_one_wheel_freshness` to the
+    ``trading_core`` wheel — the stage name (``wheel_freshness``), semantics
+    and detail wording are preserved from the pre-generalization check.
+
+    Parameters
+    ----------
+    fingerprint_file
+        Explicit path to the expected-fingerprint JSON. ``None`` = the
+        ``EXPECTED_BUILD.json`` next to the installed ``trading_core``
+        package (which IS the repo copy under ``maturin develop``).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_freshness(_TRADING_CORE_WHEEL, fingerprint_file, env)
+
+
+def check_fno_math_wheel_freshness(
+    fingerprint_file: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel-source freshness handshake for the fno_math trade-sim wheel.
+
+    DEC-FNOMATH-WHEEL-FRESHNESS-001 — the fno_math twin of
+    :func:`check_wheel_freshness`, bound to the SAME common helper. Urgent
+    because DEC-SWEEP-RUST-TRADESIM-WIRE-001 (#1182) wired
+    ``ResidentSweepSim`` UNFLAGGED into the sweep hot path, so a stale
+    installed ``_fno_math`` wheel is an always-on production risk (this very
+    container shipped a stale wheel that SIGABRTed suites). Runtime
+    stale-wheel tripwire only — the CI golden/parity suites remain the
+    correctness proof.
+
+    Parameters
+    ----------
+    fingerprint_file
+        Explicit path to the expected-fingerprint JSON. ``None`` = the
+        ``EXPECTED_BUILD.json`` next to the installed ``fno_math`` package
+        (which IS the repo copy under ``maturin develop``).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_freshness(_FNO_MATH_WHEEL, fingerprint_file, env)
 
 
 def run_doctor(
@@ -668,6 +764,7 @@ def run_doctor(
     replay_action_filter: str = "add",
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
+    fno_math_wheel_fingerprint_file: Path | None = None,
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -690,9 +787,15 @@ def run_doctor(
         Audit action to project subjects from for replay (default
         ``"add"``).
     wheel_fingerprint_file
-        Explicit expected-fingerprint JSON for the wheel-freshness stage
-        (R2-CC-G1). ``None`` = the ``EXPECTED_BUILD.json`` shipped next to
-        the installed ``trading_core`` package.
+        Explicit expected-fingerprint JSON for the trading_core
+        wheel-freshness stage (R2-CC-G1). ``None`` = the
+        ``EXPECTED_BUILD.json`` shipped next to the installed
+        ``trading_core`` package.
+    fno_math_wheel_fingerprint_file
+        Explicit expected-fingerprint JSON for the fno_math wheel-freshness
+        stage (DEC-FNOMATH-WHEEL-FRESHNESS-001). ``None`` = the
+        ``EXPECTED_BUILD.json`` shipped next to the installed ``fno_math``
+        package.
 
     Returns
     -------
@@ -717,6 +820,7 @@ def run_doctor(
     report.add(check_derived_freshness(resolved_lake))
     report.add(check_lake_uniqueness(resolved_lake))
     report.add(check_wheel_freshness(fingerprint_file=wheel_fingerprint_file))
+    report.add(check_fno_math_wheel_freshness(fingerprint_file=fno_math_wheel_fingerprint_file))
     return report
 
 
@@ -728,6 +832,7 @@ def main(
     replay_action_filter: str = "add",
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
+    fno_math_wheel_fingerprint_file: Path | None = None,
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
@@ -738,6 +843,7 @@ def main(
         replay_action_filter=replay_action_filter,
         lake_root=lake_root,
         wheel_fingerprint_file=wheel_fingerprint_file,
+        fno_math_wheel_fingerprint_file=fno_math_wheel_fingerprint_file,
     )
     print(report.format())
     return 0 if report.ok else 1

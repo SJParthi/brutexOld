@@ -132,6 +132,28 @@ def test_stamp_rejects_naive() -> None:
         stamp_bar(datetime(2025, 6, 10, 9, 15), JUN_CONTRACT)
 
 
+def test_stamp_out_of_coverage_weekday_refuses_loud() -> None:
+    # Calendar-correctness pack: the OLD silent behaviour is GONE — a bar dated
+    # on a weekday OUTSIDE the published holiday span used to be stamped with a
+    # silently-assumed regular 09:15 session open; stamp_bar now resolves the
+    # session via the strict ``get_session_checked`` and REFUSES loudly
+    # (Golden Rule #1 — never classify a bar the calendar cannot verify).
+    from brutex.calendars.nse import HolidayDataUnavailableError
+
+    out_day = date(2027, 1, 4)  # Monday, above the 2026 coverage ceiling
+    with pytest.raises(HolidayDataUnavailableError):
+        stamp_bar(_ist(out_day, 9, 15), FuturesContract(NIFTY, date(2027, 1, 28)))
+
+
+def test_stamp_in_coverage_holiday_falls_back_to_regular_open() -> None:
+    # An IN-COVERAGE non-session date (a listed holiday) still stamps without
+    # raising: ``get_session_checked`` returns an honest None and the stamper
+    # falls back to the regular 09:15 open (unchanged in-coverage behaviour).
+    holiday = date(2025, 12, 25)  # Christmas 2025 — listed, in coverage
+    m = stamp_bar(_ist(holiday, 9, 15), FuturesContract(NIFTY, date(2025, 12, 30)))
+    assert m.minute_of_session == 0
+
+
 def test_as_audit_payload_is_json_safe() -> None:
     import json
 

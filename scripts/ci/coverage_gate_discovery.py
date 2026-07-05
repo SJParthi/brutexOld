@@ -128,10 +128,11 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         "brutex/dashboard/db_view.py",
         # The Stage-1A bitset-matrix builder. Its 100% line+branch is reached by a
         # CURATED multi-file suite — test_engine_stage1a.py (the matrix builder +
-        # the resurrected VWAP/BOS bits) + test_engine_walk_forward.py (the
-        # walk-forward schedule helpers trading_day_starts / WalkForwardSchedule /
+        # the resurrected VWAP/BOS bits) + test_engine_sweep_driver_walk_forward.py
+        # (the walk-forward schedule helpers trading_day_starts / WalkForwardSchedule /
         # _day_to_bar / _walk_forward_schedule_hash / build_walk_forward_schedule,
-        # which live in stage1a.py but are exercised by their own walk-forward suite).
+        # which live in stage1a.py but are exercised by the walk-forward suite —
+        # stem-named for sweep_driver.py, whose walk-forward entry points it gates).
         # The discovery gate maps a module ONLY to its stem-matching tests
         # (test_engine_stage1a*), so it sees just the builder file and tops out at
         # ~82% STANDALONE while the walk-forward functions read 0 — the SAME
@@ -146,6 +147,25 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # excluding it here keeps that complement honest instead of blocking
         # EVERY stage1a-touching PR (DEC-COVERAGE-DISCOVERY-STAGE1A-001).
         "brutex/engine/stage1a.py",
+        # The Stage-2 sweep driver. Its 100% line+branch is reached by a CURATED
+        # two-file suite — test_engine_sweep_driver.py (evaluate/sweep/rank +
+        # the public metrics_for_mask / metrics_from_trades seams) +
+        # test_engine_walk_forward.py (the walk-forward half: FoldResult /
+        # WalkForwardResult / _score_fold / evaluate_combo_walk_forward /
+        # walk_forward_sweep, which live in sweep_driver.py but are exercised
+        # by their own walk-forward suite — the EXACT stage1a.py shape above).
+        # The discovery gate maps a module ONLY to its stem-matching tests
+        # (test_engine_sweep_driver*), so it sees just the driver file and tops
+        # out at ~83% STANDALONE while the walk-forward half reads 0 (verified
+        # 100.00% line+branch when the two files run together). Duplicating the
+        # walk-forward tests into the driver stem file would be a
+        # Golden-Rule-#11 COMMON (no copy-paste) violation. sweep_driver.py's
+        # real 100% gate is the STATIC per-module engine gate in ci.yml (the
+        # WHOLE tests/unit/test_engine_*.py suite at --cov-fail-under=100) +
+        # the whole-package floor (DEC-SWEEP-RUST-TRADESIM-WIRE-001, which made
+        # the metrics tail public and first touched this module under the
+        # discovery gate).
+        "brutex/engine/sweep_driver.py",
         # The /movers spot-snapshot module. Its 100% line+branch is reached by
         # the WHOLE movers test FAMILY collectively — the spot-CANDIDATE readers
         # (_read_daily_partition / _prev_day_close / compute_spot_candidates /

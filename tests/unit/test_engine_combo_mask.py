@@ -213,6 +213,24 @@ def test_count_combos_canonical_values() -> None:
     assert count_combos(5, n=52) == 2598960
 
 
+def test_combo_mask_doctests_pass() -> None:
+    """Run every doctest in ``brutex.engine.combo_mask`` as a bounded gate.
+
+    Regression for the stale 52-bit ``count_combos`` doctest examples
+    (52/1326/22100 were the pre-u128-widening C(52, k) values; with
+    ``VOCAB_BITS = 60`` the truth is 60/1770/34220). No repo-wide
+    ``--doctest-modules`` policy exists, so this single-module gate is
+    the only thing keeping the engine module's Examples honest.
+    The ``attempted > 0`` guard prevents a silent no-op if the
+    docstrings are ever stripped.
+    """
+    import doctest
+
+    results = doctest.testmod(combo_mask)
+    assert results.failed == 0
+    assert results.attempted > 0
+
+
 def test_count_combos_full_set() -> None:
     """C(n, n) = 1 (the all-bits-set combo)."""
     assert count_combos(VOCAB_BITS) == 1

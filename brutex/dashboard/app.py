@@ -51,6 +51,8 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
+from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
 from brutex.adapters.ingest_common import (
     gate_pull_credentials,
     label_synthetic,
@@ -93,7 +95,7 @@ from brutex.dashboard.db_view import (
     sample_rows,
     spot_window_rollup,
     summarize_option_datasets,
-    summarize_spot_datasets,
+    summarize_spot_verdict_datasets,
     table_summary,
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
@@ -109,6 +111,7 @@ from brutex.dashboard.fno_underlying import (
     fno_underlying_forms,
     resolve_fno_index_aliases,
 )
+from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_revision import lake_revision
@@ -136,10 +139,12 @@ from brutex.dashboard.movers_snapshot import (
     pending_asset_payload,
 )
 from brutex.dashboard.movers_warm import (
+    MoversWarmResult,
     futures_warm_grid,
     latest_movers_date,
     options_warm_grid,
     spot_warm_grid,
+    warm_coordinate_label,
     warm_movers_snapshots,
 )
 from brutex.dashboard.pipeline_prebuild import (
@@ -159,14 +164,22 @@ from brutex.dashboard.preopen_report import (
     resolve_report_datasets,
 )
 from brutex.dashboard.pull_controller import (
+    GROWW_HISTORY_FLOOR,
     BulkSpotReport,
     SessionRateController,
+    default_date_range,
     pull_all_spot,
     pull_candles,
     resolve_candle_range,
     resolve_fetch_intervals,
     resolve_pull_symbols,
     resolve_pull_targets,
+)
+from brutex.dashboard.pull_intent import (
+    PullIntent,
+    PullIntentStore,
+    persist_intent_for_launch,
+    run_auto_resume,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.rate_sampler import RatePanelSampler
@@ -220,6 +233,7 @@ from brutex.data.timeframe_materialize import MaterializeResult, materialize_lak
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
+from brutex.observability.power_keepawake import keep_awake
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -926,6 +940,13 @@ def _registry_unreadable_payload(columns: tuple[str, ...]) -> dict[str, Any]:
 #: OPTIONS are never checked — they must stay side-effect-free reads.
 _ORIGIN_GUARDED_METHODS: Final[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+#: First 5xx status code — the intent-resume launch binding splits an
+#: ``HTTPException`` on this floor: a 4xx is a DETERMINISTIC validation refusal
+#: (→ ``ValueError`` → the resume core clears the intent), a 5xx is transient
+#: (→ ``RuntimeError`` → the intent is kept and re-tried, cap-bounded) —
+#: DEC-PULL-INTENT-RESUME-001.
+_SERVER_ERROR_FLOOR: Final[int] = 500
+
 #: 403 detail returned for a browser-initiated cross-site state change.
 _CROSS_ORIGIN_DETAIL: Final = "cross-origin request blocked"
 
@@ -1040,6 +1061,7 @@ def build_app(
     pull_active_probe: Callable[[], bool | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
+    pull_intent_store: PullIntentStore | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1135,6 +1157,19 @@ def build_app(
         ``http://localhost`` via the root conftest fixture, or inject this
         parameter). The CLI launcher passes the actual bound host when
         serving beyond loopback (``cli._dashboard_allowed_hosts``).
+    pull_intent_store
+        Optional :class:`~brutex.dashboard.pull_intent.PullIntentStore` — the
+        durable ``.pull_intent.json`` crash-recovery sidecar
+        (DEC-PULL-INTENT-RESUME-001). When supplied, a REAL ``/pull-pipeline``
+        launch persists its re-fire intent (a ``dry_run`` never does), the
+        background job clears it on worker exit (``on_finally`` — success AND
+        failure, before the single-flight release), the app exposes
+        ``app.state.brutex_resume_pipeline`` (the boot-time seam
+        ``cli.cmd_dashboard`` wires into the extended auto-resume launcher),
+        and ``GET /api/v1/liveproof`` carries the resume red-banner payload.
+        ``None`` (the default — unit tests / bare apps) disables all of it;
+        ``build_app`` itself never fires a resume (the launcher seam does), so
+        constructing an app stays side-effect-free.
 
     Returns
     -------
@@ -1396,6 +1431,16 @@ def build_app(
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
     _session_rate = SessionRateController()
+    # The Greeks-enrichment consecutive-failure health counter
+    # (DEC-GREEKS-ENRICH-OBSERVE-001): the fully-guarded post-pull Greeks pass can
+    # NEVER fail a pull, so a persistently broken enrichment used to be one
+    # swallowed log line per pull. Each pull job feeds its report's whole-pass
+    # `greeks_enrich_ok` verdict here; at the threshold crossing ONE structlog
+    # WARNING `pull.greeks_enrich_failing` fires (log-only — no Telegram push:
+    # `pull_degraded`'s r/s units would be dishonest for a Greeks pass). Owned by
+    # this app instance (no module-global mutable state — CLAUDE.md §4);
+    # PROCESS-LOCAL — a restart resets the streak (honest envelope).
+    _greeks_health = GreeksEnrichHealth()
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
@@ -2787,6 +2832,10 @@ def build_app(
                     session_rate=_session_rate,
                     until_clean=until_clean,
                 )
+            # Consecutive-failure health over the post-pull Greeks pass
+            # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
+            # ignored inside `observe`, so a synthetic pull never moves the streak.
+            _greeks_health.observe(report.greeks_enrich_ok, error=report.greeks_enrich_error)
             return report.to_dict()
 
         started = _pull_job.start(_work, total=len(selected), detail=detail)
@@ -2807,15 +2856,28 @@ def build_app(
             }
         )
 
-    @app.post("/api/v1/universe/pull-pipeline")
-    async def api_universe_pull_pipeline(
-        symbols: str | None = Query(default=None),
-        symbol: str | None = Query(default=None),
-        from_date: str | None = Query(default=None),
-        to_date: str | None = Query(default=None),
-        dry_run: bool = Query(default=False),
-    ) -> JSONResponse:
-        """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
+    def _launch_pipeline(
+        *,
+        symbols: str | None,
+        symbol: str | None,
+        from_date: str | None,
+        to_date: str | None,
+        dry_run: bool,
+        intent_restarts: int = 0,
+    ) -> dict[str, Any]:
+        """The ONE-CLICK pull(+movers) pipeline launcher — the ``/pull-pipeline`` body.
+
+        Extracted from the route (DEC-PULL-INTENT-RESUME-001) so the SAME
+        validated launch path serves BOTH the operator's POST and the boot-time
+        intent resume (``app.state.brutex_resume_pipeline``) — the persistable
+        request surface is exactly this keyword quadruple plus ``dry_run``;
+        everything else (targets, lake root, years, intervals) is re-derived
+        here. *intent_restarts* threads the resume path's already-bumped
+        restart counter into the re-persisted intent (a fresh operator click
+        passes the default ``0``); a ``dry_run`` NEVER persists an intent and
+        NEVER clears one (a crashed real pull's intent must survive a dry-run).
+        Raises ``HTTPException`` exactly as the route did (400 validation /
+        503 credential refusal); returns the route's JSON payload dict.
 
         Backs BOTH the "▶ Pull EVERYTHING" hero button (no selection → the WHOLE
         admitted universe — DEC-ONE-CLICK-PIPELINE-001) AND the "▶ Pull selected · N
@@ -2861,8 +2923,13 @@ def build_app(
         SPOT pull window AND narrow the metadata-pull YEAR grid. **Blank ⇒ the
         canonical default** ``[2020-01-01, previous trading day]`` (byte-identical
         to the pre-picker behaviour). The F&O HISTORICAL phase receives the dates
-        as an **EXPIRY scope** (DEC-FNO-EXPIRY-SCOPE-001): only expiries within
-        ``[from_date, to_date]`` (both inclusive) are candle-pulled — an
+        as an **EXPIRY scope** (DEC-FNO-EXPIRY-SCOPE-001, amended at the LIVE
+        edge by DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a DEFAULT-shaped bound is
+        lifted to unbounded before threading (``to_date`` at/after the
+        request-time previous day ⇒ ``scope_end=None`` so live/unexpired
+        contracts stay in scope; ``from_date`` at/below the 2020 floor ⇒
+        ``scope_start=None``) — only a GENUINELY narrowed range scopes: then
+        only expiries within ``[from_date, to_date]`` (both inclusive) are candle-pulled — an
         out-of-scope expiry is fetched not at all (zero vendor calls, zero
         ledger rows, one ``fno.expiry_out_of_scope`` log per expiry; stored
         bars untouched) — while each IN-scope contract keeps its per-contract
@@ -2904,6 +2971,22 @@ def build_app(
             fno_scope_end = _parse_iso_date_arg(to_date, "to_date") if to_date else None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # LIVE-EDGE scope normalization (DEC-EXPIRY-SCOPE-LIVE-EDGE-001, backend
+        # AUTHORITATIVE): the pickers pre-fill the canonical default and the
+        # frontend historically sent them whenever non-blank, so every default
+        # one-click pull carried scope_end = previous day — scoping OUT all
+        # live/unexpired contracts. A default-shaped bound (scope_end at/after
+        # the request-time previous day per the SAME resolve_candle_range law
+        # that pre-fills the picker; scope_start at/below GROWW_HISTORY_FLOOR)
+        # is lifted to None here, whatever the frontend sent. A genuinely
+        # narrowed range scopes exactly as before (DEC-FNO-EXPIRY-SCOPE-001
+        # untouched below the live edge).
+        fno_scope_start, fno_scope_end = normalize_expiry_scope(
+            fno_scope_start,
+            fno_scope_end,
+            envelope_end=date.fromisoformat(default_date_range()[1]),
+            floor=GROWW_HISTORY_FLOOR,
+        )
         try:
             targets, target_source = resolve_pull_targets(
                 symbols=symbols,
@@ -2961,6 +3044,9 @@ def build_app(
                 # per-phase view highlights the running phase (label only — the window
                 # tallies come from the ledger counts, never this string).
                 _pull_job.set_phase("spot")
+                # Honest gated-movers status (DEC-PREBUILD-GATE-HONEST-NOTE-001):
+                # name the running stage on the gate too (no-op when idle/dry-run).
+                _prebuild_gate.set_phase("spot")
                 # The operator-picked spot range (DEC-UNIVERSE-PULL-DATERANGE-001);
                 # blank ⇒ None ⇒ pull_all_spot's resolve_candle_range default
                 # [2020-01-01, prev-day] (byte-identical to the pre-picker pull).
@@ -2985,6 +3071,7 @@ def build_app(
                 # window-ledger rows, so the three window rows stay honestly "pending"
                 # (build_phase_progress highlights no window row on the metadata label).
                 _pull_job.set_phase("metadata")
+                _prebuild_gate.set_phase("metadata")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_expiries_contracts(
                         tradable,
@@ -3010,6 +3097,7 @@ def build_app(
                 # the counters keep moving instead of freezing at the metadata
                 # phase's "45/45 units, 0 bars" while millions of bars stream in.
                 _pull_job.set_phase("historical", pair_progress=True)
+                _prebuild_gate.set_phase("historical")
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -3039,6 +3127,7 @@ def build_app(
                 # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
                 # observed during the movers warm is named "movers".
                 _pull_job.set_phase("movers")
+                _prebuild_gate.set_phase("movers")
                 try:
                     warm_date = latest_movers_date(lake_root)
                 except Exception as exc:  # pylint: disable=broad-except - best-effort warm
@@ -3049,17 +3138,19 @@ def build_app(
                 # post-pull generation (the pull bumped it) — the SAME the /movers route reads.
                 return warm_date, _summary_cache.generation
 
-            def _warm_spot_movers() -> int:
+            def _warm_spot_movers() -> MoversWarmResult:
                 """Per-segment SPOT warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when spot succeeds.
 
                 Pre-warms the whole spot grid (every exchange scope — DEC-MOVERS-WARM-GRID-001)
                 reusing the EXACT candidate_key + compute the /api/v1/movers route uses (no
                 drift, CLAUDE.md §11 COMMON). Best-effort via ``warm_movers_snapshots`` — a
-                warmer that raises is logged + counted 0, never failing the successful pull.
+                warmer that raises is logged + counted failed, never failing the successful
+                pull; per-coordinate progress logs + the gate's live i/N ride the SAME call
+                (DEC-MOVERS-WARM-PROGRESS-001).
                 """
                 resolved = _warm_for_date()
                 if resolved is None:
-                    return 0
+                    return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
 
                 def _make_spot_job(exch: str | None) -> Callable[[], int]:
@@ -3085,11 +3176,15 @@ def build_app(
 
                     return _spot_job
 
+                coords = spot_warm_grid()
                 return warm_movers_snapshots(
-                    [_make_spot_job(coord["exchange"]) for coord in spot_warm_grid()]
+                    [_make_spot_job(coord["exchange"]) for coord in coords],
+                    segment="spot",
+                    labels=[warm_coordinate_label(coord) for coord in coords],
+                    on_progress=_prebuild_gate.set_progress,
                 )
 
-            def _warm_futures_movers() -> int:
+            def _warm_futures_movers() -> MoversWarmResult:
                 """Per-segment FUTURES warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds.
 
                 Pre-warms the whole futures grid (exchange × Near/Next/Far —
@@ -3097,7 +3192,7 @@ def build_app(
                 """
                 resolved = _warm_for_date()
                 if resolved is None:
-                    return 0
+                    return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
@@ -3127,14 +3222,15 @@ def build_app(
 
                     return _fut_job
 
+                coords = futures_warm_grid()
                 return warm_movers_snapshots(
-                    [
-                        _make_fut_job(coord["exchange"], coord["expiry_tier"])
-                        for coord in futures_warm_grid()
-                    ]
+                    [_make_fut_job(coord["exchange"], coord["expiry_tier"]) for coord in coords],
+                    segment="futures",
+                    labels=[warm_coordinate_label(coord) for coord in coords],
+                    on_progress=_prebuild_gate.set_progress,
                 )
 
-            def _warm_options_movers() -> int:
+            def _warm_options_movers() -> MoversWarmResult:
                 """Per-segment OPTIONS warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when historical succeeds.
 
                 Pre-warms the whole options grid (exchange × Near/Next/Far × All/Monthly/Weekly
@@ -3144,7 +3240,7 @@ def build_app(
                 """
                 resolved = _warm_for_date()
                 if resolved is None:
-                    return 0
+                    return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
 
                 def _make_opt_job(
@@ -3196,19 +3292,29 @@ def build_app(
 
                     return _opt_job
 
+                coords = options_warm_grid()
                 return warm_movers_snapshots(
                     [
                         _make_opt_job(
                             coord["exchange"], coord["expiry_tier"], coord["expiry_track"]
                         )
-                        for coord in options_warm_grid()
-                    ]
+                        for coord in coords
+                    ],
+                    segment="options",
+                    labels=[warm_coordinate_label(coord) for coord in coords],
+                    on_progress=_prebuild_gate.set_progress,
                 )
 
-            def _prebuild_timeframes() -> PrebuildOutcome:
-                """Gated FINAL data stage (DEC-PIPELINE-AUTOPREBUILD-001): pre-build ALL derived TFs.
+            def _prebuild_timeframes(exclude_symbols: frozenset[str]) -> PrebuildOutcome:
+                """FINAL data stage (DEC-PIPELINE-AUTOPREBUILD-001): pre-build ALL derived TFs.
 
-                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate).
+                Runs on EVERY completed-chain pull over the CLEAN symbol set —
+                ``exclude_symbols`` is the UNCAPPED quarantined-name set
+                ``run_full_pipeline`` derives, forwarded to the pure guarded
+                runner so quarantined symbols are excluded + named while the
+                other targets still get their derived timeframes
+                (DEC-PREBUILD-CLEANSET-001, supersedes the #1145
+                fully-clean-fetch gate).
                 Covers the pulled SPOT underlyings PLUS their FUTURES + OPTIONS
                 contracts discovered from the F&O candle lake cascade
                 (``build_fno_cascade(list_fno_candle_datasets(lake_root))`` — the
@@ -3236,6 +3342,7 @@ def build_app(
                 # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
                 # observed here is named "prebuild", never blamed on "historical".
                 _pull_job.set_phase("prebuild")
+                _prebuild_gate.set_phase("prebuild")
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
@@ -3245,6 +3352,10 @@ def build_app(
                         symbol=target.symbol,
                         kind=target.kind,
                         include_daily=True,
+                        # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: per-session
+                        # substitution WARNs only for a SPOT INDEX target
+                        # (PrebuildTarget.dense = Instrument.is_index).
+                        dense_symbol=target.dense,
                     )
 
                 nonlocal prebuild_ok
@@ -3256,6 +3367,10 @@ def build_app(
                         ),
                         materialize=_materialize,
                         source="pipeline",
+                        exclude_symbols=exclude_symbols,
+                        # Allocation probe at the tiny-file writer's start
+                        # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
+                        lake_root=lake_root,
                     )
                 finally:
                     # New derived partitions may be on disk (even a partial run —
@@ -3283,8 +3398,16 @@ def build_app(
             if not dry_run:
                 _prebuild_gate.begin()
             try:
-                with RatePanelSampler(
-                    session_rate=_session_rate, observer=make_rate_observer(state)
+                # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake
+                # for the WHOLE pipeline run (spot → metadata → historical →
+                # prebuild → movers) — a sleeping Mac silently paused a real
+                # 6.5 h pull mid-flight. Best-effort: non-darwin / missing
+                # caffeinate is a logged no-op, never a raise.
+                with (
+                    keep_awake("brutex pull pipeline"),
+                    RatePanelSampler(
+                        session_rate=_session_rate, observer=make_rate_observer(state)
+                    ),
                 ):
                     report = run_full_pipeline(
                         run_spot=_run_spot,
@@ -3297,6 +3420,17 @@ def build_app(
                     )
                 if report.spot is not None:
                     _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                # Consecutive-failure health over the post-pull Greeks pass
+                # (DEC-GREEKS-ENRICH-OBSERVE-001), via the nested candle
+                # sub-report. A stopped-early / no-candle pipeline (either
+                # nesting level None) observes `None`, which `observe` ignores
+                # — the streak only moves on a pull that actually ran the pass.
+                composite = report.historical
+                hist_report = composite.historical if composite is not None else None
+                _greeks_health.observe(
+                    None if hist_report is None else hist_report.greeks_enrich_ok,
+                    error=None if hist_report is None else hist_report.greeks_enrich_error,
+                )
                 return report.to_dict()
             finally:
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
@@ -3312,20 +3446,115 @@ def build_app(
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
             pipeline_detail = label_synthetic(pipeline_detail)
+        # Durable pull intent (DEC-PULL-INTENT-RESUME-001): persist the re-fire
+        # payload AFTER validation and BEFORE the job starts, so a SIGKILL at
+        # any later point leaves the crash-recovery record on disk. A dry_run
+        # never persists (persist_intent_for_launch returns False without
+        # writing) and never wires the clear hook — it must not erase a crashed
+        # REAL pull's intent. The clear fires in the job's finally, on the
+        # worker's success AND failure, BEFORE the single-flight release.
+        on_finally: Callable[[], None] | None = None
+        if pull_intent_store is not None and not dry_run:
+            # Best-effort write (a failed write is logged, never blocks the
+            # pull); the clear hook is wired for EVERY real pull regardless —
+            # a completing real pull supersedes any lingering older intent.
+            persist_intent_for_launch(
+                pull_intent_store,
+                dry_run=dry_run,
+                symbols=symbols,
+                symbol=symbol,
+                from_date=from_date,
+                to_date=to_date,
+                restarts=intent_restarts,
+            )
+            on_finally = pull_intent_store.clear
         started = _pull_job.start(
-            _work, total=len(targets), detail=pipeline_detail, ledger_synced=True
+            _work,
+            total=len(targets),
+            detail=pipeline_detail,
+            ledger_synced=True,
+            on_finally=on_finally,
         )
+        return {
+            "started": started,
+            "targets": len(targets),
+            "total": len(targets),  # the JS title reads body.total for the first render
+            "tradable": len(tradable),
+            "target_source": target_source,  # "selection" / "single" / "universe"
+            "years": years,
+            "dry_run": dry_run,
+        }
+
+    @app.post("/api/v1/universe/pull-pipeline")
+    async def api_universe_pull_pipeline(
+        symbols: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
+
+        Thin delegator over :func:`_launch_pipeline` (which carries the full
+        semantics docstring): the launch body is shared with the boot-time
+        intent resume (DEC-PULL-INTENT-RESUME-001), so the operator's POST and
+        a resumed pull can never drift onto two different launch paths.
+        """
         return JSONResponse(
-            {
-                "started": started,
-                "targets": len(targets),
-                "total": len(targets),  # the JS title reads body.total for the first render
-                "tradable": len(tradable),
-                "target_source": target_source,  # "selection" / "single" / "universe"
-                "years": years,
-                "dry_run": dry_run,
-            }
+            _launch_pipeline(
+                symbols=symbols,
+                symbol=symbol,
+                from_date=from_date,
+                to_date=to_date,
+                dry_run=dry_run,
+            )
         )
+
+    if pull_intent_store is not None:
+        _intent_store: PullIntentStore = pull_intent_store
+
+        def _resume_launch(intent: PullIntent) -> None:
+            """Re-fire the persisted pipeline pull — the resume's launch binding.
+
+            Always a REAL pull (``dry_run=False`` — a dry-run never persisted an
+            intent) with the intent's already-bumped restart counter threaded
+            through, so the re-persisted intent keeps the cap honest. A
+            route-shaped validation refusal (``HTTPException`` — a stale
+            selection that no longer resolves, a bad date, a credential 503) is
+            normalised to ``ValueError``/``RuntimeError`` for the 100 %-tested
+            resume core: a 4xx is DETERMINISTIC (the same intent can never
+            launch → the core clears it), while a 5xx (credentials not yet
+            fixed at boot) is transient (the core keeps the intent and re-tries
+            next boot, bounded by the cap).
+            """
+            try:
+                _launch_pipeline(
+                    symbols=intent.symbols,
+                    symbol=intent.symbol,
+                    from_date=intent.from_date,
+                    to_date=intent.to_date,
+                    dry_run=False,
+                    intent_restarts=intent.restarts,
+                )
+            except HTTPException as exc:
+                if exc.status_code < _SERVER_ERROR_FLOOR:
+                    raise ValueError(str(exc.detail)) from exc
+                raise RuntimeError(str(exc.detail)) from exc
+
+        def _resume_pipeline_from_intent() -> None:
+            """Boot-time seam: run the intent auto-resume decision + dispatch.
+
+            Exposed as ``app.state.brutex_resume_pipeline`` for the
+            ``cli.cmd_dashboard`` startup launcher (the SAME daemon-thread seam
+            family as the instrument autoload). Every load-bearing decision —
+            single-flight probe, restart-cap refusal + CRITICAL alert + red
+            banner, bump-before-launch, stale-intent clear — lives in the
+            100 %-tested :func:`~brutex.dashboard.pull_intent.run_auto_resume`;
+            this binding only supplies the real launcher. Never raises.
+            """
+            run_auto_resume(_intent_store, launch=_resume_launch)
+
+        app.state.brutex_resume_pipeline = _resume_pipeline_from_intent
 
     @app.post("/api/v1/universe/retry-failed")
     async def api_universe_retry_failed(  # pragma: no cover — thin route over the 100%-tested core
@@ -3524,10 +3753,23 @@ def build_app(
         is wired (a bare/test app). Read-only: this route never starts a kit
         run (startup + the pull gate are the only triggers), so polling it
         costs nothing (Golden Rule #10 — display, not action).
+
+        DEC-PULL-INTENT-RESUME-001: when a pull-intent store is wired AND its
+        resume banner holds a payload (an over-cap refusal / failed resume
+        launch), the payload rides along as a ``resume`` section —
+        ``{"level": "critical", "message": …}`` — which the SAME site-wide
+        ``bx-liveproof.js`` pill renders as the existing RED top banner (§11
+        COMMON, no second banner mechanism). Absent banner ⇒ no ``resume`` key
+        (the pre-existing payload stays byte-identical).
         """
-        if liveproof is None:
-            return JSONResponse({"present": False})
-        return JSONResponse({"present": True, **liveproof.status()})
+        payload: dict[str, Any] = (
+            {"present": False} if liveproof is None else {"present": True, **liveproof.status()}
+        )
+        if pull_intent_store is not None:
+            resume = pull_intent_store.banner.snapshot()
+            if resume is not None:
+                payload["resume"] = resume
+        return JSONResponse(payload)
 
     @app.get("/api/v1/coverage/counters")
     async def api_coverage_counters() -> JSONResponse:
@@ -3634,7 +3876,11 @@ def build_app(
         counts as *pulled*; each row's ``completeness`` chip asserts ONLY
         ledger-settledness over planner-planned ranges
         (DEC-SPOT-COVERAGE-COMPLETENESS-001 — partially executes the #397
-        follow-up; a trading-day gap audit is NOT claimed). When no lake root
+        follow-up). A session-density RANGE audit now feeds the
+        ``/completeness`` amber ``settled_partial_range`` chip
+        (DEC-SPOT-PARTIAL-RANGE-CHIP-001 — ``session_days`` rides this same
+        SPOT scan); the PER-WINDOW trading-day gap audit and the options-side
+        range audit remain follow-ups, NOT claimed. When no lake root
         is wired (a store opened without a filesystem path) the payload is an
         empty summary, never a 500.
         """
@@ -3649,8 +3895,12 @@ def build_app(
             # The O(files) full-lake aggregate — runs ONLY on a cache miss / a
             # dirty read past the 2 s TTL floor, on a threadpool worker, and
             # builds + uses store.connection here so the store RLock stays on one
-            # thread (DEC-DASHBOARD-FASTREAD-001).
-            return summarize_spot_datasets(store.connection, lake)
+            # thread (DEC-DASHBOARD-FASTREAD-001). FNO-pruned + bounded to the
+            # verdict intervals (DEC-COMPLETENESS-FNO-SKIP-001): a materialised
+            # options lake holds ~10⁵-10⁶ contract datasets the spot verdicts
+            # never read — the unfiltered scan blocked the first open for tens
+            # of minutes.
+            return summarize_spot_verdict_datasets(store.connection, lake)
 
         def _rows_and_rollup() -> dict[str, Any]:
             """Lake rows via SummaryCache + the ledger rollup PER REQUEST.
@@ -3721,7 +3971,7 @@ def build_app(
         )
         spot_rows = build_spot_coverage_payload(
             _summary_cache.get_or_refresh(
-                SPOT, recompute=lambda: summarize_spot_datasets(store.connection, lake)
+                SPOT, recompute=lambda: summarize_spot_verdict_datasets(store.connection, lake)
             ),
             spot_window_rollup(lake),
         )["rows"]
@@ -4029,6 +4279,30 @@ def build_app(
                 "Content-Disposition": 'attachment; filename="economics_integrity.csv"',
             },
         )
+
+    def _read_parse_skips() -> dict[str, Any] | None:
+        """Read the persisted parse-skip snapshot (``None`` if never loaded)."""
+        raw = _require_store().get_meta(PARSE_SKIPS_META_KEY)
+        if raw is None:
+            return None
+        parsed: dict[str, Any] = json.loads(raw)
+        return parsed
+
+    @app.get("/api/v1/universe/parse-skips")
+    async def api_universe_parse_skips() -> JSONResponse:
+        """GET /api/v1/universe/parse-skips — the green/red master parse-skip verdict.
+
+        DEC-PARSE-SKIP-REPORT-001. Returns the bounded parse-skip snapshot the master
+        load persisted to ``schema_meta``: the malformed in-scope rows the parser
+        skipped-and-counted (DEC-INSTRUMENT-SKIP-NO-GSYM-001), the in-scope
+        denominator, capped sample reasons, and the verdict — GREEN iff
+        ``skipped_count <= max(10, ceil(0.1% of in-scope rows))``. READ-ONLY;
+        ``{"present": false}`` until the master has been loaded once. No store → 503.
+        """
+        snapshot = await run_in_threadpool(_read_parse_skips)
+        if snapshot is None:
+            return JSONResponse({"present": False})
+        return JSONResponse({"present": True, **snapshot})
 
     def _build_lake_census_payload() -> dict[str, Any]:
         """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
@@ -4608,28 +4882,42 @@ def build_app(
         ``1day`` partition for ``basis=day`` (default), else the ``1minute``
         partition for ``basis=minute``. The picker for the pre-open report panel.
         READ-ONLY; empty when no lake.
+
+        DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
+        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
+        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        store reads run on a threadpool worker, NEVER the event loop.
+        Forensically proven (2026-07-04 run): this route ran the walk
+        SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
+        froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
+        requests burst-flushed on release). The store connection is built +
+        used inside the worker so its RLock stays on one thread
+        (DEC-DASHBOARD-FASTREAD-001).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
-        triples = resolve_report_datasets(lake_root.parent, basis=report_basis)
-        # Tag each report symbol with option-pullability so /reports can badge
-        # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
-        # the SAME store calls + single-source predicate the /universe explorer
-        # uses (no duplication). A symbol absent from the underlying universe
-        # (a spot-only dataset) defaults to NOT pullable.
-        pullable = {
-            (row["exchange"], row["symbol"]): row["option_pullable"]
-            for row in list_underlyings(
-                store.list_index_equity_instruments(),
-                fno_eligible=store.fno_eligible_underlyings(),
-                reference_only_ids=store.reference_only_security_ids(),
-            )
-        }
-        return JSONResponse(
-            {
+        lake = lake_root.parent
+
+        def _resolve() -> dict[str, Any]:
+            """Walk the lake + tag pullability off the event loop (threadpool)."""
+            triples = resolve_report_datasets(lake, basis=report_basis)
+            # Tag each report symbol with option-pullability so /reports can badge
+            # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
+            # the SAME store calls + single-source predicate the /universe explorer
+            # uses (no duplication). A symbol absent from the underlying universe
+            # (a spot-only dataset) defaults to NOT pullable.
+            pullable = {
+                (row["exchange"], row["symbol"]): row["option_pullable"]
+                for row in list_underlyings(
+                    store.list_index_equity_instruments(),
+                    fno_eligible=store.fno_eligible_underlyings(),
+                    reference_only_ids=store.reference_only_security_ids(),
+                )
+            }
+            return {
                 "symbols": [
                     {
                         "exchange": e,
@@ -4641,7 +4929,8 @@ def build_app(
                 ],
                 "basis": report_basis,
             }
-        )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
 
     @app.get("/api/v1/reports/preopen.xlsx")
     async def api_preopen_xlsx(
@@ -4700,8 +4989,10 @@ def build_app(
             symbols=wanted,
         )
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
+        # The workbook serialisation is CPU-bound over every report row — off the
+        # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
         return Response(
-            content=render_xlsx(rows, title=title),
+            content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
@@ -4768,7 +5059,11 @@ def build_app(
             if isinstance(lake_root, Path)
             else []
         )
-        blob = render_report_zip(rows, mode=report_mode, min_pct=Decimal(str(min_pct)))
+        # One xlsx per year + zip packing is CPU-bound over every report row —
+        # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        blob = await run_in_threadpool(
+            render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
+        )
         # Self-describing download name (DEC-REPORT-FILENAME-001): mode (+ the
         # top-mover threshold where it applies) + basis + the selected symbols +
         # the range — replaces the selection-blind static "preopen_report.zip".
@@ -4886,7 +5181,7 @@ def build_app(
         request runs the SAME ``cmd_sweep_all`` engine the CLI uses on the
         **single-flight** background job (poll the live tick at
         ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
-        the ``INDEX`` segment over ``2021-01-01 → today``. A second click while a
+        the ``INDEX`` segment over ``2020-01-01 → today``. A second click while a
         pull OR sweep is already running is a no-op (``{"started": false}``) — one
         lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
 
@@ -5070,7 +5365,11 @@ def build_app(
         from brutex.observability.logging import resolve_log_file
 
         path = resolve_log_file()
-        records = tail_records(path, max_lines=lines)
+        # A bounded read, but still DISK I/O — on a stalled/contended volume a
+        # synchronous tail would wedge the event loop with every other request
+        # behind it, so it rides the same threadpool offload as the lake reads
+        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
     # ── Database viewer (DEC-DB-VIEWER-001) ─────────────────────────
@@ -5511,7 +5810,7 @@ def build_app(
         DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
         security_id / interval /
         window dates / status / bars / attempts / last_error / streak / in-pull
-        fetches). READ-ONLY:
+        fetches / deduped net-new bars). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
@@ -5541,6 +5840,7 @@ def build_app(
             "last_attempt_at",
             "empty_streak",
             "in_pull_fetches",
+            "bars_net_new",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)

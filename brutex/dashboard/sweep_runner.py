@@ -32,6 +32,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.vocabulary.bits import TOTAL_CONDITIONS
+
 #: Default LAKE-partition index symbols (bare trading symbols, NOT the
 #: ``EXCH-SYMBOL`` groww keys) — mirrors the CLI ``--symbols`` default in
 #: ``brutex.cli._add_sweep_grid_args``. SENSEX is BSE-listed, so it is run
@@ -53,14 +55,17 @@ DEFAULT_MODE: Final[str] = "A"
 #: Default lake exchange / segment partition for the index sweep.
 DEFAULT_EXCHANGE: Final[str] = "NSE"
 DEFAULT_SEGMENT: Final[str] = "INDEX"
-#: Default Track-1 history start (the rolling ``2021-01-01 → today`` range).
-DEFAULT_START: Final[str] = "2021-01-01"
+#: Default Track-1 history start (the rolling ``2020-01-01 → today`` range —
+#: GROWW_HISTORY_FLOOR, DEC-PULL-FLOOR-2020-001).
+DEFAULT_START: Final[str] = "2020-01-01"
 
 #: Accepted direction tokens (upper-cased before the check).
 _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
 #: Max conditions-per-combo K — the engine bounds ``k`` by the unique condition
-#: count, which is the full 52-vocabulary by default (SweepGridConfig docstring).
-_MAX_K: Final[int] = 52
+#: count, which is the full 60-condition vocabulary by default (SweepGridConfig
+#: docstring; ``TOTAL_CONDITIONS`` is the one source of truth, so a future
+#: vocab growth moves this bound automatically — DEC-VOCAB-U128-CODEGEN-001).
+_MAX_K: Final[int] = TOTAL_CONDITIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +156,7 @@ def _normalise_directions(value: str | None) -> str:
 
 
 def _normalise_k(value: str | None) -> str:
-    """Validate every K parses to an int in ``[1, 52]``; return the normalised CSV."""
+    """Validate every K parses to an int in ``[1, TOTAL_CONDITIONS]``; return the CSV."""
     tokens = _clean_csv(value, DEFAULT_K)
     out: list[str] = []
     for token in tokens:
@@ -252,8 +257,12 @@ def resolve_sweep_request(
     ------
     ValueError
         On any unknown interval, non-BUY/SELL direction, out-of-range / non-integer
-        K, malformed SL/TP leg, non-positive ``top``, unparseable date, or
-        ``end < start``.
+        K, malformed SL/TP leg, non-positive ``top``, unparseable date,
+        ``end < start``, or an out-of-engine-scope launch coordinate (the
+        :func:`brutex.engine.sweep_scope.check_sweep_scope` refusal —
+        DEC-ENGINE-SCOPE-GUARD-001 + its corporate-action extension
+        DEC-CORP-ACTION-GATE-001 / ADR-0016 — surfaced eagerly as a 400 via
+        the route's existing ``ValueError`` mapping).
     """
     resolved_top = DEFAULT_TOP if top is None else top
     if resolved_top < 1:
@@ -326,7 +335,8 @@ def build_sweep_kwargs(
     """Map a validated *request* onto the ``cmd_sweep_all`` keyword contract.
 
     A pure 1:1 mapping (the request is already validated). The non-swept knobs are
-    pinned to the safe dashboard defaults: ``conditions=None`` (all 52),
+    pinned to the safe dashboard defaults: ``conditions=None`` (the full
+    60-condition vocabulary — ``default_condition_bits()``),
     ``options_sim=False`` (signal-only research — no option lake required),
     ``allow_missing_slices=True`` (a one-click sweep runs on WHATEVER is in the
     lake, skipping empty ``(symbol, interval)`` slices honestly rather than hard

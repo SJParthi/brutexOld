@@ -9,9 +9,19 @@ at module level). ``completeness._resolve_spot_category`` is now a thin
 delegating wrapper over :func:`resolve_spot_key` (the established thin-wrapper
 pattern, cf. ``cli._emit_pull_halt_alert`` → ``sweep_alerts.emit_pull_halt_alert``).
 
-This module is **intentionally pure** (stdlib only — no I/O, no clock, no
-polars/duckdb imports), mirroring the :mod:`brutex.data.fno_symbol` precedent, so
-it is importable from anywhere in the data layer without extras.
+This module is **intentionally pure** (stdlib only — no file I/O, no clock, no
+polars/duckdb imports; :func:`fno_index_alias_pairs` reads ONE env var,
+defensively), mirroring the :mod:`brutex.data.fno_symbol` precedent, so it is
+importable from anywhere in the data layer without extras.
+
+DEC-DB-MONEYNESS-KEY-RECOVER-001: the FULL F&O→spot drift-recovery ladder
+(:func:`spot_recovery_candidates` — index aliases BOTH directions + the env
+``BRUTEX_FNO_INDEX_ALIASES`` override + the ``"<EXCH>-<underlying>"`` #911 form
++ the :func:`spot_key_candidates` rungs) moved here VERBATIM from
+``brutex/data/greeks_enrich.py`` (its DEC-GREEKS-CORRECTNESS-AUDIT-001
+SPOTJOIN-2 fix) so the ``/db`` per-bar moneyness spot-join
+(``brutex/dashboard/db_view.py``) and the Greeks enrichment share ONE candidate
+builder (CLAUDE.md §11 COMMON — never copy-paste).
 
 The two documented drift classes (and ONLY those — no case-folding, no
 ``&``-encoding recovery; Golden Rule #1, a genuinely unknown stray STAYS
@@ -26,7 +36,10 @@ unresolved) are:
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Mapping
+from typing import Final
 
 
 def spot_key_candidates(symbol: str, exchange: str) -> tuple[str, ...]:
@@ -118,4 +131,91 @@ def resolve_spot_key[V](
     return None
 
 
-__all__ = ["resolve_spot_key", "spot_key_candidates"]
+#: Sourced spot-``trading_symbol`` ↔ F&O ``underlying_symbol`` equivalences for
+#: the two NSE index derivatives whose Groww spot ``trading_symbol`` differs
+#: from the symbol the vendor stamps on the option legs (CLAUDE.md §6 / the
+#: DEC-FNO-INDEX-ALIAS-001 sourced pairs). This deliberately MIRRORS
+#: ``brutex/dashboard/instrument_loader._SOURCED_FNO_INDEX_ALIASES`` — the map
+#: is not imported from there because ``brutex/data`` must never import
+#: ``brutex/dashboard`` (the locked import direction); the env override below
+#: keeps the two surfaces operator-extensible from the SAME single lever.
+_SOURCED_INDEX_SPOT_ALIASES: Final[dict[str, str]] = {
+    "NIFTYJR": "NIFTYNXT50",
+    "NIFTYMIDSELECT": "MIDCPNIFTY",
+}
+
+#: The operator JSON override env (``{spot_trading_symbol: fno_underlying}``)
+#: shared with the dashboard's ``resolve_fno_index_aliases`` — parsed LOCALLY
+#: and defensively here (absent / malformed → sourced defaults only).
+FNO_INDEX_ALIASES_ENV: Final[str] = "BRUTEX_FNO_INDEX_ALIASES"
+
+
+def fno_index_alias_pairs() -> tuple[tuple[str, str], ...]:
+    """The ``(spot trading_symbol, F&O underlying)`` pairs — sourced + env override.
+
+    Reads :data:`FNO_INDEX_ALIASES_ENV` defensively (the exact contract of
+    the dashboard's ``resolve_fno_index_aliases``): a missing / non-JSON /
+    non-object payload or a non-``str→non-blank-str`` entry is IGNORED, never
+    a crash — a lost override costs only the extra recovery rungs.
+    """
+    aliases = dict(_SOURCED_INDEX_SPOT_ALIASES)
+    raw = os.environ.get(FNO_INDEX_ALIASES_ENV)
+    if raw:
+        try:
+            parsed: object = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key, value in parsed.items():
+                if (
+                    isinstance(key, str)
+                    and isinstance(value, str)
+                    and key.strip()
+                    and value.strip()
+                ):
+                    aliases[key.strip().upper()] = value.strip()
+    return tuple(aliases.items())
+
+
+def spot_recovery_candidates(underlying: str, exchange: str) -> tuple[str, ...]:
+    """Ordered spot-key drift candidates for *underlying* — identity excluded.
+
+    The FULL F&O→spot recovery ladder (DEC-GREEKS-CORRECTNESS-AUDIT-001
+    SPOTJOIN-2, moved here verbatim per DEC-DB-MONEYNESS-KEY-RECOVER-001),
+    every rung traceable to a repo-verified drift class (Golden Rule #1 —
+    nothing invented): (1) the index-alias map in BOTH directions (reverse —
+    the chain names the F&O ``underlying_symbol``, the spot dir its
+    ``trading_symbol``; forward — the mirror case), (2) the
+    ``"<exchange>-<underlying>"`` #911 drifted-directory form, (3) the
+    :func:`spot_key_candidates` #911 ladder applied to *underlying* itself (a
+    drifted-SHAPED underlying walks back down to its canonical key). STOCK
+    drift pairs (``BAJAJ-AUTO`` vs ``BAJAJAUTO``) are deliberately ABSENT: the
+    normalisation that produced them is not reversible without an instrument
+    master, so the stock arm stays an honest no-spot + a named follow-up (the
+    operator env lever above covers a known pair today via the reverse rung).
+    """
+    candidates: list[str] = []
+
+    def _add(key: str) -> None:
+        if key != underlying and key not in candidates:
+            candidates.append(key)
+
+    upper = underlying.strip().upper()
+    for spot_key, fno_key in fno_index_alias_pairs():
+        if fno_key.upper() == upper:
+            _add(spot_key)
+        if spot_key == upper:
+            _add(fno_key)
+    _add(f"{exchange}-{underlying}")
+    for drifted in spot_key_candidates(underlying, exchange):
+        _add(drifted)
+    return tuple(candidates)
+
+
+__all__ = [
+    "FNO_INDEX_ALIASES_ENV",
+    "fno_index_alias_pairs",
+    "resolve_spot_key",
+    "spot_key_candidates",
+    "spot_recovery_candidates",
+]

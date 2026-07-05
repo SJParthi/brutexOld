@@ -189,9 +189,11 @@ class TestDiscoverTouchedModules:
         #   * brutex/dashboard/db_view.py — the ~720-stmt /db viewer, covered by the
         #     six-file db_view test family (DEC-DASHBOARD-EMPTY-STATE-001);
         #   * brutex/engine/stage1a.py — the Stage-1A matrix builder, covered by
-        #     test_engine_stage1a.py (builder + VWAP/BOS bits) + test_engine_walk_forward.py
-        #     (the walk-forward helpers that live in stage1a.py); the static engine gate
-        #     runs the whole tests/unit/test_engine_*.py suite at 100%
+        #     test_engine_stage1a.py (builder + VWAP/BOS bits) +
+        #     test_engine_sweep_driver_walk_forward.py (the walk-forward helpers that
+        #     live in stage1a.py — the suite is stem-named for sweep_driver.py, whose
+        #     walk-forward entry points it gates); the static engine gate runs the
+        #     whole tests/unit/test_engine_*.py suite at 100%
         #     (DEC-COVERAGE-DISCOVERY-STAGE1A-001);
         #   * brutex/dashboard/movers_snapshot.py — the /movers spot-snapshot module
         #     whose spot-candidate readers only execute against a real seeded lake
@@ -205,6 +207,13 @@ class TestDiscoverTouchedModules:
         #     test_credentials*, so it CAN reach 100% standalone; kept excluded as a
         #     COMPLEMENT, gated by the dedicated static per-module gate (that exact pair)
         #     + the whole-package floor (DEC-AWS-ONLY-CREDS-001).
+        #   * brutex/engine/sweep_driver.py — the Stage-2 sweep driver, covered by
+        #     test_engine_sweep_driver.py (evaluate/sweep/rank + the public metrics
+        #     seams) + test_engine_walk_forward.py (the walk-forward half that lives in
+        #     sweep_driver.py — the EXACT stage1a.py shape); ~83% standalone against its
+        #     stem match, 100.00% with the pair; the static whole-engine gate runs
+        #     tests/unit/test_engine_*.py together at 100%
+        #     (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -215,6 +224,7 @@ class TestDiscoverTouchedModules:
                     "brutex/engine/stage1a.py",
                     "brutex/dashboard/movers_snapshot.py",
                     "brutex/config/credentials.py",
+                    "brutex/engine/sweep_driver.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE

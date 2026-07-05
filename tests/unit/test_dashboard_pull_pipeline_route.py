@@ -15,6 +15,7 @@ import importlib
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -28,6 +29,7 @@ pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.composite_pull import CompositePullReport
+from brutex.dashboard.greeks_health import DEFAULT_GREEKS_FAILURE_THRESHOLD
 from brutex.dashboard.historical_pull import HistoricalPullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.prebuild_gate import PrebuildGate
@@ -35,6 +37,7 @@ from brutex.dashboard.pull_controller import BulkSpotReport, SymbolPullResult
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 app_module = importlib.import_module("brutex.dashboard.app")
 
@@ -527,6 +530,140 @@ def test_pull_pipeline_blank_dates_thread_unbounded_scope_to_historical(
     assert historical_calls[0]["scope_end"] is None
 
 
+# ── live-edge expiry scope (DEC-EXPIRY-SCOPE-LIVE-EDGE-001) ───────────────────
+
+
+def test_pull_pipeline_default_prefill_dates_thread_unbounded_scope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The picker's PRE-FILL defaults thread an UNBOUNDED expiry scope.
+
+    THE live-edge bug (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): the frontend sent the
+    pre-filled ``[2020-01-01, prev-day]`` defaults whenever non-blank — ALWAYS —
+    so every default one-click pull carried ``scope_end = prev-day`` and scoped
+    OUT all live/unexpired contracts. The backend normalizer is AUTHORITATIVE:
+    default-shaped bounds are lifted to ``None`` even when the frontend sends
+    them, while the SPOT phase still receives the raw strings verbatim.
+    """
+    from brutex.dashboard.pull_controller import default_date_range
+
+    _pin_creds_present(monkeypatch)
+    spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    from_iso, to_iso = default_date_range()
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": from_iso, "to_date": to_iso},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    # SPOT: the raw strings, verbatim (the spot window law is untouched).
+    assert spot_calls[0]["from_date"] == from_iso
+    assert spot_calls[0]["to_date"] == to_iso
+    # HISTORICAL: the default-shaped bounds are LIFTED — live expiries in scope.
+    assert len(historical_calls) == 1
+    assert historical_calls[0]["scope_start"] is None
+    assert historical_calls[0]["scope_end"] is None
+
+
+def test_pull_pipeline_default_dates_keep_live_expiry_contract_ingested(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ingest-spy teeth: with default dates a LIVE-expiry contract IS in scope.
+
+    Runs the REAL ``partition_contracts_by_scope`` law over a live/unexpired
+    contract with EXACTLY the scope bounds the route threaded — before the
+    live-edge fix the partition scoped it OUT (zero vendor calls); now it stays
+    IN SCOPE, so the historical phase ingests it (DEC-EXPIRY-SCOPE-LIVE-EDGE-001).
+    """
+    from datetime import datetime, timedelta
+
+    from brutex.adapters.groww.expiry_scope import partition_contracts_by_scope
+    from brutex.dashboard.pull_controller import default_date_range
+    from brutex.data.registry_store import ContractRow
+
+    _pin_creds_present(monkeypatch)
+    live_expiry = date.today() + timedelta(days=20)
+    live_contract = ContractRow(
+        exch="NSE",
+        underlying="NIFTY",
+        expiry_date=live_expiry,
+        contract_symbol=f"NSE-NIFTY-{live_expiry.strftime('%d%b%y')}-21000-CE",
+        strike=21000.0,
+        side="CE",
+        candle_status="none",
+        last_run_id="live-edge-test",
+        fetched_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+    )
+    in_scope_counts: list[int] = []
+
+    def _historical(*args: Any, **kwargs: Any) -> CompositePullReport:
+        part = partition_contracts_by_scope(
+            [live_contract],
+            scope_start=kwargs["scope_start"],
+            scope_end=kwargs["scope_end"],
+        )
+        in_scope_counts.append(len(part.in_scope))
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _historical)
+    from_iso, to_iso = default_date_range()
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": from_iso, "to_date": to_iso},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert in_scope_counts == [1], "the live-expiry contract must be IN scope (ingested)"
+
+
+def test_pull_pipeline_narrowed_to_date_still_scopes(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GENUINELY narrowed to_date (prev-day − 1) still scopes exactly as today.
+
+    #1146 permutation-preservation (DEC-FNO-EXPIRY-SCOPE-001 untouched below the
+    live edge): only a DEFAULT-shaped bound lifts; one day earlier passes
+    through as the parsed scope bound.
+    """
+    from datetime import timedelta
+
+    from brutex.dashboard.pull_controller import default_date_range
+
+    _pin_creds_present(monkeypatch)
+    _spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    narrowed = date.fromisoformat(default_date_range()[1]) - timedelta(days=1)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2021-03-01", "to_date": narrowed.isoformat()},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert historical_calls[0]["scope_start"] == date(2021, 3, 1)
+    assert historical_calls[0]["scope_end"] == narrowed
+
+
+def test_pull_pipeline_below_floor_from_date_scope_start_lifted(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A from_date at/below the 2020 floor lifts ``scope_start`` to None.
+
+    Behaviour-identical for the lake (nothing predates the floor) but the scope
+    log stops naming a phantom bound (DEC-EXPIRY-SCOPE-LIVE-EDGE-001).
+    """
+    _pin_creds_present(monkeypatch)
+    _spot_calls, historical_calls = _patch_spines_capturing_historical(monkeypatch)
+    resp = client.post(
+        "/api/v1/universe/pull-pipeline",
+        params={"from_date": "2019-01-01", "to_date": "2021-01-01"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert historical_calls[0]["scope_start"] is None
+    assert historical_calls[0]["scope_end"] == date(2021, 1, 1)
+
+
 # ── the movers PREBUILD GATE binding (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2) ──
 
 
@@ -596,7 +733,7 @@ def test_pull_pipeline_gates_movers_while_running_then_releases_ok_true(
             # MID-RUN: the gate blocks and the movers route answers honestly.
             body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
             assert body["gated"] is True
-            assert "prebuild in progress" in body["note"]
+            assert "pull pipeline running" in body["note"]
             assert compute_calls == []  # ZERO lake-reading computation while gated
         finally:
             proceed.set()
@@ -739,6 +876,109 @@ def test_pull_pipeline_clean_run_finish_detail_is_the_complete_note(
     assert snap["state"] == "done"
     assert snap["detail"].startswith("pipeline complete — spot ")
     assert "quarantined" not in snap["detail"]
+    assert "Greeks enrichment FAILED" not in snap["detail"]
+
+
+# ── Greeks-enrichment failure surfaces in the finish detail ───────────────────
+# (DEC-GREEKS-ENRICH-OBSERVE-001)
+
+
+def test_pull_pipeline_greeks_failure_shows_in_finish_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WHOLE-pass Greeks-enrichment failure is NAMED in the job's headline.
+
+    End-to-end through the real pipeline composition + BackgroundPullJob: the
+    historical fake's candle sub-report carries ``greeks_enrich_ok=False``
+    (the fully-guarded pass failed whole — the pull itself completed), the
+    pipeline settles ``done``, and the /pull-progress ``detail`` carries the
+    ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next
+    pull" clause so
+    the operator sees the failed pass instead of one swallowed log line.
+    """
+    _pin_creds_present(monkeypatch)
+
+    def _historical_with_greeks_failure(*args: Any, **kwargs: Any) -> CompositePullReport:
+        base = _fake_historical(*args, **kwargs)
+        inner = base.historical
+        assert inner is not None
+        failing = replace(
+            inner,
+            greeks_enrich_ok=False,
+            greeks_enrich_error="RuntimeError: misconfigured risk-free source",
+        )
+        return replace(base, historical=failing)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(
+        app_module, "pull_historical_for_underlyings", _historical_with_greeks_failure
+    )
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    assert snap["detail"].startswith("pipeline complete — ")
+    assert (
+        ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next pull"
+        in snap["detail"]
+    )
+
+
+def test_pull_pipeline_work_feeds_greeks_health_counter(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The /pull-pipeline ``_work`` closure REALLY feeds ``GreeksEnrichHealth``.
+
+    Hostile-review MAJOR fold (the shipped-DORMANT failure mode of #935/#1014):
+    the counter primitive is 100%-tested, but nothing pinned that a real pull
+    job feeds it — deleting the ``_greeks_health.observe`` call site in
+    ``app.py`` left every test green. This drives the REAL route + background
+    job ``threshold`` times with a failing Greeks sub-report and asserts
+    exactly ONE ``pull.greeks_enrich_failing`` WARNING fires through the
+    production binding; a recovery pull then RESETS + RE-ARMS the latch, so a
+    relapse warns again (streak + latch proven end-to-end, not on the unit).
+    """
+    _pin_creds_present(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+
+    def _historical_with_greeks(ok: bool) -> Any:
+        def _factory(*args: Any, **kwargs: Any) -> CompositePullReport:
+            base = _fake_historical(*args, **kwargs)
+            inner = base.historical
+            assert inner is not None
+            patched = replace(
+                inner,
+                greeks_enrich_ok=ok,
+                greeks_enrich_error=None if ok else "RuntimeError: broken risk-free source",
+            )
+            return replace(base, historical=patched)
+
+        return _factory
+
+    def _run_pipeline(*, greeks_ok: bool) -> None:
+        monkeypatch.setattr(
+            app_module, "pull_historical_for_underlyings", _historical_with_greeks(greeks_ok)
+        )
+        resp = client.post("/api/v1/universe/pull-pipeline")
+        assert resp.status_code == 200
+        assert _wait_for_job(client)["state"] == "done"
+
+    with capture_logs() as logs:
+        for _ in range(DEFAULT_GREEKS_FAILURE_THRESHOLD):
+            _run_pipeline(greeks_ok=False)
+    breaches = [r for r in logs if r["event"] == "pull.greeks_enrich_failing"]
+    assert len(breaches) == 1  # ONE warning at the OK→BREACH crossing, not per pull
+    assert breaches[0]["consecutive"] == DEFAULT_GREEKS_FAILURE_THRESHOLD
+    assert breaches[0]["last_error"] == "RuntimeError: broken risk-free source"
+
+    with capture_logs() as relapse_logs:
+        _run_pipeline(greeks_ok=True)  # recovery resets the streak + re-arms the latch
+        for _ in range(DEFAULT_GREEKS_FAILURE_THRESHOLD):
+            _run_pipeline(greeks_ok=False)
+    relapses = [r for r in relapse_logs if r["event"] == "pull.greeks_enrich_failing"]
+    assert len(relapses) == 1  # the relapse warns AGAIN through the same binding
 
 
 # ── cross-list selection (DEC-UNIVERSE-UI-POLISH-002) ─────────────────────────

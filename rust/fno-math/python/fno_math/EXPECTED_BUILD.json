@@ -1,0 +1,18 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-FNOMATH-WHEEL-FRESHNESS-001 — the fno_math twin of trading_core's R2-CC-G1 fingerprint). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose. Read by `brutex doctor`'s wheel_freshness_fno_math stage and pinned equal to fno_math._EXPECTED_COMPILED_SYMBOLS by tests. Update this file in the SAME commit as any rust/fno-math surface or version change. HONEST residual gap (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; they do NOT catch same-version symbol-compatible behavioral drift — the CI golden/parity suites remain the correctness proof, and closing the runtime gap needs a source-content digest baked into the wheel (named follow-up, out of this scope).",
+  "crate_version": "0.2.0",
+  "symbols": [
+    "ResidentBars",
+    "ResidentSweepSim",
+    "__version__",
+    "add_u64",
+    "bitand_count_u64s",
+    "bitcount_u64s",
+    "blake3_hash",
+    "count_supermask_u64s",
+    "count_supermasks_u64s",
+    "count_supermasks_u64s_nthreads",
+    "popcount_bytes",
+    "sweep_drawdown_stats"
+  ]
+}
