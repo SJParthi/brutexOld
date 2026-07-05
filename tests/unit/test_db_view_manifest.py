@@ -297,3 +297,32 @@ class TestManifestFirstDiscovery:
         listed = db_view.list_candle_datasets(tmp_path)
         assert any(d["symbol"] == "NIFTY" for d in listed)
         assert not lm.manifest_meta_path(tmp_path).exists()
+
+
+def test_manifest_rows_with_invalid_coordinates_are_screened(tmp_path: Path) -> None:
+    """Manifest rows failing the walk's dir-level validity screens are dropped.
+
+    The walk never LISTS an invalid exchange/interval dir, so a served manifest
+    must apply the SAME screens — a foreign row (e.g. hand-edited or from a
+    future format drift) can never surface a coordinate the walk would hide.
+    """
+    _seed_ledger(tmp_path)
+    token = lm.ledger_stat_token(tmp_path)
+    assert token is not None
+    rows = [
+        {"exchange": "NSE", "segment": "INDEX", "symbol": "NIFTY", "interval": "1minute"},
+        {"exchange": "MCX", "segment": "INDEX", "symbol": "GOLD", "interval": "1minute"},
+        {"exchange": "NSE", "segment": "INDEX", "symbol": "NIFTY", "interval": "9lives"},
+        {"exchange": "NSE", "segment": "BOGUS", "symbol": "NIFTY", "interval": "1minute"},
+    ]
+    assert lm.rebuild_manifest(tmp_path, rows, ledger_token=token) is True
+    listed = db_view.list_candle_datasets(tmp_path)
+    assert listed == [
+        {
+            "kind": "spot",
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbol": "NIFTY",
+            "interval": "1minute",
+        }
+    ]
