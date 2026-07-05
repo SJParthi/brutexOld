@@ -5,7 +5,8 @@ Coverage targets per the 4-agent hostile pre-impl review:
 * Sizing math (Hostile §1) — verify ``m_bits``, ``k`` use ``ceil``
   not truncate; empirical FPR ≤ target.
 * MAX_BLOOM_BYTES guard (Hostile §3) — reject sizings that exceed
-  the 16 GiB envelope.
+  the RAM-derived ceiling (DEC-RAM-BUDGETS-001; the DEC-P0-047 16 GiB
+  value is now the undetected-RAM floor + exact 48 GiB-box parity).
 * FAIL_CLOSED capacity gate (Hostile §2) — :meth:`add` raises
   :class:`BloomCapacityExceeded` past ``capacity``.
 * FPR range validation (Reality-check §4) — reject ``fpr_target``
@@ -26,12 +27,19 @@ import hashlib
 import math
 import sys
 import threading
+from collections.abc import Iterator
 from unittest.mock import patch
 
+import brutex.hardware_envelope as he
 import pytest
+from brutex.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 from brutex.orchestrator.bloom import (
     DEFAULT_CAPACITY,
     DEFAULT_FPR,
+    MAX_BLOOM_BYTES,
+    MAX_BLOOM_BYTES_ENV,
+    MAX_BLOOM_BYTES_FLOOR,
+    MAX_BLOOM_BYTES_FRACTION,
     MAX_FPR_TARGET,
     MIN_FPR_TARGET,
     BloomCapacityExceeded,
@@ -40,7 +48,18 @@ from brutex.orchestrator.bloom import (
     BloomTooLargeError,
     _compute_m_bytes,
     _popcount_bytes,
+    resolve_max_bloom_bytes,
 )
+
+_GIB = 1024**3
+
+
+def _simulate_ram(monkeypatch: pytest.MonkeyPatch, total_bytes: int) -> None:
+    """Force RAM detection to *total_bytes* (0 = the undetected sentinel)."""
+    monkeypatch.setattr(he, "_sysconf_total_ram_bytes", lambda: total_bytes)
+    monkeypatch.setattr(he, "_sysctl_total_ram_bytes", lambda: UNDETECTED_RAM)
+    reset_hardware_envelope_cache()
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Sizing math + constants
@@ -124,13 +143,89 @@ class TestConstructorValidation:
 
     def test_capacity_too_large_rejected(self) -> None:
         # 146B (Cuckoo escalation threshold) at FPR 1e-9 would need
-        # ~787 GB — blows the 16 GiB envelope by 50×.
+        # ~787 GB — blows the 16 GiB floor by 50× (and any realistic
+        # RAM-derived ceiling: a machine would need ~2.3 TB RAM for its
+        # 1/3 share to admit it).
         with pytest.raises(BloomTooLargeError):
+            BloomFilter(capacity=146_000_000_000, fpr_target=1e-9)
+
+    def test_capacity_too_large_rejected_at_the_16_gib_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-RAM-BUDGETS-001 back-compat pin: with the ceiling forced to the
+        # undetected-RAM floor (the pre-derivation DEC-P0-047 constant), the
+        # guard behaves exactly as before — refusal BEFORE any allocation.
+        monkeypatch.setattr("brutex.orchestrator.bloom.MAX_BLOOM_BYTES", MAX_BLOOM_BYTES_FLOOR)
+        with pytest.raises(BloomTooLargeError, match="exceeds MAX_BLOOM_BYTES"):
             BloomFilter(capacity=146_000_000_000, fpr_target=1e-9)
 
     def test_bloom_too_large_is_subclass_of_config_error(self) -> None:
         # Caller can catch the parent BloomConfigError.
         assert issubclass(BloomTooLargeError, BloomConfigError)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# MAX_BLOOM_BYTES derivation (DEC-RAM-BUDGETS-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestMaxBloomBytesDerivation:
+    """The RAM-derived Bloom ceiling: floor sentinel, 48 GiB parity, env knob."""
+
+    @pytest.fixture(autouse=True)
+    def _ram_seam(self) -> Iterator[None]:
+        """Isolate each test from the process-global RAM detection cache."""
+        reset_hardware_envelope_cache()
+        yield
+        reset_hardware_envelope_cache()
+
+    def test_floor_when_ram_undetected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The sentinel law: undetected RAM → the DEC-P0-047 16 GiB constant
+        # EXACTLY (pre-derivation behavior, bit-for-bit).
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
+        assert resolve_max_bloom_bytes({}) == MAX_BLOOM_BYTES_FLOOR == 16 * _GIB
+
+    def test_48_gib_box_derives_exact_old_constant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The CLAUDE.md §8 regression pin: 48 GiB × 1/3 == 16 GiB.
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        assert resolve_max_bloom_bytes({}) == MAX_BLOOM_BYTES_FLOOR
+
+    def test_detected_ram_scales_by_fraction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 96 * _GIB)
+        assert resolve_max_bloom_bytes({}) == int(96 * _GIB * MAX_BLOOM_BYTES_FRACTION)
+
+    def test_small_box_derives_a_smaller_wall(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Portability: the guard refuses BEFORE an allocation a small box
+        # could never hold — deliberately below the old constant.
+        _simulate_ram(monkeypatch, 6 * _GIB)
+        assert resolve_max_bloom_bytes({}) == 2 * _GIB
+
+    def test_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        assert resolve_max_bloom_bytes({MAX_BLOOM_BYTES_ENV: "123456"}) == 123456
+
+    def test_garbage_env_fails_loud(self) -> None:
+        with pytest.raises(ValueError, match=MAX_BLOOM_BYTES_ENV):
+            resolve_max_bloom_bytes({MAX_BLOOM_BYTES_ENV: "16GiB"})
+
+    @pytest.mark.parametrize("raw", ["0", "-1"])
+    def test_non_positive_env_fails_loud(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="must be > 0 bytes"):
+            resolve_max_bloom_bytes({MAX_BLOOM_BYTES_ENV: raw})
+
+    def test_module_constant_matches_process_resolution(self) -> None:
+        # MAX_BLOOM_BYTES was derived ONCE at import (once-per-process law);
+        # re-resolving against the same process environment reproduces it.
+        assert resolve_max_bloom_bytes() == MAX_BLOOM_BYTES
+
+    def test_guard_refuses_just_past_the_derived_wall(self) -> None:
+        # The BloomTooLargeError wall tracks the DERIVED ceiling: a capacity
+        # sized to need just over MAX_BLOOM_BYTES is refused BEFORE any
+        # allocation (the guard runs before the Rust bit array is built).
+        bits_per_item = -math.log(DEFAULT_FPR) / math.log(2) ** 2
+        just_past = int(MAX_BLOOM_BYTES * 8 / bits_per_item * 1.01)
+        with pytest.raises(BloomTooLargeError, match="exceeds MAX_BLOOM_BYTES"):
+            BloomFilter(capacity=just_past, fpr_target=DEFAULT_FPR)
 
 
 # ────────────────────────────────────────────────────────────────────────
