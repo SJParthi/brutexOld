@@ -50,6 +50,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+# RETIRED names, re-exported for back-compat only (DEC-AWS-ONLY-CREDS-001: no code reads
+# these env vars for auth — credentials are AWS-SSM-only, `resolve_groww_aws_credentials`).
 from brutex.adapters.groww.auth import ENV_API_KEY as ENV_GROWW_API_KEY
 from brutex.adapters.groww.auth import ENV_TOTP_SECRET as ENV_GROWW_TOTP_SECRET
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
@@ -649,8 +651,8 @@ __all__ = [
     "ENV_ACCESS_TOKEN",
     "ENV_CLIENT_ID",
     "ENV_CREDENTIALS_FILE",
-    "ENV_GROWW_API_KEY",
-    "ENV_GROWW_TOTP_SECRET",
+    "ENV_GROWW_API_KEY",  # RETIRED name (DEC-AWS-ONLY-CREDS-001) — back-compat export only
+    "ENV_GROWW_TOTP_SECRET",  # RETIRED name (DEC-AWS-ONLY-CREDS-001) — back-compat export only
     "CredentialsError",
     "GrowwFileCredentials",
     "TokenFileCredentials",

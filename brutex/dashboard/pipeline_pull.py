@@ -563,12 +563,15 @@ def _complete_note(
     A non-empty quarantine set leads the note ("pipeline complete — N symbol(s)
     quarantined: … — …", :func:`_quarantine_clause`) so a per-symbol failure is
     NEVER hidden behind a bare "pipeline complete"; a fully-clean pull keeps
-    the prior wording byte-identically. Appends a pre-build clause ONLY when
-    the gated prebuild phase ran (:func:`_prebuild_note_clause` — built count +
-    bars + capped failure names), THEN a per-segment movers-warm clause ONLY
-    for the segments that actually warmed (:func:`_movers_note_clause`) — the
-    prebuild-then-movers order mirrors the execution order
-    (DEC-PIPELINE-AUTOPREBUILD-001).
+    the prior wording byte-identically. A WHOLE-pass Greeks-enrichment failure
+    on the candle sub-report appends ", Greeks enrichment FAILED (<ErrorType>)
+    — overlay re-attempted next pull" (DEC-GREEKS-ENRICH-OBSERVE-001; absent when the
+    pass completed, never ran, or there was no candle sub-report). Appends a
+    pre-build clause ONLY when the gated prebuild phase ran
+    (:func:`_prebuild_note_clause` — built count + bars + capped failure
+    names), THEN a per-segment movers-warm clause ONLY for the segments that
+    actually warmed (:func:`_movers_note_clause`) — the prebuild-then-movers
+    order mirrors the execution order (DEC-PIPELINE-AUTOPREBUILD-001).
     """
     hist = historical.historical
     bars = hist.bars_appended if hist is not None else 0
@@ -594,13 +597,26 @@ def _complete_note(
         if hist is not None and hist.expiries_out_of_scope
         else ""
     )
+    # Greeks-enrichment honesty (DEC-GREEKS-ENRICH-OBSERVE-001): a WHOLE-pass
+    # enrichment failure is NAMED in the pipeline note (the overlay is re-derivable
+    # — the next pull re-attempts it), never a swallowed log line. `hist is None`
+    # (a metadata-only / no-candle run) honestly carries no clause. The clause
+    # carries the same <ErrorType> class as the historical note (hostile-review
+    # fold — one uniform operator-facing string).
+    greeks_clause = (
+        f", Greeks enrichment FAILED "
+        f"({(hist.greeks_enrich_error or 'error').split(':', 1)[0]}) "
+        "— overlay re-attempted next pull"
+        if hist is not None and hist.greeks_enrich_ok is False
+        else ""
+    )
     return (
         f"{prefix}pipeline complete — "
         f"{_quarantine_clause(quarantined, quarantined_count)}spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
         f"contracts, historical {bars} bars over {contracts} contract(s)"
-        f"{scope_clause}{skipped_clause}{_prebuild_note_clause(prebuild)}"
+        f"{scope_clause}{skipped_clause}{greeks_clause}{_prebuild_note_clause(prebuild)}"
         f"{_movers_note_clause(segment_movers_warmed, segment_movers_failed)}"
     )
 

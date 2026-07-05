@@ -110,6 +110,7 @@ from brutex.dashboard.fno_underlying import (
     fno_underlying_forms,
     resolve_fno_index_aliases,
 )
+from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_revision import lake_revision
@@ -1429,6 +1430,16 @@ def build_app(
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
     _session_rate = SessionRateController()
+    # The Greeks-enrichment consecutive-failure health counter
+    # (DEC-GREEKS-ENRICH-OBSERVE-001): the fully-guarded post-pull Greeks pass can
+    # NEVER fail a pull, so a persistently broken enrichment used to be one
+    # swallowed log line per pull. Each pull job feeds its report's whole-pass
+    # `greeks_enrich_ok` verdict here; at the threshold crossing ONE structlog
+    # WARNING `pull.greeks_enrich_failing` fires (log-only — no Telegram push:
+    # `pull_degraded`'s r/s units would be dishonest for a Greeks pass). Owned by
+    # this app instance (no module-global mutable state — CLAUDE.md §4);
+    # PROCESS-LOCAL — a restart resets the streak (honest envelope).
+    _greeks_health = GreeksEnrichHealth()
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
@@ -2820,6 +2831,10 @@ def build_app(
                     session_rate=_session_rate,
                     until_clean=until_clean,
                 )
+            # Consecutive-failure health over the post-pull Greeks pass
+            # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
+            # ignored inside `observe`, so a synthetic pull never moves the streak.
+            _greeks_health.observe(report.greeks_enrich_ok, error=report.greeks_enrich_error)
             return report.to_dict()
 
         started = _pull_job.start(_work, total=len(selected), detail=detail)
@@ -3404,6 +3419,17 @@ def build_app(
                     )
                 if report.spot is not None:
                     _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                # Consecutive-failure health over the post-pull Greeks pass
+                # (DEC-GREEKS-ENRICH-OBSERVE-001), via the nested candle
+                # sub-report. A stopped-early / no-candle pipeline (either
+                # nesting level None) observes `None`, which `observe` ignores
+                # — the streak only moves on a pull that actually ran the pass.
+                composite = report.historical
+                hist_report = composite.historical if composite is not None else None
+                _greeks_health.observe(
+                    None if hist_report is None else hist_report.greeks_enrich_ok,
+                    error=None if hist_report is None else hist_report.greeks_enrich_error,
+                )
                 return report.to_dict()
             finally:
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
@@ -5126,7 +5152,7 @@ def build_app(
         request runs the SAME ``cmd_sweep_all`` engine the CLI uses on the
         **single-flight** background job (poll the live tick at
         ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
-        the ``INDEX`` segment over ``2021-01-01 → today``. A second click while a
+        the ``INDEX`` segment over ``2020-01-01 → today``. A second click while a
         pull OR sweep is already running is a no-op (``{"started": false}``) — one
         lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
 
