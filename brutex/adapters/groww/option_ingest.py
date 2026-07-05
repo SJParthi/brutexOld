@@ -100,6 +100,7 @@ from brutex.adapters.groww.errors import (
     is_rate_limit,
     is_retryable,
     is_terminal_auth_failure,
+    steps_timeout_ladder,
 )
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
 from brutex.adapters.groww.ingest import IngestReport
@@ -125,7 +126,7 @@ from brutex.data.partial_window_detect import (
     observe_partial_window,
 )
 from brutex.data.raw_integrity_store import CaptureHookFactory
-from brutex.data.session import filter_intraday_session
+from brutex.data.session import ALL_FILTERED, filter_to_trading_session, observe_all_filtered
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -380,6 +381,7 @@ def ingest_option_contract(
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     on_raw_payload: RawPayloadHook | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
 ) -> IngestReport:
@@ -517,12 +519,16 @@ def ingest_option_contract(
                             exc=exc,
                         )
                     raise  # terminal (auth included) → outer quarantine, never swallowed
-                # Transient: feed the controller (a 429 steps the rate down, a timeout
-                # drives the timeout ladder) and record FAILED so the operator SEES it.
+                # Transient: feed the controller (a 429 steps the rate down, a NON-auth
+                # transient drives the timeout ladder — `steps_timeout_ladder`,
+                # DEC-AUTH-LADDER-EXCLUDE-001: a retryable auth-family failure
+                # (token-stale / mint-throttle) feeds NEITHER hook, it is no evidence
+                # about candle-endpoint health) and record FAILED so the operator SEES
+                # it — the ledger record + breaker feed below stay byte-identical.
                 if is_rate_limit(exc):
                     if on_rate_limit is not None:
                         on_rate_limit()
-                elif on_timeout is not None:
+                elif on_timeout is not None and steps_timeout_ladder(exc):
                     on_timeout()
                 if ledger is not None:
                     ledger.record(
@@ -530,6 +536,7 @@ def ingest_option_contract(
                         raw_bars=0,
                         error_type=type(exc).__name__,
                         bars_appended=0,
+                        bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
                     )
@@ -656,6 +663,7 @@ def ingest_option_contract(
             on_success=on_success,
             pull_id=pull_id,
             fields=fields,
+            observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
@@ -679,6 +687,7 @@ def ingest_option_contract(
             on_success=on_success,
             pull_id=pull_id,
             fields=fields,
+            observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
         )
         if result_report.still_failed_windows:
@@ -738,6 +747,7 @@ def _process_option_window_tail(
     on_success: Callable[[], None] | None,
     pull_id: str,
     fields: dict[str, str],
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
 ) -> IngestReport:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
@@ -771,13 +781,53 @@ def _process_option_window_tail(
     suppress_settle = empty_breaker is not None and not empty_breaker.allow_settle()
     settle_empty = raw.settle_empty and not suppress_settle
     attempt = raw.attempt
-    bars = raw_bars if interval == _DAILY else filter_intraday_session(raw_bars)
+    # CALENDAR-AWARE session filter (DEC-INGEST-BOUNDARY-INTEGRITY-001) — the F&O
+    # twin of the spot boundary: bars outside their OWN IST date's real NSE
+    # session (pre-open/post-close AND non-trading-date leaks) are dropped before
+    # the lake write; evening-muhurat / special-weekend bars are KEPT. Daily bars
+    # carry no intraday time — deliberately unfiltered.
+    if interval == _DAILY:
+        bars = raw_bars
+    else:
+        session_verdict = filter_to_trading_session(raw_bars)
+        bars = session_verdict.kept
+        if session_verdict.dropped:
+            # EXACTLY ONE aggregated WARNING per window (never per bar), carrying
+            # the window identity + per-cause counts.
+            _LOG.warning(
+                "option.ingest.session_filter.dropped",
+                pull_id=pull_id,
+                window_start=key.start.isoformat(),
+                window_end=key.end.isoformat(),
+                dropped=session_verdict.dropped,
+                off_session=session_verdict.dropped_off_session,
+                non_trading_date=session_verdict.dropped_non_trading_date,
+                **fields,
+            )
     # Drop any bar timestamped on a date STRICTLY AFTER the clamped window end
     # (DEC-CANDLE-DROP-FUTURE-BAR-001): a vendor bar PAST the clamped bound would write a
     # PHANTOM FUTURE partition. ``key.end`` is the clamped end (``_clamped_window_key``); a
     # bar ON the boundary is KEPT, so this only ever removes an out-of-window / clock-skew
     # phantom, never a legitimate in-range bar (existing behaviour byte-unchanged).
     bars = drop_bars_after(bars, key.end)
+    # ALL-FILTERED at the WHOLE boundary (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
+    # widening DEC-INGEST-BOUNDARY-INTEGRITY-001's session-filter-only check): the
+    # kept count is read AFTER the session filter AND the future-bar drop, so a
+    # window emptied by EITHER stage is caught. The shared WARNING always fires
+    # on the shape and carries the window bounds (spot-parity triage fields);
+    # only the ledger demotion below is interval-gated.
+    all_boundary_filtered = observe_all_filtered(
+        _LOG,
+        raw_count=len(raw_bars),
+        kept_count=len(bars),
+        pull_id=pull_id,
+        fields={
+            "window_start": key.start.isoformat(),
+            "window_end": key.end.isoformat(),
+            **fields,
+        },
+    )
+    all_filtered = interval != _DAILY and all_boundary_filtered
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
@@ -814,6 +864,7 @@ def _process_option_window_tail(
                 raw_bars=0,
                 error_type=type(exc).__name__,
                 bars_appended=0,
+                bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
             )
@@ -850,9 +901,28 @@ def _process_option_window_tail(
             raw_bars=len(raw_bars),
             error_type=None,
             bars_appended=result.bars_appended,
+            # Persist the sink's keep-first-DEDUPED net-new count alongside the
+            # input count (DEC-INGEST-BOUNDARY-INTEGRITY-001).
+            bars_net_new=result.bars_net_new,
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
             settle_empty=settle_empty,
+            # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001, boundary-
+            # widened by DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the vendor
+            # returned bars but EVERY one was removed at the filter boundary
+            # (session filter AND/OR future-bar drop) — a would-be SUCCESS with
+            # ZERO stored bars the skip rule would never revisit. This is the
+            # F&O spine's ONLY demotion: #1031 deliberately kept the F&O
+            # interior-gap/partial-window detectors observe-only (option sparsity is
+            # indistinguishable from truncation), and that stance is PRESERVED —
+            # all-filtered is a narrower, INTRINSIC signal (vendor sent bars, the
+            # boundary kept none — not a liquidity heuristic), so it is UNgated
+            # here: the F&O dry-run client returns EMPTY candle payloads
+            # (``raw_bars == 0`` → EMPTY, this flag can never fire offline).
+            # Orthogonal to sink dedup — a full-dedup re-pull keeps ``bars``
+            # non-empty and stays SUCCESS.
+            degraded=all_filtered,
+            degraded_reason=ALL_FILTERED if all_filtered else None,
             old_window=raw.old_window,
             suppress_settle=suppress_settle,
         )
@@ -861,7 +931,7 @@ def _process_option_window_tail(
     # SESSION-FILTERED bars stop materially before the expected end (a truncation the SUCCESS
     # classifier + skip rule would otherwise never revisit). Fully guarded inside — never
     # breaks the pull, changes no status/ledger/return.
-    _observe_partial_window(raw, bars, pull_id=pull_id, fields=fields)
+    _observe_partial_window(raw, bars, pull_id=pull_id, fields=fields, observed=observed_holidays)
     if on_success is not None:
         on_success()
     return IngestReport(
@@ -1003,12 +1073,24 @@ class UnderlyingEmptyReport:
         whether Groww returns a clean-200-empty for such legs is UNVERIFIED from an
         offline sandbox; Tier B trades that bounded warning noise for coverage and
         stays observe-only.
+    never_planned_pairs
+        Count of this underlying's contracts that were NEVER PLANNED this pull —
+        far-future legs skipped at planning time (``fno.window_not_open``,
+        DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
+        ``IngestReport`` pair) — threaded in via
+        :func:`scan_underlying_all_empty`'s *never_planned_symbols*
+        (DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001). ANNOTATION ONLY: the flag
+        decision never reads it — a low-leg flag with
+        ``never_planned_pairs >= 1`` still fires, it just SELF-DESCRIBES as a
+        probable far-leg-not-open chain so triage can weigh it lower. Default
+        ``0`` keeps every pre-existing construction byte-identical.
     """
 
     underlying: str
     attempted_pairs: int
     stored_bars: int
     low_leg: bool = False
+    never_planned_pairs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1038,6 +1120,7 @@ def scan_underlying_all_empty(
     pairs: Mapping[tuple[str, str], IngestReport],
     contract_list: Sequence[DerivativeContract],
     failed_symbols: Iterable[str] = (),
+    never_planned_symbols: Iterable[str] = (),
 ) -> AllEmptyScan:
     """Scan one pull's ``pairs`` for underlyings whose every cleanly-fetched contract was empty.
 
@@ -1061,14 +1144,20 @@ def scan_underlying_all_empty(
       quarantined leg each leave a non-clean/failed sibling that disqualifies the
       whole underlying at the low-leg tier.
 
-    HONEST residual (accepted, Golden Rule #10): a NEVER-PLANNED sibling — a
+    HONEST residual (now SELF-DESCRIBED, still never suppressed —
+    DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001): a NEVER-PLANNED sibling — a
     far-future contract skipped at planning time (``fno.window_not_open``,
     DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
-    ``IngestReport`` pair, no failure) — is structurally invisible to both the
+    ``IngestReport`` pair, no failure) — stays structurally invisible to both the
     non-clean tally and *failed_symbols*, so a chain of one clean-empty near leg +
-    one not-yet-open far leg still flags ``low_leg=True``. Consistent with the
-    tried-vs-never-tried philosophy (Tier A ignores never-tried siblings
-    identically); observe-only WARN noise, deliberately not mechanised away.
+    one not-yet-open far leg STILL flags ``low_leg=True`` (annotate, NEVER
+    suppress — the flag decision expression is untouched). What changed: the
+    caller may thread *never_planned_symbols* (the planner's omitted set) and
+    each flagged report then carries ``never_planned_pairs``, so the WARN reads
+    e.g. ``low_leg=True never_planned_pairs=1`` — "probably a
+    far-leg-not-open chain, weigh lower" — instead of leaving triage guessing.
+    Consistent with the tried-vs-never-tried philosophy (Tier A ignores
+    never-tried siblings identically); observe-only.
 
     Pure + O(pairs + failures); a pair (or failed symbol) not in *contract_list* is
     skipped (defensive — never raises).
@@ -1085,6 +1174,15 @@ def scan_underlying_all_empty(
         they never enter *pairs*, so without them a 2-leg chain with one
         quarantined leg would be indistinguishable from a 1-leg clean-empty chain.
         Default empty (Tier A behaviour is failure-blind, unchanged).
+    never_planned_symbols
+        Contract symbols the PLANNER omitted entirely this pull (the not-yet-open
+        far-future legs of DEC-FNO-FAR-EXPIRY-WINDOW-001 — zero vendor calls, zero
+        ledger rows, so they can never appear in *pairs* or *failed_symbols*).
+        Tallied per underlying onto each flagged report's ``never_planned_pairs``
+        — ANNOTATION ONLY, the flag decision never reads it
+        (DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001). An unknown symbol is
+        defensively skipped (same as *failed_symbols*). Default empty —
+        byte-identical scan.
 
     Returns
     -------
@@ -1109,12 +1207,19 @@ def scan_underlying_all_empty(
         for symbol in failed_symbols
         if (underlying := symbol_to_underlying.get(symbol)) is not None
     }
+    never_planned: dict[str, int] = {}
+    for symbol in never_planned_symbols:
+        underlying = symbol_to_underlying.get(symbol)
+        if underlying is None:  # defensive skip, same as failed_symbols
+            continue
+        never_planned[underlying] = never_planned.get(underlying, 0) + 1
     flagged = tuple(
         UnderlyingEmptyReport(
             underlying=underlying,
             attempted_pairs=attempted[underlying],
             stored_bars=stored[underlying],
             low_leg=attempted[underlying] < _ALL_EMPTY_MIN_CONTRACTS,
+            never_planned_pairs=never_planned.get(underlying, 0),
         )
         for underlying in sorted(attempted)
         if stored[underlying] == 0
@@ -1146,6 +1251,7 @@ def _log_underlying_all_empty(scan: AllEmptyScan, *, pull_id: str | None) -> Non
             attempted_pairs=rep.attempted_pairs,
             stored_bars=rep.stored_bars,
             low_leg=rep.low_leg,
+            never_planned_pairs=rep.never_planned_pairs,
         )
 
 
@@ -1154,6 +1260,7 @@ def emit_underlying_all_empty(
     contract_list: Sequence[DerivativeContract],
     *,
     failed_symbols: Iterable[str] = (),
+    never_planned_symbols: Iterable[str] = (),
     pull_id: str | None = None,
 ) -> None:
     """Scan one pull's *pairs* for whole-underlying empties + WARN — fully guarded, observe-only.
@@ -1180,11 +1287,18 @@ def emit_underlying_all_empty(
     :func:`scan_underlying_all_empty` so the LOW-LEG Tier B rule can disqualify an
     underlying with a quarantined sibling leg (quarantines never enter *pairs*);
     default empty keeps the Tier A behaviour byte-identical.
+    *never_planned_symbols* (DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001) is the
+    planner's omitted not-yet-open contract set, threaded to
+    :func:`scan_underlying_all_empty` so a Tier-B low-leg flag SELF-DESCRIBES via
+    ``never_planned_pairs`` (annotation only — never a suppression); the in-driver
+    synchronous call site leaves it default-empty because the DRIVER has no
+    planning info (the planner's omitted set lives in
+    ``dashboard.historical_pull``, the production post-drain caller).
     """
     resolved_pull_id = pull_id if pull_id is not None else current_pull_id()
     try:
         _log_underlying_all_empty(
-            scan_underlying_all_empty(pairs, contract_list, failed_symbols),
+            scan_underlying_all_empty(pairs, contract_list, failed_symbols, never_planned_symbols),
             pull_id=resolved_pull_id,
         )
     except Exception as exc:  # observe-only diagnostic must never break the pull
@@ -1207,6 +1321,7 @@ def _observe_partial_window(
     *,
     pull_id: str | None,
     fields: dict[str, str],
+    observed: frozenset[date] = frozenset(),
 ) -> None:
     """Observe-only: WARN if a FUTURES SUCCESS window's bars stop before its end.
 
@@ -1231,6 +1346,7 @@ def _observe_partial_window(
         symbol=raw.contract.symbol,
         interval=fields.get("interval", raw.interval),
         pull_id=pull_id,
+        observed=observed,
     )
 
 
@@ -1636,6 +1752,7 @@ def run_groww_option_ingest(
     capture_hook_factory: CaptureHookFactory | None = None,
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     breaker_health_probe: Callable[[], bool] | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
@@ -1895,6 +2012,7 @@ def run_groww_option_ingest(
                 market=market,
                 on_raw_payload=contract_hook,
                 fetch_pipeline=fetch_pipeline,
+                observed_holidays=observed_holidays,
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
             )

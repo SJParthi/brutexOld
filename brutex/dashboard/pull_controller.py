@@ -109,6 +109,7 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
+from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -1643,6 +1644,12 @@ def pull_all_spot(
             end=end.date(),
             floors=load_vendor_floors(floor_store, [i.symbol_name for i in instruments]),
         )
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
+        # per pull and threaded into the completeness detectors' margin arithmetic
+        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
+        # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
+        # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
+        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -1763,6 +1770,7 @@ def pull_all_spot(
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
+                    observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
                 )
@@ -2485,6 +2493,12 @@ def pull_candles(
             end=end.date(),
             floors=load_vendor_floors(floor_store, (symbol,)),
         )
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
+        # per pull and threaded into the completeness detectors' margin arithmetic
+        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
+        # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
+        # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
+        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2549,6 +2563,7 @@ def pull_candles(
                     # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
                     # false-red on the synthetic adapter's first-day-only bars.
                     detect_completeness_gaps=True,
+                    observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
                 )

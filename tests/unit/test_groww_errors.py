@@ -625,3 +625,50 @@ class TestAuthorisationErrorSplit:
         assert str(storm) == "plain message"
         assert storm.distinct_symbols == 0
         assert storm.symbols == ()
+
+
+# ── steps_timeout_ladder (DEC-AUTH-LADDER-EXCLUDE-001) ───────────────────────
+
+
+@pytest.mark.parametrize(
+    ("exc", "steps"),
+    [
+        # SERVER-STRESS transients — candle-endpoint evidence → MAY step the ladder down.
+        (e.GrowwTimeoutError("stall"), True),
+        (e.GrowwEmptyResponseError("empty body"), True),
+        (e.GrowwServerError("502"), True),
+        (e.GrowwNetworkError("dns blip"), True),
+        # A rate-limit keeps its OWN on_rate_limit path (kills the `not is_rate_limit`
+        # conjunct — a mutant dropping it flips this row).
+        (e.GrowwRateLimitError("429"), False),
+        # The two RETRYABLE auth-family shapes — a mint-endpoint throttle / a token
+        # race says NOTHING about candle-endpoint health (kills `not is_auth_failure`).
+        (e.GrowwTokenIssuanceThrottled("mint throttled"), False),
+        (e.GrowwTokenStillStaleError("same dead token"), False),
+        # Terminal shapes never reach the ladder at all (kills the `is_retryable`
+        # conjunct — an inverted/weakened predicate flips these rows).
+        (e.GrowwError("unknown"), False),
+        (e.GrowwAuthError("bad credential"), False),
+        (e.GrowwCredentialDeadError("dead credential"), False),
+        (e.GrowwBadRequestError("bad request"), False),
+        (e.GrowwNotFoundError("404"), False),
+        (e.GrowwFeedError("feed"), False),
+    ],
+)
+def test_steps_timeout_ladder(exc: e.GrowwError, steps: bool) -> None:
+    """The ONE ladder predicate: retryable AND not-rate-limit AND not-auth-family.
+
+    DEC-AUTH-LADDER-EXCLUDE-001: the AIMD timeout ladder is a SERVER-STRESS signal
+    (timeout / empty body / 5xx / network) — a retryable auth-family failure must
+    never ease the pull rate. Every error class in the module is enumerated so a
+    new class must consciously pick a row (and each conjunct's mutant dies here).
+    """
+    assert e.steps_timeout_ladder(exc) is steps
+
+
+def test_steps_timeout_ladder_reexported_from_package() -> None:
+    """The package facade re-exports the predicate beside ``is_auth_failure``."""
+    from brutex.adapters import groww as groww_pkg
+
+    assert groww_pkg.steps_timeout_ladder is e.steps_timeout_ladder
+    assert "steps_timeout_ladder" in groww_pkg.__all__

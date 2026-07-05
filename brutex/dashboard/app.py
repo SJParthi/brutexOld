@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
+from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
 from brutex.adapters.ingest_common import (
     gate_pull_credentials,
     label_synthetic,
@@ -110,6 +111,7 @@ from brutex.dashboard.fno_underlying import (
     fno_underlying_forms,
     resolve_fno_index_aliases,
 )
+from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_revision import lake_revision
@@ -172,6 +174,12 @@ from brutex.dashboard.pull_controller import (
     resolve_fetch_intervals,
     resolve_pull_symbols,
     resolve_pull_targets,
+)
+from brutex.dashboard.pull_intent import (
+    PullIntent,
+    PullIntentStore,
+    persist_intent_for_launch,
+    run_auto_resume,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.rate_sampler import RatePanelSampler
@@ -932,6 +940,13 @@ def _registry_unreadable_payload(columns: tuple[str, ...]) -> dict[str, Any]:
 #: OPTIONS are never checked — they must stay side-effect-free reads.
 _ORIGIN_GUARDED_METHODS: Final[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+#: First 5xx status code — the intent-resume launch binding splits an
+#: ``HTTPException`` on this floor: a 4xx is a DETERMINISTIC validation refusal
+#: (→ ``ValueError`` → the resume core clears the intent), a 5xx is transient
+#: (→ ``RuntimeError`` → the intent is kept and re-tried, cap-bounded) —
+#: DEC-PULL-INTENT-RESUME-001.
+_SERVER_ERROR_FLOOR: Final[int] = 500
+
 #: 403 detail returned for a browser-initiated cross-site state change.
 _CROSS_ORIGIN_DETAIL: Final = "cross-origin request blocked"
 
@@ -1046,6 +1061,7 @@ def build_app(
     pull_active_probe: Callable[[], bool | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
+    pull_intent_store: PullIntentStore | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1141,6 +1157,19 @@ def build_app(
         ``http://localhost`` via the root conftest fixture, or inject this
         parameter). The CLI launcher passes the actual bound host when
         serving beyond loopback (``cli._dashboard_allowed_hosts``).
+    pull_intent_store
+        Optional :class:`~brutex.dashboard.pull_intent.PullIntentStore` — the
+        durable ``.pull_intent.json`` crash-recovery sidecar
+        (DEC-PULL-INTENT-RESUME-001). When supplied, a REAL ``/pull-pipeline``
+        launch persists its re-fire intent (a ``dry_run`` never does), the
+        background job clears it on worker exit (``on_finally`` — success AND
+        failure, before the single-flight release), the app exposes
+        ``app.state.brutex_resume_pipeline`` (the boot-time seam
+        ``cli.cmd_dashboard`` wires into the extended auto-resume launcher),
+        and ``GET /api/v1/liveproof`` carries the resume red-banner payload.
+        ``None`` (the default — unit tests / bare apps) disables all of it;
+        ``build_app`` itself never fires a resume (the launcher seam does), so
+        constructing an app stays side-effect-free.
 
     Returns
     -------
@@ -1402,6 +1431,16 @@ def build_app(
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor.
     _session_rate = SessionRateController()
+    # The Greeks-enrichment consecutive-failure health counter
+    # (DEC-GREEKS-ENRICH-OBSERVE-001): the fully-guarded post-pull Greeks pass can
+    # NEVER fail a pull, so a persistently broken enrichment used to be one
+    # swallowed log line per pull. Each pull job feeds its report's whole-pass
+    # `greeks_enrich_ok` verdict here; at the threshold crossing ONE structlog
+    # WARNING `pull.greeks_enrich_failing` fires (log-only — no Telegram push:
+    # `pull_degraded`'s r/s units would be dishonest for a Greeks pass). Owned by
+    # this app instance (no module-global mutable state — CLAUDE.md §4);
+    # PROCESS-LOCAL — a restart resets the streak (honest envelope).
+    _greeks_health = GreeksEnrichHealth()
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
@@ -2795,6 +2834,10 @@ def build_app(
                     session_rate=_session_rate,
                     until_clean=until_clean,
                 )
+            # Consecutive-failure health over the post-pull Greeks pass
+            # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
+            # ignored inside `observe`, so a synthetic pull never moves the streak.
+            _greeks_health.observe(report.greeks_enrich_ok, error=report.greeks_enrich_error)
             return report.to_dict()
 
         started = _pull_job.start(_work, total=len(selected), detail=detail)
@@ -2815,15 +2858,28 @@ def build_app(
             }
         )
 
-    @app.post("/api/v1/universe/pull-pipeline")
-    async def api_universe_pull_pipeline(
-        symbols: str | None = Query(default=None),
-        symbol: str | None = Query(default=None),
-        from_date: str | None = Query(default=None),
-        to_date: str | None = Query(default=None),
-        dry_run: bool = Query(default=False),
-    ) -> JSONResponse:
-        """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
+    def _launch_pipeline(
+        *,
+        symbols: str | None,
+        symbol: str | None,
+        from_date: str | None,
+        to_date: str | None,
+        dry_run: bool,
+        intent_restarts: int = 0,
+    ) -> dict[str, Any]:
+        """The ONE-CLICK pull(+movers) pipeline launcher — the ``/pull-pipeline`` body.
+
+        Extracted from the route (DEC-PULL-INTENT-RESUME-001) so the SAME
+        validated launch path serves BOTH the operator's POST and the boot-time
+        intent resume (``app.state.brutex_resume_pipeline``) — the persistable
+        request surface is exactly this keyword quadruple plus ``dry_run``;
+        everything else (targets, lake root, years, intervals) is re-derived
+        here. *intent_restarts* threads the resume path's already-bumped
+        restart counter into the re-persisted intent (a fresh operator click
+        passes the default ``0``); a ``dry_run`` NEVER persists an intent and
+        NEVER clears one (a crashed real pull's intent must survive a dry-run).
+        Raises ``HTTPException`` exactly as the route did (400 validation /
+        503 credential refusal); returns the route's JSON payload dict.
 
         Backs BOTH the "▶ Pull EVERYTHING" hero button (no selection → the WHOLE
         admitted universe — DEC-ONE-CLICK-PIPELINE-001) AND the "▶ Pull selected · N
@@ -3252,10 +3308,16 @@ def build_app(
                     on_progress=_prebuild_gate.set_progress,
                 )
 
-            def _prebuild_timeframes() -> PrebuildOutcome:
-                """Gated FINAL data stage (DEC-PIPELINE-AUTOPREBUILD-001): pre-build ALL derived TFs.
+            def _prebuild_timeframes(exclude_symbols: frozenset[str]) -> PrebuildOutcome:
+                """FINAL data stage (DEC-PIPELINE-AUTOPREBUILD-001): pre-build ALL derived TFs.
 
-                Runs ONLY after a fully-successful fetch (run_full_pipeline's gate).
+                Runs on EVERY completed-chain pull over the CLEAN symbol set —
+                ``exclude_symbols`` is the UNCAPPED quarantined-name set
+                ``run_full_pipeline`` derives, forwarded to the pure guarded
+                runner so quarantined symbols are excluded + named while the
+                other targets still get their derived timeframes
+                (DEC-PREBUILD-CLEANSET-001, supersedes the #1145
+                fully-clean-fetch gate).
                 Covers the pulled SPOT underlyings PLUS their FUTURES + OPTIONS
                 contracts discovered from the F&O candle lake cascade
                 (``build_fno_cascade(list_fno_candle_datasets(lake_root))`` — the
@@ -3293,6 +3355,10 @@ def build_app(
                         symbol=target.symbol,
                         kind=target.kind,
                         include_daily=True,
+                        # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: per-session
+                        # substitution WARNs only for a SPOT INDEX target
+                        # (PrebuildTarget.dense = Instrument.is_index).
+                        dense_symbol=target.dense,
                     )
 
                 nonlocal prebuild_ok
@@ -3304,6 +3370,7 @@ def build_app(
                         ),
                         materialize=_materialize,
                         source="pipeline",
+                        exclude_symbols=exclude_symbols,
                         # Allocation probe at the tiny-file writer's start
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
@@ -3356,6 +3423,17 @@ def build_app(
                     )
                 if report.spot is not None:
                     _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                # Consecutive-failure health over the post-pull Greeks pass
+                # (DEC-GREEKS-ENRICH-OBSERVE-001), via the nested candle
+                # sub-report. A stopped-early / no-candle pipeline (either
+                # nesting level None) observes `None`, which `observe` ignores
+                # — the streak only moves on a pull that actually ran the pass.
+                composite = report.historical
+                hist_report = composite.historical if composite is not None else None
+                _greeks_health.observe(
+                    None if hist_report is None else hist_report.greeks_enrich_ok,
+                    error=None if hist_report is None else hist_report.greeks_enrich_error,
+                )
                 return report.to_dict()
             finally:
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
@@ -3371,20 +3449,115 @@ def build_app(
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
             pipeline_detail = label_synthetic(pipeline_detail)
+        # Durable pull intent (DEC-PULL-INTENT-RESUME-001): persist the re-fire
+        # payload AFTER validation and BEFORE the job starts, so a SIGKILL at
+        # any later point leaves the crash-recovery record on disk. A dry_run
+        # never persists (persist_intent_for_launch returns False without
+        # writing) and never wires the clear hook — it must not erase a crashed
+        # REAL pull's intent. The clear fires in the job's finally, on the
+        # worker's success AND failure, BEFORE the single-flight release.
+        on_finally: Callable[[], None] | None = None
+        if pull_intent_store is not None and not dry_run:
+            # Best-effort write (a failed write is logged, never blocks the
+            # pull); the clear hook is wired for EVERY real pull regardless —
+            # a completing real pull supersedes any lingering older intent.
+            persist_intent_for_launch(
+                pull_intent_store,
+                dry_run=dry_run,
+                symbols=symbols,
+                symbol=symbol,
+                from_date=from_date,
+                to_date=to_date,
+                restarts=intent_restarts,
+            )
+            on_finally = pull_intent_store.clear
         started = _pull_job.start(
-            _work, total=len(targets), detail=pipeline_detail, ledger_synced=True
+            _work,
+            total=len(targets),
+            detail=pipeline_detail,
+            ledger_synced=True,
+            on_finally=on_finally,
         )
+        return {
+            "started": started,
+            "targets": len(targets),
+            "total": len(targets),  # the JS title reads body.total for the first render
+            "tradable": len(tradable),
+            "target_source": target_source,  # "selection" / "single" / "universe"
+            "years": years,
+            "dry_run": dry_run,
+        }
+
+    @app.post("/api/v1/universe/pull-pipeline")
+    async def api_universe_pull_pipeline(
+        symbols: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
+
+        Thin delegator over :func:`_launch_pipeline` (which carries the full
+        semantics docstring): the launch body is shared with the boot-time
+        intent resume (DEC-PULL-INTENT-RESUME-001), so the operator's POST and
+        a resumed pull can never drift onto two different launch paths.
+        """
         return JSONResponse(
-            {
-                "started": started,
-                "targets": len(targets),
-                "total": len(targets),  # the JS title reads body.total for the first render
-                "tradable": len(tradable),
-                "target_source": target_source,  # "selection" / "single" / "universe"
-                "years": years,
-                "dry_run": dry_run,
-            }
+            _launch_pipeline(
+                symbols=symbols,
+                symbol=symbol,
+                from_date=from_date,
+                to_date=to_date,
+                dry_run=dry_run,
+            )
         )
+
+    if pull_intent_store is not None:
+        _intent_store: PullIntentStore = pull_intent_store
+
+        def _resume_launch(intent: PullIntent) -> None:
+            """Re-fire the persisted pipeline pull — the resume's launch binding.
+
+            Always a REAL pull (``dry_run=False`` — a dry-run never persisted an
+            intent) with the intent's already-bumped restart counter threaded
+            through, so the re-persisted intent keeps the cap honest. A
+            route-shaped validation refusal (``HTTPException`` — a stale
+            selection that no longer resolves, a bad date, a credential 503) is
+            normalised to ``ValueError``/``RuntimeError`` for the 100 %-tested
+            resume core: a 4xx is DETERMINISTIC (the same intent can never
+            launch → the core clears it), while a 5xx (credentials not yet
+            fixed at boot) is transient (the core keeps the intent and re-tries
+            next boot, bounded by the cap).
+            """
+            try:
+                _launch_pipeline(
+                    symbols=intent.symbols,
+                    symbol=intent.symbol,
+                    from_date=intent.from_date,
+                    to_date=intent.to_date,
+                    dry_run=False,
+                    intent_restarts=intent.restarts,
+                )
+            except HTTPException as exc:
+                if exc.status_code < _SERVER_ERROR_FLOOR:
+                    raise ValueError(str(exc.detail)) from exc
+                raise RuntimeError(str(exc.detail)) from exc
+
+        def _resume_pipeline_from_intent() -> None:
+            """Boot-time seam: run the intent auto-resume decision + dispatch.
+
+            Exposed as ``app.state.brutex_resume_pipeline`` for the
+            ``cli.cmd_dashboard`` startup launcher (the SAME daemon-thread seam
+            family as the instrument autoload). Every load-bearing decision —
+            single-flight probe, restart-cap refusal + CRITICAL alert + red
+            banner, bump-before-launch, stale-intent clear — lives in the
+            100 %-tested :func:`~brutex.dashboard.pull_intent.run_auto_resume`;
+            this binding only supplies the real launcher. Never raises.
+            """
+            run_auto_resume(_intent_store, launch=_resume_launch)
+
+        app.state.brutex_resume_pipeline = _resume_pipeline_from_intent
 
     @app.post("/api/v1/universe/retry-failed")
     async def api_universe_retry_failed(  # pragma: no cover — thin route over the 100%-tested core
@@ -3584,10 +3757,23 @@ def build_app(
         is wired (a bare/test app). Read-only: this route never starts a kit
         run (startup + the pull gate are the only triggers), so polling it
         costs nothing (Golden Rule #10 — display, not action).
+
+        DEC-PULL-INTENT-RESUME-001: when a pull-intent store is wired AND its
+        resume banner holds a payload (an over-cap refusal / failed resume
+        launch), the payload rides along as a ``resume`` section —
+        ``{"level": "critical", "message": …}`` — which the SAME site-wide
+        ``bx-liveproof.js`` pill renders as the existing RED top banner (§11
+        COMMON, no second banner mechanism). Absent banner ⇒ no ``resume`` key
+        (the pre-existing payload stays byte-identical).
         """
-        if liveproof is None:
-            return JSONResponse({"present": False})
-        return JSONResponse({"present": True, **liveproof.status()})
+        payload: dict[str, Any] = (
+            {"present": False} if liveproof is None else {"present": True, **liveproof.status()}
+        )
+        if pull_intent_store is not None:
+            resume = pull_intent_store.banner.snapshot()
+            if resume is not None:
+                payload["resume"] = resume
+        return JSONResponse(payload)
 
     @app.get("/api/v1/coverage/counters")
     async def api_coverage_counters() -> JSONResponse:
@@ -3694,7 +3880,11 @@ def build_app(
         counts as *pulled*; each row's ``completeness`` chip asserts ONLY
         ledger-settledness over planner-planned ranges
         (DEC-SPOT-COVERAGE-COMPLETENESS-001 — partially executes the #397
-        follow-up; a trading-day gap audit is NOT claimed). When no lake root
+        follow-up). A session-density RANGE audit now feeds the
+        ``/completeness`` amber ``settled_partial_range`` chip
+        (DEC-SPOT-PARTIAL-RANGE-CHIP-001 — ``session_days`` rides this same
+        SPOT scan); the PER-WINDOW trading-day gap audit and the options-side
+        range audit remain follow-ups, NOT claimed. When no lake root
         is wired (a store opened without a filesystem path) the payload is an
         empty summary, never a 500.
         """
@@ -4093,6 +4283,30 @@ def build_app(
                 "Content-Disposition": 'attachment; filename="economics_integrity.csv"',
             },
         )
+
+    def _read_parse_skips() -> dict[str, Any] | None:
+        """Read the persisted parse-skip snapshot (``None`` if never loaded)."""
+        raw = _require_store().get_meta(PARSE_SKIPS_META_KEY)
+        if raw is None:
+            return None
+        parsed: dict[str, Any] = json.loads(raw)
+        return parsed
+
+    @app.get("/api/v1/universe/parse-skips")
+    async def api_universe_parse_skips() -> JSONResponse:
+        """GET /api/v1/universe/parse-skips — the green/red master parse-skip verdict.
+
+        DEC-PARSE-SKIP-REPORT-001. Returns the bounded parse-skip snapshot the master
+        load persisted to ``schema_meta``: the malformed in-scope rows the parser
+        skipped-and-counted (DEC-INSTRUMENT-SKIP-NO-GSYM-001), the in-scope
+        denominator, capped sample reasons, and the verdict — GREEN iff
+        ``skipped_count <= max(10, ceil(0.1% of in-scope rows))``. READ-ONLY;
+        ``{"present": false}`` until the master has been loaded once. No store → 503.
+        """
+        snapshot = await run_in_threadpool(_read_parse_skips)
+        if snapshot is None:
+            return JSONResponse({"present": False})
+        return JSONResponse({"present": True, **snapshot})
 
     def _build_lake_census_payload() -> dict[str, Any]:
         """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
@@ -4971,7 +5185,7 @@ def build_app(
         request runs the SAME ``cmd_sweep_all`` engine the CLI uses on the
         **single-flight** background job (poll the live tick at
         ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
-        the ``INDEX`` segment over ``2021-01-01 → today``. A second click while a
+        the ``INDEX`` segment over ``2020-01-01 → today``. A second click while a
         pull OR sweep is already running is a no-op (``{"started": false}``) — one
         lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
 
@@ -5600,7 +5814,7 @@ def build_app(
         DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
         security_id / interval /
         window dates / status / bars / attempts / last_error / streak / in-pull
-        fetches). READ-ONLY:
+        fetches / deduped net-new bars). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
@@ -5630,6 +5844,7 @@ def build_app(
             "last_attempt_at",
             "empty_streak",
             "in_pull_fetches",
+            "bars_net_new",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)

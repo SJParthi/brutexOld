@@ -1,13 +1,17 @@
 # Track 1 — Groww Adapter Specification
 
-> **⛔ SUPERSEDED (2026-05-31, ADR-0002 / DEC-GROWW-DHAN-REVERT-001).** The
-> Groww vendor pivot was REVERTED: the live Track 1 vendor is **Dhan Data
-> API v2**. This spec is retained for history only — the authoritative
-> adapter spec is **`docs/TRACK1_DHAN_ADAPTER.md`**. Do NOT build against
-> this document. (Banner added per DEC-WORKSPACE-VERIFY-001 entry #398 D6 /
-> DEC-DOC-DRIFT-RECONCILE-001.)
+> **📜 HISTORICAL DESIGN RECORD (banner refreshed 2026-07-03).** The live
+> Track 1 vendor is **Groww** again per **DEC-DHAN-GROWW-REMIGRATE-001 /
+> ADR-0009 (2026-06-12)**, which supersedes the ADR-0002 Dhan revert this
+> banner previously announced (`docs/TRACK1_DHAN_ADAPTER.md` was REMOVED in
+> the ADR-0009 §5 cutover). This document remains the ORIGINAL design spec,
+> kept for history — it predates the remigration, so its quotas/flows are
+> NOT the live contract. Do NOT build against this document: the live
+> adapter contract is **CLAUDE.md §6 + `brutex/adapters/groww/`** (e.g. the
+> "100K/day quota" below is superseded — operator-confirmed **NO daily
+> quota**, 500 req/min hard governor, DEC-GROWW-RATE-PERMIN-001).
 
-**Status:** SUPERSEDED by ADR-0002 (was: PROPOSED). Live vendor is Dhan — see `docs/TRACK1_DHAN_ADAPTER.md`.
+**Status:** HISTORICAL record (was: PROPOSED → superseded by ADR-0002 → vendor re-migrated per ADR-0009). Live vendor is **Groww**; live contract is CLAUDE.md §6.
 **Decision ID:** `DEC-VENDOR-PIVOT-001` (ADR-0001, SUPERSEDED by ADR-0002)
 **Date:** 2026-05-26 (superseded 2026-05-31)
 **Replaces (when merged):** the prior broker adapter as the spec-locked backtesting data source
@@ -49,11 +53,19 @@ Per operator decree 2026-05-26 + CLAUDE.md §11 AUTOMATED rule ("ZERO clicks per
 
 ### 2.1 Required env vars
 
+> **⚠️ RETIRED (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065):** the first three rows below
+> are the ORIGINAL spec's env-var/file design and are NO LONGER the credential contract —
+> the api-key, TOTP secret AND the daily access token now live ONLY in AWS Parameter
+> Store (SecureStrings `/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region
+> `ap-south-1`; fail-fast, no env/file fallback). Live reference:
+> `docs/runbooks/ENV_VARS.md` §5 + `docs/runbooks/aws-token-broker.md`. The table is
+> kept as the historical spec record.
+
 | Env var | Type | Default | Purpose |
 |---|---|---|---|
-| `BRUTEX_GROWW_API_KEY` | string | — | TOTP token (16-byte base32 secret) |
-| `BRUTEX_GROWW_TOTP_SECRET` | string | — | TOTP secret (32-char base32) |
-| `BRUTEX_GROWW_TOKEN_PATH` | path | `~/.brutex/groww/access_token.json` | Cached access_token file (mode 0600, mirrors prior-broker pattern) |
+| `BRUTEX_GROWW_API_KEY` (RETIRED) | string | — | TOTP token (16-byte base32 secret) |
+| `BRUTEX_GROWW_TOTP_SECRET` (RETIRED) | string | — | TOTP secret (32-char base32) |
+| `BRUTEX_GROWW_TOKEN_PATH` (RETIRED) | path | `~/.brutex/groww/access_token.json` | Cached access_token file (mode 0600, mirrors prior-broker pattern) |
 | `BRUTEX_GROWW_SMOKE` | flag | unset (off) | Set to `1` to enable smoke tests against real Groww API |
 
 ### 2.2 Auth lifecycle
@@ -360,7 +372,7 @@ The single most important design decision: **we do NOT write five separate error
 | **Error translator** | all 11 `Groww*Exception` → neutral `Vendor*` → `Outcome` (retry / re-auth / quarantine / settle) | `adapters/groww/client.py` + `orchestrator/retry.py::classify_exception` | ✅ built |
 | **Watermark** | crash-safe resume; settled work (COMPLETED / NO_DATA) never re-pulled | `data/watermark.py::FetchWatermark` | ✅ built |
 | **Audit** | every action = one hash-chained JSONL line (`vendor: groww`) | `orchestrator/audit.py` | ✅ built |
-| **Quota** | the 100K/day ceiling halts cleanly, resumes next IST day | `orchestrator/quota_tracker.py` | ✅ built (wiring pending) |
+| **Quota** | the 100K/day ceiling halts cleanly, resumes next IST day *(HISTORICAL — operator-confirmed 2026-06-13: backtesting has **NO daily quota**, DEC-GROWW-RATE-PERMIN-001; the live build sites wire `quota_tracker=None`)* | `orchestrator/quota_tracker.py` | ✅ built (wiring pending) |
 | **Sink / Store** | parsed records land idempotently (Bloom + content-hash dedup) | `data/sink.py` (bars) · `data/instrument_store.py` (instruments/expiries/contracts) | ✅ built |
 
 **The template is `GrowwCandleFetcher`** (`adapters/groww/client.py`): pace → call SDK → extract → translate errors → return. Each new surface is the same five steps against a different SDK method, feeding a different store. This is CLAUDE.md §11 **COMMON** (one spine, no copy-paste) + **DYNAMIC** (add a surface without re-architecting).
@@ -557,7 +569,7 @@ Every row's **spine outcome** is one of: `RETRY` (backoff ladder) · `QUARANTINE
 3. **`brutex fetch` CLI (indices)** — wire auth + master + the existing candle stack for the **3 brute-force indices** end-to-end → first real (or `--dry-run` fake) bars + logs you can verify. *(Indices need no C/D.)*
 4. **Surface C — `expiries.py`** (F&O lake).
 5. **Surface D — `contracts.py`** (F&O lake) → extend `brutex fetch` to the 200-stock F&O universe.
-6. **Quota-tracker wiring** into the loop (stop-at-100K, resume next IST day) + price-unit (#285) resolution.
+6. **Quota-tracker wiring** into the loop (stop-at-100K, resume next IST day) + price-unit (#285) resolution. *(HISTORICAL plan step — never wired: backtesting has NO daily quota, DEC-GROWW-RATE-PERMIN-001.)*
 
 Each step: its own PR, 100% standalone-gated tests covering its slice of the 34-matrix, MIGRATION entry, ruff+mypy+pyright green.
 

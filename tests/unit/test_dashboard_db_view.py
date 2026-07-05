@@ -1027,16 +1027,20 @@ class TestBuildWindowPayloadDuckDB:
         # A corrupt / wrong-shape ledger Parquet (missing the `status` core column) makes
         # the DuckDB GROUP BY raise — it must NOT 500, but fall through to the legacy path
         # which guards core columns and degrades to an empty ledger (route "never a 500").
+        # The probe's ValueError is DETERMINISTIC, so the torn-read retry sleeper must
+        # NEVER fire on this path (DEC-WINDOW-TORN-READ-RETRY-001: duckdb.Error ONLY).
         import pyarrow as pa
         import pyarrow.parquet as pq
         from brutex.data.window_ledger_store import ledger_dir, ledger_path
 
         ledger_dir(tmp_path).mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.table({"market": ["groww"], "security_id": ["X"]}), ledger_path(tmp_path))
-        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        sleeps: list[float] = []
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), retry_sleep=sleeps.append)
         assert payload["source"] == "ledger"
         assert payload["count"] == 0
         assert payload["windows"] == []
+        assert sleeps == []  # real ValueError shape error → immediate fallback, no retry
 
 
 # ── Live per-phase pull progress (DEC-UNIVERSE-PER-PHASE-PROGRESS-001) ────────
@@ -1373,6 +1377,31 @@ class TestWindowStatusLabel:
         assert window_status_label("SKIPPED", 2, None) == (
             "vendor confirmed no trades (2 clean attempt(s) — settled)"
         )
+
+    @pytest.mark.parametrize(
+        "reason", ["ALL_FILTERED", "INTERIOR_GAP", "SUSPECTED_PARTIAL", "DEGRADED"]
+    )
+    def test_skipped_with_demoted_reason_reads_completeness_gap(self, reason: str) -> None:
+        """DEC-DATA-HONESTY-ALLFILTERED-SEED-001 (refuter F-3 fold): a SKIPPED row
+        settled through the #1031 degraded channel must NOT read "vendor confirmed
+        no trades" — the vendor RETURNED bars every time (boundary-filtered /
+        hole-flagged / truncation-flagged); the label names the reason honestly.
+        ``DEGRADED`` is record()'s reason-less defensive fallback (latent — both
+        spines always pass a concrete tag): same channel, same honest wording
+        (wiring-review fold, PR #1158)."""
+        assert window_status_label("SKIPPED", 3, reason) == (
+            f"completeness gap accepted ({reason}, 3 flagged attempt(s)) — settled"
+        )
+
+    def test_skipped_demoted_reason_streak_floors_to_one(self) -> None:
+        assert window_status_label("SKIPPED", 0, "ALL_FILTERED") == (
+            "completeness gap accepted (ALL_FILTERED, 1 flagged attempt(s)) — settled"
+        )
+
+    def test_failed_with_demoted_reason_keeps_repull_label(self) -> None:
+        # A demoted FAILED is honestly re-pullable — the generic label already
+        # says so; only the terminal SKIPPED needed the reason-aware wording.
+        assert window_status_label("FAILED", 1, "ALL_FILTERED") == "FAILED (will re-pull)"
 
     def test_failed_reads_will_repull(self) -> None:
         assert window_status_label("FAILED", 0) == "FAILED (will re-pull)"

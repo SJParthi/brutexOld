@@ -603,6 +603,55 @@ def is_retryable(exc: GrowwError) -> bool:
     )
 
 
+def steps_timeout_ladder(exc: GrowwError) -> bool:
+    """True iff *exc* may step the AIMD TIMEOUT ladder down — a server-stress signal only.
+
+    DEC-AUTH-LADDER-EXCLUDE-001 — the ONE source of truth for "this swallowed
+    transient may feed ``on_timeout``" at BOTH ingest spines'
+    ``elif on_timeout is not None`` sites. The timeout ladder
+    (:meth:`brutex.adapters.rate_common.RateController.on_timeout`) is a
+    SERVER-STRESS signal: a sustained storm of timeouts / empty bodies / 5xx /
+    network blips steps the issue rate down toward the deep 1 r/s floor because
+    the CANDLE endpoint looks unhealthy. A RETRYABLE AUTH-FAMILY failure says
+    nothing about candle-endpoint health, so it must NOT ease the pull rate:
+
+    * :class:`GrowwTokenIssuanceThrottled` IS a genuine vendor throttle — but on
+      the token-MINT endpoint, not the candle endpoint; slowing candle fetches
+      does not relieve it (do not "fix" this back into a ladder step).
+    * :class:`GrowwTokenStillStaleError` is a token race (the read-only re-read
+      adopted the SAME dead token before the Lambda's fresh mint) — pure
+      credential state, zero data-plane evidence.
+
+    Motivation (LOG-OBSERVED, not repo-verified — Golden Rule #1): an audited
+    production pull log showed a sustained pre-06:05-IST token-stale interval
+    (~339 stale-token failures observed in that log) riding the timeout ladder
+    and pinning the whole pull at the 1 r/s deep floor — mis-training the AIMD
+    controller as if Groww's candle endpoint were struggling. Containment for
+    the auth family stays what it always was, byte-identical: the mid-pull
+    reauth self-heal (DEC-GROWW-TOKEN-REAUTH-001), the client ``max_attempts``
+    ladder, the FAILED ledger record (the window stays re-pullable), and the
+    K-consecutive-StillStale → :class:`GrowwCredentialDeadError` breaker
+    escalation (DEC-VENDOR-DOWN-BREAKER-001) — none of which this predicate
+    touches. A rate-limit is excluded because it keeps its OWN ``on_rate_limit``
+    path; at the two call sites the code is already past ``is_retryable`` + the
+    rate-limit branch, so only the auth conjunct changes behaviour there — the
+    full three-conjunct form makes the predicate correct ANYWHERE, not just
+    after those branches (CLAUDE.md §11 COMMON).
+
+    Parameters
+    ----------
+    exc
+        The classified :class:`GrowwError` a spine's transient branch swallowed.
+
+    Returns
+    -------
+    bool
+        ``True`` for a retryable NON-rate-limit, NON-auth-family transport
+        failure (timeout / empty body / 5xx / network); ``False`` otherwise.
+    """
+    return is_retryable(exc) and not is_rate_limit(exc) and not is_auth_failure(exc)
+
+
 __all__ = [
     "GrowwAuthError",
     "GrowwAuthorisationError",
@@ -624,4 +673,5 @@ __all__ = [
     "is_rate_limit",
     "is_retryable",
     "is_terminal_auth_failure",
+    "steps_timeout_ladder",
 ]
