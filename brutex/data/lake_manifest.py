@@ -31,8 +31,8 @@ Design — write-time maintenance, read-time O(manifest-rows)
   COMMON :func:`~brutex.data.partition_lock.partition_write_lock` keyed on the
   JSONL path (CLAUDE.md §11 COMMON — no second lock implementation).
 
-Staleness honesty (Golden Rule #1 — never serve a stale illusion)
------------------------------------------------------------------
+Staleness honesty (Golden Rule #1 — bounded, stated windows, never silent)
+--------------------------------------------------------------------------
 The freshness token mirrors the proven ``lake_revision`` approach
 (DEC-HARDENING-LEFTOVERS-001 #1149): ONE ``os.stat`` of the durable
 window-ledger Parquet (every production pull — dashboard AND CLI — checkpoints
@@ -40,12 +40,31 @@ it per window, DEC-CLI-LEDGER-CHECKPOINT-001 #884). A reader serves the
 manifest ONLY when the CURRENT ledger token equals the token stamped at the
 last manifest write; a mismatch (a vendor pull landed since) falls back to the
 legacy walk and REBUILDS the manifest from the walk result, stamped with the
-token captured BEFORE the walk started (so a write landing DURING the walk
-stales the rebuilt manifest immediately — never a silently-partial rebuild).
-Every writer-side :func:`record_dataset` upsert re-stamps the CURRENT token,
-so the post-pull prebuild (which creates the ~10⁵ derived-TF datasets WITHOUT
-touching the ledger) converges the manifest to a served-hot state with no walk
-at all.
+token captured BEFORE the walk started (so a LEDGER-MOVING write landing
+DURING the walk stales the rebuilt manifest immediately) and UNIONED
+keep-first with any parseable on-disk rows (so a concurrent writer's
+:func:`record_dataset` append survives the rebuild). Every writer-side
+:func:`record_dataset` upsert re-stamps the CURRENT token, so the post-pull
+prebuild (which creates the ~10⁵ derived-TF datasets WITHOUT touching the
+ledger) converges the manifest to a served-hot state with no walk at all.
+
+Two BOUNDED under/over-listing windows remain (honest, not claimed away):
+
+* **Cold walk ∩ active prebuild** — while NO manifest base exists (the very
+  walk that is rebuilding it), :func:`record_dataset` no-ops, so a NON-ledger
+  writer (the prebuild) creating a dataset AFTER the walk passed its directory
+  is in NEITHER the walk result NOR the on-disk union; the rebuild is stamped
+  with a still-current token and UNDER-LISTS that dataset until the next
+  ledger move / heal invalidation. Not a regression — the pre-manifest
+  generation-keyed memo had the exact same window (a walk racing a prebuild
+  missed the same dirs) — but the bound is stated, not hidden.
+* **Failed invalidation ghost row** — a heal that removes a dataset's LAST
+  file invalidates best-effort; if BOTH unlinks fail with a real
+  :class:`OSError` (e.g. a permissions fault on the whole ``.manifest`` dir —
+  logged ``lake_manifest.unlink_failed``; a meta-ONLY failure still fails
+  closed, the meta-first order's point), the surviving manifest can serve one
+  GHOST row (an empty, queryable-but-bar-less dataset — an empty page, never
+  wrong data) until the next ledger move.
 
 Honest envelope (Golden Rule #10 — stated, not hidden)
 ------------------------------------------------------
