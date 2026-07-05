@@ -94,6 +94,8 @@ import structlog
 
 from brutex.adapters.empty_circuit_breaker import OFF_ENV_VALUES, resolve_int_env
 from brutex.adapters.groww.constants import (
+    GROWW_AUTHZ_STORM_MIN_SYMBOLS,
+    GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV,
     GROWW_CREDENTIAL_DEAD_MIN_MINUTES,
     GROWW_CREDENTIAL_DEAD_MINUTES_ENV,
     GROWW_CREDENTIAL_DEAD_STREAK,
@@ -104,12 +106,17 @@ from brutex.adapters.groww.constants import (
     GROWW_STORM_MIN_FAILURES_ENV,
     GROWW_STORM_MIN_SYMBOLS_ENV,
 )
-from brutex.adapters.groww.errors import GrowwCredentialDeadError, GrowwTokenStillStaleError
+from brutex.adapters.groww.errors import (
+    GrowwAuthorisationStormError,
+    GrowwCredentialDeadError,
+    GrowwTokenStillStaleError,
+)
 from brutex.models import BruteXError
 
 __all__ = [
     "ErrorStormBreaker",
     "VendorDownError",
+    "observe_authorisation_failure",
     "observe_window_failure",
     "observe_window_success",
     "resolve_error_storm_breaker",
@@ -120,6 +127,7 @@ _LOG = structlog.get_logger("brutex.adapters.error_storm_breaker")
 #: Trip-rule labels (the breaker latches exactly one).
 _RULE_VENDOR_DOWN: Final[str] = "vendor_down"
 _RULE_CREDENTIAL_DEAD: Final[str] = "credential_dead"
+_RULE_AUTHZ_STORM: Final[str] = "authorisation_storm"
 
 #: Cap on the symbols named in the halt message (the counts stay exact).
 _MAX_NAMED_SYMBOLS: Final[int] = 10
@@ -203,6 +211,25 @@ def _emit_credential_dead_alert(exc: GrowwCredentialDeadError) -> None:
         _LOG.exception("error_storm.credential_dead_alert_failed")
 
 
+def _emit_authorisation_storm_alert(exc: GrowwAuthorisationStormError) -> None:
+    """Fire the best-effort CRITICAL AUTHORISATION-STORM Telegram alert (never raises).
+
+    The account-suspension twin of :func:`_emit_vendor_down_alert`
+    (DEC-GROWW-AUTHZ-QUARANTINE-001) — same blanket-guard, best-effort,
+    silent-when-disabled contract. Textually DISTINCT from BOTH the vendor-down
+    alert (the vendor is UP — it is answering with authorisation rejections) and
+    the credential-dead alert (the token IS authenticated — the ACCOUNT's
+    entitlements are the problem), so the operator action is unambiguous: check
+    the Groww account's status / entitlements, not the credential or the network.
+    """
+    try:
+        from brutex.notifications.sweep_alerts import SweepAlerter
+
+        SweepAlerter().authorisation_storm(distinct_symbols=exc.distinct_symbols)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the halt
+        _LOG.exception("error_storm.authorisation_storm_alert_failed")
+
+
 @dataclass(slots=True)
 class ErrorStormBreaker:
     """Per-pull, thread-safe error-storm counter with the two escalation rules.
@@ -245,10 +272,20 @@ class ErrorStormBreaker:
     min_failed_windows: int = GROWW_STORM_MIN_FAILED_WINDOWS
     credential_dead_streak: int = GROWW_CREDENTIAL_DEAD_STREAK
     credential_dead_min_seconds: float = GROWW_CREDENTIAL_DEAD_MIN_MINUTES * 60.0
+    #: Distinct-symbol floor for the AUTHORISATION-storm rule
+    #: (DEC-GROWW-AUTHZ-QUARANTINE-001): terminal authorisation rejections on this
+    #: many DISTINCT symbols with zero transport successes since the storm began
+    #: escalate to the fleet-wide :class:`~brutex.adapters.groww.errors.\
+    #: GrowwAuthorisationStormError` halt. ``<= 0`` disables the arm (every
+    #: authorisation error stays a per-symbol quarantine).
+    authz_min_distinct_symbols: int = GROWW_AUTHZ_STORM_MIN_SYMBOLS
     enabled: bool = True
     now: Callable[[], float] = time.monotonic
     alert_vendor_down: Callable[[VendorDownError], None] = _emit_vendor_down_alert
     alert_credential_dead: Callable[[GrowwCredentialDeadError], None] = _emit_credential_dead_alert
+    alert_authorisation_storm: Callable[[GrowwAuthorisationStormError], None] = (
+        _emit_authorisation_storm_alert
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     #: The latched trip rule (``""`` = not tripped) — once set it never clears.
     _trip_rule: str = field(default="", repr=False)
@@ -262,6 +299,13 @@ class ErrorStormBreaker:
     #: sticky windows cannot accumulate a fake storm across failure-only retry
     #: streams. Grows monotonically, bounded by the pull's window worklist.
     _seen_window_keys: set[Hashable] = field(default_factory=set, repr=False)
+    #: Distinct symbols with a TERMINAL authorisation rejection since the last
+    #: transport success (DEC-GROWW-AUTHZ-QUARANTINE-001) — the authorisation-storm
+    #: arm's evidence set. A set, so re-observing the SAME restricted symbol across
+    #: windows / intervals / retry rounds never inflates the distinct count; ANY
+    #: transport success clears it (an accepted fetch on another symbol disproves
+    #: the account-wide-suspension shape this arm exists to catch).
+    _authz_symbols: set[str] = field(default_factory=set, repr=False)
     #: Consecutive ladder-exhausted StillStale outcomes (zero successes between).
     _stale_streak: int = field(default=0, repr=False)
     #: Injected-clock instant of the streak's FIRST StillStale (``None`` = no streak).
@@ -288,6 +332,12 @@ class ErrorStormBreaker:
         with self._lock:
             return (self._failed_windows, len(self._failed_symbols), self._stale_streak)
 
+    @property
+    def authz_distinct_symbols(self) -> int:
+        """Distinct authorisation-rejected symbols in the current storm — O(1), atomic."""
+        with self._lock:
+            return len(self._authz_symbols)
+
     def observe_success(self, symbol: str) -> None:
         """Record a SUCCESSFUL transport outcome for *symbol* — resets BOTH streaks, O(1).
 
@@ -312,6 +362,12 @@ class ErrorStormBreaker:
             self._failed_symbols.clear()
             self._stale_streak = 0
             self._stale_started = None
+            # A transport success ALSO resets the authorisation-storm evidence set
+            # (DEC-GROWW-AUTHZ-QUARANTINE-001): an accepted fetch proves the account
+            # is NOT fleet-suspended, so any accumulated per-symbol authorisation
+            # rejections are individual entitlement restrictions — quarantines, never
+            # a storm. A mixed success/authz pull can therefore NEVER trip this arm.
+            self._authz_symbols.clear()
 
     def observe_transport_failure(
         self, symbol: str, *, error_type: str, window_key: Hashable, still_stale: bool = False
@@ -342,6 +398,7 @@ class ErrorStormBreaker:
             return
         vendor_halt: VendorDownError | None = None
         cred_halt: GrowwCredentialDeadError | None = None
+        authz_halt: GrowwAuthorisationStormError | None = None
         fresh_trip = False
         with self._lock:
             if not self._trip_rule:
@@ -378,6 +435,11 @@ class ErrorStormBreaker:
                 )
             elif self._trip_rule == _RULE_CREDENTIAL_DEAD:
                 cred_halt = self._credential_dead_error_locked()
+            elif self._trip_rule == _RULE_AUTHZ_STORM:
+                # An ALREADY-latched authorisation storm (tripped via
+                # observe_authz_failure) keeps raising on every further transport
+                # observation too — every in-flight worker must stop promptly.
+                authz_halt = self._authz_storm_error_locked()
         if vendor_halt is not None:
             if fresh_trip:
                 self._log_trip(_RULE_VENDOR_DOWN, error_type=error_type, detail=str(vendor_halt))
@@ -388,6 +450,76 @@ class ErrorStormBreaker:
                 self._log_trip(_RULE_CREDENTIAL_DEAD, error_type=error_type, detail=str(cred_halt))
                 self._fire_alert(_RULE_CREDENTIAL_DEAD, self.alert_credential_dead, cred_halt)
             raise cred_halt
+        if authz_halt is not None:
+            raise authz_halt
+
+    def observe_authz_failure(self, symbol: str, *, error_type: str) -> None:
+        """Record a TERMINAL vendor AUTHORISATION rejection for *symbol*; RAISE on/after a trip.
+
+        DEC-GROWW-AUTHZ-QUARANTINE-001 — the authorisation-storm arm. Each observed
+        symbol joins the distinct-symbol evidence set (a set — re-observing the SAME
+        restricted symbol across windows / intervals / retry rounds never inflates
+        the count, so the arm counts SYMBOLS, not windows); when the set reaches
+        :attr:`authz_min_distinct_symbols` with ZERO transport successes since the
+        storm began (any success clears the set in :meth:`observe_success`), the
+        fleet-wide :class:`~brutex.adapters.groww.errors.GrowwAuthorisationStormError`
+        is built under the lock, the CRITICAL alert hook fires ONCE at the trip
+        transition (outside the lock, exception-guarded), and the error is raised
+        OUTSIDE the lock — restoring the old pull-wide HALT semantics for exactly
+        the account-suspension shape. DELIBERATELY ORTHOGONAL to the other two arms:
+        an authorisation rejection is neither vendor-transport evidence nor a
+        StillStale token stall, so it never counts toward — nor resets — the
+        vendor-down storm or the credential-dead streak (those arms are
+        byte-unchanged). An already-tripped breaker (ANY rule) keeps raising its
+        latched rule's error on every further observation, so in-flight workers
+        stop promptly. O(1) lock-held set work.
+        """
+        if not self.enabled:
+            return
+        vendor_halt: VendorDownError | None = None
+        cred_halt: GrowwCredentialDeadError | None = None
+        authz_halt: GrowwAuthorisationStormError | None = None
+        fresh_trip = False
+        with self._lock:
+            if not self._trip_rule:
+                self._authz_symbols.add(symbol)
+                if self._authz_storm_locked():
+                    self._trip_rule = _RULE_AUTHZ_STORM
+                    fresh_trip = True
+            if self._trip_rule == _RULE_AUTHZ_STORM:
+                authz_halt = self._authz_storm_error_locked()
+            elif self._trip_rule == _RULE_VENDOR_DOWN:
+                vendor_halt = VendorDownError(
+                    failed_windows=self._failed_windows,
+                    distinct_symbols=len(self._failed_symbols),
+                    symbols=tuple(sorted(self._failed_symbols)),
+                )
+            elif self._trip_rule == _RULE_CREDENTIAL_DEAD:
+                cred_halt = self._credential_dead_error_locked()
+        if authz_halt is not None:
+            if fresh_trip:
+                self._log_trip(_RULE_AUTHZ_STORM, error_type=error_type, detail=str(authz_halt))
+                self._fire_alert(_RULE_AUTHZ_STORM, self.alert_authorisation_storm, authz_halt)
+            raise authz_halt
+        if vendor_halt is not None:
+            raise vendor_halt
+        if cred_halt is not None:
+            raise cred_halt
+
+    def _authz_storm_locked(self) -> bool:
+        """Evaluate the authorisation-storm rule under the lock — O(1).
+
+        ``authz_min_distinct_symbols <= 0`` disables the arm entirely (every
+        authorisation rejection stays a per-symbol quarantine).
+        """
+        return 0 < self.authz_min_distinct_symbols <= len(self._authz_symbols)
+
+    def _authz_storm_error_locked(self) -> GrowwAuthorisationStormError:
+        """Build the escalated authorisation-storm error from the locked set — O(symbols)."""
+        return GrowwAuthorisationStormError(
+            distinct_symbols=len(self._authz_symbols),
+            symbols=tuple(sorted(self._authz_symbols)),
+        )
 
     def _vendor_down_locked(self) -> bool:
         """Evaluate the vendor-down rule under the lock — O(1).
@@ -495,10 +627,39 @@ GrowwCredentialDeadError`) PROPAGATES — it is the global stop, the whole point
             window_key=window_key,
             still_stale=isinstance(exc, GrowwTokenStillStaleError),
         )
-    except (VendorDownError, GrowwCredentialDeadError):
+    except (VendorDownError, GrowwCredentialDeadError, GrowwAuthorisationStormError):
         raise  # the TRIP is the mechanism — it must reach _GLOBAL_STOP_ERRORS
     except Exception:  # pylint: disable=broad-exception-caught — a breaker bug never crashes a pull
         _LOG.exception("error_storm.observe_failure_failed", symbol=symbol)
+
+
+def observe_authorisation_failure(
+    breaker: ErrorStormBreaker | None, *, symbol: str, window_key: Hashable, exc: BaseException
+) -> None:
+    """The COMMON authorisation-observation seam BOTH spines call — None-safe, trip-propagating.
+
+    DEC-GROWW-AUTHZ-QUARANTINE-001. Called on the TERMINAL authorisation path of
+    each spine (the branch that previously never observed anything — only the
+    retryable branch fed the breaker) just before the per-symbol quarantine raise:
+    feeds *symbol* to the breaker's authorisation-storm arm. *symbol* is the
+    distinct-symbol unit (the spot spine passes the instrument's ``symbol_name``;
+    the F&O spine passes the contract's **underlying** symbol, mirroring
+    :func:`observe_window_failure`); *window_key* is carried for log evidence only
+    (the arm counts distinct SYMBOLS — a set already dedupes re-observations). A
+    TRIP (:class:`~brutex.adapters.groww.errors.GrowwAuthorisationStormError`, or
+    another rule's latched halt) PROPAGATES — it is the global stop, the whole
+    point — while any other internal breaker bug is swallowed + logged so a defect
+    here can never crash a pull (the quarantine raise still follows at the call
+    site). ``None`` breaker (dry-run / synthetic) is a no-op.
+    """
+    if breaker is None:
+        return
+    try:
+        breaker.observe_authz_failure(symbol, error_type=type(exc).__name__)
+    except (VendorDownError, GrowwCredentialDeadError, GrowwAuthorisationStormError):
+        raise  # the TRIP is the mechanism — it must reach _GLOBAL_STOP_ERRORS
+    except Exception:  # pylint: disable=broad-exception-caught — a breaker bug never crashes a pull
+        _LOG.exception("error_storm.observe_authz_failed", symbol=symbol, window_key=window_key)
 
 
 def _resolve_minutes(env_name: str, default: float) -> float:
@@ -543,6 +704,9 @@ def resolve_error_storm_breaker(*, now: Callable[[], float] | None = None) -> Er
             GROWW_CREDENTIAL_DEAD_STREAK_ENV, GROWW_CREDENTIAL_DEAD_STREAK
         ),
         credential_dead_min_seconds=minutes * 60.0,
+        authz_min_distinct_symbols=resolve_int_env(
+            GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV, GROWW_AUTHZ_STORM_MIN_SYMBOLS
+        ),
         enabled=enabled,
         now=now if now is not None else time.monotonic,
     )

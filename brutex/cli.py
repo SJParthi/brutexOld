@@ -3526,6 +3526,7 @@ def cmd_fetch(
             from brutex.adapters.groww.constants import (
                 GROWW_RATE_LIMIT_PER_MIN,
                 GROWW_RATE_LIMIT_RPS_CEILING,
+                resolve_smooth_pacing_mode,
             )
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
@@ -3535,10 +3536,15 @@ def cmd_fetch(
             # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 8×60 = 480 < 500,
             # so the per-second ceiling is the binding gate without fighting the
             # governor; the AIMD ladder still steps DOWN on 429s (raised 5 → 8 on
-            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002).
+            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002). The smooth-pacing mode is
+            # threaded HERE too (DEC-SMOOTH-PACING-AUTOLATCH-001 — the CLI previously
+            # built the controller WITHOUT it, so BRUTEX_GROWW_SMOOTH_PACING was a
+            # dead flag on the `brutex fetch` path): unset ⇒ ADAPTIVE (auto-latch on
+            # burst-evidenced 429s), truthy ⇒ ON, explicit falsy ⇒ OFF.
             _rate = RateController(
                 ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
                 ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+                smooth_pacing_mode=resolve_smooth_pacing_mode(),
             )
             # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
             # controller's own on_rate_limit so a sustained 429 storm also fires a
