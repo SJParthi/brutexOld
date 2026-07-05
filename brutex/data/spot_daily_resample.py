@@ -1116,7 +1116,12 @@ def make_lake_write_1day(  # pragma: no cover — raw lake write, integration-te
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    # DERIVED-1day writer → per-partition telemetry at DEBUG
+    # (DEC-PREBUILD-LOG-FLOOD-001, same rationale as make_lake_write_tf: the
+    # prebuild's derived fan-out must cost O(symbols) INFO lines, never
+    # O(partitions) — the per-symbol aggregate rides
+    # `lake.derived.write_summary`); the live-pull vendor writers keep INFO.
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root, partition_log_level="debug"))
 
     def _write(bars: Sequence[CandleBar]) -> int:
         result = sink.append(
