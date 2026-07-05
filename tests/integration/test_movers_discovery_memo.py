@@ -220,3 +220,76 @@ class TestRouteDiscoveryMemo:
         summary_cache.mark_dirty()
         assert client.get("/api/v1/movers", params={**params, "asset": "spot"}).status_code == 200
         assert calls["n"] == 2
+
+
+# ── warm memo byte-identity (DEC-MOVERS-WARM-UNBLOCK-001 fix 1) ────────────
+
+
+class TestWarmMemoByteIdentity:
+    """The warmed (memoised-``datasets``) computation equals the unmemoized one.
+
+    The post-pull warmer now threads ONE pre-discovered ``list_candle_datasets``
+    walk into every ``compute_*_candidates`` job via the EXISTING ``datasets=``
+    seam (DEC-MOVERS-DISCOVERY-MEMO-001). Same function, same inputs — the
+    candidate output must be EQUAL to the ``datasets=None`` self-scan, so the
+    memo can never change what the warm caches (Golden Rule #7 idempotence).
+    """
+
+    def test_spot_memoized_equals_self_scan(self, tmp_path: Path) -> None:
+        from brutex.dashboard.db_view import list_candle_datasets
+
+        _write(
+            tmp_path, segment="INDEX", symbol="NIFTY", interval="1day", bars=[_day_bar(close="100")]
+        )
+        _write(
+            tmp_path, segment="CASH", symbol="RELIANCE", interval="1day", bars=[_day_bar(close="7")]
+        )
+        walked = list_candle_datasets(tmp_path)
+        memoized = compute_spot_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, datasets=walked
+        )
+        self_scan = compute_spot_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, datasets=None
+        )
+        assert memoized == self_scan
+        assert memoized.snapshots != ()  # a REAL candidate set, not vacuous equality
+
+    def test_futures_memoized_equals_self_scan(self, tmp_path: Path) -> None:
+        from brutex.dashboard.db_view import list_candle_datasets
+
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-FUT",
+            interval="1minute",
+            bars=[_min_bar(close="100", oi=5)],
+        )
+        walked = list_candle_datasets(tmp_path)
+        memoized = compute_futures_candidates(
+            lake_root=tmp_path, interval="1minute", date="2024-06-13", time="09:15", datasets=walked
+        )
+        self_scan = compute_futures_candidates(
+            lake_root=tmp_path, interval="1minute", date="2024-06-13", time="09:15", datasets=None
+        )
+        assert memoized == self_scan
+        assert memoized.movers != ()
+
+    def test_options_memoized_equals_self_scan(self, tmp_path: Path) -> None:
+        from brutex.dashboard.db_view import list_candle_datasets
+
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-NIFTY-27Jun24-22000-CE",
+            interval="1minute",
+            bars=[_min_bar(close="100", oi=5)],
+        )
+        walked = list_candle_datasets(tmp_path)
+        memoized = compute_options_candidates(
+            lake_root=tmp_path, interval="1minute", date="2024-06-13", time="09:15", datasets=walked
+        )
+        self_scan = compute_options_candidates(
+            lake_root=tmp_path, interval="1minute", date="2024-06-13", time="09:15", datasets=None
+        )
+        assert memoized == self_scan
+        assert memoized.movers != ()

@@ -1267,3 +1267,52 @@ class TestLakePartitionWriteTelemetry:
             sink.append(bars=[jan, feb], **_TELEMETRY_COORDS)
 
         assert len(self._write_events(logs)) == 2
+
+
+class TestPartitionLogLevel:
+    """DEC-PREBUILD-LOG-FLOOD-001: the per-partition write telemetry's level is
+    a per-writer construction choice — INFO on the live-pull vendor writers
+    (rare + valuable), DEBUG on the prebuild's derived-TF writers (whose ~10⁵
+    per-partition lines at INFO rotated the fetch-phase audit trail away in
+    ~26 minutes). Event NAME + FIELDS are identical at either level."""
+
+    def test_default_writer_emits_partition_write_at_info(self, tmp_path: Path) -> None:
+        writer = ParquetWriter(lake_root=tmp_path)
+        with capture_logs() as logs:
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=[_bar(0, open_="1", high="2", low="1", close="2")],
+            )
+        events = [e for e in logs if e["event"] == "lake.partition.write"]
+        assert len(events) == 1
+        assert events[0]["log_level"] == "info"  # the LIVE-PULL default
+        assert {"append_ms", "lock_wait_ms", "rows", "partition_rows", "partition"} <= set(
+            events[0]
+        )
+
+    def test_debug_writer_emits_same_event_and_fields_at_debug(self, tmp_path: Path) -> None:
+        writer = ParquetWriter(lake_root=tmp_path, partition_log_level="debug")
+        with capture_logs() as logs:
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="5minute",
+                bars=[_bar(0, open_="1", high="2", low="1", close="2")],
+            )
+        events = [e for e in logs if e["event"] == "lake.partition.write"]
+        assert len(events) == 1
+        assert events[0]["log_level"] == "debug"  # the derived-TF prebuild level
+        # Same fields — the telemetry is demoted, never dropped (Golden Rule #1).
+        assert {"append_ms", "lock_wait_ms", "rows", "partition_rows", "partition"} <= set(
+            events[0]
+        )
+
+    def test_unknown_partition_log_level_raises_writer_error(self, tmp_path: Path) -> None:
+        from brutex.data.errors import WriterError
+
+        with pytest.raises(WriterError, match="partition_log_level"):
+            ParquetWriter(lake_root=tmp_path, partition_log_level="warn")

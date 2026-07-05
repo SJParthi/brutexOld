@@ -126,6 +126,18 @@ if TYPE_CHECKING:  # pragma: no cover
 #: log lines), so the ``write_consumer`` (Lever 1 of DEC-FETCH-WRITE-OVERLAP)
 #: could not be sized or gated honestly. This event makes that cost a measurable
 #: fact. Cheap, always-on, O(1) (one ``info`` per PARTITION write, not per bar).
+#: LEVEL is per-writer (DEC-PREBUILD-LOG-FLOOD-001): the LIVE-PULL writers keep
+#: the INFO default (rare + valuable — one vendor window per write), while the
+#: pipeline PREBUILD's derived-TF writers construct with
+#: ``partition_log_level="debug"`` — the prebuild materialises ~66k contracts ×
+#: 20 TFs of tiny derived partitions, and at INFO those 205,609 lines (~132/s)
+#: rolled the 10 MiB × 5 rotation over in ~26 min, WIPING the 15.7 h fetch
+#: phase's rate/429/window-settle audit trail (measured, pull 2026-07-04/05
+#: pull_id 22fc7739f719 — an undocumented DEC-LAKE-WRITE-INSTRUMENT-001 ×
+#: DEC-PIPELINE-AUTOPREBUILD-001 interaction). The telemetry is NOT dropped:
+#: the fields survive in aggregate via the per-symbol
+#: ``lake.derived.write_summary`` INFO (timeframe_materialize) and per-partition
+#: at DEBUG for a deliberately-verbose session.
 _LOG = structlog.get_logger("brutex.data.parquet_writer")
 
 
@@ -446,10 +458,23 @@ class ParquetWriter:
     lake_root
         Top-level data-lake directory. Must be a :class:`pathlib.Path`.
         The directory is created on first write.
+    partition_log_level
+        The level of the per-partition ``lake.partition.write`` telemetry event
+        (DEC-PREBUILD-LOG-FLOOD-001): ``"info"`` (default — the LIVE-PULL
+        vendor-write path, rare + valuable) or ``"debug"`` (the pipeline
+        prebuild's DERIVED-timeframe writers, whose ~10⁵ per-partition lines at
+        INFO rotated the whole fetch-phase audit trail away in ~26 minutes).
+        Event NAME + FIELDS are identical at either level — only the level
+        moves; any other value raises :class:`WriterError` (fail-closed).
     """
 
-    def __init__(self, *, lake_root: Path) -> None:
+    def __init__(self, *, lake_root: Path, partition_log_level: str = "info") -> None:
+        if partition_log_level not in ("info", "debug"):
+            raise WriterError(
+                f"unknown partition_log_level {partition_log_level!r}; expected 'info' or 'debug'"
+            )
         self._lake_root = lake_root
+        self._partition_log = _LOG.debug if partition_log_level == "debug" else _LOG.info
 
     @property
     def lake_root(self) -> Path:
@@ -515,7 +540,11 @@ class ParquetWriter:
         — the throughput-binding step the pull-log forensic could only INFER —
         a measurable fact, so the overlap ``write_consumer`` (Lever 1 of
         DEC-FETCH-WRITE-OVERLAP) can be sized + gated honestly. Cheap, always-on,
-        O(1) (one ``info`` per partition write, NOT per bar).
+        O(1) (one event per partition write, NOT per bar) — emitted at the
+        writer's ``partition_log_level`` (INFO on the live-pull writers, DEBUG
+        on the prebuild's derived-TF writers — DEC-PREBUILD-LOG-FLOOD-001, so
+        the derived fan-out can never rotate the fetch-phase audit trail away;
+        same event name + fields at either level).
         """
         if merge_mode not in ("keep-first", "latest-wins"):
             raise WriterError(
@@ -659,9 +688,11 @@ class ParquetWriter:
 
         # Emit the per-partition write telemetry AFTER the locks are released (the
         # log call is not itself part of the serialised critical section). One
-        # `info` per successful partition write — the throughput-binding cost the
-        # pull-log forensic could only INFER, now a measurable fact.
-        _LOG.info(
+        # event per successful partition write — the throughput-binding cost the
+        # pull-log forensic could only INFER, now a measurable fact. INFO on the
+        # live-pull writers, DEBUG on the prebuild's derived-TF writers
+        # (DEC-PREBUILD-LOG-FLOOD-001 — the per-writer `partition_log_level`).
+        self._partition_log(
             "lake.partition.write",
             append_ms=round(append_ms, 3),
             lock_wait_ms=round(lock_wait_ms, 3),
