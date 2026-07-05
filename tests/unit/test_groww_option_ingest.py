@@ -20,6 +20,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -4648,7 +4649,7 @@ def test_audit_chain_records_run_and_pairs(tmp_path: Path) -> None:
     sdk = _FakeSDK(payload=_candles(), raise_for={bad.symbol: GrowwAPIBadRequestException("nope")})
     path = tmp_path / "audit" / "fno-ingest.jsonl"
     path.parent.mkdir(parents=True)
-    with pull_id_scope("pull-fno") , AuditWriter.open(path) as audit:
+    with pull_id_scope("pull-fno"), AuditWriter.open(path) as audit:
         report = run_groww_option_ingest(
             _client(sdk),
             _Sink(),
@@ -4664,7 +4665,7 @@ def test_audit_chain_records_run_and_pairs(tmp_path: Path) -> None:
     assert verify_chain(path) == 5  # RUN_START + 2×PAIR_DONE + PAIR_FAILED + RUN_COMPLETE
     entries = read_entries(path)
     assert entries[0].prev_hash == GENESIS_PREV_HASH
-    for prev, cur in zip(entries, entries[1:], strict=False):
+    for prev, cur in pairwise(entries):
         assert cur.prev_hash == prev.entry_hash
         assert cur.seq == prev.seq + 1
     actions = [e.action for e in entries]

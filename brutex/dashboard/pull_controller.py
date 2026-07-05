@@ -128,8 +128,8 @@ from brutex.data.window_ledger_store import (
 from brutex.models import Instrument
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.correlation import pull_id_scope
-from brutex.orchestrator.audit import open_ingest_audit
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
+from brutex.orchestrator.audit import open_ingest_audit
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel

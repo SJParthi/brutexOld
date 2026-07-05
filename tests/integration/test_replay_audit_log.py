@@ -108,9 +108,7 @@ def _replay_from_audit(audit_path: Path, lake_root: Path) -> None:
     start_entry = next(e for e in entries if e.action == "INGEST_RUN_START")
     start = date.fromisoformat(str(start_entry.payload["start"]))
     end = date.fromisoformat(str(start_entry.payload["end"]))
-    pairs = [
-        e.subject.rsplit(":", 1) for e in entries if e.action == "INGEST_PAIR_DONE"
-    ]
+    pairs = [e.subject.rsplit(":", 1) for e in entries if e.action == "INGEST_PAIR_DONE"]
     symbols = sorted({sym for sym, _ in pairs})
     intervals = sorted({interval for _, interval in pairs})
     run_groww_spot_ingest(
@@ -126,17 +124,14 @@ def _replay_from_audit(audit_path: Path, lake_root: Path) -> None:
 def _bars_tree(lake_root: Path) -> dict[str, bytes]:
     """Map each ``bars/**/*.parquet`` file's lake-relative path → its bytes."""
     root = lake_root / "bars"
-    return {
-        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*.parquet"))
-    }
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*.parquet"))}
 
 
 def _lake_pair_subjects(lake_root: Path) -> frozenset[str]:
     """Project the lake's written partitions to ``SYMBOL:interval`` subjects."""
     root = lake_root / "bars"
     return frozenset(
-        f"{p.parent.parent.parent.name}:{p.parent.parent.name}"
-        for p in root.rglob("*.parquet")
+        f"{p.parent.parent.parent.name}:{p.parent.parent.name}" for p in root.rglob("*.parquet")
     )
 
 

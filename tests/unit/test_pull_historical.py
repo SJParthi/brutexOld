@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 
@@ -3378,7 +3379,7 @@ def _walk_fno_chain(lake_root: Path) -> list[str]:
     entries = read_entries(path)
     assert verify_chain(path) == len(entries)
     assert entries[0].prev_hash == GENESIS_PREV_HASH
-    for prev, cur in zip(entries, entries[1:], strict=False):
+    for prev, cur in pairwise(entries):
         assert cur.prev_hash == prev.entry_hash
         assert cur.seq == prev.seq + 1
     return [e.action for e in entries]
