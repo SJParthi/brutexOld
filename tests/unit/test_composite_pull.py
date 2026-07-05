@@ -692,3 +692,53 @@ def test_composite_note_names_out_of_scope_expiries(tmp_path: Path) -> None:
     assert report.historical.contracts_out_of_scope == 3
     assert ", 1 expiries out of scope skipped" in report.note
     assert "then pulled 0/0 contract(s) (0 bar(s))" in report.note
+
+
+# ── Greeks-enrichment failure suffix (DEC-GREEKS-ENRICH-OBSERVE-001) ────────────
+
+
+def test_composite_note_names_greeks_enrich_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WHOLE-pass Greeks-enrichment failure is NAMED in the composite note.
+
+    The driver's risk-free seam is broken (the same failure mode the historical
+    suite pins) so the candle phase completes but its Greeks pass fails whole —
+    the composite note must carry the FAILED suffix, never a swallowed log line.
+    """
+    pytest.importorskip("trading_core")
+    import brutex.data.greeks_enrich as ge
+
+    def _boom() -> object:
+        raise RuntimeError("misconfigured risk-free source")
+
+    monkeypatch.setattr(ge, "resolve_risk_free_source", _boom)
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    report = _run(
+        [_instrument("NIFTY", 13)], sdk=sdk, sink=sink, registry=registry, coverage=_CoverageSink()
+    )
+    assert report.historical is not None
+    assert report.historical.greeks_enrich_ok is False
+    # The clause carries the ErrorType class, uniform with the historical note.
+    assert (
+        ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next pull" in report.note
+    )
+
+
+def test_composite_note_has_no_greeks_clause_on_a_clean_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed Greeks pass leaves the composite note byte-identical (no clause)."""
+    pytest.importorskip("trading_core")
+    monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)  # the fixed-6.5% default
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    report = _run(
+        [_instrument("NIFTY", 13)], sdk=sdk, sink=sink, registry=registry, coverage=_CoverageSink()
+    )
+    assert report.historical is not None
+    assert report.historical.greeks_enrich_ok is True
+    assert "Greeks enrichment FAILED" not in report.note

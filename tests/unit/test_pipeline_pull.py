@@ -111,6 +111,8 @@ def _historical_inner(
     contracts_out_of_scope: int = 0,
     phase1_complete: tuple[str, ...] = ("RELIANCE25JAN3000CE",),
     start_dates: dict[str, str] | None = None,
+    greeks_enrich_ok: bool | None = None,
+    greeks_enrich_error: str | None = None,
 ) -> HistoricalPullReport:
     """Build the inner :class:`HistoricalPullReport` (the candle sub-report)."""
     return HistoricalPullReport(
@@ -131,6 +133,8 @@ def _historical_inner(
         minute_skipped=False,
         expiries_out_of_scope=expiries_out_of_scope,
         contracts_out_of_scope=contracts_out_of_scope,
+        greeks_enrich_ok=greeks_enrich_ok,
+        greeks_enrich_error=greeks_enrich_error,
     )
 
 
@@ -352,6 +356,44 @@ def test_pipeline_complete_note_with_no_candle_subreport() -> None:
     assert report.stopped_after is None
     assert report.ok is True
     assert "0 bars over 0 contract(s)" in report.note
+    # DEC-GREEKS-ENRICH-OBSERVE-001 hist-is-None guard: no candle sub-report →
+    # no Greeks pass ran → honestly no clause (never a fabricated verdict).
+    assert "Greeks enrichment FAILED" not in report.note
+
+
+def test_pipeline_complete_note_names_greeks_enrich_failure() -> None:
+    """A WHOLE-pass Greeks failure on the candle sub-report is NAMED in the note.
+
+    DEC-GREEKS-ENRICH-OBSERVE-001 — the pipeline's completion headline (the job
+    finish detail) must carry the failure clause, never a swallowed log line.
+    """
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(
+            _composite(
+                historical=_historical_inner(
+                    greeks_enrich_ok=False,
+                    greeks_enrich_error="RuntimeError: misconfigured risk-free source",
+                )
+            )
+        ),
+    )
+    assert report.stopped_after is None
+    # The clause carries the ErrorType class, uniform with the historical note.
+    assert (
+        ", Greeks enrichment FAILED (RuntimeError) — overlay re-attempted next pull" in report.note
+    )
+
+
+def test_pipeline_complete_note_has_no_greeks_clause_when_pass_completed() -> None:
+    """A completed Greeks pass (ok=True) leaves the pipeline note byte-identical."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner(greeks_enrich_ok=True))),
+    )
+    assert "Greeks enrichment FAILED" not in report.note
 
 
 # --------------------------------------------------------------------------- #
