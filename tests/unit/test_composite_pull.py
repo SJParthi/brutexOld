@@ -56,8 +56,17 @@ _TO = date(2024, 1, 20)
 
 
 def _candle_payload() -> dict[str, object]:
-    """One 1-day bar (row-of-arrays Groww shape: ts, o, h, l, c, v, oi)."""
-    return {"candles": [["2024-01-25T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
+    """One 1-day bar (row-of-arrays Groww shape: ts, o, h, l, c, v, oi).
+
+    2024-01-19 (Friday, a regular NSE trading day) sits INSIDE every window this
+    file fetches ([_FROM, _TO] spot + the expiry-clamped F&O windows), so the
+    recorded outcome is a genuine stored-bar SUCCESS. The previous 2024-01-25
+    stamp fell PAST the clamped window ends — every bar was future-dropped at the
+    boundary, which DEC-DATA-HONESTY-ALLFILTERED-SEED-001 now honestly demotes to
+    a re-pullable FAILED (the exact silent-green shape it exists to catch), so an
+    out-of-window canned bar can no longer fake a settled SUCCESS fixture.
+    """
+    return {"candles": [["2024-01-19T09:15:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
 
 
 class _FakeSDK:

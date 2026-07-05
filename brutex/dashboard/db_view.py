@@ -86,7 +86,11 @@ from brutex.data.partition import (
 from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
-from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, is_expired_window_settle_reason
+from brutex.data.window_ledger import (
+    DEMOTED_SETTLE_REASONS,
+    EMPTY_TERMINAL_THRESHOLD,
+    is_expired_window_settle_reason,
+)
 from brutex.money import round_money
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
@@ -3250,6 +3254,22 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       the row's genuine clean-empty streak, floored at 1 (a legacy record with
       no streak column still had at least the one clean attempt that classified
       it EMPTY).
+    * ``SKIPPED`` carrying a data-completeness DEMOTION reason
+      (:data:`~brutex.data.window_ledger.DEMOTED_SETTLE_REASONS` —
+      ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL`` plus the
+      ``"DEGRADED"`` record()-side reason-less fallback, the #1031
+      degraded channel's accept-gap settle) → ``"completeness gap accepted
+      (<reason>, N flagged attempt(s)) — settled"``
+      (DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the generic "vendor confirmed
+      no trades" wording is factually WRONG for these rows — the vendor
+      RETURNED bars every time; they were boundary-filtered / hole-flagged /
+      truncation-flagged, never a clean no-trades answer. HONEST envelope:
+      the label keys on the row's FINAL ``last_error`` only — degraded and
+      clean-EMPTY bumps share ONE un-provenance'd streak
+      (:meth:`~brutex.data.window_ledger.WindowLedger.record`), so a
+      MIXED-evidence settle attributes all N attempts to the final channel
+      (documented beside the streak arms; a per-channel count needs the named
+      streak-provenance follow-up, NOT claimed).
     * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
       ``— settled`` (the ledger promoted it; no further re-pull).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
@@ -3262,6 +3282,11 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
     if status == "SKIPPED":
         if is_expired_window_settle_reason(last_error):
             return f"{last_error} — settled"
+        if last_error in DEMOTED_SETTLE_REASONS:
+            return (
+                f"completeness gap accepted ({last_error}, "
+                f"{max(int(empty_streak), 1)} flagged attempt(s)) — settled"
+            )
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
