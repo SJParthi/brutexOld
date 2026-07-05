@@ -206,6 +206,54 @@ class TestStorableLadderComplete:
         assert expected == INTRADAY_TF_INTERVALS
 
 
+class TestMonthPartitionFiles:
+    """DEC-TF-REBUILD-MONTH-BOUND-001 — the pure explicit-month file-list core."""
+
+    def test_returns_only_existing_months_sorted(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import month_partition_files
+
+        for year, month in [(2021, 2), (2020, 12)]:
+            f = tmp_path / f"{year:04d}" / f"{month:02d}.parquet"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"stub")
+        files = month_partition_files(
+            tmp_path,
+            [(2021, 2), (2020, 12), (2023, 5)],  # 2023-05 absent on disk
+        )
+        assert files == [
+            (tmp_path / "2020" / "12.parquet").as_posix(),
+            (tmp_path / "2021" / "02.parquet").as_posix(),
+        ]
+
+    def test_duplicates_are_read_once_and_empty_is_empty(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import month_partition_files
+
+        f = tmp_path / "2021" / "01.parquet"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"stub")
+        assert month_partition_files(tmp_path, [(2021, 1), (2021, 1)]) == [f.as_posix()]
+        assert month_partition_files(tmp_path, []) == []
+
+
+def test_months_with_include_daily_raises(tmp_path: Path) -> None:
+    """``months=`` + ``include_daily=True`` is REFUSED: the midnight-IST derived
+    1day straddles UTC months (an IST date-D bar lives in the month of D−1), so
+    a month-bounded daily derive would silently mis-derive — the daily recall
+    path's ±1-day-padded window read is the correct tool (named follow-up)."""
+    from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
+
+    with pytest.raises(ValueError, match="include_daily"):
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+            months=[(2021, 1)],
+        )
+
+
 # ────────────────────────────────────────────────────────────────────────
 # frame_to_candle_bars — the batched frame → CandleBar conversion
 # (DEC-PREBUILD-GIL-VECTORIZE-001). BYTE-IDENTITY oracle: the verbatim

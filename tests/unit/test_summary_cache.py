@@ -511,6 +511,85 @@ def test_out_of_order_probe_tokens_over_invalidate_never_miss() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# cold-start-outage recovery bump (DEC-SUMMARY-CACHE-COLD-OUTAGE-BUMP-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_cold_start_outage_recovery_bumps_once_and_recomputes() -> None:
+    """The MINOR-2 envelope (DEC-SURFACE-TRIAL-001) MECHANISED: entries cached
+    while a WIRED probe errors (pre-baseline ``None``) are invalidated ONCE on
+    the first recovered token — a CLI write may have landed unseen during the
+    outage — and the next read recomputes."""
+    probe = _MutableProbe(None)  # the app starts mid-outage
+    cache = SummaryCache(clock=_FakeClock(), ttl_floor_s=0.0, revision_probe=probe)
+    rc = _CountingRecompute()
+    # Populated DURING the outage — the caches the recovery must not trust.
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]
+    assert cache.generation == 0
+    probe.token = "t1"  # the probe recovers
+    assert cache.generation == 1  # recovery bump — exactly once
+    assert cache.generation == 1  # same token → no further bump
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 2}]  # recomputed
+    assert rc.calls == 2
+
+
+def test_cold_start_outage_recovery_without_entries_is_plain_baseline() -> None:
+    """An outage the app merely OBSERVED (nothing cached over it) records the
+    recovered token as a plain no-bump baseline — the healthy-start contract."""
+    probe = _MutableProbe(None)
+    cache = SummaryCache(clock=_FakeClock(), revision_probe=probe)
+    assert cache.generation == 0  # outage observed, no entries populated
+    probe.token = "t1"
+    assert cache.generation == 0  # recovery: baseline WITHOUT a bump
+
+
+def test_cold_start_outage_bump_is_at_most_once_per_process() -> None:
+    """After the recovery bump, a LATER outage + same-token recovery never
+    bumps again — the baseline transition happens exactly once per process."""
+    probe = _MutableProbe(None)
+    cache = SummaryCache(clock=_FakeClock(), ttl_floor_s=0.0, revision_probe=probe)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)  # outage-populated
+    probe.token = "t1"
+    assert cache.generation == 1  # THE one recovery bump
+    probe.token = None  # a second, post-baseline outage...
+    assert cache.generation == 1  # ...is a plain no-op (never re-arms)
+    probe.token = "t1"  # ...and recovering to the SAME token
+    assert cache.generation == 1  # never bumps again
+    probe.token = "t2"  # a REAL change still bumps (the #1149 law intact)
+    assert cache.generation == 2
+
+
+def test_healthy_warm_start_with_entries_never_bumps() -> None:
+    """A first probe call that ALREADY returns a token (no outage) records the
+    baseline with NO bump even when an entry was populated before any
+    ``generation`` read — a pre-first-probe-call population with a healthy
+    probe must never look like an outage."""
+    probe = _MutableProbe("t1")
+    cache = SummaryCache(clock=_FakeClock(), ttl_floor_s=0.0, revision_probe=probe)
+    rc = _CountingRecompute()
+    # get_or_refresh probes BEFORE populating → baseline lands healthy, with
+    # the entry stored under the un-bumped generation.
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]
+    assert cache.generation == 0
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]  # clean hit
+    assert rc.calls == 1
+
+
+def test_unwired_probe_never_arms_the_outage_flag() -> None:
+    """``revision_probe=None`` reconciles ``None`` on every read (the
+    ``_probe_token`` no-probe path) — it must NEVER arm the outage flag or
+    bump: the pre-probe byte-identical contract."""
+    cache = SummaryCache(clock=_FakeClock(), ttl_floor_s=0.0)
+    rc = _CountingRecompute()
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]
+    assert cache.generation == 0
+    assert cache.generation == 0
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]  # clean hit
+    assert rc.calls == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
 # CoverageCounters — incremental, idempotent O(1) tally
 # ────────────────────────────────────────────────────────────────────────
 
