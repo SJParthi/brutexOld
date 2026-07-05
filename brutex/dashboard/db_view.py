@@ -65,6 +65,11 @@ from brutex.data.fno_candle_lake import (
 )
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.lake_keys import spot_recovery_candidates
+from brutex.data.lake_manifest import (
+    ledger_stat_token,
+    load_manifest_datasets,
+    rebuild_manifest,
+)
 from brutex.data.lake_read import (
     DEDUP_PARQUET_SOURCE_SQL,
     DEDUP_STAR_SELECT_SQL,
@@ -939,11 +944,25 @@ def list_candle_datasets(
 ) -> list[dict[str, str]]:
     """Discover which ``(exchange, segment, symbol, interval)`` candle sets exist.
 
-    Walks ``<lake_root>/bars/<exchange>/<segment>/<symbol>/<interval>/`` and
-    returns one entry per interval directory that holds at least one
-    ``.parquet`` file. Directory names that are not valid coordinates are
-    skipped (a foreign / partially-written tree never raises). A missing
-    ``bars`` directory yields ``[]``.
+    MANIFEST-FIRST (DEC-LAKE-MANIFEST-O1-001): when the durable write-time
+    dataset manifest (``<lake_root>/.manifest/`` —
+    :mod:`brutex.data.lake_manifest`) exists and its integrity token validates
+    (window-ledger stat token + row count), the dataset list is served from it
+    in **O(manifest-rows)** — independent of the lake's partition/file count
+    (the measured 2.36M-file post-prebuild lake paid a 29.7-minute O(files)
+    walk on the first post-restart discovery; the manifest serves the SAME
+    byte-identical list in seconds). An absent / stale / corrupt manifest
+    falls back GRACEFULLY to the legacy walk below (byte-identical results,
+    never a 500), and an UNFILTERED walk rebuilds the manifest from its result
+    (self-healing: the first discovery after this change — or after a vendor
+    pull — pays one last walk, then serves manifest-first until the next
+    ledger move / heal invalidation).
+
+    LEGACY WALK: walks ``<lake_root>/bars/<exchange>/<segment>/<symbol>/
+    <interval>/`` and returns one entry per interval directory that holds at
+    least one ``.parquet`` file. Directory names that are not valid
+    coordinates are skipped (a foreign / partially-written tree never raises).
+    A missing ``bars`` directory yields ``[]``.
 
     Parameters
     ----------
@@ -954,7 +973,8 @@ def list_candle_datasets(
         segment's tree is never even descended (DEC-COMPLETENESS-FNO-SKIP-001:
         skipping ``FNO`` here avoids walking the ~10⁵-10⁶ per-contract
         partition dirs a fully-materialised options lake holds). Empty (the
-        default) is byte-identical to the unfiltered walk.
+        default) is byte-identical to the unfiltered walk. Applied as a row
+        filter on the manifest-served path (same result set).
     intervals
         When given, only these interval directories are listed (e.g. the spot
         verdict pair ``("1minute", "1day")``); ``None`` (the default) lists
@@ -963,8 +983,83 @@ def list_candle_datasets(
     Returns
     -------
     list[dict[str, str]]
-        ``[{"exchange", "segment", "symbol", "interval"}]`` sorted by all
-        four keys — the candle-viewer dataset picker.
+        ``[{"kind", "exchange", "segment", "symbol", "interval"}]`` sorted by
+        the four coordinate keys — the candle-viewer dataset picker.
+    """
+    manifest_rows = load_manifest_datasets(lake_root)
+    if manifest_rows is not None:
+        return _datasets_from_manifest(
+            manifest_rows, exclude_segments=exclude_segments, intervals=intervals
+        )
+    # Capture the freshness token BEFORE the walk: a vendor write landing
+    # DURING the (potentially long) walk must stale the rebuilt manifest on the
+    # very next read — a post-walk stamp could claim freshness the walk never
+    # had (Golden Rule #1).
+    pre_walk_token = ledger_stat_token(lake_root)
+    found = _walk_candle_datasets(lake_root, exclude_segments=exclude_segments, intervals=intervals)
+    if not exclude_segments and intervals is None and pre_walk_token is not None:
+        # Only an UNFILTERED walk sees the whole dataset population, so only it
+        # may (re)build the manifest — a filtered walk would persist a
+        # silently-partial row set. Best-effort: a rebuild failure leaves the
+        # walk result (already correct) untouched.
+        rebuild_manifest(lake_root, found, ledger_token=pre_walk_token)
+    return found
+
+
+def _datasets_from_manifest(
+    rows: list[dict[str, str]],
+    *,
+    exclude_segments: frozenset[str],
+    intervals: Collection[str] | None,
+) -> list[dict[str, str]]:
+    """Project manifest rows to the walk's exact result shape — O(rows).
+
+    Applies the SAME coordinate validity screens the walk applies at the
+    directory level (``VALID_EXCHANGES`` / ``VALID_SEGMENTS`` /
+    ``VALID_INTERVALS`` — symbols are deliberately UNfiltered, mirroring the
+    walk, so a #911-style drift-key directory like ``NSE-M&M`` stays listed)
+    plus the caller's ``exclude_segments`` / ``intervals`` filters, and emits
+    the identical ``{"kind": "spot", …}`` dicts in the identical
+    four-key sort order (the walk's per-level ``sorted`` is exactly a
+    lexicographic sort on the coordinate tuple) — byte-identity is pinned by
+    test against the walk on the same lake.
+    """
+    out: list[dict[str, str]] = []
+    for row in sorted(
+        rows, key=lambda r: (r["exchange"], r["segment"], r["symbol"], r["interval"])
+    ):
+        if row["exchange"] not in VALID_EXCHANGES:
+            continue
+        if row["segment"] not in VALID_SEGMENTS or row["segment"] in exclude_segments:
+            continue
+        if row["interval"] not in VALID_INTERVALS:
+            continue
+        if intervals is not None and row["interval"] not in intervals:
+            continue
+        out.append(
+            {
+                "kind": "spot",
+                "exchange": row["exchange"],
+                "segment": row["segment"],
+                "symbol": row["symbol"],
+                "interval": row["interval"],
+            }
+        )
+    return out
+
+
+def _walk_candle_datasets(
+    lake_root: Path,
+    *,
+    exclude_segments: frozenset[str],
+    intervals: Collection[str] | None,
+) -> list[dict[str, str]]:
+    """The legacy O(files) ``bars/`` tree walk (the manifest-miss fallback).
+
+    The pre-manifest :func:`list_candle_datasets` body, byte-unchanged: one
+    entry per interval dir holding at least one ``.parquet``, invalid
+    coordinate names skipped, missing ``bars/`` → ``[]``. Kept as the fallback
+    + the manifest's rebuild source (the lake tree stays the source of truth).
     """
     bars = lake_root / "bars"
     if not bars.is_dir():
