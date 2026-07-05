@@ -202,7 +202,7 @@ def combo_digest(
     Parameters
     ----------
     mask
-        The u64 strategy mask (which of the 52 conditions the combo requires).
+        The strategy mask (which of the 60 conditions the combo requires).
     instrument, tf, direction
         Context labels (e.g. ``"NIFTY"``, ``"5m"``, ``"bull"``).
     params

@@ -160,21 +160,23 @@
   </div>
 
   <details class="winhelp" style="margin:8px 16px 0;color:var(--muted);font-size:12px;">
-    <summary style="cursor:pointer;">ℹ️ How to read a row — <code>attempts</code> · <code>EMPTY-retries (↻)</code> · <code>EMPTY x/3</code> · the 3× retry</summary>
+    <summary style="cursor:pointer;">ℹ️ How to read a row — <code>attempts</code> · <code>In-pull retries (↻)</code> · <code>EMPTY x/3</code> · the 3× retry</summary>
     <div style="margin-top:6px;line-height:1.55;max-width:980px;">
       <b>attempts</b> = number of <b>pulls</b>, not network fetches — within <em>each</em> pull an
       empty window is automatically re-fetched up to <b>3×</b> before it is recorded (the in-pull
       empty-retry), so <code>attempts 1</code> already means up to 3 fetches happened this pull.<br>
-      <b>fetches</b> = the <b>in-pull EMPTY-retry depth</b> of the <b>last pull</b> — i.e. how many
-      times the empty/transient re-fetch loop re-issued THIS window before recording it. <code>1</code>
-      = a clean first-try; <code><b>↻ 3</b></code> (amber) = the window came back empty and was
-      re-fetched 3× this pull; <code>—</code> = a planned window not yet fetched.<br>
+      <b>In-pull retries</b> = the <b>in-pull re-fetch depth</b> of the <b>last pull</b> — i.e. how
+      many times the fetch loop re-issued THIS window before recording it. It counts <b>BOTH</b> the
+      empty re-fetches AND the transient (429 / timeout) re-attempts: on an <b>EMPTY</b> row the
+      number is the empty-retry depth, on a <b>FAILED</b> row it is the transient-retry depth.
+      <code>1</code> = a clean first-try; <code><b>↻ 3</b></code> (amber) = the loop re-issued the
+      window 3× this pull; <code>—</code> = a planned window not yet fetched.<br>
       <b>This is NOT the total vendor calls.</b> It does NOT include the deeper timeout / 429 retry
       ladder a <b>FAILED</b> window also burns: each of these fetches internally retries up to
       <b>6×</b> on a timeout / rate-limit (the in-call ladder), and the whole window can be re-tried
-      across multiple transient passes and pull rounds — so a FAILED row reading <code>fetches 1</code>
-      may have actually made many more vendor calls than the number shown here (only the EMPTY-retry
-      depth is persisted per window, not the in-call ladder count).<br>
+      across multiple transient passes and pull rounds — so a FAILED row reading <code>1</code>
+      may have actually made many more vendor calls than the number shown here (only the in-pull
+      re-fetch depth is persisted per window, not the in-call ladder count).<br>
       <b>EMPTY x/3</b> = the vendor returned a clean, empty response on <b>x of 3</b> separate pulls;
       the window is re-checked every pull and only settles as a durable no-data gap at <b>3/3</b>
       (reverted 10→3 per DEC-REALDATA-ONLY-NO-1M-TO-1D-001, MIGRATION.md #852 — the 1m→1d resample
@@ -241,12 +243,17 @@ function winStatus(r) {
   return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>" + streak;
 }
 
-/* In-pull EMPTY-retry depth of the LAST pull (DEC-WINDOW-INPULL-FETCHES-001;
-   relabelled "EMPTY-retries" for honesty by DEC-FETCHES-COL-HONESTY-001):
+/* In-pull re-fetch depth of the LAST pull (DEC-WINDOW-INPULL-FETCHES-001;
+   relabelled for honesty by DEC-FETCHES-COL-HONESTY-001 #924, then renamed
+   "In-pull retries" by DEC-FETCHES-COL-RENAME-001 — the counter
+   `in_pull_fetches` counts BOTH empty re-fetches AND transient (429/timeout)
+   re-attempts, so the #924 EMPTY-only column name was itself a mislabel):
    `attempts` counts PULLS; this counts the empty/transient re-fetch loop's
    re-issues of THIS window INSIDE one pull. >1 means the retry fired (up to 3×)
    — amber + ↻ so the operator SEES the retry that was previously DEBUG-only.
    0 = a never-fetched PLANNED row (shown as —); 1 = a first-try outcome (muted).
+   The tooltip is context-aware: a FAILED row's depth is transient re-attempts,
+   an EMPTY row's depth is empty re-fetches.
    NOTE: this is NOT the total vendor calls — the deeper in-call timeout/429
    ladder (client.py max_attempts, up to 6×) a FAILED window burns is not
    counted here (see the winhelp legend). */
@@ -254,8 +261,13 @@ function winFetches(r) {
   const n = Number(r.in_pull_fetches || 0);
   if (n <= 0) return '<span style="color:#787B86;">—</span>';
   if (n === 1) return '<span style="color:#9aa4b2;">1</span>';
+  const kind = r.status === "FAILED"
+    ? "transient 429/timeout re-attempts"
+    : r.status === "EMPTY"
+    ? "empty re-fetches"
+    : "empty/transient re-fetches";
   return '<span style="color:#FFB74D;font-weight:700;" title="re-fetched ' + esc(n)
-    + '× within this pull (in-pull empty/transient retry)">↻ ' + esc(n) + "</span>";
+    + '× within this pull (in-pull retry depth: ' + esc(kind) + ')">↻ ' + esc(n) + "</span>";
 }
 
 /* Server-side filters (DEC-OPTION-WINDOW-PLAN-001 C3): the chips drive query
@@ -314,7 +326,7 @@ function renderWindows(rows) {
     + "<th>Symbol</th><th>Market</th><th>Interval</th><th>Window start</th><th>Window end</th>"
     + "<th>Status</th><th>Bars</th>"
     + '<th title="number of PULLS that touched this window (one per re-pull)">Attempts</th>'
-    + '<th title="in-pull EMPTY-retry depth of the LAST pull — &gt;1 (↻) means the empty/transient re-fetch loop fired (up to 3×). NOT the total vendor calls: a FAILED window also burns the deeper timeout/429 in-call retry ladder (up to 6× per fetch) across passes/rounds, which is not counted here">EMPTY-retries</th>'
+    + '<th title="in-pull re-fetch depth of the LAST pull — counts BOTH empty re-fetches AND transient (429/timeout) re-attempts of this window; &gt;1 (↻) means the loop fired (up to 3×). NOT the total vendor calls: a FAILED window also burns the deeper timeout/429 in-call retry ladder (up to 6× per fetch) across passes/rounds, which is not counted here">In-pull retries</th>'
     + "<th>Last error</th>"
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }

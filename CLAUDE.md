@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-03 (DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294 —
+_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
+(`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
+fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
+sentinel, cached once per process; `memory_budget_bytes` — env override wins
+fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction /
+workers)`). The TWO §8-keyed hand-picked byte budgets are now derived through
+it: the sweep rank-region default (`sweep_mem_budget.DEFAULT_MEM_BUDGET_BYTES`
+8 GiB → floor of a 1/6 fraction; `BRUTEX_SWEEP_MEM_BUDGET_BYTES` override
+byte-unchanged, #1352 contract preserved) and the Bloom bit-array wall
+(`bloom.MAX_BLOOM_BYTES` 16 GiB → derived once at import from a 1/3 fraction
+over NEW floor `MAX_BLOOM_BYTES_FLOOR` + NEW fail-loud env
+`BRUTEX_MAX_BLOOM_BYTES`; `BloomTooLargeError` semantics unchanged, refusal
+still before any allocation; results-safe — the Bloom is an L1 prefilter over
+the LMDB exact ground truth, never in run identity). Regression-pinned: a
+simulated 48 GiB §8 box derives EXACT parity with both old constants; less
+RAM → smaller budgets (the portability win); undetected RAM → the old
+constants bit-for-bit. Everything else in the sweep's classification stays
+FIXED (LMDB virtual maps, FAIL_CLOSED capacities, determinism pins,
+back-pressure queues — reasons in #1360). HONEST: a PORTABILITY + headroom
+change, NOT a measured speedup; detection is TOTAL physical RAM, not
+available/free. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules
+100% line+branch).
+Earlier: 2026-07-03 (DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294 —
 the ingest data-integrity pack, four boundary gaps as ONE change set: (a) the
 ingest-boundary session filter is now CALENDAR-AWARE (`brutex/data/session.py`
 `filter_to_trading_session` via `calendars/nse.get_session`, wired at BOTH ingest
@@ -294,7 +317,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/nice-wright-qmb2bz` (docs-debt + observability pack). Prior merged: (**DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294** — the
+- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+  budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
+  test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
+  override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
+  the floor on the detected path). Derived call sites (BOTH exact-parity at the §8 48 GiB box, regression-pinned):
+  `sweep_mem_budget.DEFAULT_MEM_BUDGET_BYTES` (8 GiB floor, fraction 1/6; the `BRUTEX_SWEEP_MEM_BUDGET_BYTES` #1352
+  override contract byte-unchanged) + `bloom.MAX_BLOOM_BYTES` (16 GiB floor `MAX_BLOOM_BYTES_FLOOR`, fraction 1/3,
+  derived ONCE at import via `resolve_max_bloom_bytes`, NEW fail-loud env `BRUTEX_MAX_BLOOM_BYTES`;
+  `BloomTooLargeError` refusal still BEFORE any allocation; results-safe — the Bloom is an L1 prefilter over the LMDB
+  exact ground truth, never in run identity). Every other candidate deliberately KEPT FIXED (LMDB virtual-map sizes,
+  FAIL_CLOSED capacity trip-points, determinism pins like `ROW_GROUP_SIZE` + trade-sim chunk bounds, back-pressure
+  queue depths — full classification in #1360). HONEST: PORTABILITY + headroom, NOT a measured speedup; detection is
+  TOTAL physical RAM not available/free; the macOS `sysctl` path is UNVERIFIED on real macOS (mocked unit seam only);
+  ADR-0016's "48 GB safety ASSERTED, NOT MEASURED" caveat stays OPEN. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  `hardware_envelope.py`/`sweep_mem_budget.py`/`bloom.py`/`sweep_launch.py` ALL 100% line+branch; ruff/ruff-format
+  clean, mypy `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/nice-wright-qmb2bz` (docs-debt + observability pack). Prior merged: (**DEC-INGEST-BOUNDARY-INTEGRITY-001, MIGRATION.md #1294** — the
   ingest data-integrity pack, four boundary gaps as ONE change set: **(a)** the ingest-boundary session filter is
   CALENDAR-AWARE (NEW `brutex/data/session.py::filter_to_trading_session` judging each bar against its OWN IST date's
   real NSE session via `calendars/nse.get_session`, wired at BOTH spine tails) — non-trading-date bars (weekend/holiday

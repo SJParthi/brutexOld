@@ -128,10 +128,11 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         "brutex/dashboard/db_view.py",
         # The Stage-1A bitset-matrix builder. Its 100% line+branch is reached by a
         # CURATED multi-file suite — test_engine_stage1a.py (the matrix builder +
-        # the resurrected VWAP/BOS bits) + test_engine_walk_forward.py (the
-        # walk-forward schedule helpers trading_day_starts / WalkForwardSchedule /
+        # the resurrected VWAP/BOS bits) + test_engine_sweep_driver_walk_forward.py
+        # (the walk-forward schedule helpers trading_day_starts / WalkForwardSchedule /
         # _day_to_bar / _walk_forward_schedule_hash / build_walk_forward_schedule,
-        # which live in stage1a.py but are exercised by their own walk-forward suite).
+        # which live in stage1a.py but are exercised by the walk-forward suite —
+        # stem-named for sweep_driver.py, whose walk-forward entry points it gates).
         # The discovery gate maps a module ONLY to its stem-matching tests
         # (test_engine_stage1a*), so it sees just the builder file and tops out at
         # ~82% STANDALONE while the walk-forward functions read 0 — the SAME

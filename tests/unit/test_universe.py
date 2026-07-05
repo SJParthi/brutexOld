@@ -1067,6 +1067,63 @@ class TestClassifyEngineSweepTarget:
         assert "did you mean" not in verdict.reason
 
 
+class TestEngineScopeAgreesWithLakeSideTruth:
+    """Cross-module drift pin (ported from DEC-CORP-ACTION-GATE-001).
+
+    ``BRUTE_FORCE_INDEX_SYMBOLS`` (``adapters/groww/constants.py``) is the
+    lake-side truth ``{"NSE-NIFTY", "NSE-BANKNIFTY", "BSE-SENSEX"}``; the
+    engine law derives its triples from the universe-side
+    ``BRUTE_FORCE_INDEX_UNDERLYINGS``. The two are defined in SEPARATE
+    modules (the engine imports nothing from ``brutex.adapters`` —
+    layering), so this pin makes any drift between them a test failure.
+    """
+
+    def test_spot_triples_agree_with_the_groww_index_keys(self) -> None:
+        from brutex.adapters.groww.constants import BRUTE_FORCE_INDEX_SYMBOLS
+
+        derived = frozenset(
+            (key.split("-", 1)[0], "INDEX", key.split("-", 1)[1])
+            for key in BRUTE_FORCE_INDEX_SYMBOLS
+        )
+        assert derived == ENGINE_SWEEP_SPOT_TRIPLES
+
+
+class TestClassifyEngineSweepTargetAdversarialCorpus:
+    """Hard-coded homoglyph/encoding vectors, expectations hand-derived.
+
+    Ported from DEC-CORP-ACTION-GATE-001 and re-derived against the
+    classifier's OWN exact-case, deny-by-default semantics (no strip/upper
+    normalization exists here — every vector must be REFUSED because it is
+    not byte-equal to an allowed form; the ``upper()`` fold in the
+    did-you-mean branch must only ever HINT, never admit).
+    """
+
+    @pytest.mark.parametrize(
+        "symbol",
+        [
+            "NIFTY\u200b",  # trailing ZERO WIDTH SPACE
+            "\u200bNIFTY",  # leading ZERO WIDTH SPACE
+            "\u00a0NIFTY\u00a0",  # NBSP padding (no strip here — refused)
+            "NIF TY",  # interior ASCII space
+            "\uff2e\uff29\uff26\uff34\uff39",  # fullwidth NIFTY
+            "B\u0410NKNIFTY",  # Cyrillic A homoglyph for Latin A
+            "\u0130NDIAVIX",  # Turkish dotted capital I
+        ],
+    )
+    def test_homoglyph_and_encoding_variants_refused(self, symbol: str) -> None:
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol=symbol)
+        assert verdict.allowed is False
+        assert verdict.tier == "refused"
+
+    def test_turkish_dotless_i_gets_the_hint_but_stays_refused(self) -> None:
+        # '\u0131'.upper() == "I" under Python's locale-independent casing,
+        # so "n\u0131fty".upper() == "NIFTY" — the did-you-mean branch fires,
+        # and the verdict MUST still be a refusal (hint, never admission).
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="n\u0131fty")
+        assert verdict.allowed is False
+        assert "did you mean 'NIFTY'?" in verdict.reason
+
+
 # ────────────────────────────────────────────────────────────────────────
 # F&O-index symbol-mismatch diagnostic (DEC-FNO-INDEX-MATCH-DIAG-001)
 # ────────────────────────────────────────────────────────────────────────
