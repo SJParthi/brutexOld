@@ -296,6 +296,7 @@ def ingest_spot(
     on_window: WindowTick | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
 ) -> IngestReport:
@@ -462,6 +463,7 @@ def ingest_spot(
                 old_cutoff=old_cutoff,
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
+                observed_holidays=observed_holidays,
                 empty_breaker=empty_breaker,
                 storm_breaker=storm_breaker,
             )
@@ -595,6 +597,7 @@ def _ingest_one_window(
     old_cutoff: date | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
 ) -> _WindowOutcome:
@@ -652,6 +655,7 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
@@ -676,6 +680,7 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
         )
         if result_outcome.transient:
@@ -953,6 +958,7 @@ def _process_window_tail(
     pull_id: str,
     series_fields: dict[str, str],
     detect_completeness_gaps: bool = False,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
@@ -1154,6 +1160,7 @@ def _process_window_tail(
         symbol=instrument.symbol_name,
         interval=interval,
         pull_id=pull_id,
+        observed=observed_holidays,
     )
     interior_verdict = observe_interior_gap(
         _LOG,
@@ -1161,6 +1168,7 @@ def _process_window_tail(
         symbol=instrument.symbol_name,
         interval=interval,
         pull_id=pull_id,
+        observed=observed_holidays,
     )
     truncated = partial_verdict is not None and partial_verdict.is_suspected_partial()
     interior_gap = interior_verdict is not None and interior_verdict.is_interior_gap()
