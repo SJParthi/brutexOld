@@ -50,7 +50,12 @@ the TRANSIENT :class:`~brutex.data.errors.PartitionLockTimeout` — the ingest s
 catch it at the window boundary, record the window ``FAILED``, and DEFER it to the next
 pull, exactly like a 429 / timeout (the peer genuinely making progress finishes and the
 deferred window succeeds on the re-pull). A CRASHED holder is still released by the
-kernel (no stale lock). On each poll the bounded wait fires a
+kernel (no stale lock). The default acquire deadline sits strictly BELOW the durable-write
+freeze guard's 90 s deadline (75 s vs :data:`~brutex.adapters.groww.constants.GROWW_WRITE_DEADLINE_S`
+— DEC-WRITE-DEADLINE-LOCK-ORDER-001) so a contended acquire always resolves through THIS
+clean ``PartitionLockTimeout`` path before the outer deadline abandons the write thread
+mid-``flock`` (which would leak the thread + lock fd); env overrides can re-invert the
+ordering, which the write guard WARNs about at use time. On each poll the bounded wait fires a
 :func:`~brutex.observability.progress_beat.emit_progress_beat` so a slow-but-progressing
 pull contending on a busy partition keeps its watchdog heartbeat alive (a no-op when no
 watchdog is registered). ``fcntl.flock`` is POSIX (Linux + macOS — the Track-1 hardware
@@ -95,7 +100,26 @@ _LOCK_SUBDIR = ".locks"
 #: watchdog would kill the whole pull — the real-root anti-stall fix. Generous enough
 #: that a peer doing a normal multi-second read-modify-write is simply waited out, not
 #: spuriously deferred. Operator-tunable via :data:`PARTITION_LOCK_TIMEOUT_ENV`.
-DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS: float = 120.0
+#:
+#: ORDERING INVARIANT (DEC-WRITE-DEADLINE-LOCK-ORDER-001): this default MUST stay
+#: strictly BELOW :data:`~brutex.adapters.groww.constants.GROWW_WRITE_DEADLINE_S`
+#: (90 s) with real margin, because the durable-write freeze guard
+#: (:func:`~brutex.adapters.groww.write_deadline.append_with_deadline`) wraps the
+#: WHOLE ``sink.append`` INCLUDING this lock acquire. The prior 120 s default made
+#: this bound UNREACHABLE: the 90 s write deadline abandoned the write thread while
+#: it still blocked in the ``flock`` poll loop — leaking the thread + lock fd on
+#: every contended window — instead of letting the clean
+#: :class:`~brutex.data.errors.PartitionLockTimeout` defer path fire. 75 s leaves a
+#: 15 s margin for the merge/render/fsync/replace that follows a slow acquire.
+#: The two constants deliberately stay in their own modules (``brutex.data`` must
+#: never import ``brutex.adapters``); the ordering is pinned by the cross-module
+#: regression test ``tests/unit/test_write_deadline_lock_order.py``. HONEST
+#: envelope: the env overrides (:data:`PARTITION_LOCK_TIMEOUT_ENV` /
+#: ``BRUTEX_GROWW_WRITE_DEADLINE_S``) CAN re-invert the ordering at runtime — an
+#: inverted effective configuration is WARNED once per process at use time by
+#: :func:`~brutex.adapters.groww.write_deadline.append_with_deadline`
+#: (``groww.write_deadline.lock_timeout_inversion``), never silently accepted.
+DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS: float = 75.0
 
 #: Sleep between non-blocking re-acquire attempts (seconds). Short so the wait reacts
 #: promptly when the peer releases, but not a busy-spin.
