@@ -1,11 +1,13 @@
-"""52-atomic-condition vocabulary.
+"""60-atomic-condition vocabulary.
 
-Per `docs/TRACK1_VOCABULARY.md`:
-- 52 boolean conditions packed into a single u64 bitmask
-- 9 indicator groups (EMA, Pivot, PDH/PDL, Fib, Candle, Prior, DayStructure,
-  TimeOfDay, DayType)
-- Strategy mask = u64 with set bits = required-true conditions (AND)
-- Direction (bull/bear) is SEPARATE from the 52 bits
+Per `docs/TRACK1_VOCABULARY.md` (grown 52 → 60 by DEC-VOCAB-U128-CODEGEN-001 /
+ADR-0012 PR-1):
+- 60 boolean conditions packed into a u128 bitmask (bits 0..59 used)
+- 12 indicator groups (EMA, Pivot, PDH/PDL, Fib, Candle, Prior, DayStructure,
+  TimeOfDay, DayType, VWAP Position, Pivot Proximity Extended, Market
+  Structure — `bits.GROUP_RANGES` is the one source of truth)
+- Strategy mask = u128 with set bits = required-true conditions (AND)
+- Direction (bull/bear) is SEPARATE from the 60 bits
 
 This is the shared vocabulary used by:
 - Backtest (BruteX, this repo) — Stage 1A precompute over 5y of bars
@@ -15,9 +17,9 @@ Same code path, same bit semantics, bit-identical output.
 
 ## Modules
 
-- `bits` — bit-position constants for each of the 52 conditions
+- `bits` — bit-position constants for each of the 60 conditions
 - `conflicts` — conflict pairs (pruned at strategy generation)
-- `evaluator` — `evaluate_atoms(snapshot, params) -> u64` per bar
+- `evaluator` — `evaluate_atoms(snapshot, params) -> u128` per bar
 - `snapshot` — `IndicatorSnapshot` input dataclass
 
 ## O(1) per bar
@@ -33,8 +35,8 @@ Each `evaluate_atoms()` call performs:
 - = O(1) per bar regardless of total bar count
 
 Operator decree 2026-05-16: COMMON · DYNAMIC · SCALABLE · AUTOMATED.
-This module satisfies all 5 (DEC-SHARED-CORE-001 #441 — the 52-condition
-logic now lives ONCE, in the Rust `trading-core` crate, which BruteX
+This module satisfies all 5 (DEC-SHARED-CORE-001 #441 — the condition
+logic (52 conditions then, 60 now) lives ONCE, in the Rust `trading-core` crate, which BruteX
 reaches via the `trading_core` PyO3 wheel and TickVault links natively):
 - COMMON: the *same compiled core* serves backtest + live (not just an
   identical class — literally one Rust implementation, bit-identical)

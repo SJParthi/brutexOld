@@ -284,9 +284,10 @@ def _add_sweep_grid_args(
         help=(
             "RESEARCH ONLY: proceed even when a requested symbol is outside the "
             "brute-force engine scope (NIFTY/BANKNIFTY/SENSEX spot + NIFTY futures, "
-            "CLAUDE.md §2 Rule 3 / ADR-0012). Loud WARNING + audit-stamped "
-            "scope_override=True; REFUSED on sweep-daemon (unattended runs never "
-            "override) — DEC-ENGINE-SCOPE-GUARD-001"
+            "CLAUDE.md §2 Rule 3 / ADR-0012). Loud WARNING + structlog corporate-"
+            "action hazard + audit-stamped scope_override=True; also gates "
+            "sweep-verify --recount; REFUSED on sweep-daemon (unattended runs never "
+            "override) — DEC-ENGINE-SCOPE-GUARD-001 + DEC-CORP-ACTION-GATE-001"
         ),
     )
     parser.add_argument(
@@ -5176,6 +5177,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     stage3_top_k: int | None = None,
     stage3_fevals: int | None = None,
     stage3_restarts: int | None = None,
+    allow_out_of_scope: bool = False,
 ) -> int:
     """Verify a sweep results tree — the doctor's CLI (DEC-SWEEP-VERIFY-001).
 
@@ -5184,7 +5186,14 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     (``--recount``) shadow re-sweeps the grid into a scratch root with the
     SAME 100%-tested ``run_sweep_grid`` and byte-diffs — verdict-grade ONLY
     under a fully matched recorded context (the hostile review's validity
-    gate). REPORT-ONLY: this command never modifies the verified tree.
+    gate). REPORT-ONLY toward the verified tree: this command never modifies
+    it — but Tier 3 EXECUTES the real engine into ``--scratch-root``, so the
+    recount tier runs the SAME ``check_sweep_scope`` launch gate as
+    sweep/sweep-all (DEC-ENGINE-SCOPE-GUARD-001 + its corporate-action
+    extension DEC-CORP-ACTION-GATE-001 / ADR-0016), with the SAME CLI-only
+    ``--allow-out-of-scope`` research escape so a legacy out-of-scope tree
+    stays recount-verifiable LOUDLY, never silently; Tier 1/2 run no engine
+    and stay unguarded.
     """
     from brutex.engine.sweep_verify import (
         SweepVerifyError,
@@ -5229,6 +5238,37 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     from brutex.strategies.types import FibAnchorKind, Side
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if recount:
+        # Engine scope gate (DEC-ENGINE-SCOPE-GUARD-001 + its corporate-action
+        # extension DEC-CORP-ACTION-GATE-001 / ADR-0016): the Tier-3 --recount
+        # shadow re-sweep EXECUTES the real engine (run_sweep_grid over lake
+        # bars, persisting per-tuple stores into --scratch-root) — a
+        # production sweep entry, NOT a report-only read — so it runs the SAME
+        # check_sweep_scope gate as sweep/sweep-all, with the SAME CLI-only
+        # --allow-out-of-scope research escape (loud WARNING + structlog
+        # hazard) so a legacy out-of-scope tree stays recount-verifiable
+        # LOUDLY, never silently. --allow-context-mismatch overrides the
+        # recount CONTEXT gate only, never scope. Tier 1/2 (structural +
+        # identity) stay unguarded: they read an existing tree and launch no
+        # engine, and a legacy out-of-scope tree stays report-verifiable.
+        from brutex.engine.sweep_scope import check_sweep_scope
+
+        scope = check_sweep_scope(
+            symbol_list, exchange=exchange, segment=segment, allow_out_of_scope=allow_out_of_scope
+        )
+        if not scope.ok:
+            print(f"[brutex] sweep-verify --recount: {scope.refusal_message()}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if scope.overridden:
+            import structlog
+
+            print(f"[brutex] {scope.override_warning()}")
+            structlog.get_logger("brutex.sweep").warning(
+                "sweep.scope_override",
+                symbols=[verdict.symbol for verdict in scope.refused],
+                exchange=exchange,
+                segment=segment,
+            )
     interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
     for interval in interval_list:
         if interval not in INTERVAL_SECONDS:
@@ -5288,8 +5328,12 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "code_commit_sha": code_sha,
         "top_k": top,
         # DEC-ENGINE-SCOPE-GUARD-001: verifying recorded work, not launching —
-        # a legacy out-of-scope tree must stay verifiable, so the Layer-1
-        # config invariant is opted out at this ONE forensic rebuild site.
+        # a legacy out-of-scope tree must stay Tier-1/2 verifiable, so the
+        # Layer-1 config invariant is opted out at this ONE forensic rebuild
+        # site. The Tier-3 --recount LAUNCH is separately Layer-2 gated above
+        # (DEC-CORP-ACTION-GATE-001 extension) with the --allow-out-of-scope
+        # escape, so the opt-out here never lets an engine execution through
+        # silently.
         "unsafe_allow_out_of_scope_instruments": True,
     }
     if max_tuples is not None:
@@ -6590,6 +6634,7 @@ def main(argv: list[str] | None = None) -> int:
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,
             stage3_restarts=args.stage3_restarts,
+            allow_out_of_scope=args.allow_out_of_scope,
         )
     # Quarantine heal (DEC-SWEEP-HEAL-001) — dry-run by default.
     if args.command == "sweep-heal":

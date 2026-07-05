@@ -169,8 +169,9 @@ class SweepGridConfig:
         How many of the chosen conditions each combo requires; non-empty, each in
         ``[0, n_unique]`` where ``n_unique = len(set(condition_bits))``.
     condition_bits
-        The condition bit positions (of the 52) to brute-force over; non-empty,
-        de-duplicated for the ``k`` bound + the mask enumeration.
+        The condition bit positions (of the 60-condition vocabulary) to
+        brute-force over; non-empty, de-duplicated for the ``k`` bound + the
+        mask enumeration.
     stop_losses, take_profits
         Stop-loss / take-profit distances in paisa (``> 0``), or ``None`` to
         disable that leg; each axis non-empty.
