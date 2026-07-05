@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import math
 import os
-import subprocess
+import subprocess  # nosec B404 — fixed absolute-path sysctl probe only, list argv, no shell
 import threading
 from collections.abc import Mapping
 from typing import Final
@@ -124,7 +124,7 @@ def _sysctl_total_ram_bytes() -> int:
         Total physical RAM in bytes, or ``0`` when undetectable this way.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 — fixed absolute binary, list argv, no shell
+        proc = subprocess.run(  # noqa: S603 # nosec B603 — fixed absolute binary, list argv, no shell
             [_SYSCTL_BINARY, "-n", "hw.memsize"],
             capture_output=True,
             text=True,
