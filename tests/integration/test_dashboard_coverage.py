@@ -197,12 +197,19 @@ class TestCoverageApi:
         # row without the raw code comments (the operator-reported confusion).
         assert "How to read a row" in win.text
         assert "in-pull" in win.text
-        # DEC-FETCHES-COL-HONESTY-001: the column is RELABELLED "EMPTY-retries" and the
-        # legend states it is NOT the total vendor calls — the deeper timeout/429 in-call
-        # retry ladder a FAILED window burns is not counted, so the operator cannot read
-        # the column as "barely retried".
-        assert "EMPTY-retries" in win.text
+        # DEC-FETCHES-COL-RENAME-001: the column is RELABELLED "In-pull retries" (the
+        # #924 "EMPTY-retries" name was itself a mislabel — the in_pull_fetches counter
+        # ALSO counts transient 429/timeout re-attempts, option_ingest.py's inner retry
+        # loop bumps it on every GrowwError retry) and the legend still states it is NOT
+        # the total vendor calls — the deeper timeout/429 in-call retry ladder a FAILED
+        # window burns is not counted, so the operator cannot read the column as
+        # "barely retried".
+        assert "In-pull retries" in win.text
+        assert "EMPTY-retries" not in win.text
         assert "NOT the total vendor calls" in win.text
+        # Context-aware honesty: the legend explains a FAILED row's depth is the
+        # transient-retry depth, an EMPTY row's the empty-retry depth.
+        assert "transient" in win.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
@@ -419,8 +426,11 @@ class TestColdStartSeedInteriorGap:
             assert seeded == 1
             skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
             assert len(skips) == 1
-            gap = skips[0]["largest_gap_sessions"]
-            assert isinstance(gap, int) and gap > 5
+            # DEC-DATA-HONESTY-ALLFILTERED-SEED-001: the refusal WARN now names the
+            # confirmed run's inclusive bar-less bounds instead of a bare length.
+            gap_first = date.fromisoformat(str(skips[0]["gap_first"]))
+            gap_last = date.fromisoformat(str(skips[0]["gap_last"]))
+            assert date(2020, 1, 1) < gap_first <= gap_last < date(2020, 1, 28)
 
             # The un-seeded gappy window is minted PLANNED (re-pullable, self-heals via
             # the fetch-time detector); the seeded clean row stays settled.
@@ -908,6 +918,52 @@ class TestCompletenessScoreboard:
         assert entry["stray_lake_symbols"] == [repr("NSE-M&M")]
         assert entry["unmatched_scored_symbols"] == [repr("M&M")]
 
+    def test_sparse_settled_range_reads_amber_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SPOT-PARTIAL-RANGE-CHIP-001 end-to-end: a SETTLED symbol whose real lake
+        holds only 3 session-days over a 3-month span reads the amber
+        ``settled_partial_range`` on the /completeness scoreboard — the ``session_days``
+        scalar rides the real ``summarize_spot_datasets`` scan, the ledger rollup is
+        settled (nothing left to re-pull), yet the range density (3 / ~60 sessions)
+        honestly fails the 0.95 floor. Pre-fix this read a false ``full``."""
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("SPARSECO")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-sparse",
+                csv_source_sha256="0" * 64,
+            )
+            # A REAL sparse lake: Jan-2020-anchored (the floor passes) but only 3 distinct
+            # session dates across Jan→Mar 2020 (one write per month partition).
+            writer = ParquetWriter(lake_root=tmp_path)
+            for ts, close in [
+                (datetime(2020, 1, 1, 9, 15, tzinfo=UTC), "100.4"),
+                (datetime(2020, 2, 3, 9, 15, tzinfo=UTC), "100.8"),
+                (datetime(2020, 3, 31, 9, 15, tzinfo=UTC), "101.00"),
+            ]:
+                writer.write(
+                    exchange="NSE",
+                    segment="CASH",
+                    symbol="SPARSECO",
+                    interval="1minute",
+                    bars=[_bar(ts, close)],
+                )
+            # A fully-SETTLED ledger rollup for the cell (5 settled, 0 pending, 0 failed) —
+            # the base verdict is ``full``; only the range audit can downgrade it.
+            monkeypatch.setattr(
+                _app_module,
+                "spot_window_rollup",
+                lambda _lake: {("SPARSECO", "1minute"): (5, 0, 0)},
+            )
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
+            body = client.get("/api/v1/completeness/scoreboard").json()
+        per_symbol = {row["symbol"]: row for row in body["spot"]["per_symbol"]}
+        assert per_symbol["SPARSECO"]["1minute"] == "settled_partial_range"
+        assert per_symbol["SPARSECO"]["1minute_start"] == "2020-01-01"
+        # …and it does NOT inflate the FULL 1-minute aggregate.
+        assert body["spot"]["by_category"]["equity"]["full_1minute"] == 0
+
     def test_reconcile_diagnostic_silent_when_lake_key_matches_scored(self, tmp_path: Path) -> None:
         """The clean counterpart: when the lake partition key EQUALS the scored ``symbol_name``
         (``M&M`` on both sides) the symbol scores normally and NO reconciliation WARNING fires —
@@ -990,6 +1046,7 @@ _LEDGER_COLS = [
     "last_attempt_at",
     "empty_streak",
     "in_pull_fetches",
+    "bars_net_new",
 ]
 
 
@@ -1026,7 +1083,12 @@ class TestWindowLedgerApi:
             end=date(2021, 4, 1),
         )
         ledger.record(
-            key, raw_bars=5, error_type=None, bars_appended=5, now=datetime(2026, 6, 9, tzinfo=UTC)
+            key,
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            bars_net_new=4,
+            now=datetime(2026, 6, 9, tzinfo=UTC),
         )
         # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
         save_window_ledger(ledger, tmp_path)
@@ -1038,9 +1100,12 @@ class TestWindowLedgerApi:
         assert row[1] == "NIFTY"  # security_id
         assert row[5] == "SUCCESS"  # status
         assert row[6] == 5  # bars
-        # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): the last column,
-        # 1 for this first-try SUCCESS — the /db grid surfaces the in-pull retry too.
+        # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): 1 for this
+        # first-try SUCCESS — the /db grid surfaces the in-pull retry too.
         assert row[12] == 1
+        # bars_net_new (idx 13, DEC-INGEST-BOUNDARY-INTEGRITY-001): the last column —
+        # the sink's keep-first-DEDUPED net-new count, persisted + surfaced on /db.
+        assert row[13] == 4
         # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
         assert row[9] == "2026-06-09 05:30:00"
         assert "+00:00" not in str(row[9])  # the raw UTC offset is gone

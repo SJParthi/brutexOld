@@ -208,6 +208,74 @@ def test_header_drift_raises() -> None:
         gi.parse_instrument_csv(bad)
 
 
+# ── additive header drift (DEC-INSTRUMENT-HEADER-ADDITIVE-001) ───────────────
+# A purely-ADDITIVE vendor change (extra TRAILING columns after the verified 21)
+# must parse — with ONE loud warning naming the extras — instead of killing the
+# whole universe load. Every OTHER drift (missing / reordered / renamed among
+# the first 21, or an extra that duplicates a known name) still fail-louds.
+def _csv_with_extras(*extras: str, rows: tuple[str, ...] = ()) -> str:
+    header = ",".join((*INSTRUMENT_CSV_COLUMNS, *extras))
+    padded = [f"{row},{','.join('x' for _ in extras)}" for row in rows]
+    return "\n".join([header, *padded]) + "\n"
+
+
+def test_extra_trailing_column_parses_and_warns_once() -> None:
+    text = _csv_with_extras("new_vendor_col", rows=(_NIFTY, _WIPRO))
+    with capture_logs() as logs:
+        pairs = gi.parse_instrument_csv(text)
+    assert {gsym for gsym, _ in pairs} == {"NSE-NIFTY", "NSE-WIPRO"}
+    warnings = [e for e in logs if e["event"] == "groww.instruments.header_extra_columns"]
+    assert len(warnings) == 1
+    assert warnings[0]["extra_columns"] == ["new_vendor_col"]
+    assert warnings[0]["count"] == 1
+
+
+def test_two_extra_trailing_columns_both_named_in_warning() -> None:
+    text = _csv_with_extras("extra_one", "extra_two", rows=(_NIFTY,))
+    with capture_logs() as logs:
+        pairs = gi.parse_instrument_csv(text)
+    assert [gsym for gsym, _ in pairs] == ["NSE-NIFTY"]
+    warnings = [e for e in logs if e["event"] == "groww.instruments.header_extra_columns"]
+    assert len(warnings) == 1
+    assert warnings[0]["extra_columns"] == ["extra_one", "extra_two"]
+    assert warnings[0]["count"] == 2
+
+
+def test_exact_21_column_header_emits_no_extra_columns_warning() -> None:
+    with capture_logs() as logs:
+        pairs = gi.parse_instrument_csv(_csv(_NIFTY))
+    assert [gsym for gsym, _ in pairs] == ["NSE-NIFTY"]
+    assert not [e for e in logs if e["event"] == "groww.instruments.header_extra_columns"]
+
+
+def test_missing_column_among_first_21_raises() -> None:
+    header = ",".join(INSTRUMENT_CSV_COLUMNS[:-1])  # drop the 21st column
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv(header + "\n")
+
+
+def test_reordered_columns_raise() -> None:
+    swapped = list(INSTRUMENT_CSV_COLUMNS)
+    swapped[0], swapped[1] = swapped[1], swapped[0]
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv(",".join(swapped) + "\n")
+
+
+def test_renamed_column_raises() -> None:
+    renamed = list(INSTRUMENT_CSV_COLUMNS)
+    renamed[3] = "groww_sym_v2"  # groww_symbol renamed
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv(",".join(renamed) + "\n")
+
+
+def test_extra_column_duplicating_known_name_raises() -> None:
+    # A trailing duplicate of a known column would make csv.DictReader keep the
+    # LAST occurrence — silently overwriting real cell values — so it is refused.
+    text = _csv_with_extras("lot_size", rows=(_NIFTY,))
+    with pytest.raises(InstrumentFormatError, match="duplicate known"):
+        gi.parse_instrument_csv(text)
+
+
 def test_missing_groww_symbol_raises() -> None:
     with pytest.raises(InstrumentFormatError, match="missing groww_symbol"):
         gi.parse_instrument_row(dict.fromkeys(INSTRUMENT_CSV_COLUMNS, ""))
@@ -278,6 +346,91 @@ def test_all_in_scope_rows_malformed_yields_empty_not_raise() -> None:
     # recoverable state, never a 502). Header is still valid here.
     focused_it = _row(exchange="BSE", exchange_token="93", instrument_type="IDX", segment="CASH")
     assert gi.parse_instrument_csv(_csv(focused_it, _COMMODITY)) == []
+
+
+# ── ParseSkipReport (DEC-PARSE-SKIP-REPORT-001): the skip data is RETURNED, ──
+# not just logged-then-discarded, so the dashboard can persist + surface it.
+def _junk_row(token: str) -> str:
+    """An in-scope IDX row with a blank groww_symbol → always skipped."""
+    return _row(exchange="BSE", exchange_token=token, instrument_type="IDX", segment="CASH")
+
+
+def test_parse_with_report_counts_skips_and_denominator() -> None:
+    parsed, report = gi.parse_instrument_csv_with_report(
+        _csv(_NIFTY, _junk_row("93"), _WIPRO, _junk_row("94"), _COMMODITY)
+    )
+    assert {gsym for gsym, _ in parsed} == {"NSE-NIFTY", "NSE-WIPRO"}
+    # The MCX COMMODITY row is out-of-scope FILTERED, never a "skip".
+    assert report.skipped_count == 2
+    assert report.in_scope_rows == 4  # 2 parsed + 2 skipped
+    assert len(report.samples) == 2
+    assert all("groww_symbol" in reason for reason in report.samples)
+
+
+def test_parse_with_report_clean_master_zero_skips() -> None:
+    parsed, report = gi.parse_instrument_csv_with_report(_csv(_NIFTY, _WIPRO))
+    assert len(parsed) == 2
+    assert report == gi.ParseSkipReport(skipped_count=0, in_scope_rows=2, samples=())
+
+
+def test_parse_wrapper_back_compat_identical_rows() -> None:
+    # The old signature returns EXACTLY the with_report parsed list — clean AND dirty.
+    dirty = _csv(_NIFTY, _junk_row("93"), _WIPRO)
+    assert gi.parse_instrument_csv(dirty) == gi.parse_instrument_csv_with_report(dirty)[0]
+    clean = _csv(_NIFTY, _WIPRO)
+    assert gi.parse_instrument_csv(clean) == gi.parse_instrument_csv_with_report(clean)[0]
+
+
+def test_parse_with_report_header_drift_still_raises() -> None:
+    with pytest.raises(InstrumentFormatError, match="header drift"):
+        gi.parse_instrument_csv_with_report("not,the,groww,header\n")
+
+
+def test_parse_with_report_samples_capped() -> None:
+    junk = [_junk_row(str(1000 + i)) for i in range(gi.PARSE_SKIP_SAMPLE_CAP + 5)]
+    _parsed, report = gi.parse_instrument_csv_with_report(_csv(*junk))
+    assert report.skipped_count == gi.PARSE_SKIP_SAMPLE_CAP + 5
+    assert len(report.samples) == gi.PARSE_SKIP_SAMPLE_CAP
+
+
+def test_parse_with_report_warning_log_unchanged() -> None:
+    # Regression: the DEC-INSTRUMENT-SKIP-NO-GSYM-001 WARNING is byte-identical —
+    # same event, same count, same 3-sample cap — via BOTH entry points.
+    dirty = _csv(_NIFTY, *(_junk_row(str(2000 + i)) for i in range(5)))
+    for entry in (gi.parse_instrument_csv, gi.parse_instrument_csv_with_report):
+        with capture_logs() as logs:
+            entry(dirty)
+        warns = [e for e in logs if e["event"] == "instrument_master.skipped_unparseable_rows"]
+        assert len(warns) == 1
+        assert warns[0]["count"] == 5
+        assert len(warns[0]["samples"]) == 3
+
+
+@pytest.mark.parametrize(
+    ("in_scope", "threshold"),
+    [
+        (0, 10),  # absolute floor on a tiny/empty master
+        (9_999, 10),  # ceil(9.999) = 10 — floor and fraction meet
+        (10_000, 10),  # ceil(10.0) = 10
+        (10_001, 11),  # ceil(10.001) = 11 — never rounds a breach down
+        (162_000, 162),  # the real-master scale: 0.1% of ~162k rows
+    ],
+)
+def test_parse_skip_threshold(in_scope: int, threshold: int) -> None:
+    assert gi.parse_skip_threshold(in_scope) == threshold
+
+
+def test_parse_skip_verdict_boundary() -> None:
+    # GREEN at exactly the threshold; RED one past it (the boundary law).
+    at = gi.ParseSkipReport(skipped_count=10, in_scope_rows=100, samples=())
+    past = gi.ParseSkipReport(skipped_count=11, in_scope_rows=100, samples=())
+    assert gi.parse_skip_verdict(at) is True
+    assert gi.parse_skip_verdict(past) is False
+    # The 0.1% arm: 200 skips on a 200k-row master (threshold 200) is GREEN, 201 RED.
+    big_at = gi.ParseSkipReport(skipped_count=200, in_scope_rows=200_000, samples=())
+    big_past = gi.ParseSkipReport(skipped_count=201, in_scope_rows=200_000, samples=())
+    assert gi.parse_skip_verdict(big_at) is True
+    assert gi.parse_skip_verdict(big_past) is False
 
 
 # ── is_in_scope_row branches ────────────────────────────────────────────────

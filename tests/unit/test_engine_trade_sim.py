@@ -657,7 +657,8 @@ class TestSessionAwareForcedExit:
         # No real HALF_DAY date exists in 2021-2026 (NSE retired pre-festival
         # half-days; the enum is forward-compat). Drive a genuine HALF_DAY
         # session (12:30 early close → forced 12:20) through the production
-        # ``get_session`` seam so the real ``_forced_exit_seconds`` resolver runs.
+        # ``get_session_checked`` seam so the real ``_forced_exit_seconds``
+        # resolver runs.
         half_day = date(2024, 1, 2)
         session = TradingSession(
             date=half_day,
@@ -667,7 +668,7 @@ class TestSessionAwareForcedExit:
         )
         monkeypatch.setattr(
             ts_mod,
-            "get_session",
+            "get_session_checked",
             lambda d: session if d == half_day else None,
         )
         bars = [
@@ -697,10 +698,12 @@ class TestSessionAwareForcedExit:
     def test_non_session_date_falls_back_to_1520_no_crash(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A bar dated on a date with NO trading session (get_session → None) must
-        # not crash; the resolver returns None and is_forced_exit_bar falls back
-        # to the standard 15:20 boundary. A contiguous real feed never hits this.
-        monkeypatch.setattr(ts_mod, "get_session", lambda d: None)
+        # A bar dated on an IN-COVERAGE date with NO trading session
+        # (get_session_checked → None) must not crash; the resolver returns None
+        # and is_forced_exit_bar falls back to the standard 15:20 boundary. A
+        # contiguous real feed never hits this. (An OUT-of-coverage weekday now
+        # raises instead — see TestOutOfCoverageDateRefusesLoudly.)
+        monkeypatch.setattr(ts_mod, "get_session_checked", lambda d: None)
         bars = [
             _bar(15, 18, "100", "100", "100", "100"),
             _bar(15, 19, "100", "100", "100", "100"),
@@ -714,15 +717,15 @@ class TestSessionAwareForcedExit:
     def test_boundary_cache_resolves_once_per_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # O(1)-per-bar / O(1)-space: the boundary is resolved ONCE per IST date
         # and memoised (1-slot, last-date), so a 3-bar single-day feed calls
-        # get_session exactly once.
+        # get_session_checked exactly once.
         calls: list[date] = []
-        real_get_session = ts_mod.get_session
+        real_get_session = ts_mod.get_session_checked
 
         def _counting_get_session(d: date) -> TradingSession | None:
             calls.append(d)
             return real_get_session(d)
 
-        monkeypatch.setattr(ts_mod, "get_session", _counting_get_session)
+        monkeypatch.setattr(ts_mod, "get_session_checked", _counting_get_session)
         bars = [
             _bar(15, 17, "100", "100", "100", "100"),
             _bar(15, 18, "100", "100", "100", "100"),
@@ -762,6 +765,44 @@ class TestSessionAwareForcedExit:
         assert trades[1].exit_ts == _ts(14, 35, day=_AFTERNOON_MUHURAT)  # day-2 Muhurat
         assert trades[0].pnl_paisa == 30
         assert trades[1].pnl_paisa == 10
+
+
+class TestOutOfCoverageDateRefusesLoudly:
+    """Calendar-correctness pack: the OLD silent fabrication is GONE.
+
+    A bar dated on a weekday OUTSIDE the published holiday span used to get a
+    silently-FABRICATED regular 15:20 forced-exit boundary (``get_session``
+    treats an unknown weekday as a trading day). The walker now resolves the
+    session via the strict ``get_session_checked``, so the same feed raises
+    ``HolidayDataUnavailableError`` — loud (quarantined per tuple by
+    DEC-ENGINE-TUPLE-SKIP-RESILIENT-001), never a silent wrong boundary.
+    """
+
+    _OUT_DAY = date(2027, 1, 4)  # Monday, above the 2026 coverage ceiling
+
+    def test_out_of_coverage_weekday_bar_raises_loud(self) -> None:
+        from brutex.calendars.nse import HolidayDataUnavailableError
+
+        bars = [
+            _bar(9, 15, "100", "100", "100", "100", day=self._OUT_DAY),
+            _bar(9, 16, "100", "100", "100", "100", day=self._OUT_DAY),
+        ]
+        # The forced-exit check (and thus the session resolve) runs the moment a
+        # pending entry needs managing — the second push hits the resolver.
+        with pytest.raises(HolidayDataUnavailableError):
+            _trade_with_signal_then_ride(bars)
+
+    def test_in_coverage_behaviour_unchanged(self) -> None:
+        # Byte-identical regression on an in-coverage regular day.
+        bars = [
+            _bar(15, 18, "100", "100", "100", "100"),
+            _bar(15, 19, "100", "100", "100", "100"),
+            _bar(15, 20, "100.30", "101", "100", "100.50"),
+        ]
+        trades = _trade_with_signal_then_ride(bars)
+        assert len(trades) == 1
+        assert trades[0].exit_ts == _ts(15, 20)
+        assert trades[0].pnl_paisa == 30
 
 
 # ────────────────────────────────────────────────────────────────────────

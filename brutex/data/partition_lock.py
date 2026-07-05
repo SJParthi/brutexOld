@@ -22,9 +22,14 @@ Design notes (COMMON · O(1) · honest):
   partition's INODE on every write, so an ``flock`` held on the partition fd would
   guard an orphaned inode while a second process locks the NEW one — no mutual
   exclusion. The lock is therefore taken on a stable per-partition sidecar under
-  ``<lake_root>/.locks/<sha256(dest)>.lock`` that is only ever opened + locked,
-  never replaced. The ``.locks`` dir is OUTSIDE the ``bars/`` + ``options/`` trees
-  and is not a ``*.parquet`` file, so no lake scanner / dataset glob ever sees it.
+  ``<lake_root>/.locks/<sha256(realpath(dest))>.lock`` that is only ever opened +
+  locked, never replaced. The dest path is CANONICALISED via ``os.path.realpath``
+  before hashing (DEC-PARTITION-LOCK-REALPATH-001) so two processes reaching one
+  physical partition via different path spellings (symlink / relative ``lake_root``
+  / ``..``) key the SAME lock file; an already-canonical absolute path hashes
+  byte-identically to the pre-fix scheme. The ``.locks`` dir is OUTSIDE the
+  ``bars/`` + ``options/`` trees and is not a ``*.parquet`` file, so no lake
+  scanner / dataset glob ever sees it.
 * **Per partition, never global.** Writers to DIFFERENT partitions hash to
   DIFFERENT lock files and never contend — the pull's per-window fan-out keeps its
   parallelism; only same-partition writers (across processes) queue. A single
@@ -50,7 +55,12 @@ the TRANSIENT :class:`~brutex.data.errors.PartitionLockTimeout` — the ingest s
 catch it at the window boundary, record the window ``FAILED``, and DEFER it to the next
 pull, exactly like a 429 / timeout (the peer genuinely making progress finishes and the
 deferred window succeeds on the re-pull). A CRASHED holder is still released by the
-kernel (no stale lock). On each poll the bounded wait fires a
+kernel (no stale lock). The default acquire deadline sits strictly BELOW the durable-write
+freeze guard's 90 s deadline (75 s vs :data:`~brutex.adapters.groww.constants.GROWW_WRITE_DEADLINE_S`
+— DEC-WRITE-DEADLINE-LOCK-ORDER-001) so a contended acquire always resolves through THIS
+clean ``PartitionLockTimeout`` path before the outer deadline abandons the write thread
+mid-``flock`` (which would leak the thread + lock fd); env overrides can re-invert the
+ordering, which the write guard WARNs about at use time. On each poll the bounded wait fires a
 :func:`~brutex.observability.progress_beat.emit_progress_beat` so a slow-but-progressing
 pull contending on a busy partition keeps its watchdog heartbeat alive (a no-op when no
 watchdog is registered). ``fcntl.flock`` is POSIX (Linux + macOS — the Track-1 hardware
@@ -95,7 +105,26 @@ _LOCK_SUBDIR = ".locks"
 #: watchdog would kill the whole pull — the real-root anti-stall fix. Generous enough
 #: that a peer doing a normal multi-second read-modify-write is simply waited out, not
 #: spuriously deferred. Operator-tunable via :data:`PARTITION_LOCK_TIMEOUT_ENV`.
-DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS: float = 120.0
+#:
+#: ORDERING INVARIANT (DEC-WRITE-DEADLINE-LOCK-ORDER-001): this default MUST stay
+#: strictly BELOW :data:`~brutex.adapters.groww.constants.GROWW_WRITE_DEADLINE_S`
+#: (90 s) with real margin, because the durable-write freeze guard
+#: (:func:`~brutex.adapters.groww.write_deadline.append_with_deadline`) wraps the
+#: WHOLE ``sink.append`` INCLUDING this lock acquire. The prior 120 s default made
+#: this bound UNREACHABLE: the 90 s write deadline abandoned the write thread while
+#: it still blocked in the ``flock`` poll loop — leaking the thread + lock fd on
+#: every contended window — instead of letting the clean
+#: :class:`~brutex.data.errors.PartitionLockTimeout` defer path fire. 75 s leaves a
+#: 15 s margin for the merge/render/fsync/replace that follows a slow acquire.
+#: The two constants deliberately stay in their own modules (``brutex.data`` must
+#: never import ``brutex.adapters``); the ordering is pinned by the cross-module
+#: regression test ``tests/unit/test_write_deadline_lock_order.py``. HONEST
+#: envelope: the env overrides (:data:`PARTITION_LOCK_TIMEOUT_ENV` /
+#: ``BRUTEX_GROWW_WRITE_DEADLINE_S``) CAN re-invert the ordering at runtime — an
+#: inverted effective configuration is WARNED once per process at use time by
+#: :func:`~brutex.adapters.groww.write_deadline.append_with_deadline`
+#: (``groww.write_deadline.lock_timeout_inversion``), never silently accepted.
+DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS: float = 75.0
 
 #: Sleep between non-blocking re-acquire attempts (seconds). Short so the wait reacts
 #: promptly when the peer releases, but not a busy-spin.
@@ -285,9 +314,21 @@ class BoundedLockRegistry:
 def partition_lock_path(lake_root: Path, dest: Path) -> Path:
     """Return the stable lock-file path for the partition at *dest*.
 
-    Keyed by ``sha256(str(dest))`` so a given partition ALWAYS maps to the same
-    lock file (within a lake root) and two different partitions map to different
-    files — the per-partition granularity the cross-process lock relies on.
+    Keyed by ``sha256(os.path.realpath(dest))`` — the CANONICALISED path
+    (DEC-PARTITION-LOCK-REALPATH-001) — so a given PHYSICAL partition ALWAYS
+    maps to the same lock file (within a lake root) and two different
+    partitions map to different files — the per-partition granularity the
+    cross-process lock relies on. Pre-fix the digest keyed on the RAW path
+    string, so two processes reaching ONE physical partition via DIFFERENT
+    path spellings (a symlinked lake root, a relative ``lake_root``, a ``..``
+    component) computed DIFFERENT lock files and did NOT mutually exclude —
+    silently re-opening the lost-update race this module exists to close.
+    ``os.path.realpath`` resolves symlinks + ``..`` + relative prefixes and is
+    the IDENTITY on an already-canonical absolute path, so every existing lock
+    file name for a canonical path is UNCHANGED (no cross-version split-lock
+    window on the normal deploy). A not-yet-created *dest* is fine —
+    ``realpath`` resolves the existing prefix and keeps the non-existent tail
+    (POSIX, non-strict mode — the same Linux/macOS envelope as ``flock``).
 
     Parameters
     ----------
@@ -300,9 +341,9 @@ def partition_lock_path(lake_root: Path, dest: Path) -> Path:
     Returns
     -------
     Path
-        ``<lake_root>/.locks/<sha256(dest)>.lock`` (never created here).
+        ``<lake_root>/.locks/<sha256(realpath(dest))>.lock`` (never created here).
     """
-    digest = hashlib.sha256(str(dest).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(os.path.realpath(dest).encode("utf-8")).hexdigest()
     return lake_root / _LOCK_SUBDIR / f"{digest}.lock"
 
 

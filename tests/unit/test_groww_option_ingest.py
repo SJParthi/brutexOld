@@ -31,7 +31,11 @@ from brutex.adapters.groww.constants import (
     OPTION_SEGMENT,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
-from brutex.adapters.groww.errors import GrowwTimeoutError
+from brutex.adapters.groww.errors import (
+    GrowwTimeoutError,
+    GrowwTokenIssuanceThrottled,
+    GrowwTokenStillStaleError,
+)
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
     SUSPECTED_PARTIAL_WINDOW_EVENT,
@@ -1071,6 +1075,94 @@ def test_ingest_dns_error_exhausted_is_deferred_not_terminal() -> None:
         end=date(2024, 1, 2),
     )
     assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull, never dropped
+
+
+class _BreakerFeed:
+    """Recording ``ErrorStormBreaker`` stand-in (the option twin of the spot spine's spy).
+
+    Captures the exact ``observe_transport_failure`` arguments so the
+    auth-ladder-exclusion tests pin the breaker feed BYTE-IDENTICAL to the
+    pre-guard behaviour (DEC-AUTH-LADDER-EXCLUDE-001 — the guard withholds only
+    the ``on_timeout`` step, never the dead-credential containment chain).
+    """
+
+    def __init__(self) -> None:
+        self.fed: list[tuple[str, str, object, bool]] = []
+        self.successes: list[str] = []
+
+    def observe_transport_failure(
+        self, symbol: str, *, error_type: str, window_key: object, still_stale: bool = False
+    ) -> None:
+        self.fed.append((symbol, error_type, window_key, still_stale))
+
+    def observe_success(self, symbol: str) -> None:
+        self.successes.append(symbol)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GrowwTokenStillStaleError("re-read returned the same dead token"),
+        GrowwTokenIssuanceThrottled("mint throttled"),
+    ],
+)
+def test_ingest_retryable_auth_family_feeds_neither_hook(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """DEC-AUTH-LADDER-EXCLUDE-001 (option-spine twin): auth-family feeds NEITHER hook.
+
+    A retryable auth-family failure (token-stale / mint-throttle) is credential
+    state, not candle-endpoint evidence — it must not step the AIMD timeout
+    ladder toward the 1 r/s deep floor. The FAILED ledger row, the deferred
+    (``still_failed``) report shape, and the storm-breaker feed stay
+    byte-identical (the regression: before the guard ``on_timeout()`` fired here).
+    """
+
+    def _auth_fetch(*_args: object, **_kw: object) -> list[CandleBar]:
+        raise error
+
+    monkeypatch.setattr(_oi, "fetch_option_candles", _auth_fetch)
+    ledger = WindowLedger()
+    breaker = _BreakerFeed()
+    hits: list[int] = []
+    timeouts: list[int] = []
+    report = ingest_option_contract(
+        _client(_FakeSDK(payload=_candles())),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        on_rate_limit=lambda: hits.append(1),
+        on_timeout=lambda: timeouts.append(1),
+        ledger=ledger,
+        storm_breaker=breaker,  # type: ignore[arg-type]
+        max_attempts=0,
+        now_ist=_now,
+    )
+    # NEITHER controller hook fires — no ladder step, no rate step.
+    assert timeouts == []
+    assert hits == []
+    # Containment BYTE-IDENTICAL: deferred (re-pullable), never terminally quarantined…
+    assert report.still_failed_windows == 1 and report.transient_failures == 1
+    assert report.retried_windows == 0
+    # …the ledger row is FAILED with the honest error type + in-pull fetch count…
+    [row] = ledger.records()
+    assert row.last_error == type(error).__name__
+    assert row.in_pull_fetches == 1
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)  # FAILED — deferred, never dropped
+    # …and the breaker was fed EXACTLY once — the UNDERLYING symbol, the same
+    # window key, and the still_stale flag routing the dead-credential streak.
+    expected_stale = isinstance(error, GrowwTokenStillStaleError)
+    assert breaker.fed == [("NIFTY", type(error).__name__, key, expected_stale)]
+    assert breaker.successes == []
 
 
 def test_run_multi_contract_dns_failure_does_not_terminally_quarantine() -> None:
@@ -2489,19 +2581,74 @@ class TestSuspiciousEmptyFlag:
         assert [r.underlying for r in scan.suspicious] == ["RELIANCE"]
 
     def test_low_leg_never_planned_sibling_still_flags(self) -> None:
-        # HONEST-residual pin (docstring-documented, accepted): a NEVER-PLANNED sibling —
+        # HONEST-residual pin (docstring-documented): a NEVER-PLANNED sibling —
         # a far-future contract skipped at planning time (fno.window_not_open,
         # DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
-        # IngestReport pair, no failure) — is structurally INVISIBLE to Tier B, so a
+        # IngestReport pair, no failure) — stays structurally INVISIBLE to Tier B, so a
         # 1-clean-empty-near-leg + 1-not-yet-open-far-leg chain STILL flags low_leg=True.
-        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically);
-        # observe-only WARN noise, deliberately not mechanised away.
+        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically).
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: the flag now SELF-DESCRIBES — when the
+        # caller threads never_planned_symbols the report carries never_planned_pairs,
+        # but the flag DECISION is untouched (annotate, NEVER suppress).
         contracts, _ = _empty_chain("BEL", 2)
         pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
         # contracts[1] was never planned: absent from pairs AND from failed_symbols.
         scan = scan_underlying_all_empty(pairs, contracts, [])
         assert scan.suspicious == (
             UnderlyingEmptyReport(underlying="BEL", attempted_pairs=1, stored_bars=0, low_leg=True),
+        )
+        # Threading the planner's omitted set STILL flags — now self-described.
+        annotated = scan_underlying_all_empty(pairs, contracts, [], [contracts[1].symbol])
+        assert annotated.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="BEL",
+                attempted_pairs=1,
+                stored_bars=0,
+                low_leg=True,
+                never_planned_pairs=1,
+            ),
+        )
+
+    def test_never_planned_default_empty_scan_byte_identical(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001 back-compat: an explicit empty
+        # never_planned_symbols yields the EXACT same scan as omitting the param
+        # (every report carries the default never_planned_pairs=0).
+        contracts, pairs = _empty_chain("M&M", 3)
+        assert scan_underlying_all_empty(pairs, contracts, [], []) == scan_underlying_all_empty(
+            pairs, contracts
+        )
+
+    def test_never_planned_unknown_symbol_is_skipped(self) -> None:
+        # An omitted symbol NOT in contract_list is defensively dropped (mirrors the
+        # unknown failed_symbols drop) — the flag + annotation are unaffected.
+        contracts, pairs = _empty_chain("RELIANCE", 1)
+        scan = scan_underlying_all_empty(pairs, contracts, [], ["NSE-GHOST-99-FUT"])
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="RELIANCE",
+                attempted_pairs=1,
+                stored_bars=0,
+                low_leg=True,
+                never_planned_pairs=0,
+            ),
+        )
+
+    def test_never_planned_never_suppresses_tier_a(self) -> None:
+        # A Tier A whole-chain flag with never-planned siblings STILL fires and is
+        # annotated — the count is data, never a suppression lever.
+        contracts, _ = _empty_chain("VEDL", 5)
+        pairs = {(c.symbol, "1day"): _ireport(windows=1, bars=0) for c in contracts[:3]}
+        scan = scan_underlying_all_empty(
+            pairs, contracts, [], [contracts[3].symbol, contracts[4].symbol]
+        )
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="VEDL",
+                attempted_pairs=3,
+                stored_bars=0,
+                low_leg=False,
+                never_planned_pairs=2,
+            ),
         )
 
     def test_tier_a_ignores_nonclean_and_failed_siblings(self) -> None:
@@ -2548,6 +2695,42 @@ class TestSuspiciousEmptyFlag:
         assert warns[0]["underlying"] == repr("WIPRO")
         assert warns[0]["attempted_pairs"] == 1
         assert warns[0]["low_leg"] is True
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: the payload always carries the
+        # annotation key (0 when nothing was omitted by the planner).
+        assert warns[0]["never_planned_pairs"] == 0
+
+    def test_emit_warn_payload_carries_never_planned_pairs(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: a low-leg flag with a never-planned
+        # sibling self-describes in the WARN payload — triage reads low_leg=True +
+        # never_planned_pairs=1 as "probably a far-leg-not-open chain, weigh lower".
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        scan = scan_underlying_all_empty(pairs, contracts, [], [contracts[1].symbol])
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(scan, pull_id="pid-1")
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("BEL")
+        assert warns[0]["low_leg"] is True
+        assert warns[0]["never_planned_pairs"] == 1
+
+    def test_emit_helper_threads_never_planned_symbols(self) -> None:
+        # emit_underlying_all_empty threads never_planned_symbols → scan → WARN payload
+        # (the guarded COMMON helper, used by the production post-drain call site).
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        with capture_logs() as logs:
+            _oi.emit_underlying_all_empty(
+                pairs,
+                contracts,
+                never_planned_symbols=[contracts[1].symbol],
+                pull_id="pid-9",
+            )
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["pull_id"] == "pid-9"
+        assert warns[0]["never_planned_pairs"] == 1
+        assert warns[0]["low_leg"] is True  # annotated, NEVER suppressed
 
     def test_emit_silent_when_clean(self) -> None:
         with capture_logs() as logs:
@@ -3744,6 +3927,364 @@ class TestEmptyBreakerOptionSpine:
         assert rec.status == _EMPTY_STATUS  # NOT SKIPPED — settle suppressed
         assert rec.empty_streak == 0  # untrusted empty: streak preserved
         assert not ledger.is_skippable(key)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# DEC-INGEST-BOUNDARY-INTEGRITY-001 — calendar-aware boundary + all-filtered
+# demotion + persisted bars_net_new (the F&O spine)
+# ─────────────────────────────────────────────────────────────────────────
+
+# 2024-01-06 (Saturday) 10:00 IST — in-window wall clock, NO session (the
+# non-trading-date leak the date-blind filter wrongly stored).
+_SATURDAY = "2024-01-06T10:00:00"
+# 2024-01-02 09:00 IST — pre-open on a regular trading day.
+_PRE_OPEN = "2024-01-02T09:00:00"
+# 2024-11-01 18:30 IST — inside the Diwali muhurat session 18:00–19:00.
+_MUHURAT_EVENING = "2024-11-01T18:30:00"
+
+
+class _NetNewSink:
+    """Recording sink whose result carries an EXPLICIT deduped ``bars_net_new``
+    (``bars_appended - 1``, floored at 0) so the two counts DIFFER — proving the
+    ledger stores the sink's deduped count, not a mirror of the input count."""
+
+    def __init__(self) -> None:
+        self.appends: list[int] = []
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval
+        self.appends.append(len(bars))
+        return SinkAppendResult(
+            bars_appended=len(bars),
+            partitions_written=1,
+            write_results=(),
+            bars_net_new=max(len(bars) - 1, 0),
+        )
+
+
+def _option_key(interval: str = "1minute", *, end: date = date(2024, 1, 8)) -> WindowKey:
+    return WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval=interval,
+        start=date(2024, 1, 1),
+        end=end,
+    )
+
+
+def test_option_session_filter_warns_exactly_once_per_window_with_counts() -> None:
+    # One window, three bars: kept / pre-open (off-session) / Saturday
+    # (non-trading date). EXACTLY ONE aggregated WARNING with identity + counts.
+    payload = {
+        "candles": [
+            [_IN_SESSION, 100.0, 110.0, 90.0, 105.0, 50, 7],
+            [_PRE_OPEN, 100.0, 110.0, 90.0, 105.0, 50, 7],
+            [_SATURDAY, 100.0, 110.0, 90.0, 105.0, 50, 7],
+        ]
+    }
+    sdk = _FakeSDK(payload=payload)
+    sink = _Sink()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            now_ist=_now,
+        )
+    assert report.bars_appended == 1  # only the in-session Tuesday bar survives
+    warns = [e for e in logs if e["event"] == "option.ingest.session_filter.dropped"]
+    assert len(warns) == 1
+    assert warns[0]["dropped"] == 2
+    assert warns[0]["off_session"] == 1
+    assert warns[0]["non_trading_date"] == 1
+    assert warns[0]["window_start"] == "2024-01-01"
+    assert warns[0]["window_end"] == "2024-01-08"
+    assert warns[0]["symbol"] == "NSE-NIFTY-02Jan25-28500-CE"
+
+
+def test_option_muhurat_evening_bar_is_now_stored() -> None:
+    # SANCTIONED BEHAVIOR CHANGE (DEC-INGEST-BOUNDARY-INTEGRITY-001): an evening
+    # Diwali-muhurat option bar was wrongly dropped by the date-blind filter.
+    sdk = _FakeSDK(payload=_candles(_MUHURAT_EVENING))
+    sink = _Sink()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 11, 1),
+            end=date(2024, 11, 2),
+            now_ist=_now,
+        )
+    assert report.bars_appended == 1  # KEPT (was 0 under the old filter)
+    assert not any(e["event"] == "option.ingest.session_filter.dropped" for e in logs)
+
+
+def test_option_all_filtered_window_is_demoted_to_repullable() -> None:
+    # GAP (c), F&O scope extension: raw bars > 0 but EVERY one session-filtered →
+    # demoted FAILED + ALL_FILTERED (re-examinable). UNgated on this spine — the
+    # F&O dry-run client returns EMPTY payloads (raw_bars == 0), so the flag can
+    # never fire offline; #1031's observe-only stance for the liquidity-heuristic
+    # detectors (interior gap / partial window) is PRESERVED.
+    from brutex.data.session import ALL_FILTERED
+
+    sdk = _FakeSDK(payload=_candles(_SATURDAY))
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 0
+    rec = ledger.records()[0]
+    assert rec.status == "FAILED"
+    assert rec.last_error == ALL_FILTERED
+    assert rec.empty_streak == 1  # bounded-settle machinery engaged
+    assert not ledger.is_skippable(_option_key())  # re-pulled next pass
+
+
+def test_option_all_filtered_settles_skipped_after_threshold() -> None:
+    # BOUNDED: after EMPTY_TERMINAL_THRESHOLD consecutive all-filtered pulls the
+    # contract window settles SKIPPED so the universe pull converges (data-safe —
+    # the sink is keep-first; nothing is deleted).
+    from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, SKIPPED
+
+    ledger = WindowLedger()
+    for _ in range(EMPTY_TERMINAL_THRESHOLD):
+        sdk = _FakeSDK(payload=_candles(_SATURDAY))
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            ledger=ledger,
+            now_ist=_now,
+        )
+    assert ledger.records()[0].status == SKIPPED
+
+
+def test_option_dedup_to_zero_net_new_stays_success() -> None:
+    # ORTHOGONALITY: a re-pull whose bars all dedup to ZERO net-new still passes
+    # bars THROUGH the filter → SUCCESS (the discriminator reads filter
+    # survivors, never the sink dedup). _Sink models full dedup (bars_net_new=0).
+    from brutex.data.window_ledger import SUCCESS
+
+    sdk = _FakeSDK(payload=_candles(_IN_SESSION))
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _Sink(),  # bars_appended=1, bars_net_new=0 (all deduped)
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    rec = ledger.records()[0]
+    assert rec.status == SUCCESS
+    assert rec.bars == 1
+    assert rec.bars_net_new == 0  # GAP (d): the deduped count is persisted
+
+
+def test_option_bars_net_new_threaded_from_sink_to_ledger() -> None:
+    # GAP (d): the ledger stores the SINK's deduped net-new — deliberately
+    # different from bars_appended so a mirror would fail.
+    payload = {
+        "candles": [
+            ["2024-01-02T09:30:00", 100.0, 110.0, 90.0, 105.0, 50, 7],
+            ["2024-01-02T09:31:00", 101.0, 111.0, 91.0, 106.0, 51, 8],
+        ]
+    }
+    sdk = _FakeSDK(payload=payload)
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _NetNewSink(),  # bars_appended=2, bars_net_new=1
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    rec = ledger.records()[0]
+    assert rec.bars == 2
+    assert rec.bars_net_new == 1
+
+
+def test_option_write_deferred_record_carries_known_zero_net_new() -> None:
+    # A deferred write (lock timeout) stored nothing — a KNOWN 0, not None.
+    sdk = _FakeSDK(payload=_candles(_IN_SESSION))
+    ledger = WindowLedger()
+    ingest_option_contract(
+        _client(sdk),
+        _LockTimeoutSink(),
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    rec = ledger.records()[0]
+    assert rec.last_error == "PartitionLockTimeout"
+    assert rec.bars_net_new == 0
+
+
+def test_option_daily_interval_is_not_session_filtered_and_never_all_filtered() -> None:
+    # The daily path keeps its no-filter behavior (a daily bar has no intraday
+    # time) — an out-of-session-looking DAILY bar is stored and never demoted.
+    from brutex.data.window_ledger import SUCCESS
+
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 1
+    rec = ledger.records()[0]
+    assert rec.status == SUCCESS
+    assert rec.last_error is None
+
+
+# 2024-01-09 (Tuesday, a regular NSE trading day) 10:00 IST — in-session for its
+# OWN date but STRICTLY AFTER the [2024-01-01, 2024-01-08] test window's clamped
+# end, so the session filter KEEPS it and drop_bars_after removes it.
+_FUTURE_TRADING = "2024-01-09T10:00:00"
+
+
+def test_option_all_future_dropped_window_is_demoted() -> None:
+    # FAILS-BEFORE / PASSES-AFTER (DEC-DATA-HONESTY-ALLFILTERED-SEED-001, the F&O
+    # twin of the spot boundary-widen): a window whose every bar survives the
+    # session filter but is dropped by drop_bars_after previously recorded a
+    # silent-green SUCCESS with zero stored bars.
+    from brutex.data.session import ALL_FILTERED
+
+    sdk = _FakeSDK(payload=_candles(_FUTURE_TRADING))
+    ledger = WindowLedger()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1minute",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 8),
+        ledger=ledger,
+        now_ist=_now,
+    )
+    assert report.bars_appended == 0
+    rec = ledger.records()[0]
+    assert rec.status == "FAILED"
+    assert rec.last_error == ALL_FILTERED
+    assert rec.empty_streak == 1
+
+
+def test_option_all_future_dropped_daily_warns_but_never_demotes() -> None:
+    # The derived-1day gate on the F&O spine (the twin of the spot
+    # `test_all_future_dropped_daily_warns_but_never_demotes` pin): a DAILY
+    # window emptied at the future-bar drop stage still records SUCCESS — the
+    # `interval != _DAILY` conjunct in `all_filtered` is LOAD-BEARING new logic
+    # (on main the daily path structurally never assigned the session verdict;
+    # after the boundary-widen ONLY this gate protects daily F&O windows), so
+    # this test exists to KILL the `all_filtered = all_boundary_filtered`
+    # mutant (drop the non-daily gate → the row demotes FAILED+ALL_FILTERED
+    # and this assertion fails). The visibility WARN still fires — never gated.
+    from brutex.data.window_ledger import SUCCESS
+
+    sdk = _FakeSDK(payload=_candles(_FUTURE_TRADING))
+    ledger = WindowLedger()
+    with capture_logs() as logs:
+        report = ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            ledger=ledger,
+            now_ist=_now,
+        )
+    assert report.bars_appended == 0  # the future phantom never lands
+    rec = ledger.records()[0]
+    assert rec.status == SUCCESS
+    assert rec.last_error is None
+    assert rec.empty_streak == 0
+    warns = [e for e in logs if e["event"] == "ingest.window.all_bars_filtered"]
+    assert len(warns) == 1
+    assert warns[0]["raw_bars"] == 1
+    assert warns[0]["kept_bars"] == 0
+    assert warns[0]["interval"] == "1day"
+
+
+def test_option_all_filtered_warn_carries_window_bounds() -> None:
+    # The dedicated grep-able WARNING fires on the F&O spine too, carrying the
+    # window bounds (spot-parity triage fields — refuter F-8 fold) + the
+    # contract coordinates; the per-cause session_filter warn ALSO fires for a
+    # session-filtered shape (two distinguishable events, one signal each).
+    sdk = _FakeSDK(payload=_candles(_SATURDAY))
+    with capture_logs() as logs:
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            now_ist=_now,
+        )
+    warns = [e for e in logs if e["event"] == "ingest.window.all_bars_filtered"]
+    assert len(warns) == 1
+    assert warns[0]["log_level"] == "warning"
+    assert warns[0]["raw_bars"] == 1
+    assert warns[0]["kept_bars"] == 0
+    assert warns[0]["window_start"] == "2024-01-01"
+    assert warns[0]["window_end"] == "2024-01-08"
+    assert warns[0]["symbol"] == "NSE-NIFTY-02Jan25-28500-CE"
+    assert warns[0]["interval"] == "1minute"
+
+
+def test_option_kept_bars_emit_no_all_filtered_warn() -> None:
+    # A surviving bar keeps the dedicated event silent.
+    sdk = _FakeSDK(payload=_candles(_IN_SESSION))
+    with capture_logs() as logs:
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            now_ist=_now,
+        )
+    assert not any(e["event"] == "ingest.window.all_bars_filtered" for e in logs)
 
 
 # ── make_breaker_canary_probe (DEC-EMPTY-BREAKER-CANARY-001) ─────────────────
