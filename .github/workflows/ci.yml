@@ -682,9 +682,11 @@ jobs:
             pytest --cov=brutex.data.greeks_enrich --cov=brutex.data.spot_join --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_greeks_enrich.py tests/unit/test_data_spot_join.py \
               tests/unit/test_greeks_enrich_audit_regressions.py \
+              tests/unit/test_greeks_enrich_parallel.py \
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
-              tests/golden/test_greeks_enrich_golden.py
+              tests/golden/test_greeks_enrich_golden.py \
+              tests/golden/test_greeks_enrich_parallel_golden.py
           else
             echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
           fi

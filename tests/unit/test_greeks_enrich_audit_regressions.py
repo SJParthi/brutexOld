@@ -424,8 +424,10 @@ class TestLakeWriteHaltReRaise:
     identically; the per-target ``except Exception`` used to swallow it and
     keep reading + solving + write-hammering every remaining contract with
     ``errored=N`` indistinguishable from N corrupt contracts. It now
-    re-raises immediately (the FENCED ``_enrich_greeks_from_minute`` wrapper
-    still catches everything, so the pull itself can never fail).
+    re-raises immediately. Since DEC-GREEKS-PARALLEL-001 the
+    ``_enrich_greeks_from_minute`` wrapper RE-RAISES this halt too (plus
+    ``GreeksEnrichPoolBroken``) so it reaches the CRITICAL pull-halt alert —
+    every OTHER enrich error stays fenced and can never fail the pull.
     """
 
     def test_halt_on_first_target_stops_the_pass_immediately(self, tmp_path: Path) -> None:

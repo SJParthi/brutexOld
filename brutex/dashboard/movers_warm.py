@@ -24,33 +24,102 @@ The warm is a pure read-only accelerator over the just-filled lake. A warmer tha
 propagates to fail the already-successful pull (Correctness of the pull > the warm's
 latency benefit). The cached value (even an empty candidate set) is still valid for the
 generation, so the next ``/movers`` open is correct regardless.
+
+## Bounded per-job SLOWNESS (DEC-MOVERS-WARM-UNBLOCK-001)
+
+Best-effort covered a job that *raises*, but a job that is merely SLOW was unbounded:
+the 2026-07-04/05 forensics (pull_id ``22fc7739f719``) measured 170-256 s PER warm key
+over the 39-key grid (~1.7-2.6 h total; one BSE key with ZERO candidates cost 169.4 s of
+pure lake-walk) because each job re-walked the whole options-exploded lake. Each job now
+runs under the COMMON :func:`~brutex.adapters.groww.deadline.run_with_deadline` freeze
+guard (the #910/#999 guard — REUSED, no copy; CLAUDE.md §11 COMMON), default
+:data:`DEFAULT_WARM_JOB_DEADLINE_S` (300 s), env :data:`WARM_JOB_DEADLINE_ENV`. A
+timed-out job is counted ``failed`` + logged ``movers.warm.job_timeout`` and the warm
+CONTINUES with the next coordinate — the pull is never failed by a slow warm.
+
+HONEST envelope (Golden Rule #10, the #999 pattern): the guard runs the job in a daemon
+worker thread — an abandoned (timed-out) worker CANNOT be killed; it dies with the
+process or when its blocking read finally returns. If it eventually completes, its
+``get_or_compute`` result is the CORRECT value for that generation, so a late completion
+can only populate the cache with the same data the route would compute — never a wrong
+snapshot.
 """
 
 from __future__ import annotations
 
+import math
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import structlog
 
+from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
 from brutex.observability.progress_beat import emit_progress_beat
 
 __all__ = [
+    "DEFAULT_WARM_JOB_DEADLINE_S",
     "WARM_EXCHANGES",
+    "WARM_JOB_DEADLINE_ENV",
     "WARM_OPTIONS_TIERS",
     "WARM_OPTIONS_TRACKS",
     "MoversWarmResult",
     "futures_warm_grid",
     "latest_movers_date",
     "options_warm_grid",
+    "resolve_warm_job_deadline_s",
     "spot_warm_grid",
     "warm_coordinate_label",
     "warm_movers_snapshots",
 ]
 
 _LOG = structlog.get_logger(__name__)
+
+#: Default per-warm-job wall-clock deadline (seconds). Sized from the 2026-07-04/05
+#: forensics: a HEALTHY warmed coordinate completes in seconds (28 s for the WHOLE
+#: 39-key grid pre-materialization), while the pathological full-lake-walk jobs ran
+#: 170-256 s each — 300 s passes a slow-but-live job and cuts an effectively-wedged
+#: one, keeping the worst-case whole-grid warm bounded at ~39 × 300 s in the
+#: background (DEC-MOVERS-WARM-UNBLOCK-001; the movers GATE no longer waits on it).
+DEFAULT_WARM_JOB_DEADLINE_S: Final[float] = 300.0
+
+#: Env override for the per-warm-job deadline (seconds).
+WARM_JOB_DEADLINE_ENV: Final[str] = "BRUTEX_MOVERS_WARM_JOB_DEADLINE_S"
+
+
+def resolve_warm_job_deadline_s(raw: str | None = None) -> float:
+    """Resolve the per-warm-job deadline: env override, else the audited default.
+
+    Reads :data:`WARM_JOB_DEADLINE_ENV` (``BRUTEX_MOVERS_WARM_JOB_DEADLINE_S``);
+    falls back to :data:`DEFAULT_WARM_JOB_DEADLINE_S` when unset, blank,
+    non-numeric, non-positive, OR non-finite (``nan``/``inf`` parse as floats but
+    would DEFEAT the bound — an ``inf`` deadline never expires, re-introducing the
+    unbounded warm this fix removes). A bad value can therefore NEVER disable the
+    bound (fail-safe to the audited default, Golden Rule #1). Mirrors the COMMON
+    validation shape of
+    :func:`~brutex.adapters.groww.write_deadline.resolve_write_deadline_seconds`
+    (CLAUDE.md §11 COMMON shape). O(1).
+
+    Parameters
+    ----------
+    raw
+        The deadline value (``None`` reads :data:`WARM_JOB_DEADLINE_ENV`); a test
+        may pass one directly.
+    """
+    value = os.environ.get(WARM_JOB_DEADLINE_ENV) if raw is None else raw
+    if value is None or not value.strip():
+        return DEFAULT_WARM_JOB_DEADLINE_S
+    try:
+        parsed = float(value)
+    except ValueError:
+        return DEFAULT_WARM_JOB_DEADLINE_S
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        return DEFAULT_WARM_JOB_DEADLINE_S
+    return parsed
+
 
 #: The spot segments the movers default snapshot reads (INDEX + CASH 1day partitions).
 _SPOT_SEGMENTS: tuple[str, ...] = ("INDEX", "CASH")
@@ -216,6 +285,7 @@ def warm_movers_snapshots(
     segment: str = "",
     labels: Sequence[str] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    job_deadline_s: float | None = None,
 ) -> MoversWarmResult:
     """Run each warm *job* (compute+cache one default snapshot); return the honest tally.
 
@@ -225,7 +295,10 @@ def warm_movers_snapshots(
     empty snapshot counts ``0`` (honest). A job that RAISES (a transient lake-read race) is
     logged, swallowed and counted in ``failed`` — the warm is best-effort and NEVER fails the
     already-successful pull that triggered it (the cached value, if any, is still valid for
-    the generation).
+    the generation). A job that is merely SLOW is bounded too (DEC-MOVERS-WARM-UNBLOCK-001):
+    each job runs under the COMMON ``run_with_deadline`` freeze guard (*job_deadline_s*), and
+    a timeout is counted ``failed`` + logged ``movers.warm.job_timeout`` — never an unbounded
+    stall of the whole warm.
 
     Per-coordinate PROGRESS (DEC-MOVERS-WARM-PROGRESS-001 — the forensic fix for
     the silent 9+ minutes between ``pipeline.movers_warm.started`` and ``…done``
@@ -255,12 +328,24 @@ def warm_movers_snapshots(
         Optional ``(done_so_far, total)`` observer invoked BEFORE each job runs
         (``done_so_far`` counts completed jobs, so the first call is ``(0, N)``)
         and once more after the last job completes (``(N, N)``).
+    job_deadline_s
+        The per-job wall-clock deadline in seconds (DEC-MOVERS-WARM-UNBLOCK-001).
+        ``None`` (the default) resolves :func:`resolve_warm_job_deadline_s` (env
+        :data:`WARM_JOB_DEADLINE_ENV`, default :data:`DEFAULT_WARM_JOB_DEADLINE_S`
+        = 300 s). Each job runs under the COMMON
+        :func:`~brutex.adapters.groww.deadline.run_with_deadline` freeze guard; a
+        job that blows the deadline is counted ``failed``, logged
+        ``movers.warm.job_timeout``, and the warm CONTINUES. HONEST envelope
+        (Golden Rule #10, same as #999): the abandoned worker is a daemon thread
+        that CANNOT be killed — it dies with the process, and a late completion
+        only caches the correct generation-keyed value.
 
     Returns
     -------
     MoversWarmResult
         The ``warmed`` / ``failed`` / ``total`` tally.
     """
+    deadline = resolve_warm_job_deadline_s() if job_deadline_s is None else job_deadline_s
     total = len(jobs)
     warmed = 0
     failed = 0
@@ -283,9 +368,36 @@ def warm_movers_snapshots(
         emit_progress_beat()
         _observe(index - 1)
         label = labels[index - 1] if labels is not None and index <= len(labels) else str(index)
+        # Job-level start event (DEC-MOVERS-WARM-UNBLOCK-001 observability): the
+        # 2026-07-04 incident's per-coordinate 170-256 s stalls were invisible
+        # between coordinate-DONE lines — the start line + the done line bound
+        # each job's elapsed from the log alone. BOUNDED cadence by construction
+        # (≤ 39 coordinates per DEC-MOVERS-WARM-GRID-001).
+        _LOG.info(
+            "movers.warm.job_start",
+            segment=segment,
+            key=label,
+            index=index,
+            total=total,
+            deadline_s=deadline,
+        )
         job_started = time.monotonic()
         try:
-            candidates = job()
+            # The COMMON freeze guard (#910/#999 — REUSED, no copy): bounds a job
+            # that is SLOW-but-never-raises (the unbounded-walk incident class).
+            candidates = run_with_deadline(job, deadline)
+        except DeadlineExceeded:
+            failed += 1
+            _LOG.warning(
+                "movers.warm.job_timeout",
+                segment=segment,
+                key=label,
+                index=index,
+                total=total,
+                deadline_s=deadline,
+                elapsed_s=round(time.monotonic() - job_started, 3),
+            )
+            continue
         except Exception as exc:  # pylint: disable=broad-except - best-effort warm; logged, never re-raised
             failed += 1
             _LOG.warning(

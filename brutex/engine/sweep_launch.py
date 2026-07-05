@@ -14,10 +14,11 @@ Rule 12). Three concerns, one module:
    use their own raising ``_NoDedup`` stand-in). Eagerly building
    ``ComboDedup(OptionDedupIndex(capacity=bloom_capacity_hint(grid), …))`` at
    launch therefore allocated up to :data:`~brutex.orchestrator.bloom.MAX_BLOOM_BYTES`
-   (16 GiB) of never-read Bloom bit array below the wall — and REFUSED the
+   (RAM-derived since DEC-RAM-BUDGETS-001; 16 GiB on the §8 box / undetected
+   floor) of never-read Bloom bit array below the wall — and REFUSED the
    launch with :class:`~brutex.orchestrator.bloom.BloomTooLargeError` above it
-   (≈4.1e9 mask identities at fpr 1e-7) for a filter that would never be
-   consulted. :func:`plan_launch_dedup` returns the no-alloc
+   (≈4.1e9 mask identities at fpr 1e-7 at that 16 GiB figure) for a filter
+   that would never be consulted. :func:`plan_launch_dedup` returns the no-alloc
    :class:`DigestPathNoDedup` on the digest path and maps the legacy build's
    ``BloomTooLargeError`` to the operator-facing
    :class:`SweepLaunchCapacityError` naming the capacity math.
@@ -74,7 +75,8 @@ class SweepLaunchCapacityError(SweepLaunchError):
     :class:`~brutex.orchestrator.bloom.BloomTooLargeError`: the message names
     the grid's mask-identity count (:func:`~brutex.engine.sweep_orchestrator.bloom_capacity_hint`),
     the computed bit-array bytes vs :data:`~brutex.orchestrator.bloom.MAX_BLOOM_BYTES`
-    (via the chained cause's own message), the ≈4.1e9-identity ceiling, and the
+    (via the chained cause's own message), the identity ceiling implied by the
+    machine's RAM-derived wall (≈4.1e9 at the 16 GiB floor), and the
     remedy — so the CLI exits with an actionable error instead of a raw
     traceback. Raised only on the legacy ``digest_path=False`` arm; the
     production digest path never builds this Bloom at all.
@@ -171,7 +173,9 @@ def launch_bloom_identity_ceiling(fpr_target: float = LAUNCH_DEDUP_FPR) -> int:
     (``m_bits = ceil(-capacity · ln p / ln 2²)``) solved at
     ``m_bits = MAX_BLOOM_BYTES · 8``: capacities above this wall raise
     :class:`~brutex.orchestrator.bloom.BloomTooLargeError` at construction.
-    ≈4.097e9 identities at the launch default ``fpr_target=1e-7``. Used for
+    ≈4.097e9 identities at the launch default ``fpr_target=1e-7`` and the
+    16 GiB ``MAX_BLOOM_BYTES`` undetected-RAM floor — the ceiling tracks the
+    RAM-derived wall automatically (DEC-RAM-BUDGETS-001). Used for
     the operator-facing capacity math in :class:`SweepLaunchCapacityError`
     ONLY — never for sizing (the honest, slightly-conservative-free
     approximation ignores the per-capacity ``ceil`` rounding; Golden

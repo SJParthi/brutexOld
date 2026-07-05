@@ -4433,9 +4433,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # (the parallel driver's workers use their own raising ``_NoDedup``). The
     # eager ``ComboDedup(OptionDedupIndex(capacity=bloom_capacity_hint(grid),
     # …))`` + LMDB combo-dedup store previously built here were pure dead
-    # weight: up to ~16 GiB of never-read Bloom bit array below the
-    # MAX_BLOOM_BYTES wall, and a BloomTooLargeError launch REFUSAL above it
-    # (~4.1e9 mask identities) for a filter no code path reads.
+    # weight: up to MAX_BLOOM_BYTES (RAM-derived since DEC-RAM-BUDGETS-001;
+    # ~16 GiB at the undetected floor) of never-read Bloom bit array below the
+    # wall, and a BloomTooLargeError launch REFUSAL above it (~4.1e9 mask
+    # identities at that floor) for a filter no code path reads.
     # ``plan_launch_dedup(grid, digest_path=True)`` below returns a no-alloc
     # raising sink instead (a consult would be a real invariant break,
     # surfaced loudly). The mask-grain dedup GUARANTEE is unchanged — it lives
@@ -5563,7 +5564,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # (run_one_tuple always passes trial_stats_digest → bypass_dedup),
             # so the grid-sized ComboDedup(OptionDedupIndex(...)) + LMDB
             # combo-dedup store previously built here were never consulted —
-            # and refused a >~4.1e9-identity recount with BloomTooLargeError.
+            # and refused a recount past the MAX_BLOOM_BYTES identity ceiling
+            # (~4.1e9 at the 16 GiB floor) with BloomTooLargeError.
             # plan_launch_dedup returns the no-alloc raising sink instead.
             with AuditWriter.open(audit_path) as audit:
                 resweep_summary = run_sweep_grid(

@@ -7,10 +7,15 @@ the derived ``1day``) for SPOT + FUTURES + OPTIONS
 the movers screens would read a half-filled lake (stale derived partitions
 mid-overwrite, a 1-minute series still landing), so the operator decree gates
 them: a pipeline pull **begins** the gate (movers return an honest "prebuild in
-progress" payload with ZERO lake reads) and the gate is **released** when the
-prebuild finishes — or when the pipeline stops early / fails for ANY reason
-(the binding site releases in a ``try/finally``), so a failed pull can NEVER
-leave the movers blocked forever.
+progress" payload with ZERO lake reads) and the gate is **released the moment
+the prebuild outcome is known** (ok or failed —
+DEC-MOVERS-WARM-UNBLOCK-001: the half-filled-lake hazard the gate exists for
+ends at prebuild completion, so the movers warm that FOLLOWS runs un-gated in
+the background as a pure cache accelerator and can never hold ``/movers``
+hostage; the 2026-07-04/05 incident held the gate for hours behind 39 slow
+warm keys) — or when the pipeline stops early / fails for ANY reason (the
+binding site ALSO releases in a ``try/finally``, the idempotent backstop), so
+a failed pull can NEVER leave the movers blocked forever.
 
 ## Honest envelope (Golden Rule #1 / #10)
 
@@ -76,11 +81,13 @@ class GateSnapshot:
         the honest provenance for a note/diagnostic, never fabricated.
     phase
         The gating pipeline's CURRENT phase label
-        (``"pull"``/``"spot"``/``"metadata"``/``"historical"``/``"prebuild"``/
-        ``"movers"`` — DEC-PREBUILD-GATE-HONEST-NOTE-001), or ``None`` when not
-        blocking. Honest: the gate releases only AFTER the movers warm too, so
-        the payload can name WHICH multi-hour stage is actually running instead
-        of the old blanket "prebuild in progress".
+        (``"pull"``/``"spot"``/``"metadata"``/``"historical"``/``"prebuild"``
+        — DEC-PREBUILD-GATE-HONEST-NOTE-001), or ``None`` when not blocking,
+        so the payload can name WHICH multi-hour stage is actually running
+        instead of the old blanket "prebuild in progress". Since
+        DEC-MOVERS-WARM-UNBLOCK-001 the gate releases the moment the prebuild
+        outcome is known, so the ``"movers"`` (warm) phase annotation lands on
+        an already-idle gate and is never visible while blocking.
     started_at
         ISO-8601 UTC instant :meth:`PrebuildGate.begin` was called (``None``
         when not blocking).
@@ -93,6 +100,11 @@ class GateSnapshot:
         :meth:`PrebuildGate.set_progress` via ``warm_movers_snapshots``'s
         ``on_progress`` seam — DEC-MOVERS-WARM-PROGRESS-001); both ``None``
         when the running phase reports no progress.
+    progress_segment
+        The progress's SEGMENT name (``"spot"``/``"futures"``/``"options"`` —
+        DEC-MOVERS-WARM-UNBLOCK-001 honesty: a bare "6/9" read as
+        7-of-9-TOTAL to the operator; the label makes it "futures 6/9"), or
+        ``None`` when the reporter named none / not blocking.
     """
 
     state: str
@@ -103,6 +115,7 @@ class GateSnapshot:
     elapsed_s: float | None = None
     progress_done: int | None = None
     progress_total: int | None = None
+    progress_segment: str | None = None
 
     @property
     def blocking(self) -> bool:
@@ -115,10 +128,13 @@ class PrebuildGate:
 
     Owned by the app instance (built/injected in ``build_app`` — CLAUDE.md §4,
     no module-global mutable state). The ``/pull-pipeline`` background job calls
-    :meth:`begin` when the pull starts and :meth:`release` in a ``try/finally``
-    when the prebuild finishes OR the pipeline stops early/fails — so a crashed
-    pull can never wedge the movers shut. The ``/api/v1/movers`` route reads
-    :meth:`snapshot` per request (O(1) — one lock acquisition, no I/O).
+    :meth:`begin` when the pull starts and :meth:`release` the MOMENT the
+    prebuild outcome is known (DEC-MOVERS-WARM-UNBLOCK-001 — BEFORE the movers
+    warm, which continues un-gated in the background), PLUS unconditionally in
+    a ``try/finally`` (the idempotent backstop) so an early stop / raised phase
+    / crashed pull can never wedge the movers shut. The ``/api/v1/movers``
+    route reads :meth:`snapshot` per request (O(1) — one lock acquisition, no
+    I/O).
     """
 
     def __init__(self) -> None:
@@ -129,7 +145,7 @@ class PrebuildGate:
         self._phase: str | None = None
         self._started_monotonic: float | None = None
         self._started_at: str | None = None
-        self._progress: tuple[int, int] | None = None
+        self._progress: tuple[int, int, str | None] | None = None
 
     def begin(self) -> None:
         """A pipeline pull started — gate the movers (idempotent; counts runs).
@@ -164,15 +180,18 @@ class PrebuildGate:
             self._phase = phase
             self._progress = None
 
-    def set_progress(self, done: int, total: int) -> None:
+    def set_progress(self, done: int, total: int, *, segment: str | None = None) -> None:
         """Record the current phase's coordinate progress (``done``/``total``).
 
         Fed by ``warm_movers_snapshots``'s ``on_progress`` seam
         (DEC-MOVERS-WARM-PROGRESS-001) so the gated movers payload can show
-        ``movers warm i/N`` live. O(1), one lock hold, never raises.
+        ``movers warm i/N`` live. *segment* optionally NAMES which segment the
+        ``i/N`` belongs to (DEC-MOVERS-WARM-UNBLOCK-001 — a bare "6/9" was the
+        per-SEGMENT count, misread as 7-of-9-TOTAL; the payload renders it
+        "futures 6/9"). O(1), one lock hold, never raises.
         """
         with self._lock:
-            self._progress = (done, total)
+            self._progress = (done, total, segment)
 
     def release(self, ok: bool) -> None:
         """The prebuild finished (``ok``) or the pipeline stopped — un-gate movers.
@@ -212,6 +231,7 @@ class PrebuildGate:
                 elapsed_s=elapsed,
                 progress_done=progress[0] if progress is not None else None,
                 progress_total=progress[1] if progress is not None else None,
+                progress_segment=progress[2] if progress is not None else None,
             )
 
 
@@ -239,18 +259,20 @@ def gated_movers_payload(
     ``note``) with ``gated: true`` and NO ranked category lists — the page reads
     ``j.gated`` and renders the note, then keeps polling until the gate lifts.
 
-    HONEST NOTE + LIVE STATUS (DEC-PREBUILD-GATE-HONEST-NOTE-001): the old note
-    said "prebuild in progress — movers available when finished", but the gate
-    actually releases only AFTER the movers warm too, and a multi-hour stage
-    showed no phase/elapsed at all. The note now states the real release
-    condition, and the payload carries the gate's ``phase`` + ``started_at`` +
-    ``elapsed_s`` (+ ``warm_done``/``warm_total`` when the movers warm reports
-    progress — DEC-MOVERS-WARM-PROGRESS-001's ``on_progress`` seam) so
-    ``movers.html`` can render "final stage: <phase> — running Xh Ym
-    (auto-refreshes)" via ``textContent``. The NOTE itself stays STABLE per
-    phase (no ticking elapsed inside it) so the page's paint-once gated-shell
-    guard (DEC-DASHBOARD-JS-PERF-001) keeps skipping identical repaints; the
-    ticking elapsed rides the separate ``elapsed_s`` field.
+    HONEST NOTE + LIVE STATUS (DEC-PREBUILD-GATE-HONEST-NOTE-001, release
+    condition re-stated by DEC-MOVERS-WARM-UNBLOCK-001): the note states the
+    REAL release condition — the gate lifts the moment the FINAL prebuild's
+    outcome is known (the movers warm that follows runs un-gated in the
+    background as a pure accelerator, never a hold on this screen) — and the
+    payload carries the gate's ``phase`` + ``started_at`` + ``elapsed_s``
+    (+ ``warm_done``/``warm_total``/``warm_segment`` when a phase reports
+    progress — DEC-MOVERS-WARM-PROGRESS-001's ``on_progress`` seam; the
+    SEGMENT name makes "6/9" read "futures 6/9", never mistaken for
+    7-of-9-total) so ``movers.html`` can render "final stage: <phase> —
+    running Xh Ym (auto-refreshes)" via ``textContent``. The NOTE itself stays
+    STABLE per phase (no ticking elapsed inside it) so the page's paint-once
+    gated-shell guard (DEC-DASHBOARD-JS-PERF-001) keeps skipping identical
+    repaints; the ticking elapsed rides the separate ``elapsed_s`` field.
 
     Parameters
     ----------
@@ -294,9 +316,11 @@ def gated_movers_payload(
         "elapsed_s": snapshot.elapsed_s,
         "warm_done": snapshot.progress_done,
         "warm_total": snapshot.progress_total,
+        "warm_segment": snapshot.progress_segment,
         "note": (
             f"pull pipeline running{phase_clause} — movers stay gated until the final "
-            "prebuild AND the movers warm both finish, so a half-filled lake is never "
-            "ranked (this screen retries automatically; no action needed)."
+            "prebuild finishes (the movers warm then continues un-gated in the "
+            "background), so a half-filled lake is never ranked (this screen retries "
+            "automatically; no action needed)."
         ),
     }

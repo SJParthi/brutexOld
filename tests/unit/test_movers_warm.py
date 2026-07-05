@@ -241,3 +241,104 @@ def test_grid_tokens_are_lowercase_canonical() -> None:
     assert WARM_OPTIONS_TIERS == ("near", "next", "far")
     assert WARM_OPTIONS_TRACKS == ("all", "weekly", "monthly")
     assert WARM_EXCHANGES == (None, "NSE", "BSE")
+
+
+# ── DEC-MOVERS-WARM-UNBLOCK-001: per-job deadline + job-start observability ──
+
+
+def test_resolve_warm_job_deadline_default_and_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from brutex.dashboard.movers_warm import (
+        DEFAULT_WARM_JOB_DEADLINE_S,
+        WARM_JOB_DEADLINE_ENV,
+        resolve_warm_job_deadline_s,
+    )
+
+    # Unset env → the audited 300 s default.
+    monkeypatch.delenv(WARM_JOB_DEADLINE_ENV, raising=False)
+    assert resolve_warm_job_deadline_s() == DEFAULT_WARM_JOB_DEADLINE_S
+    # Env override wins (read when raw is None).
+    monkeypatch.setenv(WARM_JOB_DEADLINE_ENV, "120")
+    assert resolve_warm_job_deadline_s() == 120.0
+    # Explicit raw wins over env.
+    assert resolve_warm_job_deadline_s("45.5") == 45.5
+    # Fail-safe to the default (Golden Rule #1 — a bad value can NEVER disable
+    # the bound): blank / non-numeric / non-positive / non-finite.
+    assert resolve_warm_job_deadline_s("   ") == DEFAULT_WARM_JOB_DEADLINE_S
+    assert resolve_warm_job_deadline_s("not-a-number") == DEFAULT_WARM_JOB_DEADLINE_S
+    assert resolve_warm_job_deadline_s("0") == DEFAULT_WARM_JOB_DEADLINE_S
+    assert resolve_warm_job_deadline_s("-5") == DEFAULT_WARM_JOB_DEADLINE_S
+    assert resolve_warm_job_deadline_s("inf") == DEFAULT_WARM_JOB_DEADLINE_S
+    assert resolve_warm_job_deadline_s("nan") == DEFAULT_WARM_JOB_DEADLINE_S
+
+
+def test_warm_job_timeout_counts_failed_warns_and_continues() -> None:
+    """A job that is merely SLOW (never raises) is bounded: counted failed +
+    one `movers.warm.job_timeout` WARN, and the warm CONTINUES with the next
+    coordinate — the 2026-07-04/05 unbounded-walk incident class (170-256 s
+    per key over 39 keys) can never stall the warm without a trace."""
+    import threading
+
+    from structlog.testing import capture_logs
+
+    release = threading.Event()
+
+    def _wedged() -> int:
+        release.wait(30.0)  # never set before the deadline fires
+        return 0
+
+    try:
+        with capture_logs() as logs:
+            result = warm_movers_snapshots(
+                [_wedged, lambda: 3],
+                segment="options",
+                labels=["BSE|far|weekly", "NSE|near|all"],
+                job_deadline_s=0.05,
+            )
+    finally:
+        release.set()  # let the abandoned daemon worker exit promptly
+    assert result == MoversWarmResult(warmed=1, failed=1, total=2)
+    timeouts = [e for e in logs if e["event"] == "movers.warm.job_timeout"]
+    assert len(timeouts) == 1
+    assert timeouts[0]["key"] == "BSE|far|weekly"
+    assert timeouts[0]["segment"] == "options"
+    assert timeouts[0]["deadline_s"] == 0.05
+    assert timeouts[0]["elapsed_s"] >= 0.05
+    # The SECOND job still ran + warmed (the warm continued past the timeout).
+    progress = [e for e in logs if e["event"] == "movers.warm.progress"]
+    assert [e["key"] for e in progress] == ["NSE|near|all"]
+
+
+def test_warm_job_own_timeout_error_is_generic_failure_not_timeout() -> None:
+    """A job that RAISES its own TimeoutError is re-raised unchanged by the
+    guard (never re-typed to DeadlineExceeded) and takes the generic
+    `movers.warm.job_failed` path — the two failure modes stay distinguishable."""
+    from structlog.testing import capture_logs
+
+    def _raises_timeout() -> int:
+        raise TimeoutError("the job's own timeout — not the guard's")
+
+    with capture_logs() as logs:
+        result = warm_movers_snapshots([_raises_timeout], job_deadline_s=5.0)
+    assert result == MoversWarmResult(warmed=0, failed=1, total=1)
+    assert [e["event"] for e in logs if "job_" in e["event"]] == [
+        "movers.warm.job_start",
+        "movers.warm.job_failed",
+    ]
+
+
+def test_warm_emits_job_start_with_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One `movers.warm.job_start` INFO per coordinate (bounded ≤ 39) carrying
+    the resolved deadline — with the default arg the env-resolved bound is used
+    (DEC-MOVERS-WARM-UNBLOCK-001 observability: start + done lines bound each
+    job's elapsed from the log alone)."""
+    from brutex.dashboard.movers_warm import WARM_JOB_DEADLINE_ENV
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv(WARM_JOB_DEADLINE_ENV, "60")
+    with capture_logs() as logs:
+        warm_movers_snapshots([lambda: 1, lambda: 2], segment="spot", labels=["all", "NSE"])
+    starts = [e for e in logs if e["event"] == "movers.warm.job_start"]
+    assert [(e["key"], e["index"], e["total"]) for e in starts] == [("all", 1, 2), ("NSE", 2, 2)]
+    assert all(e["deadline_s"] == 60.0 and e["segment"] == "spot" for e in starts)
