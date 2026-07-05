@@ -213,8 +213,9 @@ def resolve_sweep_throttle_s() -> float:
 class LakeAuditSink(Protocol):
     """The ``append`` slice of the hash-chained audit writer the healer uses.
 
-    Mirrors ``brutex.data.option_sink.OptionAuditSink`` — an injected seam so
-    the data layer never imports :mod:`brutex.orchestrator` at module level.
+    An injected seam so the data layer never imports
+    :mod:`brutex.orchestrator` at module level (the same ``append`` slice
+    :class:`~brutex.orchestrator.audit.AuditWriter` satisfies).
     """
 
     def append(self, *, action: str, subject: str, payload: dict[str, Any] | None = None) -> object:

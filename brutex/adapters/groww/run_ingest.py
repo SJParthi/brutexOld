@@ -71,6 +71,7 @@ from brutex.adapters.groww.errors import (
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.groww.vendor_floor import VendorFloorLearner
+from brutex.adapters.ingest_common import maybe_audit
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
@@ -285,22 +286,6 @@ class GrowwIngestReport:
         a token death — retrying is futile until re-auth.
         """
         return any(f.auth_failure for f in self.failures)
-
-
-def _maybe_audit(
-    audit: AuditWriter | None,
-    action: str,
-    subject: str,
-    payload: dict[str, object],
-) -> None:
-    """Append one hash-chained audit line when an ``audit`` writer is wired.
-
-    A no-op when ``audit is None``. Called ONLY from the single controller thread
-    (the fan-out drain loop), so the not-thread-safe :class:`AuditWriter` is never
-    touched concurrently (Golden Rule #8).
-    """
-    if audit is not None:
-        audit.append(action=action, subject=subject, payload=payload)
 
 
 def run_groww_spot_ingest(
@@ -547,7 +532,7 @@ def run_groww_spot_ingest(
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
-    _maybe_audit(
+    maybe_audit(
         audit,
         "INGEST_RUN_START",
         f"pull:{pull_id}",
@@ -569,7 +554,7 @@ def run_groww_spot_ingest(
             if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[instrument.symbol_name, interval] = report
-            _maybe_audit(
+            maybe_audit(
                 audit,
                 "INGEST_PAIR_DONE",
                 f"{instrument.symbol_name}:{interval}",
@@ -627,7 +612,7 @@ def run_groww_spot_ingest(
                 auth_failure=auth_failed,
             )
         )
-        _maybe_audit(
+        maybe_audit(
             audit,
             "INGEST_PAIR_FAILED",
             f"{instrument.symbol_name}:{interval}",
@@ -674,7 +659,7 @@ def run_groww_spot_ingest(
             retried_windows=inst_retried,
             still_failed_windows=inst_still_failed,
         )
-    _maybe_audit(
+    maybe_audit(
         audit,
         "INGEST_RUN_COMPLETE",
         f"pull:{pull_id}",

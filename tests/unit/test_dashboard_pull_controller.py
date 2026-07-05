@@ -3203,3 +3203,90 @@ class TestObservedHolidaysArming:
         pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert captured
         assert all(observed == frozenset() for observed in captured)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Golden Rule #8 — the dashboard spot pulls write the hash-chained ingest
+# audit trail (DEC-INGEST-AUDIT-WIRING-001; the CLI-parity regression)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestIngestAuditWiring:
+    """The dashboard `/pull-pipeline` spot pull — the PRIMARY pull UI — must
+    write the SAME hash-chained ``<lake>/audit/spot-ingest.jsonl`` trail the
+    CLI ``brutex fetch`` writes (Golden Rule #8; before this fix it wrote
+    ZERO audit — no caller could even wire one)."""
+
+    def _walk_chain(self, path: Path) -> list[str]:
+        """Verify the chain end-to-end + link-by-link; return the action list."""
+        from brutex.orchestrator.audit import GENESIS_PREV_HASH, read_entries, verify_chain
+
+        entries = read_entries(path)
+        assert verify_chain(path) == len(entries)
+        assert entries[0].prev_hash == GENESIS_PREV_HASH
+        for prev, cur in zip(entries, entries[1:], strict=False):
+            assert cur.prev_hash == prev.entry_hash
+            assert cur.seq == prev.seq + 1
+        return [e.action for e in entries]
+
+    def test_pull_all_spot_writes_verifiable_hash_chain(self, tmp_path: Path) -> None:
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert report.total_failed == 0
+        actions = self._walk_chain(tmp_path / "audit" / "spot-ingest.jsonl")
+        # One 1-minute phase (GROWW_FETCH_INTERVALS) over one symbol:
+        # RUN_START → PAIR_DONE → RUN_COMPLETE, exactly the CLI chain shape.
+        assert actions == ["INGEST_RUN_START", "INGEST_PAIR_DONE", "INGEST_RUN_COMPLETE"]
+
+    def test_pull_all_spot_second_pull_resumes_the_chain(self, tmp_path: Path) -> None:
+        """A later pull into the same lake CONTINUES the chain (resume, one history)."""
+        for _ in range(2):
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        actions = self._walk_chain(tmp_path / "audit" / "spot-ingest.jsonl")
+        assert len(actions) == 6
+        assert actions.count("INGEST_RUN_START") == 2
+
+    def test_pull_all_spot_quarantine_lands_on_the_chain(self, tmp_path: Path) -> None:
+        """A quarantined symbol writes INGEST_PAIR_FAILED — errors are material actions."""
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda root, _insts: (_FailingAdapter(), _real_sink(root)),
+        )
+        assert report.total_failed == 1
+        actions = self._walk_chain(tmp_path / "audit" / "spot-ingest.jsonl")
+        assert actions == ["INGEST_RUN_START", "INGEST_PAIR_FAILED", "INGEST_RUN_COMPLETE"]
+
+    def test_pull_all_spot_dry_run_writes_no_audit(self, tmp_path: Path) -> None:
+        """A dry-run writes no real data → no audit file, no audit dir (CLI parity)."""
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert not (tmp_path / "audit").exists()
+
+    def test_pull_candles_writes_verifiable_hash_chain(self, tmp_path: Path) -> None:
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        actions = self._walk_chain(tmp_path / "audit" / "spot-ingest.jsonl")
+        assert actions == ["INGEST_RUN_START", "INGEST_PAIR_DONE", "INGEST_RUN_COMPLETE"]
+
+    def test_pull_candles_dry_run_writes_no_audit(self, tmp_path: Path) -> None:
+        pull_candles(_index(), lake_root=tmp_path, dry_run=True)
+        assert not (tmp_path / "audit").exists()

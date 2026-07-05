@@ -1,7 +1,10 @@
 """Expired-option Parquet table writer — the concrete `OptionPartitionWriter`.
 
-The physical lake layer the :class:`~brutex.data.option_sink.OptionBarSink`
-delegates to: persists a deduped batch of
+The physical lake layer for the expired-option ``options/`` tree (today driven
+by the lake healer's :meth:`OptionParquetWriter.heal_partition` — the Dhan-era
+``option_sink.OptionBarSink`` orchestration above it was DELETED as dead code by
+DEC-INGEST-AUDIT-WIRING-001; the Groww F&O pull writes candles through
+:class:`~brutex.data.sink.ParquetBarSink` instead): persists a deduped batch of
 :class:`~brutex.data.models.OptionBar` rows to a Parquet partition under
 ``<lake_root>/options/<series>/<YYYY>-<MM>.parquet``. One series (one
 ``partition_key``) per call; bars spanning month boundaries are split into
@@ -103,9 +106,9 @@ _SAFE: str = "__"
 #: PATH (not writer instance) on purpose: the parallel rolling-option fetch
 #: (DEC-DHAN-PARALLEL-INGEST-001) may build one :class:`OptionParquetWriter` per worker, so
 #: the lock MUST be shared across instances that resolve to the same on-disk file. This is
-#: belt-and-braces below the coarse :class:`~brutex.data.option_sink.OptionBarSink` audit
-#: lock: it makes the writer correct on its OWN, so the option write can be parallelised
-#: out from under that global serialisation without a lost-update race. The intern is
+#: belt-and-braces that makes the writer correct on its OWN (originally below the
+#: now-DELETED Dhan-era ``option_sink.OptionBarSink`` audit lock), so an option write
+#: can be parallelised without a lost-update race. The intern is
 #: CAPACITY-BOUNDED (:class:`~brutex.data.partition_lock.BoundedLockRegistry`, LRU eviction
 #: of idle locks) so the huge option chain (every strike × CE/PE × month) can no longer
 #: accumulate a ``Lock`` object per partition forever (GAP #19); an in-flight (refcounted)

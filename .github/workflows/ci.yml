@@ -1630,11 +1630,6 @@ jobs:
           else
             echo "(brutex.data.lmdb_membership test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_option_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.option_sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_sink.py
-          else
-            echo "(brutex.data.option_sink test file not present yet — gate inactive)"
-          fi
           # DEC-COVERAGE-INCREMENTAL-001: modules taken to 100% line+branch.
           # HISTORICAL NOTE (resolved): orchestrator modules originally could
           # NOT get a per-module pytest-cov gate — a `--cov=brutex.orchestrator.*`
