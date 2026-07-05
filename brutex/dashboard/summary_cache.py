@@ -215,13 +215,18 @@ class SummaryCache:
         the consequence is only ever a spurious EXTRA bump (over-invalidation),
         never a missed change: the next probe of the final on-disk state always
         differs from any stale baseline, and the generation stays monotonic;
-        (c) cold-start-during-outage limit: if the app STARTS while the probe
-        is erroring (``None``) and a CLI write lands BEFORE the probe recovers,
-        the first recovered token is recorded as the baseline WITHOUT a bump —
-        caches populated during the outage survive until the next dashboard
-        :meth:`mark_dirty` or ledger move. This is the deliberate cost of the
-        baseline-no-bump design (a healthy warm start must not invalidate its
-        cold caches); the outage window is loudly logged per probe call.
+        (c) cold-start-during-outage recovery
+        (DEC-SUMMARY-CACHE-COLD-OUTAGE-BUMP-001, mechanising the MINOR-2
+        envelope note of DEC-SURFACE-TRIAL-001): if the app STARTS while the
+        probe is erroring (``None``) and entries are populated during the
+        outage, the FIRST recovered token bumps the generation ONCE (a CLI
+        write may have landed unseen), then records the baseline — at most
+        ONE spurious bump per process (the baseline None→non-None transition
+        happens exactly once), pure over-invalidation, never a missed change.
+        A healthy warm start (first probe call already non-``None``) still
+        records the baseline WITHOUT bumping, and an outage-recovery with NO
+        populated entries is a plain no-bump baseline; the outage window is
+        loudly logged per probe call.
 
     Notes
     -----
@@ -252,6 +257,11 @@ class SummaryCache:
         #: Last token the probe returned (``None`` until the first non-None
         #: observation — the baseline is recorded WITHOUT a bump).
         self._last_revision: str | None = None
+        #: True iff a WIRED probe returned ``None`` (an outage) BEFORE the
+        #: baseline was ever recorded — the cold-start-during-outage window
+        #: (DEC-SUMMARY-CACHE-COLD-OUTAGE-BUMP-001). Consumed (and cleared)
+        #: by the baseline branch of :meth:`_reconcile_revision_locked`.
+        self._cold_probe_outage = False
         self._lock = threading.Lock()
         self._generation = 0
         self._entries: dict[str, _Entry] = {}
@@ -320,20 +330,42 @@ class SummaryCache:
         """Reconcile the generation against a probed *token* — O(1).
 
         Caller MUST hold ``self._lock``; *token* was probed OUTSIDE it. A
-        ``None`` token → no-op. First non-``None`` token → record the baseline
-        WITHOUT bumping (an app started over an existing lake must not
-        invalidate its cold caches). A token CHANGE → record it + bump the
-        generation exactly once, so every generation-keyed cache invalidates
-        on the next key build (DEC-HARDENING-LEFTOVERS-001 — the CLI-write
-        staleness fix). Tokens observed outside the lock may be applied out of
+        ``None`` token → no-op for the generation, but a WIRED probe's
+        pre-baseline ``None`` arms the cold-start-outage flag
+        (DEC-SUMMARY-CACHE-COLD-OUTAGE-BUMP-001). First non-``None`` token →
+        record the baseline WITHOUT bumping (an app started over an existing
+        lake must not invalidate its cold caches) — UNLESS the flag is armed
+        AND entries were populated during the outage, in which case the
+        recovery bumps exactly once (a CLI write may have landed unseen).
+        A token CHANGE → record it + bump the generation exactly once, so
+        every generation-keyed cache invalidates on the next key build
+        (DEC-HARDENING-LEFTOVERS-001 — the CLI-write staleness fix). Tokens observed outside the lock may be applied out of
         order under concurrency — the worst case is a spurious extra bump
         (pure over-invalidation), never a missed change, and ``_generation``
         only ever increments (see the ``revision_probe`` parameter notes).
         """
         if token is None:
+            if self._revision_probe is not None and self._last_revision is None:
+                # A WIRED probe erroring BEFORE any baseline == the cold-start
+                # outage window (DEC-SUMMARY-CACHE-COLD-OUTAGE-BUMP-001). An
+                # UNwired cache also reconciles ``None`` (``_probe_token``
+                # returns it without calling anything), so the wired-ness
+                # check is the load-bearing discriminator — an unwired cache
+                # must never arm the recovery bump.
+                self._cold_probe_outage = True
             return
         if self._last_revision is None:
             self._last_revision = token
+            if self._cold_probe_outage and self._entries:
+                # Recovery from a cold-start outage with caches ALREADY
+                # populated: a CLI write may have landed UNSEEN while the
+                # probe was erroring, so invalidate ONCE — at most one
+                # spurious bump per process, structurally: ``_last_revision``
+                # transitions None→non-None exactly once, and the flag is
+                # cleared below. An outage-recovery with NO entries records
+                # the plain baseline (nothing was cached over stale data).
+                self._generation += 1
+            self._cold_probe_outage = False
             return
         if token != self._last_revision:
             self._last_revision = token

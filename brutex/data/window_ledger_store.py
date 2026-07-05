@@ -45,6 +45,12 @@ Design (priority law — Correctness > Reliability > … > Performance):
 
 The O(1) per-window probe/record stays in :class:`WindowLedger`; only the
 one-shot load (run start) + save (run end) are O(N) over the recorded windows.
+The throttled MID-pull flush is O(dirty) since DEC-LEDGER-DELTA-FLUSH-001: it
+appends only the dirtied rows to ``window_ledger/deltas/``
+(:func:`append_ledger_delta`); :func:`load_window_ledger` folds ``base +
+deltas`` newer-file-wins and the pull-end :func:`save_window_ledger` subsumes +
+deletes the deltas. Scheduled compaction of crash-orphaned deltas (and an
+SQL-side delta fold for the /coverage DuckDB fast paths) are NAMED follow-ups.
 """
 
 from __future__ import annotations
@@ -69,6 +75,7 @@ from brutex.data.window_ledger import (
     FAILED,
     PLANNED,
     SKIPPED,
+    SKIPPED_AUDIT_PER_PULL,
     SUCCESS,
     WindowLedger,
     WindowLedgerRecord,
@@ -80,6 +87,14 @@ _LOG = structlog.get_logger("brutex.data.window_ledger_store")
 #: The ledger table directory + file under the lake root (browsable on /db).
 LEDGER_DIRNAME: str = "window_ledger"
 LEDGER_FILENAME: str = "ledger.parquet"
+
+#: The incremental delta directory under :data:`LEDGER_DIRNAME`
+#: (DEC-LEDGER-DELTA-FLUSH-001): each throttled mid-pull flush appends ONE small
+#: Parquet of ONLY the rows dirtied since the last flush
+#: (:func:`append_ledger_delta`), instead of rewriting the whole O(N) base file.
+#: :func:`load_window_ledger` folds ``base + deltas`` newer-file-wins; the
+#: pull-end :func:`save_window_ledger` subsumes + deletes them.
+DELTAS_DIRNAME: str = "deltas"
 
 #: Minimum seconds between live mid-pull ledger flushes (mirrors the status store):
 #: small enough that /coverage/windows feels live, large enough that a
@@ -121,6 +136,26 @@ def ledger_dir(lake_root: Path) -> Path:
 def ledger_path(lake_root: Path) -> Path:
     """Return the ledger Parquet path (``<lake_root>/window_ledger/ledger.parquet``)."""
     return ledger_dir(lake_root) / LEDGER_FILENAME
+
+
+def deltas_dir(lake_root: Path) -> Path:
+    """The delta directory (``<lake_root>/window_ledger/deltas`` — DEC-LEDGER-DELTA-FLUSH-001)."""
+    return ledger_dir(lake_root) / DELTAS_DIRNAME
+
+
+def list_ledger_deltas(lake_root: Path) -> list[Path]:
+    """Every delta Parquet, in APPEND (filename) order — ``[]`` when none exist.
+
+    Delta filenames embed a zero-padded ``time_ns`` prefix (see
+    :func:`append_ledger_delta`), so lexicographic filename order IS chronological
+    append order — the fold order :func:`load_window_ledger` replays. The prefix
+    is minted INSIDE the ledger's cross-process ``partition_write_lock`` AND
+    bumped strictly past every delta already on disk
+    (:func:`_next_delta_path`, DEC-LEDGER-DELTA-LOCKED-TS-001), so the creation
+    order is real by construction — not a clock guess, immune to lock-contention
+    reordering and to a wall-clock step-back. O(deltas) directory listing.
+    """
+    return sorted(deltas_dir(lake_root).glob("*.parquet"))
 
 
 def _derive_empty_streak(status: str, attempts: int) -> int:
@@ -234,55 +269,107 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
     return coerced
 
 
+#: The exception set a per-file ledger Parquet read degrades on — the SAME set the
+#: pre-delta loader caught (wrong shape / IO / import), ONE source of truth for the
+#: base-degrade AND the per-delta skip (DEC-LEDGER-DELTA-FLUSH-001).
+_LEDGER_READ_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    ValueError,
+    TypeError,
+    KeyError,
+    ImportError,
+)
+
+
+def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
+    """Read ONE ledger-shaped Parquet into the coerced 14-field row tuples.
+
+    The single per-file read (CLAUDE.md §11 COMMON) shared by the BASE load and
+    the per-DELTA fold. The core 11 columns are REQUIRED — a missing one raises
+    ``KeyError`` (the wrong-shape guard the caller degrades on). ``empty_streak``
+    + ``in_pull_fetches`` + ``bars_net_new`` are OPTIONAL (a legacy file lacks
+    one or more) and derived per-row by :func:`_rows_to_records` (an absent
+    ``bars_net_new`` stays an honest ``None`` —
+    DEC-INGEST-BOUNDARY-INTEGRITY-001). Raises any of
+    :data:`_LEDGER_READ_ERRORS` on a malformed / unreadable file — the CALLER
+    decides the degrade (base → empty + ``load_failed``; delta → skip that one
+    file).
+    """
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
+    present = set(table.schema.names)
+    columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
+    n = len(columns[_CORE_COLUMNS[0]])
+    streaks = table.column("empty_streak").to_pylist() if "empty_streak" in present else [None] * n
+    fetches = (
+        table.column("in_pull_fetches").to_pylist() if "in_pull_fetches" in present else [None] * n
+    )
+    net_new = table.column("bars_net_new").to_pylist() if "bars_net_new" in present else [None] * n
+    rows = zip(*(columns[name] for name in _CORE_COLUMNS), streaks, fetches, net_new, strict=True)
+    return _rows_to_records(rows)
+
+
 def load_window_ledger(
     lake_root: Path, *, threshold: int = EMPTY_TERMINAL_THRESHOLD
 ) -> WindowLedger:
-    """Load the persisted ledger for *lake_root*, or an EMPTY one if unavailable.
+    """Load the persisted ledger (base **+ delta fold**), or an EMPTY one if unavailable.
 
-    **Never raises** (reliability): a missing file is a clean empty ledger; a
-    malformed / wrong-shaped / unreadable Parquet logs a WARNING and also degrades
-    to empty (re-pulling is safe — the idempotent sink no-ops stored bars).
+    **Never raises** (reliability): a missing base file is a clean empty ledger; a
+    malformed / wrong-shaped / unreadable base Parquet logs a WARNING and degrades
+    to empty with ``load_failed=True`` (re-pulling is safe — the idempotent sink
+    no-ops stored bars).
+
+    **Delta fold (DEC-LEDGER-DELTA-FLUSH-001):** every delta Parquet under
+    ``window_ledger/deltas/`` is replayed over the base in APPEND (filename) order,
+    **newer-file-wins per window key** — a WAL replay of one lake's serialised
+    write chronology (appends run under the ledger's cross-process lock), NOT a
+    cross-process merge. The item sketch named :func:`merge_ledger_rows` for this
+    fold; that rule is DELIBERATELY not used here because its more-settled
+    preference would resurrect a deliberate demotion (a ``reopen_skipped`` /
+    degraded ``SUCCESS→FAILED`` row) from an older, more-settled copy —
+    regression-pinned. :func:`merge_ledger_rows` STAYS the cross-process arbiter
+    where it belongs: the read-merge-write inside :func:`save_window_ledger`. A
+    malformed individual delta logs ``window_ledger.delta_load_failed`` and is
+    SKIPPED (the never-raises degrade contract) — only a failed BASE read sets
+    ``load_failed=True``. A base-less lake with deltas (a first pull's mid-flight
+    checkpoint) reconstructs from the deltas alone.
     """
     path = ledger_path(lake_root)
-    if not path.is_file():
+    delta_files = list_ledger_deltas(lake_root)
+    load_failed = False
+    base_rows: list[tuple[Any, ...]] = []
+    if path.is_file():
+        try:
+            base_rows = _read_ledger_file_rows(path)
+        except _LEDGER_READ_ERRORS as exc:
+            _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
+            # LOUD degrade (DEC-WINDOW-LEDGER-RESCUE-001): the file EXISTED but could
+            # not be read — mark the returned ledger so the pull drivers announce the
+            # failed reload (window ledger reload FAILED — running full re-verify
+            # pull, no skip) instead of silently re-fetching everything. Still never
+            # raises (a lost ledger costs a re-pull, never data). Readable deltas are
+            # still folded below — better a partial rescue than none.
+            load_failed = True
+    elif not delta_files:
         return WindowLedger(_threshold=threshold)
-    try:
-        import pyarrow.parquet as pq
-
-        table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
-        present = set(table.schema.names)
-        # The core 11 columns are REQUIRED — a missing one raises KeyError below and
-        # degrades to empty (the wrong-shape guard). ``empty_streak`` + ``in_pull_fetches``
-        # + ``bars_net_new`` are OPTIONAL: a legacy file lacks one (or more), so fill
-        # ``None`` for the missing column(s) and let `_rows_to_records` derive each
-        # per-row (an absent ``bars_net_new`` stays an honest ``None``).
-        columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
-        n = len(columns[_CORE_COLUMNS[0]])
-        streaks = (
-            table.column("empty_streak").to_pylist() if "empty_streak" in present else [None] * n
-        )
-        fetches = (
-            table.column("in_pull_fetches").to_pylist()
-            if "in_pull_fetches" in present
-            else [None] * n
-        )
-        net_new = (
-            table.column("bars_net_new").to_pylist() if "bars_net_new" in present else [None] * n
-        )
-        rows = zip(
-            *(columns[name] for name in _CORE_COLUMNS), streaks, fetches, net_new, strict=True
-        )
-        return WindowLedger.from_rows(_rows_to_records(rows), threshold=threshold)
-    except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
-        _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
-        # LOUD degrade (DEC-WINDOW-LEDGER-RESCUE-001): the file EXISTED but could not
-        # be read — mark the returned empty ledger so the pull drivers can announce
-        # the failed reload (window ledger reload FAILED — running full re-verify
-        # pull, no skip) on the pull report / note instead of silently re-fetching
-        # everything. Still never raises (a lost ledger costs a re-pull, never data).
-        degraded = WindowLedger(_threshold=threshold)
-        degraded.load_failed = True
-        return degraded
+    folded: dict[tuple[str, str, str, str, str], tuple[Any, ...]] = {
+        (row[0], row[1], row[2], row[3], row[4]): row for row in base_rows
+    }
+    for delta in delta_files:
+        try:
+            delta_rows = _read_ledger_file_rows(delta)
+        except _LEDGER_READ_ERRORS as exc:
+            _LOG.warning("window_ledger.delta_load_failed", path=str(delta), error=str(exc))
+            continue
+        for row in delta_rows:
+            folded[(row[0], row[1], row[2], row[3], row[4])] = row  # newer-file-wins
+    ledger = WindowLedger.from_rows(
+        (folded[key] for key in sorted(folded)),
+        threshold=threshold,
+    )
+    ledger.load_failed = load_failed
+    return ledger
 
 
 #: One serialised ledger row — EXACTLY the 14-field tuple :meth:`WindowLedger.to_rows`
@@ -404,6 +491,141 @@ def merge_ledger_rows(
     return sorted(merged.values(), key=_row_key)
 
 
+def _rows_to_table(rows: Sequence[LedgerRow]) -> Any:
+    """Serialise ledger rows to a pyarrow table with the FIXED :data:`_COLUMNS` schema.
+
+    The ONE table builder (CLAUDE.md §11 COMMON) shared by the full
+    :func:`save_window_ledger` and the incremental :func:`append_ledger_delta`, so
+    a delta Parquet is byte-schema-identical to the base and loads through the
+    SAME :func:`_read_ledger_file_rows`.
+    """
+    import pyarrow as pa
+
+    by_col: dict[str, list[Any]] = {name: [] for name in _COLUMNS}
+    for row in rows:
+        for name, value in zip(_COLUMNS, row, strict=True):
+            by_col[name].append(value)
+    schema = pa.schema(
+        [
+            ("market", pa.string()),
+            ("security_id", pa.string()),
+            ("interval", pa.string()),
+            ("window_start", pa.string()),
+            ("window_end", pa.string()),
+            ("status", pa.string()),
+            ("bars", pa.int64()),
+            ("attempts", pa.int64()),
+            ("last_error", pa.string()),
+            ("first_seen_at", pa.string()),
+            ("last_attempt_at", pa.string()),
+            ("empty_streak", pa.int64()),
+            ("in_pull_fetches", pa.int64()),
+            # Nullable by design: a legacy/seeded row's net-new is an honest
+            # unknown ``None`` (DEC-INGEST-BOUNDARY-INTEGRITY-001).
+            ("bars_net_new", pa.int64()),
+        ]
+    )
+    return pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
+
+
+def _next_delta_path(directory: Path) -> Path:
+    """Mint the next delta filename — call ONLY while holding the ledger flock.
+
+    P2-1 fix (DEC-LEDGER-DELTA-LOCKED-TS-001): the ``time_ns`` prefix used to be
+    sampled BEFORE :func:`~brutex.data.partition_lock.partition_write_lock` was
+    acquired, so under cross-process contention (``flock`` has no FIFO fairness
+    — the exact CLI+dashboard shared-lake scenario of
+    DEC-LAKE-PARTITION-FLOCK-001) the later-locking writer could carry the
+    EARLIER filename, inverting the fold order relative to the real serialised
+    append order — breaking the "filename order == append order" invariant the
+    newer-file-wins fold in :func:`load_window_ledger` relies on. Minting the
+    prefix UNDER the same flock that serialises the append — and bumping it
+    STRICTLY past every delta already on disk — makes filename order equal to
+    append order by construction, immune even to a wall-clock step-back (the
+    on-disk maximum is the floor, not the clock). A foreign ``*.parquet`` file
+    with a non-numeric prefix is ignored (it never participated in the ordering
+    contract). O(deltas) per append — bounded, because the pull-end full save
+    prunes the directory (delta subsumption, DEC-LEDGER-DELTA-FLUSH-001).
+    """
+    import os
+    import time
+
+    ts = time.time_ns()
+    latest = 0
+    for existing in directory.glob("*.parquet"):
+        prefix = existing.name.split("-", 1)[0]
+        try:
+            latest = max(latest, int(prefix))
+        except ValueError:  # a foreign file — never blocks the append
+            continue
+    if ts <= latest:
+        ts = latest + 1
+    return directory / f"{ts:020d}-{os.getpid()}.parquet"
+
+
+def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
+    """Append ONLY *ledger*'s dirtied rows as one new delta Parquet — the O(dirty) flush.
+
+    DEC-LEDGER-DELTA-FLUSH-001 (first step — base compaction of crash-orphaned
+    deltas is a NAMED follow-up, not built). The throttled mid-pull flush used to
+    call :func:`save_window_ledger` — an O(N) whole-file READ-MERGE-WRITE
+    (~841k rows ≈ ~4 s/save measured) on every fire. This appends ONE small
+    Parquet of just the rows dirtied since the last flush
+    (:meth:`~brutex.data.window_ledger.WindowLedger.dirty_rows`) to
+    ``window_ledger/deltas/``, under the SAME cross-process
+    :func:`~brutex.data.partition_lock.partition_write_lock` (keyed on the ledger
+    path) the full save holds — so appends serialise against each other AND
+    against a concurrent full save. The filename embeds a zero-padded ``time_ns``
+    + pid, minted INSIDE the lock and bumped strictly past every delta already
+    on disk (:func:`_next_delta_path`, DEC-LEDGER-DELTA-LOCKED-TS-001), so
+    filename order == append order (the fold order) by construction.
+
+    Contracts preserved:
+
+    * **No dirty rows** → a pure no-op (no lock, no file).
+    * **Disk-full / OOM** → the COMMON :func:`~brutex.data.atomic_io.atomic_write_via`
+      maps ENOSPC/MemoryError to :class:`~brutex.data.errors.LakeWriteHalt`
+      (DEC-WINDOW-LEDGER-WRITE-HALT-001 — a full disk still halts the pull
+      gracefully); every other error propagates unchanged.
+    * **Lock timeout** → a loud ``window_ledger.delta_lock_timeout`` WARNING, the
+      keys STAY dirty, and the next throttled flush retries (mirrors the full
+      save's skip contract).
+    * The dirty keys are cleared ONLY after a successful atomic write.
+
+    Returns the number of rows appended (0 for a no-op / a skipped flush).
+    """
+    import pyarrow.parquet as pq
+
+    rows = ledger.dirty_rows()
+    if not rows:
+        return 0
+    directory = deltas_dir(lake_root)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        with partition_write_lock(lake_root, ledger_path(lake_root)):
+            # The filename timestamp is minted UNDER the flock (P2-1,
+            # DEC-LEDGER-DELTA-LOCKED-TS-001) — sampling it before the acquire
+            # let a later-locking writer carry an earlier filename under
+            # contention, inverting the newer-file-wins fold order.
+            path = _next_delta_path(directory)
+            table = _rows_to_table(rows)
+
+            def _write_parquet(tmp: Path) -> None:
+                pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+
+            atomic_write_via(path, _write_parquet)
+    except PartitionLockTimeout as exc:
+        _LOG.warning(
+            "window_ledger.delta_lock_timeout",
+            path=str(directory),
+            error=str(exc),
+        )
+        return 0
+    ledger.clear_dirty((row[0], row[1], row[2], row[3], row[4]) for row in rows)
+    _LOG.debug("window_ledger.delta_appended", path=str(path), rows=len(rows))
+    return len(rows)
+
+
 def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     """Persist *ledger* — cross-process-locked READ-MERGE-WRITE, then atomic replace.
 
@@ -434,8 +656,21 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     data. A disk-full/OOM still maps to the pull-wide
     :class:`~brutex.data.errors.LakeWriteHalt` (see below), and any other error
     propagates unchanged.
+
+    **Delta subsumption (DEC-LEDGER-DELTA-FLUSH-001):** the under-lock
+    :func:`load_window_ledger` read transparently FOLDS every pending delta into
+    ``disk_rows``, so the merged full file SUBSUMES them; after the atomic
+    replace (still under the SAME lock) the folded delta files are deleted —
+    lifecycle hygiene so deltas cannot grow unboundedly across normal pulls (NOT
+    the compaction follow-up: deltas orphaned by a CRASHED pull are folded +
+    subsumed by the NEXT pull's first save; a scheduled standalone compactor
+    stays the named follow-up). A failed per-file unlink is loudly logged
+    (``window_ledger.delta_prune_failed``) — honest envelope: a stale delta left
+    behind would newer-wins-override this fresher base on the next load until a
+    later successful save prunes it.
     """
-    import pyarrow as pa
+    import contextlib
+
     import pyarrow.parquet as pq
 
     directory = ledger_dir(lake_root)
@@ -447,6 +682,11 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
         # read-merge-write so the later writer reads AFTER the earlier writer's
         # os.replace — its merge then includes the earlier rows (no lost update).
         with partition_write_lock(lake_root, path):
+            # Capture the delta set FIRST (no new delta can appear while the lock
+            # is held — append_ledger_delta takes the SAME lock), then load: the
+            # load folds exactly these files, so deleting them after the replace
+            # is safe (DEC-LEDGER-DELTA-FLUSH-001).
+            subsumed_deltas = list_ledger_deltas(lake_root)
             disk_rows = load_window_ledger(lake_root).to_rows()
             # LOAD-BEARING snapshot ORDER (hostile-review fold, DEC-WINDOW-LEDGER-
             # DEGRADED-TOMBSTONE-001): the ROW snapshot is taken BEFORE the
@@ -466,32 +706,7 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
                 reopened_keys=ledger.reopened_keys(),
                 degraded_keys=ledger.degraded_keys(),
             )
-            # Build per-column arrays in the fixed order so the schema is stable.
-            by_col: dict[str, list[Any]] = {name: [] for name in _COLUMNS}
-            for row in rows:
-                for name, value in zip(_COLUMNS, row, strict=True):
-                    by_col[name].append(value)
-            schema = pa.schema(
-                [
-                    ("market", pa.string()),
-                    ("security_id", pa.string()),
-                    ("interval", pa.string()),
-                    ("window_start", pa.string()),
-                    ("window_end", pa.string()),
-                    ("status", pa.string()),
-                    ("bars", pa.int64()),
-                    ("attempts", pa.int64()),
-                    ("last_error", pa.string()),
-                    ("first_seen_at", pa.string()),
-                    ("last_attempt_at", pa.string()),
-                    ("empty_streak", pa.int64()),
-                    ("in_pull_fetches", pa.int64()),
-                    # Nullable by design: a legacy/seeded row's net-new is an honest
-                    # unknown ``None`` (DEC-INGEST-BOUNDARY-INTEGRITY-001).
-                    ("bars_net_new", pa.int64()),
-                ]
-            )
-            table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
+            table = _rows_to_table(rows)
 
             def _write_parquet(tmp: Path) -> None:
                 pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
@@ -510,6 +725,25 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
             # place. The fsync (durability for the durable ledger) + temp cleanup on any
             # error are unchanged.
             atomic_write_via(path, _write_parquet)
+            # The merged base now carries every folded delta row — delete the
+            # subsumed files (still under the lock, so a concurrent append can
+            # never interleave with the prune).
+            for delta in subsumed_deltas:
+                try:
+                    delta.unlink()
+                except OSError as exc:
+                    _LOG.warning(
+                        "window_ledger.delta_prune_failed",
+                        path=str(delta),
+                        error=str(exc),
+                    )
+            with contextlib.suppress(OSError):
+                # Best-effort tidy of an emptied deltas dir (its absence is the
+                # signal the /coverage fast paths use to stay base-only).
+                deltas_dir(lake_root).rmdir()
+        # The full file now persists EVERY in-memory row — nothing is left for
+        # the incremental stream to carry (DEC-LEDGER-DELTA-FLUSH-001).
+        ledger.clear_dirty(ledger.dirty_keys())
     except PartitionLockTimeout as exc:
         # A peer held the ledger lock past the bounded deadline (a wedged writer).
         # SKIP this save loudly — never crash the pull mid-flush: the in-memory
@@ -605,8 +839,12 @@ def load_or_migrate_window_ledger(
     ledger loss re-migrates that snapshot; newer windows simply re-fetch,
     idempotent keep-first). Stage-6 deletes it. (The ``fetch_coverage.json``
     fold was retired with the coverage set in DEC-WINDOW-LEDGER-001 Stage e.)
+    A base-less lake that HOLDS deltas (a first pull's mid-flight checkpoint that
+    crashed before its pull-end save) is a LIVE ledger, not a legacy lake — it
+    loads via the delta fold, never the sidecar migration
+    (DEC-LEDGER-DELTA-FLUSH-001).
     """
-    if ledger_path(lake_root).is_file():
+    if ledger_path(lake_root).is_file() or list_ledger_deltas(lake_root):
         return load_window_ledger(lake_root, threshold=threshold)
     return _migrate_legacy_sidecars(lake_root, threshold=threshold)
 
@@ -1172,20 +1410,27 @@ def make_live_ledger_flush(
     this persists it MID-pull (throttled) so /db + /coverage/windows tick up live
     instead of jumping only at pull end. A ``None`` *ledger* (dry-run) yields a
     no-op callable. *clock* / *min_interval_s* are injectable for deterministic
-    tests; O(N) only on the calls that actually write.
+    tests; O(dirty) only on the calls that actually write.
+
+    INCREMENTAL since DEC-LEDGER-DELTA-FLUSH-001: each eligible fire calls
+    :func:`append_ledger_delta` — an O(dirty-rows) append of ONLY the rows
+    changed since the last flush — instead of :func:`save_window_ledger`'s O(N)
+    whole-file read-merge-write (~4 s/save measured on a ~841k-row pre-planned
+    universe ledger, the very cost the adaptive throttle existed to absorb). The
+    pull-end :func:`end_pull_ledger` still runs the FULL merge-save, which
+    subsumes + prunes the deltas.
 
     The throttle is ADAPTIVE (DEC-OPTION-WINDOW-PLAN-001, hostile C2): the
     effective interval is ``max(min_interval_s, _FLUSH_DUTY_FACTOR ×
-    last_save_duration)``, measured with the same injectable *clock*. A small
-    ledger keeps the snappy fixed cadence; a pre-planned universe-scale ledger
-    (~841k rows, ~4 s/save measured) self-paces so the flush can never dominate
-    wall time or hold the ledger lock back-to-back.
+    last_flush_duration)``, measured with the same injectable *clock* — it now
+    measures the DELTA append (the actual work), so a cheap delta keeps the
+    snappy fixed cadence by construction.
     """
     from time import monotonic
 
     tick = clock if clock is not None else monotonic
     last_write: list[float | None] = [None]
-    #: Seconds the LAST save took — drives the adaptive interval (0.0 until one runs).
+    #: Seconds the LAST delta append took — drives the adaptive interval.
     last_duration: list[float] = [0.0]
 
     def _flush() -> None:
@@ -1196,7 +1441,7 @@ def make_live_ledger_flush(
         if last_write[0] is not None and now - last_write[0] < interval:
             return
         last_write[0] = now
-        save_window_ledger(ledger, lake_root)
+        append_ledger_delta(ledger, lake_root)
         last_duration[0] = max(tick() - now, 0.0)
 
     return _flush
@@ -1228,6 +1473,172 @@ def make_locked_flush(flush: Callable[[], None]) -> Callable[[], None]:
     return _locked
 
 
+#: The round-robin skipped-audit cursor sidecar (DEC-SKIPPED-AUDIT-ROUNDROBIN-001)
+#: — a tiny JSON next to the ledger, NOT a new ledger Parquet column (the fixed
+#: 13-col ``_COLUMNS`` schema + the cross-process merge rank stay byte-untouched).
+SKIPPED_AUDIT_CURSOR_FILENAME: str = "skipped_audit_cursor.json"
+
+#: The 5-field window identity arity the cursor key must carry.
+_CURSOR_KEY_ARITY: int = 5
+
+
+def skipped_audit_cursor_path(lake_root: Path) -> Path:
+    """The audit-cursor sidecar path (``<lake_root>/window_ledger/skipped_audit_cursor.json``)."""
+    return ledger_dir(lake_root) / SKIPPED_AUDIT_CURSOR_FILENAME
+
+
+def load_skipped_audit_cursor(
+    lake_root: Path,
+) -> tuple[str, tuple[str, str, str, str, str] | None] | None:
+    """Read the persisted audit cursor — ``(last_audit_pull_id, cursor_key)`` or ``None``.
+
+    TOLERANT by contract (the audit is best-effort — a cursor problem must never
+    block a pull): a missing / unreadable / malformed / wrong-shaped sidecar
+    logs ``window_ledger.skipped_audit_cursor_invalid`` (missing is silent) and
+    reads as ``None`` — the next audit simply restarts the rotation from the
+    head, which is safe (re-opening is always DATA-SAFE).
+    """
+    import json
+
+    path = skipped_audit_cursor_path(lake_root)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        _LOG.warning("window_ledger.skipped_audit_cursor_invalid", path=str(path), error=str(exc))
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("last_audit_pull_id"), str):
+        _LOG.warning(
+            "window_ledger.skipped_audit_cursor_invalid", path=str(path), error="wrong shape"
+        )
+        return None
+    raw_key = payload.get("cursor_key")
+    if raw_key is None:
+        return str(payload["last_audit_pull_id"]), None
+    if (
+        isinstance(raw_key, list)
+        and len(raw_key) == _CURSOR_KEY_ARITY
+        and all(isinstance(part, str) for part in raw_key)
+    ):
+        key = (str(raw_key[0]), str(raw_key[1]), str(raw_key[2]), str(raw_key[3]), str(raw_key[4]))
+        return str(payload["last_audit_pull_id"]), key
+    _LOG.warning(
+        "window_ledger.skipped_audit_cursor_invalid", path=str(path), error="wrong key shape"
+    )
+    return None
+
+
+def save_skipped_audit_cursor(
+    lake_root: Path,
+    *,
+    pull_id: str,
+    cursor_key: tuple[str, str, str, str, str] | None,
+) -> None:
+    """Persist the audit cursor — best-effort, atomic, NEVER raises.
+
+    Uses the guard-free :func:`~brutex.data.atomic_io.atomic_write_simple`
+    (DELIBERATELY not the lake-guarded path: a cursor write failure — even a
+    disk-full — must never :class:`~brutex.data.errors.LakeWriteHalt` a pull;
+    the cursor is a convenience, the audit restarts from the head without it).
+    An :class:`OSError` logs ``window_ledger.skipped_audit_cursor_save_failed``.
+    """
+    import json
+
+    from brutex.data.atomic_io import atomic_write_simple
+
+    path = skipped_audit_cursor_path(lake_root)
+    body = json.dumps(
+        {
+            "last_audit_pull_id": pull_id,
+            "cursor_key": list(cursor_key) if cursor_key is not None else None,
+        },
+        sort_keys=True,
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(path, lambda tmp: tmp.write_text(body, encoding="utf-8"))
+    except OSError as exc:
+        _LOG.warning(
+            "window_ledger.skipped_audit_cursor_save_failed", path=str(path), error=str(exc)
+        )
+
+
+def run_skipped_audit(
+    ledger: WindowLedger,
+    lake_root: Path,
+    *,
+    pull_id: str,
+    cap: int = SKIPPED_AUDIT_PER_PULL,
+) -> int:
+    """Mechanized round-robin re-audit of ≤ *cap* terminally-``SKIPPED`` windows — once per pull.
+
+    DEC-SKIPPED-AUDIT-ROUNDROBIN-001. Loads the sidecar cursor; a matching
+    ``last_audit_pull_id`` short-circuits to 0 (idempotent re-entry — the audit
+    fires AT MOST ONCE per pull, Golden Rule #7); otherwise
+    :meth:`~brutex.data.window_ledger.WindowLedger.audit_reopen_skipped` demotes
+    the next *cap* rows in rotation order (wrapping at the tail) on the pull's
+    OWN in-memory ledger — so the ``reopened_keys`` tombstones flow into the
+    pull-end :func:`save_window_ledger` merge and the demotions persist. The new
+    cursor (the last key selected; the PRIOR cursor when nothing was selected)
+    is saved best-effort. Logs ONE ``pull.skipped_audit`` naming the count +
+    cursor. Budget honesty lives on
+    :data:`~brutex.data.window_ledger.SKIPPED_AUDIT_PER_PULL`.
+
+    **Crash-window honesty (P2-3, Golden Rule #10):** the advanced cursor is
+    persisted here — BEFORE the pull-end :func:`save_window_ledger` persists
+    the in-memory demotions. A pull that crashes between the two therefore
+    advances the rotation while its ≤ *cap* demotions are LOST: those windows
+    stay ``SKIPPED`` and wait one full rotation cycle for their next re-audit.
+    Best-effort by design and DATA-SAFE (nothing was fetched or stored on
+    their behalf; a later rotation pass reaches them again) — deliberately NOT
+    inverted, since the cursor save must not ride the pull-end save's
+    lock/halt paths.
+    """
+    prior = load_skipped_audit_cursor(lake_root)
+    if prior is not None and prior[0] == pull_id:
+        _LOG.debug("pull.skipped_audit_already_ran", pull_id=pull_id)
+        return 0
+    start_after = prior[1] if prior is not None else None
+    reopened, last_key = ledger.audit_reopen_skipped(start_after=start_after, cap=cap)
+    save_skipped_audit_cursor(
+        lake_root,
+        pull_id=pull_id,
+        cursor_key=last_key if last_key is not None else start_after,
+    )
+    _LOG.info(
+        "pull.skipped_audit",
+        pull_id=pull_id,
+        reopened=reopened,
+        cap=cap,
+        cursor=list(last_key) if last_key is not None else None,
+    )
+    return reopened
+
+
+def run_skipped_audit_guarded(
+    ledger: WindowLedger | None,
+    lake_root: Path,
+    *,
+    pull_id: str,
+    cap: int = SKIPPED_AUDIT_PER_PULL,
+) -> int:
+    """Best-effort :func:`run_skipped_audit` — a ``None`` ledger / any error is a 0 no-op.
+
+    The pull-seam wrapper (the #935/#1014 guarded-wiring precedent): a dry-run
+    threads ``ledger=None`` (no audit — nothing persists on a dry-run) and ANY
+    internal error logs ``pull.skipped_audit_error`` and returns 0, so the
+    mechanized audit can never block, slow, or crash a pull.
+    """
+    if ledger is None:
+        return 0
+    try:
+        return run_skipped_audit(ledger, lake_root, pull_id=pull_id, cap=cap)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort seam
+        _LOG.warning("pull.skipped_audit_error", pull_id=pull_id, error=str(exc))
+        return 0
+
+
 def begin_pull_ledger(
     lake_root: Path, *, dry_run: bool, now: datetime | None = None
 ) -> WindowLedger | None:
@@ -1250,22 +1661,32 @@ def end_pull_ledger(ledger: WindowLedger | None, lake_root: Path, *, dry_run: bo
 
 
 __all__ = [
+    "DELTAS_DIRNAME",
     "LEDGER_DIRNAME",
     "LEDGER_FILENAME",
     "LIVE_FLUSH_MIN_INTERVAL_S",
+    "SKIPPED_AUDIT_CURSOR_FILENAME",
     "LedgerRow",
+    "append_ledger_delta",
     "begin_pull_ledger",
+    "deltas_dir",
     "end_pull_ledger",
     "index_lake_spans",
     "ledger_dir",
     "ledger_path",
+    "list_ledger_deltas",
     "load_or_migrate_window_ledger",
+    "load_skipped_audit_cursor",
     "load_window_ledger",
     "make_live_ledger_flush",
     "merge_ledger_rows",
     "plan_windows",
     "reconcile_ledger_windows",
     "reconcile_ledger_with_lake",
+    "run_skipped_audit",
+    "run_skipped_audit_guarded",
+    "save_skipped_audit_cursor",
     "save_window_ledger",
     "seed_enclosed_windows",
+    "skipped_audit_cursor_path",
 ]

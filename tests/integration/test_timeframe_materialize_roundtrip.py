@@ -576,6 +576,192 @@ def test_include_daily_default_before_covers_none_branch(tmp_path: Path) -> None
     assert result.written[DAILY_TF_LABEL] == 1
 
 
+# ── month-bounded rebuild byte-equality (DEC-TF-REBUILD-MONTH-BOUND-001) ──────
+
+#: Three real NSE sessions spanning a UTC month boundary: Fri 2021-01-29,
+#: Mon 2021-02-01 (the IST 1st-of-month session — the boundary case the
+#: session-never-crosses-UTC-month invariant must hold on) and Mon 2021-03-01.
+_MONTH_SESSIONS = (
+    datetime(2021, 1, 29, 3, 45, tzinfo=UTC),
+    datetime(2021, 2, 1, 3, 45, tzinfo=UTC),
+    datetime(2021, 3, 1, 3, 45, tzinfo=UTC),
+)
+
+
+def _write_multi_month_lake(lake_root: Path, *, bars_per_session: int = 60) -> None:
+    """Write one 1-minute session per month partition (2021/01 + /02 + /03)."""
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    for base, session_open in enumerate(_MONTH_SESSIONS):
+        bars = [
+            CandleBar(
+                timestamp=session_open + timedelta(minutes=i),
+                open=Decimal(str(100.0 + base * 500 + i)),
+                high=Decimal(str(110.0 + base * 500 + i)),
+                low=Decimal(str(90.0 + base * 500 + i)),
+                close=Decimal(str(105.0 + base * 500 + i)),
+                volume=10 + base * 100 + i,
+                open_interest=0,
+            )
+            for i in range(bars_per_session)
+        ]
+        sink.append(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            interval="1minute",
+            bars=bars,
+        )
+
+
+def _tf_month_file(lake_root: Path, month: int) -> Path:
+    return (
+        lake_root
+        / "bars"
+        / _EXCHANGE
+        / _SEGMENT
+        / _SYMBOL
+        / "5minute"
+        / "2021"
+        / f"{month:02d}.parquet"
+    )
+
+
+def test_month_bounded_rebuild_is_byte_identical_to_full(tmp_path: Path) -> None:
+    """DEC-TF-REBUILD-MONTH-BOUND-001 byte-equality oracle: rebuilding ONE
+    deleted TF month with ``months={(y, m)}`` reproduces the EXACT bytes the
+    whole-tree materialise wrote — incl. the Feb month whose session is the IST
+    1st-of-month boundary — and leaves every other month's file untouched."""
+    _write_multi_month_lake(tmp_path)
+    result = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+    )
+    assert result.written["5m"] == 36  # 3 sessions × 60 / 5
+    baseline = {m: _tf_month_file(tmp_path, m).read_bytes() for m in (1, 2, 3)}
+
+    # Heal-style targeted rebuild: delete the boundary (Feb) month, re-derive
+    # ONLY it from its own 1-minute month partition.
+    _tf_month_file(tmp_path, 2).unlink()
+    rebuilt = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        months=[(2021, 2)],
+    )
+    assert rebuilt.written["5m"] == 12  # ONLY Feb's buckets — the bounded read
+    for month in (1, 2, 3):
+        assert _tf_month_file(tmp_path, month).read_bytes() == baseline[month], (
+            f"2021/{month:02d} diverged from the full-rebuild bytes"
+        )
+
+
+def test_month_bounded_read_never_touches_other_months(tmp_path: Path) -> None:
+    """TEETH: corrupt the JANUARY 1-minute file, then rebuild FEBRUARY with
+    ``months={(2021, 2)}`` — the bounded read succeeds byte-identically while
+    the old whole-tree ``/**/*.parquet`` scan would have raised on the corrupt
+    January file (proves the read genuinely never opens other months)."""
+    _write_multi_month_lake(tmp_path)
+    full = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+    )
+    assert full.written["5m"] == 36
+    feb_baseline = _tf_month_file(tmp_path, 2).read_bytes()
+
+    jan_1m = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute" / "2021" / "01.parquet"
+    jan_1m.write_bytes(b"not a parquet file")
+    with pytest.raises(pl.exceptions.PolarsError):  # the whole-tree scan trips on Jan
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+        )
+
+    _tf_month_file(tmp_path, 2).unlink()
+    rebuilt = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        months=[(2021, 2)],
+    )
+    assert rebuilt.written["5m"] == 12
+    assert _tf_month_file(tmp_path, 2).read_bytes() == feb_baseline
+
+
+def test_months_matching_nothing_on_disk_raises(tmp_path: Path) -> None:
+    """A months set with NO existing partition keeps the loud 'no stored
+    1minute bars' ValueError contract (mirrors the empty-tree raise)."""
+    _write_multi_month_lake(tmp_path)
+    with pytest.raises(ValueError, match="no stored 1minute bars"):
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+            months=[(2030, 1)],
+        )
+
+
+# ── session-close-aware default cutoff (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001) ──
+
+
+def test_default_cutoff_is_session_close_aware(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``daily_before=None`` (production) the default cutoff is
+    session-close-aware: a MID-SESSION run on the run day defers its own
+    still-forming session, a POST-CLOSE run derives it. Drives the REAL
+    :func:`brutex.calendars.nse.daily_derive_cutoff` through the REAL wiring —
+    ONLY the clock seam (``_now_ist``) is frozen, never the cutoff law."""
+    from brutex.calendars.nse import IST
+    from brutex.data import timeframe_materialize as tfm
+
+    _write_1m_bars(tmp_path, n=120)  # one full session on Mon 2021-01-04
+    run_day_noon = datetime(2021, 1, 4, 12, 0, tzinfo=IST)
+    run_day_evening = datetime(2021, 1, 4, 16, 0, tzinfo=IST)
+
+    def _run() -> int:
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+            include_daily=True,
+        )
+        return result.written[DAILY_TF_LABEL]
+
+    # MID-SESSION run: the run day's session is still forming → deferred.
+    monkeypatch.setattr(tfm, "_now_ist", lambda: run_day_noon)
+    assert _run() == 0
+
+    # POST-CLOSE run the SAME day: the session provably closed → derived NOW
+    # (pre-DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 this stayed 0 until the next
+    # calendar day's pipeline run — the whole-day-granular clause).
+    monkeypatch.setattr(tfm, "_now_ist", lambda: run_day_evening)
+    assert _run() == 1
+
+
 # ────────────────────────────────────────────────────────────────────────
 # DEC-PREBUILD-GIL-VECTORIZE-001 — the batched frame→CandleBar conversion
 # (`frame_to_candle_bars` + the vectorized spot-daily filter/re-stamp) must
