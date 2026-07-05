@@ -75,10 +75,12 @@ rule (CLAUDE.md §11 COMMON).
 from __future__ import annotations
 
 import os
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from brutex.calendars.nse import IST, is_holiday_data_available, is_trading_day
+from brutex.calendars.nse import IST, is_holiday_data_available
+from brutex.calendars.observed_sessions import is_trading_day_observed
 
 __all__ = [
     "NOT_TRUNCATED",
@@ -173,37 +175,47 @@ def _tunable_sessions(env_var: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def last_completed_session_on_or_before(d: date) -> date:
+def last_completed_session_on_or_before(
+    d: date, *, observed: AbstractSet[date] = frozenset()
+) -> date:
     """Return the latest NSE trading day ``<= d`` — the last completed session by *d*.
 
     Walks backwards day-by-day from *d* until :func:`brutex.calendars.nse.is_trading_day`
-    is True (a weekend / holiday rolls back to the prior session). Bounded: the NSE
-    week always contains a trading day, so this returns within a handful of steps
-    (O(1) amortised — never an unbounded loop). Used to map a calendar end boundary
-    onto the trading-session grid the bars actually live on.
+    is True AND the date is not an *observed* overlay day
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001 — an observably-untraded day is not a
+    session, so the expected end rolls back past it). A weekend / holiday rolls
+    back to the prior session. Bounded: the NSE week always contains a trading
+    day, the DETECTOR-written overlay is capped at 8 days/year (write-time —
+    ``classify_month_drift``; a hand-edited sidecar still loads a FINITE set),
+    so this returns within a handful of steps (O(1) amortised — never an
+    unbounded loop). Used to map a
+    calendar end boundary onto the trading-session grid the bars actually live on.
     """
     cursor = d
-    while not is_trading_day(cursor):
+    while not is_trading_day_observed(cursor, observed=observed):
         cursor -= timedelta(days=1)
     return cursor
 
 
-def sessions_between(start: date, end: date) -> int:
+def sessions_between(start: date, end: date, *, observed: AbstractSet[date] = frozenset()) -> int:
     """Count NSE trading days in the half-open ``(start, end]`` — sessions AFTER *start*.
 
     Returns the number of trading sessions strictly after *start* up to and
     including *end* (``0`` when ``end <= start``). This is the "how many sessions did
     the last bar miss" measure: *start* is the last stored bar's session, *end* the
     expected-end session, so the result is the trailing gap in sessions (a holiday
-    span between the two contributes nothing — only real sessions count). O(days in
-    span); the spans here are bounded by a single contract window.
+    span between the two contributes nothing — only real sessions count; an
+    *observed* overlay day likewise contributes nothing —
+    DEC-CALENDAR-OBSERVED-SESSIONS-001, remove-only: subtracting sessions can only
+    SHRINK the measured lag). O(days in span); the spans here are bounded by a
+    single contract window.
     """
     if end <= start:
         return 0
     count = 0
     cursor = start + timedelta(days=1)
     while cursor <= end:
-        if is_trading_day(cursor):
+        if is_trading_day_observed(cursor, observed=observed):
             count += 1
         cursor += timedelta(days=1)
     return count
@@ -217,6 +229,7 @@ def classify_partial_window(
     expiry: date | None = None,
     tolerance_sessions: int | None = None,
     live_edge_sessions: int | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> PartialWindowVerdict:
     """Classify one SUCCESS window as :data:`SUSPECTED_PARTIAL` or :data:`NOT_TRUNCATED`.
 
@@ -246,6 +259,11 @@ def classify_partial_window(
     live_edge_sessions
         Override the live-edge horizon (trading sessions). ``None`` reads
         :data:`PARTIAL_WINDOW_LIVE_EDGE_SESSIONS` (env-tunable).
+    observed
+        Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+        remove-only; default empty = byte-identical back-compat). An overlaid
+        date is not a session in the margin arithmetic — an observed holiday is
+        not a data hole, so the expected end + missing-session count step over it.
 
     Returns
     -------
@@ -305,14 +323,14 @@ def classify_partial_window(
     if expiry is not None and expiry < end_exclusive:
         end_exclusive = expiry
     end_exclusive = min(end_exclusive, today)
-    expected_end = last_completed_session_on_or_before(end_exclusive)
+    expected_end = last_completed_session_on_or_before(end_exclusive, observed=observed)
 
     # AT-EXPIRY exclusion: the window's expected end coincides with (or sits at/after) the
     # contract's expiry session. A bar cannot exist past a dead contract, so the last bar
     # stopping there is COMPLETE, never a truncation — even if it lands a session or two
     # short of the raw calendar end_exclusive.
     if expiry is not None:
-        expiry_session = last_completed_session_on_or_before(expiry)
+        expiry_session = last_completed_session_on_or_before(expiry, observed=observed)
         if expected_end >= expiry_session:
             expected_end = expiry_session
             if last_bar_date >= expiry_session:
@@ -327,8 +345,8 @@ def classify_partial_window(
     # LIVE-EDGE exclusion: the expected end is within the live-edge horizon of today, so
     # the vendor may simply not have published the most recent sessions yet — a missing
     # tail here is expected, never a truncation.
-    today_session = last_completed_session_on_or_before(today)
-    if sessions_between(expected_end, today_session) < live_edge:
+    today_session = last_completed_session_on_or_before(today, observed=observed)
+    if sessions_between(expected_end, today_session, observed=observed) < live_edge:
         return PartialWindowVerdict(
             verdict=NOT_TRUNCATED,
             last_bar_date=last_bar_date,
@@ -339,7 +357,7 @@ def classify_partial_window(
 
     # COMPLETE-TO-BOUND: the last bar reaches the expected end (sparse-but-complete is
     # COMPLETE — bar DENSITY is never consulted, only temporal coverage).
-    missing = sessions_between(last_bar_date, expected_end)
+    missing = sessions_between(last_bar_date, expected_end, observed=observed)
     if missing == 0:
         return PartialWindowVerdict(
             verdict=NOT_TRUNCATED,
@@ -388,6 +406,7 @@ def observe_partial_window(
     symbol: str,
     interval: str,
     pull_id: str | None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> PartialWindowVerdict | None:
     """WARN if a SUCCESS window's bars stop materially before its end; return the verdict.
 
@@ -419,6 +438,7 @@ def observe_partial_window(
             window_end=window_end,
             now=now,
             expiry=expiry,
+            observed=observed,
         )
         if verdict.is_suspected_partial():
             log.warning(  # type: ignore[attr-defined]

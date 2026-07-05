@@ -9,6 +9,7 @@ interior hole bookended by real bars. 100% line + branch on
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from typing import ClassVar
 
 import pytest
 from brutex.calendars.nse import IST
@@ -280,3 +281,63 @@ def test_verdict_is_frozen() -> None:
     )
     with pytest.raises((AttributeError, TypeError)):
         v.verdict = INTERIOR_GAP  # type: ignore[misc]
+
+
+# ─────────── observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001) ───────────
+
+
+class TestObservedOverlayMargin:
+    """The overlay corrects the interior-hole MARGIN: an observed holiday is not a hole."""
+
+    # Bars bracket a 6-trading-session interior hole (2026-05-05..2026-05-08 +
+    # 2026-05-11..2026-05-12), strictly > the 5-session tolerance.
+    _BRACKET: ClassVar[list[datetime]] = [_ts(2026, 5, 4), _ts(2026, 5, 13)]
+
+    def test_overlaid_day_not_counted_in_hole(self) -> None:
+        # FAIL-BEFORE/PASS-AFTER: 6 bar-less sessions flag; overlaying ONE of them
+        # shrinks the hole to 5 <= tolerance -> NO_INTERIOR_GAP.
+        from datetime import date
+
+        flagged = classify_interior_gap(bar_timestamps=self._BRACKET)
+        assert flagged.verdict == INTERIOR_GAP
+        assert flagged.largest_gap_sessions == 6
+        cleared = classify_interior_gap(
+            bar_timestamps=self._BRACKET, observed=frozenset({date(2026, 5, 6)})
+        )
+        assert cleared.verdict == NO_INTERIOR_GAP
+        assert cleared.largest_gap_sessions == 5
+
+    def test_default_empty_overlay_byte_identical(self) -> None:
+        default = classify_interior_gap(bar_timestamps=self._BRACKET)
+        explicit = classify_interior_gap(bar_timestamps=self._BRACKET, observed=frozenset())
+        assert default == explicit
+
+    def test_observe_threads_observed(self) -> None:
+        from datetime import date
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            verdict = observe_interior_gap(
+                structlog.get_logger("test"),
+                bar_timestamps=self._BRACKET,
+                symbol="NIFTY",
+                interval="1minute",
+                pull_id=None,
+                observed=frozenset({date(2026, 5, 6)}),
+            )
+        assert verdict is not None
+        assert verdict.verdict == NO_INTERIOR_GAP
+        assert [e for e in logs if e["event"] == INTERIOR_GAP_WINDOW_EVENT] == []
+
+    def test_overlay_remove_only_never_grows_gap(self) -> None:
+        # Overlaying a WEEKEND / already-non-session date changes nothing.
+        from datetime import date
+
+        base = _largest_interior_session_gap([_ts(2026, 5, 4).date(), _ts(2026, 5, 13).date()])
+        with_weekend = _largest_interior_session_gap(
+            [_ts(2026, 5, 4).date(), _ts(2026, 5, 13).date()],
+            frozenset({date(2026, 5, 9)}),  # a Saturday
+        )
+        assert with_weekend == base == 6

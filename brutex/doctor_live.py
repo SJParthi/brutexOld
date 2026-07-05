@@ -57,6 +57,7 @@ import binascii
 import inspect
 import json
 from collections.abc import Callable, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -91,6 +92,10 @@ from brutex.adapters.groww.probe import (
 from brutex.adapters.groww.token_cache import CachedToken, current_session
 from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
 from brutex.adapters.rate_common import RateController
+from brutex.calendars.observed_sessions import (
+    is_trading_day_observed,
+    load_observed_holidays,
+)
 from brutex.config.credentials import resolve_groww_aws_credentials
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
 from brutex.config.dotenv import parse_dotenv
@@ -314,9 +319,11 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "NSE-BANKNIFTY + BSE-SENSEX + NSE-INDIAVIX present"
     ),
     "master.header_drift": (
-        "FAIL master[M17]: instrument-master header drift — {error}. The strict tuple-equality "
-        "check bricks the entire universe load until a code change ships. Fix: file the "
-        "additive-column tolerance change; short-term, pin the master snapshot."
+        "FAIL master[M17]: instrument-master header drift — {error}. A missing/reordered/"
+        "renamed column among the verified first 21 (or a trailing extra duplicating a known "
+        "name) bricks the entire universe load; benign trailing extras are tolerated with a "
+        "WARNING (DEC-INSTRUMENT-HEADER-ADDITIVE-001). Fix: inspect the master CSV header; "
+        "short-term, pin the master snapshot."
     ),
     "master.unreachable": (
         "FAIL master[R8/G4]: cannot reach the instrument master: {error} — network/TLS/proxy "
@@ -2426,6 +2433,24 @@ def run_live_doctor(
     return KitReport(run_id=run_id, transcript_path=transcript_path, outcomes=tuple(outcomes))
 
 
+def resolve_probe_day(now: datetime, *, observed: AbstractSet[date] = frozenset()) -> date:
+    """The kit's probe day: latest session STRICTLY before *now*'s IST date.
+
+    Extracted PURE from ``build_real_deps._probe_day`` (hostile-review fold) so
+    the probe-day rule is tested at 100% line+branch OUTSIDE the
+    ``# pragma: no cover`` real-composition factory — the factory keeps only the
+    binding. Steps backwards from IST-yesterday over weekends, listed holidays
+    AND observably-untraded overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+    remove-only), so the live vendor probe never targets a day the vendor
+    demonstrably served no bars for. Bounded: the NSE week always contains a
+    trading day and the loaded overlay set is finite.
+    """
+    day = now.astimezone(IST).date() - timedelta(days=1)
+    while not is_trading_day_observed(day, observed=observed):
+        day -= timedelta(days=1)
+    return day
+
+
 def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/clock composition
     """Compose the REAL dependencies (network, git, boto3, SDK) for the CLI.
 
@@ -2450,7 +2475,6 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
     from brutex.adapters.groww.instrument_loader import urllib_http_get
     from brutex.adapters.groww.live import installed_growwapi_version
     from brutex.adapters.groww.reauth import _real_sdk_factory
-    from brutex.calendars.nse import is_trading_day
     from brutex.data.bhavcopy import urllib_http_get_nse
 
     def _git(*args: str) -> str | None:
@@ -2495,11 +2519,16 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         server = parsedate_to_datetime(server_date)
         return (datetime.now(UTC) - server).total_seconds()
 
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded
+    # ONCE per deps build (design W5), never per probe. The loader never raises
+    # (missing/corrupt -> empty overlay).
+    observed_holidays = load_observed_holidays(resolve_lake_root(os.environ, home=Path.home()))
+
     def _probe_day() -> date:
-        day = datetime.now(UTC).astimezone(IST).date() - timedelta(days=1)
-        while not is_trading_day(day):
-            day -= timedelta(days=1)
-        return day
+        # Binding only — the probe-day rule itself is the PURE, 100%-covered
+        # module-level resolve_probe_day (an observably-untraded overlay day is
+        # NOT a probe day; stepped over like a holiday).
+        return resolve_probe_day(datetime.now(UTC), observed=observed_holidays)
 
     def _controller() -> RateController:
         return RateController(

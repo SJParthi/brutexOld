@@ -444,3 +444,89 @@ class TestObservePartialWindow:
             pull_id="pid-1",
         )
         assert verdict is None  # a guarded failure never demotes
+
+
+# ─────────── observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001) ───────────
+
+
+class TestObservedOverlayMargin:
+    """The overlay corrects the truncation MARGIN: an observed holiday is not a lag."""
+
+    _NOW = datetime(2026, 7, 4, 10, 0, tzinfo=UTC)
+
+    def test_sessions_between_observed(self) -> None:
+        # (2026-05-05, 2026-05-14] holds 7 trading sessions; overlaying two of
+        # them removes exactly those from the count (remove-only).
+        base = sessions_between(date(2026, 5, 5), date(2026, 5, 14))
+        assert base == 7
+        shrunk = sessions_between(
+            date(2026, 5, 5),
+            date(2026, 5, 14),
+            observed=frozenset({date(2026, 5, 6), date(2026, 5, 7)}),
+        )
+        assert shrunk == 5
+
+    def test_last_completed_session_observed(self) -> None:
+        # 2026-05-14 (Thu) is a session; overlaying it rolls the expected end
+        # back to 2026-05-13.
+        assert last_completed_session_on_or_before(date(2026, 5, 14)) == date(2026, 5, 14)
+        assert last_completed_session_on_or_before(
+            date(2026, 5, 14), observed=frozenset({date(2026, 5, 14)})
+        ) == date(2026, 5, 13)
+
+    def test_classify_partial_window_observed_margin(self) -> None:
+        # FAIL-BEFORE/PASS-AFTER: last bar 2026-05-05, window end 2026-05-15 ->
+        # 7 missing sessions > 5 -> SUSPECTED_PARTIAL. Overlaying two of the
+        # "missing" sessions shrinks the lag to 5 <= tolerance -> NOT_TRUNCATED.
+        last_bar = datetime(2026, 5, 5, 4, 5, tzinfo=UTC)
+        flagged = classify_partial_window(
+            last_bar_ts=last_bar,
+            window_end=date(2026, 5, 15),
+            now=self._NOW,
+            expiry=None,
+        )
+        assert flagged.verdict == SUSPECTED_PARTIAL
+        assert flagged.missing_sessions == 7
+        cleared = classify_partial_window(
+            last_bar_ts=last_bar,
+            window_end=date(2026, 5, 15),
+            now=self._NOW,
+            expiry=None,
+            observed=frozenset({date(2026, 5, 6), date(2026, 5, 7)}),
+        )
+        assert cleared.verdict == NOT_TRUNCATED
+        assert cleared.missing_sessions == 5
+        assert cleared.reason == "sparse_complete"
+
+    def test_default_empty_overlay_byte_identical(self) -> None:
+        last_bar = datetime(2026, 5, 5, 4, 5, tzinfo=UTC)
+        default = classify_partial_window(
+            last_bar_ts=last_bar, window_end=date(2026, 5, 15), now=self._NOW, expiry=None
+        )
+        explicit = classify_partial_window(
+            last_bar_ts=last_bar,
+            window_end=date(2026, 5, 15),
+            now=self._NOW,
+            expiry=None,
+            observed=frozenset(),
+        )
+        assert default == explicit
+
+    def test_observe_threads_observed(self) -> None:
+        import structlog
+
+        with capture_logs() as logs:
+            verdict = observe_partial_window(
+                structlog.get_logger("test"),
+                last_bar_ts=datetime(2026, 5, 5, 4, 5, tzinfo=UTC),
+                window_end=date(2026, 5, 15),
+                now=self._NOW,
+                expiry=None,
+                symbol="NIFTY",
+                interval="1minute",
+                pull_id=None,
+                observed=frozenset({date(2026, 5, 6), date(2026, 5, 7)}),
+            )
+        assert verdict is not None
+        assert verdict.verdict == NOT_TRUNCATED
+        assert [e for e in logs if e["event"] == SUSPECTED_PARTIAL_WINDOW_EVENT] == []
