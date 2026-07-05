@@ -221,7 +221,8 @@ class MaterializeResult:
         1-minute source was byte-for-byte unchanged since its last stamped
         derive (DEC-PREBUILD-INCREMENTAL-001 — ``written`` is then empty and
         the lake state is provably identical to a full re-derive, which the
-        keep-first/latest-wins writers would have no-opped anyway). ``False``
+        latest-wins derived writers (DEC-TF-REMAT-LATEST-WINS-001) would have
+        rewritten byte-identically anyway). ``False``
         for every run that actually read + resampled.
     """
 
@@ -382,9 +383,13 @@ def materialize_lake_timeframes(
 
     ``daily_before`` is the forming-session cutoff (an IST date); ``None``
     (production) resolves to today IST, so a still-forming session is never
-    written as a final daily bar (no look-ahead). Rerun-safe: the intraday
-    partitions are keep-first idempotent and the derived daily is latest-wins
-    (a re-derivation of identical data is a silent no-op) — CLAUDE.md §2 Rule 7.
+    written as a final daily bar (no look-ahead). Rerun-safe: the derived
+    intraday partitions AND the derived daily are both latest-wins
+    (DEC-TF-REMAT-LATEST-WINS-001 — a re-derivation of identical data is a
+    silent byte-identical no-op, and a bucket recomputed from GROWN 1-minute
+    data REPLACES its stale partial-day predecessor instead of being
+    keep-first-discarded) — CLAUDE.md §2 Rule 7. The vendor 1-minute base
+    itself stays keep-first (only DERIVED data is recomputable/replaceable).
 
     DELIBERATE live-edge divergence (DEC-DOCTOR-KIT-HONESTY-001 fix-4 verdict,
     pinned by ``TestPrebuildLiveEdgeDivergencePinned``): the intraday TFs carry
@@ -412,8 +417,8 @@ def materialize_lake_timeframes(
     read; an unchanged source + identical request (+ the daily-cutoff rule +
     the derived-dirs-present guard) returns ``unchanged=True`` with ZERO
     read/resample — provably byte-identical lake state, because the full
-    re-derive's keep-first/latest-wins writes are no-ops on unchanged data
-    (golden-pinned). A successful FULL derive writes a fresh stamp
+    re-derive's latest-wins writes rewrite identical values byte-identically
+    on unchanged data (golden-pinned). A successful FULL derive writes a fresh stamp
     (best-effort). ``incremental=False`` (the lake-heal rebuild path — heal
     must always rebuild what it just quarantined) never skips and never
     stamps.
@@ -633,7 +638,13 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
     have no OI column). The sink snaps prices to the 2-decimal tick grid +
     merges idempotently by ``(year, month)`` (CLAUDE.md §7 /
-    DEC-SPOT-PRICE-2DP-001). Raw lake I/O — ``# pragma: no cover``; exercised
+    DEC-SPOT-PRICE-2DP-001) in **latest-wins** mode
+    (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised bucket recomputed from
+    grown 1-minute data REPLACES its stale partial-day predecessor; identical
+    data rewrites byte-identically; the vendor 1-minute base never routes
+    through this writer and stays keep-first). The write itself stays atomic
+    tmp → fsync → ``os.replace`` via the shared
+    :func:`~brutex.data.atomic_io.atomic_write_via` inside the writer. Raw lake I/O — ``# pragma: no cover``; exercised
     by the round-trip integration test. Moved here from the dashboard route
     glue (DEC-TF-MATERIALIZE-002) — one builder for every caller.
     """
@@ -678,6 +689,18 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
             symbol=symbol,
             interval=interval,
             bars=bars,
+            # LATEST-WINS on the DERIVED intraday partitions (DEC-TF-REMAT-LATEST-WINS-001,
+            # mirroring the derived ``1day``'s make_lake_write_1day): a re-materialise
+            # recomputes every bucket from the CURRENT stored 1-minute, so the fresh
+            # bucket is authoritative — keep-first would FREEZE a partial-day bucket
+            # materialised mid-day (e.g. a 15m bucket derived from only its first 3
+            # minutes) forever, discarding every later correct recompute. Derived data
+            # is recomputable, so replacing it is safe ("keep-first would keep poison",
+            # DEC-LAKE-HEAL-001); the VENDOR 1-minute base is written elsewhere and
+            # STAYS keep-first (never routed through this writer — regression-pinned).
+            # Idempotent: re-deriving unchanged data writes identical values, a silent
+            # byte-identical no-op (CLAUDE.md §2 Rule 7, golden-pinned).
+            merge_mode="latest-wins",
         )
         return result.bars_appended
 
