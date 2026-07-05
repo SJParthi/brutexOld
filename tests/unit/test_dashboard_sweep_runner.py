@@ -156,10 +156,26 @@ def test_non_integer_k_raises() -> None:
         resolve_sweep_request(k="1,abc", today=_TODAY)
 
 
-@pytest.mark.parametrize("bad", ["0", "53", "-1"])
+@pytest.mark.parametrize("bad", ["0", "61", "-1"])
 def test_out_of_range_k_raises(bad: str) -> None:
     with pytest.raises(ValueError, match="k must be a whole number"):
         resolve_sweep_request(k=bad, today=_TODAY)
+
+
+def test_k_bound_is_the_full_60_vocabulary() -> None:
+    """``_MAX_K`` tracks ``TOTAL_CONDITIONS`` (60) — the pre-fix 52 rejected 53..60.
+
+    Pinned against the engine's own default condition set so a future vocab
+    growth moves the dashboard bound automatically (DEC-VOCAB-U128-CODEGEN-001;
+    the drift class the 60-vocab doc sweep exists to kill).
+    """
+    from brutex.cli import default_condition_bits
+    from brutex.dashboard.sweep_runner import _MAX_K
+    from brutex.vocabulary.bits import TOTAL_CONDITIONS
+
+    assert _MAX_K == TOTAL_CONDITIONS == len(default_condition_bits()) == 60
+    # The pre-fix boundary: 53..60 must be ACCEPTED now.
+    assert resolve_sweep_request(k="53,60", today=_TODAY).k == "53,60"
 
 
 def test_non_integer_sl_leg_raises() -> None:
@@ -286,3 +302,35 @@ def test_request_is_frozen() -> None:
     )
     with pytest.raises((AttributeError, TypeError)):
         req.symbols = "BANKNIFTY"  # type: ignore[misc]
+
+
+# ── corporate-action extension of the scope gate (DEC-CORP-ACTION-GATE-001) ──
+
+
+def test_out_of_scope_refusal_carries_the_corp_action_rationale() -> None:
+    """The eager dashboard refusal (DEC-ENGINE-SCOPE-GUARD-001, proven above)
+    now carries the corporate-action rationale + both DEC ids + ADR-0016
+    (DEC-CORP-ACTION-GATE-001 — the extension), naming only the offender."""
+    with pytest.raises(ValueError, match="corporate-action adjustment layer missing") as excinfo:
+        resolve_sweep_request(symbols="NIFTY,RELIANCE", today=_TODAY)
+    message = str(excinfo.value)
+    assert "DEC-CORP-ACTION-GATE-001" in message
+    assert "DEC-ENGINE-SCOPE-GUARD-001" in message
+    assert "ADR-0016" in message
+    assert "- RELIANCE:" in message
+    assert "- NIFTY:" not in message
+
+
+def test_whitespace_padded_in_scope_symbols_are_trimmed_and_admitted() -> None:
+    # Trim-only normalisation (case must be lake-exact — a lowercase symbol
+    # is refused with a did-you-mean hint, pinned below).
+    req = resolve_sweep_request(symbols=" NIFTY , BANKNIFTY ", today=_TODAY)
+    assert req.symbols == "NIFTY,BANKNIFTY"
+
+
+def test_lowercase_in_scope_symbol_is_refused_with_a_did_you_mean_hint() -> None:
+    # Lake partition keys are case-exact (DEC-ENGINE-SCOPE-GUARD-001): the
+    # dashboard never silently upper-cases — the refusal names the fix.
+    with pytest.raises(ValueError, match="did you mean") as excinfo:
+        resolve_sweep_request(symbols="nifty", today=_TODAY)
+    assert "'NIFTY'" in str(excinfo.value)
