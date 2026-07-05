@@ -131,6 +131,10 @@ def test_threaded_prebuild_not_slower(tmp_path: Path) -> None:
         f"\nprebuild bench: seq={seq_s:.3f}s par={par_s:.3f}s "
         f"workers={workers} speedup={speedup:.2f}x"
     )
-    # Regression guard: threaded must not be MATERIALLY slower than sequential.
-    # (Tolerant ceiling for a ≤2-core shared CI box; a real box shows > 1x.)
-    assert par_s <= seq_s * 1.8
+    # Regression guard (m-5): the threaded run must be AT WORST at parity with
+    # sequential on this 12-symbol fixture. 1.05 tolerates shared-CI timing
+    # noise around parity (a genuinely slower pool — lock contention, GIL-bound
+    # work — reads well above it; the measured sandbox ratio is 0.72, i.e.
+    # 1.39x FASTER). Deliberately NOT a >1x speedup assertion: a ≤2-core CI box
+    # may only reach parity, and asserting a speedup there is flaky-by-design.
+    assert par_s <= seq_s * 1.05

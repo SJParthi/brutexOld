@@ -22,7 +22,7 @@ import pytest
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
-from brutex.dashboard.fno_cascade import build_fno_cascade
+from brutex.dashboard.fno_cascade import FnoCascadeIndex, build_fno_cascade
 from brutex.dashboard.pipeline_prebuild import (
     PrebuildTarget,
     run_pipeline_prebuild,
@@ -31,7 +31,7 @@ from brutex.dashboard.pipeline_prebuild import (
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
-from brutex.data.timeframe_materialize import materialize_lake_timeframes
+from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 _EXCHANGE = "NSE"
@@ -60,7 +60,15 @@ def _spot(name: str) -> Instrument:
     )
 
 
-def _seed_symbol(lake_root: Path, symbol: str, *, base: float, n: int = 240) -> None:
+def _seed_symbol(
+    lake_root: Path,
+    symbol: str,
+    *,
+    base: float,
+    n: int = 240,
+    segment: str = _SEGMENT,
+    oi: int = 0,
+) -> None:
     """Write *n* deterministic in-session 1-minute bars for *symbol*."""
     bars = [
         CandleBar(
@@ -70,20 +78,51 @@ def _seed_symbol(lake_root: Path, symbol: str, *, base: float, n: int = 240) -> 
             low=Decimal(str(base - 5 + i)),
             close=Decimal(str(base + 2 + i)),
             volume=10 + i,
-            open_interest=0,
+            open_interest=oi + i if oi else 0,
         )
         for i in range(n)
     ]
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
-    sink.append(exchange=_EXCHANGE, segment=_SEGMENT, symbol=symbol, interval="1minute", bars=bars)
+    sink.append(exchange=_EXCHANGE, segment=segment, symbol=symbol, interval="1minute", bars=bars)
 
 
 _SYMBOLS = {"NIFTY": 100.0, "BANKNIFTY": 400.0, "SENSEX": 700.0}
+
+#: FNO contract partitions (m-2): one FUT + one CE under the NIFTY underlying so
+#: the FUTURES + OPTIONS phases are byte-compared on REAL lake bytes too (the
+#: OI-aware resampler pair), not just SPOT.
+_FUT_SYMBOL = "NSE-NIFTY-28Jan21-FUT"
+_CE_SYMBOL = "NSE-NIFTY-28Jan21-15000-CE"
 
 
 def _seed_lake(root: Path) -> None:
     for name, base in _SYMBOLS.items():
         _seed_symbol(root, name, base=base)
+    _seed_symbol(root, _FUT_SYMBOL, base=105.0, segment="FNO", oi=500)
+    _seed_symbol(root, _CE_SYMBOL, base=55.0, segment="FNO", oi=900)
+
+
+def _contract_dataset(symbol: str, itype: str, *, strike: str | None = None) -> dict[str, object]:
+    return {
+        "symbol": symbol,
+        "exchange": _EXCHANGE,
+        "underlying": "NIFTY",
+        "expiry": "2021-01-28",
+        "strike": strike,
+        "option_type": itype if itype in ("CE", "PE") else None,
+        "instrument_type": itype,
+        "interval": "1minute",
+    }
+
+
+def _cascade() -> FnoCascadeIndex:
+    """The F&O candle-lake cascade matching the seeded contract partitions."""
+    return build_fno_cascade(
+        [
+            _contract_dataset(_FUT_SYMBOL, "FUT"),
+            _contract_dataset(_CE_SYMBOL, "CE", strike="15000"),
+        ]
+    )
 
 
 def _derived_parquets(root: Path) -> dict[str, bytes]:
@@ -105,9 +144,9 @@ def test_parallel_lake_is_byte_identical_to_sequential(tmp_path: Path) -> None:
     _seed_lake(par_root)
 
     instruments = [_spot(n) for n in _SYMBOLS]
-    empty_cascade = build_fno_cascade([])
+    cascade = _cascade()
 
-    def _seq_materialize(target: PrebuildTarget) -> object:
+    def _seq_materialize(target: PrebuildTarget) -> MaterializeResult:
         return materialize_lake_timeframes(
             lake_root=seq_root,
             exchange=target.exchange,
@@ -121,11 +160,11 @@ def test_parallel_lake_is_byte_identical_to_sequential(tmp_path: Path) -> None:
         )
 
     seq_outcome = run_pipeline_prebuild(
-        instruments=instruments, cascade=empty_cascade, materialize=_seq_materialize
+        instruments=instruments, cascade=cascade, materialize=_seq_materialize
     )
     par_outcome = run_pipeline_prebuild_parallel(
         instruments=instruments,
-        cascade=empty_cascade,
+        cascade=cascade,
         lake_root=par_root,
         workers=3,
         include_daily=True,
@@ -133,8 +172,9 @@ def test_parallel_lake_is_byte_identical_to_sequential(tmp_path: Path) -> None:
         incremental=False,
     )
 
-    # Both built the 3 spot symbols with identical totals.
-    assert seq_outcome.symbols_built == par_outcome.symbols_built == 3
+    # Both built the 3 spot symbols + the FUT + the CE with identical totals
+    # (m-2: the OI-aware FUTURES/OPTIONS phases are byte-compared too).
+    assert seq_outcome.symbols_built == par_outcome.symbols_built == 5
     assert seq_outcome.total_bars == par_outcome.total_bars > 0
     assert seq_outcome.ok and par_outcome.ok
 
@@ -144,6 +184,8 @@ def test_parallel_lake_is_byte_identical_to_sequential(tmp_path: Path) -> None:
     # Same derived-partition file SET (paths), and BYTE-IDENTICAL contents.
     assert seq_files.keys() == par_files.keys()
     assert seq_files, "expected derived partitions to have been written"
+    # m-2: the CONTRACT (FNO / OI-aware) derived partitions are in the compared set.
+    assert any("/FNO/" in rel for rel in seq_files), "expected derived FNO partitions"
     mismatches = [rel for rel in seq_files if seq_files[rel] != par_files[rel]]
     assert mismatches == [], f"byte-divergent derived partitions: {mismatches}"
 
@@ -155,11 +197,11 @@ def test_kill_switch_workers_one_matches_sequential(tmp_path: Path) -> None:
     _seed_lake(seq_root)
     _seed_lake(par_root)
     instruments = [_spot(n) for n in _SYMBOLS]
-    empty_cascade = build_fno_cascade([])
+    cascade = _cascade()
 
     run_pipeline_prebuild(
         instruments=instruments,
-        cascade=empty_cascade,
+        cascade=cascade,
         materialize=lambda t: materialize_lake_timeframes(
             lake_root=seq_root,
             exchange=t.exchange,
@@ -174,7 +216,7 @@ def test_kill_switch_workers_one_matches_sequential(tmp_path: Path) -> None:
     )
     run_pipeline_prebuild_parallel(
         instruments=instruments,
-        cascade=empty_cascade,
+        cascade=cascade,
         lake_root=par_root,
         workers=1,
         include_daily=True,

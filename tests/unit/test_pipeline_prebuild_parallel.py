@@ -232,6 +232,45 @@ def test_m4_drift_pair_materialises_contract_once(
     assert outcome.symbols_built == 5
 
 
+def test_m3_sequential_path_dedups_identically(tmp_path: Path) -> None:
+    # m-3: the SEQUENTIAL path applies the SAME partition-coords dedup, so a
+    # #911 drift pair reports IDENTICAL counts on both paths (not just bytes).
+    calls: list[str] = []
+
+    def _seq(target: PrebuildTarget) -> MaterializeResult:
+        calls.append(target.symbol)
+        return MaterializeResult(written={"5m": 3, "1day": 1}, skipped=())
+
+    from brutex.dashboard.pipeline_prebuild import run_pipeline_prebuild
+
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY"), _spot("NIFTY")],
+        cascade=_cascade(),
+        materialize=_seq,
+    )
+    # Same counts as the parallel drift-pair test above: 2 spots + 3 contracts.
+    assert outcome.symbols_built == 5
+    assert calls.count("NSE-NIFTY-30Jan25-FUT") == 1
+    assert calls.count("NSE-NIFTY-30Jan25-20000-CE") == 1
+
+
+def test_m4_duplicate_spot_instrument_materialised_once(
+    patched: _FakeMaterialize, tmp_path: Path
+) -> None:
+    # The spot arm of the dedup (COMMON `_unique_spot_instruments`): the same
+    # instrument passed twice materialises its partition exactly once — on the
+    # parallel path here, and the sequential path shares the helper.
+    outcome = run_pipeline_prebuild_parallel(
+        instruments=[_spot("NSE-NIFTY"), _spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        lake_root=tmp_path,
+        workers=2,
+        daily_before=date(2025, 2, 1),
+    )
+    assert len(patched.by_symbol("NSE-NIFTY")) == 1
+    assert outcome.symbols_built == 4  # 1 spot + 1 future + 2 options
+
+
 # ── per-symbol quarantine + tallies ────────────────────────────────────────
 
 

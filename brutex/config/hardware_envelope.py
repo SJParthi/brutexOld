@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import os
 import platform
-import subprocess
+import subprocess  # nosec B404 — fixed-argv `sysctl -n` probe only, no shell (see _run_sysctl_int)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -385,8 +385,14 @@ def cpu_pool_workers(
     ``base`` is the ``performance_cores`` when *prefer_performance* (heavy work
     should land on the P-cores; the E-cores of an M4 Pro are markedly slower),
     else ``logical_cores``. A valid ``>= 1`` :data:`CPU_WORKERS_ENV` override
-    wins verbatim. Never returns ``< 1``. On the reference M4 Pro
-    (``performance_cores=10``, ``reserve=2``) this is **8**. O(1).
+    wins **verbatim — deliberately UNCLAMPED** (it bypasses *reserve* AND
+    *cap*): an explicit operator override is trusted as intent, mirroring the
+    sweep resolver's env-explicit contract
+    (:func:`brutex.engine.sweep_parallel.resolve_sweep_workers`) — an absurd
+    value (e.g. ``1000``) is the operator's own conscious lever, visible in the
+    caller's ``*.workers.resolved`` log, never silently "corrected". Never
+    returns ``< 1``. On the reference M4 Pro (``performance_cores=10``,
+    ``reserve=2``) this is **8**. O(1).
 
     Parameters
     ----------

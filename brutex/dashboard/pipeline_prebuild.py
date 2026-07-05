@@ -255,13 +255,30 @@ def run_pipeline_prebuild(
         # Fully-quarantined pull (DEC-PREBUILD-CLEANSET-001): nothing clean to
         # derive over — LOUD, then complete honestly with a 0-built outcome.
         _LOG.warning("pipeline.prebuild.all_excluded", excluded_symbols=excluded_count)
-    instruments = kept
+    instruments = _unique_spot_instruments(kept)
     futures_by_underlying: dict[str, tuple[FnoContract, ...]] = {}
     options_by_underlying: dict[str, tuple[FnoContract, ...]] = {}
     contract_exchange: dict[str, str] = {}
+    # M4, sequential twin (DEC-HARDWARE-ENVELOPE-001): the loose token-set
+    # discovery can match a #911 drift pair (``NSE-M&M`` + ``M&M``) to the SAME
+    # contract partitions under two underlyings — dedupe by partition coords
+    # (first underlying wins) so a partition is never materialised twice and
+    # the sequential + parallel paths report IDENTICAL counts.
+    seen_contract_coords: set[tuple[str, str, str]] = set()
+
+    def _first_seen(contracts: tuple[FnoContract, ...]) -> tuple[FnoContract, ...]:
+        out: list[FnoContract] = []
+        for contract in contracts:
+            coords = (contract.exchange, fno_segment, contract.symbol)
+            if coords in seen_contract_coords:
+                continue
+            seen_contract_coords.add(coords)
+            out.append(contract)
+        return tuple(out)
+
     for inst in instruments:
-        futures = discover_futures_contracts(inst, cascade)
-        options = discover_option_contracts(inst, cascade)
+        futures = _first_seen(discover_futures_contracts(inst, cascade))
+        options = _first_seen(discover_option_contracts(inst, cascade))
         futures_by_underlying[inst.symbol_name] = futures
         options_by_underlying[inst.symbol_name] = options
         for contract in (*futures, *options):
@@ -374,6 +391,25 @@ def _log_prebuild_done(outcome: PrebuildOutcome, started: float) -> None:
     )
 
 
+def _unique_spot_instruments(instruments: Sequence[Instrument]) -> list[Instrument]:
+    """First-wins dedupe of spot instruments by lake partition coords (M4, COMMON).
+
+    The spot arm of the DEC-HARDWARE-ENVELOPE-001 partition dedup, shared by the
+    sequential AND parallel paths so both report identical counts: two entries
+    resolving to the SAME ``(exchange, segment, symbol)`` partition would
+    materialise (and derive-stamp) it twice. O(instruments).
+    """
+    seen: set[tuple[str, str, str]] = set()
+    out: list[Instrument] = []
+    for inst in instruments:
+        coords = (inst.exch_id.value, inst.segment.value, inst.symbol_name)
+        if coords in seen:
+            continue
+        seen.add(coords)
+        out.append(inst)
+    return out
+
+
 def _build_outcome(
     report: GatedPrebuildReport,
     *,
@@ -420,23 +456,25 @@ def run_pipeline_prebuild_parallel(
     The CPU-bound win (DEC-HARDWARE-ENVELOPE-001): the SAME SPOT → FUTURES →
     OPTIONS discovery + report + outcome as the sequential path, but every
     symbol's :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes`
-    runs in a :class:`~concurrent.futures.ProcessPoolExecutor` of *workers*
-    processes (:func:`brutex.dashboard.prebuild_parallel.run_work_items`).
-    Different symbols write DIFFERENT lake partitions under a per-partition
+    runs in a :class:`~concurrent.futures.ThreadPoolExecutor` of *workers*
+    threads (:func:`brutex.dashboard.prebuild_parallel.run_work_items` — THREADS
+    because the heavy work is off-GIL; see that module's docstring). Different
+    symbols write DIFFERENT lake partitions under a per-partition
     ``flock`` (DEC-LAKE-PARTITION-FLOCK-001), so the lake output is
     **byte-identical** to the sequential run (golden-pinned), and the per-symbol
     quarantine + the pull-wide global-stop propagation mirror the spine exactly.
 
     Unlike the sequential path this takes the materialise arguments EXPLICITLY
     (``lake_root`` / ``include_daily`` / ``daily_before`` / ``incremental``)
-    instead of an injected closure — a process worker cannot receive an
-    un-picklable parent closure, so it reconstructs the call from the picklable
-    :class:`~brutex.dashboard.prebuild_parallel.PrebuildWorkItem` DATA. The route
-    binds ``include_daily=True`` (matching the sequential ``_materialize``), so
-    the two paths are equivalent. ``daily_before`` is passed explicitly so the
-    forming-session cutoff is identical across every worker (never a per-process
-    clock skew). Cost: O(symbols × bars) work spread over *workers* cores — NOT
-    an O(1) claim (Golden Rule #10).
+    instead of an injected closure — the worker rebuilds the call from
+    :class:`~brutex.dashboard.prebuild_parallel.PrebuildWorkItem` DATA, keeping
+    the work unit declarative + auditable (and process-pool-portable, though the
+    shipped pool is threads). The route binds ``include_daily=True`` (matching
+    the sequential ``_materialize``), so the two paths are equivalent.
+    ``daily_before`` is resolved ONCE here when ``None`` so the forming-session
+    cutoff is identical across every worker (byte-identity across a midnight-IST
+    boundary; never a per-worker clock skew). Cost: O(symbols × bars) work
+    spread over *workers* cores — NOT an O(1) claim (Golden Rule #10).
 
     Parameters mirror :func:`run_pipeline_prebuild` except for the explicit
     materialise arguments above and *workers* (``>= 2``; the caller resolves it
@@ -450,7 +488,7 @@ def run_pipeline_prebuild_parallel(
     excluded_count = len(instruments) - len(kept)
     if excluded_count and not kept:
         _LOG.warning("pipeline.prebuild.all_excluded", excluded_symbols=excluded_count)
-    instruments = kept
+    instruments = _unique_spot_instruments(kept)
 
     # M1 (byte-identity): resolve the forming-session daily cutoff ONCE per RUN.
     # ``materialize_lake_timeframes`` resolves ``daily_before=None`` to now-IST
