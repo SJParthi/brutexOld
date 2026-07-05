@@ -1378,6 +1378,26 @@ class TestWindowStatusLabel:
             "vendor confirmed no trades (2 clean attempt(s) — settled)"
         )
 
+    @pytest.mark.parametrize("reason", ["ALL_FILTERED", "INTERIOR_GAP", "SUSPECTED_PARTIAL"])
+    def test_skipped_with_demoted_reason_reads_completeness_gap(self, reason: str) -> None:
+        """DEC-DATA-HONESTY-ALLFILTERED-SEED-001 (refuter F-3 fold): a SKIPPED row
+        settled through the #1031 degraded channel must NOT read "vendor confirmed
+        no trades" — the vendor RETURNED bars every time (boundary-filtered /
+        hole-flagged / truncation-flagged); the label names the reason honestly."""
+        assert window_status_label("SKIPPED", 3, reason) == (
+            f"completeness gap accepted ({reason}, 3 flagged attempt(s)) — settled"
+        )
+
+    def test_skipped_demoted_reason_streak_floors_to_one(self) -> None:
+        assert window_status_label("SKIPPED", 0, "ALL_FILTERED") == (
+            "completeness gap accepted (ALL_FILTERED, 1 flagged attempt(s)) — settled"
+        )
+
+    def test_failed_with_demoted_reason_keeps_repull_label(self) -> None:
+        # A demoted FAILED is honestly re-pullable — the generic label already
+        # says so; only the terminal SKIPPED needed the reason-aware wording.
+        assert window_status_label("FAILED", 1, "ALL_FILTERED") == "FAILED (will re-pull)"
+
     def test_failed_reads_will_repull(self) -> None:
         assert window_status_label("FAILED", 0) == "FAILED (will re-pull)"
 
