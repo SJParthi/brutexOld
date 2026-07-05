@@ -54,10 +54,11 @@ int64 paisa throughout per CLAUDE.md §4 (``DailyCandle`` is the prev_day_ohlc o
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date
 
-from brutex.calendars.nse import is_trading_day_checked
+from brutex.calendars.observed_sessions import is_trading_day_checked_observed
 from brutex.indicators.prev_day_ohlc import DailyCandle, find_prev_trading_day
 
 
@@ -87,6 +88,7 @@ def rolling_weekly_anchor(
     daily_candles_by_date: dict[date, DailyCandle],
     *,
     sessions: int = 5,
+    observed: AbstractSet[date] = frozenset(),
 ) -> FibAnchor | None:
     """Anchor over the trailing *sessions* completed trading days before *today*.
 
@@ -100,6 +102,10 @@ def rolling_weekly_anchor(
         daily_candles_by_date: ``date -> DailyCandle`` (caller-provided, the
             prev_day_ohlc daily dict).
         sessions: The trailing-session window (default 5 = one trading week).
+        observed: Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+            remove-only; default empty = byte-identical back-compat). An overlaid
+            date is treated as NOT a session, so the trailing window extends one
+            session earlier instead of folding an observably-untraded day in.
 
     Returns:
         A :class:`FibAnchor`, or ``None`` if fewer than *sessions* prior trading
@@ -113,7 +119,7 @@ def rolling_weekly_anchor(
             the strict variant refuses to guess rather than fold an
             out-of-coverage 2020 holiday into the weekly window.
     """
-    if not is_trading_day_checked(today):
+    if not is_trading_day_checked_observed(today, observed=observed):
         raise ValueError(f"today ({today}) is not a trading day — rolling-weekly anchor invalid")
     if sessions < 1:
         raise ValueError(f"sessions must be >= 1, got {sessions}")
@@ -131,7 +137,7 @@ def rolling_weekly_anchor(
     max_steps = sessions * 14  # ample slack for holiday-dense spans
     while len(collected) < sessions and guard < max_steps:
         guard += 1
-        prev = find_prev_trading_day(cursor)
+        prev = find_prev_trading_day(cursor, observed=observed)
         if prev is None:
             break
         cursor = prev
@@ -155,6 +161,8 @@ def rolling_weekly_anchor(
 def weekly_static_anchor(
     today: date,
     daily_candles_by_date: dict[date, DailyCandle],
+    *,
+    observed: AbstractSet[date] = frozenset(),
 ) -> FibAnchor | None:
     """Anchor = High/Low of the last COMPLETED ISO week before *today*'s week.
 
@@ -166,6 +174,10 @@ def weekly_static_anchor(
     Args:
         today: The trading day the anchor applies to.
         daily_candles_by_date: ``date -> DailyCandle`` (caller-provided).
+        observed: Observed-holiday overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+            remove-only; default empty = byte-identical back-compat). An overlaid
+            date is stepped over exactly like a holiday, so it can never
+            contribute to the completed week's High/Low.
 
     Returns:
         A :class:`FibAnchor` for the last completed week, or ``None`` if no daily
@@ -177,7 +189,7 @@ def weekly_static_anchor(
             walk visits) lies outside the published holiday span so its
             trading-day verdict is unknown (DEC-CALENDAR-2020-HONEST-001).
     """
-    if not is_trading_day_checked(today):
+    if not is_trading_day_checked_observed(today, observed=observed):
         raise ValueError(f"today ({today}) is not a trading day — weekly-static anchor invalid")
 
     current_week = _iso_week(today)
@@ -192,7 +204,7 @@ def weekly_static_anchor(
     max_steps = 60  # ample slack to step out of the current week + scan one week
     while guard < max_steps:
         guard += 1
-        prev = find_prev_trading_day(cursor)
+        prev = find_prev_trading_day(cursor, observed=observed)
         if prev is None:
             break
         cursor = prev

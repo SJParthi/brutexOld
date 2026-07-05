@@ -2948,3 +2948,100 @@ class TestExpiryScope:
         assert "NSE-RELIANCE-29Feb24-2800-CE" not in scoped_sdk.candle_symbols
         after = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in stored}
         assert after == before, "an out-of-scope expiry's stored bars must never change"
+
+
+def _write_overlay_sidecar(lake_root: Path, day: str = "2026-05-12") -> frozenset[date]:
+    """Write a minimal valid observed-sessions overlay sidecar under *lake_root*."""
+    import json
+
+    from brutex.calendars.observed_sessions import (
+        OBSERVED_LABEL,
+        OBSERVED_OVERLAY_VERSION,
+        overlay_path,
+    )
+
+    path = overlay_path(lake_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": OBSERVED_OVERLAY_VERSION,
+                "entries": [
+                    {
+                        "date": day,
+                        "detected_at": "2026-07-04T00:00:00+00:00",
+                        "month": day[:7],
+                        "label": OBSERVED_LABEL,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return frozenset({date.fromisoformat(day)})
+
+
+def test_live_pull_threads_observed_holidays(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """DEC-CALENDAR-OBSERVED-SESSIONS-001: the LIVE F&O pull loads the overlay
+    sidecar ONCE and threads it into ``run_groww_option_ingest`` (whose futures
+    partial-window observe consumes it — margin arithmetic only, never planning)."""
+    expected = _write_overlay_sidecar(tmp_lake)
+    seen: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, observed_holidays: object = frozenset(), **_kw: object
+    ) -> GrowwOptionIngestReport:
+        seen.append(observed_holidays)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert seen
+    assert all(observed == expected for observed in seen)
+
+
+def test_dry_run_pull_threads_empty_observed_holidays(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """A dry-run threads the EMPTY overlay even when a sidecar exists on disk."""
+    _write_overlay_sidecar(tmp_lake)
+    seen: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, observed_holidays: object = frozenset(), **_kw: object
+    ) -> GrowwOptionIngestReport:
+        seen.append(observed_holidays)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert seen
+    assert all(observed == frozenset() for observed in seen)

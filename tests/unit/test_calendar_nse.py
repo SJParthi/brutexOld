@@ -942,3 +942,33 @@ class TestFacadeIntegration:
         assert exit_t == cal.FORCED_EXIT_IST
         assert cal.is_forced_exit_bar(exit_t, tf_minutes=1)
         assert cal.expected_bars_per_day_for_tf(5) == 75
+
+
+class TestHolidays2026HonestyFix:
+    """DEC-CALENDAR-OBSERVED-SESSIONS-001 — the HOLIDAYS_2026 honesty fix.
+
+    The previously-listed 2026-02-15 "Mahashivratri" was per-line UNVERIFIED AND
+    provably a SUNDAY — an arithmetic no-op in ``is_trading_day`` — so it was
+    removed WITHOUT a substitute date (Golden Rule #1: the real NSE 2026
+    observance date is UNKNOWN pending the official circular).
+    """
+
+    def test_2026_02_15_not_in_holidays_and_still_nontrading(self) -> None:
+        removed = date(2026, 2, 15)
+        assert removed.weekday() == 6  # Sunday — the no-op proof
+        assert removed not in ALL_HOLIDAYS
+        assert not is_holiday(removed)  # flipped True -> False by the removal
+        assert not is_trading_day(removed)  # verdict UNCHANGED (weekend)
+        assert not is_special_weekend_session(removed)
+
+    def test_holiday_coverage_last_year_still_2026(self) -> None:
+        # The removal must not shrink the derived coverage span.
+        assert HOLIDAY_COVERAGE_LAST_YEAR == 2026
+        assert HOLIDAY_COVERAGE_FIRST_YEAR == 2020
+
+    def test_holidays_2026_count_eight(self) -> None:
+        from brutex.calendars.nse import HOLIDAYS_2026
+
+        assert len(HOLIDAYS_2026) == 8
+        assert date(2026, 1, 26) in HOLIDAYS_2026  # Republic Day retained
+        assert date(2026, 8, 15) in HOLIDAYS_2026  # fixed-date Saturday retained
