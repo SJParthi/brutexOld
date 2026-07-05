@@ -62,12 +62,29 @@ Honest envelope (Golden Rule #10): :func:`run_persisted_sweep` refuses to
 enumerate more than ``cfg.max_combos`` masks (raising before any ``bar_bits``
 build), the same opt-in guardrail :func:`brutex.engine.sweep_driver.rank_sweep_over_bits`
 uses — an oversized sweep is a conscious choice, not an accident.
+
+**Bounded rank + memory budget (DEC-SWEEP-STREAMING-RANK-001 part 2).** The
+Phase-C rank retention is budget-guarded: a pre-flight plan
+(:func:`brutex.engine.sweep_mem_budget.plan_rank_memory`, mode env
+``BRUTEX_SWEEP_BOUNDED_RANK`` in ``{off, auto, on}`` default ``auto``, budget
+env ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``) keeps today's batch ``pairs`` +
+:func:`~brutex.ranking.rank_combos` path byte-identical below budget, and past
+budget either ENGAGES the bounded columnar rank
+(:mod:`brutex.engine.sweep_stream` — O(kept) columnar payload at ~80-105 B/kept
+instead of ~1 KB/kept rich objects, ranked through the SAME shared
+:mod:`brutex.ranking` internals so bounded == batch BIT-FOR-BIT, top-K selected
+via an O(survivors x log K) heap on the strict ``(-composite, mask)`` key) or
+REFUSES the tuple gracefully with a typed :class:`SweepMemoryBudgetError`
+(a ``SweepComboError`` tuple-skip — never a raw ``MemoryError`` crash). The
+bounded arm requires the digest path + a finite ``top_k``; a genuine
+``MemoryError`` remains a bare global stop (DEC-LAKE-WRITE-HALT-001). Retained
+memory in bounded mode is O(kept), NOT O(1).
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -94,6 +111,18 @@ from brutex.engine.sweep_driver import (
     metrics_from_trades,
 )
 from brutex.engine.sweep_lookahead import maybe_guard_bars
+from brutex.engine.sweep_mem_budget import (
+    BoundedRankMode,
+    plan_rank_memory,
+    resolve_bounded_rank_mode,
+    resolve_mem_budget_bytes,
+    watermark_message,
+)
+from brutex.engine.sweep_stream import (
+    BoundedRankResult,
+    SurvivorColumns,
+    rank_survivor_columns,
+)
 from brutex.engine.trade_sim import simulate_trades
 from brutex.engine.trial_stats import (
     TrialStatsError,
@@ -182,6 +211,25 @@ class SweepComboError(BruteXError):
     mask-specific edge cannot be ruled out — skipping the whole tuple is the conservative
     response. The grid drivers SKIP the whole tuple (deterministic redo next run), never
     the one mask.
+    """
+
+
+class SweepMemoryBudgetError(SweepComboError):
+    """The tuple's rank-region memory exceeds the operator budget — a GRACEFUL refusal.
+
+    Raised (a) at PRE-FLIGHT when the batch-rank projection
+    (:func:`brutex.engine.sweep_mem_budget.plan_rank_memory`) exceeds
+    ``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` and the bounded columnar rank cannot / may
+    not engage, BEFORE any survivor allocation; or (b) MID-FLIGHT when the
+    bounded accumulator's EXACT owned bytes cross the budget (the watermark).
+    Subclassing :class:`SweepComboError` rides the existing tuple-skip contract
+    UNCHANGED — the grid drivers count it in ``tuples_failed``, emit
+    ``TUPLE_FAILED``, leave the tuple un-sentineled for a deterministic redo,
+    and exit non-zero — instead of today's raw ``MemoryError`` whole-sweep
+    crash (DEC-SWEEP-STREAMING-RANK-001). The message always NAMES the knobs
+    (both env vars) + concrete remedies. A genuine ``MemoryError`` remains a
+    bare global stop (DEC-LAKE-WRITE-HALT-001) — this error is the guard that
+    fires before one plausibly can.
     """
 
 
@@ -396,7 +444,8 @@ class SweepRunConfig:
         ``HOLD`` is rejected by :func:`run_persisted_sweep`, not here, so the
         config stays a pure data holder).
     condition_bits
-        The condition bit positions (of the 52) to brute-force over; duplicates
+        The condition bit positions (of the 60-condition vocabulary) to
+        brute-force over; duplicates
         are ignored (set semantics) for both the enumeration and the ``k`` bound.
     k
         How many of the chosen conditions each combo requires
@@ -968,6 +1017,134 @@ def _reattribute_chunk_failure(
     ) from batch_exc
 
 
+def _iter_mask_metrics(
+    sim: ResidentTradeSim,
+    masks: Sequence[int],
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    cfg: SweepRunConfig,
+    direction_label: str,
+    run_id_of: Callable[[int], str],
+) -> Iterator[tuple[int, ResultMetrics]]:
+    """Yield ``(mask, metrics)`` for *masks* in order — THE one chunked eval spine.
+
+    The factored Phase-C body (DEC-SWEEP-STREAMING-RANK-001, CLAUDE.md §11
+    COMMON): chunked :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks`
+    batches + the per-mask :func:`~brutex.engine.sweep_driver.metrics_from_trades`
+    tail, shared VERBATIM by the batch rank accumulation, the bounded columnar
+    accumulation, AND the bounded finalists' O(top_k) metrics recompute — one
+    spine, so the three consumers can never drift (the recomputed finalist
+    metrics are bit-identical to the streamed pass because ``simulate_masks``
+    is per-mask independent and deterministic).
+
+    Error contract UNCHANGED from the pre-factor inline loop: a batch failure
+    goes through :func:`_reattribute_chunk_failure` (per-mask oracle replay →
+    the exact :class:`SweepComboError` fingerprint, or the loud chunk-level
+    error); a metrics-tail failure raises :func:`_combo_error`; ``MemoryError``
+    re-raises BARE at every level (OOM = GLOBAL stop, DEC-LAKE-WRITE-HALT-001).
+    """
+    chunk_size = _trade_sim_chunk_masks(len(bars))
+    for chunk_start in range(0, len(masks), chunk_size):
+        chunk = masks[chunk_start : chunk_start + chunk_size]
+        try:
+            chunk_trades = sim.simulate_masks(
+                chunk,
+                direction=cfg.direction,
+                stop_loss_paisa=cfg.sl_paisa,
+                take_profit_paisa=cfg.tp_paisa,
+            )
+            # Batch-contract guard: `simulate_masks` must RETURN exactly one
+            # trade list per mask (both arms do, by construction). A
+            # wrong-length return (a PyO3 marshalling bug, a kernel bug)
+            # raises HERE — inside the chunk try — so it rides the SAME
+            # re-attribution → SweepComboError tuple-skip ladder as a chunk
+            # that RAISES (the oracle passes every mask, so it fails LOUD
+            # naming the chunk), instead of escaping run_persisted_sweep as
+            # a bare error the grid drivers (#904) would turn into a
+            # grid-wide abort. The `strict=True` zip below is then a
+            # structurally-unreachable second belt.
+            if len(chunk_trades) != len(chunk):
+                raise ValueError(
+                    f"simulate_masks returned {len(chunk_trades)} trade lists "
+                    f"for a chunk of {len(chunk)} masks — batch-contract violation"
+                )
+        except MemoryError:
+            raise
+        except Exception as exc:
+            _reattribute_chunk_failure(bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of)
+        for mask, trades in zip(chunk, chunk_trades, strict=True):
+            try:
+                metrics = metrics_from_trades(
+                    bars,
+                    trades,
+                    start_equity_paisa=cfg.start_equity_paisa,
+                    tf_minutes=cfg.tf_minutes,
+                )
+            except MemoryError:
+                raise
+            except Exception as exc:
+                raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+            yield mask, metrics
+
+
+def _rebuild_bounded_finalists(
+    selected: BoundedRankResult,
+    sim: ResidentTradeSim | None,
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    cfg: SweepRunConfig,
+    direction_label: str,
+    run_id_of: Callable[[int], str],
+) -> list[RankedCombo]:
+    """Recompute the bounded finalists' full ``ResultMetrics`` — O(top_k), same spine.
+
+    The bounded rank streams composites without retaining any
+    :class:`~brutex.metrics.compute.ResultMetrics`; the ≤ ``top_k`` finalists'
+    metrics are recomputed here through the SAME :func:`_iter_mask_metrics`
+    spine the stream used (deterministic + per-mask independent, so the values
+    are bit-identical to the streamed pass — the established finalist
+    re-simulation precedent, spec V16), then re-married to the streamed
+    composite + DSR into ordinary :class:`~brutex.ranking.RankedCombo`s so the
+    UNCHANGED ``ranked_combo_to_result_row → append → flush`` chain runs.
+    """
+    if not selected.finalists:
+        return []
+    if sim is None:
+        # Structurally unreachable via run_persisted_sweep (finalists ⊆ kept,
+        # and the sim is built whenever kept is non-empty) — a defensive,
+        # tested guard so a future wiring regression fails LOUD as a tuple
+        # skip, never an AttributeError mid-persist.
+        raise SweepComboError(
+            f"bounded finalist recompute in {cfg.instrument}/{cfg.tf}/{direction_label} "
+            f"k={cfg.k}: no trade-sim was built for this tuple (finalists without kept "
+            f"masks — a wiring bug)"
+        )
+    finalist_masks = [finalist.mask for finalist in selected.finalists]
+    rebuilt: list[RankedCombo] = []
+    for finalist, (mask, metrics) in zip(
+        selected.finalists,
+        _iter_mask_metrics(sim, finalist_masks, bars, bar_bits, cfg, direction_label, run_id_of),
+        strict=True,
+    ):
+        # _iter_mask_metrics preserves input order, so the pairing is positional;
+        # the equality is a belt against a future spine reorder.
+        if mask != finalist.mask:
+            raise SweepComboError(
+                f"bounded finalist recompute in {cfg.instrument}/{cfg.tf}/{direction_label} "
+                f"k={cfg.k}: metrics stream returned 0x{mask:032x} where "
+                f"0x{finalist.mask:032x} was requested — order contract violated"
+            )
+        rebuilt.append(
+            RankedCombo(
+                mask=finalist.mask,
+                metrics=metrics,
+                composite_score=finalist.composite_score,
+                deflated_sharpe=finalist.deflated_sharpe,
+            )
+        )
+    return rebuilt
+
+
 def run_persisted_sweep(
     bars: Sequence[CandleBar],
     cfg: SweepRunConfig,
@@ -1015,6 +1192,15 @@ def run_persisted_sweep(
        :func:`~brutex.engine.sweep_driver.metrics_for_mask` loop (which remains
        the per-mask oracle for chunk-failure re-attribution). Rank them
        (:func:`brutex.ranking.rank_combos`), take the top ``cfg.top_k``.
+       Under the rank-memory budget plan (DEC-SWEEP-STREAMING-RANK-001 part 2
+       — resolved BEFORE step 3, after the sentinel check) the BOUNDED arm
+       instead folds each kept mask into
+       :class:`~brutex.engine.sweep_stream.SurvivorColumns` (the metrics
+       object dropped per mask, an exact owned-bytes watermark enforcing the
+       budget) and ranks via
+       :func:`~brutex.engine.sweep_stream.rank_survivor_columns` — pinned
+       BIT-IDENTICAL to the batch arm — recomputing only the ≤ ``top_k``
+       finalists' full metrics through the same sim spine.
     8. Project each finalist to a :class:`ResultRow` and append to the store.
     9. Flush the store; write the trial-stats sidecar (digest path); mark
        **all** evaluated identities seen; then write the completion sentinel
@@ -1077,8 +1263,17 @@ def run_persisted_sweep(
     ------
     ValueError
         If ``bars`` is empty, ``cfg.direction`` is ``HOLD``, the enumerated combo
-        count exceeds ``cfg.max_combos``, or ``kernel`` was built from a different
-        number of bars than ``bars``.
+        count exceeds ``cfg.max_combos``, ``kernel`` was built from a different
+        number of bars than ``bars``, an env knob is malformed
+        (``BRUTEX_SWEEP_BOUNDED_RANK`` / ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``), or
+        ``BRUTEX_SWEEP_BOUNDED_RANK=on`` is forced without the digest path or a
+        finite ``top_k`` (a config error — global, not a tuple condition).
+    SweepMemoryBudgetError
+        The graceful tuple-skip refusal (DEC-SWEEP-STREAMING-RANK-001): the
+        batch-rank projection exceeds ``BRUTEX_SWEEP_MEM_BUDGET_BYTES`` and the
+        bounded rank may not / cannot engage (mode ``off``, ``top_k=None``, or
+        the legacy no-digest path), or the bounded accumulator's EXACT owned
+        bytes crossed the budget mid-flight — never a raw ``MemoryError``.
     """
     if not bars:
         raise ValueError("run_persisted_sweep: bars must be non-empty")
@@ -1127,6 +1322,41 @@ def run_persisted_sweep(
                 store_content_hash=sentinel.store_content_hash,
                 resumed_complete=True,
             )
+
+    # ── Rank-memory budget plan (DEC-SWEEP-STREAMING-RANK-001 part 2) ──
+    # ONE deterministic pre-flight decision from the config alone, taken AFTER
+    # the sentinel short-circuit (a complete tuple is never refused) and BEFORE
+    # any O(masks) allocation: below budget the batch path stays byte-identical
+    # (the default-preservation goldens pin it); past budget mode `auto`
+    # engages the bounded columnar rank while an ineligible/forbidden tuple is
+    # REFUSED as a graceful SweepMemoryBudgetError tuple-skip — never today's
+    # raw MemoryError crash. Mode `on`'s structural refusals (legacy path /
+    # top_k=None) raise ValueError from plan_rank_memory — an explicit operator
+    # forcing with an impossible shape is a config error, not a tuple condition.
+    plan = plan_rank_memory(
+        n_masks=n_masks,
+        top_k=cfg.top_k,
+        digest_path=trial_stats_digest is not None,
+        mode=resolve_bounded_rank_mode(),
+        budget_bytes=resolve_mem_budget_bytes(),
+    )
+    if plan.refusal is not None:
+        raise SweepMemoryBudgetError(f"{subject}: {plan.refusal}")
+    if plan.bounded:
+        engaged_payload = {
+            "subject": subject,
+            "mode": plan.mode.value,
+            "n_masks": n_masks,
+            "projected_bytes": plan.projected_bytes,
+            "budget_bytes": plan.budget_bytes,
+            "top_k": plan.bounded_top_k,
+        }
+        if plan.mode is BoundedRankMode.AUTO:
+            # LOUD by design: an auto-engage means the tuple would have blown
+            # past the budget on the batch path — the operator should see it.
+            _LOG.warning("sweep_run.bounded_rank_engaged", **engaged_payload)
+        else:
+            _LOG.info("sweep_run.bounded_rank_engaged", **engaged_payload)
 
     audit.append(
         action=_ACTION_START,
@@ -1267,55 +1497,56 @@ def run_persisted_sweep(
     # chunk call, the metrics tail, the re-attribution — BEFORE any wrap or
     # oracle re-run (OOM is a GLOBAL stop, DEC-LAKE-WRITE-HALT-001, never a
     # per-tuple skip and never a retry under memory pressure).
+    # The chunked simulate→metrics spine itself is the SHARED `_iter_mask_metrics`
+    # generator (one spine for the batch accumulation, the bounded columnar
+    # accumulation, and the bounded finalist recompute — COMMON). The BATCH arm
+    # collects `pairs` exactly as before (byte-identical below budget); the
+    # BOUNDED arm (DEC-SWEEP-STREAMING-RANK-001 part 2) appends each kept mask's
+    # ranking columns to `SurvivorColumns` and DROPS the ResultMetrics — O(kept)
+    # columnar payload (~80-105 B/kept) instead of O(kept) rich objects — under
+    # an EXACT owned-bytes watermark that degrades gracefully to a
+    # SweepMemoryBudgetError tuple-skip if even the columns outgrow the budget.
     pairs: list[tuple[int, ResultMetrics]] = []
+    columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
+    sim: ResidentTradeSim | None = None
     if kept:
         sim = _build_trade_sim(bars, bar_bits, cfg, direction_label)
-        chunk_size = _trade_sim_chunk_masks(len(bars))
-        for chunk_start in range(0, len(kept), chunk_size):
-            chunk = kept[chunk_start : chunk_start + chunk_size]
-            try:
-                chunk_trades = sim.simulate_masks(
-                    chunk,
-                    direction=cfg.direction,
-                    stop_loss_paisa=cfg.sl_paisa,
-                    take_profit_paisa=cfg.tp_paisa,
-                )
-                # Batch-contract guard: `simulate_masks` must RETURN exactly one
-                # trade list per mask (both arms do, by construction). A
-                # wrong-length return (a PyO3 marshalling bug, a kernel bug)
-                # raises HERE — inside the chunk try — so it rides the SAME
-                # re-attribution → SweepComboError tuple-skip ladder as a chunk
-                # that RAISES (the oracle passes every mask, so it fails LOUD
-                # naming the chunk), instead of escaping run_persisted_sweep as
-                # a bare error the grid drivers (#904) would turn into a
-                # grid-wide abort. The `strict=True` zip below is then a
-                # structurally-unreachable second belt.
-                if len(chunk_trades) != len(chunk):
-                    raise ValueError(
-                        f"simulate_masks returned {len(chunk_trades)} trade lists "
-                        f"for a chunk of {len(chunk)} masks — batch-contract violation"
-                    )
-            except MemoryError:
-                raise
-            except Exception as exc:
-                _reattribute_chunk_failure(
-                    bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of
-                )
-            for mask, trades in zip(chunk, chunk_trades, strict=True):
-                try:
-                    metrics = metrics_from_trades(
-                        bars,
-                        trades,
-                        start_equity_paisa=cfg.start_equity_paisa,
-                        tf_minutes=cfg.tf_minutes,
-                    )
-                except MemoryError:
-                    raise
-                except Exception as exc:
-                    raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+        for mask, metrics in _iter_mask_metrics(
+            sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
+        ):
+            if columns is None:
                 pairs.append((mask, metrics))
-    ranked = rank_combos(pairs, overfit=cfg.overfit)
-    finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
+                continue
+            columns.append(mask, metrics)
+            if columns.owned_nbytes() > plan.budget_bytes:
+                raise SweepMemoryBudgetError(
+                    f"{subject}: "
+                    + watermark_message(
+                        owned_bytes=columns.owned_nbytes(),
+                        budget_bytes=plan.budget_bytes,
+                        n_kept=columns.n_kept,
+                    )
+                )
+    if columns is None:
+        ranked = rank_combos(pairs, overfit=cfg.overfit)
+        finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
+        n_ranked = len(ranked)
+        backtested = len(pairs)
+        sidecar_sharpes = [metrics.sharpe_ratio for _, metrics in pairs]
+    else:
+        # Bounded rank: the SAME shared ranking internals over the columns
+        # (bit-identical to `rank_combos(pairs)[:top_k]` — property-pinned),
+        # then the finalists' full metrics recomputed O(top_k) via the SAME
+        # eval spine (the V16 re-simulation precedent).
+        selected = rank_survivor_columns(
+            columns, overfit=cfg.overfit, top_k=plan.require_bounded_top_k()
+        )
+        finalists = _rebuild_bounded_finalists(
+            selected, sim, bars, bar_bits, cfg, direction_label, run_id_of
+        )
+        n_ranked = selected.n_ranked
+        backtested = columns.n_kept
+        sidecar_sharpes = columns.sharpe_values()
 
     persisted = 0
     for rc in finalists:
@@ -1350,7 +1581,7 @@ def run_persisted_sweep(
     trial_sum_sharpe_sq = 0.0
     if trial_stats_digest is not None:
         stats = tuple_trial_stats_from_sharpes(
-            [metrics.sharpe_ratio for _, metrics in pairs],
+            sidecar_sharpes,
             n_enumerated=enumerated,
             n_conflict_pruned=conflict_pruned,
             n_minhits_dropped=evaluated - len(kept),
@@ -1393,11 +1624,11 @@ def run_persisted_sweep(
         "conflict_pruned": conflict_pruned,
         "skipped_dedup": skipped_dedup,
         "evaluated": evaluated,
-        "ranked": len(ranked),
+        "ranked": n_ranked,
         "persisted": persisted,
         # Additive trial-stats tallies (DEC-TRIAL-STATS-WRITE-001) — the
         # hash-chain is per-line, so new payload keys are chain-safe.
-        "backtested": len(pairs),
+        "backtested": backtested,
         "minhits_dropped": evaluated - len(kept),
         "trial_n_finite": trial_n_finite,
         "trial_sidecar_written": sidecar_written,
@@ -1417,10 +1648,10 @@ def run_persisted_sweep(
         conflict_pruned=conflict_pruned,
         skipped_dedup=skipped_dedup,
         evaluated=evaluated,
-        ranked=len(ranked),
+        ranked=n_ranked,
         persisted=persisted,
         store_content_hash=flush.content_hash,
-        backtested=len(pairs),
+        backtested=backtested,
         minhits_dropped=evaluated - len(kept),
         trial_n_finite=trial_n_finite,
         trial_sum_sharpe=trial_sum_sharpe,
@@ -1433,6 +1664,7 @@ def run_persisted_sweep(
 __all__ = [
     "ComboDedup",
     "SweepComboError",
+    "SweepMemoryBudgetError",
     "SweepRunConfig",
     "SweepRunSummary",
     "canonical_trade_params",

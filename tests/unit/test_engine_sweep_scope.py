@@ -4,11 +4,15 @@ The pure coordinate-law preflight every production sweep mouth runs BEFORE any
 lake I/O. Classification itself is the ONE canonical
 :func:`brutex.universe.classify_engine_sweep_target` (tested in
 ``tests/unit/test_universe.py``); here we pin the report semantics — ok /
-refused preservation / override / message content.
+refused preservation / override / message content — plus the corporate-action
+extension (DEC-CORP-ACTION-GATE-001 / ADR-0016): the hard refusal carries the
+corp-action rationale + both DEC ids, and the override path emits ONE loud
+``sweep.scope_override_hazard`` structlog WARNING, never a silent escape.
 """
 
 from __future__ import annotations
 
+import structlog
 from brutex.engine.sweep_scope import ScopeReport, SymbolVerdict, check_sweep_scope
 
 _SPOT_NSE = {"exchange": "NSE", "segment": "INDEX"}
@@ -92,3 +96,54 @@ class TestScopeReportMessages:
         assert isinstance(verdict, SymbolVerdict)
         assert verdict.symbol == "INDIAVIX"
         assert verdict.reason
+
+
+class TestCorporateActionExtension:
+    """DEC-CORP-ACTION-GATE-001 / ADR-0016 — the extension of DEC-ENGINE-SCOPE-GUARD-001.
+
+    BruteX has ZERO corporate-action adjustment code, so (a) the hard refusal
+    must carry that rationale + BOTH decision ids, and (b) the research
+    escape must emit one loud structlog hazard WARNING — no override can
+    silently produce split-corrupted results.
+    """
+
+    def test_refusal_message_carries_the_corp_action_rationale_and_both_dec_ids(self) -> None:
+        message = check_sweep_scope(
+            ["RELIANCE"], allow_out_of_scope=False, **_SPOT_NSE
+        ).refusal_message()
+        assert "corporate-action adjustment layer missing" in message
+        assert "DEC-CORP-ACTION-GATE-001" in message
+        assert "DEC-ENGINE-SCOPE-GUARD-001" in message
+        assert "ADR-0016" in message
+        assert "silently corrupt" in message
+
+    def test_override_emits_exactly_one_hazard_warning_naming_the_symbols(self) -> None:
+        with structlog.testing.capture_logs() as logs:
+            report = check_sweep_scope(
+                ["INDIAVIX", "RELIANCE"], allow_out_of_scope=True, **_SPOT_NSE
+            )
+        assert report.overridden is True
+        events = [e for e in logs if e["event"] == "sweep.scope_override_hazard"]
+        assert len(events) == 1
+        assert events[0]["symbols"] == ["INDIAVIX", "RELIANCE"]
+        assert events[0]["exchange"] == "NSE"
+        assert events[0]["segment"] == "INDEX"
+        assert "corporate-action adjustment layer missing" in events[0]["hazard"]
+        assert "DEC-CORP-ACTION-GATE-001" in events[0]["hazard"]
+        assert "ADR-0016" in events[0]["hazard"]
+
+    def test_refusal_without_the_flag_does_not_emit_the_hazard_warning(self) -> None:
+        # The hard refusal is the message's job — the hazard WARNING belongs
+        # to the let-through path only (it stamps an actual override).
+        with structlog.testing.capture_logs() as logs:
+            report = check_sweep_scope(["RELIANCE"], allow_out_of_scope=False, **_SPOT_NSE)
+        assert report.ok is False
+        assert not any(e["event"] == "sweep.scope_override_hazard" for e in logs)
+
+    def test_in_scope_launch_with_the_flag_does_not_emit_the_hazard_warning(self) -> None:
+        # The flag alone never warns — only actually-refused symbols do
+        # (mirrors the ``overridden`` stamp semantics).
+        with structlog.testing.capture_logs() as logs:
+            report = check_sweep_scope(["NIFTY"], allow_out_of_scope=True, **_SPOT_NSE)
+        assert report.ok is True
+        assert not any(e["event"] == "sweep.scope_override_hazard" for e in logs)
