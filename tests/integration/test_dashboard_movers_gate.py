@@ -189,4 +189,4 @@ class TestMoversGatePhaseNote:
         assert body["gated"] is True
         assert body["phase"] == "pull"
         assert "(current stage: pull)" in body["note"]
-        assert "movers stay gated until the final prebuild AND the movers warm" in body["note"]
+        assert "movers stay gated until the final prebuild finishes" in body["note"]
