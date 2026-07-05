@@ -1059,6 +1059,7 @@ def build_app(
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
+    pull_phase_probe: Callable[[], str | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
     pull_intent_store: PullIntentStore | None = None,
@@ -1133,6 +1134,18 @@ def build_app(
         (the default) wires the production probe — this app's own
         ``BackgroundPullJob.running``. Injected so tests drive the mid-pull /
         just-finished transitions deterministically.
+    pull_phase_probe
+        Optional pipeline-phase signal (DEC-PIPELINE-PHASE-UI-HONESTY-001). A
+        zero-arg callable returning the pipeline's CURRENT coarse ``set_phase``
+        label (``spot`` / ``metadata`` / ``historical`` / ``movers`` /
+        ``prebuild``; ``""`` = none in flight) — read by BOTH honest-progress
+        surfaces: the gated ``/api/v1/movers`` payload names the phase in its
+        note (never a blanket "prebuild in progress" during the fetch phases),
+        and the ``/api/v1/pull/rate`` verdict reads the amber ``local`` state
+        for the zero-vendor-call LOCAL phases (``prebuild``/``movers``) instead
+        of a red "stalled". ``None`` (the default) wires the production probe —
+        this app's own ``BackgroundPullJob.snapshot().phase``. Injected so
+        tests drive the per-phase projections deterministically.
     liveproof
         Optional :class:`~brutex.doctor_autorun.LiveProofAutorun` — the
         zero-command auto-run of the Mac live-proof kit
@@ -1574,6 +1587,12 @@ def build_app(
             # reads "done"/"idle", never a red "stalled" (the CLI bridge below has no
             # active flag, so its side keeps the tick-freshness fallback).
             panel_pull_active=_pull_active_probe(),
+            # DEC-PIPELINE-PHASE-UI-HONESTY-001: the pipeline's current phase label —
+            # the PANEL side only (the CLI bridge is a separate process with no
+            # pipeline phase). During the zero-vendor-call LOCAL stages
+            # (prebuild/movers) the verdict reads amber "local", never a red
+            # "stalled" off the correctly-flatlined fetch rate.
+            panel_phase=_pull_phase_probe(),
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,
@@ -2121,6 +2140,17 @@ def build_app(
     # tests inject a deterministic probe. Resolved at request time via the route closure.
     _pull_active_probe: Callable[[], bool | None] = (
         pull_active_probe if pull_active_probe is not None else (lambda: _pull_job.running)
+    )
+
+    # The pipeline-phase probe (DEC-PIPELINE-PHASE-UI-HONESTY-001): the production
+    # default reads THIS app's own single-flight job's coarse phase label (an O(1)
+    # lock-guarded PullProgress snapshot — "spot"/"metadata"/"historical"/"movers"/
+    # "prebuild", "" when none is in flight). Read at request time by the gated
+    # /api/v1/movers payload (phase-honest note) and the /api/v1/pull/rate verdict
+    # (amber "local" during the zero-vendor-call prebuild/movers stages); tests
+    # inject a deterministic probe.
+    _pull_phase_probe: Callable[[], str | None] = (
+        pull_phase_probe if pull_phase_probe is not None else (lambda: _pull_job.snapshot().phase)
     )
 
     # Last finished spot pull's verdict dict (DEC-VERDICT-BANNER-001). The
