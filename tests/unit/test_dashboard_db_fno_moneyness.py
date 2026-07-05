@@ -751,3 +751,129 @@ class TestQueryCandlesRegistryStep:
         )
         assert chain is not None
         assert sorted(chain) == [Decimal("24000"), Decimal("24050"), Decimal("24100")]
+
+
+# ── spot-key drift recovery (DEC-DB-MONEYNESS-KEY-RECOVER-001) ──────────────
+
+
+class TestSpotKeyRecovery:
+    """The /db moneyness spot-join walks the COMMON drift ladder when the exact
+    key probe is empty — mirroring the Greeks enrichment's SPOTJOIN-2 recovery
+    (DEC-GREEKS-CORRECTNESS-AUDIT-001), never fabricating a spot."""
+
+    def test_drifted_prefix_key_recovers_spot(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # FAILS BEFORE THE FIX: the spot dir carries the #911 "<EXCH>-<underlying>"
+        # drifted form; the raw "NIFTY" probe is empty, the ladder recovers it.
+        _write(tmp_path, segment="INDEX", symbol="NSE-NIFTY", bars=[_bar(_T1, "23900", oi=None)])
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            out = _underlying_spot_close_by_ts(
+                conn,
+                tmp_path,
+                exchange="NSE",
+                underlying="NIFTY",
+                interval="1minute",
+                ts_values=[_T1],
+            )
+        assert out[_utc_instant(_T1)] == Decimal("23900.00")
+        recovered = [e for e in logs if e["event"] == "db_view.spot_key_recovered"]
+        assert len(recovered) == 1  # exactly ONE recovery log, naming both keys.
+        assert recovered[0]["underlying"] == "NIFTY"
+        assert recovered[0]["recovered_key"] == "NSE-NIFTY"
+
+    def test_verbose_index_alias_recovers_spot(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # The MIDCPNIFTY chain over a NIFTYMIDSELECT-keyed spot dir (the sourced
+        # reverse alias rung) — pre-fix this read moneyness UNKNOWN on every bar.
+        _write(
+            tmp_path, segment="INDEX", symbol="NIFTYMIDSELECT", bars=[_bar(_T1, "12500", oi=None)]
+        )
+        out = _underlying_spot_close_by_ts(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            underlying="MIDCPNIFTY",
+            interval="1minute",
+            ts_values=[_T1],
+        )
+        assert out[_utc_instant(_T1)] == Decimal("12500.00")
+
+    def test_unrecoverable_key_stays_empty(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # Spot stored under a key NO ladder rung can reach → the honest empty map
+        # (every bar classifies UNKNOWN), never a fabricated spot.
+        _write(tmp_path, segment="INDEX", symbol="SOMETHINGELSE", bars=[_bar(_T1, "1", oi=None)])
+        assert (
+            _underlying_spot_close_by_ts(
+                conn,
+                tmp_path,
+                exchange="NSE",
+                underlying="NIFTY",
+                interval="1minute",
+                ts_values=[_T1],
+            )
+            == {}
+        )
+
+    def test_canonical_key_never_walks_the_ladder(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Byte-identity on the already-canonical hot path: the exact-key hit
+        # returns the same map as before the fix, with ZERO ladder probes and
+        # no recovery log.
+        import brutex.dashboard.db_view as db_view_mod
+
+        _seed_option_lake(tmp_path)
+
+        def _boom(underlying: str, exchange: str) -> tuple[str, ...]:
+            raise AssertionError("ladder must not be walked on an exact-key hit")
+
+        monkeypatch.setattr(db_view_mod, "spot_recovery_candidates", _boom)
+        out = _underlying_spot_close_by_ts(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            underlying="NIFTY",
+            interval="1minute",
+            ts_values=[_T1, _T2],
+        )
+        assert out[_utc_instant(_T1)] == Decimal("23900.00")
+        assert out[_utc_instant(_T2)] == Decimal("24200.00")
+
+    def test_recovered_spot_renders_real_moneyness_end_to_end(
+        self, conn: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        # FAILS BEFORE THE FIX: the full per-bar derivation reads real moneyness
+        # (not "?") when the spot dir key drifted to the #911 form.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            bars=[_bar(_T1, "150"), _bar(_T2, "210")],
+        )
+        _write(tmp_path, segment="FNO", symbol="NSE-NIFTY-30Jun25-23950-CE", bars=[_bar(_T1, "1")])
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            bars=[_bar(_T1, "23900", oi=None), _bar(_T2, "24200", oi=None)],
+        )
+        cells, _confidence = _fno_derived_rows(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            symbol="NSE-NIFTY-30Jun25-24000-CE",
+            interval="1minute",
+            raw_rows=[(_T1, Decimal("150")), (_T2, Decimal("210"))],
+            out_columns=["timestamp", "close"],
+        )
+        # T1 spot 23900 < 24000 CE → OTM; T2 spot 24200 > 24000 → ITM — real
+        # labels, not the pre-fix "?" UNKNOWN.
+        assert cells[0][0].startswith("OTM")
+        assert cells[1][0].startswith("ITM")
+        assert cells[0][1] == "23900.00"  # the recovered spot value itself.
