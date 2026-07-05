@@ -435,3 +435,15 @@ class TestInvalidate:
 
     def test_parse_lines_empty_text(self) -> None:
         assert lm._parse_lines("") == []
+
+
+def test_ledger_file_path_pins_window_ledger_store(tmp_path: Path) -> None:
+    """The leaf twin MUST equal ``window_ledger_store.ledger_path`` — the pin.
+
+    ``lake_manifest`` deliberately does NOT import ``window_ledger_store``
+    (the ledger/calendar import graph closed the CodeQL ``py/cyclic-import``
+    loop on PR #1177 — see ``_LEDGER_DIRNAME``), so THIS test is the guard
+    that the duplicated path constants can never drift from the ONE canonical
+    definition (the ``lake_revision._SWEEPS_DIRNAME`` precedent).
+    """
+    assert lm.ledger_file_path(tmp_path) == ledger_path(tmp_path)

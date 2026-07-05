@@ -112,6 +112,32 @@ ABSENT_LEDGER_TOKEN: Final[str] = "absent"  # noqa: S105  # nosec B105 — a fre
 #: The four coordinate fields every manifest row must carry (as strings).
 _ROW_FIELDS: Final[tuple[str, str, str, str]] = ("exchange", "segment", "symbol", "interval")
 
+#: The durable window-ledger Parquet's location relative to the lake root.
+#: MUST equal ``brutex.data.window_ledger_store.ledger_path(lake_root)`` —
+#: PINNED BY TEST, deliberately NOT imported: ``window_ledger_store`` pulls
+#: the ledger/calendar import graph (``window_ledger`` →
+#: ``interior_gap_detect`` → ``observed_sessions``, whose probes lazily reach
+#: back into the lake/adapter modules), and importing it from here — even
+#: function-locally — placed this module inside that import cycle (the CodeQL
+#: ``py/cyclic-import`` findings on PR #1177: the ``parquet_writer`` /
+#: ``db_view`` → ``lake_manifest`` edges then closed the loop). The manifest
+#: must stay a LEAF (stdlib + ``atomic_io`` + ``partition_lock`` only) so the
+#: lake writer AND the dashboard can both import it cycle-free — the exact
+#: ``lake_revision._SWEEPS_DIRNAME`` test-pinned-not-imported precedent
+#: (DEC-HARDENING-LEFTOVERS-001).
+_LEDGER_DIRNAME: Final[str] = "window_ledger"
+_LEDGER_FILENAME: Final[str] = "ledger.parquet"
+
+
+def ledger_file_path(lake_root: Path) -> Path:
+    """The window-ledger Parquet path the freshness token stats — O(1), no I/O.
+
+    The test-pinned twin of ``brutex.data.window_ledger_store.ledger_path``
+    (see :data:`_LEDGER_DIRNAME` for why it is duplicated rather than
+    imported — the manifest is a leaf module by design).
+    """
+    return lake_root / _LEDGER_DIRNAME / _LEDGER_FILENAME
+
 
 def manifest_dir(lake_root: Path) -> Path:
     """Return ``<lake_root>/.manifest`` (never created here)."""
@@ -133,15 +159,16 @@ def ledger_stat_token(lake_root: Path) -> str | None:
 
     The data-layer twin of ``lake_revision._ledger_revision`` (that module is
     dashboard-layer and composes a sweeps-tree component this manifest does not
-    need — a sweep write never creates a candle dataset). Resolved via the
-    COMMON :func:`brutex.data.window_ledger_store.ledger_path` (the ONE place
-    the ledger path is defined). Returns :data:`ABSENT_LEDGER_TOKEN` when the
-    ledger does not exist yet, ``None`` ("unknown — no freshness decision") on
-    any other :class:`OSError`, logged.
+    need — a sweep write never creates a candle dataset). The ledger path is
+    the test-pinned :func:`ledger_file_path` twin of
+    ``window_ledger_store.ledger_path``, NOT an import (see
+    :data:`_LEDGER_DIRNAME` — the import, even function-local, put this module
+    inside the ledger/calendar import cycle CodeQL flagged on PR #1177).
+    Returns :data:`ABSENT_LEDGER_TOKEN` when the ledger does not exist yet,
+    ``None`` ("unknown — no freshness decision") on any other
+    :class:`OSError`, logged.
     """
-    from brutex.data.window_ledger_store import ledger_path
-
-    target = ledger_path(lake_root)
+    target = ledger_file_path(lake_root)
     try:
         st = os.stat(target)
     except FileNotFoundError:
@@ -480,6 +507,7 @@ __all__ = [
     "MANIFEST_META_FILENAME",
     "MANIFEST_VERSION",
     "invalidate_manifest",
+    "ledger_file_path",
     "ledger_stat_token",
     "load_manifest_datasets",
     "manifest_data_path",

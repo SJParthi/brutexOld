@@ -23,15 +23,26 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from brutex.dashboard.db_view import (
-    VALID_EXCHANGES,
-    VALID_INTERVALS,
-    VALID_SEGMENTS,
-    _datasets_from_manifest,
-)
+import pytest
 from brutex.data import lake_manifest as lm
+from brutex.data.partition import VALID_EXCHANGES, VALID_INTERVALS, VALID_SEGMENTS
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+
+# NOTE (lean-CI honesty): `brutex.dashboard.db_view` imports `duckdb` + the
+# heavy dashboard graph at module level, and the property job installs only
+# the lean `.[dev]` extra (its sibling suites skip on the missing heavy deps).
+# The manifest-only properties below must still RUN there (`lake_manifest` is
+# a stdlib+leaf module by design — DEC-LAKE-MANIFEST-O1-001), so the ONE
+# db_view-dependent property is guarded by a module-level TRY-import + a
+# `skipif` marker (a decorator skip — never a mid-`@given` skip) instead of
+# skipping the whole module.
+try:
+    from brutex.dashboard import db_view as _db_view
+except ModuleNotFoundError:  # pragma: no cover — the lean .[dev]-only CI job
+    _db_view = None  # type: ignore[assignment]
+
+_HAS_DB_VIEW = _db_view is not None
 
 _SYMBOLS = st.text(
     alphabet="ABCXYZ&-. 123",
@@ -109,6 +120,7 @@ def test_rebuild_union_never_drops_on_disk_rows(
         assert loaded == _canonical(rows + extra)
 
 
+@pytest.mark.skipif(not _HAS_DB_VIEW, reason="db_view needs duckdb (the heavy extra)")
 @_PROPERTY_SETTINGS
 @given(
     rows=_ROWS,
@@ -127,7 +139,8 @@ def test_manifest_projection_matches_plain_filter(
     canonical form (a raw duplicated list is collapsed by the loader, never
     handed to the projection).
     """
-    projected = _datasets_from_manifest(
+    assert _db_view is not None  # skipif-guarded; narrows for the type checkers
+    projected = _db_view._datasets_from_manifest(
         _canonical(rows), exclude_segments=exclude, intervals=interval_filter
     )
     expected = [
