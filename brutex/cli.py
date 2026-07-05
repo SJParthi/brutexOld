@@ -1652,12 +1652,17 @@ def cmd_reopen_skipped(
     )
     from brutex.data.window_ledger_store import (
         ledger_path,
+        list_ledger_deltas,
         load_window_ledger,
         save_window_ledger,
     )
 
     resolved = _resolve_lake_root(lake_root)
-    if not ledger_path(resolved).is_file():
+    # Delta-aware presence gate (P2 fix-round, DEC-REOPEN-DELTA-AWARE-001): a
+    # base-less lake HOLDING deltas (a first pull's mid-flight crash checkpoint,
+    # DEC-LEDGER-DELTA-FLUSH-001) is a LIVE ledger — load_or_migrate treats it
+    # exactly so — hence it must be operable here, not refused as "no ledger".
+    if not (ledger_path(resolved).is_file() or list_ledger_deltas(resolved)):
         print(
             f"[brutex] no window ledger found at {ledger_path(resolved)} — nothing to re-open "
             "(run a pull first, or pass the right --lake-root).",
