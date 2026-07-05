@@ -1829,9 +1829,11 @@ def test_make_cli_rate_bridge_on_window_breach_pushes_one_pull_degraded(
     wrapped = cli._make_cli_rate_bridge_on_window(
         lambda: None, tmp_path, controller, _DegradedAdapter(), monitor
     )
-    # One observe is not enough for the hysteresis edge to settle on every rule, but the
-    # WARN rule fires on the first breaching sample; fire a few windows to be deterministic.
-    for _ in range(3):
+    # The WARN rules are dwell-gated (DEC-PULL-HEALTH-WARN-DWELL-001: 5 consecutive
+    # breaching samples before the OK->BREACH edge fires, so a ~1s-old pool never
+    # cold-fires) — fire enough windows to cross the dwell and prove a SUSTAINED
+    # breach still alerts exactly once through the CLI seam.
+    for _ in range(8):
         wrapped()
 
     breaches = [d for d in degraded if d[0] == "pull.achieved_below_allowed"]
@@ -1927,3 +1929,114 @@ def test_cmd_fetch_dry_run_does_not_publish_rate_bridge(
     )
     assert rc == cli.EXIT_OK
     assert not rate_bridge_path(tmp_path).exists()
+
+
+# ── Observed-sessions overlay arming (DEC-CALENDAR-OBSERVED-SESSIONS-001) ──
+
+
+def _write_overlay_sidecar(lake_root: Path) -> frozenset[Any]:
+    """Write a minimal valid overlay sidecar; return the expected loaded set."""
+    import json
+    from datetime import date
+
+    from brutex.calendars.observed_sessions import (
+        OBSERVED_LABEL,
+        OBSERVED_OVERLAY_VERSION,
+        overlay_path,
+    )
+
+    path = overlay_path(lake_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": OBSERVED_OVERLAY_VERSION,
+                "entries": [
+                    {
+                        "date": "2026-05-12",
+                        "detected_at": "2026-07-04T00:00:00+00:00",
+                        "month": "2026-05",
+                        "label": OBSERVED_LABEL,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return frozenset({date(2026, 5, 12)})
+
+
+def _spy_ingest_observed(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Wrap the real spot ingest-with-retry, recording the observed_holidays kwarg."""
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    captured: list[Any] = []
+    real = run_ingest.run_groww_spot_ingest_with_retry
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs.get("observed_holidays"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", _spy)
+    return captured
+
+
+def test_cmd_fetch_dry_run_threads_empty_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--dry-run`` threads the EMPTY overlay even when a sidecar exists on disk
+    (the ``detect_completeness_gaps`` gating pattern — a synthetic pull must never
+    consume real-lake calendar state)."""
+    _write_overlay_sidecar(tmp_path)
+    captured = _spy_ingest_observed(monkeypatch)
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=True,
+        inspect=False,
+        rows_per_chunk=2,
+    )
+    assert rc == cli.EXIT_OK
+    assert captured
+    assert all(observed == frozenset() for observed in captured)
+
+
+def test_cmd_fetch_live_threads_loaded_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REAL (non-dry) pull loads the overlay sidecar from the production lake and
+    threads it into the ingest spine (the detectors' margin arithmetic)."""
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    expected = _write_overlay_sidecar(tmp_path)
+    captured = _spy_ingest_observed(monkeypatch)
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_build_live_groww_spot",
+        lambda lake, catalog=None: (
+            _RealVendorSpotAdapter(bars_per_window=2),
+            ParquetBarSink(writer=ParquetWriter(lake_root=lake), catalog=catalog),
+        ),
+    )
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=2,
+        auto_retry=False,
+    )
+    assert rc == cli.EXIT_OK
+    assert captured
+    assert all(observed == expected for observed in captured)

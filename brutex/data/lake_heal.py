@@ -66,6 +66,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
+from brutex.data.derive_stamp import remove_derive_stamp
 from brutex.data.errors import (
     LakeWriteHalt,
     PartitionLockTimeout,
@@ -961,6 +962,10 @@ def _rebuild_tf_months(
             kind=kind,
             tfs=tf_labels,
             months=months,
+            # The heal just quarantine-MOVED these months — the rebuild must
+            # ALWAYS re-derive and must NOT write a fresh stamp (its tf subset /
+            # no-daily shape is not the pipeline's; DEC-PREBUILD-INCREMENTAL-001).
+            incremental=False,
         )
     except LakeWriteHalt:
         raise
@@ -993,6 +998,11 @@ def _run_recall(state: _BatchState, *, before: date) -> RecallReport:
     tf_rebuilt = 0
     tf_failed = 0
     for (exchange, segment, symbol), months in sorted(state.touched_minute.items()):
+        # DEC-PREBUILD-INCREMENTAL-001: the heal rewrote this symbol's 1-minute
+        # source, so its derive stamp is stale by definition — remove it OUTRIGHT
+        # (belt-and-braces: the rewrite already moved the source token) so the
+        # next pipeline prebuild can never skip a healed symbol.
+        remove_derive_stamp(state.lake_root, exchange, segment, symbol)
         y_min, m_min = min(months)
         y_max, m_max = max(months)
         target = DailyDeriveTarget(

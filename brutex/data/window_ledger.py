@@ -39,10 +39,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.interior_gap_detect import INTERIOR_GAP
+from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
+from brutex.data.session import ALL_FILTERED
 from brutex.data.window_status import EMPTY, FAILED, SUCCESS, classify_window_status
 
 __all__ = [
     "CONFIRMED_EMPTY_MIN_FETCHES",
+    "DEMOTED_SETTLE_REASONS",
     "EMPTY",
     "EMPTY_TERMINAL_THRESHOLD",
     "EXPIRED_WINDOW_SETTLE_SUFFIX",
@@ -111,6 +115,26 @@ CONFIRMED_EMPTY_MIN_FETCHES: int = 2
 #: ``brutex.dashboard.db_view.window_status_label`` keys the honest UI label on
 #: (DEC-OLD-EMPTY-SINGLE-CONFIRM-001; CLAUDE.md §11 COMMON — no second spelling).
 EXPIRED_WINDOW_SETTLE_SUFFIX: str = ", expired window)"
+
+#: Every ``degraded_reason`` tag the data-completeness demotion channel
+#: (:meth:`WindowLedger.record` ``degraded=True``) can stamp as a row's
+#: ``last_error`` — the ONE canonical set (CLAUDE.md §11 COMMON;
+#: DEC-DATA-HONESTY-ALLFILTERED-SEED-001) so the ``/coverage/windows`` label
+#: (:func:`brutex.dashboard.db_view.window_status_label`) can render a
+#: demotion-settled ``SKIPPED`` honestly instead of the "vendor confirmed no
+#: trades" wording (factually WRONG for these rows: the vendor RETURNED bars —
+#: they were boundary-filtered / hole-flagged / truncation-flagged, never a
+#: clean no-trades answer). Each tag's detector module stays its source of
+#: truth; this set only ENUMERATES them beside the channel that stamps them.
+#: ``"DEGRADED"`` is the FOURTH member by convention, not detection: it is the
+#: :meth:`WindowLedger.record` defensive fallback stamped when a caller passes
+#: ``degraded=True`` with no ``degraded_reason`` — unreachable from the current
+#: production spines (both always pass a concrete tag) but, were it ever
+#: stamped, its settle is STILL a demotion settle and must never fall through
+#: to the "vendor confirmed no trades" wording (wiring-review fold, PR #1158).
+DEMOTED_SETTLE_REASONS: frozenset[str] = frozenset(
+    {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"}
+)
 
 
 def expired_window_settle_reason(clean_attempts: int) -> str:
@@ -272,6 +296,17 @@ class WindowLedgerRecord:
     #: each pull (the last pull's count, like ``last_error`` / ``last_attempt_at``) —
     #: NOT cumulative, so a re-run of the SAME pull is bit-identical (Golden Rule #7).
     in_pull_fetches: int = 0
+    #: DEDUPED bars the sink actually NET-ADDED to the lake on the MOST-RECENT
+    #: attempt (DEC-INGEST-BOUNDARY-INTEGRITY-001) — the persisted twin of
+    #: :attr:`~brutex.data.sink.SinkAppendResult.bars_net_new`, which
+    #: DEC-SINK-DEDUP-COUNT-001 (#1031) computed but never persisted. ``bars``
+    #: stays the INPUT batch size the spine appended (several ``>0`` gates read
+    #: it); this is the keep-first-deduped count, so a re-pull whose bars are all
+    #: already stored reads ``bars > 0, bars_net_new == 0``. ``None`` = honestly
+    #: UNKNOWN — a legacy row written before the column existed, or a path with
+    #: no sink result (a lake cold-start seed) — NEVER fabricated to ``0``
+    #: (Golden Rule #1: ``0`` would falsely claim "that pull added nothing new").
+    bars_net_new: int | None = None
 
 
 @dataclass(slots=True)
@@ -412,6 +447,7 @@ class WindowLedger:
                 last_attempt_at=None,
                 empty_streak=0,
                 in_pull_fetches=0,  # never fetched — a pure PLANNED row
+                bars_net_new=0,  # nothing appended yet (mirrors bars=0)
             )
             self._dirty.add(wk)
 
@@ -445,9 +481,26 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=0,
                 in_pull_fetches=1,  # the lake proves one successful fetch's data
+                # The historical write's keep-first-deduped count is UNRECORDED —
+                # honest unknown, never fabricated (DEC-INGEST-BOUNDARY-INTEGRITY-001).
+                bars_net_new=None,
             )
             self._dirty.add(wk)
             return True
+
+    def has_window(self, key: WindowKey) -> bool:
+        """True iff ANY row exists for *key* (any status) — **O(1)**, atomic, read-only.
+
+        The cold-start seed's existence probe (DEC-DATA-HONESTY-ALLFILTERED-SEED-001):
+        :func:`~brutex.data.window_ledger_store.seed_enclosed_windows` skips its
+        density cross-check + refusal WARNING for a window that already HAS a row,
+        because the only-if-absent :meth:`seed_lake_success` would no-op anyway —
+        without this probe every steady-state reconcile re-warned about windows
+        that were long since fetched/settled. Never mutates anything.
+        """
+        wk = self._key(key)
+        with self._lock:
+            return wk in self._by_window
 
     def is_skippable(self, key: WindowKey) -> bool:
         """Return ``True`` iff *key* is SETTLED (``SUCCESS`` / ``SKIPPED``) — **O(1)**, atomic.
@@ -506,6 +559,7 @@ class WindowLedger:
         degraded: bool = False,
         degraded_reason: str | None = None,
         suppress_settle: bool = False,
+        bars_net_new: int | None = None,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -543,30 +597,43 @@ class WindowLedger:
 
         *old_window* (DEC-DEAD-STRIKE-LEDGER-SETTLE-001) is the pure "vendor data can
         never appear" fact (``window_end`` older than
-        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`), threaded so the
-        old-gap fast-settle can be BUDGET-AWARE: a strike whose in-pull EMPTY-retry
-        budget was REDUCED to 1 (DEC-FETCH-PER-WINDOW-GUARANTEE-001) can never reach
-        :data:`CONFIRMED_EMPTY_MIN_FETCHES` fetches inside ONE pull, so without this
-        it re-fetched once per pull long after its empty was confirmed. When the
-        classification is ``EMPTY``, the window is old, and the settle is not
-        suppressed, the confirmation count is CUMULATIVE across pulls:
-        ``prior.empty_streak`` (each unit one distinct prior pull's genuine,
-        unsuppressed clean-EMPTY observation — an independent confirmation at least as
-        strong as an in-pull re-fetch) plus this pull's *in_pull_fetches*; crossing
-        :data:`CONFIRMED_EMPTY_MIN_FETCHES` settles ``SKIPPED`` exactly like the
-        one-pull fast-settle (streak forced to the threshold). The data-safety law is
-        untouched ("if uncertain, fetch"): a ``SUCCESS`` resets the streak, a
-        ``FAILED`` (429/timeout) never counts and never settles, a breaker-suppressed
-        empty neither bumps nor settles, a RECENT window (*old_window* ``False``)
-        keeps the conservative across-pull streak, and :meth:`reopen_skipped` resets
-        the streak so an operator re-open regains the full confirmation budget. The
-        default ``False`` is byte-identical to the prior behaviour. HONEST envelope:
-        *in_pull_fetches* counts transient re-attempts too, preserving the
-        already-shipped in-pull generosity (1 transient + 1 clean empty == 2), and on
-        the SPOT spine ``empty_streak`` may include degraded-demotion bumps — but the
-        spot spine never passes *old_window* (its full empty-retry budget always
-        reaches the in-pull confirmation), so the cumulative rule's evidence there is
-        genuine clean-EMPTY pulls only.
+        :data:`~brutex.adapters.ingest_common.OLD_GAP_HORIZON_DAYS`). Since
+        **DEC-OLD-EMPTY-SINGLE-CONFIRM-001** (operator-decreed 2026-07-04, superseding
+        #1172's budget-aware cumulative accumulation) an OLD window settles ``SKIPPED``
+        off a SINGLE genuine, unsuppressed clean-EMPTY fetch in THIS pull — the streak
+        is forced to the threshold and the honest
+        :func:`expired_window_settle_reason` stamp becomes the ``last_error`` (see the
+        settle arm below). The data-safety law is untouched ("if uncertain, fetch"): a
+        ``SUCCESS`` resets the streak, a ``FAILED`` (429/timeout) never counts and
+        never settles, a breaker-suppressed empty neither bumps nor settles, a RECENT
+        window (*old_window* ``False``) keeps the conservative across-pull streak, and
+        :meth:`reopen_skipped` resets the streak so an operator re-open regains the
+        full confirmation budget. The default ``False`` is byte-identical to the prior
+        behaviour. HONEST envelope (DEC-DATA-HONESTY-ALLFILTERED-SEED-001 doc
+        reconcile): BOTH spines' ``empty_streak`` may now include degraded-demotion
+        bumps — the F&O spine passes *degraded* (an ``ALL_FILTERED`` boundary verdict)
+        AND *old_window* on the SAME record call. Because the old-empty settle is
+        single-confirm (it fires off THIS pull's own genuine clean EMPTY), a prior
+        degraded bump can never SUBSTITUTE for clean-EMPTY evidence — but the
+        :func:`expired_window_settle_reason` stamp's clean-attempt COUNT is
+        streak-derived (``prior_streak + 1``), so a prior degraded bump INFLATES that
+        display count by one (e.g. one all-filtered demotion then one clean EMPTY
+        reads "2 clean attempts"). Accepted + regression-pinned: the settle decision
+        is sound (a real clean EMPTY landed), only the count conflates flagged
+        attempts with clean ones; ``brutex reopen-skipped`` stays the recovery.
+        The same no-provenance conflation applies to the THRESHOLD settle over
+        MIXED evidence (correctness-review fold, PR #1158): degraded bumps and
+        clean-EMPTY bumps share this ONE ``empty_streak``, so a mixed-evidence
+        settle labels ALL its attempts by whichever channel landed the FINAL
+        record — two ``ALL_FILTERED`` demotions then one genuine clean EMPTY
+        settle ``SKIPPED`` with ``last_error=None`` ("vendor confirmed no
+        trades (3 clean attempt(s))" though two were boundary-filter
+        demotions), and the symmetric two-clean-empties-then-one-demotion
+        settle reads "3 flagged attempt(s)". Display-only (#1031/#1294
+        pre-existing streak-sharing semantics — the settle itself is sound and
+        ``reopen-skipped`` recovers); an honest per-channel count needs a
+        streak-provenance column — the SAME named follow-up as the expired-stamp
+        inflation above, deliberately NOT claimed here.
 
         *degraded* (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001) is the
         DATA-COMPLETENESS demotion hint: a clean bars-returning fetch whose stored bars
@@ -574,7 +641,8 @@ class WindowLedger:
         complete window, so it must NOT be marked terminal/skippable on a ``SUCCESS``.
         When ``True`` AND the natural classification is ``SUCCESS`` the window is recorded
         ``FAILED`` (re-pullable — exactly like a transient) with *degraded_reason* (a
-        non-secret tag such as ``"INTERIOR_GAP"`` / ``"TRUNCATED"``) stamped as the
+        non-secret tag from :data:`DEMOTED_SETTLE_REASONS` — ``"INTERIOR_GAP"`` /
+        ``"SUSPECTED_PARTIAL"`` / ``"ALL_FILTERED"``) stamped as the
         ``last_error``, and the ``empty_streak`` is BUMPED so the re-pull is BOUNDED: after
         :data:`EMPTY_TERMINAL_THRESHOLD` consecutive degraded pulls the window settles
         ``SKIPPED`` (the gap is accepted after the operator has been warned that many
@@ -608,6 +676,13 @@ class WindowLedger:
         settle ``SKIPPED`` on this record (both the fast-settle and the streak
         promotion are gated off). IGNORED for ``SUCCESS`` / ``FAILED`` / degraded
         outcomes; the default ``False`` is byte-identical to the prior behaviour.
+
+        *bars_net_new* (DEC-INGEST-BOUNDARY-INTEGRITY-001) is the sink's
+        keep-first-DEDUPED net-new bar count for this append
+        (:attr:`~brutex.data.sink.SinkAppendResult.bars_net_new`), stored
+        alongside ``bars`` (the INPUT batch size, unchanged — the ``>0`` gates
+        keep reading it). ``None`` (the default) records an honest UNKNOWN for a
+        caller with no sink result — never fabricated to ``0``.
         """
         classified = classify_window_status(raw_bars, error_type, degraded=degraded)
         # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
@@ -729,6 +804,7 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
                 in_pull_fetches=in_pull_fetches,
+                bars_net_new=bars_net_new,
             )
             self._dirty.add(wk)
             return status
@@ -751,6 +827,8 @@ class WindowLedger:
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             bars = prior.bars if prior is not None else 0
             empty_streak = prior.empty_streak if prior is not None else 0
+            # No fetch/append happened here — preserve the prior net-new (like ``bars``).
+            bars_net_new = prior.bars_net_new if prior is not None else None
             if prior is None or prior.status != SKIPPED:
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a known-gap
                 # settle is a newly-SKIPPED window too — the verdict must SAY it.
@@ -769,6 +847,7 @@ class WindowLedger:
                 last_attempt_at=now.isoformat(),
                 empty_streak=empty_streak,
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
+                bars_net_new=bars_net_new,
             )
             self._dirty.add(wk)
             return SKIPPED
@@ -868,6 +947,7 @@ class WindowLedger:
                 last_attempt_at=row.last_attempt_at,
                 empty_streak=0,
                 in_pull_fetches=row.in_pull_fetches,
+                bars_net_new=row.bars_net_new,  # no fetch here — preserved
             )
         self._reopened.update(doomed)
         self._dirty.update(doomed)
@@ -1102,8 +1182,10 @@ class WindowLedger:
     @staticmethod
     def _record_row(
         r: WindowLedgerRecord,
-    ) -> tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]:
-        """One record → the canonical serialised 13-tuple (ONE shape — CLAUDE.md §11)."""
+    ) -> tuple[
+        str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
+    ]:
+        """One record → the canonical serialised 14-tuple (ONE shape — CLAUDE.md §11)."""
         return (
             r.market,
             r.security_id,
@@ -1118,15 +1200,33 @@ class WindowLedger:
             r.last_attempt_at,
             r.empty_streak,
             r.in_pull_fetches,
+            r.bars_net_new,
         )
 
     def dirty_rows(
         self,
-    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]]:
+    ) -> list[
+        tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            int,
+            int,
+            str | None,
+            str,
+            str | None,
+            int,
+            int,
+            int | None,
+        ]
+    ]:
         """Serialise ONLY the rows dirtied since the last :meth:`clear_dirty` — sorted.
 
         DEC-LEDGER-DELTA-FLUSH-001: the delta append's row source. Emits the SAME
-        13-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
+        14-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
         restricted to keys stamped by a row-writing mutator since the last cleared
         batch. A dirty key whose row was meanwhile DELETED (a prune) is silently
         skipped — a delta cannot express a deletion (the pull-end full save owns
@@ -1194,12 +1294,31 @@ class WindowLedger:
 
     def to_rows(
         self,
-    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]]:
+    ) -> list[
+        tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            int,
+            int,
+            str | None,
+            str,
+            str | None,
+            int,
+            int,
+            int | None,
+        ]
+    ]:
         """Serialise to a deterministic list of plain tuples (for the durable store).
 
-        ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) is the LAST tuple element —
-        appended after ``empty_streak`` exactly as that column was, so a legacy 12-tuple
-        Parquet (written before it existed) still loads (the store fills it per-row).
+        ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) then ``bars_net_new``
+        (DEC-INGEST-BOUNDARY-INTEGRITY-001) were each appended LAST — after
+        ``empty_streak`` exactly as that column was — so a legacy 12/13-tuple
+        Parquet (written before either existed) still loads (the store fills the
+        missing column per-row; an absent ``bars_net_new`` reads ``None``).
         """
         return [self._record_row(r) for r in self.records()]
 
@@ -1207,7 +1326,22 @@ class WindowLedger:
     def from_rows(
         cls,
         rows: Iterable[
-            tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int, int]
+            tuple[
+                str,
+                str,
+                str,
+                str,
+                str,
+                str,
+                int,
+                int,
+                str | None,
+                str,
+                str | None,
+                int,
+                int,
+                int | None,
+            ]
         ],
         *,
         threshold: int = EMPTY_TERMINAL_THRESHOLD,
@@ -1228,6 +1362,7 @@ class WindowLedger:
             last_attempt_at,
             empty_streak,
             in_pull_fetches,
+            bars_net_new,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -1244,6 +1379,7 @@ class WindowLedger:
                     last_attempt_at=last_attempt_at,
                     empty_streak=empty_streak,
                     in_pull_fetches=in_pull_fetches,
+                    bars_net_new=bars_net_new,
                 )
             )
         return ledger
