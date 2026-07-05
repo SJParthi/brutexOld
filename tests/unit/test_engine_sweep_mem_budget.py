@@ -9,12 +9,15 @@ refusal NAMES both env knobs + concrete remedies).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from brutex.engine.sweep_mem_budget import (
     BATCH_RANK_BYTES_PER_KEPT,
     BOUNDED_RANK_MODE_ENV,
     DEFAULT_MEM_BUDGET_BYTES,
     MEM_BUDGET_ENV,
+    MEM_BUDGET_FRACTION,
     BoundedRankMode,
     RankMemoryPlan,
     plan_rank_memory,
@@ -22,6 +25,25 @@ from brutex.engine.sweep_mem_budget import (
     resolve_mem_budget_bytes,
     watermark_message,
 )
+from brutex.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
+
+_GIB = 1024**3
+
+
+@pytest.fixture(autouse=True)
+def _fresh_ram_cache() -> Iterator[None]:
+    """Isolate from the process-global RAM detection cache (DEC-RAM-BUDGETS-001)."""
+    reset_hardware_envelope_cache()
+    yield
+    reset_hardware_envelope_cache()
+
+
+def _simulate_ram(monkeypatch: pytest.MonkeyPatch, total_bytes: int) -> None:
+    """Force RAM detection to *total_bytes* (0 = the undetected sentinel)."""
+    monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: total_bytes)
+    monkeypatch.setattr("brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM)
+    reset_hardware_envelope_cache()
+
 
 # ────── resolve_bounded_rank_mode ──────
 
@@ -62,13 +84,35 @@ class TestResolveBoundedRankMode:
 
 
 class TestResolveMemBudgetBytes:
-    def test_unset_defaults_to_8_gib(self) -> None:
-        assert resolve_mem_budget_bytes({}) == DEFAULT_MEM_BUDGET_BYTES == 8 * 1024**3
+    def test_unset_with_undetected_ram_floors_at_8_gib(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The DEC-RAM-BUDGETS-001 sentinel law: RAM undetected → the old
+        # hand-picked 8 GiB constant EXACTLY (pre-derivation behavior).
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
+        assert resolve_mem_budget_bytes({}) == DEFAULT_MEM_BUDGET_BYTES == 8 * _GIB
 
-    def test_blank_defaults(self) -> None:
+    def test_unset_with_48_gib_ram_derives_exact_old_constant(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The 48 GiB CLAUDE.md §8 regression pin: 48 GiB × 1/6 == 8 GiB.
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        assert resolve_mem_budget_bytes({}) == DEFAULT_MEM_BUDGET_BYTES
+
+    def test_unset_with_detected_ram_scales_by_fraction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _simulate_ram(monkeypatch, 96 * _GIB)
+        assert resolve_mem_budget_bytes({}) == int(96 * _GIB * MEM_BUDGET_FRACTION)
+
+    def test_blank_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
         assert resolve_mem_budget_bytes({MEM_BUDGET_ENV: "  "}) == DEFAULT_MEM_BUDGET_BYTES
 
-    def test_explicit_value(self) -> None:
+    def test_explicit_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The #1352 explicit-override contract is byte-unchanged — the env
+        # value wins over any detection outcome.
+        _simulate_ram(monkeypatch, 48 * _GIB)
         assert resolve_mem_budget_bytes({MEM_BUDGET_ENV: " 123456 "}) == 123456
 
     def test_non_integer_raises_naming_the_knob(self) -> None:
