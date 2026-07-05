@@ -16,6 +16,8 @@ include the #911 drift-key alphabet — ``&``, ``-``, ``.``, space):
   integration test pins against real directories).
 """
 
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import tempfile
