@@ -919,3 +919,109 @@ class TestRankCombosOverfit:
         assert ranked[0].mask == 1
         assert ranked[0].composite_score == 0.0
         assert ranked[0].deflated_sharpe is not None
+
+
+# ────── shared rank internals (DEC-SWEEP-STREAMING-RANK-001) ──────
+#
+# The bounded columnar rank (brutex.engine.sweep_stream) reuses these public
+# internals; the direct pins below keep them honest INDEPENDENTLY of the two
+# rank paths (whose bit-identity is property-gated in
+# tests/property/test_sweep_stream_bounded_rank.py).
+
+
+class TestSharedRankInternals:
+    def test_composite_term_inputs_order_and_projection(self) -> None:
+        from brutex.ranking import composite_term_inputs
+
+        m = _m(
+            sharpe_ratio=1.5,
+            sortino_ratio=None,
+            calmar_ratio=0.25,
+            profit_factor=2.0,
+            recovery_factor=None,
+            win_rate=0.4,
+            win_loss_ratio=3.0,
+            avg_mfe_paisa=600,
+            avg_mae_paisa=0,  # floored at 1 paisa by _risk_efficiency
+        )
+        assert composite_term_inputs(m) == (1.5, 0.0, 0.25, 1.0, 0.0, 0.4 * 3.0, 600.0)
+
+    def test_composite_scores_matches_manual_weighted_sum(self) -> None:
+        from brutex.ranking import N_COMPOSITE_TERMS, composite_scores
+
+        columns = tuple([float(i), float(i) * 2.0] for i in range(N_COMPOSITE_TERMS))
+        dsr_contrib = [0.25, -0.25]
+        scores = composite_scores(columns, dsr_contrib)
+        weights = (0.25, 0.20, 0.15, 0.15, 0.10, 0.10, 0.15)
+        for i in range(2):
+            expected = 0.0
+            for column, weight in zip(columns, weights, strict=True):
+                expected += weight * _zscores(column)[i]
+            expected += dsr_contrib[i]
+            assert scores[i] == expected
+
+    def test_composite_scores_wrong_column_count_rejected(self) -> None:
+        from brutex.ranking import composite_scores
+
+        with pytest.raises(ValueError, match="expects 7 term columns, got 2"):
+            composite_scores(([0.0], [0.0]), [0.0])
+
+    def test_dsr_z_contributions_inactive_is_all_zero(self) -> None:
+        from brutex.ranking import dsr_z_contributions
+
+        assert dsr_z_contributions(None, 3, None) == [0.0, 0.0, 0.0]
+
+    def test_dsr_z_contributions_scales_zscores_by_weight(self) -> None:
+        from brutex.ranking import dsr_z_contributions
+
+        cfg = OverfitGateConfig(weight=0.5)
+        dsrs = [0.1, 0.9]
+        expected = [0.5 * z for z in _zscores(dsrs)]
+        assert dsr_z_contributions(dsrs, 2, cfg) == expected
+
+    def test_ensure_unique_survivor_masks_accepts_unique(self) -> None:
+        from brutex.ranking import ensure_unique_survivor_masks
+
+        ensure_unique_survivor_masks([3, 1, 2])  # no raise
+
+    def test_ensure_unique_survivor_masks_names_only_duplicates(self) -> None:
+        from brutex.ranking import ensure_unique_survivor_masks
+
+        with pytest.raises(ValueError) as excinfo:
+            ensure_unique_survivor_masks([5, 5, 7])
+        assert str(excinfo.value) == (
+            "rank_combos requires a unique mask per candidate (the deterministic "
+            "tie-break keys on it); duplicate survivor mask(s): [5]"
+        )
+
+    def test_overfit_gate_positions_abstains_on_undeflatable_pool(self) -> None:
+        from brutex.ranking import overfit_gate_positions
+
+        cfg = OverfitGateConfig()
+        # A single finite Sharpe → dispersion not deflatable → abstain (None).
+        assert overfit_gate_positions([1.0, None], [(1.0, 50, 0.0, 0.0)], cfg) is None
+
+    def test_overfit_gate_positions_returns_positions_and_dsrs(self) -> None:
+        from brutex.ranking import overfit_gate_positions
+
+        cfg = OverfitGateConfig(dsr_min=0.5)
+        pool: list[float | None] = [2.0, 0.1, 3.5, 0.2]
+        survivors = [
+            (2.0, 100, 0.5, 0.0),  # strong — passes
+            (0.1, 100, 0.0, 0.0),  # weak — deflated below 0.5
+        ]
+        outcome = overfit_gate_positions(pool, survivors, cfg)
+        assert outcome is not None
+        positions, dsrs = outcome
+        assert positions == [0]
+        assert len(dsrs) == 1
+        expected = deflated_sharpe_for(
+            2.0,
+            100,
+            0.5,
+            0.0,
+            n_trials=4,
+            trial_sharpe_variance=pool_sharpe_dispersion(pool).variance,
+            cfg=cfg,
+        )
+        assert dsrs[0] == expected
