@@ -53,28 +53,42 @@ VALUE change), an identical restate is detected pre-write (no partition
 rewrite at all), and the ``latest-wins`` merge corrects any stale overlay
 (Golden Rule #7).
 
-Concurrency (honest envelope, DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3):
-the pass is WRITE-serialised via the per-partition flock and safe against a
-concurrent KEEP-FIRST vendor pull (raw OHLCV identity untouched either way),
-but two concurrent ENRICH passes are LAST-WRITER-WINS — never torn, the
-stamp always agrees with its values, yet the slower pass's inputs restate.
-The intended execution model is single-enricher-per-lake (the pass runs once
-per pull, post-drain).
+Concurrency (honest envelope, DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3 +
+DEC-GREEKS-PARALLEL-001): the pass is WRITE-serialised via the per-partition
+flock and safe against a concurrent KEEP-FIRST vendor pull (raw OHLCV identity
+untouched either way), but two concurrent ENRICH passes are LAST-WRITER-WINS —
+never torn, the stamp always agrees with its values, yet the slower pass's
+inputs restate. The intended execution model is single-ENRICH-PASS-per-lake
+(the pass runs once per pull, post-drain) — UNCHANGED by the in-pass process
+pool: the parallel driver's spawn workers write DISJOINT contract symbols by
+construction (all targets of one ``(exchange, underlying)`` whose symbols
+could collide share ONE work unit, processed in sorted order inside one
+worker), so intra-pass workers never contend on a partition and the stored
+bytes are IDENTICAL to the sequential pass (golden-pinned). The driver's own
+structlog events + liveness beats are emitted PARENT-side in sorted order;
+the DEEP seam logs (read-dedup warnings, ``spot_key_recovered``) fire inside
+per-target processing and therefore emit CHILD-side in parallel mode —
+honest: log parity is driver-events-only, never claimed for the deep seams.
 """
 
 from __future__ import annotations
 
+import multiprocessing
 import os
+import pickle
 from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.lake_keys import spot_recovery_candidates
@@ -106,6 +120,7 @@ __all__ = [
     "EXPIRY_HOUR_IST",
     "EXPIRY_MINUTE_IST",
     "GREEKS_FORMULA_VERSION",
+    "GREEKS_WORKERS_ENV",
     "Q_BIAS_ZERO",
     "RATE_SOURCE_ID_CSV",
     "RATE_SOURCE_ID_FIXED",
@@ -129,9 +144,11 @@ __all__ = [
     "enrich_greeks_for_targets",
     "enrich_option_bars",
     "expiry_instant_utc",
+    "greeks_pool_workers",
     "pack_greeks_provenance",
     "rate_source_id_for",
     "read_spot_join_with_recovery",
+    "resolve_greeks_workers",
     "resolve_risk_free_source",
     "t_years_act365",
     "unpack_greeks_provenance",
@@ -1103,11 +1120,15 @@ def write_option_greeks(
     of the vendor spine is untouched (the writer's ``_bar_values_equal`` stays
     OHLCV+OI-only).
 
-    Concurrency (DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3): the flock
-    serialises each write's read-modify-write, so this is safe against a
-    concurrent keep-first VENDOR writer; two concurrent ENRICH passes are
-    last-writer-wins (single-enricher-per-lake execution model — the pass
-    runs once per pull).
+    Concurrency (DEC-GREEKS-CORRECTNESS-AUDIT-001 G-RACE-3 +
+    DEC-GREEKS-PARALLEL-001): the flock serialises each write's
+    read-modify-write, so this is safe against a concurrent keep-first VENDOR
+    writer; two concurrent ENRICH passes are last-writer-wins (the
+    single-ENRICH-PASS-per-lake execution model — the pass runs once per pull
+    — stands). WITHIN one pass, the parallel driver's workers write DISJOINT
+    contract symbols by construction (a symbol's every target rides one work
+    unit), so intra-pass writes never contend on a partition and each
+    partition's merge sequence is identical to the sequential pass.
     """
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
@@ -1124,22 +1145,34 @@ def write_option_greeks(
     return result.bars_appended
 
 
+def _chain_key(target: GreeksEnrichTarget) -> tuple[str, str, date, date]:
+    """The target's spot-CHAIN coordinate — exactly the :class:`_SpotJoinMemo` key.
+
+    ``(exchange, underlying, start, end)``: every CE/PE strike of one
+    (underlying, window) chain shares this key (ONE spot read per chain). The
+    underlying comes from :func:`~brutex.data.fno_symbol.parse_fno_symbol`;
+    an undecodable symbol falls back to the raw symbol so the keying is total
+    + deterministic (DEC-GREEKS-PARALLEL-001 unit assignment reuses it).
+    """
+    parts = parse_fno_symbol(target.symbol)
+    underlying = parts.underlying if parts is not None else target.symbol
+    return (target.exchange, underlying, target.start, target.end)
+
+
 def _target_sort_key(target: GreeksEnrichTarget) -> tuple[str, str, date, date, str]:
     """Deterministic total order grouping targets that share one spot read.
 
     ``(exchange, underlying, start, end, symbol)`` — the leading four fields
-    are EXACTLY the :class:`_SpotJoinMemo` key, so after sorting every target
-    sharing one spot window sits adjacent and the capacity-2 LRU reaches
-    O(distinct keys) reads (registry order gives NO adjacency guarantee —
-    the fetch phase's FUT-first market sort never reaches the enrich targets).
-    The underlying comes from :func:`~brutex.data.fno_symbol.parse_fno_symbol`;
-    an undecodable symbol falls back to the raw symbol (sorting by the raw
-    symbol alone would interleave strike/expiry tokens lexically across one
-    chain). The trailing ``symbol`` makes the order total + deterministic.
+    are EXACTLY the :class:`_SpotJoinMemo` key (:func:`_chain_key`), so after
+    sorting every target sharing one spot window sits adjacent and the
+    capacity-2 LRU reaches O(distinct keys) reads (registry order gives NO
+    adjacency guarantee — the fetch phase's FUT-first market sort never
+    reaches the enrich targets). An undecodable symbol falls back to the raw
+    symbol (sorting by the raw symbol alone would interleave strike/expiry
+    tokens lexically across one chain). The trailing ``symbol`` makes the
+    order total + deterministic.
     """
-    parts = parse_fno_symbol(target.symbol)
-    underlying = parts.underlying if parts is not None else target.symbol
-    return (target.exchange, underlying, target.start, target.end, target.symbol)
+    return (*_chain_key(target), target.symbol)
 
 
 class _SpotJoinMemo:
@@ -1204,6 +1237,581 @@ class _SpotJoinMemo:
         return join
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Parallel enrichment (DEC-GREEKS-PARALLEL-001)
+# ────────────────────────────────────────────────────────────────────────
+
+#: Environment variable overriding the AUTO Greeks worker count. ``"1"`` is
+#: the operator KILL-SWITCH forcing the unchanged sequential path; unset /
+#: blank resolves the AUTO count; an invalid value (non-integer / ``< 1``)
+#: falls back to AUTO and is logged LOUDLY at WARNING (the
+#: :func:`~brutex.engine.sweep_parallel.resolve_sweep_workers` invalid-env
+#: convention, mirrored).
+GREEKS_WORKERS_ENV: Final[str] = "BRUTEX_GREEKS_WORKERS"
+
+#: AUTO worker-count cap + reserved CPUs — ``max(1, min(cpu_count - 2, 8))``,
+#: the sweep pool's ADR-0016 envelope arithmetic mirrored (reserve 2 cores for
+#: the rest of the machine per CLAUDE.md §8, cap at 8). HONEST (Golden Rule
+#: #10): a LOCAL mirror, not a measured optimum for the IV-solve workload; no
+#: shared hardware-envelope module exists on main today — when one lands, both
+#: resolvers should repoint at it (named follow-up, CLAUDE.md §11 COMMON).
+_GREEKS_WORKERS_CAP: Final[int] = 8
+_GREEKS_WORKERS_RESERVED_CPUS: Final[int] = 2
+
+#: Per-target outcome kinds — one per :class:`GreeksEnrichReport` tally bucket.
+_KIND_ENRICHED: Final[str] = "enriched"
+_KIND_ALREADY_CURRENT: Final[str] = "already_current"
+_KIND_FUTURES_SKIPPED: Final[str] = "futures_skipped"
+_KIND_UNDECODABLE: Final[str] = "undecodable"
+_KIND_NO_BARS: Final[str] = "no_bars"
+_KIND_ERRORED: Final[str] = "errored"
+
+
+def greeks_pool_workers(cpu_count: int | None) -> int:
+    """The AUTO Greeks worker count for *cpu_count* CPUs — pure + injectable.
+
+    ``max(1, min(cpu_count - 2, 8))``, mirroring
+    :func:`~brutex.engine.sweep_parallel.auto_sweep_workers` (the GIL-held
+    Rust IV solve means a process pool is the only real parallelism — the
+    ``trading_core`` kernel never detaches the GIL). A ``None`` *cpu_count*
+    (``os.cpu_count()`` may return ``None`` on exotic platforms) resolves to
+    1 — never guess parallelism on an undetectable machine. O(1).
+
+    Parameters
+    ----------
+    cpu_count
+        The detected CPU count, or ``None`` when undetectable.
+
+    Returns
+    -------
+    int
+        The auto worker count (``>= 1``).
+    """
+    if cpu_count is None:
+        cpu_count = 1
+    return max(1, min(cpu_count - _GREEKS_WORKERS_RESERVED_CPUS, _GREEKS_WORKERS_CAP))
+
+
+def resolve_greeks_workers(
+    env: Mapping[str, str] | None = None,
+    *,
+    cpu_count_fn: Callable[[], int | None] | None = None,
+) -> int:
+    """Resolve the Greeks-enrichment worker count from :data:`GREEKS_WORKERS_ENV`.
+
+    * **unset / blank** → the AUTO count :func:`greeks_pool_workers`.
+    * **explicit valid env ``>= 1``** → that value verbatim (``"1"`` is the
+      operator kill-switch — the driver runs the unchanged sequential path).
+    * **INVALID env (non-integer / ``< 1``)** → the AUTO count, logged LOUDLY
+      at WARNING on ``greeks_enrich.workers_invalid`` naming the value via
+      ``repr`` (the ``resolve_sweep_workers`` invalid-env convention). O(1).
+
+    Parameters
+    ----------
+    env
+        Environment mapping (defaults to :data:`os.environ`) — injectable.
+    cpu_count_fn
+        CPU-count probe (defaults to :func:`os.cpu_count`) — injectable.
+
+    Returns
+    -------
+    int
+        The resolved worker count (``>= 1``).
+    """
+    source = os.environ if env is None else env
+    probe = os.cpu_count if cpu_count_fn is None else cpu_count_fn
+    auto = greeks_pool_workers(probe())
+    raw = source.get(GREEKS_WORKERS_ENV)
+    if raw is None or not raw.strip():
+        return auto
+    try:
+        parsed = int(raw)
+    except ValueError:
+        parsed = 0  # sentinel: falls through to the invalid branch below.
+    if parsed < 1:
+        _LOG.warning("greeks_enrich.workers_invalid", requested_env=repr(raw), fallback=auto)
+        return auto
+    return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetOutcome:
+    """One target's picklable verdict — the unit of parent-side fold + emit.
+
+    Carries EVERYTHING the driver-level structlog events + the report
+    counters need, as plain picklable data (``null_reasons`` stays the
+    :class:`EnrichStats` tuple-of-pairs form; the emitter re-derives the
+    event's dict). ``skipped`` is tallied for EVERY kind that reached
+    :func:`enrich_option_bars` — including a target that then ERRORED in its
+    write (the pre-refactor driver incremented ``bars_skipped`` before the
+    write, preserved bit-for-bit).
+    """
+
+    kind: str
+    symbol: str
+    start: str
+    end: str
+    written: int = 0
+    solved: int = 0
+    nulls: int = 0
+    reused: int = 0
+    skipped: int = 0
+    null_reasons: tuple[tuple[str, int], ...] = ()
+    style: int = STYLE_UNKNOWN
+    error: str | None = None
+
+
+def _run_target(
+    target: GreeksEnrichTarget,
+    *,
+    reader: Callable[[GreeksEnrichTarget], list[dict[str, object]]],
+    writer: Callable[[GreeksEnrichTarget, Sequence[FnoGreeksBar]], int],
+    memo: _SpotJoinMemo,
+    rate_source: RiskFreeSource,
+    reraise: tuple[type[BaseException], ...] = (LakeWriteHalt,),
+) -> _TargetOutcome:
+    """ONE target's read→join→solve→write body — shared by BOTH drivers.
+
+    The single source of truth (CLAUDE.md §11 COMMON) for the per-target
+    pipeline: the sequential driver and the pool worker call THIS, so the two
+    paths cannot drift. Exception policy is the caller's via *reraise*:
+
+    * the sequential driver keeps the default ``(LakeWriteHalt,)`` — the
+      CTR-2 whole-pass abort (DEC-GREEKS-CORRECTNESS-AUDIT-001), every other
+      ``Exception`` (including ``MemoryError``, the pre-refactor behaviour)
+      quarantines to an ``errored`` outcome;
+    * the pool worker passes ``(LakeWriteHalt, MemoryError)`` — a raw
+      worker-side OOM must tear the pool down, never blend into a quiet
+      per-target quarantine (the sweep-worker convention).
+    """
+    start = target.start.isoformat()
+    end = target.end.isoformat()
+    skipped_seen = 0
+    try:
+        parts = parse_fno_symbol(target.symbol)
+        if parts is None:
+            return _TargetOutcome(
+                kind=_KIND_UNDECODABLE, symbol=target.symbol, start=start, end=end
+            )
+        if parts.option_type is None or parts.strike is None:
+            return _TargetOutcome(
+                kind=_KIND_FUTURES_SKIPPED, symbol=target.symbol, start=start, end=end
+            )
+        rows = reader(target)
+        if not rows:
+            return _TargetOutcome(kind=_KIND_NO_BARS, symbol=target.symbol, start=start, end=end)
+        join = memo.get(target, parts)
+        style = _style_for_segment(join.segment)
+        bars, stats = enrich_option_bars(
+            rows,
+            parts=parts,
+            spot_by_ts=join.close_by_ts,
+            rate_source=rate_source,
+            style_flag=style,
+        )
+        skipped_seen = stats.skipped
+        if stats.changed == 0:
+            return _TargetOutcome(
+                kind=_KIND_ALREADY_CURRENT,
+                symbol=target.symbol,
+                start=start,
+                end=end,
+                skipped=skipped_seen,
+            )
+        written = writer(target, bars)
+        return _TargetOutcome(
+            kind=_KIND_ENRICHED,
+            symbol=target.symbol,
+            start=start,
+            end=end,
+            written=written,
+            solved=stats.solved,
+            nulls=stats.nulls,
+            reused=stats.reused,
+            skipped=skipped_seen,
+            null_reasons=stats.null_reasons,
+            style=style,
+        )
+    except reraise:
+        # A pull-wide global stop (disk full / OOM) fails EVERY remaining
+        # write identically — re-raised BEFORE the per-target quarantine so
+        # the pass never keeps solving + write-hammering N-1 doomed contracts
+        # (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-2). Since
+        # DEC-GREEKS-PARALLEL-001 the `_enrich_greeks_from_minute` wrapper
+        # RE-RAISES `LakeWriteHalt` + `GreeksEnrichPoolBroken` (only those —
+        # every other enrich error stays fenced), so a genuine host halt
+        # ABORTS the pull and fires the CRITICAL Telegram pull-halt alert.
+        raise
+    except Exception as exc:
+        return _TargetOutcome(
+            kind=_KIND_ERRORED,
+            symbol=target.symbol,
+            start=start,
+            end=end,
+            skipped=skipped_seen,
+            error=str(exc),
+        )
+
+
+def _emit_target_event(outcome: _TargetOutcome) -> None:
+    """Emit the driver-level structlog event for one folded outcome.
+
+    The SAME three events (name + payload, byte-for-byte) the pre-refactor
+    sequential loop emitted inline; the parallel driver relays them
+    PARENT-side in the deterministic fold order. A ``futures_skipped`` /
+    ``no_bars`` / ``already_current`` outcome emits nothing (as before).
+    """
+    if outcome.kind == _KIND_ENRICHED:
+        _LOG.info(
+            "greeks_enrich.target_enriched",
+            symbol=outcome.symbol,
+            start=outcome.start,
+            end=outcome.end,
+            bars=outcome.written,
+            solved=outcome.solved,
+            nulls=outcome.nulls,
+            null_reasons=dict(outcome.null_reasons),
+            reused=outcome.reused,
+            style=outcome.style,
+        )
+    elif outcome.kind == _KIND_UNDECODABLE:
+        _LOG.warning("greeks_enrich.target_undecodable", symbol=outcome.symbol)
+    elif outcome.kind == _KIND_ERRORED:
+        _LOG.warning(
+            "greeks_enrich.target_errored",
+            symbol=outcome.symbol,
+            start=outcome.start,
+            end=outcome.end,
+            error=outcome.error,
+        )
+
+
+@dataclass(slots=True)
+class _PassCounters:
+    """Mutable fold accumulator — one per pass, parent-side only."""
+
+    enriched: int = 0
+    already_current: int = 0
+    futures_skipped: int = 0
+    undecodable: int = 0
+    no_bars: int = 0
+    errored: int = 0
+    bars_written: int = 0
+    bars_solved: int = 0
+    bars_null: int = 0
+    bars_reused: int = 0
+    bars_skipped: int = 0
+
+    def fold(self, outcome: _TargetOutcome) -> None:
+        """Fold one outcome — deterministic, order = the sorted target order."""
+        self.bars_skipped += outcome.skipped
+        if outcome.kind == _KIND_ENRICHED:
+            self.enriched += 1
+            self.bars_written += outcome.written
+            self.bars_solved += outcome.solved
+            self.bars_null += outcome.nulls
+            self.bars_reused += outcome.reused
+        elif outcome.kind == _KIND_ALREADY_CURRENT:
+            self.already_current += 1
+        elif outcome.kind == _KIND_FUTURES_SKIPPED:
+            self.futures_skipped += 1
+        elif outcome.kind == _KIND_UNDECODABLE:
+            self.undecodable += 1
+        elif outcome.kind == _KIND_NO_BARS:
+            self.no_bars += 1
+        else:
+            self.errored += 1
+
+    def report(self, *, spot_reads: int, spot_hits: int) -> GreeksEnrichReport:
+        """The immutable pass report from the folded tallies."""
+        return GreeksEnrichReport(
+            enriched=self.enriched,
+            already_current=self.already_current,
+            futures_skipped=self.futures_skipped,
+            undecodable=self.undecodable,
+            no_bars=self.no_bars,
+            errored=self.errored,
+            bars_written=self.bars_written,
+            bars_solved=self.bars_solved,
+            bars_null=self.bars_null,
+            bars_reused=self.bars_reused,
+            spot_reads=spot_reads,
+            spot_hits=spot_hits,
+            bars_skipped=self.bars_skipped,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _GreeksUnit:
+    """One picklable work unit — a spot CHAIN (or a merged same-underlying block).
+
+    ``index`` is the unit's position in the SEQUENTIAL sorted order — the
+    parent folds results in ascending index so the driver events + counters
+    are IDENTICAL to the sequential pass, not merely equivalent.
+    """
+
+    index: int
+    targets: tuple[GreeksEnrichTarget, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _GreeksUnitResult:
+    """One unit's picklable result — plain data only, no exception crosses.
+
+    ``halt_reason`` is the :class:`~brutex.data.errors.LakeWriteHalt` sentinel
+    (the unit stopped IMMEDIATELY; the parent re-raises) — a domain exception
+    riding the executor result channel would risk the unpickling-failure →
+    whole-pool-poisoning class of bug, so failures cross as data by design.
+    """
+
+    index: int
+    outcomes: tuple[_TargetOutcome, ...]
+    halt_reason: str | None
+    spot_reads: int
+    spot_hits: int
+
+
+def _build_units(ordered: Sequence[GreeksEnrichTarget]) -> list[_GreeksUnit]:
+    """Group the SORTED targets into parallel work units — chain-grained.
+
+    The unit of dispatch is the spot-memo CHAIN :func:`_chain_key`
+    ``(exchange, underlying, start, end)`` — every unit owns whole chains, so
+    a fresh per-unit :class:`_SpotJoinMemo` performs exactly one read per
+    distinct chain and the summed ``spot_reads`` / ``spot_hits`` equal the
+    sequential pass (in sorted order a chain key never recurs after its
+    contiguous block, so the sequential capacity-2 LRU never re-reads an
+    evicted key either — both sides count distinct chains).
+
+    SYMBOL AFFINITY guard: when one symbol appears under MORE than one chain
+    (possible only via the public API — the production caller maps each
+    symbol to at most one window), ALL chains of that ``(exchange,
+    underlying)`` merge into ONE unit processed in sorted order, so a
+    symbol's writes are always time-ordered inside a single worker and the
+    stored bytes stay byte-identical to sequential. Units keep the sorted
+    order via ``index``.
+    """
+    chains: OrderedDict[tuple[str, str, date, date], list[GreeksEnrichTarget]] = OrderedDict()
+    first_chain_of_symbol: dict[str, tuple[str, str, date, date]] = {}
+    merged_groups: set[tuple[str, str]] = set()
+    for target in ordered:
+        key = _chain_key(target)
+        chains.setdefault(key, []).append(target)
+        prior = first_chain_of_symbol.setdefault(target.symbol, key)
+        if prior != key:
+            merged_groups.add((key[0], key[1]))
+    units: list[_GreeksUnit] = []
+    for group, group_chains in groupby(chains.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        if group in merged_groups:
+            merged: list[GreeksEnrichTarget] = []
+            for _key, chain in group_chains:
+                merged.extend(chain)
+            units.append(_GreeksUnit(index=len(units), targets=tuple(merged)))
+        else:
+            for _key, chain in group_chains:
+                units.append(_GreeksUnit(index=len(units), targets=tuple(chain)))
+    return units
+
+
+def _default_seams(
+    lake_root: Path,
+) -> tuple[
+    Callable[[GreeksEnrichTarget], list[dict[str, object]]],
+    Callable[[GreeksEnrichTarget, FnoSymbolParts], SpotJoin],
+    Callable[[GreeksEnrichTarget, Sequence[FnoGreeksBar]], int],
+]:
+    """The production (reader, spot-reader, writer) triple over *lake_root*.
+
+    ONE binding site (CLAUDE.md §11 COMMON) used by the sequential driver's
+    defaults AND rebuilt INSIDE each spawn worker from the picklable context
+    — the closures themselves never cross the process boundary.
+    """
+    return (
+        lambda t: read_option_rows(lake_root, t),
+        lambda t, parts: read_spot_join_with_recovery(lake_root, t, parts),
+        lambda t, b: write_option_greeks(lake_root, t, b),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _GreeksWorkerContext:
+    """Immutable picklable per-pool context handed to workers via the initializer."""
+
+    lake_root: Path
+    rate_source: RiskFreeSource
+
+
+#: The per-worker-PROCESS context, set ONCE by :func:`_greeks_worker_init`. A
+#: module global by necessity — a ``ProcessPoolExecutor`` initializer cannot
+#: return a value (the sweep-pool convention, ``sweep_parallel._WORKER_CTX``).
+_GREEKS_WORKER_CTX: _GreeksWorkerContext | None = None
+
+
+def _greeks_worker_init(ctx: _GreeksWorkerContext) -> None:
+    """Pool ``initializer``: pin single-threaded numerics + stash the context.
+
+    OMP / RAYON / POLARS pinned to 1 so N workers never oversubscribe into
+    N × num_cpus nested threads (the ``sweep_parallel._worker_init``
+    determinism pin, mirrored). ``polars`` is lazily imported by the readers
+    AFTER this runs, so ``POLARS_MAX_THREADS`` lands in time;
+    ``trading_core`` is imported at module-import (before this), but its
+    rayon pools initialise lazily and the crate has no detach/parallel
+    sections — the RAYON pin is kept for convention-consistency, not claimed
+    to precede the import.
+    """
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["RAYON_NUM_THREADS"] = "1"
+    os.environ["POLARS_MAX_THREADS"] = "1"
+    global _GREEKS_WORKER_CTX  # noqa: PLW0603 — set-once per worker process
+    _GREEKS_WORKER_CTX = ctx
+
+
+def _run_unit(
+    unit: _GreeksUnit, *, lake_root: Path, rate_source: RiskFreeSource
+) -> _GreeksUnitResult:
+    """Process one unit over the DEFAULT seams — the worker body, in-process testable.
+
+    Per-target failures quarantine to ``errored`` outcomes (never kill the
+    pool); a :class:`~brutex.data.errors.LakeWriteHalt` stops the unit
+    IMMEDIATELY and crosses as the ``halt_reason`` sentinel; a raw
+    ``MemoryError`` propagates (pool teardown — the honest OOM signal). The
+    per-unit :class:`_SpotJoinMemo` counters ride the result and sum to the
+    sequential totals (see :func:`_build_units`).
+    """
+    reader, spot_reader, writer = _default_seams(lake_root)
+    memo = _SpotJoinMemo(spot_reader)
+    outcomes: list[_TargetOutcome] = []
+    halt_reason: str | None = None
+    for target in unit.targets:
+        try:
+            outcome = _run_target(
+                target,
+                reader=reader,
+                writer=writer,
+                memo=memo,
+                rate_source=rate_source,
+                reraise=(LakeWriteHalt, MemoryError),
+            )
+        except LakeWriteHalt as halt:
+            halt_reason = halt.reason
+            break
+        outcomes.append(outcome)
+    return _GreeksUnitResult(
+        index=unit.index,
+        outcomes=tuple(outcomes),
+        halt_reason=halt_reason,
+        spot_reads=memo.reads,
+        spot_hits=memo.hits,
+    )
+
+
+def _greeks_worker(unit: _GreeksUnit) -> _GreeksUnitResult:
+    """The module-level pool task: bind the initializer's context, run the unit."""
+    ctx = _GREEKS_WORKER_CTX
+    if ctx is None:  # pragma: no cover — the initializer always runs before a task
+        msg = "greeks worker context was not initialised"
+        raise RuntimeError(msg)
+    return _run_unit(unit, lake_root=ctx.lake_root, rate_source=ctx.rate_source)
+
+
+def _parallel_pickle_ok(lake_root: Path, rate_source: RiskFreeSource) -> bool:
+    """True iff the worker context can cross the spawn boundary — probe, never crash.
+
+    ``rate_source`` is only Protocol-typed: the production sources
+    (:class:`~brutex.options.risk_free.FixedRateSource` /
+    :class:`~brutex.options.risk_free.CsvRateSource`) are frozen picklable
+    dataclasses, but a caller-injected fake (a closure, a mock) would blow up
+    pool startup with an opaque pickling error — probed here instead, WARNed,
+    and gracefully degraded to the sequential path.
+    """
+    try:
+        pickle.dumps((lake_root, rate_source))
+    except (pickle.PicklingError, TypeError, AttributeError):
+        _LOG.warning(
+            "greeks_enrich.parallel_disabled",
+            reason="context_unpicklable",
+            rate_source_type=type(rate_source).__name__,
+        )
+        return False
+    return True
+
+
+def _run_parallel(
+    units: Sequence[_GreeksUnit],
+    *,
+    lake_root: Path,
+    rate_source: RiskFreeSource,
+    max_workers: int,
+) -> GreeksEnrichReport:
+    """The pool driver: dispatch units, fold results in sequential order.
+
+    Liveness (DEC-PIPELINE-STALL-HEARTBEAT-001): the parent beats once before
+    dispatch and once per COMPLETED unit — real observed progress only, never
+    a timer keepalive that would blind the watchdog to a genuinely hung
+    worker. A unit is one option chain (bounded — minutes, well under the
+    600 s watchdog), so beat silence is bounded by the largest single unit.
+
+    Failure model: a unit's ``halt_reason`` (LakeWriteHalt in a worker)
+    cancels every QUEUED unit and re-raises ``LakeWriteHalt(reason)`` —
+    HONEST envelope: units already RUNNING in sibling workers finish first
+    (``shutdown(wait=True)``; a spawned process cannot be safely killed
+    mid-write), so the parallel halt is not instantaneous like sequential
+    CTR-2 — on a full disk each in-flight worker hits its own halt quickly.
+    A :class:`BrokenProcessPool` (a worker died ABRUPTLY — OOM SIGKILL,
+    external kill, hard interpreter crash: NOT distinguishable through the
+    public executor API) raises
+    :class:`~brutex.data.errors.GreeksEnrichPoolBroken`, which the dashboard
+    job layer recognises as a pull-halt (CRITICAL Telegram alert).
+    """
+    ctx = _GreeksWorkerContext(lake_root=lake_root, rate_source=rate_source)
+    pool_size = min(max_workers, len(units))
+    _LOG.info("greeks_enrich.parallel_start", units=len(units), workers=pool_size)
+    emit_progress_beat()
+    results: dict[int, _GreeksUnitResult] = {}
+    try:
+        with ProcessPoolExecutor(
+            max_workers=pool_size,
+            # SPAWN, never FORK (the Linux default): the parent runs threads
+            # (watchdog daemons) + holds flock/logging locks, and a
+            # fork-after-threads inherits those locks in an arbitrary state —
+            # a classic child deadlock (the sweep_parallel precedent).
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_greeks_worker_init,
+            initargs=(ctx,),
+        ) as pool:
+            futures = [pool.submit(_greeks_worker, unit) for unit in units]
+            for future in as_completed(futures):
+                emit_progress_beat()
+                result = future.result()
+                results[result.index] = result
+                if result.halt_reason is not None:
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    raise LakeWriteHalt(result.halt_reason)
+    except BrokenProcessPool as exc:
+        detail = (
+            "a worker process died before completing its unit — an OOM "
+            "SIGKILL, an external kill or a hard interpreter crash are NOT "
+            "distinguishable from BrokenProcessPool"
+        )
+        _LOG.error(
+            "greeks_enrich.pool_broken",
+            workers=pool_size,
+            units_total=len(units),
+            units_done=len(results),
+            error=str(exc),
+        )
+        raise GreeksEnrichPoolBroken(detail) from exc
+    counters = _PassCounters()
+    spot_reads = spot_hits = 0
+    for unit in units:
+        result = results[unit.index]
+        spot_reads += result.spot_reads
+        spot_hits += result.spot_hits
+        for outcome in result.outcomes:
+            _emit_target_event(outcome)
+            counters.fold(outcome)
+    return counters.report(spot_reads=spot_reads, spot_hits=spot_hits)
+
+
 def enrich_greeks_for_targets(
     *,
     targets: Iterable[GreeksEnrichTarget],
@@ -1212,6 +1820,7 @@ def enrich_greeks_for_targets(
     read_bars: Callable[[GreeksEnrichTarget], list[dict[str, object]]] | None = None,
     read_spot: Callable[[GreeksEnrichTarget, FnoSymbolParts], SpotJoin] | None = None,
     write_bars: Callable[[GreeksEnrichTarget, Sequence[FnoGreeksBar]], int] | None = None,
+    workers: int | None = None,
 ) -> GreeksEnrichReport:
     """Enrich every option target's stored bars with Greeks — the pass driver.
 
@@ -1239,106 +1848,52 @@ def enrich_greeks_for_targets(
     parts.underlying, target.start, target.end)`` — the memo key — never of
     the individual contract symbol.
 
+    Parallel execution (DEC-GREEKS-PARALLEL-001): with DEFAULT seams, a
+    resolved worker count > 1 (*workers* param, else
+    :data:`GREEKS_WORKERS_ENV`, else auto) and ≥ 2 work units, the pass fans
+    the chain-grained units over a SPAWN ``ProcessPoolExecutor`` (the Rust IV
+    solve holds the GIL, so processes are the only real parallelism). The
+    STORED bytes, the report (every counter incl. ``spot_reads`` /
+    ``spot_hits``) and the driver-level event sequence are IDENTICAL to the
+    sequential pass (golden-pinned); the DEEP seam logs fire child-side (see
+    the module docstring). FORCED sequential — honestly, never silently
+    broken: ``workers=1`` / ``BRUTEX_GREEKS_WORKERS=1`` (the kill-switch), ANY
+    injected seam (test closures are unpicklable; the seam contract is
+    unchanged), fewer than 2 units, or an unpicklable *rate_source* (WARNed).
+
     Durability / crash-resumability: each partition write is the atomic
     flock-guarded tmp→fsync→``os.replace`` spine, so a crash mid-pass leaves
     every partition either fully old or fully new (never corrupt); the next
     pull's pass re-enriches the un-stamped remainder incrementally.
     """
-    reader = read_bars if read_bars is not None else (lambda t: read_option_rows(lake_root, t))
-    spot_reader = (
-        read_spot
-        if read_spot is not None
-        else (lambda t, parts: read_spot_join_with_recovery(lake_root, t, parts))
-    )
-    writer = (
-        write_bars
-        if write_bars is not None
-        else (lambda t, b: write_option_greeks(lake_root, t, b))
-    )
+    ordered = sorted(targets, key=_target_sort_key)
+    if read_bars is None and read_spot is None and write_bars is None:
+        resolved = resolve_greeks_workers() if workers is None else max(1, workers)
+        if resolved > 1:
+            units = _build_units(ordered)
+            if len(units) > 1 and _parallel_pickle_ok(lake_root, rate_source):
+                return _run_parallel(
+                    units,
+                    lake_root=lake_root,
+                    rate_source=rate_source,
+                    max_workers=resolved,
+                )
+    default_reader, default_spot_reader, default_writer = _default_seams(lake_root)
+    reader = read_bars if read_bars is not None else default_reader
+    spot_reader = read_spot if read_spot is not None else default_spot_reader
+    writer = write_bars if write_bars is not None else default_writer
 
     memo = _SpotJoinMemo(spot_reader)
-    enriched = already_current = futures_skipped = undecodable = no_bars = errored = 0
-    bars_written = bars_solved = bars_null = bars_reused = bars_skipped = 0
-    for target in sorted(targets, key=_target_sort_key):
+    counters = _PassCounters()
+    for target in ordered:
         # Liveness beat per contract (DEC-PIPELINE-STALL-HEARTBEAT-001): the Greeks
         # enrichment pass runs minutes-to-hours AFTER the last fetch heartbeat, so
         # without this the pull stall watchdog false-declared a HEALTHY pipeline HUNG
         # (forensically proven). No-op outside a dashboard pull; best-effort; O(1).
         emit_progress_beat()
-        try:
-            parts = parse_fno_symbol(target.symbol)
-            if parts is None:
-                undecodable += 1
-                _LOG.warning("greeks_enrich.target_undecodable", symbol=target.symbol)
-                continue
-            if parts.option_type is None or parts.strike is None:
-                futures_skipped += 1
-                continue
-            rows = reader(target)
-            if not rows:
-                no_bars += 1
-                continue
-            join = memo.get(target, parts)
-            bars, stats = enrich_option_bars(
-                rows,
-                parts=parts,
-                spot_by_ts=join.close_by_ts,
-                rate_source=rate_source,
-                style_flag=_style_for_segment(join.segment),
-            )
-            bars_skipped += stats.skipped
-            if stats.changed == 0:
-                already_current += 1
-                continue
-            written = writer(target, bars)
-            enriched += 1
-            bars_written += written
-            bars_solved += stats.solved
-            bars_null += stats.nulls
-            bars_reused += stats.reused
-            _LOG.info(
-                "greeks_enrich.target_enriched",
-                symbol=target.symbol,
-                start=target.start.isoformat(),
-                end=target.end.isoformat(),
-                bars=written,
-                solved=stats.solved,
-                nulls=stats.nulls,
-                null_reasons=dict(stats.null_reasons),
-                reused=stats.reused,
-                style=_style_for_segment(join.segment),
-            )
-        except LakeWriteHalt:
-            # A pull-wide global stop (disk full / OOM) fails EVERY remaining
-            # write identically — re-raised BEFORE the per-target quarantine
-            # so the pass never keeps solving + write-hammering N-1 doomed
-            # contracts (DEC-GREEKS-CORRECTNESS-AUDIT-001 CTR-2). The FENCED
-            # `_enrich_greeks_from_minute` wrapper catches everything and
-            # logs ONE `fno.greeks_enrich.error` — the pull itself can never
-            # fail from this re-raise.
-            raise
-        except Exception as exc:
-            errored += 1
-            _LOG.warning(
-                "greeks_enrich.target_errored",
-                symbol=target.symbol,
-                start=target.start.isoformat(),
-                end=target.end.isoformat(),
-                error=str(exc),
-            )
-            continue
-    return GreeksEnrichReport(
-        enriched=enriched,
-        already_current=already_current,
-        futures_skipped=futures_skipped,
-        undecodable=undecodable,
-        no_bars=no_bars,
-        errored=errored,
-        bars_written=bars_written,
-        bars_solved=bars_solved,
-        bars_null=bars_null,
-        bars_reused=bars_reused,
-        spot_reads=memo.reads,
-        spot_hits=memo.hits,
-        bars_skipped=bars_skipped,
-    )
+        outcome = _run_target(
+            target, reader=reader, writer=writer, memo=memo, rate_source=rate_source
+        )
+        _emit_target_event(outcome)
+        counters.fold(outcome)
+    return counters.report(spot_reads=memo.reads, spot_hits=memo.hits)
