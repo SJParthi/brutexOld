@@ -93,8 +93,9 @@ import contextlib
 import hashlib
 import itertools
 import time
+from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -359,6 +360,39 @@ class BarConflict:
     vendor: CandleBar
 
 
+def max_conflict_close_delta(conflicts: Iterable[BarConflict]) -> Decimal | None:
+    """The max absolute vendor-vs-stored CLOSE delta across *conflicts* — exact Decimal.
+
+    DEC-VENDOR-CONFLICT-SURFACE-001: the ONE derivation of a conflict batch's
+    "how far did the vendor's re-stated close drift" figure, shared by the sink
+    fold, both ingest spines, and the pipeline headline (CLAUDE.md §11 COMMON).
+    Prices are Decimal rupees (CLAUDE.md §6 price-unit row — NEVER float), so the
+    delta stays exact through every fold. Returns ``None`` for an empty batch —
+    honestly distinct from a genuine ``Decimal("0")`` delta (a conflict whose
+    close matched while another OHLCV/OI field differed).
+    """
+    delta: Decimal | None = None
+    for c in conflicts:
+        delta = fold_max_close_delta(delta, abs(c.vendor.close - c.stored.close))
+    return delta
+
+
+def fold_max_close_delta(a: Decimal | None, b: Decimal | None) -> Decimal | None:
+    """MAX-fold two optional close deltas — ``None`` is the identity (DEC-VENDOR-CONFLICT-SURFACE-001).
+
+    The pure fold every aggregation level uses (window → series → phase →
+    pipeline headline): commutative, associative, ``None``-identity, and exact
+    (Decimal comparison — no float round-trip, CLAUDE.md §4 money rule). Two
+    ``None``\\s fold to ``None`` (no conflict observed anywhere), never a
+    fabricated zero (Golden Rule #1).
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
 @dataclass(frozen=True, slots=True)
 class WriteResult:
     """Outcome of a successful :meth:`ParquetWriter.write` call.
@@ -393,6 +427,17 @@ class WriteResult:
         fresh keep-first write (DEC-FRESH-WRITE-BATCH-DEDUP-001). The stored /
         first-occurrence bar was kept (keep-first, never overwritten). Empty tuple
         for a duplicate-free first write or a clean re-pull with no value changes.
+    vendor_dup_rows_dropped
+        WITHIN-BATCH duplicate-timestamp rows the vendor physically sent in THIS
+        write's batch and the writer collapsed (DEC-VENDOR-CONFLICT-SURFACE-001)
+        — the SAME count the aggregated ``lake.vendor_duplicate_rows`` WARNING
+        reports, now carried on the result so the pull can SUM it end-to-end
+        instead of the count dying in the log. Covers BOTH branches (the fresh
+        ``_dedup_batch`` collapse AND the merge branch's timestamp-keyed-dict
+        collapse — the count is the batch's ``len − len(unique timestamps)``
+        either way). STORED-poison heals (``lake.partition.dedup_healed`` — rows
+        a PRIOR write landed) are deliberately NOT counted here: they are a heal
+        surface, not this batch's vendor behaviour.
     """
 
     path: Path
@@ -403,6 +448,7 @@ class WriteResult:
     bytes_written: int
     bars_added: int = 0
     conflicts: tuple[BarConflict, ...] = ()
+    vendor_dup_rows_dropped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,6 +763,14 @@ class ParquetWriter:
                 dropped=duplicates_in_batch,
                 partition=str(dest),
             )
+            # Carry the SAME count on the result (DEC-VENDOR-CONFLICT-SURFACE-001)
+            # so the sink → spine → phase → headline fold can SUM it — the count
+            # no longer dies in the log. ONE stamp site covers BOTH branches (the
+            # fresh `_dedup_batch` collapse and the merge dict collapse both drop
+            # exactly the batch's within-batch duplicate timestamps counted above).
+            # The zero-duplicate path returns the branch result untouched
+            # (byte-identical fast path, no extra allocation).
+            result = replace(result, vendor_dup_rows_dropped=duplicates_in_batch)
         return result
 
     def _merge_write(

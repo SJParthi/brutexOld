@@ -73,6 +73,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Final
 
 import structlog
@@ -83,6 +84,9 @@ from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.parquet_writer import fold_max_close_delta
+from brutex.money import format_inr, round_money
+from brutex.notifications.sweep_alerts import emit_vendor_conflict_alert
 
 _LOG = structlog.get_logger(__name__)
 
@@ -398,6 +402,11 @@ class PipelinePullReport:
     prebuild_opens_substituted: int | None = None
     quarantined_symbols: tuple[str, ...] = ()
     quarantined_count: int = 0
+    #: True when the PRE-RUN disk guard skipped the whole prebuild
+    #: (DEC-LAKE-FOOTPRINT-MEASURED-001) — the note carries the guard's honest
+    #: numbers, and the movers warm was consequently skipped (gated on
+    #: ``PrebuildOutcome.ok``).
+    prebuild_disk_guarded: bool = False
 
     @property
     def ok(self) -> bool:
@@ -430,6 +439,7 @@ class PipelinePullReport:
             "prebuild_failed": list(self.prebuild_failed),
             "prebuild_crashed": self.prebuild_crashed,
             "fs_allocation_note": self.fs_allocation_note,
+            "prebuild_disk_guarded": self.prebuild_disk_guarded,
             "prebuild_opens_substituted": self.prebuild_opens_substituted,
             "quarantined_symbols": list(self.quarantined_symbols),
             "quarantined_count": self.quarantined_count,
@@ -505,6 +515,12 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     """
     if prebuild is None:
         return ""
+    if prebuild.disk_guard_blocked:
+        # DEC-LAKE-FOOTPRINT-MEASURED-001: the pre-run disk guard skipped the
+        # whole prebuild — the headline carries the guard's honest numbers
+        # (est. need, multiplier + provenance, free space, the env override),
+        # never a benign "pre-built for 0 symbol(s)".
+        return f", prebuild SKIPPED — {prebuild.disk_guard_detail}"
     if prebuild.crashed is not None:
         return f", prebuild CRASHED ({prebuild.crashed})"
     clause = (
@@ -531,6 +547,54 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         # headline too — the slack is spent by exactly this phase's tiny files.
         clause += f", ⚠ {prebuild.fs_note}"
     return clause
+
+
+def vendor_surface_totals(
+    spot: BulkSpotReport | None, historical: CompositePullReport | None
+) -> tuple[int, int, Decimal | None]:
+    """Fold the pull's vendor-behaviour counters across the spot + F&O phases — pure.
+
+    DEC-VENDOR-CONFLICT-SURFACE-001: returns ``(conflicts, vendor_dup_rows_dropped,
+    max_close_delta)`` — conflicts + duplicate drops SUM across the two fetch
+    phases, the close delta MAX-folds (exact Decimal, ``None`` identity via the
+    COMMON :func:`~brutex.data.parquet_writer.fold_max_close_delta`). A phase
+    that never ran contributes zeros/``None`` (never fabricated counts).
+    """
+    conflicts = dup_rows = 0
+    delta: Decimal | None = None
+    if spot is not None:
+        conflicts += spot.conflicts
+        dup_rows += spot.vendor_dup_rows_dropped
+        delta = fold_max_close_delta(delta, spot.max_close_delta)
+    hist = historical.historical if historical is not None else None
+    if hist is not None:
+        conflicts += hist.conflicts
+        dup_rows += hist.vendor_dup_rows_dropped
+        delta = fold_max_close_delta(delta, hist.max_close_delta)
+    return conflicts, dup_rows, delta
+
+
+def _conflict_clause(conflicts: int, dup_rows: int, max_close_delta: Decimal | None) -> str:
+    """The honest ``", vendor conflicts: …"`` headline clause (empty when all-zero).
+
+    DEC-VENDOR-CONFLICT-SURFACE-001: 25 conflict summaries + 9,141 dropped
+    duplicate rows previously lived ONLY in log lines — the completion headline
+    now names them. The delta renders through ``brutex.money``
+    (DEC-MONEY-2DP-001 — the display is 2dp-snapped; the exact Decimal is what
+    the alert threshold compared). Bounded length (two counters + one amount)
+    — never a flooded note. A clean pull renders NOTHING (byte-identical note).
+    """
+    parts: list[str] = []
+    if conflicts:
+        delta_part = (
+            f" (max close delta {format_inr(int(round_money(max_close_delta) * 100))})"
+            if max_close_delta is not None
+            else ""
+        )
+        parts.append(f"vendor conflicts: {conflicts}{delta_part}")
+    if dup_rows:
+        parts.append(f"duplicate vendor rows dropped: {dup_rows}")
+    return f", {'; '.join(parts)}" if parts else ""
 
 
 def _quarantine_clause(quarantined: tuple[str, ...], quarantined_count: int) -> str:
@@ -597,6 +661,9 @@ def _complete_note(
         if hist is not None and hist.expiries_out_of_scope
         else ""
     )
+    # Vendor-behaviour honesty (DEC-VENDOR-CONFLICT-SURFACE-001): keep-first
+    # conflicts + duplicate-row drops are NAMED in the headline when non-zero.
+    conflicts, dup_rows, max_delta = vendor_surface_totals(spot, historical)
     # Greeks-enrichment honesty (DEC-GREEKS-ENRICH-OBSERVE-001): a WHOLE-pass
     # enrichment failure is NAMED in the pipeline note (the overlay is re-derivable
     # — the next pull re-attempts it), never a swallowed log line. `hist is None`
@@ -616,7 +683,9 @@ def _complete_note(
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
         f"contracts, historical {bars} bars over {contracts} contract(s)"
-        f"{scope_clause}{skipped_clause}{greeks_clause}{_prebuild_note_clause(prebuild)}"
+        f"{scope_clause}{skipped_clause}{greeks_clause}"
+        f"{_conflict_clause(conflicts, dup_rows, max_delta)}"
+        f"{_prebuild_note_clause(prebuild)}"
         f"{_movers_note_clause(segment_movers_warmed, segment_movers_failed)}"
     )
 
@@ -814,6 +883,19 @@ def run_full_pipeline(
     # (they check pull-wide signals), so it must be NAMED in the complete note —
     # never hidden behind a bare "pipeline complete" (`quarantined` /
     # `quarantined_count` derived above, before the prebuild).
+    # ONE vendor-conflict-drift alert per pull (DEC-VENDOR-CONFLICT-SURFACE-001),
+    # fired at THIS completion-headline seam with the reconciled totals: the
+    # helper gates on the BRUTEX_CONFLICT_CLOSE_DELTA_ALERT threshold (default
+    # 1.00 rupees), is best-effort, and is a silent no-op below threshold /
+    # with Telegram disabled — it can never crash the pull. A gate-STOPPED run
+    # (stopped_after set) deliberately does not alert here: its verdict already
+    # demands operator action, and the phase report still carries the counters.
+    total_conflicts, total_dup_rows, total_max_delta = vendor_surface_totals(spot, historical)
+    emit_vendor_conflict_alert(
+        conflicts=total_conflicts,
+        max_close_delta=total_max_delta,
+        dup_rows=total_dup_rows,
+    )
     return PipelinePullReport(
         spot=spot,
         metadata=metadata,
@@ -837,6 +919,7 @@ def run_full_pipeline(
         prebuild_failed=prebuild.failed if prebuild is not None else (),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
+        prebuild_disk_guarded=prebuild.disk_guard_blocked if prebuild is not None else False,
         prebuild_opens_substituted=(prebuild.opens_substituted if prebuild is not None else None),
         quarantined_symbols=quarantined,
         quarantined_count=quarantined_count,

@@ -167,9 +167,14 @@ class PrebuildKind(Enum):
         FUTURES (option bars are OI-carrying F&O bars) since
         DEC-PIPELINE-AUTOPREBUILD-001, which SUPERSEDES the earlier on-demand
         design (DEC-PREBUILD-SELECT-001's explicit no-op). Honest storage
-        envelope (Golden Rule #10): once all 19 intraday + the ``1day``
-        partitions exist, the options lake costs **~2-3× its 1-minute
-        footprint** — an operator-accepted cost of the decree.
+        envelope (Golden Rule #10, DEC-LAKE-FOOTPRINT-MEASURED-001): the
+        fully-materialised cost is a MEASURED multiple of the 1-minute
+        footprint — the observed multiplier is persisted to ``schema_meta``
+        (``lake_footprint.*``) after every prebuild run, with a conservative
+        **6.5×** fallback before the first observation. The retired "~2-3×"
+        estimate IGNORED the 17-column Greeks-enriched option 1-minute rewrite
+        (:mod:`brutex.data.greeks_enrich`), which alone pushes the realistic
+        all-in cost toward ~5-6× — operator-accepted either way.
     """
 
     SPOT = "spot"
@@ -428,8 +433,11 @@ def materialize_lake_timeframes(
       (SPOT → OI-dropping spot resampler; FUTURES/OPTIONS → OI-aware F&O
       resampler — option materialisation enabled by
       DEC-PIPELINE-AUTOPREBUILD-001, which supersedes the on-demand-only
-      design; honest cost: a fully-materialised options lake is **~2-3× its
-      1-minute footprint**, operator-accepted);
+      design; honest cost per DEC-LAKE-FOOTPRINT-MEASURED-001: a MEASURED
+      multiple of the 1-minute footprint — observed multiplier persisted to
+      ``schema_meta``, conservative 6.5× fallback; the retired "~2-3×" guess
+      ignored the Greeks-enriched 17-column 1-minute rewrite — operator-
+      accepted);
     * reads the 1-minute base ONCE, with the OI column for FUTURES + OPTIONS
       (``with_open_interest=kind is not PrebuildKind.SPOT``), so a spot
       partition's output is byte-identical to before;

@@ -45,13 +45,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from brutex.notifications.telegram import (
     TelegramEvent,
     TelegramEventKind,
     TelegramSeverity,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -541,6 +544,45 @@ class SweepAlerter:
             dedupe_key=f"pull-degraded:{rule}",
         )
 
+    def vendor_conflict_drift(
+        self, *, conflicts: int, max_close_delta_display: str, dup_rows: int
+    ) -> bool:
+        """Alert that a pull recorded material vendor close-drift (WARN; deduped).
+
+        DEC-VENDOR-CONFLICT-SURFACE-001: fired at MOST once per pull, at the
+        pipeline's completion-headline seam, when the pull's MAX keep-first close
+        delta reached the operator threshold
+        (``BRUTEX_CONFLICT_CLOSE_DELTA_ALERT``, default ``1.00`` rupees). The
+        stored bars WON every conflict (keep-first — DEC-LAKE-CONFLICT-KEEPFIRST-001,
+        the CLAUDE.md §6 F&O-candle-lake row's merge law), so this is an
+        OBSERVATION for triage, never a data mutation. Mirrors
+        :meth:`pull_degraded`: best-effort, fire-and-forget, silent no-op when
+        Telegram is disabled.
+
+        Parameters
+        ----------
+        conflicts
+            The pull's total keep-first vendor re-statements.
+        max_close_delta_display
+            The pre-formatted rupee display of the max close delta (the caller
+            formats via ``brutex.money`` — DEC-MONEY-2DP-001; passed as a string
+            so this module stays Decimal-agnostic).
+        dup_rows
+            The pull's total within-batch duplicate vendor rows dropped.
+        """
+        message = escape_markdown_v2(
+            f"⚠️ Vendor data drift: {conflicts} keep-first conflict(s), max close "
+            f"delta {max_close_delta_display}; {dup_rows} duplicate vendor row(s) "
+            "dropped. Stored bars kept (keep-first) — review the conflict "
+            "summaries in /logs."
+        )
+        return self._publish(
+            kind=TelegramEventKind.RATE_LIMIT_DOWNSHIFT,
+            severity=TelegramSeverity.WARN,
+            message=message,
+            dedupe_key="vendor-conflict-drift",
+        )
+
     def auth_renew_failed(self, *, reason: str) -> bool:
         """Alert that ``RenewToken`` refused so the token will expire (ERROR)."""
         message = escape_markdown_v2(
@@ -874,6 +916,83 @@ def emit_pull_halt_alert(exc: Exception) -> None:
         )
 
 
+#: Env var naming the pull-level max-close-delta (rupees) at/above which ONE
+#: vendor-conflict-drift Telegram alert fires per pull
+#: (DEC-VENDOR-CONFLICT-SURFACE-001). Parsed as an exact Decimal.
+CONFLICT_DELTA_ALERT_ENV: Final[str] = "BRUTEX_CONFLICT_CLOSE_DELTA_ALERT"
+
+#: The default alert threshold (rupees) when the env var is absent/malformed.
+DEFAULT_CONFLICT_DELTA_ALERT: Final[str] = "1.00"
+
+
+def conflict_alert_threshold() -> Decimal:
+    """The vendor-conflict close-delta alert threshold in exact Decimal rupees.
+
+    Reads :data:`CONFLICT_DELTA_ALERT_ENV` (default
+    :data:`DEFAULT_CONFLICT_DELTA_ALERT`). A malformed value falls back to the
+    default LOUDLY (one WARNING) — never a silent never-alerts config
+    (Golden Rule #1). Decimal end-to-end: prices are Decimal rupees
+    (CLAUDE.md §6 price-unit row), so the comparison is exact, never a float.
+    """
+    import os
+    from decimal import Decimal, InvalidOperation
+
+    raw = os.environ.get(CONFLICT_DELTA_ALERT_ENV, DEFAULT_CONFLICT_DELTA_ALERT)
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        import structlog
+
+        structlog.get_logger("brutex.notifications.sweep_alerts").warning(
+            "conflict_alert_threshold_invalid",
+            value=raw,
+            fallback=DEFAULT_CONFLICT_DELTA_ALERT,
+        )
+        return Decimal(DEFAULT_CONFLICT_DELTA_ALERT)
+
+
+def emit_vendor_conflict_alert(
+    *, conflicts: int, max_close_delta: Decimal | None, dup_rows: int
+) -> bool:
+    """Fire AT MOST one best-effort vendor-conflict-drift alert for a pull.
+
+    DEC-VENDOR-CONFLICT-SURFACE-001 — the COMMON module helper (mirrors
+    :func:`emit_pull_halt_alert`) the pipeline's completion-headline seam calls
+    once per pull with the folded totals. Fires ONLY when *max_close_delta* is
+    non-``None`` AND ``>=`` :func:`conflict_alert_threshold` (exact Decimal
+    comparison); below the threshold — or with no conflict at all — it is a
+    silent no-op, so a clean pull never pings the operator. The rupee display
+    goes through ``brutex.money`` (DEC-MONEY-2DP-001: money display only —
+    the exact Decimal is compared BEFORE any display rounding). Returns whether
+    the alert was PUBLISHED (``False`` = below threshold / disabled / failed).
+
+    The whole body is wrapped in a blanket ``try/except`` so the fire-and-forget
+    contract is STRUCTURAL — an alert failure is swallowed + logged and can
+    NEVER crash the pull (Telegram disabled ⇒ silent no-op).
+    """
+    import structlog
+
+    try:
+        if max_close_delta is None or max_close_delta < conflict_alert_threshold():
+            return False
+        from brutex.money import format_inr, round_money
+
+        # Exact-threshold compare happened above on the FULL-precision Decimal;
+        # only the DISPLAY is 2dp-snapped (ROUND_HALF_UP) then rendered via the
+        # ONE paisa formatter (DEC-MONEY-2DP-001).
+        display = format_inr(int(round_money(max_close_delta) * 100))
+        return SweepAlerter().vendor_conflict_drift(
+            conflicts=conflicts,
+            max_close_delta_display=display,
+            dup_rows=dup_rows,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crashes the pull
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "vendor_conflict_alert_failed"
+        )
+        return False
+
+
 def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
     """Fire a best-effort Telegram alert for one lake-heal batch (DEC-LAKE-HEAL-001).
 
@@ -915,7 +1034,9 @@ def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
 
 
 __all__ = [
+    "CONFLICT_DELTA_ALERT_ENV",
     "CRASH_LOOP_RELAUNCH_THRESHOLD",
+    "DEFAULT_CONFLICT_DELTA_ALERT",
     "LakeHealActionLike",
     "LakeHealReportLike",
     "NotifierResolver",
@@ -924,7 +1045,9 @@ __all__ = [
     "SweepSummaryLike",
     "SymbolFailureLike",
     "WorkerEventLike",
+    "conflict_alert_threshold",
     "emit_lake_heal_alert",
     "emit_pull_halt_alert",
+    "emit_vendor_conflict_alert",
     "escape_markdown_v2",
 ]

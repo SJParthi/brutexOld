@@ -1573,9 +1573,15 @@ class TestIngestSpotAsyncPipeline:
                 self.captured = result
 
             def fold_totals(
-                self, *, bars_appended: int, conflicts: int, series_key: object
+                self,
+                *,
+                bars_appended: int,
+                conflicts: int,
+                series_key: object,
+                vendor_dup_rows_dropped: int = 0,
+                max_close_delta: object = None,
             ) -> None:
-                del series_key
+                del series_key, vendor_dup_rows_dropped, max_close_delta
                 self.folded = (bars_appended, conflicts)
 
         sink = _Sink()

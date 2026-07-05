@@ -885,8 +885,16 @@ def test_ingest_async_pipeline_spine_wires_rehydrate_hook() -> None:
         def submit(self, result: RawFetchResult) -> None:
             self.captured = result
 
-        def fold_totals(self, *, bars_appended: int, conflicts: int, series_key: object) -> None:
-            del series_key
+        def fold_totals(
+            self,
+            *,
+            bars_appended: int,
+            conflicts: int,
+            series_key: object,
+            vendor_dup_rows_dropped: int = 0,
+            max_close_delta: object = None,
+        ) -> None:
+            del series_key, vendor_dup_rows_dropped, max_close_delta
             self.folded = (bars_appended, conflicts)
 
     sdk = _FakeSDK(payload=_candles())
