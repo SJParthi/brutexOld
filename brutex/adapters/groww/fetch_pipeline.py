@@ -439,6 +439,7 @@ class FetchPipeline:
         spill_area: FetchSpillArea | None = None,
         keepalive: VolumeKeepalive | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        on_bars: Callable[[int], None] | None = None,
     ) -> None:
         """Start *workers* consumer threads, each draining a ``queue_maxsize``-bounded queue.
 
@@ -478,6 +479,15 @@ class FetchPipeline:
             is byte-identical to today.
         monotonic
             Injected monotonic clock (tests pass a fake to drive the watchdog deterministically).
+        on_bars
+            Optional best-effort LIVE-progress hook ``(bars_appended_delta) -> None``
+            (DEC-PULL-PROGRESS-HONESTY-001): invoked once per :meth:`fold_totals` with
+            that window's durable appended-bar delta, so a dashboard bars counter can
+            tick live while the producer-side per-pair reports honestly read 0 in
+            async mode. Fired under the totals lock (the fold and the hook see one
+            consistent delta); GUARDED — a hook error is logged and never trips the
+            pipeline. ``None`` (the default — every non-dashboard build site) is
+            byte-identical to before.
         """
         if workers < 1:
             raise ValueError(f"workers must be >= 1, got {workers}")
@@ -502,6 +512,7 @@ class FetchPipeline:
         self._pause_fired = False
         self._pause_lock = threading.Lock()
         self._monotonic = monotonic
+        self._on_bars = on_bars
         # `object` poison-pill sentinel: a unique instance per pipeline so a stray
         # RawFetchResult can never be mistaken for the stop signal.
         self._poison: object = object()
@@ -616,6 +627,14 @@ class FetchPipeline:
         (DEC-VENDOR-CONFLICT-SURFACE-001) fold alongside: duplicates SUM, the close delta
         MAX-folds (``None`` identity — the defaults keep every legacy caller byte-identical).
         O(1) under the totals lock.
+
+        When an ``on_bars`` hook is wired (DEC-PULL-PROGRESS-HONESTY-001) it is invoked
+        HERE with this window's *bars_appended* delta — once per folded window, so a
+        live dashboard bars counter advances by exactly the folded deltas (the
+        no-double-count invariant: the async producer's per-pair report carries 0
+        bars, so nothing else adds them). GUARDED: a hook error is logged
+        (``fetch_pipeline.on_bars_error``) and never trips the pipeline or loses the
+        fold — the totals above are already committed.
         """
         with self._totals_lock:
             self._processed += 1
@@ -635,6 +654,11 @@ class FetchPipeline:
                     vendor_dup_rows_dropped=vendor_dup_rows_dropped,
                     max_close_delta=max_close_delta,
                 )
+            if self._on_bars is not None:
+                try:
+                    self._on_bars(bars_appended)
+                except Exception:  # pylint: disable=broad-exception-caught — observe-only hook
+                    _LOG.exception("fetch_pipeline.on_bars_error")
 
     def fold_tail_transient(self, series_key: tuple[str, str] | None = None) -> None:
         """Thread-safe fold of ONE tail-side transient defer (a ``PartitionLockTimeout``).

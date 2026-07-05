@@ -53,7 +53,7 @@ expansion.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -1290,6 +1290,8 @@ def make_live_sync(
     *,
     min_interval_s: float = LIVE_SYNC_INTERVAL_S,
     clock: Callable[[], float] | None = None,
+    markets: Collection[str] | None = None,
+    intervals: Collection[str] | None = None,
 ) -> Callable[[], None]:
     """Build a THROTTLED, thread-safe per-window live-sync callback (DEC-SPOT-WINDOW-PROGRESS-001).
 
@@ -1314,6 +1316,13 @@ def make_live_sync(
     *on_ledger_sync* push runs lock-free. A ``None`` *ledger* / *on_ledger_sync* (dry-run /
     non-dashboard) yields a no-op (the CLI / synthetic paths pay nothing). *clock* /
     *min_interval_s* are injectable for deterministic tests.
+
+    *markets* / *intervals* (DEC-PULL-PROGRESS-HONESTY-001): optional SCOPE filters
+    forwarded verbatim to :meth:`~brutex.data.window_ledger.WindowLedger.progress_counts`
+    — the F&O historical phase folds ONLY its own ``groww-option`` / ``groww-future`` ×
+    ``1minute`` windows so the cross-run, cross-market ledger's spot rows never pollute
+    its denominator. ``None`` (the default — the spot pull) is byte-identical to the
+    unfiltered fold.
     """
     if ledger is None or on_ledger_sync is None:
         return lambda: None
@@ -1330,7 +1339,7 @@ def make_live_sync(
                 return
             last_sync[0] = now
             ledger_flush()
-            progress = ledger.progress_counts()
+            progress = ledger.progress_counts(markets=markets, intervals=intervals)
         # The bar numerator is RESOLVED (SUCCESS+SKIPPED+EMPTY), not just settled — a
         # genuine no-data window is done, not "pending" (DEC-EMPTY-RESOLVED-REPORTING-001),
         # so a complete historical pull reads ~100% instead of "stuck / re-pull".

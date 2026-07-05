@@ -97,8 +97,10 @@ from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from brutex.adapters.groww.option_ingest import ProgressHook
-    from brutex.dashboard.pull_controller import SessionRateController
+    from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
     from brutex.models import Instrument
 
 #: Structured logger — the reference-only skip + the empty-registry degrade are logged
@@ -237,6 +239,8 @@ def pull_historical_for_underlyings(
     until_clean: bool = True,
     scope_start: date | None = None,
     scope_end: date | None = None,
+    on_bars: Callable[[int], None] | None = None,
+    on_ledger_sync: OnLedgerSync | None = None,
 ) -> CompositePullReport:
     """One-click composite: refresh metadata THEN pull candles for the selected underlyings.
 
@@ -309,6 +313,12 @@ def pull_historical_for_underlyings(
         refresh is NOT scoped (the registry deliberately caches the FULL
         calendar; scoping is a candle-pull concern). ``None``/``None`` (the
         default) is byte-identical to the unscoped composite.
+    on_bars, on_ledger_sync
+        Optional live-progress hooks forwarded VERBATIM to phase (b)
+        (DEC-PULL-PROGRESS-HONESTY-001): *on_bars* receives each durable window's
+        appended-bar delta (the frozen-bars fix); *on_ledger_sync* receives the
+        throttled, F&O-scope-filtered absolute ledger counts (the honest
+        denominator). ``None`` (defaults) is byte-identical.
 
     Returns
     -------
@@ -407,6 +417,8 @@ def pull_historical_for_underlyings(
         run_parallel=historical_run_parallel,
         scope_start=scope_start,
         scope_end=scope_end,
+        on_bars=on_bars,
+        on_ledger_sync=on_ledger_sync,
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law

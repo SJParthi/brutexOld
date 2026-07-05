@@ -228,6 +228,8 @@ def _run(
     lake_root: Path | None = None,
     scope_start: date | None = None,
     scope_end: date | None = None,
+    on_bars: Callable[[int], None] | None = None,
+    on_ledger_sync: Callable[[int, int, int, int, str], None] | None = None,
 ) -> CompositePullReport:
     if lake_root is None:
         # Each test gets its OWN lake (so the persisted WindowLedger never bleeds across
@@ -256,6 +258,8 @@ def _run(
         until_clean=False,
         scope_start=scope_start,
         scope_end=scope_end,
+        on_bars=on_bars,
+        on_ledger_sync=on_ledger_sync,
     )
 
 
@@ -692,6 +696,50 @@ def test_composite_note_names_out_of_scope_expiries(tmp_path: Path) -> None:
     assert report.historical.contracts_out_of_scope == 3
     assert ", 1 expiries out of scope skipped" in report.note
     assert "then pulled 0/0 contract(s) (0 bar(s))" in report.note
+
+
+# ── live-progress hooks threaded verbatim (DEC-PULL-PROGRESS-HONESTY-001) ────────
+
+
+def test_progress_hooks_threaded_to_candle_phase(tmp_path: Path) -> None:
+    """``on_bars`` / ``on_ledger_sync`` reach phase (b) end-to-end through the composite.
+
+    Fails-before: the composite had no way to carry the dashboard's live-bars /
+    honest-denominator hooks, so the F&O phase's headline froze (bars) and pinned
+    (percent). This drives the REAL spines (no spy) and asserts BOTH hooks fire:
+    the bars deltas sum to the report's appended bars (the no-double-count
+    invariant across the composite boundary) and the ledger sync pushes the
+    F&O-scoped totals.
+    """
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    bars_deltas: list[int] = []
+    syncs: list[tuple[int, int, int, int, str]] = []
+
+    def _on_sync(resolved: int, total: int, bars: int, failed: int, current: str) -> None:
+        syncs.append((resolved, total, bars, failed, current))
+
+    report = _run(
+        [_instrument("NIFTY", 13)],
+        sdk=sdk,
+        sink=sink,
+        registry=registry,
+        coverage=_CoverageSink(),
+        on_bars=bars_deltas.append,
+        on_ledger_sync=_on_sync,
+    )
+    assert report.historical is not None
+    # This fixture's canned bar (2024-01-25) sits OUTSIDE the pull window, so 0 bars
+    # land — the hook still fired per pair and its sum EQUALS the report (the
+    # exactly-once contract; the >0-bars twin lives in
+    # ``test_pull_historical_progress_honesty.py``).
+    assert bars_deltas, "on_bars must fire through the composite boundary"
+    assert sum(bars_deltas) == report.historical.bars_appended
+    # The FINAL unthrottled push carries the settled F&O totals (3 contracts × 1 window).
+    assert syncs, "on_ledger_sync must fire at least the final post-drain push"
+    resolved, total, _bars, failed, _current = syncs[-1]
+    assert total == 3 and resolved == 3 and failed == 0
 
 
 # ── Greeks-enrichment failure suffix (DEC-GREEKS-ENRICH-OBSERVE-001) ────────────

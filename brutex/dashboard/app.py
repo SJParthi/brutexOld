@@ -1060,6 +1060,7 @@ def build_app(
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
+    pull_phase_probe: Callable[[], str | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
     pull_intent_store: PullIntentStore | None = None,
@@ -1134,6 +1135,18 @@ def build_app(
         (the default) wires the production probe — this app's own
         ``BackgroundPullJob.running``. Injected so tests drive the mid-pull /
         just-finished transitions deterministically.
+    pull_phase_probe
+        Optional pipeline-phase signal (DEC-PIPELINE-PHASE-UI-HONESTY-001). A
+        zero-arg callable returning the pipeline's CURRENT coarse ``set_phase``
+        label (``spot`` / ``metadata`` / ``historical`` / ``movers`` /
+        ``prebuild``; ``""`` = none in flight) — read by BOTH honest-progress
+        surfaces: the gated ``/api/v1/movers`` payload names the phase in its
+        note (never a blanket "prebuild in progress" during the fetch phases),
+        and the ``/api/v1/pull/rate`` verdict reads the amber ``local`` state
+        for the zero-vendor-call LOCAL phases (``prebuild``/``movers``) instead
+        of a red "stalled". ``None`` (the default) wires the production probe —
+        this app's own ``BackgroundPullJob.snapshot().phase``. Injected so
+        tests drive the per-phase projections deterministically.
     liveproof
         Optional :class:`~brutex.doctor_autorun.LiveProofAutorun` — the
         zero-command auto-run of the Mac live-proof kit
@@ -1575,6 +1588,12 @@ def build_app(
             # reads "done"/"idle", never a red "stalled" (the CLI bridge below has no
             # active flag, so its side keeps the tick-freshness fallback).
             panel_pull_active=_pull_active_probe(),
+            # DEC-PIPELINE-PHASE-UI-HONESTY-001: the pipeline's current phase label —
+            # the PANEL side only (the CLI bridge is a separate process with no
+            # pipeline phase). During the zero-vendor-call LOCAL stages
+            # (prebuild/movers) the verdict reads amber "local", never a red
+            # "stalled" off the correctly-flatlined fetch rate.
+            panel_phase=_pull_phase_probe(),
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,
@@ -2121,6 +2140,17 @@ def build_app(
     # tests inject a deterministic probe. Resolved at request time via the route closure.
     _pull_active_probe: Callable[[], bool | None] = (
         pull_active_probe if pull_active_probe is not None else (lambda: _pull_job.running)
+    )
+
+    # The pipeline-phase probe (DEC-PIPELINE-PHASE-UI-HONESTY-001): the production
+    # default reads THIS app's own single-flight job's coarse phase label (an O(1)
+    # lock-guarded PullProgress snapshot — "spot"/"metadata"/"historical"/"movers"/
+    # "prebuild", "" when none is in flight). Read at request time by the gated
+    # /api/v1/movers payload (phase-honest note) and the /api/v1/pull/rate verdict
+    # (amber "local" during the zero-vendor-call prebuild/movers stages); tests
+    # inject a deterministic probe.
+    _pull_phase_probe: Callable[[], str | None] = (
+        pull_phase_probe if pull_phase_probe is not None else (lambda: _pull_job.snapshot().phase)
     )
 
     # Last finished spot pull's verdict dict (DEC-VERDICT-BANNER-001). The
@@ -3092,13 +3122,26 @@ def build_app(
                 # segment tag is threaded through the F&O spine. The operator's from/to
                 # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
                 # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
-                # pair_progress=True (DEC-PIPELINE-STALL-HEARTBEAT-001): the F&O
-                # historical phase has NO ledger-sync driver at this layer, so the
-                # per-pair hook advances the units + cumulative bars open-endedly —
-                # the counters keep moving instead of freezing at the metadata
-                # phase's "45/45 units, 0 bars" while millions of bars stream in.
-                _pull_job.set_phase("historical", pair_progress=True)
+                # open_ended=True (DEC-PULL-PROGRESS-HONESTY-001 — supersedes the
+                # pair_progress=True grow-total pin of DEC-PIPELINE-STALL-HEARTBEAT-001
+                # at THIS site): the F&O phase now drives its units/total from the
+                # THROTTLED market/interval-filtered ledger fold (on_ledger_sync below,
+                # bars=None so the cross-run ledger bars never clobber the live tally),
+                # its BARS from the fetch pipeline's per-window fold (on_bars — real
+                # deltas; the async per-pair report honestly carries 0), and declares
+                # the denominator NON-FINAL (contracts are planned mid-phase) so the
+                # page shows "N units · total unknown" instead of a pinned 100%.
+                _pull_job.set_phase("historical", open_ended=True)
                 _prebuild_gate.set_phase("historical")
+
+                def _hist_ledger_sync(
+                    completed: int, total: int, bars: int, failed: int, current: str
+                ) -> None:
+                    del bars  # cross-run ledger bars ≠ this pull's live bars (on_bars owns them)
+                    _pull_job.sync_from_ledger(
+                        completed=completed, total=total, bars=None, failed=failed, current=current
+                    )
+
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -3114,6 +3157,8 @@ def build_app(
                         until_clean=True,
                         scope_start=fno_scope_start,
                         scope_end=fno_scope_end,
+                        on_bars=_pull_job.add_bars,
+                        on_ledger_sync=_hist_ledger_sync,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -3126,7 +3171,11 @@ def build_app(
                 today-warm would cache empties); ``None`` when the lake has no spot day yet.
                 """
                 # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
-                # observed during the movers warm is named "movers".
+                # observed during the movers warm is named "movers". The gate
+                # annotation lands on an ALREADY-RELEASED gate now — the prebuild
+                # released it the moment its outcome was known
+                # (DEC-MOVERS-WARM-UNBLOCK-001) — so it is invisible while idle
+                # (a safe no-op annotation, kept for the finally-backstop path).
                 _pull_job.set_phase("movers")
                 _prebuild_gate.set_phase("movers")
                 try:
@@ -3138,6 +3187,29 @@ def build_app(
                     return None
                 # post-pull generation (the pull bumped it) — the SAME the /movers route reads.
                 return warm_date, _summary_cache.generation
+
+            def _warm_datasets(gen: int) -> list[dict[str, str]]:
+                """The ONE lake-discovery walk per warm run (DEC-MOVERS-WARM-UNBLOCK-001).
+
+                The 2026-07-04/05 incident root: each of the 39 warm jobs called
+                its ``compute_*_candidates`` WITHOUT the ``datasets=`` memo param
+                (DEC-MOVERS-DISCOVERY-MEMO-001's seam), so every job re-ran a
+                fresh full-lake ``list_candle_datasets`` dir-walk — ~3 min each
+                on the options-exploded post-prebuild tree (~10⁵-10⁶ partition
+                dirs; forensics measured 170-256 s per key, one BSE key with
+                ZERO candidates cost 169.4 s of pure walk). Reuse the EXACT
+                generation-stamped memo the /movers route reads
+                (``_db_datasets_cache`` key ``"movers_candle_datasets"``), so
+                the whole warm run — AND the route afterwards — shares ONE walk
+                per write generation (CLAUDE.md §11 COMMON; byte-identical
+                candidates — same function, same inputs, pinned).
+                """
+                datasets: list[dict[str, str]] = _db_datasets_cache.get_or_compute(
+                    "movers_candle_datasets",
+                    generation=gen,
+                    compute=lambda: list_candle_datasets(lake_root),
+                )
+                return datasets
 
             def _warm_spot_movers() -> MoversWarmResult:
                 """Per-segment SPOT warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when spot succeeds.
@@ -3153,6 +3225,9 @@ def build_app(
                 if resolved is None:
                     return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
+                # ONE memoised discovery walk shared by every job in this warm
+                # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
+                warm_datasets = _warm_datasets(gen)
 
                 def _make_spot_job(exch: str | None) -> Callable[[], int]:
                     def _spot_job() -> int:
@@ -3171,6 +3246,7 @@ def build_app(
                                 date=warm_date,
                                 time=None,
                                 exchange=exch,
+                                datasets=warm_datasets,
                             ),
                         )
                         return len(cands.snapshots)
@@ -3182,7 +3258,11 @@ def build_app(
                     [_make_spot_job(coord["exchange"]) for coord in coords],
                     segment="spot",
                     labels=[warm_coordinate_label(coord) for coord in coords],
-                    on_progress=_prebuild_gate.set_progress,
+                    # Segment-labelled i/N (DEC-MOVERS-WARM-UNBLOCK-001 fix 4):
+                    # a bare "6/9" read as 7-of-9-total; label it "spot 6/9".
+                    on_progress=lambda done, total: _prebuild_gate.set_progress(
+                        done, total, segment="spot"
+                    ),
                 )
 
             def _warm_futures_movers() -> MoversWarmResult:
@@ -3195,6 +3275,9 @@ def build_app(
                 if resolved is None:
                     return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
+                # ONE memoised discovery walk shared by every job in this warm
+                # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
+                warm_datasets = _warm_datasets(gen)
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
                     tier = normalize_futures_tier(raw_tier)
@@ -3217,6 +3300,7 @@ def build_app(
                                 time=None,
                                 exchange=exch,
                                 expiry_tier=tier,
+                                datasets=warm_datasets,
                             ),
                         )
                         return len(cands.movers)
@@ -3228,7 +3312,10 @@ def build_app(
                     [_make_fut_job(coord["exchange"], coord["expiry_tier"]) for coord in coords],
                     segment="futures",
                     labels=[warm_coordinate_label(coord) for coord in coords],
-                    on_progress=_prebuild_gate.set_progress,
+                    # Segment-labelled i/N (DEC-MOVERS-WARM-UNBLOCK-001 fix 4).
+                    on_progress=lambda done, total: _prebuild_gate.set_progress(
+                        done, total, segment="futures"
+                    ),
                 )
 
             def _warm_options_movers() -> MoversWarmResult:
@@ -3243,6 +3330,9 @@ def build_app(
                 if resolved is None:
                     return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
+                # ONE memoised discovery walk shared by every job in this warm
+                # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
+                warm_datasets = _warm_datasets(gen)
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
@@ -3285,6 +3375,7 @@ def build_app(
                                 expiry_tier=tier,
                                 expiry_track=trk,
                                 exchange=exch,
+                                datasets=warm_datasets,
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
                             ),
@@ -3303,7 +3394,10 @@ def build_app(
                     ],
                     segment="options",
                     labels=[warm_coordinate_label(coord) for coord in coords],
-                    on_progress=_prebuild_gate.set_progress,
+                    # Segment-labelled i/N (DEC-MOVERS-WARM-UNBLOCK-001 fix 4).
+                    on_progress=lambda done, total: _prebuild_gate.set_progress(
+                        done, total, segment="options"
+                    ),
                 )
 
             def _prebuild_timeframes(exclude_symbols: frozenset[str]) -> PrebuildOutcome:
@@ -3401,6 +3495,18 @@ def build_app(
                 # movers gate with the prebuild's honest success verdict (a
                 # re-raised global stop skips this line, leaving ok=False).
                 prebuild_ok = outcome.ok
+                # Release the movers gate the MOMENT the prebuild outcome is
+                # known — ok OR failed (DEC-MOVERS-WARM-UNBLOCK-001 fix 3): the
+                # half-filled-lake hazard the gate exists for ends at prebuild
+                # completion, so the movers warm that FOLLOWS runs un-gated in
+                # the background as a pure cache accelerator. The 2026-07-04/05
+                # incident (pull_id 22fc7739f719): the warm's 39 full-lake-walk
+                # keys (170-256 s each) held /movers hostage for hours behind
+                # the finally-only release. The finally below STAYS as the
+                # idempotent backstop for every path that never reaches this
+                # line (early stop / raised phase / global stop / crash).
+                if not dry_run:
+                    _prebuild_gate.release(outcome.ok)
                 return outcome
 
             # Keep the live PULL RATE panel fed through EVERY phase, not just spot
@@ -3454,7 +3560,11 @@ def build_app(
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
                 # clean run all un-gate the movers (never blocked forever);
                 # `prebuild_ok` carries the prebuild's honest verdict (False when
-                # the pipeline never reached it). Logged by the gate itself
+                # the pipeline never reached it). On the completed-prebuild path
+                # this is the idempotent BACKSTOP — the primary release already
+                # fired inside `_prebuild_timeframes` the moment the outcome was
+                # known (DEC-MOVERS-WARM-UNBLOCK-001), so the movers warm never
+                # holds the gate. Logged by the gate itself
                 # (`pipeline.prebuild.gate_released` {ok}).
                 if not dry_run:
                     _prebuild_gate.release(prebuild_ok)
