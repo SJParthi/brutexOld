@@ -289,6 +289,12 @@ HOLIDAYS_2025 = frozenset(
 # 2026-02-01 Sunday Budget session was "missing" is REFUTED: date(2026, 2, 1)
 # is already a verified entry in SPECIAL_WEEKEND_TRADING_SESSIONS below, added
 # by DEC-CALENDAR-2020-BUDGET-SATURDAY-001.)
+# The SANCTIONED operational closure path for such drift is the OBSERVED
+# overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001, ``calendars/observed_sessions.py``):
+# a REMOVE-ONLY, evidence-gated, ``observed-not-official``-labeled sidecar that
+# subtracts a demonstrably-untraded derived-trading-day from the OPT-IN consumer
+# surfaces — it never adds a session and never names a holiday, so the
+# named-holiday gap here stays closable ONLY by the official circular.
 HOLIDAYS_2026 = frozenset(
     [
         date(2026, 1, 26),  # Mon  Republic Day (Zerodha holiday calendar; Kotak Neo)

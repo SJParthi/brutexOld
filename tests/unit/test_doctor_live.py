@@ -1801,32 +1801,61 @@ class TestDefensiveArms:
 
 
 class TestResolveProbeDay:
-    """The extracted, loud probe-day walk (calendar-correctness pack).
+    """The PURE, loud probe-day rule — both packs' contracts on ONE walk.
 
-    ``build_real_deps`` is ``pragma: no cover`` by design, so the walk-back it
-    used to inline was invisible to the suite; ``resolve_probe_day`` is the
-    module-level, directly-tested extraction.
+    Hostile-review fold (DEC-CALENDAR-OBSERVED-SESSIONS-001): extracted from
+    the ``# pragma: no cover`` ``build_real_deps`` factory so the
+    observed-overlay step-over is executable-tested and mutation-protected.
+    Calendar-correctness pack (DEC-CALENDAR-EXCHANGE-SPLIT-001): the walk uses
+    the STRICT checked calendar and degrades LOUDLY out of coverage.
     """
 
-    def test_prior_trading_day_returned_directly(self) -> None:
-        # Thu 2026-07-02 is a covered regular session before Fri 2026-07-03.
-        assert dl.resolve_probe_day(date(2026, 7, 3)) == date(2026, 7, 2)
+    def test_yesterday_trading_returned_directly(self) -> None:
+        # Tue 2026-06-30 IST -> yesterday Mon 2026-06-29 is a session.
+        now = datetime(2026, 6, 30, 10, 0, tzinfo=UTC)
+        assert dl.resolve_probe_day(now) == date(2026, 6, 29)
+
+    def test_weekend_stepped_over(self) -> None:
+        # Mon 2026-06-29 IST -> Sun/Sat stepped over; Fri 2026-06-26 is
+        # Muharram in the completed 2026 list (DEC-CALENDAR-2026-COMPLETE-001),
+        # so the walk continues to Thu 2026-06-25.
+        now = datetime(2026, 6, 29, 10, 0, tzinfo=UTC)
+        assert dl.resolve_probe_day(now) == date(2026, 6, 25)
 
     def test_weekend_and_holiday_stepped_over(self) -> None:
-        # Mon 2024-01-29: the weekend + Republic Day (Fri 2024-01-26) are
-        # stepped over down to Thu 2024-01-25.
-        assert dl.resolve_probe_day(date(2024, 1, 29)) == date(2024, 1, 25)
+        # Mon 2024-01-29 IST: the weekend + Republic Day (Fri 2024-01-26) are
+        # stepped over down to Thu 2024-01-25 (calendar-correctness pack).
+        now = datetime(2024, 1, 29, 10, 0, tzinfo=UTC)
+        assert dl.resolve_probe_day(now) == date(2024, 1, 25)
+
+    def test_observed_overlay_day_never_probed(self) -> None:
+        # An observably-untraded Monday (overlay) is NOT a probe day: the walk
+        # steps over it, the weekend, AND Muharram Fri 2026-06-26 (completed
+        # 2026 list) down to Thu 2026-06-25. Reverting the overlay subtraction
+        # to the plain calendar walk fails this test (the mutation the review
+        # proved SURVIVED the pre-fold suite — without the overlay the walk
+        # stops on the overlaid Mon 2026-06-29 itself).
+        now = datetime(2026, 6, 30, 10, 0, tzinfo=UTC)
+        observed = frozenset({date(2026, 6, 29)})
+        assert dl.resolve_probe_day(now, observed=observed) == date(2026, 6, 25)
+
+    def test_ist_rollover_not_utc(self) -> None:
+        # 20:00 UTC on Mon 2026-06-29 is ALREADY Tue 01:30 IST -> the probe day
+        # is Mon 2026-06-29, pinning the astimezone(IST) conversion.
+        now = datetime(2026, 6, 29, 20, 0, tzinfo=UTC)
+        assert dl.resolve_probe_day(now) == date(2026, 6, 29)
 
     def test_coverage_exhausted_warns_once_and_degrades(self) -> None:
-        # From 2027-01-02 (Saturday) the walk crosses the 2026 ceiling: Fri
+        # From 2027-01-02 IST (Saturday) the walk crosses the 2026 ceiling: Fri
         # 2027-01-01 is an out-of-coverage weekday, so the checked calendar
         # raises; the helper emits ONE calendar.coverage_exhausted warning and
         # returns that weekday as the best-effort probe day — the OLD silent
         # guess is GONE (it is now loudly flagged), and the doctor never crashes.
         from structlog.testing import capture_logs
 
+        now = datetime(2027, 1, 2, 10, 0, tzinfo=UTC)
         with capture_logs() as logs:
-            assert dl.resolve_probe_day(date(2027, 1, 2)) == date(2027, 1, 1)
+            assert dl.resolve_probe_day(now) == date(2027, 1, 1)
         events = [log for log in logs if log["event"] == "calendar.coverage_exhausted"]
         assert len(events) == 1
         assert events[0]["probe_day"] == "2027-01-01"

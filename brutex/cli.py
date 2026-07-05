@@ -552,6 +552,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bound the re-open to the first N matching windows (default: all matching)",
     )
 
+    # ── detect-session-drift (DEC-CALENDAR-OBSERVED-SESSIONS-001) ──
+    drift = sub.add_parser(
+        "detect-session-drift",
+        help=(
+            "Scan ONE fully-past month for observed-holiday drift (a derived "
+            "trading day with ZERO bars across all 3 engine indices + clean "
+            "SUCCESS ledger evidence) and reconcile the remove-only "
+            "observed-not-official overlay sidecar. Never adds a session; "
+            "never names a holiday (Golden Rule #1)."
+        ),
+    )
+    drift.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    drift.add_argument(
+        "--month",
+        required=True,
+        help="The FULLY-PAST month to scan, as YYYY-MM (e.g. 2026-01)",
+    )
+
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
     auth = sub.add_parser(
         "auth",
@@ -1668,6 +1691,59 @@ def cmd_reopen_skipped(
         "throttle-poisoned ones recover their data (re-opened windows are "
         "breaker-exempt deliberate re-checks — the re-pull cannot re-trip on them)."
     )
+    return EXIT_OK
+
+
+def cmd_detect_session_drift(*, lake_root: Path | None, month: str) -> int:
+    """Run the observed-sessions drift reconciler over ONE fully-past month.
+
+    DEC-CALENDAR-OBSERVED-SESSIONS-001 — the production invocation surface for
+    :func:`brutex.calendars.observed_sessions.detect_session_drift` (the
+    reconciler is deliberately MANUALLY-invoked-only: the operator scans a month
+    after its pulls have settled, reviews the printed evidence, and the labeled
+    sidecar remains the human-auditable escape hatch). Prints the verdict —
+    flagged / vetoed / no-evidence days + both cap refusals — and whether the
+    overlay sidecar was rewritten (diff-based: an unchanged month is a no-op; a
+    month whose stale entries the lake now refutes is self-healed).
+    """
+    from brutex.calendars.observed_sessions import (
+        ObservedSessionsError,
+        detect_session_drift,
+    )
+
+    try:
+        month_date = date.fromisoformat(f"{month}-01")
+    except ValueError:
+        print(
+            f"[brutex] detect-session-drift — invalid --month {month!r}; expected YYYY-MM",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    resolved = _resolve_lake_root(lake_root)
+    try:
+        report = detect_session_drift(resolved, month_date)
+    except ValueError as exc:
+        print(f"[brutex] detect-session-drift REFUSED — {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    except ObservedSessionsError as exc:
+        print(f"[brutex] detect-session-drift FAILED — {exc}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    verdict = report.verdict
+    flagged = ", ".join(f.day.isoformat() for f in verdict.flagged) or "none"
+    vetoed = ", ".join(d.isoformat() for d in verdict.vetoed_failed) or "none"
+    no_evidence = ", ".join(d.isoformat() for d in verdict.no_evidence) or "none"
+    print(
+        f"[brutex] detect-session-drift {month} — flagged: {flagged}; "
+        f"vetoed (FAILED ledger rows): {vetoed}; no-evidence: {no_evidence}; "
+        f"month-cap exceeded: {verdict.over_month_cap}; "
+        f"year-cap exceeded: {verdict.over_year_cap}; "
+        f"overlay {'REWRITTEN' if report.wrote_overlay else 'unchanged'} "
+        f"({report.overlay_path}). Every entry is observed-not-official — the "
+        "overlay never names a holiday; the official NSE circular remains the "
+        "only closure for the named-holiday gap."
+    )
+    if verdict.over_month_cap or verdict.over_year_cap:
+        return EXIT_USER_ERROR
     return EXIT_OK
 
 
@@ -3609,6 +3685,14 @@ def cmd_fetch(
         # ``None`` so it can never observe synthetic outcomes (the same gating as
         # ``detect_completeness_gaps`` below).
         storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
+        # per pull and threaded into the completeness detectors' margin arithmetic
+        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
+        # A ``--dry-run`` threads the empty overlay (the ``detect_completeness_gaps``
+        # gating pattern); the loader never raises (missing/corrupt -> empty).
+        from brutex.calendars.observed_sessions import load_observed_holidays
+
+        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -3636,6 +3720,7 @@ def cmd_fetch(
                     # land on the window's first day) leaves it OFF so it never false-reds
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
+                    observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
                 )
             except _pull_halt_errors as exc:
@@ -6243,6 +6328,8 @@ def main(argv: list[str] | None = None) -> int:
             market=args.market,
             limit=args.limit,
         )
+    if args.command == "detect-session-drift":
+        return cmd_detect_session_drift(lake_root=args.lake_root, month=args.month)
     if args.command == "auth":  # pragma: no cover — interactive / thin print shims
         if args.auth_command == "set":
             return cmd_auth_set()

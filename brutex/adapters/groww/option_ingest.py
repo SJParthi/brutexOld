@@ -379,6 +379,7 @@ def ingest_option_contract(
     market: str = GROWW_OPTION_COVERAGE_MARKET,
     on_raw_payload: RawPayloadHook | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
 ) -> IngestReport:
@@ -642,6 +643,7 @@ def ingest_option_contract(
             on_success=on_success,
             pull_id=pull_id,
             fields=fields,
+            observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
@@ -665,6 +667,7 @@ def ingest_option_contract(
             on_success=on_success,
             pull_id=pull_id,
             fields=fields,
+            observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
         )
         if result_report.still_failed_windows:
@@ -724,6 +727,7 @@ def _process_option_window_tail(
     on_success: Callable[[], None] | None,
     pull_id: str,
     fields: dict[str, str],
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
 ) -> IngestReport:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
@@ -889,7 +893,7 @@ def _process_option_window_tail(
     # SESSION-FILTERED bars stop materially before the expected end (a truncation the SUCCESS
     # classifier + skip rule would otherwise never revisit). Fully guarded inside — never
     # breaks the pull, changes no status/ledger/return.
-    _observe_partial_window(raw, bars, pull_id=pull_id, fields=fields)
+    _observe_partial_window(raw, bars, pull_id=pull_id, fields=fields, observed=observed_holidays)
     if on_success is not None:
         on_success()
     return IngestReport(
@@ -1235,6 +1239,7 @@ def _observe_partial_window(
     *,
     pull_id: str | None,
     fields: dict[str, str],
+    observed: frozenset[date] = frozenset(),
 ) -> None:
     """Observe-only: WARN if a FUTURES SUCCESS window's bars stop before its end.
 
@@ -1259,6 +1264,7 @@ def _observe_partial_window(
         symbol=raw.contract.symbol,
         interval=fields.get("interval", raw.interval),
         pull_id=pull_id,
+        observed=observed,
     )
 
 
@@ -1664,6 +1670,7 @@ def run_groww_option_ingest(
     capture_hook_factory: CaptureHookFactory | None = None,
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
+    observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     breaker_health_probe: Callable[[], bool] | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
@@ -1923,6 +1930,7 @@ def run_groww_option_ingest(
                 market=market,
                 on_raw_payload=contract_hook,
                 fetch_pipeline=fetch_pipeline,
+                observed_holidays=observed_holidays,
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
             )

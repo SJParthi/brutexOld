@@ -57,6 +57,7 @@ import binascii
 import inspect
 import json
 from collections.abc import Callable, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -91,7 +92,11 @@ from brutex.adapters.groww.probe import (
 from brutex.adapters.groww.token_cache import CachedToken, current_session
 from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
 from brutex.adapters.rate_common import RateController
-from brutex.calendars.nse import HolidayDataUnavailableError, is_trading_day_checked
+from brutex.calendars.nse import HolidayDataUnavailableError
+from brutex.calendars.observed_sessions import (
+    is_trading_day_checked_observed,
+    load_observed_holidays,
+)
 from brutex.config.credentials import resolve_groww_aws_credentials
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
 from brutex.config.dotenv import parse_dotenv
@@ -2427,41 +2432,33 @@ def run_live_doctor(
     return KitReport(run_id=run_id, transcript_path=transcript_path, outcomes=tuple(outcomes))
 
 
-def resolve_probe_day(today: date) -> date:
-    """Latest trading day STRICTLY BEFORE *today* — loud when coverage runs out.
+def resolve_probe_day(now: datetime, *, observed: AbstractSet[date] = frozenset()) -> date:
+    """The kit's probe day: latest session STRICTLY before *now*'s IST date.
 
-    The kit's vendor probe fetches candles for "the most recent completed
-    trading session", resolved by walking back one calendar day at a time from
-    ``today - 1`` using the STRICT
-    :func:`brutex.calendars.nse.is_trading_day_checked` (weekends + listed
-    holidays stepped over; special weekend sessions honoured). Extracted from
-    ``build_real_deps`` (which is ``pragma: no cover`` by design) so the walk
-    itself is directly unit-testable.
+    Extracted PURE from ``build_real_deps._probe_day`` (hostile-review fold) so
+    the probe-day rule is tested at 100% line+branch OUTSIDE the
+    ``# pragma: no cover`` real-composition factory — the factory keeps only the
+    binding. Steps backwards from IST-yesterday over weekends, listed holidays
+    AND observably-untraded overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
+    remove-only), using the STRICT
+    :func:`brutex.calendars.observed_sessions.is_trading_day_checked_observed`,
+    so the live vendor probe never targets a day the vendor demonstrably served
+    no bars for. Bounded: the NSE week always contains a trading day and the
+    loaded overlay set is finite.
 
-    LOUD out-of-coverage handling: once the walk reaches a weekday OUTSIDE the
-    published holiday span (from 2027-01-01 on, until the list is extended),
-    the checked calendar raises rather than silently guessing "trading day".
-    This helper catches that, emits ONE ``calendar.coverage_exhausted``
-    structlog warning, and returns that weekday as the BEST-EFFORT probe day —
-    explicitly flagged degraded (it may be an unlisted holiday, in which case
-    the probe reads an empty session), never a silent guess and never a crash
-    of the whole doctor run.
-
-    Parameters
-    ----------
-    today
-        The current IST calendar date (injected for deterministic tests).
-
-    Returns
-    -------
-    date
-        The latest verified trading day before *today*, or — degraded, after
-        one warning — the latest out-of-coverage weekday.
+    LOUD out-of-coverage handling (DEC-CALENDAR-EXCHANGE-SPLIT-001 pack): once
+    the walk reaches a weekday OUTSIDE the published holiday span (from
+    2027-01-01 on, until the list is extended), the checked calendar raises
+    rather than silently guessing "trading day". This helper catches that,
+    emits ONE ``calendar.coverage_exhausted`` structlog warning, and returns
+    that weekday as the BEST-EFFORT probe day — explicitly flagged degraded
+    (it may be an unlisted holiday, in which case the probe reads an empty
+    session), never a silent guess and never a crash of the whole doctor run.
     """
-    day = today - timedelta(days=1)
+    day = now.astimezone(IST).date() - timedelta(days=1)
     while True:
         try:
-            if is_trading_day_checked(day):
+            if is_trading_day_checked_observed(day, observed=observed):
                 return day
         except HolidayDataUnavailableError:
             _LOG.warning(
@@ -2546,10 +2543,16 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         server = parsedate_to_datetime(server_date)
         return (datetime.now(UTC) - server).total_seconds()
 
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded
+    # ONCE per deps build (design W5), never per probe. The loader never raises
+    # (missing/corrupt -> empty overlay).
+    observed_holidays = load_observed_holidays(resolve_lake_root(os.environ, home=Path.home()))
+
     def _probe_day() -> date:
-        # The loud, coverage-aware walk lives in the module-level (and
-        # unit-tested) ``resolve_probe_day`` — this shim only supplies the clock.
-        return resolve_probe_day(datetime.now(UTC).astimezone(IST).date())
+        # Binding only — the loud, coverage-aware, overlay-aware walk lives in
+        # the module-level (and unit-tested) ``resolve_probe_day``; this shim
+        # only supplies the clock + the loaded overlay.
+        return resolve_probe_day(datetime.now(UTC), observed=observed_holidays)
 
     def _controller() -> RateController:
         return RateController(
