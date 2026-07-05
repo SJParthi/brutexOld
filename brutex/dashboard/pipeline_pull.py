@@ -79,6 +79,7 @@ import structlog
 
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.fno_symbol import parse_fno_symbol
@@ -89,17 +90,22 @@ _LOG = structlog.get_logger(__name__)
 PHASE_SPOT = "spot"
 PHASE_METADATA = "metadata"
 PHASE_HISTORICAL = "historical"
-#: The OPTIONAL gated movers phase: warm the movers snapshots ONLY after every
-#: fetch phase succeeds AND the prebuild SUCCEEDED (``PrebuildOutcome.ok`` —
-#: DEC-PIPELINE-AUTOPREBUILD-001 chunk 2; movers read the DERIVED timeframes,
-#: which only the prebuild writes now, so a pre-prebuild or failed-prebuild
-#: warm would read stale/absent partitions).
+#: The OPTIONAL gated movers phase: warm the movers snapshots ONLY after the
+#: prebuild SUCCEEDED over the clean symbol set (``PrebuildOutcome.ok`` —
+#: DEC-PREBUILD-CLEANSET-001 dropped the ``fetch_clean`` arm of the
+#: DEC-PIPELINE-AUTOPREBUILD-001 chunk-2 gate; movers read the DERIVED
+#: timeframes, which only the prebuild writes now, so a pre-prebuild or
+#: failed-prebuild warm would read stale/absent partitions).
 PHASE_MOVERS = "movers"
-#: The gated PREBUILD phase (DEC-PIPELINE-AUTOPREBUILD-001, superseding the
+#: The PREBUILD phase (DEC-PIPELINE-AUTOPREBUILD-001, superseding the
 #: DEC-UNIVERSE-PULL-CONSOLIDATE-001 shape): pre-build ALL derived timeframes
-#: (19 intraday + the derived ``1day``) for SPOT + FUTURES + OPTIONS ONLY after
-#: every fetch phase succeeds — the pipeline's FINAL data stage, run BEFORE the
-#: movers warm.
+#: (19 intraday + the derived ``1day``) for SPOT + FUTURES + OPTIONS — the
+#: pipeline's FINAL data stage, run BEFORE the movers warm. Since
+#: DEC-PREBUILD-CLEANSET-001 (supersedes the #1145 fetch_clean all-or-nothing
+#: gate) it ALWAYS runs on the completed-chain path, over the CLEAN symbol set
+#: (every target minus the UNCAPPED quarantined names, which it receives as an
+#: exclusion set) — one quarantined symbol no longer starves the other ~N−1 of
+#: derived timeframes.
 PHASE_PREBUILD = "prebuild"
 
 #: The three PER-SEGMENT movers-warm labels. DEC-PIPELINE-AUTOPREBUILD-001
@@ -212,15 +218,16 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
 MAX_QUARANTINED_NAMES: Final[int] = 10
 
 
-def derive_quarantined_symbols(
+def derive_quarantined_name_set(
     spot: BulkSpotReport | None, historical: CompositePullReport | None
-) -> tuple[tuple[str, ...], int]:
-    """The deduped, sorted quarantined-symbol names + the TRUE total — pure.
+) -> frozenset[str]:
+    """The UNCAPPED, deduped quarantined-symbol name set — pure.
 
-    DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (headline honesty): a per-symbol
-    quarantine does NOT stop the pipeline (the phase gates check pull-wide
-    signals), so a completed run could read a bare "pipeline complete" while
-    symbols silently failed. This derives the NAMES from the phase reports:
+    DEC-PREBUILD-CLEANSET-001: this FULL set is the prebuild's EXCLUSION set —
+    it is NEVER capped (the 10-name :data:`MAX_QUARANTINED_NAMES` cap of
+    :func:`derive_quarantined_symbols` is a DISPLAY concern; excluding by the
+    capped tuple would silently prebuild the 11th+ quarantined symbol over
+    dirty/absent 1-minute data). The names come from the phase reports:
 
     * **spot** — every :class:`~brutex.dashboard.pull_controller.SymbolPullResult`
       with ``failed > 0`` (a terminally-quarantined ``(symbol, interval)`` pair;
@@ -232,9 +239,7 @@ def derive_quarantined_symbols(
       :func:`~brutex.data.fno_symbol.parse_fno_symbol` decode (an undecodable
       symbol keeps its raw name — reported, never dropped).
 
-    Returns ``(names, true_count)``: *names* deduped + sorted, capped at
-    :data:`MAX_QUARANTINED_NAMES`; *true_count* is the UNCAPPED total so the
-    note's ``(+K more)`` remainder is honest. ``((), 0)`` for a clean run.
+    Returns the empty frozenset for a clean run.
     """
     names: set[str] = set()
     if spot is not None:
@@ -244,8 +249,38 @@ def derive_quarantined_symbols(
         for symbol in set(hist.start_dates) - set(hist.phase1_complete):
             parts = parse_fno_symbol(symbol)
             names.add(symbol if parts is None else parts.underlying)
+    return frozenset(names)
+
+
+def _cap_quarantined(names: frozenset[str]) -> tuple[tuple[str, ...], int]:
+    """Sort + cap *names* for DISPLAY: ``(capped tuple, TRUE uncapped total)``.
+
+    The ONE place the :data:`MAX_QUARANTINED_NAMES` cap is applied (so the
+    display cap and the uncapped exclusion set can never drift apart —
+    DEC-PREBUILD-CLEANSET-001; CLAUDE.md §11 COMMON).
+    """
     ordered = tuple(sorted(names))
     return ordered[:MAX_QUARANTINED_NAMES], len(ordered)
+
+
+def derive_quarantined_symbols(
+    spot: BulkSpotReport | None, historical: CompositePullReport | None
+) -> tuple[tuple[str, ...], int]:
+    """The deduped, sorted quarantined-symbol names + the TRUE total — pure.
+
+    DEC-PIPELINE-AUTOPREBUILD-001 chunk 3 (headline honesty): a per-symbol
+    quarantine does NOT stop the pipeline (the phase gates check pull-wide
+    signals), so a completed run could read a bare "pipeline complete" while
+    symbols silently failed. The names are derived by
+    :func:`derive_quarantined_name_set` (the ONE source of truth — the
+    UNCAPPED twin that feeds the prebuild's exclusion set,
+    DEC-PREBUILD-CLEANSET-001); this function only sorts + caps for display.
+
+    Returns ``(names, true_count)``: *names* deduped + sorted, capped at
+    :data:`MAX_QUARANTINED_NAMES`; *true_count* is the UNCAPPED total so the
+    note's ``(+K more)`` remainder is honest. ``((), 0)`` for a clean run.
+    """
+    return _cap_quarantined(derive_quarantined_name_set(spot, historical))
 
 
 @dataclass(slots=True)
@@ -285,18 +320,21 @@ class PipelinePullReport:
     segment_movers_warmed
         The per-segment warmed-count map (:data:`SEGMENT_SPOT` / :data:`SEGMENT_FUTURES`
         / :data:`SEGMENT_OPTIONS` → count) for every segment whose warmer was injected
-        AND whose warm gate passed (a clean fetch AND a SUCCESSFUL prebuild —
-        ``PrebuildOutcome.ok``, the chunk-2 tightening). A segment that
+        AND whose warm gate passed (a SUCCESSFUL prebuild over the clean symbol
+        set — ``PrebuildOutcome.ok``; DEC-PREBUILD-CLEANSET-001 dropped the
+        ``fetch_clean`` arm of the chunk-2 gate). A segment that
         did not warm is ABSENT from the map (never a fabricated count, Golden Rule #1).
         Empty when no segment warmed.
     prebuild_built
         The number of symbols (underlyings + contracts) whose derived timeframes were
-        pre-built by the gated prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001 —
+        pre-built by the prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001 —
         :attr:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome.symbols_built`), or
-        ``None`` when that phase did NOT run — either no ``run_prebuild`` was injected,
-        OR the historical fetch did not pass its gate (pre-build runs ONLY after a
-        fully-successful pull). ``0`` is an honest "ran, built nothing", distinct from
-        ``None`` "did not run".
+        ``None`` when that phase did NOT run — no ``run_prebuild`` was injected, or an
+        earlier gate stopped the chain before the historical phase (on the
+        completed-chain path the prebuild ALWAYS runs, over the CLEAN symbol set —
+        quarantined symbols excluded; DEC-PREBUILD-CLEANSET-001, superseding the
+        #1145 fully-successful-pull gate). ``0`` is an honest "ran, built nothing",
+        distinct from ``None`` "did not run".
     prebuild_total_bars
         Total derived bars the prebuild phase wrote (intraday + ``1day``), or ``None``
         when the phase did not run.
@@ -319,6 +357,18 @@ class PipelinePullReport:
         30-300 GB of pure slack; named here AND in the note so the operator
         sees it before the disk fills. ``None`` when the filesystem is
         fine-grained, the probe was unavailable, or the phase did not run.
+    prebuild_opens_substituted
+        The prebuild's observe-only daily-open substitution total
+        (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001 —
+        :attr:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome.opens_substituted`):
+        (symbol, date) SESSIONS whose derived daily open silently substituted
+        a non-09:15 first minute, summed over the prebuild's SPOT targets
+        (F&O contracts are never scanned — spot-only by decision). ``None``
+        when the prebuild did not run. HONEST semantics: a FULL-HISTORY
+        count recomputed per run over each re-derived symbol's whole
+        1-minute frame — a permanent historical gap re-reports on every run
+        that re-derives the symbol (an unchanged-source incremental skip
+        contributes 0), so the number is honest volume, not "new this pull".
     quarantined_symbols
         The deduped, sorted names of symbols a phase QUARANTINED per-symbol
         without stopping the chain (:func:`derive_quarantined_symbols` — spot
@@ -339,11 +389,13 @@ class PipelinePullReport:
     note: str
     movers_warmed: int | None = None
     segment_movers_warmed: dict[str, int] = field(default_factory=dict)
+    segment_movers_failed: dict[str, int] = field(default_factory=dict)
     prebuild_built: int | None = None
     prebuild_total_bars: int | None = None
     prebuild_failed: tuple[str, ...] = ()
     prebuild_crashed: str | None = None
     fs_allocation_note: str | None = None
+    prebuild_opens_substituted: int | None = None
     quarantined_symbols: tuple[str, ...] = ()
     quarantined_count: int = 0
 
@@ -372,11 +424,13 @@ class PipelinePullReport:
             "note": self.note,
             "movers_warmed": self.movers_warmed,
             "segment_movers_warmed": dict(self.segment_movers_warmed),
+            "segment_movers_failed": dict(self.segment_movers_failed),
             "prebuild_built": self.prebuild_built,
             "prebuild_total_bars": self.prebuild_total_bars,
             "prebuild_failed": list(self.prebuild_failed),
             "prebuild_crashed": self.prebuild_crashed,
             "fs_allocation_note": self.fs_allocation_note,
+            "prebuild_opens_substituted": self.prebuild_opens_substituted,
             "quarantined_symbols": list(self.quarantined_symbols),
             "quarantined_count": self.quarantined_count,
             "spot": self.spot.to_dict() if self.spot is not None else None,
@@ -402,7 +456,10 @@ def _metadata_stop_note(report: MetadataPullReport) -> str:
     )
 
 
-def _movers_note_clause(segment_movers_warmed: Mapping[str, int]) -> str:
+def _movers_note_clause(
+    segment_movers_warmed: Mapping[str, int],
+    segment_movers_failed: Mapping[str, int] | None = None,
+) -> str:
     """Build the ``, movers …`` note clause from the per-segment warmed-count map.
 
     Empty when no segment warmed (no clause). Otherwise lists each warmed segment
@@ -410,6 +467,10 @@ def _movers_note_clause(segment_movers_warmed: Mapping[str, int]) -> str:
     order (e.g. ``", movers spot 3 + futures 1 snapshot(s) warmed"``), so the note
     honestly distinguishes WHICH segments warmed — a segment whose warm gate failed
     (or whose warmer was not injected) is absent from the map and from the clause.
+    When any warm JOB failed (DEC-MOVERS-WARM-PROGRESS-001 — the per-coordinate
+    tally :class:`~brutex.dashboard.movers_warm.MoversWarmResult` now carries it),
+    the clause appends an honest ``" (N warm job(s) FAILED)"`` so a swallowed
+    best-effort failure is never hidden behind the warmed counts (Golden Rule #1).
     """
     ordered = [
         (segment, segment_movers_warmed[segment])
@@ -419,7 +480,9 @@ def _movers_note_clause(segment_movers_warmed: Mapping[str, int]) -> str:
     if not ordered:
         return ""
     parts = " + ".join(f"{segment} {count}" for segment, count in ordered)
-    return f", movers {parts} snapshot(s) warmed"
+    failed_total = sum((segment_movers_failed or {}).values())
+    failed_clause = f" ({failed_total} warm job(s) FAILED)" if failed_total else ""
+    return f", movers {parts} snapshot(s) warmed{failed_clause}"
 
 
 #: How many failure NAMES the prebuild note clause shows before "(+K more)".
@@ -448,6 +511,16 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         f", timeframes pre-built for {prebuild.symbols_built} symbol(s) "
         f"({prebuild.total_bars} bars)"
     )
+    if prebuild.unchanged_skips:
+        # DEC-PREBUILD-INCREMENTAL-001: name the incremental saving honestly —
+        # these symbols were verified UNCHANGED and skipped, not built-with-0.
+        clause += f", {prebuild.unchanged_skips} unchanged symbol(s) skipped (incremental)"
+    if prebuild.opens_substituted:
+        # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: the observe-only daily-open
+        # substitution total is named in the headline (sessions whose derived
+        # daily open fell back to a non-09:15 first minute — full-history,
+        # recomputed per run). Zero keeps the note byte-identical.
+        clause += f", {prebuild.opens_substituted} daily open(s) substituted"
     if prebuild.failed:
         shown = ", ".join(prebuild.failed[:_NOTE_FAILURE_NAMES])
         more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))
@@ -483,18 +556,22 @@ def _complete_note(
     prebuild: PrebuildOutcome | None = None,
     quarantined: tuple[str, ...] = (),
     quarantined_count: int = 0,
+    segment_movers_failed: Mapping[str, int] | None = None,
 ) -> str:
     """Build the honest summary note for a fully-run pipeline.
 
     A non-empty quarantine set leads the note ("pipeline complete — N symbol(s)
     quarantined: … — …", :func:`_quarantine_clause`) so a per-symbol failure is
     NEVER hidden behind a bare "pipeline complete"; a fully-clean pull keeps
-    the prior wording byte-identically. Appends a pre-build clause ONLY when
-    the gated prebuild phase ran (:func:`_prebuild_note_clause` — built count +
-    bars + capped failure names), THEN a per-segment movers-warm clause ONLY
-    for the segments that actually warmed (:func:`_movers_note_clause`) — the
-    prebuild-then-movers order mirrors the execution order
-    (DEC-PIPELINE-AUTOPREBUILD-001).
+    the prior wording byte-identically. A WHOLE-pass Greeks-enrichment failure
+    on the candle sub-report appends ", Greeks enrichment FAILED (<ErrorType>)
+    — overlay re-attempted next pull" (DEC-GREEKS-ENRICH-OBSERVE-001; absent when the
+    pass completed, never ran, or there was no candle sub-report). Appends a
+    pre-build clause ONLY when the gated prebuild phase ran
+    (:func:`_prebuild_note_clause` — built count + bars + capped failure
+    names), THEN a per-segment movers-warm clause ONLY for the segments that
+    actually warmed (:func:`_movers_note_clause`) — the prebuild-then-movers
+    order mirrors the execution order (DEC-PIPELINE-AUTOPREBUILD-001).
     """
     hist = historical.historical
     bars = hist.bars_appended if hist is not None else 0
@@ -520,14 +597,27 @@ def _complete_note(
         if hist is not None and hist.expiries_out_of_scope
         else ""
     )
+    # Greeks-enrichment honesty (DEC-GREEKS-ENRICH-OBSERVE-001): a WHOLE-pass
+    # enrichment failure is NAMED in the pipeline note (the overlay is re-derivable
+    # — the next pull re-attempts it), never a swallowed log line. `hist is None`
+    # (a metadata-only / no-candle run) honestly carries no clause. The clause
+    # carries the same <ErrorType> class as the historical note (hostile-review
+    # fold — one uniform operator-facing string).
+    greeks_clause = (
+        f", Greeks enrichment FAILED "
+        f"({(hist.greeks_enrich_error or 'error').split(':', 1)[0]}) "
+        "— overlay re-attempted next pull"
+        if hist is not None and hist.greeks_enrich_ok is False
+        else ""
+    )
     return (
         f"{prefix}pipeline complete — "
         f"{_quarantine_clause(quarantined, quarantined_count)}spot {spot.verdict.kind} "
         f"({spot.total_completed} pair(s)), metadata "
         f"{metadata.expiries_persisted} expiries + {metadata.contracts_persisted} "
         f"contracts, historical {bars} bars over {contracts} contract(s)"
-        f"{scope_clause}{skipped_clause}{_prebuild_note_clause(prebuild)}"
-        f"{_movers_note_clause(segment_movers_warmed)}"
+        f"{scope_clause}{skipped_clause}{greeks_clause}{_prebuild_note_clause(prebuild)}"
+        f"{_movers_note_clause(segment_movers_warmed, segment_movers_failed)}"
     )
 
 
@@ -548,10 +638,10 @@ def run_full_pipeline(
     run_spot: Callable[[], BulkSpotReport],
     run_metadata: Callable[[], MetadataPullReport],
     run_historical: Callable[[], CompositePullReport],
-    warm_spot_movers: Callable[[], int] | None = None,
-    warm_futures_movers: Callable[[], int] | None = None,
-    warm_options_movers: Callable[[], int] | None = None,
-    run_prebuild: Callable[[], PrebuildOutcome] | None = None,
+    warm_spot_movers: Callable[[], MoversWarmResult] | None = None,
+    warm_futures_movers: Callable[[], MoversWarmResult] | None = None,
+    warm_options_movers: Callable[[], MoversWarmResult] | None = None,
+    run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
 
@@ -562,11 +652,17 @@ def run_full_pipeline(
     "metadata"``, historical ``None``). Otherwise ``run_historical`` runs and the
     report carries all three with ``stopped_after = None``.
 
-    **Gated PREBUILD, then movers (DEC-PIPELINE-AUTOPREBUILD-001):** after the
-    fetch phases, the FINAL data stage is the timeframe prebuild — if
-    ``run_prebuild`` is injected it fires ONLY when :func:`historical_phase_ok`
-    passes (a completed-with-failures fetch leaves ``prebuild_built = None``),
-    and its :class:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome` is
+    **Clean-set PREBUILD, then movers (DEC-PREBUILD-CLEANSET-001, superseding
+    the fetch_clean all-or-nothing gate arm of DEC-PIPELINE-AUTOPREBUILD-001
+    #1145):** after the fetch phases, the FINAL data stage is the timeframe
+    prebuild — if ``run_prebuild`` is injected it ALWAYS fires on the
+    completed-chain path (spot + metadata gates passed and the historical
+    phase RAN — an earlier stop still skips it: there is no fresh data to
+    derive over), receiving the UNCAPPED quarantined-symbol name set
+    (:func:`derive_quarantined_name_set`) as its EXCLUSION set, so the
+    prebuild covers the CLEAN symbols (every target minus the quarantined
+    ones) instead of being starved whole by one bad symbol out of ~750. Its
+    :class:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome` is
     folded into the report (built symbols, total bars, capped failure names,
     the ``crashed`` error-type marker — an ``ok=False`` outcome is still
     recorded honestly, never hidden, and a guarded whole-run crash reads
@@ -576,17 +672,20 @@ def run_full_pipeline(
     timeframes, which the prebuild alone writes now, so warming earlier would
     read stale/absent partitions. This SUPERSEDES the early spot-segment warm
     of DEC-PIPELINE-SEGMENT-MOVERS-001 (removed): all three segment warmers
-    fire together, gated on ``fetch_clean AND the prebuild SUCCEEDED``
-    (``PrebuildOutcome.ok`` — the chunk-2 tightening of the chunk-1
-    "prebuild ran" gate: an ``ok=False`` prebuild is still RECORDED in the
-    report but warms NOTHING, since its derived partitions may be stale or
-    absent) — with no ``run_prebuild`` injected NO warmer fires (there is no
-    fresh derived data to warm over). A warmed segment records its count in
+    fire together, gated on ``the prebuild SUCCEEDED over that clean set``
+    (``PrebuildOutcome.ok`` — DEC-PREBUILD-CLEANSET-001 drops the
+    ``fetch_clean`` arm of the chunk-2 gate: on a dirty-fetch day the movers
+    now warm over the freshly-derived CLEAN symbols, honestly omitting the
+    quarantined ones the note names; an ``ok=False`` prebuild is still
+    RECORDED in the report but warms NOTHING, since its derived partitions
+    may be stale or absent) — with no ``run_prebuild`` injected NO warmer
+    fires (there is no fresh derived data to warm over). A warmed segment
+    records its count in
     :attr:`PipelinePullReport.segment_movers_warmed` (``0`` is an honest "ran,
     warmed nothing"); :attr:`PipelinePullReport.movers_warmed` is the SUM
     (``None`` when no segment warmed). Neither the prebuild nor any warm ever
     affects the pull's own success (``stopped_after`` / ``ok``) — both are
-    post-success stages over the just-filled lake, and the route binds
+    post-fetch stages over the just-filled lake, and the route binds
     ``run_prebuild`` crash-guarded
     (:func:`~brutex.dashboard.pipeline_prebuild.run_pipeline_prebuild_guarded`;
     a pull-wide GLOBAL STOP — disk-full/OOM ``LakeWriteHalt``, quota — is the
@@ -611,9 +710,11 @@ def run_full_pipeline(
         :class:`~brutex.dashboard.composite_pull.CompositePullReport` (phase 3).
     warm_spot_movers
         OPTIONAL zero-arg callable that warms the SPOT movers snapshots and
-        returns how many were warmed; fired ONLY after a clean fetch AND a
-        SUCCESSFUL prebuild (``PrebuildOutcome.ok``). ``None`` skips the spot
-        warm.
+        returns its :class:`~brutex.dashboard.movers_warm.MoversWarmResult`
+        (warmed + failed + total — DEC-MOVERS-WARM-PROGRESS-001); fired ONLY
+        after a SUCCESSFUL prebuild over the clean symbol set
+        (``PrebuildOutcome.ok`` — DEC-PREBUILD-CLEANSET-001). ``None`` skips
+        the spot warm.
     warm_futures_movers
         OPTIONAL zero-arg callable warming the FUTURES movers snapshots; same
         gate. ``None`` skips the futures warm.
@@ -621,11 +722,13 @@ def run_full_pipeline(
         OPTIONAL zero-arg callable warming the OPTIONS movers snapshots; same
         gate. ``None`` skips the options warm.
     run_prebuild
-        OPTIONAL zero-arg callable running the timeframe prebuild
+        OPTIONAL callable running the timeframe prebuild
         (:func:`~brutex.dashboard.pipeline_prebuild.run_pipeline_prebuild_guarded`
-        at the route) and returning its
-        :class:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome`; fired ONLY
-        after a fully-successful fetch. ``None`` (default) skips the prebuild
+        at the route) over the CLEAN symbol set and returning its
+        :class:`~brutex.dashboard.pipeline_prebuild.PrebuildOutcome`. It
+        receives the UNCAPPED quarantined-symbol name set as its exclusion
+        set and fires on EVERY completed-chain run — clean or dirty
+        (DEC-PREBUILD-CLEANSET-001). ``None`` (default) skips the prebuild
         AND the movers warm (movers gate on the prebuild having run).
 
     Returns
@@ -660,23 +763,32 @@ def run_full_pipeline(
         )
 
     historical = run_historical()
-    # Post-fetch stages (gated, optional) — evaluate the fully-successful-fetch
-    # gate ONCE so both post-fetch stages share the same decision.
-    fetch_clean = historical_phase_ok(historical)
+    # Post-fetch stages (optional). Derive the quarantined names FIRST
+    # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
+    # exclusion set — one bad symbol no longer starves the other ~N−1 of
+    # derived timeframes (supersedes the #1145 fetch_clean all-or-nothing
+    # gate); the capped view feeds the headline (chunk-3 honesty, unchanged).
+    quarantined_names = derive_quarantined_name_set(spot, historical)
+    quarantined, quarantined_count = _cap_quarantined(quarantined_names)
     # 1) PREBUILD — the FINAL data stage: derived timeframes are written ONLY
-    #    here (DEC-PIPELINE-AUTOPREBUILD-001), never mid-pull.
+    #    here (DEC-PIPELINE-AUTOPREBUILD-001), never mid-pull. It ALWAYS runs
+    #    on the completed-chain path, over the CLEAN symbol set (every target
+    #    minus the uncapped quarantined names — DEC-PREBUILD-CLEANSET-001).
     prebuild: PrebuildOutcome | None = None
-    if run_prebuild is not None and fetch_clean:
-        prebuild = run_prebuild()
+    if run_prebuild is not None:
+        prebuild = run_prebuild(quarantined_names)
     # 2) MOVERS WARM — strictly AFTER the prebuild (movers read the derived
-    #    timeframes the prebuild just wrote); gated on fetch_clean AND the
-    #    prebuild having SUCCEEDED (`PrebuildOutcome.ok` — chunk 2 of
-    #    DEC-PIPELINE-AUTOPREBUILD-001 tightened the chunk-1 "prebuild ran"
-    #    gate: a failed/partial prebuild leaves stale/absent derived
-    #    partitions, so warming over them would cache a wrong snapshot).
+    #    timeframes the prebuild just wrote); gated on the prebuild having
+    #    SUCCEEDED over that clean set (`PrebuildOutcome.ok`) — a
+    #    failed/partial prebuild leaves stale/absent derived partitions, so
+    #    warming over them would cache a wrong snapshot. The `fetch_clean`
+    #    arm is DROPPED (DEC-PREBUILD-CLEANSET-001): on a dirty-fetch day the
+    #    movers warm over the freshly-derived CLEAN symbols, honestly
+    #    omitting the quarantined ones the note names.
     segment_movers_warmed: dict[str, int] = {}
-    if fetch_clean and prebuild is not None and prebuild.ok:
-        warmers: tuple[tuple[str, Callable[[], int] | None], ...] = (
+    segment_movers_failed: dict[str, int] = {}
+    if prebuild is not None and prebuild.ok:
+        warmers: tuple[tuple[str, Callable[[], MoversWarmResult] | None], ...] = (
             (SEGMENT_SPOT, warm_spot_movers),
             (SEGMENT_FUTURES, warm_futures_movers),
             (SEGMENT_OPTIONS, warm_options_movers),
@@ -686,12 +798,22 @@ def run_full_pipeline(
             _LOG.info("pipeline.movers_warm.started", segments=injected)
             for segment, warm in warmers:
                 if warm is not None:
-                    segment_movers_warmed[segment] = warm()
-            _LOG.info("pipeline.movers_warm.done", warmed=dict(segment_movers_warmed))
+                    result = warm()
+                    segment_movers_warmed[segment] = result.warmed
+                    # A best-effort warm job that raised was swallowed + logged
+                    # inside warm_movers_snapshots; carry the count so the note
+                    # can NAME it (DEC-MOVERS-WARM-PROGRESS-001, Golden Rule #1).
+                    if result.failed:
+                        segment_movers_failed[segment] = result.failed
+            _LOG.info(
+                "pipeline.movers_warm.done",
+                warmed=dict(segment_movers_warmed),
+                failed=dict(segment_movers_failed),
+            )
     # Headline honesty (chunk 3): a per-symbol quarantine passes the phase gates
     # (they check pull-wide signals), so it must be NAMED in the complete note —
-    # never hidden behind a bare "pipeline complete".
-    quarantined, quarantined_count = derive_quarantined_symbols(spot, historical)
+    # never hidden behind a bare "pipeline complete" (`quarantined` /
+    # `quarantined_count` derived above, before the prebuild).
     return PipelinePullReport(
         spot=spot,
         metadata=metadata,
@@ -705,14 +827,17 @@ def run_full_pipeline(
             prebuild,
             quarantined,
             quarantined_count,
+            segment_movers_failed,
         ),
         movers_warmed=_total_warmed(segment_movers_warmed),
         segment_movers_warmed=segment_movers_warmed,
+        segment_movers_failed=segment_movers_failed,
         prebuild_built=prebuild.symbols_built if prebuild is not None else None,
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
+        prebuild_opens_substituted=(prebuild.opens_substituted if prebuild is not None else None),
         quarantined_symbols=quarantined,
         quarantined_count=quarantined_count,
     )

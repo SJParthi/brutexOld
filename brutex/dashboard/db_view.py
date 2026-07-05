@@ -39,6 +39,12 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+
+# ALIASED on purpose — do NOT "simplify" to `time.sleep`: the bare name `time` in this
+# module is `datetime.time` (imported above), so `time.sleep(...)` is a runtime
+# AttributeError. The alias keeps the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001)
+# unambiguous and injectable-for-tests via the `retry_sleep` parameters below.
+from time import sleep as _default_sleep
 from typing import Any, Final, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -58,6 +64,7 @@ from brutex.data.fno_candle_lake import (
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_read import (
     DEDUP_PARQUET_SOURCE_SQL,
     DEDUP_STAR_SELECT_SQL,
@@ -80,7 +87,11 @@ from brutex.data.partition import (
 from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
-from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, is_expired_window_settle_reason
+from brutex.data.window_ledger import (
+    DEMOTED_SETTLE_REASONS,
+    EMPTY_TERMINAL_THRESHOLD,
+    is_expired_window_settle_reason,
+)
 from brutex.money import round_money
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
@@ -348,9 +359,14 @@ _IST_TS_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 
 
 #: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
 #: the candle grid renders (:func:`_format_candle_timestamp`). Derived from
-#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant) by truncating to DATE.
-#: Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O
-#: full-stored-life span + the coverage per-session aggregate.
+#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant — ``AT TIME ZONE 'UTC'``
+#: BEFORE the +05:30 shift, so the date is independent of the ambient DuckDB
+#: session ``TimeZone``; a bare CAST-to-DATE on the TIMESTAMPTZ column resolves
+#: in the session zone and split one NSE session into two dates on a
+#: negative-offset host — DEC-SPOT-SESSION-DAYS-IST-TZ-001) by truncating to
+#: DATE. Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) +
+#: the F&O full-stored-life span + the coverage per-session aggregate + the
+#: ``session_days`` distinct-IST-date count.
 _IST_DATE_EXPR: Final[str] = f"{_IST_TS_EXPR}::DATE"
 
 #: The SQL fragment for a bar's **UTC calendar date** — the legacy intraday date
@@ -1336,8 +1352,13 @@ def summarize_spot_datasets(
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
-    stored, NOT whether the full ``2020 → today`` range is complete.
-    Partial-date-range detection is an explicit follow-up, not claimed here.
+    stored, NOT whether the full ``2020 → today`` range is complete. What IS
+    now audited (DEC-SPOT-PARTIAL-RANGE-CHIP-001): ``session_days`` — the
+    per-session CTE's distinct-IST-date count (via the ambient-TZ-robust
+    :data:`_IST_DATE_EXPR`, DEC-SPOT-SESSION-DAYS-IST-TZ-001) — feeds the
+    ``/completeness`` amber ``settled_partial_range`` session-density verdict.
+    The PER-WINDOW trading-day gap audit and the options-side range audit
+    remain explicit follow-ups, not claimed.
     ``open_substituted_days`` is a SUBSTITUTION signal, not exclusively "vendor
     lost data": a genuine late/special open (Muhurat), a sparse reference
     symbol, and a vendor gap all count — each honestly means the derived daily
@@ -1424,6 +1445,16 @@ def summarize_spot_datasets(
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
+        # ``session_days`` (DEC-SPOT-PARTIAL-RANGE-CHIP-001) — the CTE's
+        # ``COUNT(*)`` of per-session rows, i.e. the DISTINCT IST calendar dates
+        # holding at least one bar — additionally feeds the /completeness
+        # session-density range audit with ZERO extra passes over the lake. The
+        # IST date comes from the COMMON :data:`_IST_DATE_EXPR` (AT TIME ZONE
+        # 'UTC' BEFORE the +05:30 shift), so the count is independent of the
+        # ambient DuckDB session ``TimeZone`` — a bare CAST-to-DATE on the
+        # TIMESTAMPTZ column resolves in the session zone and split one NSE
+        # session into two dates on a negative-offset host, inflating
+        # ``session_days`` and masking sparsity (DEC-SPOT-SESSION-DAYS-IST-TZ-001).
         if use_session_cte:
             # The ONE folded per-session CTE (DEC-DAILY-OPEN-SUBSTITUTION-
             # HONESTY-001, shared with the (a)-fix session_dates enrichment) —
@@ -2672,35 +2703,66 @@ def _underlying_spot_close_by_ts(
     Returns ``{}`` (→ every bar classifies UNKNOWN, never raising) when *ts_values* is
     empty, the underlying coordinate is illegal, or the underlying spot is absent from
     both segments (Golden Rule #1 — an honest UNKNOWN, never a fabricated spot).
+
+    When the exact *underlying* probe comes back EMPTY (and only then — zero extra
+    I/O and NO log on the hot path), the COMMON spot-key drift-recovery ladder
+    (:func:`~brutex.data.lake_keys.spot_recovery_candidates` — index aliases BOTH
+    directions + the ``BRUTEX_FNO_INDEX_ALIASES`` env override + the
+    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs) is walked in
+    order, returning the FIRST candidate with any joined spot bar and emitting ONE
+    ``db_view.spot_key_recovered`` info naming both keys
+    (DEC-DB-MONEYNESS-KEY-RECOVER-001 — pre-fix, a verbose-symbol index such as
+    ``MIDCPNIFTY`` over a ``NIFTYMIDSELECT``-keyed spot dir read moneyness UNKNOWN on
+    every bar even though the spot data existed on disk). Ladder exhaustion returns
+    the honest empty map — never a fabricated spot.
     """
     if not ts_values:
         return {}
     min_ts, max_ts = min(ts_values), max(ts_values)
-    for segment in _SPOT_PROBE_SEGMENTS:
-        try:
-            _validate_candle_coords(exchange, segment, underlying, interval)
-        except ValueError:
-            return {}  # a derived underlying that is not a legal coordinate → no spot.
-        base = lake_root / "bars" / exchange / segment / underlying / interval
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
-            continue
-        # glob built from validated coordinates (no free user text); path + both bounds
-        # are bound parameters (same SQL/path-injection guard as query_candles). A NULL
-        # close is filtered in SQL so a stray null spot bar degrades that instant to
-        # UNKNOWN (the no-spot bucket) rather than raising in `_to_decimal(None)` —
-        # honouring the "never raises / honest UNKNOWN" contract. Resilient read
-        # (DEC-DB-CORRUPT-SKIP-001): a corrupt underlying-spot Parquet degrades the join
-        # to its readable subset (the affected option bars classify UNKNOWN), never a 500.
-        rows = _execute_parquet_resilient(
-            conn,
-            base,
-            'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
-            'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
-            [min_ts, max_ts],
-            source=f"candle-spotjoin:{exchange}/{segment}/{underlying}/{interval}",
-        )
-        return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
-    return {}
+
+    def _probe(key: str) -> dict[datetime, Decimal]:
+        for segment in _SPOT_PROBE_SEGMENTS:
+            try:
+                _validate_candle_coords(exchange, segment, key, interval)
+            except ValueError:
+                return {}  # a key that is not a legal coordinate → no spot under it.
+            base = lake_root / "bars" / exchange / segment / key / interval
+            if not (base.is_dir() and any(base.rglob("*.parquet"))):
+                continue
+            # glob built from validated coordinates (no free user text); path + both
+            # bounds are bound parameters (same SQL/path-injection guard as
+            # query_candles). A NULL close is filtered in SQL so a stray null spot bar
+            # degrades that instant to UNKNOWN (the no-spot bucket) rather than raising
+            # in `_to_decimal(None)` — honouring the "never raises / honest UNKNOWN"
+            # contract. Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt
+            # underlying-spot Parquet degrades the join to its readable subset (the
+            # affected option bars classify UNKNOWN), never a 500.
+            rows = _execute_parquet_resilient(
+                conn,
+                base,
+                'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
+                'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
+                [min_ts, max_ts],
+                source=f"candle-spotjoin:{exchange}/{segment}/{key}/{interval}",
+            )
+            return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
+        return {}
+
+    spots = _probe(underlying)
+    if spots:
+        return spots
+    for candidate in spot_recovery_candidates(underlying, exchange):
+        recovered = _probe(candidate)
+        if recovered:
+            _LOG.info(
+                "db_view.spot_key_recovered",
+                underlying=underlying,
+                recovered_key=candidate,
+                exchange=exchange,
+                interval=interval,
+            )
+            return recovered
+    return spots
 
 
 def _fno_strike_step(
@@ -3270,6 +3332,22 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       the row's genuine clean-empty streak, floored at 1 (a legacy record with
       no streak column still had at least the one clean attempt that classified
       it EMPTY).
+    * ``SKIPPED`` carrying a data-completeness DEMOTION reason
+      (:data:`~brutex.data.window_ledger.DEMOTED_SETTLE_REASONS` —
+      ``ALL_FILTERED`` / ``INTERIOR_GAP`` / ``SUSPECTED_PARTIAL`` plus the
+      ``"DEGRADED"`` record()-side reason-less fallback, the #1031
+      degraded channel's accept-gap settle) → ``"completeness gap accepted
+      (<reason>, N flagged attempt(s)) — settled"``
+      (DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the generic "vendor confirmed
+      no trades" wording is factually WRONG for these rows — the vendor
+      RETURNED bars every time; they were boundary-filtered / hole-flagged /
+      truncation-flagged, never a clean no-trades answer. HONEST envelope:
+      the label keys on the row's FINAL ``last_error`` only — degraded and
+      clean-EMPTY bumps share ONE un-provenance'd streak
+      (:meth:`~brutex.data.window_ledger.WindowLedger.record`), so a
+      MIXED-evidence settle attributes all N attempts to the final channel
+      (documented beside the streak arms; a per-channel count needs the named
+      streak-provenance follow-up, NOT claimed).
     * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
       ``— settled`` (the ledger promoted it; no further re-pull).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
@@ -3282,6 +3360,11 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
     if status == "SKIPPED":
         if is_expired_window_settle_reason(last_error):
             return f"{last_error} — settled"
+        if last_error in DEMOTED_SETTLE_REASONS:
+            return (
+                f"completeness gap accepted ({last_error}, "
+                f"{max(int(empty_streak), 1)} flagged attempt(s)) — settled"
+            )
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
@@ -3491,6 +3574,42 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     return rollup
 
 
+#: Delay before the single torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001). A reader-side
+#: multi-open race against the atomic ledger writer (``os.replace`` landing between the
+#: fast path's independent ``read_parquet`` opens — log-observed as a thrift
+#: ``TProtocolException`` surfacing as a ``duckdb.Error``) clears as soon as every open
+#: sees the SAME replaced file; ~100 ms comfortably outlasts one ``os.replace``.
+_DUCKDB_RETRY_DELAY_S: Final[float] = 0.1
+
+
+def _ledger_stat_fields(ledger_file: Path) -> dict[str, Any]:
+    """Best-effort ledger-Parquet forensics for the torn-read fallback logs.
+
+    Returns ``{"ledger_size": st_size, "ledger_mtime_ns": st_mtime_ns}`` from ONE
+    ``stat`` of *ledger_file*, so a ``window_payload.duckdb_fallback`` /
+    ``phase_progress.duckdb_fallback`` event records WHICH on-disk ledger revision
+    the failed read saw (a mid-pull ``os.replace`` shows up as a moved mtime).
+    NEVER raises — a stat failure (file replaced/removed between the read and the
+    log) yields honest ``None`` fields instead of turning the diagnostic log into
+    a new crash surface (Golden Rule #1).
+
+    Parameters
+    ----------
+    ledger_file
+        The resolved window-ledger Parquet path.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``ledger_size`` / ``ledger_mtime_ns`` ints, or both ``None`` on ``OSError``.
+    """
+    try:
+        st = ledger_file.stat()
+    except OSError:
+        return {"ledger_size": None, "ledger_mtime_ns": None}
+    return {"ledger_size": st.st_size, "ledger_mtime_ns": st.st_mtime_ns}
+
+
 class WindowCountsCache(Protocol):
     """Generation-stamped cache contract for the ``/coverage/windows`` GROUP BY counts.
 
@@ -3657,6 +3776,7 @@ def phase_progress_payload(
     current_phase: str,
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> list[dict[str, Any]]:
     """The Universe pull's LIVE per-phase progress rows — REUSES the cached window counts.
 
@@ -3680,23 +3800,67 @@ def phase_progress_payload(
     ``None`` the counts are computed directly (used by the pure-fast-path tests); the
     production route always injects the cache. O(1) on a cache hit; on a miss it runs
     ONE ``GROUP BY market, status`` (:func:`_window_counts_total`).
+
+    TORN-READ resilience (DEC-WINDOW-TORN-READ-RETRY-001): a concurrent pull's atomic
+    ``os.replace`` of the ledger Parquet landing between this reader's independent
+    ``read_parquet`` opens surfaces as a transient ``duckdb.Error`` — previously
+    UNGUARDED here, so the 4 s ``/universe/pull-progress`` poll 500'd. The counts read
+    now RETRIES ONCE after :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable
+    for deterministic tests; ``None`` → the real aliased :func:`time.sleep`); a SECOND
+    ``duckdb.Error`` logs an enriched ``phase_progress.duckdb_fallback`` event and
+    returns ``[]`` — the SAME honest empty-phases shape the no-ledger contract already
+    serves, so the route can never 500. HONEST envelope (Golden Rule #10): the retry
+    bounds ONE transient race; a persistently corrupt ledger blanks the phases block
+    for that poll window (strictly better than the prior 500), and only
+    ``duckdb.Error`` is guarded — no row projection exists here, so KeyError/ValueError
+    stay genuine-bug propagation.
     """
     if not ledger_file.is_file():
         return []
     ledger_glob = ledger_file.as_posix()
-    if count_cache is None:
-        counts, _total = _window_counts_total(conn, ledger_glob)
-    else:
-        # Key the cache on the ledger mtime AS WELL as the generation so a
-        # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
-        # invalidates the cached counts — the SAME (generation, mtime) key
-        # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
-        mtime_ns = ledger_file.stat().st_mtime_ns
-        counts, _total = count_cache.get_or_compute(
-            f"window-counts|{ledger_glob}|{mtime_ns}",
-            generation=generation,
-            compute=lambda: _window_counts_total(conn, ledger_glob),
+
+    def _counts() -> dict[str, dict[str, int]]:
+        """ONE counts read — direct or through the injected generation-stamped cache."""
+        if count_cache is None:
+            counts, _total = _window_counts_total(conn, ledger_glob)
+        else:
+            # Key the cache on the ledger mtime AS WELL as the generation so a
+            # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
+            # invalidates the cached counts — the SAME (generation, mtime) key
+            # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
+            mtime_ns = ledger_file.stat().st_mtime_ns
+            counts, _total = count_cache.get_or_compute(
+                f"window-counts|{ledger_glob}|{mtime_ns}",
+                generation=generation,
+                compute=lambda: _window_counts_total(conn, ledger_glob),
+            )
+        return counts
+
+    sleeper = _default_sleep if retry_sleep is None else retry_sleep
+    try:
+        counts = _counts()
+    except duckdb.Error as exc:
+        # Torn read (reader-side multi-open race vs the atomic writer) — retry ONCE.
+        # The retry runs OUTSIDE any lock (the injected cache computes unlocked and
+        # caches NOTHING on a raise — verified against MoversSnapshotCache), so the
+        # second attempt recomputes cleanly and a retried success is cached normally.
+        _LOG.warning(
+            "phase_progress.duckdb_retry",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            **_ledger_stat_fields(ledger_file),
         )
+        sleeper(_DUCKDB_RETRY_DELAY_S)
+        try:
+            counts = _counts()
+        except duckdb.Error as exc2:
+            _LOG.warning(
+                "phase_progress.duckdb_fallback",
+                error=str(exc2),
+                error_type=type(exc2).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+            return []
     return build_phase_progress(counts, current_phase=current_phase)
 
 
@@ -3856,6 +4020,7 @@ def build_window_payload(
     conn: Any = None,
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -3897,6 +4062,16 @@ def build_window_payload(
         PLANNED rows enter the row list.
     limit
         Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``).
+    retry_sleep
+        Injectable sleeper for the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001;
+        deterministic tests). ``None`` → the real aliased :func:`time.sleep`. A
+        transient ``duckdb.Error`` on the fast path (the reader-side multi-open race
+        against the atomic ledger writer) is retried ONCE after
+        :data:`_DUCKDB_RETRY_DELAY_S`; a second failure — or a deterministic
+        ``KeyError``/``ValueError`` shape error, which is never retried — falls back
+        to the legacy pyarrow path exactly as before. HONEST envelope (Golden Rule
+        #10): the retry bounds ONE transient race; a persistently corrupt ledger
+        still costs the legacy fallback as today.
 
     Returns
     -------
@@ -3917,7 +4092,9 @@ def build_window_payload(
     # *conn* (or no Parquet) keeps the legacy pyarrow path below byte-for-byte
     # (back-compat for existing callers + the ``window_status.json`` fallback).
     if conn is not None and ledger_file.is_file():
-        try:
+        sleeper = _default_sleep if retry_sleep is None else retry_sleep
+
+        def _fast_path() -> dict[str, Any]:
             return _build_window_payload_duckdb(
                 conn,
                 ledger_file,
@@ -3929,13 +4106,50 @@ def build_window_payload(
                 count_cache=count_cache,
                 generation=generation,
             )
-        except (duckdb.Error, KeyError, ValueError) as exc:
-            # A wrong-shape / corrupt ledger Parquet (a missing core column → a DuckDB
-            # binder error, or a KeyError on the row projection) must NOT 500 the page:
-            # fall THROUGH to the legacy pyarrow path below, which guards the core columns
-            # and degrades to an empty ledger (the route's "never a 500" promise — the
+
+        try:
+            return _fast_path()
+        except (KeyError, ValueError) as exc:
+            # A wrong-shape / legacy-shape ledger Parquet (a missing core column → the
+            # explicit probe ValueError, or a KeyError on the row projection) is
+            # DETERMINISTIC — a retry would fail identically, so fall straight THROUGH
+            # to the legacy pyarrow path below, which guards the core columns and
+            # degrades to an empty ledger (the route's "never a 500" promise — the
             # fidelity the fast path would otherwise lose, hostile-review MINOR).
-            _LOG.warning("window_payload.duckdb_fallback", error=str(exc))
+            _LOG.warning(
+                "window_payload.duckdb_fallback",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+        except duckdb.Error as exc:
+            # TORN READ (DEC-WINDOW-TORN-READ-RETRY-001): the fast path performs
+            # MULTIPLE independent `read_parquet` opens per request; a concurrent
+            # pull's atomic `os.replace` landing between them yields a footer/data
+            # mismatch surfacing as a duckdb.Error (log-observed as a thrift
+            # TProtocolException — reader-side only, does NOT contradict the #901
+            # atomic-writer guarantee). Transient by nature → retry ONCE after
+            # ~100 ms; the retry runs OUTSIDE any lock (the injected count cache
+            # computes unlocked and caches nothing on a raise), so the second
+            # attempt recomputes cleanly. A second failure falls back to the legacy
+            # path EXACTLY as before — retry-once bounds one race, it is not a
+            # corrupt-ledger cure (Golden Rule #10).
+            _LOG.warning(
+                "window_payload.duckdb_retry",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(ledger_file),
+            )
+            sleeper(_DUCKDB_RETRY_DELAY_S)
+            try:
+                return _fast_path()
+            except (duckdb.Error, KeyError, ValueError) as exc2:
+                _LOG.warning(
+                    "window_payload.duckdb_fallback",
+                    error=str(exc2),
+                    error_type=type(exc2).__name__,
+                    **_ledger_stat_fields(ledger_file),
+                )
     if ledger_file.is_file():
         source = "ledger"
         records: tuple[Any, ...] = _ledger_records_cached(lake_root)

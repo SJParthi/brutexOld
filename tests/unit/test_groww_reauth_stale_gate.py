@@ -463,8 +463,13 @@ def test_never_minting_broker_window_defers_failed_as_today() -> None:
 
     A broker that NEVER mints: the first attempt pays the ONE bounded pause; the
     ladder's remaining attempts fail fast (shared anchor); the window records FAILED
-    (re-pullable — the until-clean loop stays bounded) and ``on_timeout`` feeds
-    exactly as today. No infinite hang: total fake wall-clock = ONE pause bound.
+    (re-pullable — the until-clean loop stays bounded). No infinite hang: total fake
+    wall-clock = ONE pause bound. ``on_timeout`` is NEVER fed — the propagating
+    ``GrowwTokenStillStaleError`` is a retryable AUTH-family failure, which
+    ``steps_timeout_ladder`` excludes from the AIMD timeout ladder
+    (DEC-AUTH-LADDER-EXCLUDE-001 supersedes the pre-gate "fed exactly as today"
+    expectation this test originally pinned: credential state is no evidence of
+    candle-endpoint stress, so it must not ease the pull rate).
     """
     now, advance = _fake_time()
 
@@ -494,7 +499,10 @@ def test_never_minting_broker_window_defers_failed_as_today() -> None:
     records = ledger.records()
     assert len(records) == 1 and records[0].status == FAILED  # deferred, re-pullable
     assert records[0].last_error == "GrowwTokenStillStaleError"
-    assert len(on_timeout_calls) == 3  # the ladder fed exactly as today, post-deadline
+    # Auth-family transients feed NEITHER controller hook (DEC-AUTH-LADDER-EXCLUDE-001):
+    # the window still burns its ladder attempts + defers FAILED (asserted above), but
+    # the AIMD timeout ladder is never mis-trained by pure credential state.
+    assert on_timeout_calls == []
     assert sink.appends == []  # nothing fabricated
     assert now() == pytest.approx(30.0)  # ONE bounded pause total — re-entries fail fast
 

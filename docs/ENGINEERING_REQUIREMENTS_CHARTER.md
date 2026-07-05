@@ -218,8 +218,9 @@ all-empty flag, CI/merge failures (via the PR watcher).
 
 ## 7. Security (✅ APPLIES — scoped)
 
-In scope today: **secrets via env only** (`BRUTEX_GROWW_API_KEY` /
-`BRUTEX_GROWW_TOTP_SECRET`, never argv; credential file mode `0600`);
+In scope today: **secrets via AWS Parameter Store only**
+(DEC-AWS-ONLY-CREDS-001 — SecureStrings, fail-fast; never argv, never env,
+never a local credentials file);
 **no secrets in logs/commits/PRs**; **SSRF allowlist** on the instrument-master
 host; **TLS verification never disabled**; **dependency + secret scanning**
 (bandit / pip-audit / gitleaks / CodeQL / Semgrep / Trivy in CI); **immutable

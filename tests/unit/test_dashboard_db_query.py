@@ -1903,6 +1903,66 @@ def test_summarize_spot_datasets_reports_bars_and_date_span(
     ]
 
 
+def test_summarize_spot_datasets_session_days_counts_distinct_ist_dates(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # DEC-SPOT-PARTIAL-RANGE-CHIP-001: ``session_days`` counts DISTINCT IST calendar
+    # dates (not bars, not UTC dates). Three bars: two on the SAME IST date (one of
+    # them crossing the UTC boundary — 2024-03-01 20:30 UTC is 2024-03-02 02:00 IST)
+    # plus one on a second IST date → bars=3 but session_days=2.
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _bar(datetime(2024, 3, 1, 20, 30, tzinfo=UTC), "100.4"),  # IST 2024-03-02
+            _bar(datetime(2024, 3, 2, 9, 15, tzinfo=UTC), "100.8"),  # IST 2024-03-02
+            _bar(datetime(2024, 3, 4, 9, 15, tzinfo=UTC), "101.0"),  # IST 2024-03-04
+        ],
+    )
+    [row] = summarize_spot_datasets(store.connection, tmp_path)
+    assert row["bars"] == 3
+    assert row["session_days"] == 2
+    assert row["first_date"] == "2024-03-02" and row["last_date"] == "2024-03-04"
+
+
+def test_summarize_spot_datasets_session_days_ambient_timezone_robust(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Regression (DEC-SPOT-SESSION-DAYS-IST-TZ-001): ``session_days`` must count
+    # IST dates via the COMMON _IST_DATE_EXPR (AT TIME ZONE 'UTC' BEFORE the
+    # +05:30 shift), NOT a bare CAST-to-DATE on the TIMESTAMPTZ column, which
+    # resolves in the ambient DuckDB session TimeZone. Under a negative-offset
+    # zone (America/Adak, UTC-10 pre-DST) the buggy expression dated the NSE
+    # session-open bar 2024-03-01 03:45 UTC to 2024-02-29 while the session-close
+    # bar 2024-03-01 09:59 UTC dated to 2024-03-01 — ONE session counted as TWO
+    # session_days, inflating density and masking a genuinely sparse symbol from
+    # the amber settled_partial_range verdict.
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), "100.4"),  # 09:15 IST open
+            _bar(datetime(2024, 3, 1, 9, 59, tzinfo=UTC), "100.8"),  # 15:29 IST close
+        ],
+    )
+    conn = store.connection
+    (original_tz,) = conn.execute("SELECT current_setting('TimeZone')").fetchall()[0]
+    conn.execute("SET TimeZone = 'America/Adak'")
+    try:
+        [row] = summarize_spot_datasets(conn, tmp_path)
+    finally:
+        conn.execute(f"SET TimeZone = '{original_tz}'")
+    assert row["bars"] == 2
+    assert row["session_days"] == 1  # ONE NSE session, in EVERY ambient zone
+    assert row["first_date"] == "2024-03-01" and row["last_date"] == "2024-03-01"
+
+
 def test_summarize_spot_datasets_multiple_sets(store: InstrumentStore, tmp_path: Path) -> None:
     _write_candles(tmp_path, symbol="NSE-NIFTY")
     _write_candles(tmp_path, symbol="NSE-BANKNIFTY")

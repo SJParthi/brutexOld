@@ -121,6 +121,31 @@ class TestConstruction:
         sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
         assert sim.n_bars == len(bars)
 
+    def test_out_of_coverage_weekday_bar_refuses_loud_at_construction(self) -> None:
+        # Calendar-correctness pack: the OLD silent behaviour is GONE — a bar
+        # dated on a weekday OUTSIDE the published holiday span used to get a
+        # silently-FABRICATED regular 15:20 forced-exit flag; construction now
+        # raises HolidayDataUnavailableError via the strict
+        # ``get_session_checked``, in lock-step with the streaming walker
+        # (byte-parity preserved: both paths refuse the same date).
+        from brutex.calendars.nse import HolidayDataUnavailableError
+
+        out_day = date(2027, 1, 4)  # Monday, above the 2026 coverage ceiling
+        ts = datetime(out_day.year, out_day.month, out_day.day, 9, 15, tzinfo=IST).astimezone(UTC)
+        bars = [
+            CandleBar(
+                timestamp=ts,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+                volume=0,
+                open_interest=None,
+            )
+        ]
+        with pytest.raises(HolidayDataUnavailableError):
+            ResidentTradeSim(bars, [0], tf_minutes=1)
+
     def test_missing_kernel_falls_back_without_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Shadow `import fno_math` with a module lacking ResidentSweepSim so the
         # `except (ImportError, AttributeError)` branch is covered even when the

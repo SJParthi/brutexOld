@@ -99,6 +99,12 @@
   .chip { font-weight:700; }
   .chip.full, .chip.stable { color:var(--green); }
   .chip.partial, .chip.growing { color:var(--yellow); }
+  /* AMBER settled-but-range-incomplete (DEC-SPOT-PARTIAL-RANGE-CHIP-001): the
+     ledger is settled (nothing left to re-pull) but the stored range misses the
+     Jan-2020 floor or is session-sparse — distinct from the pending "partial".
+     An UNKNOWN verdict string still renders via chip() (class+text = the raw
+     verdict), so a future verdict is never blank — just uncolored. */
+  .chip.settled_partial_range { color:#FFB74D; }
   .chip.failed { color:var(--red); }
   .chip.none { color:var(--muted); }
   .note { color:var(--muted); font-size:11px; font-style:italic; cursor:help; }
