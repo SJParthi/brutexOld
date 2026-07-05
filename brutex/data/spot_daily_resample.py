@@ -74,8 +74,7 @@ provenance — a resample made zero vendor calls). The raw lake builders
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -112,6 +111,7 @@ __all__ = [
     "DailyResampleWindow",
     "derive_daily_for_targets",
     "fill_daily_from_minute",
+    "frame_to_candle_bars",
     "ist_span_partition_files",
     "ist_span_partition_months",
     "make_lake_read_1m_window",
@@ -316,6 +316,123 @@ def derive_daily_for_targets(
     return DailyDeriveReport(derived=derived, no_minute=no_minute, errored=errored, bars=bars)
 
 
+def frame_to_candle_bars(
+    frame: pl.DataFrame,
+    *,
+    absent_open_interest: int | None = 0,
+) -> list[CandleBar]:
+    """Batched resampled-frame → :class:`~brutex.data.models.CandleBar` conversion.
+
+    The COMMON (CLAUDE.md §11) replacement for the per-row
+    ``frame.iter_rows(named=True)`` → ``CandleBar(Decimal(str(...)) × 4)`` loops
+    the derived-TF writer and the spot daily resampler each carried
+    (DEC-PREBUILD-GIL-VECTORIZE-001). Why: the pipeline prebuild runs INSIDE
+    the dashboard server process, and that per-row conversion was the largest
+    GIL-held pure-Python section of the prebuild (stack-sampled during the
+    blank-``GET /`` starvation diagnosis at the two former loop sites —
+    ``timeframe_materialize.py:516-527`` and ``spot_daily_resample.py:359-370``
+    pre-fix), stealing event-loop time from uvicorn while polars saturated the
+    cores. This batched form extracts each column ONCE (columnar, C-level)
+    instead of building a Python dict per row, renders the four price columns
+    to their shortest-round-trip decimal strings INSIDE polars
+    (``cast(String)`` — GIL released; numerically ``Decimal``-equal to Python's
+    ``str(float)`` per the DEC-LAKE-WRITE-VECTORIZE-001 byte-contract analysis
+    in :mod:`brutex.data.parquet_writer`, which pinned the same seed for the
+    write-side snap), and memoises the ``str → Decimal`` parse (2dp-snapped
+    lake prices repeat heavily across resample buckets; ``Decimal`` is
+    immutable, so sharing instances is value-safe).
+
+    Lives HERE — the import-graph LEAF of the pair (:mod:`~brutex.data.
+    timeframe_materialize` already imports this module for the daily-derive
+    seam) — and is re-exported from :mod:`brutex.data.timeframe_materialize`
+    for its original callers; it was moved from that module to break the
+    ``spot_daily_resample ↔ timeframe_materialize`` import cycle the shared
+    helper introduced (CodeQL ``py/cyclic-import``,
+    DEC-PREBUILD-GIL-VECTORIZE-001 follow-through).
+
+    BYTE-IDENTICAL lake output (Golden Rule #7): every constructed bar compares
+    equal to the legacy per-row form — same instants, ``Decimal`` values
+    numerically equal to ``Decimal(str(x))`` (polars may emit a different digit
+    STRING for the same value, e.g. ``0.00001`` vs ``1e-05`` — numerically
+    equal, and the sink's ``round_money`` 2dp snap keys off the numeric value
+    only) — pinned by the golden byte-equality regression over seeded lakes.
+    HONEST envelope (Golden Rule #10): this is a BATCHED construction, not a
+    bar-object elimination — the irreducible per-bar ``CandleBar`` (validated,
+    frozen) + Python ``datetime`` objects remain, so the measured win is the
+    dict/str/Decimal overhead (~25-30 % of the conversion), NOT an
+    order-of-magnitude cut; the sink write path is byte-unchanged. This
+    decision ships ONLY the vectorization — the diagnosis's other lever, a
+    ``POLARS_MAX_THREADS`` cap at the dashboard/pull entrypoints (set before
+    the first polars import, never on the engine/sweep path, which pins its
+    OWN per-worker cap in :mod:`brutex.engine.sweep_parallel`), is NOT
+    implemented anywhere: ``brutex/cli.py`` is fenced by open PRs, so the cap
+    is a REPORTED follow-up and polars core saturation during a prebuild
+    remains (starvation REDUCED, not eliminated).
+
+    Parameters
+    ----------
+    frame
+        A resampled frame with columns ``ts_utc, open, high, low, close,
+        volume`` and optionally ``open_interest``.
+    absent_open_interest
+        The ``open_interest`` used when the frame has NO OI column, and for a
+        present-but-null OI value. ``0`` is the derived-intraday-TF/spot lake
+        convention (the legacy ``_oi`` helper's contract); the spot daily
+        resampler passes ``None`` (spot/index daily bars carry no OI).
+    """
+    # Local imports keep the module import graph free of polars + the bar model
+    # for callers that only need the dataclasses (module discipline, §11).
+    from decimal import Decimal
+
+    import polars as pl
+
+    from brutex.data.models import CandleBar
+
+    if frame.height == 0:
+        return []
+
+    timestamps = frame.get_column("ts_utc").to_list()
+    opens, highs, lows, closes = (
+        frame.get_column(column).cast(pl.String).to_list()
+        for column in ("open", "high", "low", "close")
+    )
+    volumes = frame.get_column("volume").to_list()
+    open_interests: list[int | None]
+    if "open_interest" in frame.columns:
+        # Present-but-null OI maps to *absent_open_interest* (the legacy `_oi`
+        # contract: the lake stored 0 for spot, so 0 is the consistent absent
+        # value on the intraday path).
+        open_interests = [
+            absent_open_interest if value is None else int(value)
+            for value in frame.get_column("open_interest").to_list()
+        ]
+    else:
+        open_interests = [absent_open_interest] * frame.height
+
+    decimal_memo: dict[str, Decimal] = {}
+
+    def to_decimal(text: str) -> Decimal:
+        value = decimal_memo.get(text)
+        if value is None:
+            value = decimal_memo[text] = Decimal(text)
+        return value
+
+    return [
+        CandleBar(
+            timestamp=ts,
+            open=to_decimal(open_text),
+            high=to_decimal(high_text),
+            low=to_decimal(low_text),
+            close=to_decimal(close_text),
+            volume=int(volume),
+            open_interest=open_interest,
+        )
+        for ts, open_text, high_text, low_text, close_text, volume, open_interest in zip(
+            timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
+        )
+    ]
+
+
 def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar]:
     """Resample a 1-minute :class:`polars.DataFrame` to **midnight-IST** daily bars.
 
@@ -345,9 +462,10 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
         ``df_1m``, ascending by timestamp. Prices stay full-precision ``Decimal``
         (the lake-write sink snaps to the 2-dp tick grid, DEC-SPOT-PRICE-2DP-001).
     """
-    # Local import keeps polars out of this module's import graph for callers that
+    # Local imports keep polars out of this module's import graph for callers that
     # only need the dataclasses (CLAUDE.md §11 lazy dep, mirrors the materialiser).
-    from brutex.data.models import CandleBar
+    import polars as pl
+
     from brutex.data.tf_resampler import resample_1m_to_tf
 
     if df_1m.is_empty():
@@ -355,29 +473,38 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
 
     daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
 
-    bars: list[CandleBar] = []
-    for row in daily.iter_rows(named=True):
-        ist_date = row["ts_utc"].astimezone(_IST).date()
-        if ist_date >= before:
-            # Still-forming / incomplete session — never written as a final bar.
-            continue
-        # Re-stamp to midnight IST (== 18:30 UTC of the prior calendar day) so the
-        # UTC instant is byte-identical to a vendor-parsed "00:00:00 IST" daily bar.
-        stamp_utc = datetime(ist_date.year, ist_date.month, ist_date.day, tzinfo=_IST).astimezone(
-            UTC
+    # VECTORIZED filter + re-stamp (DEC-PREBUILD-GIL-VECTORIZE-001 — the former
+    # per-row `iter_rows` → `astimezone(_IST)` → `CandleBar(Decimal(str(...))×4)`
+    # loop was one of the two GIL-held prebuild sections starving the dashboard
+    # event loop; byte-identical output, see `frame_to_candle_bars`):
+    #
+    # 1. IST calendar date = the bar's instant shifted by the fixed +05:30 offset
+    #    (`_IST` — India has no DST, so a duration shift IS the timezone
+    #    conversion), then `.dt.date()` — identical to the former per-row
+    #    `row["ts_utc"].astimezone(_IST).date()`.
+    # 2. Still-forming / incomplete session (`ist_date >= before`) is DROPPED —
+    #    never written as a final bar (same guard, now a columnar filter).
+    # 3. Re-stamp to midnight IST (== 18:30 UTC of the prior calendar day): the
+    #    IST date at 00:00, tagged UTC, shifted BACK by the same offset — the
+    #    same UTC instant `datetime(y, m, d, tzinfo=_IST).astimezone(UTC)`
+    #    produced, so a resampled daily bar stays byte-identical to a
+    #    vendor-parsed "00:00:00 IST" one (the dedup identity; proven by the
+    #    vectorize regression tests).
+    ist_offset = _IST.utcoffset(None)  # timedelta(+05:30) — the ONE IST definition
+    complete = (
+        daily.with_columns((pl.col("ts_utc") + ist_offset).dt.date().alias("_ist_date"))
+        .filter(pl.col("_ist_date") < before)
+        .with_columns(
+            (
+                pl.col("_ist_date").cast(pl.Datetime("us")).dt.replace_time_zone("UTC") - ist_offset
+            ).alias("ts_utc")
         )
-        bars.append(
-            CandleBar(
-                timestamp=stamp_utc,
-                open=Decimal(str(row["open"])),
-                high=Decimal(str(row["high"])),
-                low=Decimal(str(row["low"])),
-                close=Decimal(str(row["close"])),
-                volume=int(row["volume"]),
-                open_interest=None,
-            )
-        )
-    return bars
+        # Select exactly the converter's input columns — also drops `_ist_date`
+        # and any OI column (spot/index daily bars carry `open_interest=None`
+        # regardless, the legacy loop's unconditional contract).
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+    )
+    return frame_to_candle_bars(complete, absent_open_interest=None)
 
 
 def resample_1m_to_daily_default(df_1m: pl.DataFrame, before: date) -> list[CandleBar]:

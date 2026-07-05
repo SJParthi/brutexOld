@@ -47,10 +47,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
+# Re-export: `frame_to_candle_bars` LIVES in `spot_daily_resample` — the
+# import-graph LEAF of the pair (this module already imports its daily-derive
+# seam) — so the shared batched converter (DEC-PREBUILD-GIL-VECTORIZE-001) is
+# one-directional and the former `spot_daily_resample ↔ timeframe_materialize`
+# cycle (CodeQL py/cyclic-import) cannot re-form. Kept in `__all__` for the
+# original call sites/tests.
+from brutex.data.spot_daily_resample import frame_to_candle_bars
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
     DAILY_TF_MINUTES,
@@ -563,6 +570,7 @@ __all__ = [
     "MaterializeResult",
     "PrebuildKind",
     "daily_resample_fn_for",
+    "frame_to_candle_bars",
     "intraday_resampler_for",
     "make_lake_read_1m",
     "make_lake_write_tf",
@@ -630,27 +638,28 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     """Build the injected per-timeframe writer for :func:`materialize_timeframes`.
 
     Returns a ``(tf_label, frame) -> bars_written`` callable that converts the
-    resampled polars frame's rows to :class:`~brutex.data.models.CandleBar`
-    objects and appends them to the lake via a
+    resampled polars frame to :class:`~brutex.data.models.CandleBar` objects
+    via the BATCHED :func:`frame_to_candle_bars`
+    (DEC-PREBUILD-GIL-VECTORIZE-001 — byte-identical to the former per-row
+    ``iter_rows`` loop; see that function's docstring for the starvation
+    mechanism + honest envelope) and appends them to the lake via a
     :class:`~brutex.data.sink.ParquetBarSink` under the TF's own stored interval
     partition (:data:`INTRADAY_TF_INTERVALS`). ``open_interest`` is carried from
     the resampled frame when the OI-aware F&O futures resampler emitted it
     (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
-    have no OI column). The sink snaps prices to the 2-decimal tick grid +
-    merges idempotently by ``(year, month)`` (CLAUDE.md §7 /
-    DEC-SPOT-PRICE-2DP-001) in **latest-wins** mode
-    (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised bucket recomputed from
-    grown 1-minute data REPLACES its stale partial-day predecessor; identical
-    data rewrites byte-identically; the vendor 1-minute base never routes
-    through this writer and stays keep-first). The write itself stays atomic
-    tmp → fsync → ``os.replace`` via the shared
-    :func:`~brutex.data.atomic_io.atomic_write_via` inside the writer. Raw lake I/O — ``# pragma: no cover``; exercised
-    by the round-trip integration test. Moved here from the dashboard route
-    glue (DEC-TF-MATERIALIZE-002) — one builder for every caller.
+    have no OI column; a present-but-null OI bucket also maps to 0). The sink
+    snaps prices to the 2-decimal tick grid + merges idempotently by
+    ``(year, month)`` (CLAUDE.md §7 / DEC-SPOT-PRICE-2DP-001) in
+    **latest-wins** mode (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised
+    bucket recomputed from grown 1-minute data REPLACES its stale partial-day
+    predecessor; identical data rewrites byte-identically; the vendor 1-minute
+    base never routes through this writer and stays keep-first). The write
+    itself stays atomic tmp → fsync → ``os.replace`` via the shared
+    :func:`~brutex.data.atomic_io.atomic_write_via` inside the writer. Raw
+    lake I/O — ``# pragma: no cover``; exercised by the round-trip integration
+    test. Moved here from the dashboard route glue (DEC-TF-MATERIALIZE-002) —
+    one builder for every caller.
     """
-    from decimal import Decimal
-
-    from brutex.data.models import CandleBar
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
@@ -658,37 +667,12 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
 
     def _write(tf_label: str, frame: pl.DataFrame) -> int:
         interval = INTRADAY_TF_INTERVALS[tf_label]
-        has_oi = "open_interest" in frame.columns
-
-        def _oi(row: dict[str, Any]) -> int:
-            # OI-aware F&O futures path: carry the bucket's snapshot OI (Int64 →
-            # int). A spot frame has no OI column (→ 0, the spot convention); a
-            # present-but-null OI bucket also maps to 0 (CandleBar.open_interest is
-            # int|None but the lake stored 0 for spot, so 0 is the consistent
-            # absent value).
-            if not has_oi:
-                return 0
-            value = row["open_interest"]
-            return 0 if value is None else int(value)
-
-        bars = [
-            CandleBar(
-                timestamp=row["ts_utc"],
-                open=Decimal(str(row["open"])),
-                high=Decimal(str(row["high"])),
-                low=Decimal(str(row["low"])),
-                close=Decimal(str(row["close"])),
-                volume=int(row["volume"]),
-                open_interest=_oi(row),
-            )
-            for row in frame.iter_rows(named=True)
-        ]
         result = sink.append(
             exchange=exchange,
             segment=segment,
             symbol=symbol,
             interval=interval,
-            bars=bars,
+            bars=frame_to_candle_bars(frame),
             # LATEST-WINS on the DERIVED intraday partitions (DEC-TF-REMAT-LATEST-WINS-001,
             # mirroring the derived ``1day``'s make_lake_write_1day): a re-materialise
             # recomputes every bucket from the CURRENT stored 1-minute, so the fresh
