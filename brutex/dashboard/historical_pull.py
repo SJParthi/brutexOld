@@ -1718,10 +1718,20 @@ def pull_contract_candles(
         # ``failed_symbols`` (DEC-SILENT-VANISH-LOWLEG-001): the phase's terminally
         # quarantined contract symbols, so the LOW-LEG Tier B rule can disqualify a
         # 1-2-leg underlying with a quarantined sibling (quarantines never enter pairs).
+        # ``never_planned_symbols`` (DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001): exactly
+        # the resolver's omitted not-yet-open set (``rebuilt − minute_windows``, the
+        # ``fno.window_not_open`` skips), so a Tier-B low-leg WARN self-describes via
+        # ``never_planned_pairs`` — annotation only, the flag still fires. Empty
+        # under explicit dates (every contract gets a window) — WARN byte-identical.
         emit_underlying_all_empty(
             minute.merged_pairs,
             [contract for _row, contract in rebuilt],
             failed_symbols=minute.failure_symbols,
+            never_planned_symbols=[
+                contract.symbol
+                for _row, contract in rebuilt
+                if contract.symbol not in minute_windows
+            ],
         )
 
     # NOTE (DEC-PIPELINE-AUTOPREBUILD-001): the mid-pull F&O 1-day derivation that ran

@@ -13,11 +13,28 @@ COMMON — never a copy).
 
 Pure preflight pattern (the :mod:`brutex.engine.sweep_preflight` sibling):
 no I/O, no clock, O(#symbols) — a frozenset probe + at most one regex + one
-``parse_fno_symbol`` per symbol. Deliberately NOT guarded: the forensic
-surfaces (``sweep-verify`` all tiers incl. ``--recount``, ``sweep-heal``,
-cascade/options replay) must be able to inspect a pre-guard tree — the one
-recount grid-rebuild site opts out via the Layer-1
-``unsafe_allow_out_of_scope_instruments`` field instead.
+``parse_fno_symbol`` per symbol; the ONE side effect is a single structlog
+hazard WARNING when the research override actually lets refused symbols
+through (DEC-CORP-ACTION-GATE-001 below). ``sweep-verify --recount`` is ALSO
+gated (the Tier-3 shadow re-sweep EXECUTES the real ``run_sweep_grid`` into
+``--scratch-root`` — a production sweep entry, not a report; the corp-action
+extension's hostile-review MAJOR); the remaining forensic surfaces
+(``sweep-verify`` Tier 1/2, ``sweep-heal``, cascade/options replay) stay
+unguarded — they inspect a pre-guard tree and run NO engine — and the
+recount grid-rebuild site opts out of the Layer-1
+``unsafe_allow_out_of_scope_instruments`` field so a legacy out-of-scope
+tree keeps Tier-1/2 verifiability.
+
+Corporate-action extension (DEC-CORP-ACTION-GATE-001 / ADR-0016, extending
+DEC-ENGINE-SCOPE-GUARD-001): BruteX has ZERO corporate-action adjustment code
+(no split/bonus/adjustment-factor/ex-date layer anywhere in ``brutex/``) —
+CORRECT for the divisor-maintained 3-index scope, CATASTROPHIC for a
+single-name sweep (a 1:1 bonus reads as a fabricated −50% overnight cliff
+feeding every PDH/PDL/pivot/gap bit). So the hard refusal names that
+rationale, and the ``allow_out_of_scope`` research escape can never proceed
+SILENTLY: every overridden launch emits one loud
+``sweep.scope_override_hazard`` structlog WARNING carrying the
+"corporate-action adjustment layer missing" hazard.
 
 Honest envelope (Golden Rule #10): this is an ALLOWLIST over addressing
 strings, not an oracle over lake contents — a mislabeled partition belongs to
@@ -30,6 +47,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import structlog
+
 from brutex.universe import classify_engine_sweep_target
 
 __all__ = [
@@ -37,6 +56,20 @@ __all__ = [
     "SymbolVerdict",
     "check_sweep_scope",
 ]
+
+_LOG = structlog.get_logger("brutex.engine.sweep_scope")
+
+#: The corporate-action hazard rationale (DEC-CORP-ACTION-GATE-001 / ADR-0016
+#: — the extension of DEC-ENGINE-SCOPE-GUARD-001): stated verbatim on BOTH the
+#: hard refusal and the override hazard WARNING so no launch outside the
+#: engine scope — refused OR overridden — can ever read as routine.
+_CORP_ACTION_HAZARD: str = (
+    "BruteX has NO corporate-action adjustment layer (corporate-action "
+    "adjustment layer missing — DEC-CORP-ACTION-GATE-001 / ADR-0016, the "
+    "corporate-action extension of DEC-ENGINE-SCOPE-GUARD-001): an "
+    "out-of-scope single-name sweep feeds the engine unadjusted candles "
+    "across split/bonus boundaries and produces silently corrupt results."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +126,7 @@ class ScopeReport:
         lines.append(
             "The engine sweeps ONLY NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) "
             "plus NIFTY futures (ADR-0012 / DEC-NIFTY-DYNAMIC-STRATEGY-001). "
+            f"Rationale: {_CORP_ACTION_HAZARD} "
             "Remedy: drop the out-of-scope symbol(s), or — CLI research runs ONLY — "
             "re-run with --allow-out-of-scope (loud + audit-stamped; no dashboard "
             "override exists)."
@@ -129,13 +163,18 @@ def check_sweep_scope(
     allow_out_of_scope
         The CLI-only research escape hatch: when True a refusing report still
         returns ``ok=True`` (with ``overridden=True`` and ``refused``
-        preserved for the warning + audit stamp). The dashboard always passes
-        False — a route override does not exist by design.
+        preserved for the warning + audit stamp), and ONE
+        ``sweep.scope_override_hazard`` structlog WARNING is emitted naming
+        the let-through symbols + the corporate-action hazard
+        (DEC-CORP-ACTION-GATE-001 / ADR-0016 — no silent override). The
+        dashboard always passes False — a route override does not exist by
+        design.
 
     Returns
     -------
     ScopeReport
-        ``ok`` + every refused verdict. O(#symbols); no I/O, no clock.
+        ``ok`` + every refused verdict. O(#symbols); no I/O, no clock; the
+        only side effect is the override hazard WARNING above.
     """
     refused_list: list[SymbolVerdict] = []
     for symbol in symbols:
@@ -144,6 +183,20 @@ def check_sweep_scope(
             refused_list.append(SymbolVerdict(symbol=symbol, reason=verdict.reason))
     refused = tuple(refused_list)
     overridden = bool(refused) and allow_out_of_scope
+    if overridden:
+        # The corporate-action hazard WARNING (DEC-CORP-ACTION-GATE-001 /
+        # ADR-0016): the ONE chokepoint every override passes through, so no
+        # research escape can ever proceed silently — emitted exactly once
+        # per check_sweep_scope invocation, only when refused symbols are
+        # actually let through (an in-scope launch with the flag set never
+        # warns, matching the ``overridden`` stamp).
+        _LOG.warning(
+            "sweep.scope_override_hazard",
+            symbols=[verdict.symbol for verdict in refused],
+            exchange=exchange,
+            segment=segment,
+            hazard=_CORP_ACTION_HAZARD,
+        )
     return ScopeReport(
         ok=not refused or allow_out_of_scope,
         refused=refused,

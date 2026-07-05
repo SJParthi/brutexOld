@@ -858,3 +858,25 @@ class TestTodSecondsRustSeam:
         )
         mask = evaluate_atoms(snapshot, _default_proximity(), _empty_history())
         assert _bit(mask, B.BIT_EARLY_MORNING)
+
+
+def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
+    """Pin the EXACT intraday-only bit set masked out on 1day (ADR-0012 D12).
+
+    ``IMPLEMENTED_MASK & ~APPLIES_TO_1DAY_MASK`` must equal exactly the four
+    Time-of-Day bits 44-47 PLUS the two VWAP-position bits 52-53 — built from
+    the named BIT_* constants, never magic numbers — so the bits.py comment
+    (which historically claimed only VWAP was cleared) can never drift from
+    the constant again (DEC-CORP-ACTION-GATE-001 doc-drift fold).
+    """
+    expected_cleared = (
+        (1 << B.BIT_EARLY_MORNING)
+        | (1 << B.BIT_MID_MORNING)
+        | (1 << B.BIT_MIDDAY)
+        | (1 << B.BIT_AFTERNOON)
+        | (1 << B.BIT_CLOSE_ABOVE_VWAP)
+        | (1 << B.BIT_CLOSE_BELOW_VWAP)
+    )
+    assert expected_cleared == B.IMPLEMENTED_MASK & ~B.APPLIES_TO_1DAY_MASK
+    # And 1day never enables a bit the evaluator does not implement.
+    assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == 0

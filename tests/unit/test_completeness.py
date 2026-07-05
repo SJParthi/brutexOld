@@ -9,10 +9,12 @@ skips, sorting, and the cell-status drift guard against ``coverage_ledger``.
 
 from __future__ import annotations
 
+import math
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from brutex.calendars import trading_days_between
 from brutex.dashboard.completeness import (
     CATEGORY_EQUITY,
     CATEGORY_INDEX,
@@ -21,6 +23,7 @@ from brutex.dashboard.completeness import (
     DIM_FULL,
     DIM_NONE,
     DIM_PARTIAL,
+    DIM_SETTLED_PARTIAL_RANGE,
     OPT_CONTRACTS_BY_DESIGN_NOTE,
     OPT_FAILED,
     OPT_GROWING,
@@ -28,6 +31,7 @@ from brutex.dashboard.completeness import (
     OPT_PARTIAL,
     OPT_STABLE,
     RECONCILE_MISMATCH_EVENT,
+    SPOT_SESSION_RATIO_FLOOR,
     SYMBOLS_NOT_YET_PULLED_EVENT,
     ReconcileLogGate,
     SymbolReconcileReport,
@@ -36,7 +40,10 @@ from brutex.dashboard.completeness import (
     _option_verdict,
     _overall_spot,
     _resolve_spot_category,
+    _session_days_of,
+    _session_range_audit,
     _spot_cell_supersedes,
+    _spot_dimension_verdict_with_floor,
     build_completeness_scoreboard,
     categorize_instruments,
     log_symbol_reconcile_from_board,
@@ -70,11 +77,14 @@ def _spot_row(
     segment: str = "CASH",
     first_date: str | None = None,
     last_date: str | None = None,
+    session_days: int | None = None,
 ) -> dict[str, Any]:
     # Production rows from ``summarize_spot_datasets`` always carry ``segment``; the
     # reconciliation diagnostic filters on it (spot segments only — F&O ``1minute``
     # contract partitions are NOT scored underlyings). Default ``CASH`` keeps every
-    # pre-existing row a scored spot symbol.
+    # pre-existing row a scored spot symbol. ``session_days`` (the
+    # DEC-SPOT-PARTIAL-RANGE-CHIP-001 lake scalar) defaults ``None`` so pre-scalar
+    # rows exercise the session-audit ABSTAIN path.
     return {
         "symbol": symbol,
         "exchange": exchange,
@@ -83,6 +93,7 @@ def _spot_row(
         "completeness": completeness,
         "first_date": first_date,
         "last_date": last_date,
+        "session_days": session_days,
     }
 
 
@@ -156,13 +167,16 @@ def test_symbol_none_when_no_ledger_record() -> None:
 
 def test_symbol_partial_when_settled_but_data_starts_after_2020() -> None:
     """DEC-SPOT-COMPLETENESS-2020-FLOOR-001 — a 1-minute series whose windows are all settled
-    but whose earliest bar is LATE (a late listing / late data, e.g. JIOFIN 2023-08-21) is
-    HONESTLY downgraded ``full`` → ``partial``: it does NOT hold the solid 2020-floor history the
-    deep-drill brute-force backtest needs, and is excluded from the FULL 1-minute count."""
+    but whose earliest bar is LATE (a late listing / late data, e.g. JIOFIN 2023-08-21) does
+    NOT hold the solid 2020-floor history the deep-drill brute-force backtest needs and is
+    excluded from the FULL 1-minute count. Since DEC-SPOT-PARTIAL-RANGE-CHIP-001 the downgrade
+    target is the distinct AMBER ``settled_partial_range`` (settled — nothing re-pulls — but
+    the range is honestly incomplete), no longer the pending-windows ``partial``."""
     rows = [_spot_row("NSE-JIOFIN", "1minute", COMPLETENESS_SETTLED, first_date="2023-08-21")]
     board = build_completeness_scoreboard(rows, {"NSE-JIOFIN": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
+    assert row["1minute"] == DIM_SETTLED_PARTIAL_RANGE
+    assert row["overall"] == DIM_SETTLED_PARTIAL_RANGE
     # the actually-covered start is carried so the operator SEES why it is partial.
     assert row["1minute_start"] == "2023-08-21"
     # a late-start symbol does NOT inflate the FULL 1-minute count.
@@ -180,7 +194,8 @@ def test_symbol_partial_when_settled_but_no_first_date() -> None:
     rows = [_spot_row("NSE-EMPTY", "1minute", COMPLETENESS_SETTLED)]  # first_date defaults None
     board = build_completeness_scoreboard(rows, {"NSE-EMPTY": CATEGORY_EQUITY}, [], {})
     [row] = board["spot"]["per_symbol"]
-    assert row["1minute"] == DIM_PARTIAL and row["overall"] == DIM_PARTIAL
+    assert row["1minute"] == DIM_SETTLED_PARTIAL_RANGE
+    assert row["overall"] == DIM_SETTLED_PARTIAL_RANGE
 
 
 def test_within_2020_late_start_is_partial_january_floor() -> None:
@@ -194,7 +209,10 @@ def test_within_2020_late_start_is_partial_january_floor() -> None:
     cats = {"NSE-TATACONSUM": CATEGORY_EQUITY, "NSE-MAXHEALTH": CATEGORY_EQUITY}
     board = build_completeness_scoreboard(rows, cats, [], {})
     verdicts = {r["symbol"]: r["1minute"] for r in board["spot"]["per_symbol"]}
-    assert verdicts == {"NSE-TATACONSUM": DIM_PARTIAL, "NSE-MAXHEALTH": DIM_PARTIAL}
+    assert verdicts == {
+        "NSE-TATACONSUM": DIM_SETTLED_PARTIAL_RANGE,
+        "NSE-MAXHEALTH": DIM_SETTLED_PARTIAL_RANGE,
+    }
     # neither within-2020-late symbol counts toward the FULL 1-minute total.
     assert board["spot"]["by_category"][CATEGORY_EQUITY] == {
         "total": 2,
@@ -214,7 +232,7 @@ def test_january_2020_boundary_full_vs_partial() -> None:
     cats = {"NSE-JANEND": CATEGORY_EQUITY, "NSE-FEB1": CATEGORY_EQUITY}
     board = build_completeness_scoreboard(rows, cats, [], {})
     verdicts = {r["symbol"]: r["1minute"] for r in board["spot"]["per_symbol"]}
-    assert verdicts == {"NSE-JANEND": DIM_FULL, "NSE-FEB1": DIM_PARTIAL}
+    assert verdicts == {"NSE-JANEND": DIM_FULL, "NSE-FEB1": DIM_SETTLED_PARTIAL_RANGE}
 
 
 def test_per_symbol_detail_downgrades_late_start_to_partial() -> None:
@@ -232,9 +250,193 @@ def test_per_symbol_detail_downgrades_late_start_to_partial() -> None:
     ]
     out = per_symbol_completeness(rows, {"NSE-TMPV": CATEGORY_EQUITY}, [], {})
     minute = out["NSE-TMPV"]["spot"]["1minute"]
-    assert minute["status"] == DIM_PARTIAL and minute["from_2020"] is False
+    assert minute["status"] == DIM_SETTLED_PARTIAL_RANGE and minute["from_2020"] is False
     assert minute["first_date"] == "2025-10-24" and minute["last_date"] == "2026-06-19"
-    assert out["NSE-TMPV"]["spot"]["overall"] == DIM_PARTIAL
+    assert out["NSE-TMPV"]["spot"]["overall"] == DIM_SETTLED_PARTIAL_RANGE
+
+
+# ── settled_partial_range — the session-density arm (DEC-SPOT-PARTIAL-RANGE-CHIP-001) ──
+
+
+def _span_with_sessions(n: int) -> tuple[date, date]:
+    """The shortest span from 2024-01-01 holding exactly *n* NSE trading sessions."""
+    start = date(2024, 1, 1)
+    end = start
+    while len(trading_days_between(start, end)) < n:
+        end += timedelta(days=1)
+    return start, end
+
+
+def test_session_range_audit_full_density_ratio_one() -> None:
+    start, end = _span_with_sessions(20)
+    expected, ratio = _session_range_audit(start.isoformat(), end.isoformat(), 20)
+    assert expected == 20 and ratio == 1.0
+
+
+def test_session_ratio_exactly_at_floor_stays_full() -> None:
+    # 19/20 = 0.95 exactly — NOT below the floor → the settled verdict stays full.
+    start, end = _span_with_sessions(20)
+    verdict = _spot_dimension_verdict_with_floor(
+        COMPLETENESS_SETTLED,
+        "2020-01-01",
+        last_date="2020-01-31",
+        session_days=None,
+    )
+    assert verdict == DIM_FULL  # abstain baseline (no scalar)
+    expected = len(trading_days_between(date(2020, 1, 1), date(2020, 1, 31)))
+    at_floor = math.ceil(SPOT_SESSION_RATIO_FLOOR * expected)
+    assert (
+        _spot_dimension_verdict_with_floor(
+            COMPLETENESS_SETTLED,
+            "2020-01-01",
+            last_date="2020-01-31",
+            session_days=at_floor,
+        )
+        == DIM_FULL
+    )
+    # One session fewer breaches the floor → the AMBER settled_partial_range.
+    assert (
+        _spot_dimension_verdict_with_floor(
+            COMPLETENESS_SETTLED,
+            "2020-01-01",
+            last_date="2020-01-31",
+            session_days=at_floor - 1,
+        )
+        == DIM_SETTLED_PARTIAL_RANGE
+    )
+    # The exact 0.95 boundary on a clean 20-session span: 19/20 full, 18/20 amber.
+    _exp2, ratio_at = _session_range_audit(start.isoformat(), end.isoformat(), 19)
+    assert ratio_at == SPOT_SESSION_RATIO_FLOOR
+    _exp3, ratio_below = _session_range_audit(start.isoformat(), end.isoformat(), 18)
+    assert ratio_below is not None and ratio_below < SPOT_SESSION_RATIO_FLOOR
+
+
+def test_floor_fail_now_reads_amber_not_partial() -> None:
+    # DEC-SPOT-PARTIAL-RANGE-CHIP-001: the Jan-2020-floor fail is a SETTLED range
+    # problem, so its downgrade target is the amber verdict, no longer DIM_PARTIAL.
+    verdict = _spot_dimension_verdict_with_floor(COMPLETENESS_SETTLED, "2023-08-21")
+    assert verdict == DIM_SETTLED_PARTIAL_RANGE
+    assert verdict != DIM_PARTIAL
+
+
+def test_session_audit_abstains_keep_full() -> None:
+    # Every abstain shape keeps the settled verdict FULL (never a guessed amber):
+    base = {"completeness": COMPLETENESS_SETTLED}
+    # (a) no lake scalar;
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date="2026-01-30", session_days=None
+        )
+        == DIM_FULL
+    )
+    # (b) missing last_date;
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date=None, session_days=1
+        )
+        == DIM_FULL
+    )
+    # (c) unparseable last_date;
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date="not-a-date", session_days=1
+        )
+        == DIM_FULL
+    )
+    # (d) span exits the published holiday coverage (out-of-calendar ABSTAIN);
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-01", last_date="2031-01-05", session_days=1
+        )
+        == DIM_FULL
+    )
+    # (e) reversed span.
+    assert (
+        _spot_dimension_verdict_with_floor(
+            base["completeness"], "2020-01-15", last_date="2020-01-02", session_days=1
+        )
+        == DIM_FULL
+    )
+
+
+def test_session_range_audit_zero_expected_abstains() -> None:
+    # A weekend-only span has ZERO trading sessions → (None, None), never a divide.
+    assert _session_range_audit("2024-01-06", "2024-01-07", 0) == (None, None)
+
+
+def test_session_days_of_row_helper() -> None:
+    assert _session_days_of({"session_days": 3}) == 3
+    assert _session_days_of({"session_days": 0}) == 0
+    assert _session_days_of({}) is None
+    assert _session_days_of({"session_days": None}) is None
+
+
+def test_scoreboard_sparse_settled_range_reads_amber() -> None:
+    # End-to-end through the scoreboard fold: a settled Jan-2020-anchored symbol whose
+    # lake holds only 3 session-days over a multi-month span reads the amber
+    # settled_partial_range — and is excluded from the FULL 1-minute count.
+    rows = [
+        _spot_row(
+            "NSE-SPARSE",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2020-03-31",
+            session_days=3,
+        )
+    ]
+    board = build_completeness_scoreboard(rows, {"NSE-SPARSE": CATEGORY_EQUITY}, [], {})
+    [row] = board["spot"]["per_symbol"]
+    assert row["1minute"] == DIM_SETTLED_PARTIAL_RANGE
+    # ``open_substituted_days`` rides every by_category bucket since the merged
+    # DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 (0 here — no substitution observed).
+    assert board["spot"]["by_category"][CATEGORY_EQUITY] == {
+        "total": 1,
+        "full_1minute": 0,
+        "open_substituted_days": 0,
+    }
+
+
+def test_per_symbol_detail_exposes_session_honesty_fields() -> None:
+    # The /universe per-symbol map carries session_days / expected_sessions /
+    # session_ratio so the operator SEES the density behind the amber verdict.
+    rows = [
+        _spot_row(
+            "NSE-SPARSE",
+            "1minute",
+            COMPLETENESS_SETTLED,
+            first_date="2020-01-01",
+            last_date="2020-03-31",
+            session_days=3,
+        )
+    ]
+    out = per_symbol_completeness(rows, {"NSE-SPARSE": CATEGORY_EQUITY}, [], {})
+    minute = out["NSE-SPARSE"]["spot"]["1minute"]
+    assert minute["status"] == DIM_SETTLED_PARTIAL_RANGE
+    assert minute["session_days"] == 3
+    expected = len(trading_days_between(date(2020, 1, 1), date(2020, 3, 31)))
+    assert minute["expected_sessions"] == expected
+    assert minute["session_ratio"] == 3 / expected
+    # An abstaining row (no scalar) exposes honest Nones, never fabricated zeros.
+    rows2 = [_spot_row("NSE-OK", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
+    out2 = per_symbol_completeness(rows2, {"NSE-OK": CATEGORY_EQUITY}, [], {})
+    minute2 = out2["NSE-OK"]["spot"]["1minute"]
+    assert minute2["status"] == DIM_FULL
+    assert minute2["expected_sessions"] is None and minute2["session_ratio"] is None
+
+
+def test_amber_rank_sits_between_partial_and_full() -> None:
+    # _spot_cell_supersedes rank regression (order-independence with the new verdict):
+    # full > settled_partial_range > partial > failed > none.
+    assert _spot_cell_supersedes(DIM_FULL, "2020-01-01", DIM_SETTLED_PARTIAL_RANGE, "2020-01-01")
+    assert not _spot_cell_supersedes(
+        DIM_SETTLED_PARTIAL_RANGE, "2020-01-01", DIM_FULL, "2020-01-01"
+    )
+    assert _spot_cell_supersedes(DIM_SETTLED_PARTIAL_RANGE, "2020-01-01", DIM_PARTIAL, "2020-01-01")
+    assert not _spot_cell_supersedes(
+        DIM_PARTIAL, "2020-01-01", DIM_SETTLED_PARTIAL_RANGE, "2020-01-01"
+    )
+    assert _spot_cell_supersedes(DIM_SETTLED_PARTIAL_RANGE, "2020-01-01", DIM_FAILED, "2020-01-01")
 
 
 def test_unmapped_symbol_and_derived_interval_skipped() -> None:
