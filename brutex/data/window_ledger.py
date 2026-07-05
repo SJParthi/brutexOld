@@ -34,7 +34,7 @@ parallel window worker); the snapshot is O(N) over the recorded windows.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -1126,7 +1126,12 @@ class WindowLedger:
         with self._lock:
             return len(self._by_window)
 
-    def progress_counts(self) -> LedgerProgress:
+    def progress_counts(
+        self,
+        *,
+        markets: Collection[str] | None = None,
+        intervals: Collection[str] | None = None,
+    ) -> LedgerProgress:
         """Return a live O(N) :class:`LedgerProgress` snapshot — thread-safe, idempotent.
 
         Folds the per-window records into the dashboard bar's numbers
@@ -1139,14 +1144,29 @@ class WindowLedger:
         blocks the O(1) per-window :meth:`plan` / :meth:`record` / :meth:`is_skippable`
         on the hot path. Polling it is idempotent — every count is an absolute fold over
         the live records, so re-touched windows are never double-counted.
+
+        *markets* / *intervals* (DEC-PULL-PROGRESS-HONESTY-001): optional SCOPE
+        filters — a record is folded only when its ``market`` / ``interval`` is a
+        member of the given collection. The ledger is CROSS-RUN and cross-market
+        (spot + F&O share one durable ledger), so the F&O historical phase's live
+        progress must fold ONLY its own ``groww-option`` / ``groww-future`` ×
+        ``1minute`` scope — otherwise the spot phase's thousands of windows would
+        pollute its denominator. ``None`` (the default) folds everything —
+        byte-identical to the unfiltered snapshot. Still one bounded O(N) sweep
+        (the filter is a per-record membership test, no extra pass).
         """
         with self._lock:
             records = list(self._by_window.values())
-        total = len(records)
+        total = 0
         settled = resolved = no_data = planned = failed = bars = 0
         latest_attempt: str | None = None
         current = ""
         for record in records:
+            if markets is not None and record.market not in markets:
+                continue
+            if intervals is not None and record.interval not in intervals:
+                continue
+            total += 1
             bars += record.bars
             # Independent folds (not an elif chain) — each bucket's status set is distinct,
             # so every count is a clean True/False branch with no dead arc, and a future

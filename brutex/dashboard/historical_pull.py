@@ -133,7 +133,7 @@ from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    from brutex.dashboard.pull_controller import SessionRateController
+    from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
 
 #: The ONLY granularity fetched from Groww for an F&O contract
 #: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the heavy ``1minute`` fill. ``1day`` is DERIVED
@@ -863,6 +863,8 @@ def _run_phase(
     run_parallel: RunParallel | None,
     write_pool: WriteConsumer | None,
     fetch_pipeline: FetchPipeline | None,
+    on_bars: Callable[[int], None] | None = None,
+    on_ledger_sync: OnLedgerSync | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
 
@@ -922,6 +924,29 @@ def _run_phase(
         census_spans = spans
         census_rows = ledger.to_rows()
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
+
+    # Honest live F&O progress (DEC-PULL-PROGRESS-HONESTY-001): a THROTTLED, market/
+    # interval-FILTERED absolute fold of the pull's own ledger, pushed to the caller's
+    # on_ledger_sync per per-pair tick (≤ once per LIVE_SYNC_INTERVAL_S). REUSES the
+    # COMMON make_live_sync (the spot spine's proven throttle — CLAUDE.md §11 COMMON;
+    # lazy import mirrors register_pull_meter's ordering-decoupled style). The flush
+    # side is a no-op lambda — the per-pair wrapper below already runs the throttled
+    # make_live_ledger_flush, and progress_counts reads the in-memory ledger directly.
+    # A dry-run (no ledger) or an unwired caller keeps the byte-identical no-op.
+    def _no_sync() -> None:
+        """No-op live sync (dry-run / unwired caller) — byte-identical to before."""
+
+    live_sync: Callable[[], None] = _no_sync
+    if ledger is not None and on_ledger_sync is not None:
+        from brutex.dashboard.pull_controller import make_live_sync
+
+        live_sync = make_live_sync(
+            ledger,
+            lambda: None,
+            on_ledger_sync,
+            markets=frozenset(by_market),
+            intervals=(interval,),
+        )
     # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): bind the per-contract
     # capture-hook factory to the lake root on the LIVE path so every F&O window
     # records a hash of EXACTLY what Groww sent. Skipped for a dry-run (no real
@@ -949,11 +974,22 @@ def _run_phase(
     breaker_canary = None if dry_run else make_breaker_canary_probe(client, pace=pace)
 
     def _progress(label: str, bars: int, failed: bool) -> None:
-        """Forward to the caller's hook + flush the ledger (either side optional)."""
+        """Forward to the caller's hook + flush the ledger (either side optional).
+
+        DEC-PULL-PROGRESS-HONESTY-001: also forwards the pair's report *bars* to
+        *on_bars* — REAL in SYNC mode (no pipeline; the only bars source there) and
+        an honest 0 in ASYNC mode (the pipeline consumer folds the real deltas via
+        its own ``on_bars`` seam), so each bar is counted EXACTLY once in both
+        modes — and fires the throttled, F&O-scope-filtered ledger sync so the
+        units denominator tracks the pull's own windows instead of pinning at 100%.
+        """
         if on_progress is not None:
             on_progress(label, bars, failed)
+        if on_bars is not None:
+            on_bars(bars)
         if flush is not None:
             flush()
+        live_sync()
 
     passes: list[_PassResult] = []
     # Merged per-pair reports + quarantined symbols across ALL rounds/buckets (last-round-wins),
@@ -1145,6 +1181,14 @@ def _run_phase(
         symbols=selected_symbols,
         source="fno",
     )
+
+    # FINAL absolute progress push (DEC-PULL-PROGRESS-HONESTY-001): the pipeline is
+    # drained above, so every window is ledger-recorded — push the settled filtered
+    # counts ONCE, unthrottled (the last throttled tick may predate the final windows;
+    # the spot spine does the same final push in pull_all_spot). Idempotent absolute fold.
+    if ledger is not None and on_ledger_sync is not None:
+        final = ledger.progress_counts(markets=frozenset(by_market), intervals=(interval,))
+        on_ledger_sync(final.resolved, final.total, final.bars, final.failed, final.current)
 
     # bars/windows SUM across rounds (round N re-appends only newly-fetched windows — the
     # keep-first sink + ledger skip make double-counting impossible); the residual reflects
@@ -1486,6 +1530,8 @@ def pull_contract_candles(
     run_parallel: RunParallel | None = None,
     scope_start: date | None = None,
     scope_end: date | None = None,
+    on_bars: Callable[[int], None] | None = None,
+    on_ledger_sync: OnLedgerSync | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -1586,6 +1632,30 @@ def pull_contract_candles(
         default window law over the standard envelope). ``None``/``None`` (the
         default) is byte-identical to the unscoped pull. Distinct from
         *from_date*/*to_date*, which reshape every contract's fetch WINDOW.
+    on_bars
+        Optional LIVE bars-delta hook ``(bars_appended_delta) -> None``
+        (DEC-PULL-PROGRESS-HONESTY-001, the frozen-bars fix). Fired once per
+        durable window from BOTH modes without double-counting: in ASYNC mode the
+        fetch pipeline's background consumer invokes it per
+        :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.fold_totals`
+        (the producer-side per-pair report carries 0 bars); in SYNC mode
+        (kill-switch / no pipeline) the per-pair progress wrapper forwards the
+        pair's REAL report bars (and in async mode that same forward adds the
+        honest 0). Counts bars PROCESSED (sink-append input, the report's
+        ``bars_appended`` semantics), not net-new lake rows. ``None`` (default)
+        is byte-identical.
+    on_ledger_sync
+        Optional THROTTLED absolute-progress callback
+        ``(resolved, total, bars, failed, current) -> None``
+        (DEC-PULL-PROGRESS-HONESTY-001, the honest-denominator fix): fed from the
+        pull's own WindowLedger via the COMMON
+        :func:`~brutex.dashboard.pull_controller.make_live_sync`, FILTERED to this
+        pull's F&O scope (``groww-option`` / ``groww-future`` × ``1minute``) so the
+        cross-run, cross-market ledger's spot rows never pollute the denominator.
+        Honest envelope: the F&O denominator still GROWS mid-phase (contracts are
+        planned per market bucket), so the dashboard marks the phase *open_ended* —
+        this feeds real moving counts, it does NOT claim a final total. ``None``
+        (default — CLI / tests) is byte-identical.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -1637,7 +1707,11 @@ def pull_contract_candles(
         drain_write_consumer as _drain_write_consumer,
     )
 
-    fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
+    # The live-bars hook rides the pipeline's fold seam (DEC-PULL-PROGRESS-HONESTY-001):
+    # the background consumer folds each window's REAL durable bar count, so invoking
+    # on_bars there is the ONLY per-window truth in async mode (the producer-side
+    # per-pair report honestly carries 0 bars).
+    fetch_pipeline = _build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root, on_bars=on_bars)
     # The fetch_pipeline SUBSUMES the Lever-1 write-only decouple (DEC-FETCH-WRITE-OVERLAP-LEVER1-001):
     # it owns the ENTIRE tail (incl. ``sink.append``), so the batched ``write_pool`` is built ONLY when
     # the pipeline is OFF (the kill-switch / dry-run path) — never BOTH. This makes the pipeline's
@@ -1719,6 +1793,8 @@ def pull_contract_candles(
             run_parallel=run_parallel,
             write_pool=write_pool,
             fetch_pipeline=fetch_pipeline,
+            on_bars=on_bars,
+            on_ledger_sync=on_ledger_sync,
         )
     finally:
         # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute lake

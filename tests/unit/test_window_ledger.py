@@ -1206,6 +1206,48 @@ class TestProgressCounts:
         second = ledger.progress_counts()
         assert first == second  # absolute fold — re-polling never inflates the counts
 
+    def test_market_and_interval_filters_scope_the_fold(self) -> None:
+        # DEC-PULL-PROGRESS-HONESTY-001: the ledger is CROSS-RUN and CROSS-MARKET,
+        # so the F&O phase's live fold must scope to its own markets × interval —
+        # otherwise the spot windows pollute its denominator (fails-before: the
+        # unfiltered fold below reads total=3). None defaults stay byte-identical.
+        ledger = WindowLedger()
+        spot = WindowKey(
+            market="groww",
+            security_id="NIFTY",
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        option = WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-25Jan24-21000-CE",
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        option_daily = WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-25Jan24-21000-CE",
+            interval="1day",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        ledger.record(spot, raw_bars=999, error_type=None, bars_appended=999, now=_NOW)
+        ledger.record(option, raw_bars=42, error_type=None, bars_appended=42, now=_LATER)
+        ledger.record(option_daily, raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        assert ledger.progress_counts().total == 3  # unfiltered — everything
+        assert ledger.progress_counts(markets=None, intervals=None).total == 3
+        scoped = ledger.progress_counts(
+            markets=frozenset({"groww-option", "groww-future"}), intervals=("1minute",)
+        )
+        assert scoped.total == 1
+        assert scoped.bars == 42  # never the spot 999 nor the 1day 7
+        assert scoped.current == f"{option.security_id} 1minute"
+        # A filter matching nothing folds honestly to all-zero.
+        nothing = ledger.progress_counts(markets=frozenset({"no-such-market"}))
+        assert (nothing.total, nothing.bars, nothing.current) == (0, 0, "")
+
 
 class TestStreakTotal:
     """`streak_total` — the O(N) summed empty_streak fold (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001)."""

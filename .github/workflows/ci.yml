@@ -1724,7 +1724,8 @@ jobs:
             echo "(brutex.dashboard.universe_pull test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_pull_progress.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py
+            # + the ETA/open-ended/add_bars honesty suite (DEC-PULL-PROGRESS-HONESTY-001)
+            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
@@ -1760,6 +1761,7 @@ jobs:
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
               tests/unit/test_pull_jobs_singleflight.py \
+              tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
               tests/integration/test_dashboard_e2e.py
