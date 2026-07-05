@@ -917,26 +917,23 @@ class TestCompletenessScoreboard:
         repeat scoreboard polls of a STABLE drifted state — ONE warning for three requests
         (pre-change: one per request, the 953x/night storm) — while every response payload
         stays byte-identical (logging is the only delta)."""
-        s = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        s.upsert_many(
-            [_eq("M&M")],
-            snapshot_date=date(2024, 1, 2),
-            run_id="r-mnm-gate",
-            csv_source_sha256="0" * 64,
-        )
-        ParquetWriter(lake_root=tmp_path).write(
-            exchange="NSE",
-            segment="CASH",
-            symbol="NSE-M&M",  # the DIVERGENT stored key → the stray-drift WARNING shape
-            interval="1minute",
-            bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
-        )
-        client = TestClient(build_app(DashboardState(), instrument_store=s))
-        try:
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("M&M")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-mnm-gate",
+                csv_source_sha256="0" * 64,
+            )
+            ParquetWriter(lake_root=tmp_path).write(
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-M&M",  # the DIVERGENT stored key → the stray-drift WARNING shape
+                interval="1minute",
+                bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+            )
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
             with capture_logs() as logs:
                 bodies = [client.get("/api/v1/completeness/scoreboard").json() for _ in range(3)]
-        finally:
-            s.close()
         warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
         assert len(warnings) == 1  # the storm fix: a stable state logs once, not per poll
         assert warnings[0]["suppressed_repeats"] == 0
