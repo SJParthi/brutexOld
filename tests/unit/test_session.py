@@ -20,13 +20,18 @@ from brutex.calendars.nse import get_session
 from brutex.data.models import CandleBar
 from brutex.data.session import (
     ALL_FILTERED,
+    ALL_FILTERED_WINDOW_EVENT,
     SessionFilterResult,
     filter_intraday_session,
     filter_to_trading_session,
     format_ist_clock,
     in_session,
+    is_all_filtered,
     is_session_exempt,
+    observe_all_filtered,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -201,6 +206,82 @@ class TestFilterToTradingSession:
         verdict = SessionFilterResult(kept=[kept_bar], dropped_off_session=2)
         assert verdict.dropped == 2
         assert verdict.all_filtered is False  # a survivor → never all-filtered
+
+
+class _SpyLog:
+    """Duck-typed structlog spy — records every ``.warning(event, **fields)`` call."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def warning(self, event: str, **fields: object) -> None:
+        self.events.append((event, fields))
+
+
+class TestAllFilteredBoundary:
+    """`is_all_filtered` / `observe_all_filtered` — the WHOLE-boundary discriminator
+    (DEC-DATA-HONESTY-ALLFILTERED-SEED-001): raw > 0 with ZERO kept bars after the
+    session filter AND the future-bar drop."""
+
+    @pytest.mark.parametrize(
+        ("raw", "kept", "expected"),
+        [
+            (3, 0, True),  # the all-filtered shape
+            (1, 0, True),
+            (0, 0, False),  # genuine EMPTY — untouched channel
+            (3, 1, False),  # a survivor → never all-filtered
+            (3, 3, False),
+        ],
+    )
+    def test_is_all_filtered_truth_table(self, raw: int, kept: int, expected: bool) -> None:
+        assert is_all_filtered(raw, kept) is expected
+
+    @given(
+        raw=st.integers(min_value=0, max_value=10_000),
+        kept=st.integers(min_value=0, max_value=10_000),
+    )
+    def test_property_all_filtered_iff_raw_positive_and_kept_zero(
+        self, raw: int, kept: int
+    ) -> None:
+        # The exact predicate law: True ⇔ raw > 0 ∧ kept == 0. Pure arithmetic —
+        # never keyed on dedup counts, error types, or gates.
+        assert is_all_filtered(raw, kept) is (raw > 0 and kept == 0)
+
+    def test_observe_all_filtered_warns_with_fields(self) -> None:
+        log = _SpyLog()
+        verdict = observe_all_filtered(
+            log,
+            raw_count=4,
+            kept_count=0,
+            pull_id="p-1",
+            fields={"window_start": "2024-01-01", "window_end": "2024-01-31", "symbol": "NIFTY"},
+        )
+        assert verdict is True
+        assert len(log.events) == 1
+        event, fields = log.events[0]
+        assert event == ALL_FILTERED_WINDOW_EVENT == "ingest.window.all_bars_filtered"
+        assert fields["raw_bars"] == 4
+        assert fields["kept_bars"] == 0
+        assert fields["pull_id"] == "p-1"
+        assert fields["window_start"] == "2024-01-01"
+        assert fields["window_end"] == "2024-01-31"
+        assert fields["symbol"] == "NIFTY"
+
+    def test_observe_all_filtered_silent_when_bars_kept(self) -> None:
+        log = _SpyLog()
+        assert (
+            observe_all_filtered(log, raw_count=4, kept_count=2, pull_id=None, fields={}) is False
+        )
+        assert log.events == []
+
+    def test_observe_all_filtered_silent_on_genuine_empty(self) -> None:
+        # raw == 0 is the genuine-EMPTY channel — never warned here (the EMPTY
+        # ledger path + its own detectors own that shape).
+        log = _SpyLog()
+        assert (
+            observe_all_filtered(log, raw_count=0, kept_count=0, pull_id=None, fields={}) is False
+        )
+        assert log.events == []
 
 
 class TestSessionExempt:

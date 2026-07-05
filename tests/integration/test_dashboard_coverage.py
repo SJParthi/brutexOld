@@ -419,8 +419,11 @@ class TestColdStartSeedInteriorGap:
             assert seeded == 1
             skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
             assert len(skips) == 1
-            gap = skips[0]["largest_gap_sessions"]
-            assert isinstance(gap, int) and gap > 5
+            # DEC-DATA-HONESTY-ALLFILTERED-SEED-001: the refusal WARN now names the
+            # confirmed run's inclusive bar-less bounds instead of a bare length.
+            gap_first = date.fromisoformat(str(skips[0]["gap_first"]))
+            gap_last = date.fromisoformat(str(skips[0]["gap_last"]))
+            assert date(2020, 1, 1) < gap_first <= gap_last < date(2020, 1, 28)
 
             # The un-seeded gappy window is minted PLANNED (re-pullable, self-heals via
             # the fetch-time detector); the seeded clean row stays settled.

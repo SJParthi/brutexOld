@@ -61,7 +61,7 @@ from brutex.calendars.nse import IST
 from brutex.data.atomic_io import atomic_write_via
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
-from brutex.data.interior_gap_detect import classify_interior_gap_dates
+from brutex.data.interior_gap_detect import interior_gap_runs
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.window_ledger import (
     EMPTY,
@@ -844,8 +844,9 @@ def seed_enclosed_windows(
     (:meth:`~brutex.data.window_ledger.WindowLedger.seed_lake_success`), so a
     ``FAILED`` / ``EMPTY`` / ``PLANNED`` row is never masked.
 
-    **Interior-gap density cross-check (DEC-COLDSTART-SEED-INTERIOR-GAP-001):** a
-    span test alone would stamp ``SUCCESS`` over a window whose lake span contains
+    **Interior-gap continuity gate (DEC-COLDSTART-SEED-INTERIOR-GAP-001, upgraded
+    DATASET-wide by DEC-DATA-HONESTY-ALLFILTERED-SEED-001):** a span test alone
+    would stamp ``SUCCESS`` over a window whose lake span contains
     an interior multi-session hole — and since ``SUCCESS`` is skippable, the hole
     would be masked FOREVER on a lost-ledger cold-start (the spot /completeness
     verdict is LEDGER-backed, so it would read ``full``; the fetch-time detector
@@ -855,26 +856,49 @@ def seed_enclosed_windows(
     :func:`reconcile_ledger_with_lake`) AND the candidate window's interval is
     the FETCHED spot granularity (``TRACK1_SPOT_INTERVAL`` — belt-and-braces with
     the read-side gate: a DERIVED ``1day`` window is never density-checked, or it
-    could sit permanently un-seedable since it is never fetched), the window's
-    in-range session dates are classified by the COMMON
-    :func:`~brutex.data.interior_gap_detect.classify_interior_gap_dates` (one
-    source of interior-hole truth — CLAUDE.md §11). A confirmed interior gap
-    SKIPS the seed with ONE ``window_ledger.seed_interior_gap_skip`` WARNING —
-    the window stays absent → ``PLANNED`` this pull → fetched → the fetch-time
-    detector bounds it (``record(degraded=True)``, re-pullable then terminal).
-    FAIL-CLOSED: an error inside the check logs
-    ``window_ledger.seed_interior_gap_error`` and skips the seed (a re-pull is
-    always data-safe — idempotent keep-first sink), never a crash. Honest
-    residuals: CASH reference equities + the F&O reconcile stay span-only (their
-    spans carry no ``session_dates``); an out-of-calendar-coverage hole
-    honestly ABSTAINS (seeded — consistent with the fetch-time detector); and a
-    hole at the window's LEADING/TRAILING edge — bars resuming only in a
-    NEIGHBOURING window, so the dataset span still encloses this one — is
-    invisible to the INTERIOR classifier (it walks strictly between the window's
-    own first/last covered dates) and stays span-seeded, a deliberate
-    interior-scope non-goal of DEC-COLDSTART-SEED-INTERIOR-GAP-001 (the
-    fetch-path trailing-truncation demotion, DEC-PARTIAL-WINDOW-REPULL-001,
-    watches edges on FETCHED windows only).
+    could sit permanently un-seedable since it is never fetched), the DATASET's
+    confirmed >tolerance bar-less runs are computed ONCE per span by the COMMON
+    :func:`~brutex.data.interior_gap_detect.interior_gap_runs` (one source of
+    interior-hole truth + ONE tolerance knob — CLAUDE.md §11) and a window
+    INTERSECTING a confirmed run is REFUSED with one
+    ``window_ledger.seed_interior_gap_skip`` WARNING carrying the run's
+    ``gap_first``/``gap_last`` — the window stays absent → ``PLANNED`` this pull
+    → fetched → the fetch-time detectors bound it (``record(degraded=True)``,
+    re-pullable then terminal). DATASET-wide runs (not the original per-window
+    classification) deliberately close the two documented per-window blind
+    spots: a >tolerance hole STRADDLING a window boundary (two sub-tolerance
+    leading/trailing edges per window under the old check) now refuses BOTH
+    windows, and a window ENTIRELY inside a giant hole (zero in-range dates —
+    the old check could only abstain ``too_few_sessions``) is refused too. A
+    long-existing row is never re-warned: :meth:`~brutex.data.window_ledger.
+    WindowLedger.has_window` short-circuits BEFORE the gate (the only-if-absent
+    seed would no-op anyway). FAIL-CLOSED: an error computing the runs logs
+    ``window_ledger.seed_interior_gap_error`` per window and skips the seed (a
+    re-pull is always data-safe — idempotent keep-first sink), never a crash.
+    Honest residuals: CASH reference equities + the F&O reconcile stay span-only
+    (their spans carry no ``session_dates``); an out-of-calendar-coverage span
+    honestly ABSTAINS dataset-wide (seeded — consistent with the fetch-time
+    detector; note the abstain now keys on the DATASET's first/last covered
+    dates, so a span reaching past holiday coverage abstains for ALL its
+    windows — conservative in the seed direction, byte-identical to the
+    span-only path); the seed calls :func:`interior_gap_runs` WITHOUT the
+    DEC-CALENDAR-OBSERVED-SESSIONS-001 ``observed=`` drift overlay the
+    fetch-time detector threads (``ingest.observe_interior_gap`` passes
+    ``observed=observed_holidays``; the reconcile chokepoints have no overlay
+    plumbed), so on a vendor-observed holiday the seed counts one more bar-less
+    "session" than the classifier would — the overlay is REMOVE-only, so the
+    omission can only EXTEND a run: at worst ONE conservative refusal → one
+    idempotent re-fetch, after which the recorded row trips ``has_window`` and
+    the gate is permanently silent (a single drift day can never mint a
+    >tolerance run alone; threading the overlay to the reconcile callers is a
+    named follow-up, NOT claimed — wiring-review fold, PR #1158);
+    sub-tolerance holes still seed; and CONVERGENCE after a
+    refusal is fetch-verdict-dependent — a run CONTAINED in one window is
+    demoted at fetch time (``INTERIOR_GAP``, bounded → SKIPPED), while a
+    STRADDLING run's halves read as edge holes per fetched window (the
+    trailing-truncation detector may demote the leading half; the trailing-edge
+    half of the NEXT window re-records what the vendor returns) — either way a
+    REAL vendor fetch re-verifies the state instead of a blind span stamp.
 
     **Live-edge guard:** a window whose coverage INCLUDES the current IST day
     (``end − 1 >= today_ist``) is NEVER seeded — the day's session data may still be
@@ -894,6 +918,15 @@ def seed_enclosed_windows(
     if today_ist is None:
         today_ist = now.astimezone(IST).date()
     seeded = 0
+    # Per-span memo of the DATASET-wide confirmed interior-hole runs
+    # (DEC-DATA-HONESTY-ALLFILTERED-SEED-001): computed ONCE per gated span per
+    # call — `None` = calendar abstain (gate inert), `()` = no confirmed run, an
+    # Exception = the fail-CLOSED sentinel (every window of that span refuses the
+    # seed, one error WARNING each — a bad density signal must never mint SUCCESS).
+    runs_by_span: dict[
+        tuple[str, str, str, str],
+        tuple[tuple[date, date], ...] | None | Exception,
+    ] = {}
     for window_key, span_key in candidates:
         entry = span_index.get(span_key)
         if (
@@ -910,34 +943,66 @@ def seed_enclosed_windows(
             continue  # live edge — today's data may be partial; never seed it settled
         if not (first_date <= window_key.start and last_covered <= last_date):
             continue
-        # Density cross-check (DEC-COLDSTART-SEED-INTERIOR-GAP-001, docstring above):
-        # only a FETCHED-interval window whose span carries `session_dates` is
-        # checked — every other candidate (F&O / CASH / derived `1day` / legacy
-        # span shape) takes the historical span-only path byte-identically.
+        # Continuity gate (DEC-COLDSTART-SEED-INTERIOR-GAP-001, upgraded DATASET-wide
+        # by DEC-DATA-HONESTY-ALLFILTERED-SEED-001 — docstring above): only a
+        # FETCHED-interval window whose span carries `session_dates` is checked —
+        # every other candidate (F&O / CASH / derived `1day` / legacy span shape)
+        # takes the historical span-only path byte-identically. The confirmed runs
+        # are computed over the WHOLE dataset's covered dates (not the window's
+        # in-range slice), then each window is refused iff it INTERSECTS a run —
+        # so a >tolerance hole STRADDLING a window boundary refuses BOTH windows,
+        # and a window ENTIRELY inside a giant hole (zero in-range dates, which a
+        # per-window classifier could only abstain on) is refused too.
         if window_key.interval == TRACK1_SPOT_INTERVAL:
             sessions = entry.get("session_dates")
             if sessions is not None:
-                try:
-                    window_sessions = [d for d in sessions if window_key.start <= d <= last_covered]
-                    verdict = classify_interior_gap_dates(covered_dates=window_sessions)
-                except Exception as exc:  # fail-CLOSED — a re-pull is always data-safe
+                if ledger.has_window(window_key):
+                    # An existing row (ANY status) makes the only-if-absent seed
+                    # below a no-op, so the density check + refusal WARNING are
+                    # skipped outright — a long-settled window must not re-WARN
+                    # on every steady-state reconcile
+                    # (DEC-DATA-HONESTY-ALLFILTERED-SEED-001, refuter F-4 fold;
+                    # the seeded count is unchanged — `seed_lake_success`
+                    # returned False for this row before). The ungated span-only
+                    # path below stays byte-identical (its only-if-absent probe
+                    # lives inside `seed_lake_success` as it always did).
+                    continue
+                if span_key not in runs_by_span:
+                    try:
+                        runs_by_span[span_key] = interior_gap_runs(covered_dates=sessions)
+                    except Exception as exc:  # fail-CLOSED — a re-pull is always data-safe
+                        runs_by_span[span_key] = exc
+                runs = runs_by_span[span_key]
+                if isinstance(runs, Exception):
                     _LOG.warning(
                         "window_ledger.seed_interior_gap_error",
                         span_key=span_key,
                         window_start=window_key.start.isoformat(),
                         window_end=window_key.end.isoformat(),
-                        error=str(exc),
+                        error=str(runs),
                     )
                     continue
-                if verdict.is_interior_gap():
-                    _LOG.warning(
-                        "window_ledger.seed_interior_gap_skip",
-                        span_key=span_key,
-                        window_start=window_key.start.isoformat(),
-                        window_end=window_key.end.isoformat(),
-                        largest_gap_sessions=verdict.largest_gap_sessions,
+                if runs:
+                    hit = next(
+                        (r for r in runs if r[0] <= last_covered and window_key.start <= r[1]),
+                        None,
                     )
-                    continue
+                    if hit is not None:
+                        # REFUSE the seed: this enclosed window intersects a
+                        # CONFIRMED >tolerance interior hole — span-stamping it
+                        # SUCCESS would make the hole PERMANENT on a lost-ledger
+                        # cold start. The window is left ABSENT → PLANNED-able →
+                        # fetched; a refusal touches NO existing ledger row
+                        # (property-pinned).
+                        _LOG.warning(
+                            "window_ledger.seed_interior_gap_skip",
+                            span_key=span_key,
+                            window_start=window_key.start.isoformat(),
+                            window_end=window_key.end.isoformat(),
+                            gap_first=hit[0].isoformat(),
+                            gap_last=hit[1].isoformat(),
+                        )
+                        continue
         if ledger.seed_lake_success(window_key, bars=int(entry["bars"]), now=now):
             seeded += 1
     return seeded
