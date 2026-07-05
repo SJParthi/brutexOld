@@ -31,7 +31,11 @@ from brutex.adapters.groww.constants import (
     OPTION_SEGMENT,
 )
 from brutex.adapters.groww.contract_bounds import default_fno_minute_window
-from brutex.adapters.groww.errors import GrowwTimeoutError
+from brutex.adapters.groww.errors import (
+    GrowwTimeoutError,
+    GrowwTokenIssuanceThrottled,
+    GrowwTokenStillStaleError,
+)
 from brutex.adapters.groww.ingest import IngestReport
 from brutex.adapters.groww.option_ingest import (
     SUSPECTED_PARTIAL_WINDOW_EVENT,
@@ -1063,6 +1067,94 @@ def test_ingest_dns_error_exhausted_is_deferred_not_terminal() -> None:
         end=date(2024, 1, 2),
     )
     assert not ledger.is_skippable(key)  # FAILED — deferred to the next pull, never dropped
+
+
+class _BreakerFeed:
+    """Recording ``ErrorStormBreaker`` stand-in (the option twin of the spot spine's spy).
+
+    Captures the exact ``observe_transport_failure`` arguments so the
+    auth-ladder-exclusion tests pin the breaker feed BYTE-IDENTICAL to the
+    pre-guard behaviour (DEC-AUTH-LADDER-EXCLUDE-001 — the guard withholds only
+    the ``on_timeout`` step, never the dead-credential containment chain).
+    """
+
+    def __init__(self) -> None:
+        self.fed: list[tuple[str, str, object, bool]] = []
+        self.successes: list[str] = []
+
+    def observe_transport_failure(
+        self, symbol: str, *, error_type: str, window_key: object, still_stale: bool = False
+    ) -> None:
+        self.fed.append((symbol, error_type, window_key, still_stale))
+
+    def observe_success(self, symbol: str) -> None:
+        self.successes.append(symbol)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GrowwTokenStillStaleError("re-read returned the same dead token"),
+        GrowwTokenIssuanceThrottled("mint throttled"),
+    ],
+)
+def test_ingest_retryable_auth_family_feeds_neither_hook(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """DEC-AUTH-LADDER-EXCLUDE-001 (option-spine twin): auth-family feeds NEITHER hook.
+
+    A retryable auth-family failure (token-stale / mint-throttle) is credential
+    state, not candle-endpoint evidence — it must not step the AIMD timeout
+    ladder toward the 1 r/s deep floor. The FAILED ledger row, the deferred
+    (``still_failed``) report shape, and the storm-breaker feed stay
+    byte-identical (the regression: before the guard ``on_timeout()`` fired here).
+    """
+
+    def _auth_fetch(*_args: object, **_kw: object) -> list[CandleBar]:
+        raise error
+
+    monkeypatch.setattr(_oi, "fetch_option_candles", _auth_fetch)
+    ledger = WindowLedger()
+    breaker = _BreakerFeed()
+    hits: list[int] = []
+    timeouts: list[int] = []
+    report = ingest_option_contract(
+        _client(_FakeSDK(payload=_candles())),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        on_rate_limit=lambda: hits.append(1),
+        on_timeout=lambda: timeouts.append(1),
+        ledger=ledger,
+        storm_breaker=breaker,  # type: ignore[arg-type]
+        max_attempts=0,
+        now_ist=_now,
+    )
+    # NEITHER controller hook fires — no ladder step, no rate step.
+    assert timeouts == []
+    assert hits == []
+    # Containment BYTE-IDENTICAL: deferred (re-pullable), never terminally quarantined…
+    assert report.still_failed_windows == 1 and report.transient_failures == 1
+    assert report.retried_windows == 0
+    # …the ledger row is FAILED with the honest error type + in-pull fetch count…
+    [row] = ledger.records()
+    assert row.last_error == type(error).__name__
+    assert row.in_pull_fetches == 1
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    assert not ledger.is_skippable(key)  # FAILED — deferred, never dropped
+    # …and the breaker was fed EXACTLY once — the UNDERLYING symbol, the same
+    # window key, and the still_stale flag routing the dead-credential streak.
+    expected_stale = isinstance(error, GrowwTokenStillStaleError)
+    assert breaker.fed == [("NIFTY", type(error).__name__, key, expected_stale)]
+    assert breaker.successes == []
 
 
 def test_run_multi_contract_dns_failure_does_not_terminally_quarantine() -> None:
