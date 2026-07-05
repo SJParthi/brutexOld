@@ -92,7 +92,7 @@ import structlog
 from brutex.calendars.nse import (
     IST,
     forced_exit_seconds_for_session,
-    get_session,
+    get_session_checked,
     is_forced_exit_bar,
 )
 from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
@@ -243,6 +243,11 @@ class ResidentTradeSim:
     ValueError
         If ``bars`` is empty, ``bar_bits`` length ≠ ``bars`` length, or
         ``tf_minutes < 1``.
+    brutex.calendars.nse.HolidayDataUnavailableError
+        If any bar is dated on a weekday OUTSIDE the published holiday span —
+        the session (and thus the forced-exit boundary) cannot be verified, so
+        construction refuses LOUDLY instead of fabricating a 15:20 boundary
+        (mirrors :meth:`brutex.engine.trade_sim.TradeSimWalker` exactly).
     """
 
     __slots__ = ("_bar_bits", "_bars", "_call_fallback_warned", "_rust", "_tf_minutes")
@@ -276,13 +281,18 @@ class ResidentTradeSim:
         # :func:`~brutex.engine.trade_sim.simulate_trades` — so the boundary is
         # the bar session's own close − 10min (15:20 IST on a regular day, the
         # early close − 10min on a half-day / Muhurat session), resolved per IST
-        # date via the COMMON ``get_session`` →
-        # :func:`~brutex.calendars.nse.forced_exit_seconds_for_session`; a date
-        # with no session falls back to 15:20 (DEC-SESSION-FORCED-EXIT-001). The
-        # boundary is memoised by the LAST IST date only (a 1-slot cache, O(1)
-        # per bar) — a chronological feed re-resolves once per new day, exactly
-        # as the streaming walker does, so the precomputed Rust-kernel flags and
-        # the Python-fallback exits never diverge.
+        # date via the COMMON strict ``get_session_checked`` →
+        # :func:`~brutex.calendars.nse.forced_exit_seconds_for_session`; an
+        # in-coverage date with no session falls back to 15:20
+        # (DEC-SESSION-FORCED-EXIT-001), while a bar dated on a weekday OUTSIDE
+        # the published holiday span raises ``HolidayDataUnavailableError`` at
+        # construction — LOUDLY, in lock-step with the streaming walker's
+        # ``_forced_exit_seconds`` (the parity contract holds: both paths refuse
+        # the same uncoverable date instead of silently fabricating a 15:20
+        # boundary). The boundary is memoised by the LAST IST date only (a
+        # 1-slot cache, O(1) per bar) — a chronological feed re-resolves once
+        # per new day, exactly as the streaming walker does, so the precomputed
+        # Rust-kernel flags and the Python-fallback exits never diverge.
         #
         # ``session_days`` is the per-bar SESSION identity — the bar's own IST
         # calendar-date ordinal, the SAME date key the forced-exit resolution
@@ -300,7 +310,7 @@ class ResidentTradeSim:
             ts_ist = bar.timestamp.astimezone(IST)
             bar_day = ts_ist.date()
             if bar_day != cache_date:
-                session = get_session(bar_day)
+                session = get_session_checked(bar_day)
                 cache_date = bar_day
                 cache_seconds = (
                     None if session is None else forced_exit_seconds_for_session(session)

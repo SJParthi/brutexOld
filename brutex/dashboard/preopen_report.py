@@ -55,7 +55,11 @@ from typing import Any, Final, Literal
 import duckdb
 import structlog
 
-from brutex.calendars.observed_sessions import is_trading_day_observed, load_observed_holidays
+from brutex.calendars.nse import HolidayDataUnavailableError
+from brutex.calendars.observed_sessions import (
+    is_trading_day_checked_observed,
+    load_observed_holidays,
+)
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _INTRADAY_BASE_INTERVAL,
@@ -179,33 +183,59 @@ def resolve_report_datasets(
     return sorted(resolved, key=lambda k: k[2])
 
 
-def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset()) -> date:
+def _previous_trading_day(day: date, *, observed: AbstractSet[date] = frozenset()) -> date | None:
     """The NSE trading session immediately before *day* (per the shared calendar).
 
-    Walks back one calendar day at a time from ``day - 1`` until
-    :func:`brutex.calendars.nse.is_trading_day` is satisfied AND the date is not
-    an *observed* overlay day (DEC-CALENDAR-OBSERVED-SESSIONS-001 — an
-    observably-untraded day is NOT a session, so the anchor steps over it exactly
-    like a holiday; remove-only, default empty = byte-identical back-compat) — so
-    weekends and listed NSE/BSE holidays are stepped over (they are NOT trading
-    sessions) and a special weekend session (e.g. a Budget-Day Saturday) IS
-    honoured. The walk always terminates: any weekday outside the holiday list is
-    a trading day and the DETECTOR-written overlay is capped at 8 days/year
+    Walks back one calendar day at a time from ``day - 1`` until the STRICT
+    :func:`brutex.calendars.observed_sessions.is_trading_day_checked_observed`
+    is satisfied — the checked calendar AND NOT an *observed* overlay day
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001 — an observably-untraded day is NOT a
+    session, so the anchor steps over it exactly like a holiday; remove-only,
+    default empty = byte-identical back-compat) — so weekends and listed
+    NSE/BSE holidays are stepped over (they are NOT trading sessions) and a
+    special weekend session (e.g. a Budget-Day Saturday) IS honoured. The walk
+    always terminates: any covered weekday outside the holiday list is a
+    trading day and the DETECTOR-written overlay is capped at 8 days/year
     (write-time — ``classify_month_drift``; a hand-edited sidecar still loads a
     FINITE set), so the immediately-preceding session is at most a handful of
     days back (bounded constant work, not unbounded).
 
+    LOUD out-of-coverage handling (DEC-CALENDAR-EXCHANGE-SPLIT-001 pack): when
+    the walk reaches a weekday OUTSIDE the published holiday span (e.g. a report
+    for the 2020-01-01 pull floor walking into 2019, or a post-coverage 2027+
+    date), the checked calendar raises rather than silently guessing "trading
+    day" — this helper catches that, emits ONE ``calendar.coverage_exhausted``
+    structlog warning, and returns ``None``. The caller
+    (:func:`_daily_prev_close_contiguous`) treats ``None`` as prev-close-ABSENT,
+    so the row is honestly SKIPPED (the locked "correct-or-absent, never wrong"
+    contract) instead of anchoring on an unverified session — never a silent
+    guess, never a crash/500.
+
     Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as a
-    holiday by :func:`is_trading_day`, so it is treated as a NON-session here.
+    holiday by the calendar, so it is treated as a NON-session here.
     A symbol whose 1-day lake happens to carry a Muhurat daily bar may therefore
     have the day-after-Diwali row conservatively SKIPPED by
     :func:`_daily_prev_close_contiguous` (the "correct-or-absent, never wrong"
     rule) — recorded in the decision ledger, not a silent wrong number.
     """
     probe = day - timedelta(days=1)
-    while not is_trading_day_observed(probe, observed=observed):
+    while True:
+        try:
+            if is_trading_day_checked_observed(probe, observed=observed):
+                return probe
+        except HolidayDataUnavailableError:
+            _LOG.warning(
+                "calendar.coverage_exhausted",
+                report_day=day.isoformat(),
+                probe_day=probe.isoformat(),
+                detail=(
+                    "holiday list exhausted while walking back to the prior trading "
+                    "session; PREV. CLOSE will be reported ABSENT for this day "
+                    "(correct-or-absent, never a guess)"
+                ),
+            )
+            return None
         probe -= timedelta(days=1)
-    return probe
 
 
 def _daily_prev_close_contiguous(
@@ -251,7 +281,10 @@ def _daily_prev_close_contiguous(
     if idx == 0:
         return None
     expected = _previous_trading_day(day, observed=observed)
-    if daily_dates[idx - 1] != expected:
+    # ``None`` = the calendar's coverage ran out while walking back (already
+    # WARNed loudly by the helper): the prior session cannot be verified, so
+    # the anchor is honestly ABSENT and the row is skipped — never a guess.
+    if expected is None or daily_dates[idx - 1] != expected:
         return None
     close = daily[expected]
     if close == 0:

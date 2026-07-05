@@ -174,6 +174,25 @@ class TestClassifyPartialWindow:
         assert v.verdict == NOT_TRUNCATED
         assert v.reason == "out_of_calendar_coverage"
 
+    def test_today_outside_calendar_coverage_not_flagged(self) -> None:
+        # The today-anchor gap (calendar-correctness audit): the live-edge
+        # horizon walks the calendar up to *now*, so a covered window judged
+        # from an UNCOVERED current date (e.g. a 2099-pinned bench clock, or any
+        # post-coverage year) would inflate the horizon count with unverifiable
+        # "sessions" and bias toward a spurious flag. The classifier now
+        # abstains honestly when TODAY itself is out of coverage — even for a
+        # window that would otherwise be a confirmed truncation.
+        from brutex.calendars.nse import HOLIDAY_COVERAGE_LAST_YEAR
+
+        v = classify_partial_window(
+            last_bar_ts=_ts(date(2024, 1, 3)),  # covered, materially truncated
+            window_end=date(2024, 2, 1),  # covered
+            now=datetime(HOLIDAY_COVERAGE_LAST_YEAR + 1, 6, 3, 10, 0, tzinfo=UTC),
+            expiry=None,
+        )
+        assert v.verdict == NOT_TRUNCATED
+        assert v.reason == "out_of_calendar_coverage"
+
     def test_expiry_clamps_expected_end_but_still_truncated_before_it(self) -> None:
         # Expiry clamps the expected end, yet the last bar stops far BEFORE expiry → flagged.
         v = classify_partial_window(
