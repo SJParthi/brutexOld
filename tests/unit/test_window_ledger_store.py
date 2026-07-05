@@ -1453,6 +1453,40 @@ class TestSeedContinuityGateDatasetRuns:
         skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
         assert len(skips) == 1
 
+    def test_window_ending_exactly_on_run_first_is_refused(self) -> None:
+        # BOUNDARY GEOMETRY (mutation teeth for the intersection's LEFT `<=`):
+        # a window whose FINAL calendar day IS the run's first bar-less session
+        # (last_covered == run_first — a single-day touch) must be refused.
+        # Mutating `r[0] <= last_covered` to `<` seeds this window SUCCESS —
+        # permanently skippable over a confirmed >tolerance hole, the exact
+        # blind-spot class the dataset-wide gate closes.
+        t = _march_2024_sessions()
+        hole = t[4:15]  # 11 bar-less sessions > tolerance 5
+        covered = frozenset(t[:4]) | frozenset(t[15:])
+        win = _key_march(date(2024, 3, 1), hole[0] + timedelta(days=1))
+        seeded, led, logs = _seed_march(covered, [(win, _MARCH_SPAN_KEY)])
+        assert seeded == 0
+        assert led.count == 0  # stays PLANNED-able — the touch is never masked
+        skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
+        assert len(skips) == 1
+        assert skips[0]["gap_first"] == hole[0].isoformat()
+
+    def test_window_starting_exactly_on_run_last_is_refused(self) -> None:
+        # BOUNDARY GEOMETRY (mutation teeth for the intersection's RIGHT `<=`):
+        # a window whose START is the run's LAST bar-less session (start ==
+        # run_last) must be refused. Mutating `window_key.start <= r[1]` to `<`
+        # seeds it SUCCESS with no test failing before this pin.
+        t = _march_2024_sessions()
+        hole = t[4:15]
+        covered = frozenset(t[:4]) | frozenset(t[15:])
+        win = _key_march(hole[-1], date(2024, 3, 29))
+        seeded, led, logs = _seed_march(covered, [(win, _MARCH_SPAN_KEY)])
+        assert seeded == 0
+        assert led.count == 0
+        skips = [e for e in logs if e["event"] == "window_ledger.seed_interior_gap_skip"]
+        assert len(skips) == 1
+        assert skips[0]["gap_last"] == hole[-1].isoformat()
+
     def test_window_not_intersecting_the_hole_still_seeds(self) -> None:
         # No over-refusal: a window covering only the DENSE region of a holed
         # dataset seeds exactly as before (the run does not intersect it).
