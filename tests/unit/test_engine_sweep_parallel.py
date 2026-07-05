@@ -659,7 +659,11 @@ class TestAccumulator:
 # worker interleaving. This is the whole point of the PR.
 # Extended (PR-4): the cross-worker-count pin below additionally chains
 # workers ∈ {3, 10, 12} to the workers=4 reference, so byte-identity holds
-# at counts ABOVE the AUTO cap too (oversubscribed pools included).
+# at pool sizes configured ABOVE the AUTO cap too. HONEST scope: with the
+# 4-tuple _grid() the lazy ProcessPoolExecutor materialises at most ~4 EVAL
+# processes, so these rows pin invariance to the configured pool-size
+# PARAMETER — genuine 11-process contention is exercised by the 24-tuple
+# bench driver evidence (DEC-SWEEP-CAP-BENCH-001), not by this in-CI golden.
 
 
 class TestSequentialEqualsParallelGolden:
@@ -719,12 +723,15 @@ class TestSequentialEqualsParallelGolden:
         reference (itself pinned bit-identical to sequential by
         ``test_parquet_trees_are_byte_identical``), so sequential == 3 == 4 ==
         10 == 12 holds transitively.  The 10/12 rows (PR-4, ADR-0016 §5
-        pre-cap-raise pin) deliberately EXCEED the usable cores on shared CI
-        runners: oversubscription must still be bit-for-bit deterministic —
-        the ``_worker_init`` OMP/RAYON/POLARS=1 pins + the writer-actor's
-        index-ordered reorder heap make the result independent of scheduler
-        interleaving, which is exactly the property any future
-        ``AUTO_SWEEP_WORKERS_CAP`` raise depends on.
+        pre-cap-raise pin) configure pool sizes that EXCEED the usable cores
+        on shared CI runners; the ``_worker_init`` OMP/RAYON/POLARS=1 pins +
+        the writer-actor's index-ordered reorder heap make the result
+        independent of scheduler interleaving, which is exactly the property
+        any future ``AUTO_SWEEP_WORKERS_CAP`` raise depends on.  HONEST
+        scope: the 4-tuple ``_grid()`` means the lazy pool materialises at
+        most ~4 EVAL processes, so this pins invariance to the configured
+        pool-size PARAMETER — the genuine 11-process-contention digest
+        evidence lives in the bench measurement (DEC-SWEEP-CAP-BENCH-001).
         """
         grid = _grid()
         root_a, audit_a, ck_a = _run_parallel(tmp_path / "a", grid, workers=workers_a)

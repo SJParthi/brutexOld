@@ -178,7 +178,7 @@ and demotes everything to sequential trips the poison). The #1080
 byte-identity goldens pass UNMODIFIED. `sweep_parallel.py` at 100% line +
 100% branch.
 
-## 8. Amendment A1 (2026-07-05, DEC-SWEEP-CAP-BENCH-001, MIGRATION.md #1355) — the §5 deferred core-scaling + RSS bench SHIPS; cap verdict KEEP 8
+## 8. Amendment A1 (2026-07-05, DEC-SWEEP-CAP-BENCH-001, MIGRATION.md #1356) — the §5 deferred core-scaling + RSS bench SHIPS; cap verdict KEEP 8
 
 The §5 deferred "pytest-benchmark core-scaling + RSS-vs-48GB memory bench" now
 exists: `tests/bench/test_sweep_worker_scaling.py` (A/B wall clock + RSS over

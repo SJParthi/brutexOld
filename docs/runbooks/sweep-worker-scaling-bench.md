@@ -114,7 +114,7 @@ when it ships.
 
 | Date | Runner | cores | Arms (workers → median s) | oversubscribed | Verdict | Record |
 |------|--------|-------|---------------------------|----------------|---------|--------|
-| 2026-07-05 | 4-core Linux sandbox (NOT the M4 Pro) — **UNVERIFIED lab, non-binding** | 4 | rep 1: 7→3.166 · 8→3.276 · 10→3.683 · 12→4.186; rep 2: 7→3.197 · 8→3.243 · 10→3.732 · 12→4.140 | every arm | KEEP CAP=8 (structural veto: cores < 14; empirical: 10/12 SLOWER than 8, `speedup_vs_cap` 0.87–0.89 / 0.78) | DEC-SWEEP-CAP-BENCH-001, MIGRATION.md #1355 |
+| 2026-07-05 | 4-core Linux sandbox (NOT the M4 Pro) — **UNVERIFIED lab, non-binding** | 4 | rep 1: 7→3.166 · 8→3.276 · 10→3.683 · 12→4.186; rep 2: 7→3.197 · 8→3.243 · 10→3.732 · 12→4.140 | every arm | KEEP CAP=8 (structural veto: cores < 14; empirical: 10/12 SLOWER than 8, `speedup_vs_cap` 0.87–0.89 / 0.78) | DEC-SWEEP-CAP-BENCH-001, MIGRATION.md #1356 |
 
 The in-repo gated body SKIPPED at its core guard on that runner (as designed);
 the numbers came from an out-of-band driver over the same helpers. Result-tree

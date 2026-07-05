@@ -1,6 +1,6 @@
 """Sweep worker-scaling A/B bench — the ADR-0016 §5 deferred core-scaling + RSS bench.
 
-DEC-SWEEP-CAP-BENCH-001 (MIGRATION.md #1355; ADR-0016 Amendment A1).
+DEC-SWEEP-CAP-BENCH-001 (MIGRATION.md #1356; ADR-0016 Amendment A1).
 
 ADR-0016 (``docs/adr/0016-multicore-sweep-autodefault.md``,
 DEC-MULTICORE-SWEEP-AUTODEFAULT-001, MIGRATION.md #1269) shipped the AUTO worker
