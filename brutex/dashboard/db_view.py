@@ -359,9 +359,14 @@ _IST_TS_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 
 
 #: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
 #: the candle grid renders (:func:`_format_candle_timestamp`). Derived from
-#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant) by truncating to DATE.
-#: Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) + the F&O
-#: full-stored-life span + the coverage per-session aggregate.
+#: :data:`_IST_TS_EXPR` (the shared fixed-offset instant — ``AT TIME ZONE 'UTC'``
+#: BEFORE the +05:30 shift, so the date is independent of the ambient DuckDB
+#: session ``TimeZone``; a bare CAST-to-DATE on the TIMESTAMPTZ column resolves
+#: in the session zone and split one NSE session into two dates on a
+#: negative-offset host — DEC-SPOT-SESSION-DAYS-IST-TZ-001) by truncating to
+#: DATE. Used by the derived-1day date filter (DEC-DB-UX-PACK-001 Feature 3) +
+#: the F&O full-stored-life span + the coverage per-session aggregate + the
+#: ``session_days`` distinct-IST-date count.
 _IST_DATE_EXPR: Final[str] = f"{_IST_TS_EXPR}::DATE"
 
 #: The SQL fragment for a bar's **UTC calendar date** — the legacy intraday date
@@ -1347,8 +1352,13 @@ def summarize_spot_datasets(
 
     **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
     as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
-    stored, NOT whether the full ``2020 → today`` range is complete.
-    Partial-date-range detection is an explicit follow-up, not claimed here.
+    stored, NOT whether the full ``2020 → today`` range is complete. What IS
+    now audited (DEC-SPOT-PARTIAL-RANGE-CHIP-001): ``session_days`` — the
+    per-session CTE's distinct-IST-date count (via the ambient-TZ-robust
+    :data:`_IST_DATE_EXPR`, DEC-SPOT-SESSION-DAYS-IST-TZ-001) — feeds the
+    ``/completeness`` amber ``settled_partial_range`` session-density verdict.
+    The PER-WINDOW trading-day gap audit and the options-side range audit
+    remain explicit follow-ups, not claimed.
     ``open_substituted_days`` is a SUBSTITUTION signal, not exclusively "vendor
     lost data": a genuine late/special open (Muhurat), a sparse reference
     symbol, and a vendor gap all count — each honestly means the derived daily
@@ -1435,6 +1445,16 @@ def summarize_spot_datasets(
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
+        # ``session_days`` (DEC-SPOT-PARTIAL-RANGE-CHIP-001) — the CTE's
+        # ``COUNT(*)`` of per-session rows, i.e. the DISTINCT IST calendar dates
+        # holding at least one bar — additionally feeds the /completeness
+        # session-density range audit with ZERO extra passes over the lake. The
+        # IST date comes from the COMMON :data:`_IST_DATE_EXPR` (AT TIME ZONE
+        # 'UTC' BEFORE the +05:30 shift), so the count is independent of the
+        # ambient DuckDB session ``TimeZone`` — a bare CAST-to-DATE on the
+        # TIMESTAMPTZ column resolves in the session zone and split one NSE
+        # session into two dates on a negative-offset host, inflating
+        # ``session_days`` and masking sparsity (DEC-SPOT-SESSION-DAYS-IST-TZ-001).
         if use_session_cte:
             # The ONE folded per-session CTE (DEC-DAILY-OPEN-SUBSTITUTION-
             # HONESTY-001, shared with the (a)-fix session_dates enrichment) —
