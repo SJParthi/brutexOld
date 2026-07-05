@@ -82,7 +82,6 @@ from brutex.dashboard.db_view import (
     list_candle_datasets,
     list_columns,
     list_fno_candle_datasets,
-    list_option_datasets,
     list_option_series,
     list_registry_contracts,
     list_registry_expiries,
@@ -99,9 +98,18 @@ from brutex.dashboard.db_view import (
     table_summary,
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
+from brutex.dashboard.discovery_warm import (
+    DB_DATASETS_KEY,
+    FNO_CASCADE_KEY,
+    LATEST_MOVERS_DATE_KEY,
+    MOVERS_DATASETS_KEY,
+    SPOT_CASCADE_KEY,
+    build_db_datasets_payload,
+    filter_spot_datasets,
+    warm_discovery_memos,
+)
 from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
 from brutex.dashboard.fno_cascade import (
-    FnoCascadeCache,
     FnoCascadeIndex,
     build_expiry_counts,
     build_fno_cascade,
@@ -212,7 +220,7 @@ from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
-from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
+from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
     census_to_dict,
@@ -1063,6 +1071,7 @@ def build_app(
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
+    pull_phase_probe: Callable[[], str | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
     pull_intent_store: PullIntentStore | None = None,
@@ -1137,6 +1146,18 @@ def build_app(
         (the default) wires the production probe — this app's own
         ``BackgroundPullJob.running``. Injected so tests drive the mid-pull /
         just-finished transitions deterministically.
+    pull_phase_probe
+        Optional pipeline-phase signal (DEC-PIPELINE-PHASE-UI-HONESTY-001). A
+        zero-arg callable returning the pipeline's CURRENT coarse ``set_phase``
+        label (``spot`` / ``metadata`` / ``historical`` / ``movers`` /
+        ``prebuild``; ``""`` = none in flight) — read by BOTH honest-progress
+        surfaces: the gated ``/api/v1/movers`` payload names the phase in its
+        note (never a blanket "prebuild in progress" during the fetch phases),
+        and the ``/api/v1/pull/rate`` verdict reads the amber ``local`` state
+        for the zero-vendor-call LOCAL phases (``prebuild``/``movers``) instead
+        of a red "stalled". ``None`` (the default) wires the production probe —
+        this app's own ``BackgroundPullJob.snapshot().phase``. Injected so
+        tests drive the per-phase projections deterministically.
     liveproof
         Optional :class:`~brutex.doctor_autorun.LiveProofAutorun` — the
         zero-command auto-run of the Mac live-proof kit
@@ -1340,6 +1361,36 @@ def build_app(
     # try/finally so a failed/stopped pull can never wedge the movers shut. Owned
     # by this app instance (no module-global mutable state — CLAUDE.md §4).
     _prebuild_gate = prebuild_gate if prebuild_gate is not None else PrebuildGate()
+
+    def _pull_live() -> bool:
+        """``True`` iff a dashboard pull is running IN THIS PROCESS — O(1), never raises.
+
+        The ONE pull-active signal every duty-degrade consumer shares
+        (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 / DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001
+        / the movers ``prefer_resample`` switch of
+        DEC-MOVERS-GATE-PREBUILD-SCOPE-001 — CLAUDE.md §11 COMMON). It reads
+        ``_pull_active_probe`` LATE-BOUND: that name is assigned below, after the
+        single-flight ``BackgroundPullJob`` exists (the circular construction
+        order — the caches taking this probe are built first), and Python
+        closures resolve names at CALL time, which is always a request-time
+        moment long after ``build_app`` returned. A raising probe is swallowed
+        to ``False`` — the probe must never break a read. A CLI pull in a
+        SEPARATE process has no in-process job signal, so this reads ``False``
+        there (the honest envelope every consumer states).
+        """
+        try:
+            return _pull_active_probe() is True
+        except Exception:  # pylint: disable=broad-except — probe must never break a read
+            return False
+
+    # LATE-BIND the pull probe onto the summary cache (the setter exists because
+    # the cache may be INJECTED and is constructed before the pull job —
+    # DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001): while a pull runs, a dirty
+    # detailed-summary read widens its floor to min(9 × the last scan's own
+    # duration, 600 s) and the served staleness is stamped into the payloads
+    # via `stamp_freshness` (duty_degraded / snapshot_age_s — visible, never
+    # silent).
+    _summary_cache.set_pull_active_probe(_pull_live)
     # The /db candle-pager TOTAL cache (DEC-DB-CANDLE-COUNT-CACHE-001): the page
     # `COUNT(*)` over `read_parquet(glob)` is O(files) (a Parquet-footer read per
     # monthly file — ~8 ms at 6 years, growing as the lake deepens) and was
@@ -1358,12 +1409,26 @@ def build_app(
     # the generation → recompute. Dedicated instance so the (counts, total) tuples
     # never share a key namespace with the candle int-totals above.
     _window_counts_cache = MoversSnapshotCache()
+    # The FOUR discovery-walk memos below additionally opt into the PULL-TIME
+    # adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the ported #920
+    # pattern): during a pull the write generation bumps on EVERY window tick,
+    # so each poll used to re-pay a full O(datasets) walk back-to-back — and
+    # post-prebuild (dataset count × the 19 materialised TFs) that walk is
+    # multi-minute. While `_pull_live()` reads True, a generation-mismatched
+    # entry younger than min(max(2 s, its own walk duration), 600 s) is served
+    # STALE (logged `movers_cache.stale_served`, never silent); the moment the
+    # pull ends the probe reads False → fresh recompute, and the post-pipeline
+    # `warm_discovery_memos` force-refreshes them all off ONE shared walk so
+    # the stale-floor state can never outlive the pull.
+    #
     # The /db F&O cascade cache (DEC-DB-FNO-CASCADE-001): the underlying→expiry→contract
     # index is an O(datasets) build over a lake dir-walk; memoised here behind the SAME
     # write-generation as the caches above so a pull rebuilds it but every cascade click
     # (underlyings / expiries / contracts) is an O(1) handoff — tiny lazy payloads, never
-    # the flat thousand-row dropdown.
-    _fno_cascade_cache = FnoCascadeCache()
+    # the flat thousand-row dropdown. Now the COMMON `MoversSnapshotCache` (keyed
+    # FNO_CASCADE_KEY) so it shares the pull-time floor + the discovery warm; the
+    # bespoke single-slot `FnoCascadeCache` class is superseded at this wiring site.
+    _fno_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
     # The /db candle-datasets discovery cache (DEC-DB-TAB-SWITCH-O1-001): the
     # `/api/v1/db/candles/datasets` endpoint walks the WHOLE `bars/` tree THREE times
     # (spot + F&O + options, each an O(files) `rglob("*.parquet")`) — and it fires on
@@ -1371,20 +1436,24 @@ def build_app(
     # between lake writes, so they are memoised behind the SAME generation signal as the
     # caches above (a pull bumps it → rediscover; otherwise a tab switch is an O(1) handoff
     # of the cached lists). REUSES the COMMON `MoversSnapshotCache` (one dataset key).
-    _db_datasets_cache = MoversSnapshotCache()
+    _db_datasets_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
     # The /db SPOT cascade cache (DEC-DB-SPOT-CASCADE-001): the symbol→interval index is
     # an O(datasets) build over the non-F&O lake partitions; memoised behind the SAME
     # write-generation as the caches above (the spot twin of `_fno_cascade_cache`), so a
     # pull rebuilds it but every symbol-picker open is an O(1) handoff — the small
     # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
-    _spot_cascade_cache = MoversSnapshotCache()
+    _spot_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
     # The DEFAULT-poll latest-movers-date cache (GAP #4): the `/api/v1/movers` route with
     # NO explicit date resolves the latest available spot 1day via `latest_movers_date`,
     # an O(datasets) DuckDB MAX over the spot 1day globs — re-run on EVERY default poll.
     # It is invariant between lake writes, so it is memoised behind the SAME write
     # generation as the caches above (a pull bumps it → re-resolve; otherwise a default
     # poll is an O(1) handoff). REUSES the COMMON `MoversSnapshotCache` (one date key).
-    _latest_movers_date_cache = MoversSnapshotCache()
+    # Pull-time staleness note: the derived 1day partitions are rewritten ONLY by the
+    # pipeline's final prebuild, so the latest date genuinely cannot move mid-fetch.
+    _latest_movers_date_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
     # The Options-tab AUTHORITATIVE expiry-calendar cache (DEC-MOVERS-CALENDAR-TIERS-001):
     # the Near/Next/Far + Weekly/Monthly tier classification reads the FULL vendor expiry
     # calendar from `registry.duckdb` (`load_registry_expiries`), an O(expiries) DuckDB
@@ -1586,6 +1655,12 @@ def build_app(
             # reads "done"/"idle", never a red "stalled" (the CLI bridge below has no
             # active flag, so its side keeps the tick-freshness fallback).
             panel_pull_active=_pull_active_probe(),
+            # DEC-PIPELINE-PHASE-UI-HONESTY-001: the pipeline's current phase label —
+            # the PANEL side only (the CLI bridge is a separate process with no
+            # pipeline phase). During the zero-vendor-call LOCAL stages
+            # (prebuild/movers) the verdict reads amber "local", never a red
+            # "stalled" off the correctly-flatlined fetch rate.
+            panel_phase=_pull_phase_probe(),
             bridge_effective_rps=bridge_effective_rps,
             bridge_current_rps=bridge_current_rps,
             bridge_recent_minute=bridge_recent_minute,
@@ -2061,6 +2136,7 @@ def build_app(
                 dry_run=dry_run,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
+                floor_store=instrument_store,
             )
         except Exception as exc:  # surface the REAL reason, never swallow it
             # A blank "no data returned" 400 was hiding the actual failure
@@ -2132,6 +2208,17 @@ def build_app(
     # tests inject a deterministic probe. Resolved at request time via the route closure.
     _pull_active_probe: Callable[[], bool | None] = (
         pull_active_probe if pull_active_probe is not None else (lambda: _pull_job.running)
+    )
+
+    # The pipeline-phase probe (DEC-PIPELINE-PHASE-UI-HONESTY-001): the production
+    # default reads THIS app's own single-flight job's coarse phase label (an O(1)
+    # lock-guarded PullProgress snapshot — "spot"/"metadata"/"historical"/"movers"/
+    # "prebuild", "" when none is in flight). Read at request time by the gated
+    # /api/v1/movers payload (phase-honest note) and the /api/v1/pull/rate verdict
+    # (amber "local" during the zero-vendor-call prebuild/movers stages); tests
+    # inject a deterministic probe.
+    _pull_phase_probe: Callable[[], str | None] = (
+        pull_phase_probe if pull_phase_probe is not None else (lambda: _pull_job.snapshot().phase)
     )
 
     # Last finished spot pull's verdict dict (DEC-VERDICT-BANNER-001). The
@@ -2348,6 +2435,7 @@ def build_app(
                 auto_retry=True,
                 until_clean=True,
                 on_ledger_sync=_ledger_sync,
+                floor_store=instrument_store,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -3076,6 +3164,7 @@ def build_app(
                     auto_retry=True,
                     until_clean=True,
                     on_ledger_sync=_ledger_sync,
+                    floor_store=instrument_store,
                 )
 
             def _run_metadata() -> MetadataPullReport:
@@ -3103,13 +3192,26 @@ def build_app(
                 # segment tag is threaded through the F&O spine. The operator's from/to
                 # rides in as the EXPIRY scope (DEC-FNO-EXPIRY-SCOPE-001): out-of-scope
                 # expiries fetch nothing; in-scope windows keep the default 30d/60d law.
-                # pair_progress=True (DEC-PIPELINE-STALL-HEARTBEAT-001): the F&O
-                # historical phase has NO ledger-sync driver at this layer, so the
-                # per-pair hook advances the units + cumulative bars open-endedly —
-                # the counters keep moving instead of freezing at the metadata
-                # phase's "45/45 units, 0 bars" while millions of bars stream in.
-                _pull_job.set_phase("historical", pair_progress=True)
+                # open_ended=True (DEC-PULL-PROGRESS-HONESTY-001 — supersedes the
+                # pair_progress=True grow-total pin of DEC-PIPELINE-STALL-HEARTBEAT-001
+                # at THIS site): the F&O phase now drives its units/total from the
+                # THROTTLED market/interval-filtered ledger fold (on_ledger_sync below,
+                # bars=None so the cross-run ledger bars never clobber the live tally),
+                # its BARS from the fetch pipeline's per-window fold (on_bars — real
+                # deltas; the async per-pair report honestly carries 0), and declares
+                # the denominator NON-FINAL (contracts are planned mid-phase) so the
+                # page shows "N units · total unknown" instead of a pinned 100%.
+                _pull_job.set_phase("historical", open_ended=True)
                 _prebuild_gate.set_phase("historical")
+
+                def _hist_ledger_sync(
+                    completed: int, total: int, bars: int, failed: int, current: str
+                ) -> None:
+                    del bars  # cross-run ledger bars ≠ this pull's live bars (on_bars owns them)
+                    _pull_job.sync_from_ledger(
+                        completed=completed, total=total, bars=None, failed=failed, current=current
+                    )
+
                 with RegistryStore.open(registry_path) as registry:
                     return pull_historical_for_underlyings(
                         targets,
@@ -3125,6 +3227,8 @@ def build_app(
                         until_clean=True,
                         scope_start=fno_scope_start,
                         scope_end=fno_scope_end,
+                        on_bars=_pull_job.add_bars,
+                        on_ledger_sync=_hist_ledger_sync,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -3137,7 +3241,11 @@ def build_app(
                 today-warm would cache empties); ``None`` when the lake has no spot day yet.
                 """
                 # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
-                # observed during the movers warm is named "movers".
+                # observed during the movers warm is named "movers". The gate
+                # annotation lands on an ALREADY-RELEASED gate now — the prebuild
+                # released it the moment its outcome was known
+                # (DEC-MOVERS-WARM-UNBLOCK-001) — so it is invisible while idle
+                # (a safe no-op annotation, kept for the finally-backstop path).
                 _pull_job.set_phase("movers")
                 _prebuild_gate.set_phase("movers")
                 try:
@@ -3149,6 +3257,29 @@ def build_app(
                     return None
                 # post-pull generation (the pull bumped it) — the SAME the /movers route reads.
                 return warm_date, _summary_cache.generation
+
+            def _warm_datasets(gen: int) -> list[dict[str, str]]:
+                """The ONE lake-discovery walk per warm run (DEC-MOVERS-WARM-UNBLOCK-001).
+
+                The 2026-07-04/05 incident root: each of the 39 warm jobs called
+                its ``compute_*_candidates`` WITHOUT the ``datasets=`` memo param
+                (DEC-MOVERS-DISCOVERY-MEMO-001's seam), so every job re-ran a
+                fresh full-lake ``list_candle_datasets`` dir-walk — ~3 min each
+                on the options-exploded post-prebuild tree (~10⁵-10⁶ partition
+                dirs; forensics measured 170-256 s per key, one BSE key with
+                ZERO candidates cost 169.4 s of pure walk). Reuse the EXACT
+                generation-stamped memo the /movers route reads
+                (``_db_datasets_cache`` key ``"movers_candle_datasets"``), so
+                the whole warm run — AND the route afterwards — shares ONE walk
+                per write generation (CLAUDE.md §11 COMMON; byte-identical
+                candidates — same function, same inputs, pinned).
+                """
+                datasets: list[dict[str, str]] = _db_datasets_cache.get_or_compute(
+                    "movers_candle_datasets",
+                    generation=gen,
+                    compute=lambda: list_candle_datasets(lake_root),
+                )
+                return datasets
 
             def _warm_spot_movers() -> MoversWarmResult:
                 """Per-segment SPOT warm (DEC-PIPELINE-SEGMENT-MOVERS-001): fired when spot succeeds.
@@ -3164,6 +3295,9 @@ def build_app(
                 if resolved is None:
                     return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
+                # ONE memoised discovery walk shared by every job in this warm
+                # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
+                warm_datasets = _warm_datasets(gen)
 
                 def _make_spot_job(exch: str | None) -> Callable[[], int]:
                     def _spot_job() -> int:
@@ -3182,6 +3316,7 @@ def build_app(
                                 date=warm_date,
                                 time=None,
                                 exchange=exch,
+                                datasets=warm_datasets,
                             ),
                         )
                         return len(cands.snapshots)
@@ -3193,7 +3328,11 @@ def build_app(
                     [_make_spot_job(coord["exchange"]) for coord in coords],
                     segment="spot",
                     labels=[warm_coordinate_label(coord) for coord in coords],
-                    on_progress=_prebuild_gate.set_progress,
+                    # Segment-labelled i/N (DEC-MOVERS-WARM-UNBLOCK-001 fix 4):
+                    # a bare "6/9" read as 7-of-9-total; label it "spot 6/9".
+                    on_progress=lambda done, total: _prebuild_gate.set_progress(
+                        done, total, segment="spot"
+                    ),
                 )
 
             def _warm_futures_movers() -> MoversWarmResult:
@@ -3206,6 +3345,9 @@ def build_app(
                 if resolved is None:
                     return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
+                # ONE memoised discovery walk shared by every job in this warm
+                # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
+                warm_datasets = _warm_datasets(gen)
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
                     tier = normalize_futures_tier(raw_tier)
@@ -3228,6 +3370,7 @@ def build_app(
                                 time=None,
                                 exchange=exch,
                                 expiry_tier=tier,
+                                datasets=warm_datasets,
                             ),
                         )
                         return len(cands.movers)
@@ -3239,7 +3382,10 @@ def build_app(
                     [_make_fut_job(coord["exchange"], coord["expiry_tier"]) for coord in coords],
                     segment="futures",
                     labels=[warm_coordinate_label(coord) for coord in coords],
-                    on_progress=_prebuild_gate.set_progress,
+                    # Segment-labelled i/N (DEC-MOVERS-WARM-UNBLOCK-001 fix 4).
+                    on_progress=lambda done, total: _prebuild_gate.set_progress(
+                        done, total, segment="futures"
+                    ),
                 )
 
             def _warm_options_movers() -> MoversWarmResult:
@@ -3254,6 +3400,9 @@ def build_app(
                 if resolved is None:
                     return MoversWarmResult(warmed=0, failed=0, total=0)
                 warm_date, gen = resolved
+                # ONE memoised discovery walk shared by every job in this warm
+                # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
+                warm_datasets = _warm_datasets(gen)
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
@@ -3296,6 +3445,7 @@ def build_app(
                                 expiry_tier=tier,
                                 expiry_track=trk,
                                 exchange=exch,
+                                datasets=warm_datasets,
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
                             ),
@@ -3314,7 +3464,10 @@ def build_app(
                     ],
                     segment="options",
                     labels=[warm_coordinate_label(coord) for coord in coords],
-                    on_progress=_prebuild_gate.set_progress,
+                    # Segment-labelled i/N (DEC-MOVERS-WARM-UNBLOCK-001 fix 4).
+                    on_progress=lambda done, total: _prebuild_gate.set_progress(
+                        done, total, segment="options"
+                    ),
                 )
 
             def _prebuild_timeframes(exclude_symbols: frozenset[str]) -> PrebuildOutcome:
@@ -3350,6 +3503,16 @@ def build_app(
                 ``run_full_pipeline``) and the ``finally`` below still releases
                 the movers gate with ``prebuild_ok=False``.
                 """
+                # Movers gate DOWN for THE PREBUILD PHASE ONLY
+                # (DEC-MOVERS-GATE-PREBUILD-SCOPE-001, narrowing the whole-
+                # pipeline begin of DEC-PIPELINE-AUTOPREBUILD-001 chunk 2):
+                # begin() as the FIRST statement of this closure, so the
+                # multi-hour fetch phases never blank the movers — the gate's
+                # honest meaning is "prebuild in progress". A dry_run pipeline
+                # writes no real data and must NOT gate (mirrors the release
+                # guard in the finally below).
+                if not dry_run:
+                    _prebuild_gate.begin()
 
                 # Honest phase label (DEC-PIPELINE-STALL-HEARTBEAT-001): a stall
                 # observed here is named "prebuild", never blamed on "historical".
@@ -3383,7 +3546,24 @@ def build_app(
                         # Allocation probe at the tiny-file writer's start
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
+                        # PRE-RUN disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001):
+                        # skip the whole prebuild gracefully when the lake
+                        # volume can't hold the estimated derived writes
+                        # (observed schema_meta multiplier, 6.5x fallback;
+                        # BRUTEX_PREBUILD_DISK_GUARD=off to override). Fails
+                        # OPEN on any measurement error.
+                        disk_guard=make_disk_guard(
+                            lake_root,
+                            instrument_store.get_meta if instrument_store is not None else None,
+                        ),
                     )
+                    # Post-run observation (best-effort, never raises): persist
+                    # the freshly-materialised lake's OBSERVED multiplier to
+                    # schema_meta so the NEXT pull's guard uses reality instead
+                    # of the fallback. Skipped when the guard blocked (nothing
+                    # changed on disk) or without an instrument store.
+                    if instrument_store is not None and not outcome.disk_guard_blocked:
+                        record_lake_footprint(lake_root, instrument_store.set_meta)
                 finally:
                     # New derived partitions may be on disk (even a partial run —
                     # or one the guard re-raised a global-stop out of — may have
@@ -3395,6 +3575,18 @@ def build_app(
                 # movers gate with the prebuild's honest success verdict (a
                 # re-raised global stop skips this line, leaving ok=False).
                 prebuild_ok = outcome.ok
+                # Release the movers gate the MOMENT the prebuild outcome is
+                # known — ok OR failed (DEC-MOVERS-WARM-UNBLOCK-001 fix 3): the
+                # half-filled-lake hazard the gate exists for ends at prebuild
+                # completion, so the movers warm that FOLLOWS runs un-gated in
+                # the background as a pure cache accelerator. The 2026-07-04/05
+                # incident (pull_id 22fc7739f719): the warm's 39 full-lake-walk
+                # keys (170-256 s each) held /movers hostage for hours behind
+                # the finally-only release. The finally below STAYS as the
+                # idempotent backstop for every path that never reaches this
+                # line (early stop / raised phase / global stop / crash).
+                if not dry_run:
+                    _prebuild_gate.release(outcome.ok)
                 return outcome
 
             # Keep the live PULL RATE panel fed through EVERY phase, not just spot
@@ -3405,10 +3597,11 @@ def build_app(
             # real fetches. The sampler ticks the SAME controller through make_rate_observer
             # (observe-only, best-effort, never builds a controller) so the widget stays
             # live the whole pull.
-            # Movers gate DOWN for the whole real pipeline (chunk 2). A dry_run
-            # writes no real data, so it must NOT gate the movers screens.
-            if not dry_run:
-                _prebuild_gate.begin()
+            # Movers gate: begin() moved INSIDE `_prebuild_timeframes`
+            # (DEC-MOVERS-GATE-PREBUILD-SCOPE-001) so the gate covers ONLY the
+            # prebuild phase, never the multi-hour fetch — mid-fetch movers now
+            # serve (with the spot stored-first read preferring the always-
+            # fresh 1-minute resample while the pull runs).
             try:
                 # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake
                 # for the WHOLE pipeline run (spot → metadata → historical →
@@ -3430,6 +3623,27 @@ def build_app(
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                     )
+                # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
+                # 1b): re-seed EVERY discovery memo off ONE shared walk at the
+                # end-of-pull generation — runs on clean AND early-stopped
+                # pipelines (any writes left the memos dirty), best-effort (a
+                # warm failure never fails the pull), and force_fresh so the
+                # still-`running` job's own pull-active floor cannot serve the
+                # stale pre-pull entries back into the seed. A raised phase
+                # (global stop) skips it — the next request then pays its own
+                # walk with the pull probe already False.
+                warm_discovery_memos(
+                    lake_root=lake_root,
+                    generation=_summary_cache.generation,
+                    symbol_for_id_fn=lambda: {
+                        str(i.security_id): i.symbol_name
+                        for i in instrument_store.list_index_equity_instruments()
+                    },
+                    db_datasets_cache=_db_datasets_cache,
+                    spot_cascade_cache=_spot_cascade_cache,
+                    fno_cascade_cache=_fno_cascade_cache,
+                    latest_date_cache=_latest_movers_date_cache,
+                )
                 if report.spot is not None:
                     _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
                 # Consecutive-failure health over the post-pull Greeks pass
@@ -3448,8 +3662,13 @@ def build_app(
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
                 # clean run all un-gate the movers (never blocked forever);
                 # `prebuild_ok` carries the prebuild's honest verdict (False when
-                # the pipeline never reached it). Logged by the gate itself
-                # (`pipeline.prebuild.gate_released` {ok}).
+                # the pipeline never reached it, in which case begin() never ran
+                # either — release without begin is a pinned-safe no-op). On the
+                # completed-prebuild path this is the idempotent BACKSTOP — the
+                # primary release already fired inside `_prebuild_timeframes`
+                # the moment the outcome was known (DEC-MOVERS-WARM-UNBLOCK-001),
+                # so the movers warm never holds the gate. Logged by the gate
+                # itself (`pipeline.prebuild.gate_released` {ok}).
                 if not dry_run:
                     _prebuild_gate.release(prebuild_ok)
 
@@ -3662,6 +3881,7 @@ def build_app(
                 session_rate=_session_rate,
                 auto_retry=True,
                 until_clean=until_clean,
+                floor_store=instrument_store,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -3899,7 +4119,11 @@ def build_app(
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse(build_spot_coverage_payload([]))
+            # Same freshness-field shape as the real path (no cached entry ⇒
+            # honest duty_degraded=False / snapshot_age_s=0.0).
+            return JSONResponse(
+                _summary_cache.stamp_freshness(SPOT, build_spot_coverage_payload([]))
+            )
         lake = lake_root.parent
 
         def _recompute() -> list[dict[str, Any]]:
@@ -3924,7 +4148,12 @@ def build_app(
             the per-request cost is O(datasets) between ledger flushes.
             """
             rows = _summary_cache.get_or_refresh(SPOT, recompute=_recompute)
-            return build_spot_coverage_payload(rows, spot_window_rollup(lake))
+            # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001):
+            # duty_degraded + snapshot_age_s make a pull-time stale serve
+            # VISIBLE to the operator — never silent (Golden Rule #1).
+            return _summary_cache.stamp_freshness(
+                SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
+            )
 
         return JSONResponse(await run_in_threadpool(_rows_and_rollup))
 
@@ -3998,9 +4227,17 @@ def build_app(
         return spot_rows, categories, store.list_coverage()
 
     def _build_completeness_board(store: Any, lake: Path) -> dict[str, Any]:
-        """Compose the aggregate + per-symbol scoreboard from the shared inputs."""
+        """Compose the aggregate + per-symbol scoreboard from the shared inputs.
+
+        Stamped with the SPOT entry's freshness (duty_degraded / snapshot_age_s
+        — DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001): the scoreboard's spot rows
+        ride the SAME cached SPOT scan, so a pull-time stale serve is visible
+        here too, never silent.
+        """
         spot_rows, categories, records = _completeness_inputs(store, lake)
-        return build_completeness_scoreboard(spot_rows, categories, records, categories)
+        return _summary_cache.stamp_freshness(
+            SPOT, build_completeness_scoreboard(spot_rows, categories, records, categories)
+        )
 
     def _build_per_symbol_completeness(store: Any, lake: Path) -> dict[str, dict[str, Any]]:
         """Compose the per-symbol completeness map (with dates) from the shared inputs."""
@@ -4025,7 +4262,11 @@ def build_app(
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return build_completeness_scoreboard([], {}, [], {})
+            # Same freshness-field shape as the real path (an absent SPOT entry
+            # honestly reads duty_degraded=False / snapshot_age_s=0.0).
+            return _summary_cache.stamp_freshness(
+                SPOT, build_completeness_scoreboard([], {}, [], {})
+            )
         board: dict[str, Any] = await run_in_threadpool(
             _build_completeness_board, store, lake_root.parent
         )
@@ -4475,7 +4716,11 @@ def build_app(
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse(build_option_coverage_payload([]))
+            # Same freshness-field shape as the real path (no cached entry ⇒
+            # honest duty_degraded=False / snapshot_age_s=0.0).
+            return JSONResponse(
+                _summary_cache.stamp_freshness(OPTIONS, build_option_coverage_payload([]))
+            )
         lake = lake_root.parent
 
         def _recompute() -> list[dict[str, Any]]:
@@ -4487,7 +4732,11 @@ def build_app(
             return summarize_option_datasets(store.connection, lake)
 
         rows = await run_in_threadpool(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
-        return JSONResponse(build_option_coverage_payload(rows))
+        # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
+        # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
+        return JSONResponse(
+            _summary_cache.stamp_freshness(OPTIONS, build_option_coverage_payload(rows))
+        )
 
     # ── Movers (reference-only lake screens — DEC-MOVERS-DASHBOARD-PAGE-001) ──
 
@@ -4668,7 +4917,7 @@ def build_app(
                 if date is None:
                     date_str = (
                         _latest_movers_date_cache.get_or_compute(
-                            "latest_movers_date",
+                            LATEST_MOVERS_DATE_KEY,
                             generation=generation,
                             compute=lambda: latest_movers_date(lake_root),
                         )
@@ -4683,7 +4932,7 @@ def build_app(
                 # compute on every cache miss (DEC-MOVERS-DISCOVERY-MEMO-001). Computed
                 # on the worker thread; a pull bumps `generation` → one fresh walk.
                 movers_datasets = _db_datasets_cache.get_or_compute(
-                    "movers_candle_datasets",
+                    MOVERS_DATASETS_KEY,
                     generation=generation,
                     compute=lambda: list_candle_datasets(lake_root),
                 )
@@ -4806,6 +5055,14 @@ def build_app(
                 spot_cands = _movers_cache.get_or_compute(
                     key,
                     generation=generation,
+                    # prefer_resample while a pull runs (DEC-MOVERS-GATE-PREBUILD-SCOPE-001):
+                    # the gate now covers ONLY the prebuild phase, so a mid-FETCH movers
+                    # read is served — but the stored TF partitions are rewritten only by
+                    # the final prebuild, so mid-fetch they can predate the freshly-landing
+                    # 1-minute bars. While `_pull_live()` reads True the spot intraday read
+                    # takes the always-fresh 1-minute resample (byte-equal semantics per the
+                    # pinned stored≡resample equality, just slower); no pull → stored-first,
+                    # byte-identical. Evaluated inside the compute (scan-time truth).
                     compute=lambda: compute_spot_candidates(
                         lake_root=lake_root,
                         interval=interval,
@@ -4813,6 +5070,7 @@ def build_app(
                         time=time,
                         exchange=exch,
                         datasets=movers_datasets,
+                        prefer_resample=_pull_live(),
                     ),
                 )
                 return build_snapshot_payload(
@@ -5547,23 +5805,16 @@ def build_app(
             used here on the SAME threadpool worker as the store read so the
             store's RLock stays on one thread (DEC-DASHBOARD-FASTREAD-001, the
             DEC-WINDOW-OPTION-DECODE-001 windows-route pattern); display-only.
-            The directory walks ride the same worker, off the event loop.
+            The directory walks ride the same worker, off the event loop. The
+            payload SHAPE is the ONE shared builder
+            (:func:`~brutex.dashboard.discovery_warm.build_db_datasets_payload`
+            — the post-pipeline discovery warm seeds this exact cache key with
+            the byte-identical shape, DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001).
             """
             symbol_for_id = {
                 str(i.security_id): i.symbol_name for i in store.list_index_equity_instruments()
             }
-            # SPOT list is honestly spot-only: drop any FNO set (an F&O contract is not
-            # spot) so the spot picker never conflates the two (DEC-FNO-CANDLE-LAKE-001);
-            # the F&O sets get their own first-class `fno` surface below.
-            spot = [
-                d for d in list_candle_datasets(lake) if d["segment"] != FNO_CANDLE_LAKE_SEGMENT
-            ]
-            return {
-                "datasets": spot,
-                "fno": list_fno_candle_datasets(lake),
-                "fno_schema": fno_candle_lake_schema(),
-                "options": list_option_datasets(lake, symbol_for_id=symbol_for_id),
-            }
+            return build_db_datasets_payload(lake, symbol_for_id=symbol_for_id)
 
         # DEC-DB-TAB-SWITCH-O1-001: the three O(files) dir-walks above are invariant
         # between lake writes, so memoise the discovered lists behind the shared write
@@ -5574,7 +5825,7 @@ def build_app(
         return JSONResponse(
             await run_in_threadpool(
                 lambda: _db_datasets_cache.get_or_compute(
-                    "db_candle_datasets", generation=gen, compute=_datasets
+                    DB_DATASETS_KEY, generation=gen, compute=_datasets
                 )
             )
         )
@@ -5596,9 +5847,10 @@ def build_app(
         lake = lake_root.parent
         gen = _summary_cache.generation
         index: FnoCascadeIndex = await run_in_threadpool(
-            lambda: _fno_cascade_cache.get(
+            lambda: _fno_cascade_cache.get_or_compute(
+                FNO_CASCADE_KEY,
                 generation=gen,
-                build=lambda: build_fno_cascade(list_fno_candle_datasets(lake)),
+                compute=lambda: build_fno_cascade(list_fno_candle_datasets(lake)),
             )
         )
         return index
@@ -5722,14 +5974,11 @@ def build_app(
 
         def _build() -> SpotCascadeIndex:
             """Build the spot symbol→interval cascade from the non-F&O lake datasets."""
-            spot = [
-                d for d in list_candle_datasets(lake) if d["segment"] != FNO_CANDLE_LAKE_SEGMENT
-            ]
-            return build_spot_cascade(spot)
+            return build_spot_cascade(filter_spot_datasets(list_candle_datasets(lake)))
 
         index: SpotCascadeIndex = await run_in_threadpool(
             lambda: _spot_cascade_cache.get_or_compute(
-                "db_spot_cascade", generation=gen, compute=_build
+                SPOT_CASCADE_KEY, generation=gen, compute=_build
             )
         )
         return index

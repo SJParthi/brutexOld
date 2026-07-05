@@ -60,6 +60,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from time import sleep as _time_sleep
 from typing import Final
@@ -74,6 +75,7 @@ from brutex.adapters.empty_circuit_breaker import (
 from brutex.adapters.error_storm_breaker import (
     ErrorStormBreaker,
     VendorDownError,
+    observe_authorisation_failure,
     observe_window_failure,
     observe_window_success,
 )
@@ -92,6 +94,7 @@ from brutex.adapters.groww.contracts import (
 )
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
+    GrowwAuthorisationError,
     GrowwCredentialDeadError,
     GrowwError,
     is_auth_failure,
@@ -118,6 +121,7 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.data.errors import LakeWriteHalt, PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.partial_window_detect import (
     SUSPECTED_PARTIAL_WINDOW_ERROR_EVENT,
     SUSPECTED_PARTIAL_WINDOW_EVENT,
@@ -498,6 +502,24 @@ def ingest_option_contract(
                 break
             except GrowwError as exc:
                 if not is_retryable(exc):
+                    # AUTHORISATION-storm observation (DEC-GROWW-AUTHZ-QUARANTINE-001):
+                    # feed the terminal authorisation rejection to the per-pull
+                    # breaker's authorisation arm BEFORE the quarantine raise (the
+                    # terminal path previously never observed — only the exhausted
+                    # retryable branch below did). The distinct-symbol unit is the
+                    # UNDERLYING symbol (one underlying's whole multi-contract chain
+                    # reads as ONE symbol, mirroring observe_window_failure). Below
+                    # the threshold: a no-op + the per-contract quarantine raise; at
+                    # the threshold: RAISES GrowwAuthorisationStormError — the
+                    # fleet-wide account-suspension global stop. None (dry-run /
+                    # synthetic / tests) observes nothing.
+                    if isinstance(exc, GrowwAuthorisationError):
+                        observe_authorisation_failure(
+                            storm_breaker,
+                            symbol=contract.underlying_symbol,
+                            window_key=key,
+                            exc=exc,
+                        )
                     raise  # terminal (auth included) → outer quarantine, never swallowed
                 # Transient: feed the controller (a 429 steps the rate down, a NON-auth
                 # transient drives the timeout ladder — `steps_timeout_ladder`,
@@ -682,6 +704,8 @@ def ingest_option_contract(
             bars_appended=result_report.bars_appended,
             conflicts=result_report.conflicts,
             series_key=series_key,
+            vendor_dup_rows_dropped=result_report.vendor_dup_rows_dropped,
+            max_close_delta=result_report.max_close_delta,
         )
 
     def _rehydrate(bars: Sequence[CandleBar]) -> None:
@@ -920,6 +944,8 @@ def _process_option_window_tail(
         transient_failures=0,
         conflicts=len(conflicts),
         retried_windows=1 if attempt > 0 else 0,
+        vendor_dup_rows_dropped=result.vendor_dup_rows_dropped,
+        max_close_delta=result.max_close_delta,
     )
 
 
@@ -978,6 +1004,24 @@ class GrowwOptionIngestReport:
     def still_failed_windows(self) -> int:
         """Total windows still failing after the retry budget (deferred to next pull)."""
         return sum(r.still_failed_windows for r in self.pairs.values())
+
+    @property
+    def conflicts(self) -> int:
+        """Total keep-first vendor re-statements across all successful pairs."""
+        return sum(r.conflicts for r in self.pairs.values())
+
+    @property
+    def vendor_dup_rows_dropped(self) -> int:
+        """Total within-batch duplicate vendor rows dropped across all pairs (sum-fold)."""
+        return sum(r.vendor_dup_rows_dropped for r in self.pairs.values())
+
+    @property
+    def max_close_delta(self) -> Decimal | None:
+        """MAX absolute keep-first close delta across all pairs (exact Decimal; ``None`` = none)."""
+        delta: Decimal | None = None
+        for r in self.pairs.values():
+            delta = fold_max_close_delta(delta, r.max_close_delta)
+        return delta
 
     @property
     def failed_pairs(self) -> int:

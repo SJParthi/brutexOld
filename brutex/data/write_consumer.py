@@ -98,7 +98,7 @@ import structlog
 
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.partition import partition_for_timestamp
-from brutex.data.sink import BarSink, SinkAppendResult
+from brutex.data.sink import BarSink, SinkAppendResult, vendor_surface_from_write_results
 
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
@@ -813,13 +813,22 @@ def _merge_parts(parts: Sequence[WriteResultParts]) -> SinkAppendResult:
     Sums the per-partition ``bars_appended`` (each already attributed to THIS request) and
     concatenates the per-partition ``write_results`` (so the spine sees every partition's
     conflicts), with ``partitions_written`` = the number of distinct partitions written.
+    The two vendor-behaviour counters (DEC-VENDOR-CONFLICT-SURFACE-001) ride the SAME
+    COMMON fold :class:`~brutex.data.sink.ParquetBarSink` uses, so the pooled sink
+    reports them identically. Honest attribution note (Golden Rule #10): a COALESCED
+    group's :class:`~brutex.data.parquet_writer.WriteResult` describes the whole
+    union write, so — exactly like ``conflicts`` today — a request sharing a
+    coalesced group reads the group-level counters, never a silently-dropped zero.
     """
     bars_appended = sum(p.bars_appended for p in parts)
     write_results = tuple(wr for p in parts for wr in p.write_results)
+    dup_rows, max_delta = vendor_surface_from_write_results(write_results)
     return SinkAppendResult(
         bars_appended=bars_appended,
         partitions_written=len(parts),
         write_results=write_results,
+        vendor_dup_rows_dropped=dup_rows,
+        max_close_delta=max_delta,
     )
 
 

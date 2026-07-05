@@ -335,6 +335,22 @@ GROWW_CREDENTIAL_DEAD_MINUTES_ENV: Final[str] = "BRUTEX_CREDENTIAL_DEAD_MINUTES"
 #: mechanisms entirely (observations no-op, never trips). Default ON.
 GROWW_ERROR_STORM_ENABLED_ENV: Final[str] = "BRUTEX_ERROR_STORM_BREAKER"
 
+#: Minimum DISTINCT symbols with a TERMINAL vendor AUTHORISATION rejection
+#: (:class:`~brutex.adapters.groww.errors.GrowwAuthorisationError` — the SDK's
+#: ``GrowwAPIAuthorisationException`` class) — with ZERO transport successes since
+#: the storm began — before the breaker escalates to the fleet-wide
+#: :class:`~brutex.adapters.groww.errors.GrowwAuthorisationStormError` pull HALT
+#: (DEC-GROWW-AUTHZ-QUARANTINE-001). BELOW the threshold each authorisation error is
+#: a PER-SYMBOL quarantine (one entitlement-restricted instrument never stops a
+#: ~750-symbol pull); AT/ABOVE it the honest verdict is an account-level suspension
+#: (which hits every symbol), so the old pull-wide HALT semantics are restored.
+#: Heuristic, not a vendor fact; env-overridable
+#: (:data:`GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV`); ``<= 0`` disables the arm.
+GROWW_AUTHZ_STORM_MIN_SYMBOLS: Final[int] = 5
+#: Env override for :data:`GROWW_AUTHZ_STORM_MIN_SYMBOLS` (int; ``<= 0`` disables
+#: the authorisation-storm arm — every authorisation error stays a quarantine).
+GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV: Final[str] = "BRUTEX_GROWW_AUTHZ_STORM_MIN_SYMBOLS"
+
 #: Default number of INDEPENDENT Groww SDK connections the live spot pull fans its worker
 #: threads across (DEC-GROWW-CLIENT-POOL-001 — the multi-connection
 #: :class:`~brutex.adapters.groww.pool.ClientPool`). 1 = today's exact single-connection
@@ -515,32 +531,82 @@ def resolve_token_param_path(env_name: str, default: str) -> str:
     return default
 
 
-#: Environment toggle for the OPTIONAL anti-burst smooth pacing
-#: (DEC-GROWW-SMOOTH-PACING-001). The token bucket already caps the AVERAGE rate at
-#: ``current_rps``, but its ``1/rate`` cadence still lets sub-second micro-bursts
-#: through (the operator's ``rps_1s_max`` spiking to 8–9 below the AIMD ceiling), which
-#: can trip a vendor 429. When this toggle is truthy, the live pull build site injects
-#: ``RateController(smooth_pacing=True)`` so issuance is spread evenly with a minimum
-#: ``1/current_rps`` interval between consecutive issues — the per-second issue count
-#: can then never exceed the current AIMD rate. DEFAULT OFF (byte-identical to today):
-#: the smoothing is provably SAFE (caps + AIMD ladder UNCHANGED) but its live
-#: 429-reduction is UNVERIFIED pending a live probe, so it ships behind a flag.
+#: Environment toggle for the anti-burst smooth pacing
+#: (DEC-GROWW-SMOOTH-PACING-001 + DEC-SMOOTH-PACING-AUTOLATCH-001). The token bucket
+#: already caps the AVERAGE rate at ``current_rps``, but its ``1/rate`` cadence still
+#: lets sub-second micro-bursts through (the operator's ``rps_1s_max`` spiking to 8–9
+#: below the AIMD ceiling), which can trip a vendor 429. THREE modes
+#: (:func:`resolve_smooth_pacing_mode`): a truthy value forces smooth pacing ON from
+#: construction; an explicit falsy value (``"0"`` / ``"false"`` / ``"no"`` / ``"off"``)
+#: disables it AND the auto-latch entirely; unset/blank (the DEFAULT) is ADAPTIVE —
+#: smoothing starts OFF (byte-identical pacing) and ONE-WAY LATCHES ON the first time a
+#: 429 lands with measured per-1s burst evidence above the then-current allowed rate.
+#: The latch only ever ADDS spacing (caps + AIMD ladder UNCHANGED — CLAUDE.md §2 Rule
+#: 6); its live 429-reduction remains UNVERIFIED pending a live probe (Golden Rule #10).
 GROWW_SMOOTH_PACING_ENV: Final[str] = "BRUTEX_GROWW_SMOOTH_PACING"
+
+#: Explicit-falsy env values that select the OFF smooth-pacing mode (latch disabled
+#: entirely). Anything truthy selects ON; unset/blank/unrecognised selects ADAPTIVE.
+_SMOOTH_PACING_OFF_VALUES: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+#: Truthy env values that select the ON smooth-pacing mode (latched from construction).
+_SMOOTH_PACING_ON_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+
+def resolve_smooth_pacing_mode() -> str:
+    """Resolve the TRI-STATE smooth-pacing mode from ``BRUTEX_GROWW_SMOOTH_PACING``.
+
+    DEC-SMOOTH-PACING-AUTOLATCH-001. Returns one of the vendor-neutral
+    :mod:`brutex.adapters.rate_common` mode tokens:
+
+    * **ADAPTIVE** (:data:`~brutex.adapters.rate_common.SMOOTH_PACING_ADAPTIVE`) —
+      the env var is UNSET / blank / unrecognised. Smoothing starts OFF
+      (byte-identical pacing) and the controller ONE-WAY latches it ON when a 429
+      arrives with measured per-1s burst evidence above the then-current allowed
+      rate. The new DEFAULT: evidence-gated, never raises any cap, so a bad env
+      value degrades to the safe adaptive default rather than silently forcing
+      smoothing ON (CLAUDE.md §2 Rule 6 — a rate gate is never FORCED by accident;
+      the latch only ADDS spacing on measured evidence).
+    * **ON** (:data:`~brutex.adapters.rate_common.SMOOTH_PACING_ON`) — an explicit
+      truthy value (``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``, case-insensitive):
+      latched from construction, the prior ``smooth_pacing=True`` behaviour.
+    * **OFF** (:data:`~brutex.adapters.rate_common.SMOOTH_PACING_OFF`) — an explicit
+      falsy value (``"0"`` / ``"false"`` / ``"no"`` / ``"off"``): smoothing AND the
+      auto-latch are disabled entirely (the pre-latch escape hatch).
+
+    O(1). The rate_common import is lazy so this constants module stays
+    import-light (the repo's deliberate lazy-import pattern).
+    """
+    from brutex.adapters.rate_common import (
+        SMOOTH_PACING_ADAPTIVE,
+        SMOOTH_PACING_OFF,
+        SMOOTH_PACING_ON,
+    )
+
+    raw = os.environ.get(GROWW_SMOOTH_PACING_ENV)
+    if raw is None:
+        return SMOOTH_PACING_ADAPTIVE
+    token = raw.strip().lower()
+    if token in _SMOOTH_PACING_ON_VALUES:
+        return SMOOTH_PACING_ON
+    if token in _SMOOTH_PACING_OFF_VALUES:
+        return SMOOTH_PACING_OFF
+    return SMOOTH_PACING_ADAPTIVE
 
 
 def resolve_smooth_pacing() -> bool:
-    """Resolve the smooth-pacing toggle from ``BRUTEX_GROWW_SMOOTH_PACING`` — default OFF.
+    """Legacy BOOLEAN smooth-pacing view — ``True`` iff the resolved mode is ON.
 
-    Reads :data:`GROWW_SMOOTH_PACING_ENV`. Returns ``True`` only for an explicit truthy
-    value (``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``, case-insensitive); ANY other
-    value — unset, blank, ``"0"``, ``"false"``, or unrecognised — returns ``False``, so
-    the safe default-OFF, byte-identical behaviour can never be enabled by accident
-    (CLAUDE.md §2 Rule 6 — never silently change a rate gate). O(1).
+    Kept as a thin compat delegate over :func:`resolve_smooth_pacing_mode`
+    (DEC-SMOOTH-PACING-AUTOLATCH-001): it is an exported public symbol with
+    existing pins, and its ORIGINAL contract — ``True`` only for an explicit
+    truthy ``BRUTEX_GROWW_SMOOTH_PACING`` (DEC-GROWW-SMOOTH-PACING-001) — is
+    preserved exactly (ADAPTIVE and OFF both read ``False``). The production
+    build sites now pass the tri-state mode instead; use
+    :func:`resolve_smooth_pacing_mode` in new code. O(1).
     """
-    raw = os.environ.get(GROWW_SMOOTH_PACING_ENV)
-    if raw is None:
-        return False
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    from brutex.adapters.rate_common import SMOOTH_PACING_ON
+
+    return resolve_smooth_pacing_mode() == SMOOTH_PACING_ON
 
 
 def resolve_pool_size() -> int:
@@ -572,6 +638,8 @@ __all__ = [
     "EARLIEST_HISTORY",
     "EXCLUDED_SEGMENTS",
     "EXPECTED_FNO_STOCK_COUNT",
+    "GROWW_AUTHZ_STORM_MIN_SYMBOLS",
+    "GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV",
     "GROWW_CLIENT_POOL_MAX",
     "GROWW_CLIENT_POOL_SIZE",
     "GROWW_CREDENTIAL_DEAD_MINUTES_ENV",
@@ -633,6 +701,7 @@ __all__ = [
     "WINDOW_DAYS_180",
     "resolve_pool_size",
     "resolve_smooth_pacing",
+    "resolve_smooth_pacing_mode",
     "resolve_token_broker_region",
     "resolve_token_param_path",
 ]

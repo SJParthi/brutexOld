@@ -682,9 +682,11 @@ jobs:
             pytest --cov=brutex.data.greeks_enrich --cov=brutex.data.spot_join --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_greeks_enrich.py tests/unit/test_data_spot_join.py \
               tests/unit/test_greeks_enrich_audit_regressions.py \
+              tests/unit/test_greeks_enrich_parallel.py \
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
-              tests/golden/test_greeks_enrich_golden.py
+              tests/golden/test_greeks_enrich_golden.py \
+              tests/golden/test_greeks_enrich_parallel_golden.py
           else
             echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
           fi
@@ -808,7 +810,7 @@ jobs:
           # under the aggregate gate, DEC-COV-CLI-HARNESS-001) / the
           # pragma'd live pull path.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
-            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
           fi
@@ -1489,6 +1491,15 @@ jobs:
           else
             echo "(brutex.adapters.groww.live test file not present yet — gate inactive)"
           fi
+          # DEC-VENDOR-FLOOR-LAZY-PROBE-001: strict gate on the lazy vendor-depth-floor
+          # learner (probe_depth reuse + mass-empty-breaker gate + schema_meta persist +
+          # pre-floor mass-settle + planning clamp). Injectable probe/store/ledger
+          # fakes, so standalone-gateable with no growwapi/network. 100% line+branch.
+          if compgen -G "tests/unit/test_groww_vendor_floor.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.vendor_floor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_vendor_floor.py
+          else
+            echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
+          fi
           # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
           # modules + the shared candle-field rules. Import-light (pure data /
           # parser over brutex.data.models), so standalone-gateable.
@@ -1635,9 +1646,19 @@ jobs:
           # dedicated test file is now strict-gated above
           # (DEC-ORCH-STRICT-GATES-001, entry #613).
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py
+            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py
           else
             echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          # DEC-LAKE-FOOTPRINT-MEASURED-001 (MIGRATION.md #1253): the measured
+          # lake-footprint multiplier + the pipeline prebuild's PRE-RUN disk
+          # guard (observed schema_meta multiplier, conservative 6.5x
+          # fallback, BRUTEX_PREBUILD_DISK_GUARD=off escape hatch, FAIL-OPEN
+          # closure). NEW module -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_lake_footprint.py" > /dev/null; then
+            pytest --cov=brutex.data.lake_footprint --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lake_footprint.py
+          else
+            echo "(brutex.data.lake_footprint test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/integration/test_strategies_runner.py" > /dev/null; then
             pytest --cov=brutex.strategies.runner --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_strategies_runner.py
@@ -1722,7 +1743,8 @@ jobs:
             echo "(brutex.dashboard.universe_pull test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_pull_progress.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py
+            # + the ETA/open-ended/add_bars honesty suite (DEC-PULL-PROGRESS-HONESTY-001)
+            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
@@ -1758,6 +1780,7 @@ jobs:
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
               tests/unit/test_pull_jobs_singleflight.py \
+              tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
               tests/integration/test_dashboard_e2e.py
@@ -1814,6 +1837,15 @@ jobs:
             pytest --cov=brutex.dashboard.summary_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_summary_cache.py
           else
             echo "(brutex.dashboard.summary_cache test file not present yet — gate inactive)"
+          fi
+          # DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 (#1250): the post-pipeline
+          # discovery warm — re-seeds the five discovery memos (db datasets
+          # triple-walk + spot/F&O cascades + latest-movers-date) off ONE
+          # shared lake walk, best-effort. 100% line+branch on discovery_warm.py.
+          if compgen -G "tests/unit/test_discovery_warm.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.discovery_warm --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_discovery_warm.py
+          else
+            echo "(brutex.dashboard.discovery_warm test file not present yet — gate inactive)"
           fi
           # DEC-DASHBOARD-REQUEST-LOGGING-001 (#440): per-request structured
           # logging — the high-frequency-poll level policy + the uvicorn

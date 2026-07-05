@@ -294,7 +294,7 @@ def test_movers_prebuild_gate_still_uses_textcontent_and_5s_retry() -> None:
     html = _template("movers.html")
     assert (
         '$("noteText").textContent = j.note || '
-        '"pull pipeline running — movers gated until the prebuild and movers warm finish.";'
+        '"pull pipeline running — movers gated until the prebuild finishes.";'
     ) in html
     # The honest gated status line (DEC-PREBUILD-GATE-HONEST-NOTE-001) also
     # renders via textContent only.

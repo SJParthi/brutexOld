@@ -189,6 +189,15 @@
      F&O". The mutually-exclusive partner of .chip.ref (every row is one or
      the other) — together they tag F&O vs spot-only at a glance. */
   .chip.opt { color:var(--green); background:rgba(38,217,176,.13); }
+  /* STALL-SUSPECT chip (DEC-PULL-STALL-CHIP-001) — the pull-progress snapshot
+     has carried stalled/stall_detail since DEC-PIPELINE-STALL-HEARTBEAT-001,
+     but NO template consumed them. This amber chip beside #pulltitle appears
+     ONLY while the payload reads stalled=true (no heartbeat for the audited
+     timeout, worker STILL running — suspect, NOT terminal) and hides the
+     instant it clears. Amber mirrors .chip.ref's "informational" palette;
+     hidden by default + revealed via the established .on toggle (.badge.on). */
+  .chip.stall { color:var(--yellow); background:rgba(255,183,77,.14); display:none; }
+  .chip.stall.on { display:inline-block; }
   .inst.refonly { opacity:.82; }   /* subtle dim so F&O rows pop */
   /* Inline legend explaining the row chips. */
   .legend { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
@@ -508,7 +517,7 @@
            indices / ±3 for stocks was never the pull rule). Verified: CLAUDE.md §6 "Options
            contract resolution" — get_contracts returns "all listed strikes, not
            relative-to-spot" (brutex/adapters/groww/contracts.py). -->
-      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b> and written <b>only</b> by the pipeline's automatic FINAL pre-build stage once the fetch fully succeeds — covering <b>SPOT, FUTURES and OPTIONS</b> (F&amp;O keeps open-interest). Heads-up on storage: a fully pre-built options lake is roughly <b>2–3× its 1-minute footprint</b> (DEC-PIPELINE-AUTOPREBUILD-001, operator-accepted; the lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>). There is no manual pre-build button — the pipeline runs it itself.</div>
+      Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b> and written <b>only</b> by the pipeline's automatic FINAL pre-build stage once the fetch fully succeeds — covering <b>SPOT, FUTURES and OPTIONS</b> (F&amp;O keeps open-interest). Heads-up on storage: a fully pre-built lake costs a <b>measured multiple of its 1-minute footprint</b> — the pipeline measures the real multiplier after every pre-build and uses a conservative <b>6.5×</b> estimate before the first measurement (the earlier "2–3×" figure ignored the Greeks-enriched option 1-minute rewrite; DEC-LAKE-FOOTPRINT-MEASURED-001, operator-accepted; the lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>). A pre-run disk guard skips the pre-build when free space is short (<code>BRUTEX_PREBUILD_DISK_GUARD=off</code> to override). There is no manual pre-build button — the pipeline runs it itself.</div>
     <!-- The ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001): selection-aware — pulls the
          TICKED instruments, or the WHOLE universe when none are ticked — via the SHARED
          /pull-pipeline route (resolve_pull_targets: ?symbols= for a selection, bare = everything).
@@ -596,7 +605,7 @@
 
   <div id="pullpanel">
     <div class="beam"></div>
-    <div class="title"><b id="pulltitle">Pulling…</b><span class="counter" id="counter">0</span><span class="sub">units</span></div>
+    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span></div>
     <div class="tfgrid" id="tfgrid"></div>
     <!-- DEC-PROGRESS-WINDOW-UNITS-001: the card counts COARSE units (spot:
          symbol×interval chunks; options: all-or-nothing SERIES of ~dozens of
@@ -1831,19 +1840,57 @@ function renderPhases(phases, currentPhase) {
    scary network-error string the removed live-feed poll used to show. */
 const POLL_MAX_FEED_RETRIES = 5;
 let pollFeedRetries = 0;
+
+/* Honest linear ETA formatter (DEC-PULL-PROGRESS-HONESTY-001): "~Xh Ym" (or "~Ym"
+   under an hour) from the backend's eta_seconds. Returns '' (hidden) when the ETA
+   is null/absent — idle, no measured rate yet, or an open-ended (growing-total)
+   phase where a linear ETA would be an illusion. textContent-only rendering. */
+function fmtEta(sec) {
+  if (typeof sec !== 'number' || !isFinite(sec) || sec < 0) return '';
+  const t = Math.round(sec);
+  const h = Math.floor(t / 3600);
+  const m = Math.round((t - h * 3600) / 60);
+  return h > 0 ? `~${h}h ${m}m` : `~${m}m`;
+}
+function etaSuffix(s) {
+  if (s.open_ended) return '';           // growing denominator — never show a linear ETA
+  const eta = fmtEta(s.eta_seconds);
+  return eta ? ` · ETA ${eta}` : '';
+}
+
+/* Stall-suspect chip (DEC-PULL-STALL-CHIP-001). The progress snapshot has
+   carried stalled/stall_detail since DEC-PIPELINE-STALL-HEARTBEAT-001, but no
+   surface consumed them — this toggles the amber #stallchip from the SAME
+   pollProgress loop (no new poll). textContent ONLY, never innerHTML (CodeQL
+   XSS guard — stall_detail is server text rendered inert). A null snapshot
+   (settle / feed-dropped via finishLive) or stalled=false hides the chip. */
+function updateStallChip(s) {
+  const chip = document.getElementById('stallchip');
+  if (!chip) return;
+  const on = !!(s && s.stalled);
+  chip.classList.toggle('on', on);
+  chip.textContent = on ? ('⚠ ' + (s.stall_detail || 'stalled — no heartbeat')) : '';
+}
 async function pollProgress(label) {
   if (pollTimer) clearTimeout(pollTimer);
   try {
     const r = await fetch('/api/v1/universe/pull-progress');
     const s = await r.json();
     pollFeedRetries = 0;  // a successful poll clears the transient-retry budget
-    document.getElementById('counter').textContent =
-      (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
+    /* open_ended (DEC-PULL-PROGRESS-HONESTY-001): the phase's total is NOT final
+       (the F&O denominator grows as contracts are planned), so show the honest
+       units count instead of a fabricated-complete "N / N". */
+    document.getElementById('counter').textContent = s.open_ended
+      ? (s.completed || 0).toLocaleString('en-IN') + ' / ?'
+      : (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
     renderLiveStats(s);
     renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
     if (s.state === 'running') {
-      document.getElementById('pulltitle').textContent =
-        `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}`;
+      updateStallChip(s);  // stalled-suspect ⇒ amber chip; a recovery clears it (DEC-PULL-STALL-CHIP-001)
+      // textContent (never innerHTML) — the CodeQL XSS guard; ETA hidden when null.
+      document.getElementById('pulltitle').textContent = s.open_ended
+        ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${esc(s.current || '…')}`
+        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}` + etaSuffix(s);
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }
@@ -1869,6 +1916,7 @@ async function pollProgress(label) {
 
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  updateStallChip(null);  // a settled run is never stalled-suspect — hide the chip (DEC-PULL-STALL-CHIP-001)
   setBulkDisabled(false);
   // Restore the ONE pull button to its selection-driven label/enabled state
   // (the pipeline button is re-enabled by setBulkDisabled(false); the manual
@@ -1921,14 +1969,17 @@ function renderLiveStats(s) {
   const row = document.getElementById('bulkrow');
   [
     ['units done', s.completed, 'ok'],
-    ['of total', s.total, ''],
+    // open_ended (DEC-PULL-PROGRESS-HONESTY-001): the total is still growing —
+    // show an honest '?' instead of a moving number that reads as final.
+    ['of total', s.open_ended ? null : s.total, ''],
     ['failed', s.failed, (s.failed ? 'bad' : '')],
     ['no-data gaps', s.gaps || 0, (s.gaps ? 'gap' : '')],
     ['bars', s.bars, 'ok'],
   ].forEach(([k, v, cls]) => {
     const d = document.createElement('div');
     d.className = 'bstat ' + (cls || '');
-    d.innerHTML = `<span class="bv">${(v || 0).toLocaleString('en-IN')}</span>`
+    const shown = (v === null) ? '?' : (v || 0).toLocaleString('en-IN');
+    d.innerHTML = `<span class="bv">${shown}</span>`
       + `<span class="bk">${esc(k)}</span>`;
     row.appendChild(d);
   });
