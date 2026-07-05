@@ -364,26 +364,18 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     try:
         import polars as pl
 
-        from brutex.data.tf_autoderive import compare_derived_freshness
+        from brutex.data.tf_autoderive import compare_derived_freshness, read_lake_bars_frame
         from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
         from brutex.data.timeframes import parse_label
 
         interval_to_label = {v: k for k, v in INTRADAY_TF_INTERVALS.items()}
 
         def _read(symbol_dir: Path, interval: str) -> pl.DataFrame:
-            from brutex.data.lake_read import dedup_bars_frame
-
-            # Keep-FIRST read dedup BEFORE the sort (DEC-LAKE-READ-UNIQUE-001):
-            # the freshness compare must see the same deduped bars every wired
-            # reader serves, not a poisoned-era physical duplicate.
-            frame, _dropped = dedup_bars_frame(
-                pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
-                source=f"doctor:{symbol_dir.name}/{interval}",
-            )
-            return (
-                frame.rename({"timestamp": "ts_utc"})
-                .select("ts_utc", "open", "high", "low", "close", "volume")
-                .sort("ts_utc")
+            # ONE COMMON reader with the sweep-preflight freshness gate
+            # (DEC-SUSPICION-SWEEP-FIXES-001 G1) — keep-FIRST read dedup BEFORE
+            # the sort (DEC-LAKE-READ-UNIQUE-001), doctor-labelled dedup source.
+            return read_lake_bars_frame(
+                symbol_dir, interval, source=f"doctor:{symbol_dir.name}/{interval}"
             )
 
         for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):

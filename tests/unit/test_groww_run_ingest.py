@@ -325,6 +325,53 @@ def test_with_paced_client_three_branches() -> None:
     assert mod.with_paced_client(sentinel, _pace) is sentinel  # type: ignore[arg-type]
 
 
+def test_with_paced_client_binds_controller_feedback_hooks() -> None:
+    """DEC-SUSPICION-SWEEP-FIXES-001 (D1): the seam binds the FULL controller
+    hook triple — pace AND on_rate_limit AND on_success — so the client's bounded
+    fast-retry can never absorb a 429 invisibly to the AIMD ladder. A pace-only
+    call (the pre-D1 shape) leaves the feedback hooks at the client's no-ops."""
+    from brutex.adapters.groww.adapter import GrowwMarketAdapter
+    from brutex.adapters.groww.client import (
+        GrowwClient,
+        client_self_reports_rate_limits,
+        client_self_reports_successes,
+    )
+    from brutex.adapters.groww.instruments import InstrumentIndex
+
+    class _FakeSDK:
+        def get_historical_candles(self, **_kwargs: object) -> Mapping[str, object]:
+            return {}
+
+        def get_expiries(self, **_kwargs: object) -> Mapping[str, object]:
+            return {}
+
+        def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
+            return {}
+
+    def _pace() -> None: ...
+
+    def _rl() -> None: ...
+
+    def _ok() -> None: ...
+
+    index = InstrumentIndex(by_groww_symbol={}, by_exchange_symbol={}, universe=())
+    adapter = GrowwMarketAdapter(client=GrowwClient(sdk=_FakeSDK()), index=index)  # type: ignore[arg-type]
+
+    bound = mod.with_paced_client(adapter, _pace, _rl, _ok)
+    assert isinstance(bound, GrowwMarketAdapter)
+    assert isinstance(bound.client, GrowwClient)
+    assert bound.client.pace is _pace
+    assert bound.client.on_rate_limit is _rl
+    assert bound.client.on_success is _ok
+    assert client_self_reports_rate_limits(bound.client)
+    assert client_self_reports_successes(bound.client)
+
+    pace_only = mod.with_paced_client(adapter, _pace)
+    assert isinstance(pace_only, GrowwMarketAdapter)
+    assert not client_self_reports_rate_limits(pace_only.client)
+    assert not client_self_reports_successes(pace_only.client)
+
+
 def test_non_groww_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
         raise ValueError("a real bug, not a vendor error")

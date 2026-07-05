@@ -1314,3 +1314,53 @@ class TestWindowLedgerApi:
         # Offset past the end → a clean empty page, total still the real count.
         tail = client.get("/api/v1/db/window-ledger?limit=10&offset=999").json()
         assert tail["rows"] == [] and tail["total"] == 5
+
+    def test_paging_clicks_parse_the_ledger_once_per_generation(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D3 read-count SPY (DEC-SUSPICION-SWEEP-FIXES-001): the route previously
+        re-PARSED the whole ledger Parquet (~841k rows measured on a full-universe
+        options pull) on EVERY paging click. Now every click within one ledger
+        generation rides ONE cached parse (``db_view.window_ledger_rows_cached``);
+        a ledger flush (mtime bump) costs exactly one more."""
+        from datetime import UTC, date, datetime
+
+        import brutex.data.window_ledger_store as store_mod
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        for i in range(4):
+            ledger.record(
+                WindowKey(
+                    market="groww",
+                    security_id=f"SYM{i:02d}",
+                    interval="1minute",
+                    start=date(2021, 1, 1),
+                    end=date(2021, 1, 31),
+                ),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=5,
+                now=datetime(2026, 7, 1, tzinfo=UTC),
+            )
+        save_window_ledger(ledger, tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        parses = {"n": 0}
+        real_load = store_mod.load_window_ledger
+
+        def _counting_load(lake_root: Path, **kwargs: object) -> WindowLedger:
+            parses["n"] += 1
+            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(store_mod, "load_window_ledger", _counting_load)
+        full = client.get("/api/v1/db/window-ledger?limit=500&offset=0").json()
+        page1 = client.get("/api/v1/db/window-ledger?limit=2&offset=0").json()
+        page2 = client.get("/api/v1/db/window-ledger?limit=2&offset=2").json()
+        assert parses["n"] == 1  # three clicks, ONE parse (was one parse PER click)
+        # The cached read serves byte-identical pages (sort + derived cols intact).
+        assert page1["rows"] == full["rows"][0:2]
+        assert page2["rows"] == full["rows"][2:4]
+        assert full["total"] == 4

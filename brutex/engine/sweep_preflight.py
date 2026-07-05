@@ -97,3 +97,59 @@ def preflight_slices(
         if slice_sizes.get((symbol, interval), 0) == 0
     )
     return PreflightReport(missing=missing, requested=len(symbols) * len(interval_list))
+
+
+@dataclass(frozen=True, slots=True)
+class FreshnessReport:
+    """Outcome of the sweep derived-timeframe FRESHNESS preflight.
+
+    DEC-SUSPICION-SWEEP-FIXES-001 (G1). The zero-bar :class:`PreflightReport`
+    refuses a MISSING slice; this refuses a PRESENT-but-STALE one: a stored
+    derived timeframe that no longer equals a fresh re-derivation from its
+    1-minute base (a 1m backfill after the last prebuild, a
+    pre-DEC-RESAMPLE-ANCHOR-002 grid) would feed the engine bars that disagree
+    with the lake's own base data — and the run identity would hash the stale
+    snapshot as if it were canonical (Golden Rule #4). Correctness > everything
+    (the merge-readiness priority law), so the launch refuses loudly instead.
+
+    Attributes
+    ----------
+    stale
+        Every checked ``(symbol, interval)`` pair whose stored derived table
+        drifted from a fresh re-derivation, in sorted deterministic order.
+    checked
+        Total pairs the freshness source could verify (pairs it abstained on —
+        no stored derived partition / no 1-minute base / a non-derived
+        interval — are NOT counted; see
+        :func:`~brutex.data.tf_autoderive.lake_derived_freshness_verdicts`).
+    """
+
+    stale: tuple[tuple[str, str], ...]
+    checked: int
+
+    @property
+    def ok(self) -> bool:
+        """True iff every VERIFIABLE requested derived pair is fresh."""
+        return not self.stale
+
+    def remediation(self) -> str:
+        """The exact operator remedy: re-run the pipeline's prebuild stage."""
+        return (
+            "stale derived TFs (stored table drifted from a fresh 1-minute "
+            "re-derivation): run the dashboard's ▶ Pull · full pipeline — its "
+            "automatic final prebuild stage re-derives every derived timeframe "
+            "(DEC-PIPELINE-AUTOPREBUILD-001)"
+        )
+
+
+def preflight_derived_freshness(verdicts: Mapping[tuple[str, str], str]) -> FreshnessReport:
+    """Fold per-pair freshness *verdicts* into the pure gate report.
+
+    *verdicts* maps each VERIFIABLE requested ``(symbol, interval)`` pair to
+    :func:`~brutex.data.tf_autoderive.compare_derived_freshness`'s verdict
+    (``"fresh"`` / ``"stale"``) — anything not exactly ``"fresh"`` counts stale
+    (fail-closed: an unexpected verdict string can never silently pass).
+    Deterministic sorted output; pure + O(pairs).
+    """
+    stale = tuple(sorted(pair for pair, verdict in verdicts.items() if verdict != "fresh"))
+    return FreshnessReport(stale=stale, checked=len(verdicts))
