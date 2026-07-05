@@ -359,3 +359,102 @@ class TestCatalogEntryValidation:
     def test_rejects_naive_fetched_at(self) -> None:
         with pytest.raises(ValueError, match="fetched_at"):
             _valid_entry(fetched_at=datetime(2024, 1, 1, 9, 59))
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Price positivity (DEC-STORED-DATA-VALIDATION-001) — the L1-a read gate
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPricePositivity:
+    """Non-positive prices are rejected by the SHARED per-bar validator.
+
+    Fails-before (round-2 audit, live-reproduced): an internally-ORDERED
+    all-negative bar (open=-5, high=-1, low=-10, close=-2) satisfied every
+    ordering invariant and passed silently — a legacy pre-#912 stored
+    partition could flow a day_low of -1000 into Stage-1A + run identity.
+    """
+
+    def test_rejects_ordered_all_negative_bar(self) -> None:
+        # THE audit repro: ordered, yet every price is negative.
+        with pytest.raises(ValueError, match="positive price"):
+            CandleBar(
+                timestamp=_ts(),
+                open=Decimal("-5"),
+                high=Decimal("-1"),
+                low=Decimal("-10"),
+                close=Decimal("-2"),
+                volume=5,
+                open_interest=None,
+            )
+
+    @pytest.mark.parametrize("field", ["open", "high", "low", "close"])
+    def test_rejects_zero_price_naming_field(self, field: str) -> None:
+        prices: dict[str, Decimal] = {
+            "open": Decimal("100"),
+            "high": Decimal("101"),
+            "low": Decimal("99"),
+            "close": Decimal("100"),
+        }
+        # Zeroing one field may ALSO break ordering — positivity fires FIRST
+        # (pinned below), so the message names the real defect per field.
+        prices[field] = Decimal("0")
+        with pytest.raises(ValueError, match=f"CandleBar.{field} must be a positive price"):
+            CandleBar(
+                timestamp=_ts(),
+                open=prices["open"],
+                high=prices["high"],
+                low=prices["low"],
+                close=prices["close"],
+                volume=0,
+                open_interest=None,
+            )
+
+    def test_error_names_the_bar_timestamp(self) -> None:
+        with pytest.raises(ValueError, match="2024-01-25T09:15:00"):
+            CandleBar(
+                timestamp=_ts(),
+                open=Decimal("0"),
+                high=Decimal("0"),
+                low=Decimal("0"),
+                close=Decimal("0"),
+                volume=0,
+                open_interest=None,
+            )
+
+    def test_positivity_fires_before_ordering(self) -> None:
+        # An UN-ordered negative bar reports positivity, not ordering.
+        with pytest.raises(ValueError, match="positive price"):
+            CandleBar(
+                timestamp=_ts(),
+                open=Decimal("-5"),
+                high=Decimal("-10"),  # also high < low — ordering broken too
+                low=Decimal("-1"),
+                close=Decimal("-2"),
+                volume=0,
+                open_interest=None,
+            )
+
+    def test_option_bar_shares_the_positivity_gate(self) -> None:
+        with pytest.raises(ValueError, match="OptionBar.open must be a positive price"):
+            _option(open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2"))
+
+    def test_greeks_bar_shares_the_positivity_gate(self) -> None:
+        with pytest.raises(ValueError, match="FnoGreeksBar.open must be a positive price"):
+            _greeks_bar(
+                open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2")
+            )
+
+    def test_smallest_tick_price_is_accepted(self) -> None:
+        # 0.05 — the smallest real Indian tick — stays a valid bar.
+        tick = Decimal("0.05")
+        bar = CandleBar(
+            timestamp=_ts(),
+            open=tick,
+            high=tick,
+            low=tick,
+            close=tick,
+            volume=1,
+            open_interest=None,
+        )
+        assert bar.low == tick

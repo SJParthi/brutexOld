@@ -18,7 +18,38 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+_Last updated: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
+MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
+adversarial audit's confirmed defects fixed as ONE change set: (a) the SHARED
+per-bar validator (`data/models.py::_validate_price_bar` — CandleBar /
+FnoGreeksBar / OptionBar) now requires every price > 0, so a zero/negative but
+internally-ORDERED legacy stored bar (reproduced: day_low −1000 into Stage-1A)
+raises LOUDLY at the read boundary; `feed/replay.py::arrow_table_to_bars`
+gains `source=` and names the partition + bar ts on a corrupt row (O(1)/bar,
+bench-neutral). (b) NEW COMMON `brutex/data/price_sanity.py` (ONE vectorized
+positivity+ordering mask) wired at the prebuild's 1-minute read boundary
+(`make_lake_read_1m`) — a high<low 1m bar can no longer LAUNDER into
+self-consistent-looking derived buckets across the 19 TFs + 1day; the raised
+`ResampleInputError` rides the EXISTING per-symbol prebuild quarantine (symbol
+named, derived TFs not written, rows never silently dropped/fixed). (c) the
+lake census/heal scanner reads the OHLC columns in its SAME per-file pass
+(`BAR_SCAN_COLUMNS`) and emits an OBSERVE-ONLY `PriceSanityRows` finding
+(census `price_files`, engine verdict flips; the healer FILTERS it — strictly
+row-removing, never value-editing). (d) the vendor OHLC clamp is counted +
+WARNed once per window (`groww.parse.ohlc_clamped`, observe-only, parse
+byte-unchanged). (e) movers/db 2dp display cells ride ONE shared
+`static/bx-format.js::bxFixed2` (string-based ROUND_HALF_UP — the
+`preopen_report._round2` twin; node-executed golden), fixing the IEEE
+`toFixed(2)` half-boundary divergence ('1.005' → "1.01", not "1.00"). (f) the
+mutation workflow's alert steps fire on `cancelled()` too — a timeout-KILLED
+cargo-mutants job (live-probed run 28748795864, both Rust jobs killed at
+exactly 120 min) now alerts instead of dying silently; the Rust jobs'
+chronic timeout itself is honestly ledgered, NOT papered over with an
+unevidenced budget raise. Sanctioned behavior change: a previously-silently-
+accepted CORRUPT stored bar now fails loudly; clean lakes byte-unaffected
+(goldens pass unmodified). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; touched modules 100% line+branch).
+Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -317,7 +348,17 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+- **Active branch:** `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
+  DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
+  the shared per-bar read validator + partition-naming corrupt-bar errors in `arrow_table_to_bars`; the NEW COMMON
+  vectorized `brutex/data/price_sanity.py` gate at the prebuild's `make_lake_read_1m` boundary (corrupt symbol
+  quarantined + named via the existing `ResampleInputError` machinery, derived TFs not written); the lake census
+  scanner's OBSERVE-ONLY `PriceSanityRows` finding over the same per-file pass (healer filters it — never
+  value-editing); the `groww.parse.ohlc_clamped` per-window clamp counter; the shared `bx-format.js` ROUND_HALF_UP
+  2dp display formatter for movers/db; and the mutation workflow alerting on `cancelled()` so a timeout-killed
+  mutation job is visible. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; clean lakes byte-unaffected; touched modules
+  100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
@@ -1681,7 +1722,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/nice-wright-qmb2bz`
+- **Active feature branch:** `claude/stored-data-validation`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
