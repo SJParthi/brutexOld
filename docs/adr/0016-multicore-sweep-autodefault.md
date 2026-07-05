@@ -177,3 +177,49 @@ asserted — so a composition-point regression that mis-threads `tuple_count`
 and demotes everything to sequential trips the poison). The #1080
 byte-identity goldens pass UNMODIFIED. `sweep_parallel.py` at 100% line +
 100% branch.
+
+## 8. Amendment A1 (2026-07-05, DEC-SWEEP-CAP-BENCH-001, MIGRATION.md #1355) — the §5 deferred core-scaling + RSS bench SHIPS; cap verdict KEEP 8
+
+The §5 deferred "pytest-benchmark core-scaling + RSS-vs-48GB memory bench" now
+exists: `tests/bench/test_sweep_worker_scaling.py` (A/B wall clock + RSS over
+the REAL `run_parallel_grid` at total-worker arms {cap−1, cap, 10, 12} derived
+from `AUTO_SWEEP_WORKERS_CAP`; gated on `BRUTEX_M4PRO_ABS=1` AND ≥ 14 visible
+CPUs; machine-readable `SWEEP_WORKER_SCALING` lines + a `VERDICT:` line) with
+operator runbook `docs/runbooks/sweep-worker-scaling-bench.md`. The env
+resolver, the small-grid sequential demotion and the `_worker_init`
+OMP/RAYON/POLARS=1 determinism pins are untouched (the bench drives the public
+`workers=` seam only), and the §3 byte-identity golden
+(`TestSequentialEqualsParallelGolden.test_stable_across_repeated_parallel_runs`)
+is EXTENDED — parametrized (4,3) → {(4,3), (10,4), (12,10)} so
+sequential == 3 == 4 == 10 == 12 holds transitively, including oversubscribed
+pools — never weakened.
+
+**First measurement (2026-07-05): VERDICT `KEEP CAP=8` — the cap does NOT
+move.** The only available runner was a 4-core Linux sandbox (nproc =
+sched_getaffinity = 4; NOT the M4 Pro), so the in-repo gated body SKIPPED at
+its core guard (proven) and the numbers were captured by an out-of-band driver
+over the same helpers: two repetitions, median-of-3 per arm, 24 tuples ×
+3,750 bars — workers 7/8/10/12 → 3.166/3.276/3.683/4.186 s and
+3.197/3.243/3.732/4.140 s; `speedup_vs_cap` 0.889/0.869 (10 workers) and
+0.783/0.783 (12 workers); every arm `oversubscribed=1`; result digests
+identical across all arms both repetitions. The raise is VETOED on two
+independent grounds: (1) 4 usable cores make every >4-worker arm
+oversubscription noise — structurally NOT proof of a dedicated-core win
+(Golden Rule #10); (2) even at face value the raised arms are SLOWER than the
+cap arm, nowhere near the ≥ 1.15 threshold.
+
+**What this does and does not close.** The §5 "8-worker THROUGHPUT is NOT
+benched" caveat is now PARTIALLY closed: the harness + decision rule +
+first (lab) numbers exist, but the M4 Pro measurement is still OUTSTANDING —
+the "~6–8×" figure REMAINS A PROJECTION and no M4-Pro number is claimed. The
+sandbox evidence cannot move the cap in EITHER direction. The runbook §2
+command (`BRUTEX_M4PRO_ABS=1 pytest tests/bench/test_sweep_worker_scaling.py
+-q -s -rA --tb=short -p no:cacheprovider -m bench` on the 14-core M4 Pro,
+internal SSD) is the only path to an evidence-based raise; if it prints
+`RAISE-ELIGIBLE(W)` the raise itself is the one-constant change
+`AUTO_SWEEP_WORKERS_CAP = W` (+ the `(10, 8)`/`(14, 8)` parametrize rows +
+a further amendment here). A sharded writer-actor (> 1 consumers) is the only
+lever past the fsync Amdahl wall — explicit FUTURE work, NOT claimed; it gets
+its own decision ID when it ships. Enumerating the bench file in
+`.github/workflows/bench-m4pro.yml` is a named wiring follow-up (the manual
+runbook command is the procedure until then).
