@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from io import StringIO
+from typing import Final
 
 import structlog
 
@@ -354,8 +356,69 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
     )
 
 
-def parse_instrument_csv(text: str) -> list[tuple[str, Instrument]]:
-    """Parse Groww instrument-master CSV text into in-scope ``(gsym, Instrument)``.
+#: Cap on the skip-reason samples a :class:`ParseSkipReport` carries (bounded —
+#: the report is persisted to ``schema_meta`` as JSON, so it must stay small
+#: however pathological the vendor CSV; mirrors the audit-report sample caps).
+PARSE_SKIP_SAMPLE_CAP: Final[int] = 10
+
+#: The ``schema_meta`` key the dashboard load persists the bounded
+#: :class:`ParseSkipReport` JSON under (DEC-PARSE-SKIP-REPORT-001 — read by
+#: ``GET /api/v1/universe/parse-skips`` + the ``/universe`` panel). Defined HERE,
+#: next to the report it names, as the ONE source of truth (CLAUDE.md §11 COMMON).
+PARSE_SKIPS_META_KEY: Final[str] = "instrument_parse_skips.report"
+
+
+@dataclass(frozen=True, slots=True)
+class ParseSkipReport:
+    """The bounded skip accounting of ONE instrument-master parse.
+
+    DEC-PARSE-SKIP-REPORT-001 — before this report existed the
+    DEC-INSTRUMENT-SKIP-NO-GSYM-001 skip data was logged then DISCARDED
+    (``parse_instrument_csv`` returned only the parsed rows), so a vendor
+    master silently rotting row-by-row was invisible outside ``/logs``.
+
+    Attributes
+    ----------
+    skipped_count
+        Malformed / stale IN-SCOPE rows isolated-and-skipped this parse
+        (:data:`_ROW_PARSE_ERRORS`). Out-of-scope rows (MCX / COMMODITY /
+        unknown type) are NOT counted — they are filtered by design, not
+        skipped for being malformed.
+    in_scope_rows
+        Total in-scope rows seen (``parsed + skipped``) — the denominator the
+        :func:`parse_skip_verdict` threshold scales on.
+    samples
+        The first :data:`PARSE_SKIP_SAMPLE_CAP` skip reasons (each the raised
+        error's ``str``), so triage can see WHAT is rotting without an
+        unbounded payload.
+    """
+
+    skipped_count: int
+    in_scope_rows: int
+    samples: tuple[str, ...]
+
+
+def parse_skip_threshold(in_scope_rows: int) -> int:
+    """Return the GREEN ceiling for skipped rows: ``max(10, ceil(0.1% of in-scope))``.
+
+    A handful of junk vendor rows (the observed BSE "BSE FOCUSED IT" blank-symbol
+    row) is normal master noise; a skip count past 0.1% of the in-scope master
+    (or past the absolute floor of 10 on a tiny master) signals genuine vendor
+    rot worth a RED panel. Pure; ``ceil`` so the fraction never rounds a real
+    breach down to green.
+    """
+    return max(10, math.ceil(0.001 * in_scope_rows))
+
+
+def parse_skip_verdict(report: ParseSkipReport) -> bool:
+    """True (GREEN) iff *report*'s skips are within :func:`parse_skip_threshold`."""
+    return report.skipped_count <= parse_skip_threshold(report.in_scope_rows)
+
+
+def parse_instrument_csv_with_report(
+    text: str,
+) -> tuple[list[tuple[str, Instrument]], ParseSkipReport]:
+    """Parse Groww instrument-master CSV text + return the bounded skip report.
 
     Validates the header against the verified 21-column schema (fail-loud on
     drift — Golden Rule #1), then parses each in-scope row. Out-of-scope rows
@@ -367,10 +430,44 @@ def parse_instrument_csv(text: str) -> list[tuple[str, Instrument]]:
     WARNING, and skipped — so one junk vendor row can never abort the whole
     master and leave the dashboard with an empty universe (the HTTP 502 the
     operator hit). The HEADER schema contract above still fail-louds.
+
+    DEC-PARSE-SKIP-REPORT-001: the skip accounting is additionally RETURNED as
+    a :class:`ParseSkipReport` (count + in-scope denominator + capped samples)
+    so the dashboard load can persist + surface it instead of discarding it.
+    The WARNING log is byte-identical to the pre-report behaviour.
+
+    Additive-drift tolerance (DEC-INSTRUMENT-HEADER-ADDITIVE-001): a purely
+    ADDITIVE vendor change — one or more EXTRA columns appended AFTER the
+    verified 21 — is accepted (parsing keys on the known 21 column names, so
+    trailing extras are inert) and surfaced as ONE loud
+    ``groww.instruments.header_extra_columns`` WARNING naming the extras, so
+    a benign 22nd column can never again kill the whole universe load. Every
+    OTHER drift still fail-louds exactly as before: a missing, reordered, or
+    renamed column among the first 21 raises :class:`InstrumentFormatError`,
+    and so does an extra column that DUPLICATES a known name (``DictReader``
+    would let the trailing duplicate silently overwrite the real cell —
+    corrupted values, worse than a refusal; Golden Rule #1).
     """
     reader = csv.DictReader(StringIO(text))
-    if tuple(reader.fieldnames or ()) != INSTRUMENT_CSV_COLUMNS:
+    fields = tuple(reader.fieldnames or ())
+    known = len(INSTRUMENT_CSV_COLUMNS)
+    if fields[:known] != INSTRUMENT_CSV_COLUMNS:
         raise InstrumentFormatError(f"Groww instrument header drift: got {reader.fieldnames!r}")
+    extra_columns = fields[known:]
+    if extra_columns:
+        duplicated = [col for col in extra_columns if col in INSTRUMENT_CSV_COLUMNS]
+        if duplicated:
+            raise InstrumentFormatError(
+                f"Groww instrument header drift: extra trailing column(s) duplicate known "
+                f"column name(s) {duplicated!r} — a duplicate would silently overwrite the "
+                f"real cell values (csv.DictReader keeps the LAST occurrence); refusing. "
+                f"Full header: {reader.fieldnames!r}"
+            )
+        _LOG.warning(
+            "groww.instruments.header_extra_columns",
+            extra_columns=list(extra_columns),
+            count=len(extra_columns),
+        )
     parsed: list[tuple[str, Instrument]] = []
     skipped: list[str] = []
     for row in reader:
@@ -399,6 +496,23 @@ def parse_instrument_csv(text: str) -> list[tuple[str, Instrument]]:
             count=len(skipped),
             samples=skipped[:3],
         )
+    report = ParseSkipReport(
+        skipped_count=len(skipped),
+        in_scope_rows=len(parsed) + len(skipped),
+        samples=tuple(skipped[:PARSE_SKIP_SAMPLE_CAP]),
+    )
+    return parsed, report
+
+
+def parse_instrument_csv(text: str) -> list[tuple[str, Instrument]]:
+    """Parse Groww instrument-master CSV text into in-scope ``(gsym, Instrument)``.
+
+    Thin back-compat wrapper over :func:`parse_instrument_csv_with_report`
+    (DEC-PARSE-SKIP-REPORT-001) — the parse, the WARNING skip log and the
+    returned rows are byte-identical; only the skip REPORT is dropped. Callers
+    that surface skip honesty should use the ``_with_report`` variant.
+    """
+    parsed, _report = parse_instrument_csv_with_report(text)
     return parsed
 
 
@@ -454,13 +568,19 @@ def index_symbol_of(groww_symbol: str) -> str:
 
 
 __all__ = [
+    "PARSE_SKIPS_META_KEY",
+    "PARSE_SKIP_SAMPLE_CAP",
     "InstrumentIndex",
+    "ParseSkipReport",
     "build_index",
     "index_symbol_of",
     "is_in_scope_row",
     "load_index_from_csv",
     "parse_instrument_csv",
+    "parse_instrument_csv_with_report",
     "parse_instrument_row",
+    "parse_skip_threshold",
+    "parse_skip_verdict",
     "resolve",
     "resolve_by_pair",
 ]

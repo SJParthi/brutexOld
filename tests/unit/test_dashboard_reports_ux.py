@@ -107,8 +107,25 @@ def test_reports_date_pickers_prefilled_with_canonical_default() -> None:
     assert "__BRUTEX_DATE_" not in html
 
 
+def test_sweep_start_picker_prefilled_with_backend_default() -> None:
+    """DEC-SWEEP-DEFAULT-2020-001 render-side drift guard (hostile-review fold).
+
+    The ``swStart`` date-picker POSTs its value, so the browser-submitted date
+    is the EFFECTIVE default for a UI-driven sweep — it silently OVERRIDES any
+    backend-only default. Pinning the rendered template value to
+    ``sweep_runner.DEFAULT_START`` (itself pinned to ``GROWW_HISTORY_FLOOR``
+    by ``test_default_start_matches_pull_floor``) means a future floor move
+    cannot leave the template stale.
+    """
+    from brutex.dashboard.app import _render_reports_html
+    from brutex.dashboard.sweep_runner import DEFAULT_START
+
+    html = _render_reports_html()
+    assert f'<input id="swStart" type="date" value="{DEFAULT_START}">' in html
+
+
 def test_resolve_report_dates_defaults_blanks_to_canonical_range() -> None:
-    """A blank from/to falls back to the canonical [2021-01-01, previous day]."""
+    """A blank from/to falls back to the canonical [2020-01-01, previous day]."""
     from datetime import date
 
     from brutex.dashboard.app import _resolve_report_dates

@@ -11,7 +11,7 @@ PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): this module
 was repointed from the retired-vendor 31-column detailed scrip master to the
 Groww 21-column instrument master — the J2-equivalent the dashboard never got.
 The Groww CSV schema differs, so the parse goes through the Groww parser
-(:func:`~brutex.adapters.groww.instrument_loader.load_index` →
+(:func:`~brutex.adapters.groww.instrument_loader.load_index_with_report` →
 :class:`~brutex.adapters.groww.instruments.InstrumentIndex`), NOT the retired one.
 
 This module is the thin, fully-testable seam that:
@@ -90,8 +90,17 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
-from brutex.adapters.groww.instruments import InstrumentIndex, index_symbol_of
+from brutex.adapters.groww.instrument_loader import load_index_with_report, urllib_http_get
+from brutex.adapters.groww.instruments import (
+    PARSE_SKIPS_META_KEY as _PARSE_SKIPS_META_KEY,
+)
+from brutex.adapters.groww.instruments import (
+    InstrumentIndex,
+    ParseSkipReport,
+    index_symbol_of,
+    parse_skip_threshold,
+    parse_skip_verdict,
+)
 from brutex.dashboard.nse_constituents import fetch_constituent_csv, parse_constituents
 from brutex.dashboard.ntm_cache import (
     default_cache_dir,
@@ -1052,6 +1061,41 @@ def _persist_economics_integrity(
     return payload
 
 
+def _persist_parse_skips(
+    report: ParseSkipReport, store: Any, *, run_id: str, csv_sha256: str
+) -> dict[str, Any]:
+    """Persist the master's bounded parse-skip report, log it, return the summary.
+
+    DEC-PARSE-SKIP-REPORT-001 — the skip sibling of the mapping / economics audits.
+    The parser's per-row skip accounting (DEC-INSTRUMENT-SKIP-NO-GSYM-001) was
+    previously logged then DISCARDED; this persists the bounded JSON summary to
+    ``schema_meta`` (read by ``GET /api/v1/universe/parse-skips`` + the green/red
+    ``/universe`` panel) so master rot is visible without grepping ``/logs``.
+    GREEN iff ``skipped_count <= max(10, ceil(0.1% of in-scope rows))``
+    (:func:`~brutex.adapters.groww.instruments.parse_skip_verdict`). Pure fold +
+    one INSERT; the samples tuple is already capped at the parser.
+    """
+    payload: dict[str, Any] = {
+        "skipped_count": report.skipped_count,
+        "in_scope_rows": report.in_scope_rows,
+        "samples": list(report.samples),
+        "threshold": parse_skip_threshold(report.in_scope_rows),
+        "is_green": parse_skip_verdict(report),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "run_id": run_id,
+        "csv_source_sha256": csv_sha256,
+    }
+    store.set_meta(_PARSE_SKIPS_META_KEY, json.dumps(payload))
+    _LOG.info(
+        "universe.load.parse_skips",
+        is_green=payload["is_green"],
+        skipped_count=report.skipped_count,
+        in_scope_rows=report.in_scope_rows,
+        threshold=payload["threshold"],
+    )
+    return payload
+
+
 def load_instrument_master(
     store: Any,
     *,
@@ -1117,8 +1161,13 @@ def load_instrument_master(
         universe underlyings. ``filtered`` is always ``0`` (the Groww parser
         skips out-of-scope MCX / COMMODITY rows BEFORE they reach the index, so
         ``parsed`` already counts only in-scope rows) and ``quarantined`` is
-        always ``0`` (the Groww parser **fails closed** on a malformed in-scope
-        row — Golden Rule #1 — rather than quarantining).
+        always ``0`` — kept for BACK-COMPAT only: since
+        DEC-INSTRUMENT-SKIP-NO-GSYM-001 the Groww parser does NOT fail closed on
+        a malformed in-scope row — it isolates, counts and skips it — and that
+        skip accounting is surfaced in the NEW ``parse_skips`` key
+        (DEC-PARSE-SKIP-REPORT-001: count + in-scope denominator + capped sample
+        reasons + the green/red verdict, also persisted to ``schema_meta``).
+        Only HEADER schema drift still fail-louds.
         ``security_id_collisions`` is the write-boundary identity-collision
         count from :class:`~brutex.data.instrument_store.UpsertResult` —
         DISTINCT-``symbol_name`` rows dropped by the store's
@@ -1130,8 +1179,10 @@ def load_instrument_master(
     Raises
     ------
     brutex.models.InstrumentFormatError
-        On CSV header schema drift (the Groww 21-column header is enforced) or
-        any malformed in-scope row — the store keeps its last good snapshot.
+        On CSV header schema drift (the Groww 21-column header is enforced) —
+        the store keeps its last good snapshot. A malformed in-scope ROW does
+        NOT raise: it is skipped-and-counted
+        (DEC-INSTRUMENT-SKIP-NO-GSYM-001), surfaced via ``parse_skips``.
     """
     fetch = http_get
     if fetch is None:
@@ -1147,7 +1198,11 @@ def load_instrument_master(
         # parser, which fails loud on schema drift (Golden Rule #1).
         master_text = fetch(load_index_url())
         csv_sha256 = hashlib.sha256(master_text.encode("utf-8")).hexdigest()
-        index = load_index(lambda _url: master_text)
+        # DEC-PARSE-SKIP-REPORT-001: the report-carrying twin of ``load_index`` —
+        # same SSRF check + parse + index build, but the per-row skip accounting
+        # (DEC-INSTRUMENT-SKIP-NO-GSYM-001) is RETURNED instead of discarded, so
+        # it can be persisted + surfaced below.
+        index, parse_skip_report = load_index_with_report(lambda _url: master_text)
         parsed = len(index.universe)
         fno_eligible = build_fno_eligible_underlyings(index.universe)
         # The options-bearing underlyings (CE/PE legs) — harvested NOW, while the
@@ -1241,6 +1296,12 @@ def load_instrument_master(
         economics_integrity = _persist_economics_integrity(
             index, store, run_id=run_id, csv_sha256=csv_sha256
         )
+        # Parse-skip honesty (DEC-PARSE-SKIP-REPORT-001): persist the parser's bounded
+        # skip report (count + capped reasons + green/red verdict) — same fail-safe
+        # persist-after-upsert ordering as the two audits above.
+        parse_skips = _persist_parse_skips(
+            parse_skip_report, store, run_id=run_id, csv_sha256=csv_sha256
+        )
         summary = _summarise_stored(store)
 
     _LOG.info(
@@ -1262,7 +1323,10 @@ def load_instrument_master(
         # The Groww parser skips out-of-scope rows BEFORE the index, so they
         # never reach this layer — `parsed` already counts only in-scope rows.
         "filtered": 0,
-        # Groww fails closed on a malformed in-scope row — no quarantine bucket.
+        # BACK-COMPAT stub: since DEC-INSTRUMENT-SKIP-NO-GSYM-001 the parser
+        # skips-and-counts a malformed in-scope row (it does NOT fail closed);
+        # the honest accounting lives in "parse_skips" below — this key is kept
+        # 0 so no existing consumer breaks (DEC-PARSE-SKIP-REPORT-001).
         "quarantined": 0,
         # Write-boundary identity collisions (DEC-MAPPING-COLLISION-HONESTY-001):
         # rows the store's (security_id, exch_id, segment) dedup DROPPED because a
@@ -1282,6 +1346,9 @@ def load_instrument_master(
         "master_integrity": master_integrity,
         # Economics (lot-per-expiry) integrity audit (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
         "economics_integrity": economics_integrity,
+        # Parse-skip honesty report (DEC-PARSE-SKIP-REPORT-001) — the malformed
+        # in-scope rows the parser skipped-and-counted, with the green/red verdict.
+        "parse_skips": parse_skips,
     }
 
 

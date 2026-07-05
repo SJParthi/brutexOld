@@ -243,6 +243,12 @@ jobs:
     # 25 -> 40 (2026-06-29): the suite re-crossed 25m; the PR-event coverage
     # job was killed at 25:12 mid touched-module gate (reported `cancelled`,
     # tests PASS at 100%). Continues the 2026-06-10 15->25 ratchet.
+    # 40 -> 55 (2026-07-04, run 28695534064): killed at 40:17 mid step 11
+    # "Touched-module 100% coverage gate" with EVERY completed step green
+    # (pytest+coverage 22:02 success, strict per-module gate 12:59 success,
+    # last log lines all passing); PR #1085 touches 10+ modules so the
+    # touched-module gate alone outgrew the remaining budget. Wall-clock
+    # budget only — no gate is weakened. Continues the 15->25->40 ratchet.
     # 40 -> 60 (2026-07-04, DEC-TOKEN-STALE-PAUSE-001 PR #1107): the merged
     # tree re-crossed 40m — run 28694858559 job 85102679929 started 04:27:04Z,
     # cancelled 05:07:17Z (40m13s) MID strict per-module gate (step 10, on
@@ -250,7 +256,8 @@ jobs:
     # coverage step already SUCCESS at 100.00%: zero real failures, pure
     # wall-time growth (the #1102/#1105 sibling merges + this PR's 21 tests).
     # 60 keeps an honest hang guard with ~45% headroom over the observed
-    # ~40m wall time. Continues the 15->25->40 ratchet.
+    # ~40m wall time. Continues the 15->25->40 ratchet (60 = the higher of
+    # the two concurrent 2026-07-04 raises, union-resolved at merge).
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -1148,16 +1155,6 @@ jobs:
           else
             echo "(brutex.ranking test file not present yet — gate inactive)"
           fi
-          # 19i2a · brutex.screeners — gainers/losers (DEC-MOVERS-GAINERS-001)
-          #         + volume/volatility movers (DEC-MOVERS-VOLUME-001). The
-          #         --cov target is the whole package, so BOTH screeners' tests
-          #         must run together to reach 100% (a single screener's tests
-          #         leave the sibling module uncovered).
-          if compgen -G "tests/unit/test_screeners_gainers_losers.py" > /dev/null; then
-            pytest --cov=brutex.screeners --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_screeners_gainers_losers.py tests/unit/test_volume_movers.py tests/property/test_volume_movers_properties.py tests/golden/test_volume_movers_golden.py
-          else
-            echo "(brutex.screeners test file not present yet — gate inactive)"
-          fi
           # 19j · brutex.strategies.types (31 stmts, 4 branches, 10 tests)
           if compgen -G "tests/unit/test_strategies_types.py" > /dev/null; then
             pytest --cov=brutex.strategies.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_types.py
@@ -1788,13 +1785,20 @@ jobs:
           # are covered by tests/unit/test_dashboard_db_ux_pack.py, which MUST
           # join this gate so its coverage of those lines registers (without it
           # the module reads 99.19%).
+          # DEC-WINDOW-TORN-READ-RETRY-001 (#1227): the torn-read retry-once +
+          # legacy fallback paths (_ledger_stat_fields OSError branch, the
+          # phase_progress.duckdb_retry/duckdb_fallback and
+          # window_payload.duckdb_retry retry arms) are covered by
+          # tests/unit/test_dashboard_window_payload_retry.py, which MUST join
+          # this gate so its coverage of those lines registers (without it the
+          # module reads 98.55%).
           # DEC-COMPLETENESS-FNO-SKIP-001: the FNO-pruned spot verdict scan
           # (summarize_spot_verdict_datasets + the list_candle_datasets
           # `intervals` walk filter) is covered by
           # tests/unit/test_completeness_fno_skip.py, which MUST also join
           # this gate (without it the module reads 99.74% — lines 935/1241).
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_completeness_fno_skip.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi

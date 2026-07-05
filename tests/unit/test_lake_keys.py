@@ -12,7 +12,14 @@ byte-equivalence matrix at the bottom pins that the move is lossless (the
 
 from __future__ import annotations
 
-from brutex.data.lake_keys import resolve_spot_key, spot_key_candidates
+import pytest
+from brutex.data.lake_keys import (
+    FNO_INDEX_ALIASES_ENV,
+    fno_index_alias_pairs,
+    resolve_spot_key,
+    spot_key_candidates,
+    spot_recovery_candidates,
+)
 
 _CATS: dict[str, str] = {
     "M&M": "equity",
@@ -121,3 +128,83 @@ class TestByteEquivalenceWithCompletenessWrapper:
             assert _resolve_spot_category(symbol, exchange, cats) == resolve_spot_key(
                 symbol, exchange, cats
             ), f"divergence for {symbol!r} / {exchange!r}"
+
+
+class TestFnoIndexAliasPairs:
+    """The sourced + env-override alias pairs (moved from ``greeks_enrich``)."""
+
+    def test_sourced_defaults_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(FNO_INDEX_ALIASES_ENV, raising=False)
+        pairs = dict(fno_index_alias_pairs())
+        assert pairs == {"NIFTYJR": "NIFTYNXT50", "NIFTYMIDSELECT": "MIDCPNIFTY"}
+
+    def test_blank_env_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_ENV, "")
+        assert dict(fno_index_alias_pairs()) == {
+            "NIFTYJR": "NIFTYNXT50",
+            "NIFTYMIDSELECT": "MIDCPNIFTY",
+        }
+
+    def test_well_formed_override_extends_and_uppercases(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_ENV, '{" foo ": " BAR "}')
+        pairs = dict(fno_index_alias_pairs())
+        assert pairs["FOO"] == "BAR"  # key stripped + uppercased, value stripped.
+        assert pairs["NIFTYJR"] == "NIFTYNXT50"  # sourced defaults kept.
+
+    @pytest.mark.parametrize("raw", ["not json", "[1, 2]", '"a string"'])
+    def test_non_object_payload_is_ignored(self, monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_ENV, raw)
+        assert dict(fno_index_alias_pairs()) == {
+            "NIFTYJR": "NIFTYNXT50",
+            "NIFTYMIDSELECT": "MIDCPNIFTY",
+        }
+
+    def test_malformed_entries_are_dropped_wellformed_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Non-str value / blank key / blank value all dropped; the one
+        # well-formed pair survives (never a crash — a lost override only
+        # costs the extra recovery rungs).
+        monkeypatch.setenv(FNO_INDEX_ALIASES_ENV, '{"A": 3, "": "X", "B": "  ", "OK": "NIFTY"}')
+        pairs = dict(fno_index_alias_pairs())
+        assert pairs["OK"] == "NIFTY"
+        assert "A" not in pairs and "B" not in pairs and "" not in pairs
+
+
+class TestSpotRecoveryCandidates:
+    """The FULL F&O→spot drift ladder (moved verbatim from ``greeks_enrich``)."""
+
+    def test_sourced_reverse_and_forward_directions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(FNO_INDEX_ALIASES_ENV, raising=False)
+        # Reverse: the chain names the F&O symbol, the spot dir the trading one.
+        assert "NIFTYMIDSELECT" in spot_recovery_candidates("MIDCPNIFTY", "NSE")
+        assert "NIFTYJR" in spot_recovery_candidates("NIFTYNXT50", "NSE")
+        # Forward: the chain names the spot spelling, the dir the F&O one.
+        assert "NIFTYNXT50" in spot_recovery_candidates("NIFTYJR", "NSE")
+
+    def test_911_form_and_lake_keys_arm(self) -> None:
+        candidates = spot_recovery_candidates("M&M", "NSE")
+        assert "NSE-M&M" in candidates
+        # A drifted-SHAPED underlying walks the spot_key_candidates ladder back down.
+        assert "M&M" in spot_recovery_candidates("NSE-M&M", "NSE")
+
+    def test_env_override_feeds_the_ladder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FNO_INDEX_ALIASES_ENV, '{"SPOTKEY": "NIFTY"}')
+        assert "SPOTKEY" in spot_recovery_candidates("NIFTY", "NSE")
+
+    def test_dedup_and_identity_exclusion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Reverse candidate collides with the #911 form → appears exactly once.
+        monkeypatch.setenv(FNO_INDEX_ALIASES_ENV, '{"NSE-FOO": "FOO", "BAZ": "BAZ"}')
+        candidates = spot_recovery_candidates("FOO", "NSE")
+        assert candidates.count("NSE-FOO") == 1
+        # A self-alias never yields the identity as a candidate.
+        assert "BAZ" not in spot_recovery_candidates("BAZ", "NSE")
+
+    def test_greeks_enrich_alias_is_the_same_object(self) -> None:
+        """The back-compat ``greeks_enrich._spot_recovery_candidates`` delegates here
+        (one source of truth — DEC-DB-MONEYNESS-KEY-RECOVER-001)."""
+        from brutex.data.greeks_enrich import _spot_recovery_candidates
+
+        assert _spot_recovery_candidates is spot_recovery_candidates

@@ -21,11 +21,14 @@ pytest.importorskip("trading_core", reason="greeks enrichment needs the trading_
 pytest.importorskip("polars", reason="the lake round-trip needs polars")
 
 import polars as pl
+from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
     STATUS_NO_SPOT,
     STATUS_OK,
     GreeksEnrichTarget,
+    _style_for_segment,
     enrich_greeks_for_targets,
+    enrich_option_bars,
     read_option_rows,
     unpack_greeks_provenance,
     write_option_greeks,
@@ -33,6 +36,7 @@ from brutex.data.greeks_enrich import (
 from brutex.data.models import CandleBar, FnoGreeksBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
+from brutex.data.spot_join import spot_close_by_ts_window
 from brutex.options.risk_free import FixedRateSource
 
 if TYPE_CHECKING:
@@ -229,6 +233,124 @@ class TestEnrichRoundTrip:
 
     def test_read_option_rows_empty_when_no_partition(self, lake: Path) -> None:
         assert read_option_rows(lake, _targets(_CE)[0]) == []
+
+
+class TestMemoisationInvariance:
+    """DEC-GREEKS-SPOT-MEMO-001 golden A/B: memoised driver ≡ per-target fresh reads.
+
+    Lake A is enriched by the REAL driver (sorted targets + the capacity-2
+    spot-read LRU); lake B — seeded byte-identically — is enriched by manually
+    composing the PUBLIC unmemoised pipeline per target (a FRESH
+    ``spot_close_by_ts_window`` for every contract, exactly what the driver
+    did before the memo). Every stored option partition must come out
+    byte-for-byte identical.
+    """
+
+    _JAN = (date(2024, 1, 1), date(2024, 1, 20))
+    _FEB = (date(2024, 2, 1), date(2024, 2, 20))
+    _FEB_TS = datetime(2024, 2, 5, 4, 0, tzinfo=UTC)
+
+    def _seed(self, lake: Path) -> list[GreeksEnrichTarget]:
+        """2 underlyings × (2 NIFTY windows + 1 RELIANCE) × strikes × CE/PE.
+
+        3 distinct memo keys — (NSE, NIFTY, Jan), (NSE, NIFTY, Feb),
+        (NSE, RELIANCE, Jan) — so the capacity-2 LRU is forced to EVICT, plus
+        shared-key chains so it is forced to HIT.
+        """
+        sink = _sink(lake)
+        for i in range(3):
+            sink.append(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=[_bar(_TS + timedelta(minutes=i), "21500", oi=None)],
+            )
+            sink.append(
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=[_bar(self._FEB_TS + timedelta(minutes=i), "21700", oi=None)],
+            )
+            sink.append(
+                exchange="NSE",
+                segment="CASH",
+                symbol="RELIANCE",
+                interval="1minute",
+                bars=[_bar(_TS + timedelta(minutes=i), "2800", oi=None)],
+            )
+        targets: list[GreeksEnrichTarget] = []
+
+        def _option(symbol: str, window: tuple[date, date], ts: datetime, close: str) -> None:
+            sink.append(
+                exchange="NSE",
+                segment="FNO",
+                symbol=symbol,
+                interval="1minute",
+                bars=[_bar(ts + timedelta(minutes=i), close) for i in range(3)],
+            )
+            targets.append(
+                GreeksEnrichTarget(exchange="NSE", symbol=symbol, start=window[0], end=window[1])
+            )
+
+        for strike in (21400, 21500, 21600):
+            for side in ("CE", "PE"):
+                _option(f"NSE-NIFTY-25Jan24-{strike}-{side}", self._JAN, _TS, "200")
+        for side in ("CE", "PE"):
+            _option(f"NSE-NIFTY-29Feb24-21700-{side}", self._FEB, self._FEB_TS, "250")
+        for strike in (2700, 2800, 2900):
+            for side in ("CE", "PE"):
+                _option(f"NSE-RELIANCE-25Jan24-{strike}-{side}", self._JAN, _TS, "110")
+        return targets
+
+    def _enrich_unmemoised(self, lake: Path, targets: list[GreeksEnrichTarget]) -> None:
+        """The public pipeline per target with a FRESH spot read every time."""
+        for target in targets:
+            parts = parse_fno_symbol(target.symbol)
+            assert parts is not None and parts.option_type is not None
+            rows = read_option_rows(lake, target)
+            join = spot_close_by_ts_window(
+                lake,
+                exchange=target.exchange,
+                underlying=parts.underlying,
+                interval="1minute",
+                start=target.start,
+                end=target.end,
+            )
+            bars, _stats = enrich_option_bars(
+                rows,
+                parts=parts,
+                spot_by_ts=join.close_by_ts,
+                rate_source=_RATE,
+                style_flag=_style_for_segment(join.segment),
+            )
+            write_option_greeks(lake, target, bars)
+
+    def test_memoised_output_byte_equals_fresh_per_target_reads(self, tmp_path: Path) -> None:
+        lake_a = tmp_path / "lake_a"
+        lake_a.mkdir()
+        lake_b = tmp_path / "lake_b"
+        lake_b.mkdir()
+        targets_a = self._seed(lake_a)
+        targets_b = self._seed(lake_b)
+
+        report = enrich_greeks_for_targets(targets=targets_a, lake_root=lake_a, rate_source=_RATE)
+        assert report.enriched == len(targets_a) == 14
+        # 3 distinct (exchange, underlying, window) keys → 3 performed reads,
+        # every other target a memo hit (the honest measured counters).
+        assert report.spot_reads == 3
+        assert report.spot_hits == len(targets_a) - 3
+
+        self._enrich_unmemoised(lake_b, targets_b)
+
+        rel_a = sorted(p.relative_to(lake_a) for p in lake_a.rglob("*.parquet"))
+        rel_b = sorted(p.relative_to(lake_b) for p in lake_b.rglob("*.parquet"))
+        assert rel_a == rel_b and len(rel_a) > 0
+        for rel in rel_a:
+            a_bytes = (lake_a / rel).read_bytes()
+            b_bytes = (lake_b / rel).read_bytes()
+            assert a_bytes == b_bytes, f"memoised vs fresh divergence at {rel}"
 
 
 class TestMixedSchemaDownstreamReaders:

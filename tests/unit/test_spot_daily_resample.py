@@ -25,6 +25,7 @@ from brutex.data.spot_daily_resample import (
     DailyResampleWindow,
     derive_daily_for_targets,
     fill_daily_from_minute,
+    frame_to_candle_bars,
     ist_span_partition_files,
     ist_span_partition_months,
     plan_daily_resample_windows,
@@ -596,3 +597,168 @@ class TestPrebuildLiveEdgeDivergencePinned:
         assert resample_1m_to_daily(frame, before=date(2026, 7, 3)) == []
         bars = resample_1m_to_daily(frame, before=date(2026, 7, 4))
         assert [bar.timestamp.astimezone(_IST).date() for bar in bars] == [date(2026, 7, 3)]
+
+
+class TestResampleVectorizedParity:
+    """Vectorized ``resample_1m_to_daily`` == the verbatim legacy per-row loop.
+
+    DEC-PREBUILD-GIL-VECTORIZE-001 replaced the per-row ``iter_rows`` →
+    ``astimezone(_IST)`` → ``CandleBar(Decimal(str(...)) × 4)`` loop with a
+    columnar filter/re-stamp + the batched
+    :func:`brutex.data.spot_daily_resample.frame_to_candle_bars` (which lives
+    here — the import-graph leaf — and is re-exported from
+    ``timeframe_materialize``). The oracle
+    below is the pre-change implementation copied byte-for-byte; every bar —
+    instant, prices, volume, OI — must match over the edge shapes (IST date
+    roll past 18:30 UTC, month/year boundary, forming-session cutoff,
+    float-noise prices).
+    """
+
+    @staticmethod
+    def _legacy_resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar]:
+        from decimal import Decimal
+
+        from brutex.data.tf_resampler import resample_1m_to_tf
+        from brutex.data.timeframes import DAILY_TF_MINUTES
+
+        if df_1m.is_empty():
+            return []
+        daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
+        bars: list[CandleBar] = []
+        for row in daily.iter_rows(named=True):
+            ist_date = row["ts_utc"].astimezone(_IST).date()
+            if ist_date >= before:
+                continue
+            stamp_utc = datetime(
+                ist_date.year, ist_date.month, ist_date.day, tzinfo=_IST
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=stamp_utc,
+                    open=Decimal(str(row["open"])),
+                    high=Decimal(str(row["high"])),
+                    low=Decimal(str(row["low"])),
+                    close=Decimal(str(row["close"])),
+                    volume=int(row["volume"]),
+                    open_interest=None,
+                )
+            )
+        return bars
+
+    def _assert_parity(self, frame: pl.DataFrame, *, before: date) -> list[CandleBar]:
+        new = resample_1m_to_daily(frame, before=before)
+        legacy = self._legacy_resample_1m_to_daily(frame, before=before)
+        assert new == legacy
+        # The UTC instant AND its rendering are identical (tzinfo object type may
+        # differ — ZoneInfo("UTC") vs timezone.utc — but the instant, offset and
+        # isoformat are what the lake/dedup identity keys on).
+        for new_bar, legacy_bar in zip(new, legacy, strict=True):
+            assert new_bar.timestamp.utcoffset() == legacy_bar.timestamp.utcoffset()
+            assert new_bar.timestamp.isoformat() == legacy_bar.timestamp.isoformat()
+        return new
+
+    def test_multi_session_month_and_year_boundary(self) -> None:
+        bars = self._assert_parity(
+            _frame(
+                (date(2025, 11, 28), 14000.0),
+                (date(2025, 12, 31), 14100.0),
+                (date(2026, 1, 1), 14200.0),
+            ),
+            before=_BEFORE,
+        )
+        assert len(bars) == 3
+        assert all(bar.open_interest is None for bar in bars)
+
+    def test_post_1830_utc_minute_rolls_ist_date(self) -> None:
+        # A bar at 18:31 UTC belongs to the NEXT IST calendar date (00:01 IST) —
+        # the columnar +05:30 shift must classify it exactly like astimezone(_IST).
+        rows = [
+            *_session_rows(date(2025, 11, 28), 14000.0),
+            {
+                "ts_utc": datetime(2025, 11, 28, 18, 31, tzinfo=UTC),
+                "open": 14020.7999,
+                "high": 14022.15,
+                "low": 14019.05,
+                "close": 14021.95,
+                "volume": 5,
+            },
+        ]
+        frame = pl.DataFrame(rows, schema=_1M_SCHEMA).sort("ts_utc")
+        bars = self._assert_parity(frame, before=_BEFORE)
+        # Two IST sessions: 28-Nov (the in-session bars) + 29-Nov (the 00:01 IST bar).
+        assert [bar.timestamp.astimezone(_IST).date() for bar in bars] == [
+            date(2025, 11, 28),
+            date(2025, 11, 29),
+        ]
+
+    def test_forming_session_cutoff_parity(self) -> None:
+        frame = _frame((date(2025, 11, 28), 14000.0), (date(2025, 12, 1), 14100.0))
+        bars = self._assert_parity(frame, before=date(2025, 12, 1))
+        assert [bar.timestamp.astimezone(_IST).date() for bar in bars] == [date(2025, 11, 28)]
+
+    def test_empty_frame_parity(self) -> None:
+        assert self._assert_parity(pl.DataFrame(schema=_1M_SCHEMA), before=_BEFORE) == []
+
+    def test_float_noise_prices_parity(self) -> None:
+        # Long-tail shortest-repr floats (the DEC-LAKE-WRITE-VECTORIZE-001 boundary
+        # class) — Decimal(polars cast-String) must equal Decimal(str(x)) per value.
+        rows = [
+            {
+                "ts_utc": datetime(2025, 11, 28, 3, 45 + i, tzinfo=UTC),
+                "open": o,
+                "high": h,
+                "low": low,
+                "close": c,
+                "volume": 10 + i,
+            }
+            for i, (o, h, low, c) in enumerate(
+                [
+                    (14020.7999, 14022.15, 14019.0001, 14021.95),
+                    (0.00499999999, 1.0, 0.00499999999, 0.005),
+                    (123456.789012345, 123457.0, 123456.0, 123456.789012345),
+                ]
+            )
+        ]
+        frame = pl.DataFrame(rows, schema=_1M_SCHEMA).sort("ts_utc")
+        self._assert_parity(frame, before=_BEFORE)
+
+
+class TestFrameToCandleBarsOpenInterest:
+    """The ``open_interest``-column arm of :func:`frame_to_candle_bars`.
+
+    The batched frame → ``CandleBar`` helper LIVES here (the import-graph
+    leaf, re-exported from ``timeframe_materialize`` for its original
+    callers), so its OI-column branch must be covered by THIS module's own
+    per-module 100% gate — not only by the timeframe_materialize suite that
+    exercises it through the intraday-TF writers. Contract (the legacy
+    ``_oi`` helper's): a present-but-null OI maps to *absent_open_interest*;
+    a present int passes through.
+    """
+
+    @staticmethod
+    def _frame_with_oi(open_interests: list[int | None]) -> pl.DataFrame:
+        rows = [
+            {
+                "ts_utc": datetime(2026, 6, 18, 3, 45 + i, tzinfo=UTC),
+                "open": 100.0 + i,
+                "high": 105.0 + i,
+                "low": 99.0 + i,
+                "close": 101.0 + i,
+                "volume": 10 + i,
+                "open_interest": oi,
+            }
+            for i, oi in enumerate(open_interests)
+        ]
+        return pl.DataFrame(rows, schema={**_1M_SCHEMA, "open_interest": pl.Int64})
+
+    def test_present_oi_column_int_passes_through_and_null_maps_to_default(self) -> None:
+        bars = frame_to_candle_bars(self._frame_with_oi([None, 75]))
+        assert [bar.open_interest for bar in bars] == [0, 75]
+        # The rest of the bar is the same batched conversion the no-OI path uses.
+        assert bars[0].timestamp == datetime(2026, 6, 18, 3, 45, tzinfo=UTC)
+        assert str(bars[0].open) == "100.0"
+        assert [bar.volume for bar in bars] == [10, 11]
+
+    def test_present_null_oi_respects_explicit_absent_value(self) -> None:
+        bars = frame_to_candle_bars(self._frame_with_oi([None, 42]), absent_open_interest=None)
+        assert [bar.open_interest for bar in bars] == [None, 42]
