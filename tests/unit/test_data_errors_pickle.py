@@ -9,6 +9,10 @@ already-formatted message STRING back through ``f"{x:g}"`` and raised
 these are real correctness bugs — any code that pickles a lake error (a process
 pool, a multiprocessing queue, a cross-process audit) would hit them. This test
 pins a clean round-trip for every ``DataLakeError`` a worker can raise.
+
+This file is ALSO the module's auto-discovered scoped 100% coverage gate
+(``coverage_gate_discovery`` maps ``brutex/data/errors.py`` here), so it covers
+the module's one non-exception function (:func:`parquet_read_skip_errors`) too.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from brutex.data.errors import (
     ResampleInputError,
     WriteDeadlineExceeded,
     WriterError,
+    parquet_read_skip_errors,
 )
 
 
@@ -75,3 +80,18 @@ class TestDefaultInitRoundTrip:
         r = _round_trip(exc)
         assert type(r) is type(exc)
         assert str(r) == str(exc)
+
+
+class TestParquetReadSkipErrors:
+    """The module's ONE non-exception function (scoped-gate completeness)."""
+
+    def test_returns_polars_and_oserror(self) -> None:
+        pl = pytest.importorskip("polars")
+        skip = parquet_read_skip_errors()
+        assert skip == (pl.exceptions.PolarsError, OSError)
+
+    def test_narrow_a_value_error_is_not_in_the_set(self) -> None:
+        pytest.importorskip("polars")
+        skip = parquet_read_skip_errors()
+        # NARROW on purpose (Golden Rule #1): a genuine code bug still propagates.
+        assert not issubclass(ValueError, skip)
