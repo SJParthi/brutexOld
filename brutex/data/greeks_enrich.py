@@ -75,7 +75,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
-import pickle
+import pickle  # nosec B403 — dumps-only picklability probe; never loads untrusted data
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
