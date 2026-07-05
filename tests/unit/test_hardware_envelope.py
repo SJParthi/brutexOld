@@ -1,439 +1,404 @@
-"""Unit tests for the COMMON hardware-envelope module (DEC-HARDWARE-ENVELOPE-001).
+"""Unit tests for RAM detection + RAM-scaled budget derivation (DEC-RAM-BUDGETS-001).
 
-100% line + branch of :mod:`brutex.config.hardware_envelope` — every detection
-cascade (macOS / Linux / fallback), every probe failure mode, and every sizing
-helper, all via dependency injection so the branches are deterministic on a
-Linux CI box that is neither an M4 Pro nor able to run ``sysctl``.
+Every branch of :mod:`brutex.hardware_envelope` — the two detection probes
+(``sysconf`` primary, ``sysctl`` macOS fallback — the latter UNVERIFIED on
+real macOS, seam-tested here with a mocked ``subprocess``), the once-per-
+process cache + reset seam, the input validation, the explicit env override
+(fail-loud), the undetected-RAM floor sentinel, the ``workers`` divisor, and
+the log-once observability line.
+
+Plus THE regression pin of the DEC-RAM-BUDGETS-001 semantics law, enumerating
+every derive-bucket call site: on a simulated 48 GiB CLAUDE.md §8 box each
+derived budget is ``>=`` (here: exactly ``==``) its old hand-picked constant,
+and on a smaller simulated box each derived budget SHRINKS (the portability
+win — deliberately not clamped to the floor).
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import pytest
-from brutex.config import hardware_envelope as hw
+from brutex.hardware_envelope import (
+    UNDETECTED_RAM,
+    detect_total_ram_bytes,
+    memory_budget_bytes,
+    reset_hardware_envelope_cache,
+)
+from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+GIB = 1024**3
 
 
-# ────────────────────────────────────────────────────────────────────────
-# _run_sysctl_int
-# ────────────────────────────────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _fresh_cache() -> Iterator[None]:
+    """Isolate every test from the process-global detection cache."""
+    reset_hardware_envelope_cache()
+    yield
+    reset_hardware_envelope_cache()
 
 
-def _proc(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=["sysctl"], returncode=returncode, stdout=stdout)
+def _simulate_ram(monkeypatch: pytest.MonkeyPatch, total_bytes: int) -> None:
+    """Force detection to *total_bytes* (0 = the undetected sentinel).
+
+    Resets the process cache AFTER patching — an earlier import (e.g.
+    ``brutex.orchestrator.bloom``'s import-time derivation) may already have
+    detected the sandbox's real RAM.
+    """
+    monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: total_bytes)
+    monkeypatch.setattr("brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM)
+    reset_hardware_envelope_cache()
 
 
-class TestRunSysctlInt:
-    def test_default_runner_returns_none_or_int(self) -> None:
-        # On Linux CI ``sysctl -n hw.memsize`` is absent/incompatible → None; on a
-        # Mac it is a positive int. Either way exercises the DEFAULT runner path.
-        result = hw._run_sysctl_int("hw.memsize")
-        assert result is None or (isinstance(result, int) and result > 0)
-
-    def test_parses_positive_int(self) -> None:
-        assert hw._run_sysctl_int("k", runner=lambda *a, **k: _proc("10\n")) == 10
-
-    def test_zero_is_none(self) -> None:
-        assert hw._run_sysctl_int("k", runner=lambda *a, **k: _proc("0")) is None
-
-    def test_negative_is_none(self) -> None:
-        assert hw._run_sysctl_int("k", runner=lambda *a, **k: _proc("-4")) is None
-
-    def test_non_integer_is_none(self) -> None:
-        assert hw._run_sysctl_int("k", runner=lambda *a, **k: _proc("nope")) is None
-
-    def test_nonzero_returncode_is_none(self) -> None:
-        assert hw._run_sysctl_int("k", runner=lambda *a, **k: _proc("10", returncode=1)) is None
-
-    def test_oserror_is_none(self) -> None:
-        def _raise(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            raise OSError("no sysctl")
-
-        assert hw._run_sysctl_int("k", runner=_raise) is None
-
-    def test_subprocess_error_is_none(self) -> None:
-        def _raise(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            raise subprocess.TimeoutExpired(cmd="sysctl", timeout=2.0)
-
-        assert hw._run_sysctl_int("k", runner=_raise) is None
+# ────── detection probes ──────
 
 
-# ────────────────────────────────────────────────────────────────────────
-# _sched_affinity
-# ────────────────────────────────────────────────────────────────────────
+class TestSysconfProbe:
+    def test_real_linux_sysconf_detects(self) -> None:
+        # This sandbox is Linux — the primary stdlib path runs for REAL.
+        value = detect_total_ram_bytes()
+        assert value > 0
 
+    @pytest.mark.parametrize(
+        "raiser",
+        [ValueError("unknown name"), OSError("boom"), AttributeError("no sysconf")],
+        ids=["valueerror", "oserror", "attributeerror"],
+    )
+    def test_sysconf_failure_maps_to_sentinel(
+        self, monkeypatch: pytest.MonkeyPatch, raiser: Exception
+    ) -> None:
+        def _boom(_name: str) -> int:
+            raise raiser
 
-class TestSchedAffinity:
-    def test_injected_returns_set(self) -> None:
-        assert hw._sched_affinity(lambda _pid: {0, 1, 2}) == {0, 1, 2}
-
-    def test_injected_oserror_returns_none(self) -> None:
-        def _raise(_pid: int) -> set[int]:
-            raise OSError
-
-        assert hw._sched_affinity(_raise) is None
-
-    def test_missing_sched_getaffinity_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delattr(os, "sched_getaffinity", raising=False)
-        assert hw._sched_affinity() is None
-
-    def test_default_probe_when_available(self) -> None:
-        # On Linux CI ``os.sched_getaffinity`` exists → a non-empty set; elsewhere
-        # None. Either exercises the DEFAULT (no-injection) branch.
-        result = hw._sched_affinity()
-        assert result is None or (isinstance(result, set) and len(result) >= 1)
-
-
-# ────────────────────────────────────────────────────────────────────────
-# _read_meminfo
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestReadMeminfo:
-    def test_parses_total_and_available(self, tmp_path: Path) -> None:
-        p = tmp_path / "meminfo"
-        p.write_text(
-            "MemTotal:       16305672 kB\nMemFree:          123 kB\nMemAvailable:    8000000 kB\n",
-            encoding="utf-8",
+        monkeypatch.setattr("os.sysconf", _boom)
+        monkeypatch.setattr(
+            "brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
         )
-        out = hw._read_meminfo(p)
-        assert out == {"MemTotal": 16305672 * 1024, "MemAvailable": 8000000 * 1024}
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
 
-    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
-        assert hw._read_meminfo(tmp_path / "nope") == {}
-
-    def test_malformed_lines_skipped(self, tmp_path: Path) -> None:
-        p = tmp_path / "meminfo"
-        # a no-colon line, a wanted key with no numeric field, a non-int field.
-        p.write_text("garbage line\nMemTotal:\nMemAvailable: notanumber kB\n", encoding="utf-8")
-        assert hw._read_meminfo(p) == {}
-
-    def test_default_path_real(self) -> None:
-        # /proc/meminfo on Linux → populated; elsewhere {} — exercises the default.
-        out = hw._read_meminfo()
-        assert isinstance(out, dict)
-
-
-# ────────────────────────────────────────────────────────────────────────
-# detect_envelope — macOS / Linux / fallback cascades
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestDetectMacos:
-    def _sysctl(self, values: dict[str, int | None]) -> Callable[[str], int | None]:
-        def _probe(key: str) -> int | None:
-            return values.get(key)
-
-        return _probe
-
-    def test_full_pe_split(self) -> None:
-        env = hw.detect_envelope(
-            platform_system="Darwin",
-            sysctl_int=self._sysctl(
-                {
-                    "hw.logicalcpu": 14,
-                    "hw.physicalcpu": 14,
-                    "hw.perflevel0.logicalcpu": 10,
-                    "hw.perflevel1.logicalcpu": 4,
-                    "hw.memsize": 48 * 1024**3,
-                }
-            ),
+    @pytest.mark.parametrize(("page", "pages"), [(0, 100), (4096, 0), (-1, 100), (4096, -1)])
+    def test_non_positive_sysconf_values_map_to_sentinel(
+        self, monkeypatch: pytest.MonkeyPatch, page: int, pages: int
+    ) -> None:
+        values = {"SC_PAGE_SIZE": page, "SC_PHYS_PAGES": pages}
+        monkeypatch.setattr("os.sysconf", lambda name: values[name])
+        monkeypatch.setattr(
+            "brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
         )
-        assert env.logical_cores == 14
-        assert env.physical_cores == 14
-        assert env.performance_cores == 10
-        assert env.efficiency_cores == 4
-        assert env.total_ram_bytes == 48 * 1024**3
-        assert env.available_ram_bytes == 0
-        assert env.source == "macos_sysctl"
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
 
-    def test_perf_present_eff_missing(self) -> None:
-        env = hw.detect_envelope(
-            platform_system="Darwin",
-            sysctl_int=self._sysctl(
-                {
-                    "hw.logicalcpu": 8,
-                    "hw.perflevel0.logicalcpu": 8,
-                    "hw.perflevel1.logicalcpu": None,
-                }
-            ),
+    def test_sysconf_product_is_page_size_times_pages(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        values = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1000}
+        monkeypatch.setattr("os.sysconf", lambda name: values[name])
+        assert detect_total_ram_bytes() == 4096 * 1000
+
+
+class TestSysctlFallback:
+    """The macOS ``sysctl hw.memsize`` seam — mocked ``subprocess`` only.
+
+    HONEST (Golden Rule #10): real macOS behavior is UNVERIFIED in this
+    Linux sandbox; these tests pin the wrapper's failure mapping, not the
+    platform.
+    """
+
+    @staticmethod
+    def _no_sysconf(monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(_name: str) -> int:
+            raise ValueError("no sysconf name")
+
+        monkeypatch.setattr("os.sysconf", _boom)
+
+    @staticmethod
+    def _fake_run(
+        stdout: str, returncode: int = 0
+    ) -> Callable[..., subprocess.CompletedProcess[str]]:
+        def _run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["sysctl"], returncode=returncode, stdout=stdout, stderr=""
+            )
+
+        return _run
+
+    def test_sysctl_success_detects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._no_sysconf(monkeypatch)
+        monkeypatch.setattr(
+            "brutex.hardware_envelope.subprocess.run", self._fake_run(f"{48 * GIB}\n")
         )
-        assert env.performance_cores == 8
-        assert env.efficiency_cores == 0
+        assert detect_total_ram_bytes() == 48 * GIB
 
-    def test_no_pe_split(self) -> None:
-        # perflevel0 absent → treat all logical as performance.
-        env = hw.detect_envelope(
-            platform_system="Darwin",
-            sysctl_int=self._sysctl({"hw.logicalcpu": 6}),
+    def test_sysctl_binary_missing_maps_to_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._no_sysconf(monkeypatch)
+
+        def _raise(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError("/usr/sbin/sysctl")
+
+        monkeypatch.setattr("brutex.hardware_envelope.subprocess.run", _raise)
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
+
+    def test_sysctl_timeout_maps_to_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._no_sysconf(monkeypatch)
+
+        def _raise(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd="sysctl", timeout=5.0)
+
+        monkeypatch.setattr("brutex.hardware_envelope.subprocess.run", _raise)
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
+
+    def test_sysctl_nonzero_exit_maps_to_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._no_sysconf(monkeypatch)
+        monkeypatch.setattr(
+            "brutex.hardware_envelope.subprocess.run", self._fake_run("", returncode=1)
         )
-        assert env.performance_cores == 6
-        assert env.efficiency_cores == 0
-        assert env.physical_cores == 6  # physical absent → logical
-        assert env.total_ram_bytes == 0
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
 
-    def test_logical_absent_falls_back_to_cpu_count(self) -> None:
-        env = hw.detect_envelope(
-            platform_system="Darwin",
-            sysctl_int=self._sysctl({}),
-            cpu_count_fn=lambda: 12,
+    def test_sysctl_garbage_output_maps_to_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._no_sysconf(monkeypatch)
+        monkeypatch.setattr(
+            "brutex.hardware_envelope.subprocess.run", self._fake_run("hw.memsize: lots\n")
         )
-        assert env.logical_cores == 12
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
+
+    @pytest.mark.parametrize("stdout", ["0", "-5"])
+    def test_sysctl_non_positive_output_maps_to_sentinel(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+    ) -> None:
+        self._no_sysconf(monkeypatch)
+        monkeypatch.setattr("brutex.hardware_envelope.subprocess.run", self._fake_run(stdout))
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
 
 
-class TestDetectLinux:
-    def test_affinity_and_meminfo(self) -> None:
-        env = hw.detect_envelope(
-            platform_system="Linux",
-            affinity_fn=lambda _pid: {0, 1, 2, 3},
-            meminfo_fn=lambda: {"MemTotal": 100, "MemAvailable": 40},
+class TestDetectionCache:
+    def test_detected_once_then_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = {"n": 0}
+
+        def _probe() -> int:
+            calls["n"] += 1
+            return 48 * GIB
+
+        monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", _probe)
+        assert detect_total_ram_bytes() == 48 * GIB
+        # A changed probe result is IGNORED — no mid-run flapping.
+        monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: 8 * GIB)
+        assert detect_total_ram_bytes() == 48 * GIB
+        assert calls["n"] == 1
+
+    def test_undetected_sentinel_is_cached_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
+        monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: 48 * GIB)
+        assert detect_total_ram_bytes() == UNDETECTED_RAM
+
+    def test_reset_seam_re_detects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 48 * GIB)
+        assert detect_total_ram_bytes() == 48 * GIB
+        _simulate_ram(monkeypatch, 8 * GIB)
+        reset_hardware_envelope_cache()
+        assert detect_total_ram_bytes() == 8 * GIB
+
+    def test_first_detection_logs_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 48 * GIB)
+        with capture_logs() as logs:
+            detect_total_ram_bytes()
+            detect_total_ram_bytes()
+        events = [log for log in logs if log["event"] == "hardware_envelope.ram_detected"]
+        assert len(events) == 1
+        assert events[0]["total_ram_bytes"] == 48 * GIB
+        assert events[0]["detected"] is True
+
+
+# ────── memory_budget_bytes ──────
+
+
+class TestMemoryBudgetValidation:
+    @pytest.mark.parametrize("fraction", [0.0, -0.5, 1.5, float("nan"), float("inf")])
+    def test_bad_fraction_raises(self, fraction: float) -> None:
+        with pytest.raises(ValueError, match="fraction must be a finite value"):
+            memory_budget_bytes(fraction=fraction, floor_bytes=1)
+
+    @pytest.mark.parametrize("floor", [0, -8])
+    def test_bad_floor_raises(self, floor: int) -> None:
+        with pytest.raises(ValueError, match="floor_bytes must be > 0"):
+            memory_budget_bytes(fraction=0.5, floor_bytes=floor)
+
+    @pytest.mark.parametrize("workers", [0, -1])
+    def test_bad_workers_raises(self, workers: int) -> None:
+        with pytest.raises(ValueError, match="workers must be >= 1"):
+            memory_budget_bytes(fraction=0.5, floor_bytes=1, workers=workers)
+
+
+class TestMemoryBudgetEnvOverride:
+    def test_explicit_env_override_wins_over_detection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _simulate_ram(monkeypatch, 48 * GIB)
+        got = memory_budget_bytes(
+            fraction=0.5, floor_bytes=GIB, env={"X_BUDGET": " 12345 "}, env_var="X_BUDGET"
         )
-        assert env.logical_cores == 4
-        assert env.physical_cores == 4
-        assert env.performance_cores == 4
-        assert env.efficiency_cores == 0
-        assert env.total_ram_bytes == 100
-        assert env.available_ram_bytes == 40
-        assert env.source == "linux"
+        assert got == 12345
 
-    def test_no_affinity_falls_back(self) -> None:
-        def _raise(_pid: int) -> set[int]:
-            raise OSError
-
-        env = hw.detect_envelope(
-            platform_system="Linux",
-            affinity_fn=_raise,
-            cpu_count_fn=lambda: 5,
-            meminfo_fn=lambda: {},
+    def test_env_override_wins_even_when_ram_undetected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
+        got = memory_budget_bytes(
+            fraction=0.5, floor_bytes=GIB, env={"X_BUDGET": "777"}, env_var="X_BUDGET"
         )
-        assert env.logical_cores == 5
-        assert env.total_ram_bytes == 0
-        assert env.available_ram_bytes == 0
+        assert got == 777
 
-    def test_real_default_probes(self) -> None:
-        # No probe injection → real _sched_affinity + _read_meminfo defaults.
-        env = hw.detect_envelope(platform_system="Linux")
-        assert env.logical_cores >= 1
-        assert env.source == "linux"
+    def test_garbage_env_value_fails_loud(self) -> None:
+        with pytest.raises(ValueError, match="X_BUDGET='16GiB' is not an integer byte count"):
+            memory_budget_bytes(
+                fraction=0.5, floor_bytes=GIB, env={"X_BUDGET": "16GiB"}, env_var="X_BUDGET"
+            )
 
+    @pytest.mark.parametrize("raw", ["0", "-1"])
+    def test_non_positive_env_value_fails_loud(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="must be > 0 bytes"):
+            memory_budget_bytes(
+                fraction=0.5, floor_bytes=GIB, env={"X_BUDGET": raw}, env_var="X_BUDGET"
+            )
 
-class TestDetectFallback:
-    def test_windows_like_fallback(self) -> None:
-        env = hw.detect_envelope(platform_system="Windows", cpu_count_fn=lambda: 4)
-        assert env.logical_cores == 4
-        assert env.physical_cores == 4
-        assert env.performance_cores == 4
-        assert env.efficiency_cores == 0
-        assert env.total_ram_bytes == 0
-        assert env.source == "fallback"
-
-    def test_cpu_count_none_floors_to_one(self) -> None:
-        env = hw.detect_envelope(platform_system="Windows", cpu_count_fn=lambda: None)
-        assert env.logical_cores == 1
-
-    def test_cpu_count_zero_floors_to_one(self) -> None:
-        env = hw.detect_envelope(platform_system="Windows", cpu_count_fn=lambda: 0)
-        assert env.logical_cores == 1
-
-    def test_real_platform_default(self) -> None:
-        # No platform override → real platform.system() (the default branch).
-        env = hw.detect_envelope()
-        assert env.logical_cores >= 1
-
-
-# ────────────────────────────────────────────────────────────────────────
-# envelope_from + cache
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestEnvelopeFrom:
-    def test_full_overrides(self) -> None:
-        env = hw.envelope_from(
-            {
-                "logical_cores": 14,
-                "physical_cores": 14,
-                "performance_cores": 10,
-                "efficiency_cores": 4,
-                "total_ram_bytes": 100,
-                "available_ram_bytes": 40,
-                "source": "test",
-            }
+    def test_blank_env_value_is_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
+        got = memory_budget_bytes(
+            fraction=0.5, floor_bytes=GIB, env={"X_BUDGET": "   "}, env_var="X_BUDGET"
         )
-        assert env.performance_cores == 10
-        assert env.source == "test"
+        assert got == GIB
 
-    def test_defaults_fill_missing(self) -> None:
-        env = hw.envelope_from({"logical_cores": 8})
-        assert env.physical_cores == 8
-        assert env.performance_cores == 8
-        assert env.efficiency_cores == 0
-        assert env.total_ram_bytes == 0
-        assert env.source == "override"
+    def test_none_env_reads_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 48 * GIB)
+        monkeypatch.setenv("X_BUDGET", "4096")
+        assert memory_budget_bytes(fraction=0.5, floor_bytes=GIB, env_var="X_BUDGET") == 4096
 
 
-class TestCache:
-    def test_cache_miss_then_hit(self) -> None:
-        hw.reset_envelope_cache()
-        first = hw.cached_envelope()
-        second = hw.cached_envelope()
-        assert first is second  # second call is the cached hit
+class TestMemoryBudgetDerivation:
+    def test_undetected_ram_returns_floor_exactly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # THE sentinel law: unknown RAM = today's constant, bit-for-bit —
+        # NEVER "zero free bytes".
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
+        assert memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB) == 8 * GIB
 
-    def test_reset_forces_recompute(self) -> None:
-        first = hw.cached_envelope()
-        hw.reset_envelope_cache()
-        second = hw.cached_envelope()
-        assert first is not second
-        assert first == second  # same machine → equal value
+    def test_detected_ram_scales_by_fraction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 96 * GIB)
+        assert memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB) == 16 * GIB
 
+    def test_workers_divides_the_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 48 * GIB)
+        assert memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB, workers=4) == 2 * GIB
 
-# ────────────────────────────────────────────────────────────────────────
-# _env_int
-# ────────────────────────────────────────────────────────────────────────
+    def test_small_ram_derives_below_floor_no_clamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The portability win: a small machine legitimately goes BELOW the
+        # old constant — deliberately NOT clamped to the floor.
+        _simulate_ram(monkeypatch, 12 * GIB)
+        assert memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB) == 2 * GIB
 
+    def test_derived_budget_never_below_one_byte(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 2)
+        assert memory_budget_bytes(fraction=0.1, floor_bytes=GIB) == 1
 
-class TestEnvInt:
-    def test_absent(self) -> None:
-        assert hw._env_int({}, "K") is None
+    def test_derivation_logs_once_per_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _simulate_ram(monkeypatch, 96 * GIB)
+        with capture_logs() as logs:
+            memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB, env_var="X_BUDGET")
+            memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB, env_var="X_BUDGET")
+        events = [log for log in logs if log["event"] == "hardware_envelope.budget_derived"]
+        assert len(events) == 1
+        assert events[0]["budget"] == "X_BUDGET"
+        assert events[0]["derived_bytes"] == 16 * GIB
+        assert events[0]["floor_bytes"] == 8 * GIB
 
-    def test_blank(self) -> None:
-        assert hw._env_int({"K": "  "}, "K") is None
+    def test_derivation_without_env_var_logs_with_synthetic_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _simulate_ram(monkeypatch, 96 * GIB)
+        with capture_logs() as logs:
+            memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB)
+        events = [log for log in logs if log["event"] == "hardware_envelope.budget_derived"]
+        assert len(events) == 1
+        assert "fraction=" in str(events[0]["budget"])
 
-    def test_valid(self) -> None:
-        assert hw._env_int({"K": "6"}, "K") == 6
-
-    def test_non_integer_logs_and_none(self) -> None:
-        assert hw._env_int({"K": "x"}, "K") is None
-
-    def test_below_one_logs_and_none(self) -> None:
-        assert hw._env_int({"K": "0"}, "K") is None
-
-    def test_default_env_is_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("K_UNSET_XYZ", raising=False)
-        assert hw._env_int(None, "K_UNSET_XYZ") is None
-
-
-# ────────────────────────────────────────────────────────────────────────
-# cpu_pool_workers
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestCpuPoolWorkers:
-    def test_m4pro_prefers_performance(self) -> None:
-        env = hw.envelope_from({"logical_cores": 14, "performance_cores": 10})
-        assert hw.cpu_pool_workers({}, reserve=2, envelope=env) == 8
-
-    def test_logical_when_not_prefer_performance(self) -> None:
-        env = hw.envelope_from({"logical_cores": 14, "performance_cores": 10})
-        assert hw.cpu_pool_workers({}, reserve=2, prefer_performance=False, envelope=env) == 12
-
-    def test_cap_applies(self) -> None:
-        env = hw.envelope_from({"logical_cores": 32, "performance_cores": 32})
-        assert hw.cpu_pool_workers({}, reserve=2, cap=8, envelope=env) == 8
-
-    def test_floor_at_one(self) -> None:
-        env = hw.envelope_from({"logical_cores": 2, "performance_cores": 2})
-        assert hw.cpu_pool_workers({}, reserve=2, envelope=env) == 1
-
-    def test_env_override_wins(self) -> None:
-        env = hw.envelope_from({"logical_cores": 14, "performance_cores": 10})
-        assert hw.cpu_pool_workers({"BRUTEX_CPU_WORKERS": "3"}, envelope=env) == 3
-
-    def test_uses_cached_envelope_when_none(self) -> None:
-        hw.reset_envelope_cache()
-        result = hw.cpu_pool_workers({})
-        assert result >= 1
+    def test_exact_floor_parity_does_not_log(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 48 GiB × 1/6 == the 8 GiB floor exactly — nothing to announce.
+        _simulate_ram(monkeypatch, 48 * GIB)
+        with capture_logs() as logs:
+            assert memory_budget_bytes(fraction=1 / 6, floor_bytes=8 * GIB) == 8 * GIB
+        assert not [log for log in logs if log["event"] == "hardware_envelope.budget_derived"]
 
 
-# ────────────────────────────────────────────────────────────────────────
-# library_thread_budget
-# ────────────────────────────────────────────────────────────────────────
+# ────── THE 48 GiB regression pin (semantics law, all derive call sites) ──────
 
 
-class TestLibraryThreadBudget:
-    def test_divides_physical(self) -> None:
-        env = hw.envelope_from({"physical_cores": 14})
-        assert hw.library_thread_budget({}, 4, envelope=env) == 3
+class TestFortyEightGibRegressionPin:
+    """On the simulated CLAUDE.md §8 48 GiB box, every derived budget must be
+    ``>=`` its old hand-picked constant (both shipped fractions give exact
+    parity by construction). Enumerates EVERY derive-bucket call site of
+    DEC-RAM-BUDGETS-001 via the call sites' own constants."""
 
-    def test_floor_at_one(self) -> None:
-        env = hw.envelope_from({"physical_cores": 8})
-        assert hw.library_thread_budget({}, 100, envelope=env) == 1
-
-    def test_zero_workers_floored(self) -> None:
-        env = hw.envelope_from({"physical_cores": 8})
-        assert hw.library_thread_budget({}, 0, envelope=env) == 8
-
-    def test_uses_cached_envelope(self) -> None:
-        hw.reset_envelope_cache()
-        assert hw.library_thread_budget({}, 2) >= 1
-
-
-# ────────────────────────────────────────────────────────────────────────
-# memory_budget_bytes + _resolve_fraction
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestMemoryBudget:
-    def test_available_preferred(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 1000, "available_ram_bytes": 400})
-        assert hw.memory_budget_bytes({}, fraction=0.5, floor=1, envelope=env) == 200
-
-    def test_falls_back_to_total_when_no_available(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 1000, "available_ram_bytes": 0})
-        assert hw.memory_budget_bytes({}, fraction=0.5, floor=1, envelope=env) == 500
-
-    def test_undetected_ram_returns_floor(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 0, "available_ram_bytes": 0})
-        assert hw.memory_budget_bytes({}, fraction=0.5, floor=777, envelope=env) == 777
-
-    def test_divided_by_workers(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 1000, "available_ram_bytes": 1000})
-        assert hw.memory_budget_bytes({}, fraction=1.0, floor=1, workers=4, envelope=env) == 250
-
-    def test_zero_workers_floored(self) -> None:
-        env = hw.envelope_from({"available_ram_bytes": 1000})
-        assert hw.memory_budget_bytes({}, fraction=1.0, floor=1, workers=0, envelope=env) == 1000
-
-    def test_result_never_below_floor(self) -> None:
-        env = hw.envelope_from({"available_ram_bytes": 100})
-        assert hw.memory_budget_bytes({}, fraction=0.01, floor=50, envelope=env) == 50
-
-    def test_env_fraction_override(self) -> None:
-        env = hw.envelope_from({"available_ram_bytes": 1000})
-        got = hw.memory_budget_bytes(
-            {"BRUTEX_MEM_FRACTION": "0.25"}, fraction=0.9, floor=1, envelope=env
+    def test_all_derived_call_sites_at_48_gib(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.engine.sweep_mem_budget import (
+            DEFAULT_MEM_BUDGET_BYTES,
+            MEM_BUDGET_FRACTION,
         )
-        assert got == 250
+        from brutex.orchestrator.bloom import (
+            MAX_BLOOM_BYTES_FLOOR,
+            MAX_BLOOM_BYTES_FRACTION,
+        )
 
-    def test_uses_cached_envelope(self) -> None:
-        hw.reset_envelope_cache()
-        assert hw.memory_budget_bytes({}, fraction=0.5) >= hw.DEFAULT_MEMORY_FLOOR_BYTES or True
+        _simulate_ram(monkeypatch, 48 * GIB)
+        call_sites = [
+            ("sweep_mem_budget.DEFAULT_MEM_BUDGET_BYTES", MEM_BUDGET_FRACTION, 8 * GIB),
+            ("bloom.MAX_BLOOM_BYTES", MAX_BLOOM_BYTES_FRACTION, 16 * GIB),
+        ]
+        assert DEFAULT_MEM_BUDGET_BYTES == 8 * GIB
+        assert MAX_BLOOM_BYTES_FLOOR == 16 * GIB
+        for name, fraction, old_constant in call_sites:
+            derived = memory_budget_bytes(fraction=fraction, floor_bytes=old_constant)
+            assert derived >= old_constant, name
+            # Both shipped fractions are chosen for EXACT parity at 48 GiB.
+            assert derived == old_constant, name
 
+    def test_all_derived_call_sites_shrink_on_a_small_box(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_mem_budget import (
+            DEFAULT_MEM_BUDGET_BYTES,
+            MEM_BUDGET_FRACTION,
+        )
+        from brutex.orchestrator.bloom import (
+            MAX_BLOOM_BYTES_FLOOR,
+            MAX_BLOOM_BYTES_FRACTION,
+        )
 
-class TestResolveFraction:
-    def test_absent_uses_arg(self) -> None:
-        assert hw._resolve_fraction({}, 0.7) == 0.7
+        _simulate_ram(monkeypatch, 8 * GIB)
+        for fraction, old_constant in [
+            (MEM_BUDGET_FRACTION, DEFAULT_MEM_BUDGET_BYTES),
+            (MAX_BLOOM_BYTES_FRACTION, MAX_BLOOM_BYTES_FLOOR),
+        ]:
+            derived = memory_budget_bytes(fraction=fraction, floor_bytes=old_constant)
+            assert derived < old_constant
 
-    def test_blank_uses_arg(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": " "}, 0.7) == 0.7
+    def test_all_derived_call_sites_floor_when_undetected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_mem_budget import (
+            DEFAULT_MEM_BUDGET_BYTES,
+            MEM_BUDGET_FRACTION,
+        )
+        from brutex.orchestrator.bloom import (
+            MAX_BLOOM_BYTES_FLOOR,
+            MAX_BLOOM_BYTES_FRACTION,
+        )
 
-    def test_valid_in_range(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "0.3"}, 0.7) == 0.3
-
-    def test_non_float_falls_back(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "abc"}, 0.7) == 0.7
-
-    def test_out_of_range_high_falls_back(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "1.5"}, 0.7) == 0.7
-
-    def test_out_of_range_zero_falls_back(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "0"}, 0.7) == 0.7
-
-    def test_default_env_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("BRUTEX_MEM_FRACTION", raising=False)
-        assert hw._resolve_fraction(None, 0.42) == 0.42
+        _simulate_ram(monkeypatch, UNDETECTED_RAM)
+        for fraction, old_constant in [
+            (MEM_BUDGET_FRACTION, DEFAULT_MEM_BUDGET_BYTES),
+            (MAX_BLOOM_BYTES_FRACTION, MAX_BLOOM_BYTES_FLOOR),
+        ]:
+            assert memory_budget_bytes(fraction=fraction, floor_bytes=old_constant) == old_constant

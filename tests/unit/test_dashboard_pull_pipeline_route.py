@@ -1047,3 +1047,132 @@ def test_pull_pipeline_cross_list_selection_scopes_both_kinds(
             assert _wait_for_job(client)["state"] == "done"
         # The spot phase received the COMBINED cross-list selection, tick-ordered.
         assert spot_target_sets == [["ADANIENT", "NIFTY"]]
+
+
+# ── the movers-warm UNBLOCK pack (DEC-MOVERS-WARM-UNBLOCK-001) ──────────────
+
+
+def _patch_warm_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the pipeline's movers-warm phase actually RUN against fakes.
+
+    Prebuild ok=True (the warm gate), a resolvable latest movers date, and
+    graceful no-registry fakes for the options warm's calendar/chain loaders.
+    """
+    from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
+
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "run_pipeline_prebuild_guarded",
+        lambda **kwargs: PrebuildOutcome(
+            symbols_built=1, total_bars=9, failed=(), failed_count=0, ok=True
+        ),
+    )
+    monkeypatch.setattr(app_module, "latest_movers_date", lambda lake_root: "2024-06-13")
+    monkeypatch.setattr(app_module, "load_registry_expiries", lambda *a, **k: None)
+    monkeypatch.setattr(app_module, "make_registry_chain_loader", lambda *a, **k: None)
+
+
+def test_pull_pipeline_blocked_warm_never_holds_the_movers_gate(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FIX-3 REGRESSION (DEC-MOVERS-WARM-UNBLOCK-001): a movers-warm job that
+    BLOCKS (threading.Event never set while we probe) must NOT keep the
+    PrebuildGate held — the gate releases the moment the prebuild outcome is
+    known, so /api/v1/movers serves the normal (non-gated) payload WHILE the
+    warm is still running. The 2026-07-04/05 incident (pull_id 22fc7739f719):
+    the warm's 39 full-lake-walk keys (170-256 s each) held /movers hostage
+    for hours behind the finally-only release."""
+    from brutex.dashboard.movers_snapshot import SpotCandidates
+
+    _patch_warm_runs(monkeypatch)
+    warm_entered = threading.Event()
+    warm_proceed = threading.Event()
+
+    def _blocking_spot_compute(**kwargs: Any) -> SpotCandidates:
+        if kwargs["date"] == "2024-06-13":  # a WARM job (the warm's target day)
+            warm_entered.set()
+            assert warm_proceed.wait(timeout=10.0), "test never released the warm"
+        return SpotCandidates(snapshots=(), skipped=0, date=str(kwargs["date"]))
+
+    monkeypatch.setattr(app_module, "compute_spot_candidates", _blocking_spot_compute)
+    gate = PrebuildGate()
+    try:
+        with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+            assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+            assert warm_entered.wait(timeout=10.0), "the movers warm never started"
+            # THE PIN: the warm is BLOCKED right now, yet the gate is already
+            # released (prebuild done) and /movers serves NON-gated.
+            snap = gate.snapshot()
+            assert snap.blocking is False
+            assert snap.last_ok is True
+            body = client.get("/api/v1/movers", params={"date": "2024-06-14"}).json()
+            assert "gated" not in body
+            warm_proceed.set()
+            assert _wait_for_job(client)["state"] == "done"
+    finally:
+        warm_proceed.set()  # never leave the warm job thread wedged
+
+
+def test_pull_pipeline_warm_shares_one_dataset_walk(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FIX-1 REGRESSION (DEC-MOVERS-WARM-UNBLOCK-001): the WHOLE 39-key warm
+    run performs exactly ONE ``list_candle_datasets`` lake walk — the memoised
+    ``datasets=`` seam (DEC-MOVERS-DISCOVERY-MEMO-001) is threaded into every
+    warm compute. Before the fix each of the 39 jobs re-walked the whole lake
+    (~3 min each on the options-exploded tree — the incident's dominant cost)."""
+    _patch_warm_runs(monkeypatch)
+    walks: list[int] = []
+
+    def _counting_walk(lake_root: Path) -> list[dict[str, str]]:
+        walks.append(1)
+        return []
+
+    monkeypatch.setattr(app_module, "list_candle_datasets", _counting_walk)
+    gate = PrebuildGate()
+    with _gated_client(store, monkeypatch, tmp_path, gate) as client:
+        assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+        snap = _wait_for_job(client)
+        assert snap["state"] == "done"
+    # ONE walk for the whole spot(3) + futures(9) + options(27) warm grid —
+    # every compute received the memoised list via `datasets=` (an injected
+    # empty list yields empty candidates WITHOUT scanning, pinned by the
+    # discovery-memo suite), so a re-walk per job would be visible here.
+    assert len(walks) == 1
+
+
+def test_pull_pipeline_wedged_warm_times_out_and_job_completes(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FIX-2 REGRESSION (DEC-MOVERS-WARM-UNBLOCK-001): a warm job wedged past
+    the per-job deadline (env ``BRUTEX_MOVERS_WARM_JOB_DEADLINE_S``) is cut,
+    counted FAILED, and the pipeline job still settles ``done`` with the gate
+    released — a wedged warm can never hold the pull open indefinitely."""
+    from brutex.dashboard.movers_snapshot import SpotCandidates
+
+    _patch_warm_runs(monkeypatch)
+    monkeypatch.setenv("BRUTEX_MOVERS_WARM_JOB_DEADLINE_S", "0.05")
+    release = threading.Event()
+
+    def _wedged_spot_compute(**kwargs: Any) -> SpotCandidates:
+        if kwargs["date"] == "2024-06-13":  # only the WARM jobs wedge
+            release.wait(30.0)
+        return SpotCandidates(snapshots=(), skipped=0, date=str(kwargs["date"]))
+
+    monkeypatch.setattr(app_module, "compute_spot_candidates", _wedged_spot_compute)
+    gate = PrebuildGate()
+    try:
+        with _gated_client(store, monkeypatch, tmp_path, gate) as client, capture_logs() as logs:
+            assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+            snap = _wait_for_job(client)
+        assert snap["state"] == "done"  # the wedged warm NEVER fails the pull
+        timeouts = [e for e in logs if e["event"] == "movers.warm.job_timeout"]
+        assert len(timeouts) == 3  # all 3 spot-grid coordinates timed out
+        assert all(e["segment"] == "spot" for e in timeouts)
+        gate_snap = gate.snapshot()
+        assert gate_snap.blocking is False
+        assert gate_snap.last_ok is True
+    finally:
+        release.set()  # let the abandoned daemon workers exit promptly

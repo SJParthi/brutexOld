@@ -427,6 +427,15 @@ def materialize_lake_timeframes(
     counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
     integration-tested by the round-trip tests.
 
+    **Log-volume envelope (DEC-PREBUILD-LOG-FLOOD-001):** a completed derive
+    emits ONE ``lake.derived.write_summary`` INFO per SYMBOL (timeframe count +
+    total bars); the per-partition ``lake.partition.write`` telemetry on this
+    derived path rides DEBUG (see :func:`make_lake_write_tf`), so a prebuild of
+    N partitions costs O(symbols) INFO lines, never O(partitions) — the fetch
+    phase's rate/429/settle audit trail can no longer be rotated away by the
+    derived fan-out (measured: 205,609 INFO lines ≈ ~26 min to roll the
+    10 MiB × 5 rotation, pull 2026-07-04/05).
+
     **Daily-open substitution observe (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001,
     SPOT + ``include_daily=True`` only):** after the daily derive, the SAME
     in-memory 1-minute frame is scanned (zero extra I/O) for complete sessions
@@ -536,11 +545,32 @@ def materialize_lake_timeframes(
             ),
         )
 
+    def _log_write_summary(result: MaterializeResult) -> None:
+        """ONE aggregate INFO per materialised SYMBOL (DEC-PREBUILD-LOG-FLOOD-001).
+
+        The per-partition ``lake.partition.write`` telemetry is DEBUG on this
+        derived path (see ``make_lake_write_tf``), so the prebuild's audit
+        record survives log rotation in O(symbols) not O(partitions): one line
+        per symbol carrying the timeframe count + total derived bars — the
+        aggregate form of the per-partition fields the forensics rely on.
+        """
+        _LOG.info(
+            "lake.derived.write_summary",
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            timeframes_written=len(result.written),
+            total_bars=result.total_bars,
+            skipped=len(result.skipped),
+            include_daily=include_daily,
+        )
+
     if not include_daily:
         result = materialize_timeframes(
             tfs=requested, read_1m=read_1m, write_tf=write_tf, resampler=resampler
         )
         _stamp(last_1m_ist_date=None)
+        _log_write_summary(result)
         return result
 
     from brutex.data.spot_daily_resample import (
@@ -574,11 +604,13 @@ def materialize_lake_timeframes(
             df_1m, before=before, symbol=symbol, dense=dense_symbol
         )
     _stamp(last_1m_ist_date=_last_ist_date(df_1m))
-    return MaterializeResult(
+    result = MaterializeResult(
         written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
         skipped=intraday.skipped,
         opens_substituted=opens_substituted,
     )
+    _log_write_summary(result)
+    return result
 
 
 def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
@@ -704,7 +736,14 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    # DERIVED-TF writer → per-partition `lake.partition.write` telemetry at
+    # DEBUG (DEC-PREBUILD-LOG-FLOOD-001): the prebuild writes ~10⁵-10⁶ tiny
+    # derived partitions per run — at INFO those lines (~132/s measured,
+    # 205,609 of 206,606 retained lines) rotated the 10 MiB × 5 log over in
+    # ~26 min and WIPED the fetch phase's rate/429/settle audit trail. The
+    # fields survive per-SYMBOL in the `lake.derived.write_summary` INFO
+    # (materialize_lake_timeframes); the live-pull vendor writers keep INFO.
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root, partition_log_level="debug"))
 
     def _write(tf_label: str, frame: pl.DataFrame) -> int:
         interval = INTRADAY_TF_INTERVALS[tf_label]
