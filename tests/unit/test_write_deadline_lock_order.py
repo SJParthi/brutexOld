@@ -25,8 +25,7 @@ This suite pins THREE things:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
 
 import pytest
 from brutex.adapters.groww.constants import GROWW_WRITE_DEADLINE_S
@@ -75,7 +74,7 @@ def _call(deadline_seconds: float | None) -> SinkAppendResult:
     )
 
 
-def _inversion_events(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _inversion_events(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
     return [entry for entry in logs if entry["event"] == _INVERSION_EVENT]
 
 
