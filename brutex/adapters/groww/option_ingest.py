@@ -1053,12 +1053,24 @@ class UnderlyingEmptyReport:
         whether Groww returns a clean-200-empty for such legs is UNVERIFIED from an
         offline sandbox; Tier B trades that bounded warning noise for coverage and
         stays observe-only.
+    never_planned_pairs
+        Count of this underlying's contracts that were NEVER PLANNED this pull —
+        far-future legs skipped at planning time (``fno.window_not_open``,
+        DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
+        ``IngestReport`` pair) — threaded in via
+        :func:`scan_underlying_all_empty`'s *never_planned_symbols*
+        (DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001). ANNOTATION ONLY: the flag
+        decision never reads it — a low-leg flag with
+        ``never_planned_pairs >= 1`` still fires, it just SELF-DESCRIBES as a
+        probable far-leg-not-open chain so triage can weigh it lower. Default
+        ``0`` keeps every pre-existing construction byte-identical.
     """
 
     underlying: str
     attempted_pairs: int
     stored_bars: int
     low_leg: bool = False
+    never_planned_pairs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1088,6 +1100,7 @@ def scan_underlying_all_empty(
     pairs: Mapping[tuple[str, str], IngestReport],
     contract_list: Sequence[DerivativeContract],
     failed_symbols: Iterable[str] = (),
+    never_planned_symbols: Iterable[str] = (),
 ) -> AllEmptyScan:
     """Scan one pull's ``pairs`` for underlyings whose every cleanly-fetched contract was empty.
 
@@ -1111,14 +1124,20 @@ def scan_underlying_all_empty(
       quarantined leg each leave a non-clean/failed sibling that disqualifies the
       whole underlying at the low-leg tier.
 
-    HONEST residual (accepted, Golden Rule #10): a NEVER-PLANNED sibling — a
+    HONEST residual (now SELF-DESCRIBED, still never suppressed —
+    DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001): a NEVER-PLANNED sibling — a
     far-future contract skipped at planning time (``fno.window_not_open``,
     DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
-    ``IngestReport`` pair, no failure) — is structurally invisible to both the
+    ``IngestReport`` pair, no failure) — stays structurally invisible to both the
     non-clean tally and *failed_symbols*, so a chain of one clean-empty near leg +
-    one not-yet-open far leg still flags ``low_leg=True``. Consistent with the
-    tried-vs-never-tried philosophy (Tier A ignores never-tried siblings
-    identically); observe-only WARN noise, deliberately not mechanised away.
+    one not-yet-open far leg STILL flags ``low_leg=True`` (annotate, NEVER
+    suppress — the flag decision expression is untouched). What changed: the
+    caller may thread *never_planned_symbols* (the planner's omitted set) and
+    each flagged report then carries ``never_planned_pairs``, so the WARN reads
+    e.g. ``low_leg=True never_planned_pairs=1`` — "probably a
+    far-leg-not-open chain, weigh lower" — instead of leaving triage guessing.
+    Consistent with the tried-vs-never-tried philosophy (Tier A ignores
+    never-tried siblings identically); observe-only.
 
     Pure + O(pairs + failures); a pair (or failed symbol) not in *contract_list* is
     skipped (defensive — never raises).
@@ -1135,6 +1154,15 @@ def scan_underlying_all_empty(
         they never enter *pairs*, so without them a 2-leg chain with one
         quarantined leg would be indistinguishable from a 1-leg clean-empty chain.
         Default empty (Tier A behaviour is failure-blind, unchanged).
+    never_planned_symbols
+        Contract symbols the PLANNER omitted entirely this pull (the not-yet-open
+        far-future legs of DEC-FNO-FAR-EXPIRY-WINDOW-001 — zero vendor calls, zero
+        ledger rows, so they can never appear in *pairs* or *failed_symbols*).
+        Tallied per underlying onto each flagged report's ``never_planned_pairs``
+        — ANNOTATION ONLY, the flag decision never reads it
+        (DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001). An unknown symbol is
+        defensively skipped (same as *failed_symbols*). Default empty —
+        byte-identical scan.
 
     Returns
     -------
@@ -1159,12 +1187,19 @@ def scan_underlying_all_empty(
         for symbol in failed_symbols
         if (underlying := symbol_to_underlying.get(symbol)) is not None
     }
+    never_planned: dict[str, int] = {}
+    for symbol in never_planned_symbols:
+        underlying = symbol_to_underlying.get(symbol)
+        if underlying is None:  # defensive skip, same as failed_symbols
+            continue
+        never_planned[underlying] = never_planned.get(underlying, 0) + 1
     flagged = tuple(
         UnderlyingEmptyReport(
             underlying=underlying,
             attempted_pairs=attempted[underlying],
             stored_bars=stored[underlying],
             low_leg=attempted[underlying] < _ALL_EMPTY_MIN_CONTRACTS,
+            never_planned_pairs=never_planned.get(underlying, 0),
         )
         for underlying in sorted(attempted)
         if stored[underlying] == 0
@@ -1196,6 +1231,7 @@ def _log_underlying_all_empty(scan: AllEmptyScan, *, pull_id: str | None) -> Non
             attempted_pairs=rep.attempted_pairs,
             stored_bars=rep.stored_bars,
             low_leg=rep.low_leg,
+            never_planned_pairs=rep.never_planned_pairs,
         )
 
 
@@ -1204,6 +1240,7 @@ def emit_underlying_all_empty(
     contract_list: Sequence[DerivativeContract],
     *,
     failed_symbols: Iterable[str] = (),
+    never_planned_symbols: Iterable[str] = (),
     pull_id: str | None = None,
 ) -> None:
     """Scan one pull's *pairs* for whole-underlying empties + WARN — fully guarded, observe-only.
@@ -1230,11 +1267,18 @@ def emit_underlying_all_empty(
     :func:`scan_underlying_all_empty` so the LOW-LEG Tier B rule can disqualify an
     underlying with a quarantined sibling leg (quarantines never enter *pairs*);
     default empty keeps the Tier A behaviour byte-identical.
+    *never_planned_symbols* (DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001) is the
+    planner's omitted not-yet-open contract set, threaded to
+    :func:`scan_underlying_all_empty` so a Tier-B low-leg flag SELF-DESCRIBES via
+    ``never_planned_pairs`` (annotation only — never a suppression); the in-driver
+    synchronous call site leaves it default-empty because the DRIVER has no
+    planning info (the planner's omitted set lives in
+    ``dashboard.historical_pull``, the production post-drain caller).
     """
     resolved_pull_id = pull_id if pull_id is not None else current_pull_id()
     try:
         _log_underlying_all_empty(
-            scan_underlying_all_empty(pairs, contract_list, failed_symbols),
+            scan_underlying_all_empty(pairs, contract_list, failed_symbols, never_planned_symbols),
             pull_id=resolved_pull_id,
         )
     except Exception as exc:  # observe-only diagnostic must never break the pull
