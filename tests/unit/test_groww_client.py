@@ -5,11 +5,15 @@ A fake SDK drives every retry branch — no ``growwapi``, no network, no real sl
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import pytest
 from brutex.adapters.groww.client import REAUTH_RETRY_BACKOFF_SECONDS, GrowwClient
-from brutex.adapters.groww.errors import GrowwRateLimitError, GrowwTimeoutError
+from brutex.adapters.groww.errors import (
+    GrowwRateLimitError,
+    GrowwTimeoutError,
+    GrowwTokenStillStaleError,
+)
 from structlog.testing import capture_logs
 
 
@@ -877,52 +881,136 @@ def test_auth_error_whose_remint_is_throttled_propagates_retryable_no_recursion(
     assert refresher.reauth_calls == 1  # exactly ONE forced re-mint — NO infinite recursion
 
 
-def test_readonly_reauth_still_stale_propagates_retryable_no_recursion() -> None:
-    """DEC-BROKER-READONLY-REAUTH-REREAD-001: a read-only re-read that is still stale surfaces
-    a RETRYABLE error that propagates OUT of ``_call`` WITHOUT re-entering the reauth branch.
+class _StillStaleReauthRefresher:
+    """A read-only-broker-shaped fake: ``reauth`` is always still-stale.
 
-    On the shared-AWS read-only host the reauth RE-READS the shared token; if the Lambda has
-    not minted the fresh one yet, ``refresher.reauth`` raises a
-    :class:`GrowwTokenStillStaleError` (a GrowwAuthError subclass that ``is_retryable``).
-    The client must NOT recurse into another reauth (that would loop the dead token); it
-    propagates as a retryable error the ingest quarantines + re-pulls — never a restart.
-    Proven: reauth is called EXACTLY once.
+    Models the DEC-TOKEN-STALE-PAUSE-001 surface the client's gate depends on:
+    ``reauth`` raises :class:`GrowwTokenStillStaleError` (the Lambda has not minted
+    yet) and ``await_token_recovery`` is scripted per test — either an ADOPTION (the
+    fresh token landed within the pause: swap the SDK, bump the generation, return
+    it) or a DEADLINE EXPIRY (re-raise the StillStale, the pre-gate propagation).
     """
-    from brutex.adapters.groww.errors import GrowwTokenStillStaleError, is_retryable
+
+    def __init__(self, sdk: _FakeSDK, *, recovered_sdk: _FakeSDK | None = None) -> None:
+        self.reauth_calls = 0
+        self.await_calls: list[dict[str, object]] = []
+        self.sdk = sdk
+        self._recovered_sdk = recovered_sdk
+        self.generation = 0
+
+    def sdk_at(self, _index: int) -> _FakeSDK:
+        return self.sdk
+
+    def current_sdk(self) -> _FakeSDK:  # pragma: no cover — leaf path uses sdk_at
+        return self.sdk
+
+    def current_generation(self) -> int:
+        return self.generation
+
+    def reauth(self, _seen_generation: int) -> int:
+        self.reauth_calls += 1
+        raise GrowwTokenStillStaleError(
+            "read-only broker re-read returned no fresh token yet", safe_message="stale"
+        )
+
+    def await_token_recovery(
+        self,
+        seen_generation: int,
+        *,
+        wait_seconds: float | None = None,
+        sleep: Callable[[float], None] = lambda _s: None,
+        clock: Callable[[], float] = lambda: 0.0,
+        method: str = "",
+    ) -> int:
+        self.await_calls.append(
+            {
+                "seen_generation": seen_generation,
+                "wait_seconds": wait_seconds,
+                "sleep": sleep,
+                "clock": clock,
+                "method": method,
+            }
+        )
+        if self._recovered_sdk is None:
+            # The DEADLINE-EXPIRED shape: the broker never minted — propagate as
+            # before the gate existed (retryable; the window defers FAILED).
+            raise GrowwTokenStillStaleError(
+                "token-stale pause exhausted: still no fresh token", safe_message="stale"
+            )
+        # The ADOPTION shape: the Lambda's mint landed mid-pause.
+        self.sdk = self._recovered_sdk
+        self.generation = seen_generation + 1
+        return self.generation
+
+
+def test_readonly_reauth_still_stale_propagates_retryable_no_recursion() -> None:
+    """DEC-BROKER-READONLY-REAUTH-REREAD-001 + DEC-TOKEN-STALE-PAUSE-001: a read-only
+    re-read that is still stale enters the BOUNDED pause; when the pause deadline expires
+    (a never-minting broker) the RETRYABLE error propagates OUT of ``_call`` WITHOUT
+    re-entering the reauth branch — the pre-gate behaviour, preserved.
+
+    On the shared-AWS read-only host the reauth RE-READS the shared token; if the Lambda
+    has not minted the fresh one yet, ``refresher.reauth`` raises a
+    :class:`GrowwTokenStillStaleError` (a GrowwAuthError subclass that ``is_retryable``).
+    The client PAUSES on ``await_token_recovery`` (the token-stale gate); a deadline
+    expiry propagates as a retryable error the ingest quarantines + re-pulls — never a
+    restart, never an infinite loop. Proven: reauth AND the pause are each called
+    EXACTLY once, and the pause received the client's injected sleep/clock + wait bound.
+    """
+    from brutex.adapters.groww.errors import is_retryable
 
     auth_sdk = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
-
-    class _StillStaleReauthRefresher:
-        def __init__(self, sdk: _FakeSDK) -> None:
-            self.reauth_calls = 0
-            self.sdk = sdk
-
-        def sdk_at(self, _index: int) -> _FakeSDK:
-            return self.sdk
-
-        def current_sdk(self) -> _FakeSDK:  # pragma: no cover — leaf path uses sdk_at
-            return self.sdk
-
-        def current_generation(self) -> int:
-            return 0
-
-        def reauth(self, _seen_generation: int) -> int:
-            self.reauth_calls += 1
-            raise GrowwTokenStillStaleError(
-                "read-only broker re-read returned no fresh token yet", safe_message="stale"
-            )
-
     refresher = _StillStaleReauthRefresher(auth_sdk)
+
+    def _sleep(_s: float) -> None:
+        pass
+
     client = GrowwClient(
         sdk=auth_sdk,
         refresher=refresher,  # type: ignore[arg-type]
-        sleep=lambda _s: None,
+        sleep=_sleep,
         max_reauths=1,
+        token_stale_wait_seconds=42.0,
     )
     with pytest.raises(GrowwTokenStillStaleError) as exc:
         client.expiries(exchange="NSE", underlying_symbol="NIFTY")
     assert is_retryable(exc.value)  # the ingest quarantines + re-pulls later, never a restart
     assert refresher.reauth_calls == 1  # exactly ONE read-only re-read — NO infinite recursion
+    assert len(refresher.await_calls) == 1  # the gate paused exactly once
+    gate_call = refresher.await_calls[0]
+    assert gate_call["seen_generation"] == 0
+    assert gate_call["wait_seconds"] == 42.0  # the client's bound is threaded through
+    assert gate_call["sleep"] is _sleep  # the client's injected sleeper drives the pause
+    assert gate_call["clock"] is client.clock  # …and its monotonic clock
+    assert gate_call["method"] == "get_expiries"
+
+
+def test_token_stale_gate_adoption_retries_without_burning_attempts() -> None:
+    """DEC-TOKEN-STALE-PAUSE-001: a fresh token adopted DURING the pause retries the call.
+
+    The 06:00-IST fetch-lane pause: ``reauth`` is still-stale, the gate waits, the
+    Lambda's mint lands mid-pause (the fake's adoption shape), and the SAME call retries
+    against the refreshed SDK and SUCCEEDS — no error ever reaches the window ladder, so
+    no window attempt burns. ``max_attempts=1`` proves the retry rides the reauth
+    buy-back (``attempt -= 1``), not the transient-retry budget.
+    """
+    auth_sdk = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired")])
+    fresh_sdk = _FakeSDK(payload={"expiries": ["2026-07-30"]})
+    refresher = _StillStaleReauthRefresher(auth_sdk, recovered_sdk=fresh_sdk)
+    client = GrowwClient(
+        sdk=auth_sdk,
+        refresher=refresher,  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+        max_attempts=1,
+        max_reauths=1,
+    )
+    out = client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert out == {"expiries": ["2026-07-30"]}  # the ADOPTED sdk served the retry
+    assert refresher.reauth_calls == 1
+    assert len(refresher.await_calls) == 1
+    assert refresher.await_calls[0]["wait_seconds"] is None  # default ⇒ env-resolved bound
+    assert auth_sdk.calls == 1  # the stale sdk was hit once (the auth failure)
+    assert fresh_sdk.calls == 1  # the pause never re-hit the vendor with the dead token
 
 
 def test_with_pace_carries_the_refresher_through() -> None:

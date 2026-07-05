@@ -256,12 +256,22 @@ function winFetches(r) {
    server; counts are always complete. */
 let marketFilter = "";
 let statusFilter = "";
+/* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the raw response
+   text LAST RENDERED, folded with the filter state that rendered it (belt-and-
+   braces — a filter flip already changes the querystring, so the server text
+   differs; the folded key guarantees a flip can never be skipped). Client-side
+   compare only — the payload carries no generation/etag field (backend
+   frozen). null after any error/manual filter change so the next good body
+   always renders. lastLiveLine replays the honest heartbeat on skipped ticks. */
+let lastPayloadKey = null;
+let lastLiveLine = "";
 function wireChips(boxId, key, setter) {
   document.querySelectorAll("#" + boxId + " a").forEach(a => {
     a.addEventListener("click", ev => {
       ev.preventDefault();
       setter(a.dataset[key]);
       document.querySelectorAll("#" + boxId + " a").forEach(x => x.classList.toggle("active", x === a));
+      lastPayloadKey = null; // manual filter flip: force the next render, never a stale skip
       poll();
     });
   });
@@ -328,8 +338,12 @@ async function poll() {
     if (marketFilter) qs.set("market", marketFilter);
     if (statusFilter) qs.set("status", statusFilter);
     const r = await fetch("/api/v1/coverage/windows" + (qs.size ? "?" + qs.toString() : ""));
-    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
-    const body = await r.json();
+    if (!r.ok) { lastPayloadKey = null; liveTxt.textContent = "error " + r.status; return; }
+    const txt = await r.text();
+    const payloadKey = marketFilter + "|" + statusFilter + "|" + txt;
+    if (payloadKey === lastPayloadKey) { liveTxt.textContent = lastLiveLine; return; }
+    lastPayloadKey = payloadKey;
+    const body = JSON.parse(txt);
     const rows = body.windows || [];
     emptyThreshold = body.empty_threshold ?? 3;
     wincEl.textContent = num(countRecorded(body.counts, body.count ?? 0));
@@ -340,8 +354,10 @@ async function poll() {
       + num(body.returned ?? rows.length) + " shown"
       + (body.capped ? " · CAPPED (severity-first — FAILED/EMPTY always shown)" : "");
     renderWindows(rows);
-    liveTxt.textContent = "live · " + rows.length + " rows";
+    lastLiveLine = "live · " + rows.length + " rows";
+    liveTxt.textContent = lastLiveLine;
   } catch (e) {
+    lastPayloadKey = null;
     liveTxt.textContent = "offline";
   }
 }

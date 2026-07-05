@@ -552,6 +552,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bound the re-open to the first N matching windows (default: all matching)",
     )
 
+    # ── detect-session-drift (DEC-CALENDAR-OBSERVED-SESSIONS-001) ──
+    drift = sub.add_parser(
+        "detect-session-drift",
+        help=(
+            "Scan ONE fully-past month for observed-holiday drift (a derived "
+            "trading day with ZERO bars across all 3 engine indices + clean "
+            "SUCCESS ledger evidence) and reconcile the remove-only "
+            "observed-not-official overlay sidecar. Never adds a session; "
+            "never names a holiday (Golden Rule #1)."
+        ),
+    )
+    drift.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    drift.add_argument(
+        "--month",
+        required=True,
+        help="The FULLY-PAST month to scan, as YYYY-MM (e.g. 2026-01)",
+    )
+
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
     auth = sub.add_parser(
         "auth",
@@ -1027,6 +1050,20 @@ def build_parser() -> argparse.ArgumentParser:
             "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY or the module default; raise it "
             "when a >capacity resume is refused FAIL_CLOSED with "
             "SweepCacheCapacityError)"
+        ),
+    )
+    sweep_all.add_argument(
+        "--acknowledge-sla-overrun",
+        action="store_true",
+        dest="acknowledge_sla_overrun",
+        help=(
+            "Proceed even when the projected wall-clock (tuple_count × an "
+            "UNBENCHMARKED per-tuple estimate, override via "
+            "BRUTEX_SWEEP_PER_TUPLE_SECONDS) exceeds the CLAUDE.md §8 2-4-day "
+            "envelope. Default: REFUSE with the honest projection "
+            "(DEC-SLA-LAUNCH-GUARD-001); acknowledging proceeds with a LOUD "
+            "warning. Manual sweep-all only — the unattended daemon never "
+            "acknowledges an overrun"
         ),
     )
 
@@ -1657,6 +1694,59 @@ def cmd_reopen_skipped(
     return EXIT_OK
 
 
+def cmd_detect_session_drift(*, lake_root: Path | None, month: str) -> int:
+    """Run the observed-sessions drift reconciler over ONE fully-past month.
+
+    DEC-CALENDAR-OBSERVED-SESSIONS-001 — the production invocation surface for
+    :func:`brutex.calendars.observed_sessions.detect_session_drift` (the
+    reconciler is deliberately MANUALLY-invoked-only: the operator scans a month
+    after its pulls have settled, reviews the printed evidence, and the labeled
+    sidecar remains the human-auditable escape hatch). Prints the verdict —
+    flagged / vetoed / no-evidence days + both cap refusals — and whether the
+    overlay sidecar was rewritten (diff-based: an unchanged month is a no-op; a
+    month whose stale entries the lake now refutes is self-healed).
+    """
+    from brutex.calendars.observed_sessions import (
+        ObservedSessionsError,
+        detect_session_drift,
+    )
+
+    try:
+        month_date = date.fromisoformat(f"{month}-01")
+    except ValueError:
+        print(
+            f"[brutex] detect-session-drift — invalid --month {month!r}; expected YYYY-MM",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    resolved = _resolve_lake_root(lake_root)
+    try:
+        report = detect_session_drift(resolved, month_date)
+    except ValueError as exc:
+        print(f"[brutex] detect-session-drift REFUSED — {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    except ObservedSessionsError as exc:
+        print(f"[brutex] detect-session-drift FAILED — {exc}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    verdict = report.verdict
+    flagged = ", ".join(f.day.isoformat() for f in verdict.flagged) or "none"
+    vetoed = ", ".join(d.isoformat() for d in verdict.vetoed_failed) or "none"
+    no_evidence = ", ".join(d.isoformat() for d in verdict.no_evidence) or "none"
+    print(
+        f"[brutex] detect-session-drift {month} — flagged: {flagged}; "
+        f"vetoed (FAILED ledger rows): {vetoed}; no-evidence: {no_evidence}; "
+        f"month-cap exceeded: {verdict.over_month_cap}; "
+        f"year-cap exceeded: {verdict.over_year_cap}; "
+        f"overlay {'REWRITTEN' if report.wrote_overlay else 'unchanged'} "
+        f"({report.overlay_path}). Every entry is observed-not-official — the "
+        "overlay never names a holiday; the official NSE circular remains the "
+        "only closure for the named-holiday gap."
+    )
+    if verdict.over_month_cap or verdict.over_year_cap:
+        return EXIT_USER_ERROR
+    return EXIT_OK
+
+
 def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
     """Interactively prompt (no echo) for the token creds and save them.
 
@@ -2172,7 +2262,11 @@ def _spawn_auto_resume_pull(
 
 
 def _start_auto_resume_on_boot(
-    lake_root: Path, log: Any
+    lake_root: Path,
+    log: Any,
+    *,
+    intent_store: Any = None,
+    resume_pipeline: Callable[[], None] | None = None,
 ) -> None:  # pragma: no cover — daemon thread + live ledger read / subprocess spawn
     """Run the opt-in boot-time auto-resume for *lake_root* in a background daemon thread.
 
@@ -2188,16 +2282,36 @@ def _start_auto_resume_on_boot(
     (default OFF — DEC-AUTO-RESUME-ON-BOOT-001), so a dev / CI boot is never
     surprised by a spontaneous pull. ``maybe_resume_on_boot`` never raises, so a
     failed resume trigger only logs — the boot is unaffected (Golden Rule #10).
+
+    DEC-PULL-INTENT-RESUME-001 (the ONE decision point): when *intent_store* (a
+    :class:`~brutex.dashboard.pull_intent.PullIntentStore`) and *resume_pipeline*
+    (the app's ``app.state.brutex_resume_pipeline`` seam) are BOTH wired and a
+    durable ``.pull_intent.json`` is present (escape hatch
+    ``BRUTEX_PULL_INTENT_RESUME`` not OFF), the dashboard PIPELINE resume runs
+    EXCLUSIVELY — the legacy spot-only CLI child is NOT spawned this boot, so
+    the two resumes can never race the account-wide single-flight ``flock``.
+    With no intent (or either seam unwired) the legacy path is byte-identical.
     """
     import threading
 
     from brutex.data.window_ledger_store import load_window_ledger
     from brutex.orchestrator.auto_resume import maybe_resume_on_boot
 
+    intent_present: Callable[[], bool] | None = None
+    if intent_store is not None and resume_pipeline is not None:
+        from brutex.dashboard.pull_intent import pull_intent_resume_active
+
+        def _intent_present() -> bool:
+            return pull_intent_resume_active(intent_store)
+
+        intent_present = _intent_present
+
     def _run() -> None:
         verdict = maybe_resume_on_boot(
             load_ledger=lambda: load_window_ledger(lake_root),
             resume=lambda incomplete: _spawn_auto_resume_pull(incomplete, lake_root, log),
+            intent_present=intent_present,
+            resume_intent=resume_pipeline,
         )
         log.info("auto_resume.verdict", verdict=verdict.value, lake_root=str(lake_root))
 
@@ -2469,12 +2583,26 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             allowed_hosts=allowed_hosts,
             host_guard="disabled" if "*" in allowed_hosts else "extended",
         )
+    # Durable pull-intent sidecar (DEC-PULL-INTENT-RESUME-001): built for THIS
+    # lake root so a real /pull-pipeline launch persists its re-fire payload,
+    # the job clears it on worker exit, and the extended auto-resume seam below
+    # can re-fire a pull that died mid-flight. Best-effort on the BIND path
+    # (Golden Rule #10): a construction failure logs and the dashboard still
+    # starts (the resume then simply stays unwired for this session).
+    pull_intent_store: Any = None
+    try:
+        from brutex.dashboard.pull_intent import PullIntentStore
+
+        pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+        _log.warning("pull_intent.build_failed", error=str(exc))
     app = build_app(
         state,
         instrument_store=store,
         summary_cache=summary_cache,
         liveproof=liveproof,
         allowed_hosts=allowed_hosts,
+        pull_intent_store=pull_intent_store,
     )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
@@ -2496,8 +2624,16 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # spawns a daemon thread (the resume DECISION never raises), but wrapping the launch
     # in a guard so even a thread-spawn failure logs + the dashboard still binds honours
     # the "never crashes boot" contract (Golden Rule #10).
+    # DEC-PULL-INTENT-RESUME-001 extends this seam: with a durable pull intent
+    # present, the PIPELINE resume (app.state.brutex_resume_pipeline) runs
+    # EXCLUSIVELY and the legacy spot-only CLI child is not spawned this boot.
     try:
-        _start_auto_resume_on_boot(_resolve_lake_root(lake_root), _log)
+        _start_auto_resume_on_boot(
+            _resolve_lake_root(lake_root),
+            _log,
+            intent_store=pull_intent_store,
+            resume_pipeline=getattr(app.state, "brutex_resume_pipeline", None),
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort, never block the bind
         _log.warning("auto_resume.launch_failed", error=str(exc))
     # DEC-LAKE-HEAL-001 L3: the ONE-TIME content-token-stamped lake-heal startup sweep
@@ -3549,6 +3685,14 @@ def cmd_fetch(
         # ``None`` so it can never observe synthetic outcomes (the same gating as
         # ``detect_completeness_gaps`` below).
         storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
+        # per pull and threaded into the completeness detectors' margin arithmetic
+        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
+        # A ``--dry-run`` threads the empty overlay (the ``detect_completeness_gaps``
+        # gating pattern); the loader never raises (missing/corrupt -> empty).
+        from brutex.calendars.observed_sessions import load_observed_holidays
+
+        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -3576,6 +3720,7 @@ def cmd_fetch(
                     # land on the window's first day) leaves it OFF so it never false-reds
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
+                    observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
                 )
             except _pull_halt_errors as exc:
@@ -3593,59 +3738,66 @@ def cmd_fetch(
                 raise
 
         until_outcome = None
-        try:
-            if until_clean:
-                # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
-                # rounds — each a full pass over the SHARED window ledger (re-fetches
-                # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
-                # SAME retry engine via run_until_clean, until clean / token dead / outer
-                # budget spent. Bounded round count (never an O(1)-total claim). The
-                # driver itself is vendor-neutral (pure 4-way decision + an injected
-                # round_runner) and lives in the vendor-neutral ingest_common home.
-                from brutex.adapters.ingest_common import (
-                    DEFAULT_MAX_ROUNDS,
-                    UntilCleanRound,
-                    run_until_clean,
-                )
+        # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
+        # whole fetch (including every until-clean round + the drain/persist
+        # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
+        # Best-effort: non-darwin / missing caffeinate is a logged no-op.
+        from brutex.observability.power_keepawake import keep_awake
 
-                fetch_passes: list[Any] = []
-
-                def _round_runner() -> UntilCleanRound:
-                    """One until-clean round = one full fetch pass; recorded for the summary.
-
-                    Groww's report has no ``auth_cause`` string (no fail-fast latch — the
-                    documented divergence; it derives ``auth_aborted`` from the quarantined
-                    failures), so the round leaves ``auth_cause`` at its ``None`` default.
-                    """
-                    res = _one_fetch_pass(True)
-                    fetch_passes.append(res)
-                    return UntilCleanRound(
-                        still_failed_windows=res.report.still_failed_windows,
-                        auth_aborted=res.report.auth_aborted,
+        with keep_awake("brutex fetch"):
+            try:
+                if until_clean:
+                    # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
+                    # rounds — each a full pass over the SHARED window ledger (re-fetches
+                    # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
+                    # SAME retry engine via run_until_clean, until clean / token dead / outer
+                    # budget spent. Bounded round count (never an O(1)-total claim). The
+                    # driver itself is vendor-neutral (pure 4-way decision + an injected
+                    # round_runner) and lives in the vendor-neutral ingest_common home.
+                    from brutex.adapters.ingest_common import (
+                        DEFAULT_MAX_ROUNDS,
+                        UntilCleanRound,
+                        run_until_clean,
                     )
 
-                rounds_budget = (
-                    until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
-                )
-                until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
-                result = fetch_passes[0]
-            else:
-                result = _one_fetch_pass(do_retry)
-        finally:
-            # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
-            # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
-            # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
-            # `sink.append` which may FEED the write consumer, so the pipeline must be drained
-            # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
-            # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
-            # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
-            # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
-            # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
-            # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
-            # error is swallowed so the ledger persist still runs.
-            drain_fetch_pipeline(fetch_pipeline)
-            drain_write_consumer(write_consumer)
-            end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+                    fetch_passes: list[Any] = []
+
+                    def _round_runner() -> UntilCleanRound:
+                        """One until-clean round = one full fetch pass; recorded for the summary.
+
+                        Groww's report has no ``auth_cause`` string (no fail-fast latch — the
+                        documented divergence; it derives ``auth_aborted`` from the quarantined
+                        failures), so the round leaves ``auth_cause`` at its ``None`` default.
+                        """
+                        res = _one_fetch_pass(True)
+                        fetch_passes.append(res)
+                        return UntilCleanRound(
+                            still_failed_windows=res.report.still_failed_windows,
+                            auth_aborted=res.report.auth_aborted,
+                        )
+
+                    rounds_budget = (
+                        until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
+                    )
+                    until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
+                    result = fetch_passes[0]
+                else:
+                    result = _one_fetch_pass(do_retry)
+            finally:
+                # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
+                # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
+                # DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-4): a pipeline consumer's tail calls
+                # `sink.append` which may FEED the write consumer, so the pipeline must be drained
+                # (every queued tail run + its ledger row recorded) BEFORE the write consumer is
+                # stopped, and BOTH BEFORE `end_pull_ledger` so settle-after-durable holds at pull
+                # granularity. Runs on ANY exit (clean return, crash, or a re-raised halt) so a
+                # crash flushes the write backlog + joins cleanly. A no-op when either is `None`
+                # (the synchronous default / --dry-run). `drain_fetch_pipeline` re-raises a
+                # captured disk-full `LakeWriteHalt` (the graceful pull-halt path); any other drain
+                # error is swallowed so the ledger persist still runs.
+                drain_fetch_pipeline(fetch_pipeline)
+                drain_write_consumer(write_consumer)
+                end_pull_ledger(ledger, resolved, dry_run=_no_persist)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -3988,6 +4140,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     sweep_cache_map_mb: int | None = None,
     sweep_cache_bloom_capacity: int | None = None,
     allow_out_of_scope: bool = False,
+    acknowledge_sla_overrun: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -4246,6 +4399,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
 
+    # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001): project the grid's
+    # wall-clock as tuple_count × an UNBENCHMARKED per-tuple estimate
+    # (BRUTEX_SWEEP_PER_TUPLE_SECONDS overrides) and REFUSE a launch projected
+    # past the CLAUDE.md §8 2-4-day envelope unless the operator passed
+    # --acknowledge-sla-overrun (then WARN loudly and proceed). Honest per
+    # Golden Rule #10: an estimate-based plausibility screen — it never
+    # certifies the §8 SLA (which remains UNMEASURED) either way.
+    from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla
+
+    try:
+        sla = check_sweep_sla(count_sweep_tuples(grid), acknowledge=acknowledge_sla_overrun)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.REFUSED:
+        print(f"[brutex] {sla.refusal_message()}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if sla.decision is SlaDecision.ACKNOWLEDGED:
+        print(f"[brutex] WARNING: {sla.acknowledged_warning()}")
+
     # Dead launch Bloom KILLED (R2-SL-F1): this launcher runs the production
     # DIGEST path — ``run_one_tuple`` always passes a non-None
     # ``trial_stats_digest``, so ``run_persisted_sweep`` sets
@@ -4343,20 +4516,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 cache=cache,
                 watchdog=watchdog,
             )
-            # Multi-core sweep (DEC-MULTICORE-SWEEP-PHASE1-001) — DEFAULT-OFF
-            # (BRUTEX_SWEEP_WORKERS=1 → the sequential path below, byte-for-byte
-            # unchanged). ``workers > 1`` dispatches the parallel driver on the
-            # PRODUCTION digest path (``run_one_tuple`` always supplies a tuple digest
-            # → ``bypass_dedup`` is always True); ``workers > 1`` on the legacy
-            # no-digest path is HARD-REFUSED (this path is always the digest path, so
-            # the guard is a belt-and-braces flag check, not a real limit).
+            # Multi-core sweep (DEC-MULTICORE-SWEEP-PHASE1-001) — AUTO-default
+            # since ADR-0016 (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): an unset
+            # BRUTEX_SWEEP_WORKERS resolves to max(1, min(cpu_count - 2, 8)), a
+            # SMALL grid (tuple_count < 2 × auto — threaded here, the one call
+            # site that knows the grid) stays sequential, and an explicit
+            # BRUTEX_SWEEP_WORKERS=1 is the sequential opt-out (byte-for-byte
+            # the path below). ``workers > 1`` dispatches the parallel driver on
+            # the PRODUCTION digest path (``run_one_tuple`` always supplies a
+            # tuple digest → ``bypass_dedup`` is always True); ``workers > 1``
+            # on the legacy no-digest path is HARD-REFUSED (this path is always
+            # the digest path, so the guard is a belt-and-braces flag check,
+            # not a real limit).
             from brutex.engine.sweep_parallel import (
                 refuse_parallel_on_legacy_path,
                 resolve_sweep_workers,
                 run_parallel_grid,
             )
 
-            workers = resolve_sweep_workers()
+            workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
             refuse_parallel_on_legacy_path(workers, digest_path=True)
             if workers > 1:
                 print(f"[brutex] sweep-all: parallel mode — {workers} workers (digest path)")
@@ -4765,6 +4943,14 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
         f"[brutex] supervisor starting — child: {' '.join(argv)} — audit: {audit_path}",
     )
 
+    # Crash-loop operator alert (DEC-SUPERVISOR-CRASHLOOP-ALERT-001): every
+    # abnormal-exit relaunch fires one best-effort, deduped Telegram push
+    # (CRITICAL once 3 relaunches land within the rolling window), so a child
+    # OOM-SIGKILL-looping all night can never stay silent. Best-effort + a
+    # silent no-op when Telegram is disabled (the default) — the supervisor's
+    # relaunch behaviour is byte-unchanged.
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
     with SweepAuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
         supervisor = ProcessSupervisor(
             launch=build_subprocess_launcher(argv),
@@ -4777,6 +4963,7 @@ def cmd_supervisor(  # pragma: no cover — live loop (real subprocess + signals
                 if shutdown_grace_seconds is not None
                 else DEFAULT_SHUTDOWN_GRACE_SECONDS
             ),
+            alerter=SweepAlerter(),
         )
         result = supervisor.run()
 
@@ -5605,8 +5792,9 @@ def _expiry_series_candidates(
         that is also that week's weekly matches BOTH series (the same
         physical contract). Empty when the expiry is unresolvable: not on the
         calendar as seen from *on_date*, beyond the Far selector, or
-        *on_date* precedes the recorded calendar history (pre-2021) — the
-        caller then rejects honestly (NO_DATA), never guesses.
+        *on_date* precedes the recorded calendar history (pre-2020 —
+        DEC-EXPIRY-REGIME-2020-001, MIGRATION.md #1178(c)) — the caller
+        then rejects honestly (NO_DATA), never guesses.
     """
     from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
 
@@ -5632,8 +5820,9 @@ def _expiry_series_candidates(
             cursor = monthly + timedelta(days=1)
     except ValueError:
         # *on_date* precedes the expiry calendar's recorded history (e.g. a
-        # 2020 signal vs the 2021-01-01 table start) — unresolvable; the
-        # caller rejects, never guesses (Golden Rule #1).
+        # 2019 signal vs the 2020-01-01 floor — DEC-EXPIRY-REGIME-2020-001,
+        # MIGRATION.md #1178(c)) — unresolvable; the caller rejects, never
+        # guesses (Golden Rule #1).
         return ()
     return tuple(candidates)
 
@@ -6139,6 +6328,8 @@ def main(argv: list[str] | None = None) -> int:
             market=args.market,
             limit=args.limit,
         )
+    if args.command == "detect-session-drift":
+        return cmd_detect_session_drift(lake_root=args.lake_root, month=args.month)
     if args.command == "auth":  # pragma: no cover — interactive / thin print shims
         if args.auth_command == "set":
             return cmd_auth_set()
@@ -6256,6 +6447,7 @@ def main(argv: list[str] | None = None) -> int:
             sweep_cache_map_mb=args.sweep_cache_map_mb,
             sweep_cache_bloom_capacity=args.sweep_cache_bloom_capacity,
             allow_out_of_scope=args.allow_out_of_scope,
+            acknowledge_sla_overrun=args.acknowledge_sla_overrun,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.

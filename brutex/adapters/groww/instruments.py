@@ -256,15 +256,55 @@ def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
     ones onto ``(exchange, " ")``): it stays pullable via
     ``by_groww_symbol`` but is excluded from the pair maps + counted, so the junk
     vendor row is visible in ``/logs`` rather than shadowing a real pair key.
+
+    Index surrogate-collision detection (DEC-INDEX-SURROGATE-COLLISION-DETECT-001):
+    a non-numeric index ``exchange_token`` becomes a deterministic 32-bit blake2b
+    surrogate ``security_id`` derived from the ``groww_symbol``
+    (:func:`_security_id`) — computed per row with no cross-row awareness. Two
+    DISTINCT-gsym indices whose surrogates collide (~1e-7 birthday odds) would
+    both enter this index, then one would be SILENTLY last-wins-overwritten
+    downstream at the store's ``(security_id, exch_id, segment)`` identity dedup
+    — order-dependently, with zero warning. This chokepoint now detects the
+    collision with an O(1) reverse-map check keyed ``(exch_id, security_id)``
+    (mirroring the store's ``Segment.INDEX`` PK partition), KEEPS the first index
+    (deterministic — mirrors the gsym first-wins dedup above, and agrees with
+    what the store retains), drops the second, and emits ONE loud
+    ``instrument_master.index_security_id_collision`` WARNING naming BOTH
+    colliding groww_symbols (``kept``/``dropped``) so nothing is silent
+    (Golden Rule #1). WARN-not-raise: a raise would abort the whole ~750-
+    underlying master load on a one-index blip (Recoverability loss).
     """
     by_groww: dict[str, Instrument] = {}
     by_pair: dict[tuple[Exchange, str], Instrument] = {}
     gsym_by_pair: dict[tuple[Exchange, str], str] = {}
     universe: list[Instrument] = []
+    # Reverse map: which gsym FIRST claimed each INDEX (exchange, security_id)
+    # identity — the surrogate-collision detector's O(1) membership probe.
+    index_identity_owner: dict[tuple[Exchange, int], str] = {}
     blank_symbol_skipped = 0
     for gsym, instrument in pairs:
         if gsym in by_groww:
             continue  # first-wins dedup, O(1)
+        if instrument.segment is Segment.INDEX:
+            # Only index rows ever carry a hashed surrogate security_id
+            # (numeric vendor tokens are used directly), so the detector is
+            # scoped to Segment.INDEX — the store PK partition where a
+            # collision would silently last-wins-overwrite one index.
+            identity = (instrument.exch_id, instrument.security_id)
+            owner = index_identity_owner.get(identity)
+            if owner is not None:
+                # A PRIOR index on this exchange already owns this 32-bit
+                # surrogate under a DIFFERENT groww_symbol: keep-first, drop
+                # this one, and say so LOUDLY naming both sides.
+                _LOG.warning(
+                    "instrument_master.index_security_id_collision",
+                    security_id=instrument.security_id,
+                    exchange=instrument.exch_id.value,
+                    kept=owner,
+                    dropped=gsym,
+                )
+                continue
+            index_identity_owner[identity] = gsym
         by_groww[gsym] = instrument
         universe.append(instrument)
         symbol = instrument.symbol_name
@@ -327,10 +367,39 @@ def parse_instrument_csv(text: str) -> list[tuple[str, Instrument]]:
     WARNING, and skipped — so one junk vendor row can never abort the whole
     master and leave the dashboard with an empty universe (the HTTP 502 the
     operator hit). The HEADER schema contract above still fail-louds.
+
+    Additive-drift tolerance (DEC-INSTRUMENT-HEADER-ADDITIVE-001): a purely
+    ADDITIVE vendor change — one or more EXTRA columns appended AFTER the
+    verified 21 — is accepted (parsing keys on the known 21 column names, so
+    trailing extras are inert) and surfaced as ONE loud
+    ``groww.instruments.header_extra_columns`` WARNING naming the extras, so
+    a benign 22nd column can never again kill the whole universe load. Every
+    OTHER drift still fail-louds exactly as before: a missing, reordered, or
+    renamed column among the first 21 raises :class:`InstrumentFormatError`,
+    and so does an extra column that DUPLICATES a known name (``DictReader``
+    would let the trailing duplicate silently overwrite the real cell —
+    corrupted values, worse than a refusal; Golden Rule #1).
     """
     reader = csv.DictReader(StringIO(text))
-    if tuple(reader.fieldnames or ()) != INSTRUMENT_CSV_COLUMNS:
+    fields = tuple(reader.fieldnames or ())
+    known = len(INSTRUMENT_CSV_COLUMNS)
+    if fields[:known] != INSTRUMENT_CSV_COLUMNS:
         raise InstrumentFormatError(f"Groww instrument header drift: got {reader.fieldnames!r}")
+    extra_columns = fields[known:]
+    if extra_columns:
+        duplicated = [col for col in extra_columns if col in INSTRUMENT_CSV_COLUMNS]
+        if duplicated:
+            raise InstrumentFormatError(
+                f"Groww instrument header drift: extra trailing column(s) duplicate known "
+                f"column name(s) {duplicated!r} — a duplicate would silently overwrite the "
+                f"real cell values (csv.DictReader keeps the LAST occurrence); refusing. "
+                f"Full header: {reader.fieldnames!r}"
+            )
+        _LOG.warning(
+            "groww.instruments.header_extra_columns",
+            extra_columns=list(extra_columns),
+            count=len(extra_columns),
+        )
     parsed: list[tuple[str, Instrument]] = []
     skipped: list[str] = []
     for row in reader:

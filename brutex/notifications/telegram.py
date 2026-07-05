@@ -157,6 +157,8 @@ class TelegramEventKind(StrEnum):
         "symbol.window_failure"  # 100% window-failure for a symbol (DEC-RATE-STORM-WATCHDOG-001)
     )
     AUTH_RENEW_FAILED = "auth.renew_failed"  # vendor token-renew refused (DEC-TELEGRAM-WIRE-001)
+    CHILD_RELAUNCHED = "child.relaunched"  # supervisor relaunched a crashed child (DEC-SUPERVISOR-CRASHLOOP-ALERT-001)
+    SUPERVISOR_GAVE_UP = "supervisor.gave_up"  # max-restart cap exhausted — the sweep is DOWN (DEC-SUPERVISOR-CRASHLOOP-ALERT-001)
     RUN_HEARTBEAT = "run.heartbeat"
     RUN_COMPLETE = "run.complete"
     TEST = "test"  # for `brutex notify test`
@@ -180,6 +182,13 @@ DEDUPE_WINDOW_SECONDS: Final[dict[str, float]] = {
     # is still set as defence-in-depth against a re-run within one process.
     TelegramEventKind.SYMBOL_WINDOW_FAILURE: 0.0,
     TelegramEventKind.AUTH_RENEW_FAILED: 300.0,  # coalesce a renew-retry storm (5 min)
+    # Coalesce an all-night crash loop into one push per 5 min per dedupe_key —
+    # the supervisor's CRITICAL crash-loop escalation carries its OWN dedupe_key
+    # so it always cuts through the WARN-tier window (DEC-SUPERVISOR-CRASHLOOP-ALERT-001).
+    TelegramEventKind.CHILD_RELAUNCHED: 300.0,
+    # The give-up verdict is TERMINAL — it fires once per supervisor run, so a
+    # coalescing window could only ever swallow it, never de-storm anything.
+    TelegramEventKind.SUPERVISOR_GAVE_UP: 0.0,
     TelegramEventKind.RUN_HEARTBEAT: 600.0,  # 10 min
     TelegramEventKind.RUN_COMPLETE: 0.0,
     TelegramEventKind.TEST: 0.0,

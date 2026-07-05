@@ -70,6 +70,16 @@ PullWork = Callable[[ProgressHook], object]
 #: invalidates the ``/results`` leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001).
 SuccessHook = Callable[[], None]
 
+#: An optional zero-arg completion callback fired ONCE in :meth:`BackgroundPullJob._run`'s
+#: ``finally`` — on success AND failure — inside the run-identity-gated block and
+#: strictly BEFORE the cross-process single-flight release, so a peer acquiring
+#: the freed ``flock`` can never observe the pre-completion state the hook clears.
+#: Used by the pipeline route to clear the durable ``.pull_intent.json`` crash-
+#: recovery sidecar (DEC-PULL-INTENT-RESUME-001): the intent survives a SIGKILL
+#: (this ``finally`` never runs) but is cleared on every worker-thread exit. A
+#: raising hook is logged + swallowed (the release still happens).
+FinallyHook = Callable[[], None]
+
 #: The injected thread spawner — runs *fn* off the caller's thread. The default
 #: spawns a daemon thread; tests inject a synchronous runner for determinism.
 Spawner = Callable[[Callable[[], None]], None]
@@ -342,6 +352,7 @@ class BackgroundPullJob:
         detail: str = "",
         ledger_synced: bool = False,
         on_success: SuccessHook | None = None,
+        on_finally: FinallyHook | None = None,
     ) -> bool:
         """Launch *work* in the background over *total* units; return whether it started.
 
@@ -378,6 +389,15 @@ class BackgroundPullJob:
         write-generation and the next ``/results`` poll re-reads the new winners
         (DEC-DASHBOARD-RESULTS-PAGE-001). A success callback that raises is logged +
         swallowed so it can never crash the worker thread.
+
+        When *on_finally* is given it is fired ONCE in :meth:`_run`'s ``finally`` —
+        success AND failure alike — inside the run-identity-gated block, strictly
+        BEFORE the single-flight release (DEC-PULL-INTENT-RESUME-001: the pipeline
+        route clears its durable ``.pull_intent.json`` here, so a peer process
+        acquiring the freed ``flock`` never sees a live intent). It does NOT fire
+        when this ``start`` is refused (single-flight contention — no worker runs)
+        nor after a SIGKILL (the durable-intent survival that powers the resume).
+        A raising hook is logged + swallowed; the release still happens.
         """
         # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):
         # the worker beats it on real progress (per window / per post-fetch unit via the
@@ -428,7 +448,7 @@ class BackgroundPullJob:
         # back-compat with every existing factory.
         watchdog.on_recovery = lambda event: self._on_recovered(event, watchdog)
         watchdog.start()
-        self._spawn(lambda: self._run(work, watchdog, on_success))
+        self._spawn(lambda: self._run(work, watchdog, on_success, on_finally))
         return True
 
     def _acquire_singleflight(self) -> bool:
@@ -560,7 +580,11 @@ class BackgroundPullJob:
             _LOG.exception("pull_stall.on_recovered failed; the pull / timer is unaffected")
 
     def _run(
-        self, work: PullWork, watchdog: PullWatchdog, on_success: SuccessHook | None = None
+        self,
+        work: PullWork,
+        watchdog: PullWatchdog,
+        on_success: SuccessHook | None = None,
+        on_finally: FinallyHook | None = None,
     ) -> None:
         """Worker body: run *work*, then mark the tracker done / errored.
 
@@ -571,6 +595,12 @@ class BackgroundPullJob:
         returns without raising and the progress is marked done — and never on the
         failure branch, so a completed sweep can invalidate the ``/results`` cache
         while a failed sweep leaves it untouched (DEC-DASHBOARD-RESULTS-PAGE-001).
+
+        *on_finally* (when given) fires ONCE in the ``finally`` — success AND
+        failure — inside the identity-gated block, BEFORE the single-flight
+        release (DEC-PULL-INTENT-RESUME-001: clear the durable pull intent so a
+        peer acquiring the freed lock never sees a live intent). Best-effort:
+        a raising hook is logged + swallowed and the release still happens.
         """
         # Install the process-global liveness beat for this run (DEC-PULL-CONTENTION-
         # ANTISTALL-001 GAP #15): the bounded partition lock-wait + the rate pacer fire
@@ -625,6 +655,20 @@ class BackgroundPullJob:
                 # let a stale worker clobber a newer run.
                 if self._watchdog is watchdog:
                     self._running = False
+                    # Fire the completion hook (DEC-PULL-INTENT-RESUME-001: the durable
+                    # pull-intent clear) INSIDE the identity gate — a superseded stale
+                    # worker must never clear a NEWER run's intent — and strictly BEFORE
+                    # the single-flight release below, so a peer process acquiring the
+                    # freed flock can never observe a live intent for a finished pull.
+                    # Best-effort: a raising hook is logged + swallowed so it can never
+                    # leave the flock held or the flag stuck.
+                    if on_finally is not None:
+                        try:
+                            on_finally()
+                        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
+                            _LOG.exception(
+                                "pull_job.on_finally failed; the single-flight release continues"
+                            )
                     # Release the account-wide cross-process single-flight lock under the
                     # SAME identity gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so a peer
                     # process can start the next pull — released HERE and only here, when
@@ -786,6 +830,7 @@ class BackgroundPullJob:
 
 __all__ = [
     "BackgroundPullJob",
+    "FinallyHook",
     "LakeRootResolver",
     "ProgressHook",
     "PullWork",

@@ -17,7 +17,40 @@ must consult the docstrings below.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+__all__ = [
+    "ResidentBars",
+    "ResidentSweepSim",
+    "__version__",
+    "add_u64",
+    "bitand_count_u64s",
+    "bitcount_u64s",
+    "blake3_hash",
+    "count_supermask_u64s",
+    "count_supermasks_u64s",
+    "count_supermasks_u64s_nthreads",
+    "popcount_bytes",
+]
+
 __version__: str
+
+__build_crate_version__: str
+"""Crate version of the INSTALLED compiled kernel (build stamp, not API).
+
+Derived at import from the compiled module's ``CARGO_PKG_VERSION``-baked
+``__version__``; read by ``brutex doctor``'s fno_math wheel-freshness stage
+(DEC-FNOMATH-WHEEL-FRESHNESS-001). Deliberately NOT in ``__all__``.
+"""
+
+_EXPECTED_COMPILED_SYMBOLS: tuple[str, ...]
+
+def _assert_compiled_surface(
+    compiled: object,
+    expected: Sequence[str] = ...,
+) -> None:
+    """Raise an actionable ``ImportError`` if ``compiled`` misses an expected symbol."""
+    ...
 
 def add_u64(a: int, b: int) -> int:
     """Add two `u64` values.
@@ -76,6 +109,21 @@ def count_supermasks_u64s_nthreads(
 
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
+    ...
+
+def sweep_drawdown_stats(
+    n_bars: int,
+    start_equity_paisa: int,
+    exits: list[tuple[int, int]],
+) -> tuple[int, float, int, float]:
+    """Fused per-mask equity fold + drawdown scan (DEC-SWEEP-RUST-METRICS-001).
+
+    `exits` is `(exit_bar_idx, pnl_paisa)` per closed trade. Returns
+    `(max_dd_paisa, max_dd_pct, max_dd_duration_bars, ulcer_index)` exactly as
+    `brutex.metrics.compute._drawdown_stats` returns them (percentages ×100),
+    bit-identical inside the `start + Σ|pnl| ≤ 2**52` exactness envelope the
+    Python wrapper pre-guards. Raises `ValueError` outside the envelope.
+    """
     ...
 
 class ResidentBars:

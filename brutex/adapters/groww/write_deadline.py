@@ -10,7 +10,14 @@ inherent wall-clock bound. The existing bounds do NOT cover it:
 * :func:`~brutex.adapters.groww.deadline.run_with_deadline` bounds only the *fetch* SDK call;
 * :data:`~brutex.data.partition_lock.DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS` bounds only the
   cross-process ``flock`` ACQUIRE — a hung write happens AFTER the lock is held, inside the
-  merge / render / fsync / replace.
+  merge / render / fsync / replace. Because THIS module's deadline wraps the whole
+  ``sink.append`` INCLUDING that acquire, the lock bound must stay strictly BELOW the write
+  deadline (75 s < 90 s — DEC-WRITE-DEADLINE-LOCK-ORDER-001) or it is unreachable: the write
+  deadline would abandon the write thread mid-``flock``, leaking the thread + lock fd instead
+  of taking the clean :class:`~brutex.data.errors.PartitionLockTimeout` defer path. Env
+  overrides can re-invert the ordering; :func:`append_with_deadline` WARNs once per process
+  (``groww.write_deadline.lock_timeout_inversion``) when the EFFECTIVE configuration is
+  inverted.
 
 So a WEDGED durable write that NEVER raises (a hung ``fsync`` / ``os.replace`` on a stalled
 external SSD / NFS mount) would block its consumer thread forever, fill that consumer's bounded
@@ -42,34 +49,93 @@ every pull until the volume recovers (the operator's signal to act), never silen
 (idempotent keep-first sink + the durable window ledger). The number of abandoned daemons is
 bounded by the distinct wedged partitions, not by the window count.
 
-This module is import-cheap: it imports only :func:`run_with_deadline`, the constant, and the
-exception type; it does NOT import the heavy lake writers (the ``sink`` is injected). O(1) per
-window — the deadline wrap is one ``threading.Event.wait``, NOT per-bar.
+This module is import-cheap: it imports only :func:`run_with_deadline`, the constants, the
+partition-lock timeout resolver (a pure env-reader), and the exception type; it does NOT
+import the heavy lake writers (the ``sink`` is injected). O(1) per window — the deadline
+wrap is one ``threading.Event.wait``, NOT per-bar.
 """
 
 from __future__ import annotations
 
 import math
 import os
+import threading
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
+
+import structlog
 
 from brutex.adapters.groww.constants import GROWW_WRITE_DEADLINE_S
 from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
 from brutex.data.errors import WriteDeadlineExceeded
+from brutex.data.partition_lock import resolve_partition_lock_timeout_seconds
 
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
     from brutex.data.sink import BarSink, SinkAppendResult
 
+_LOG = structlog.get_logger(__name__)
+
 __all__ = [
     "WRITE_DEADLINE_ENV",
     "append_with_deadline",
+    "reset_lock_timeout_inversion_warning",
     "resolve_write_deadline_seconds",
 ]
 
 #: Environment override for the durable-write deadline (operator escape hatch, no code change).
 WRITE_DEADLINE_ENV: str = "BRUTEX_GROWW_WRITE_DEADLINE_S"
+
+# Once-per-process guard for the lock-timeout inversion WARN below. A tiny sanctioned
+# process-global (the `groww.parse.epoch_timestamp` warn-once precedent,
+# DEC-INGEST-BOUNDARY-INTEGRITY-001 — a mutated set, mirroring its shape): the inversion
+# is a CONFIGURATION property, constant for the process's lifetime, and the check runs
+# once per window — warning per call would spam thousands of identical lines per pull.
+# Thread-safe; explicit reset seam for tests. Bounded: at most one sentinel element.
+_INVERSION_WARN_GUARD = threading.Lock()
+_inversion_warned: set[str] = set()
+_WARNED_SENTINEL = "warned"
+
+
+def reset_lock_timeout_inversion_warning() -> None:
+    """Test seam: re-arm the once-per-process lock-timeout inversion WARN."""
+    with _INVERSION_WARN_GUARD:
+        _inversion_warned.clear()
+
+
+def _warn_once_if_lock_timeout_inverted(deadline_seconds: float) -> None:
+    """WARN once per process when the EFFECTIVE lock timeout re-inverts the ordering.
+
+    The ordering invariant (DEC-WRITE-DEADLINE-LOCK-ORDER-001) is
+    ``partition-lock acquire timeout < durable-write deadline`` — the defaults hold it
+    (75 s < 90 s, pinned by ``tests/unit/test_write_deadline_lock_order.py``), but the
+    env overrides (``BRUTEX_PARTITION_LOCK_TIMEOUT_S`` / ``BRUTEX_GROWW_WRITE_DEADLINE_S``)
+    can re-invert it at runtime. An inverted effective configuration makes the lock bound
+    unreachable: this module's deadline abandons the write thread while it still blocks in
+    the ``flock`` poll loop (thread + lock fd leaked per contended window) instead of the
+    clean :class:`~brutex.data.errors.PartitionLockTimeout` defer. Called only on the
+    DEFAULT-deadline path (an explicit per-call ``deadline_seconds`` — a test exercising a
+    tiny timeout — is not the process configuration and must not trip it). Observe-only:
+    never raises, never changes pacing. O(1).
+    """
+    lock_timeout = resolve_partition_lock_timeout_seconds()
+    if lock_timeout < deadline_seconds:
+        return
+    with _INVERSION_WARN_GUARD:
+        if _WARNED_SENTINEL in _inversion_warned:
+            return
+        _inversion_warned.add(_WARNED_SENTINEL)
+    _LOG.warning(
+        "groww.write_deadline.lock_timeout_inversion",
+        partition_lock_timeout_s=lock_timeout,
+        write_deadline_s=deadline_seconds,
+        detail=(
+            "effective partition-lock acquire timeout >= durable-write deadline — the "
+            "lock bound is unreachable; a contended acquire will be abandoned mid-flock "
+            "(thread+fd leak) instead of the clean PartitionLockTimeout defer "
+            "(DEC-WRITE-DEADLINE-LOCK-ORDER-001)"
+        ),
+    )
 
 
 def resolve_write_deadline_seconds(raw: str | None = None) -> float:
@@ -156,7 +222,14 @@ def append_with_deadline(
         If the durable write does not complete within *deadline_seconds* (a wedged
         fsync / replace). A TRANSIENT defer signal, NOT a pull-wide stop.
     """
-    deadline = resolve_write_deadline_seconds() if deadline_seconds is None else deadline_seconds
+    if deadline_seconds is None:
+        deadline = resolve_write_deadline_seconds()
+        # The default path IS the process's effective configuration — check the
+        # ordering invariant here (an explicit per-call deadline is a test/caller
+        # choice, not the configuration; DEC-WRITE-DEADLINE-LOCK-ORDER-001).
+        _warn_once_if_lock_timeout_inverted(deadline)
+    else:
+        deadline = deadline_seconds
     try:
         return run_with_deadline(
             lambda: sink.append(
