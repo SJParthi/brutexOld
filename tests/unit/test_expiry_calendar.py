@@ -193,7 +193,84 @@ class TestNiftyWithdrawnMondayRegime:
         assert get_weekly_dow(OptionsUnderlying.NIFTY, date(2025, 9, 2)) == TUESDAY
 
 
+class Test2020Coverage:
+    """DEC-EXPIRY-REGIME-2020-001: coverage extended to the 2020-01-01 pull floor.
+
+    NIFTY + BANKNIFTY 2020 = Thursday weekly / last-Thursday monthly
+    (secondary-corroborated across two independent research rounds: NIFTY
+    weekly launched 2019-02-11, BANKNIFTY weekly launched May 2016, Thursday
+    regime continuous until the 2023 changes). SENSEX 2020 = Thursday is an
+    UNVERIFIED-continuity inference (thin/illiquid pre-2023 relaunch; no
+    citable 2020 BSE circular reachable) — pinned so a silent regime edit
+    can't slip in without revisiting the evidence.
+    """
+
+    @pytest.mark.parametrize(
+        "instrument",
+        [OptionsUnderlying.NIFTY, OptionsUnderlying.BANKNIFTY, OptionsUnderlying.SENSEX],
+    )
+    def test_weekly_dow_2020_is_thursday(self, instrument: OptionsUnderlying) -> None:
+        assert get_weekly_dow(instrument, date(2020, 6, 15)) == THURSDAY
+
+    @pytest.mark.parametrize(
+        "instrument",
+        [OptionsUnderlying.NIFTY, OptionsUnderlying.BANKNIFTY, OptionsUnderlying.SENSEX],
+    )
+    def test_monthly_dow_2020_is_thursday(self, instrument: OptionsUnderlying) -> None:
+        assert get_monthly_dow(instrument, date(2020, 6, 15)) == THURSDAY
+
+    @pytest.mark.parametrize(
+        "instrument",
+        [OptionsUnderlying.NIFTY, OptionsUnderlying.BANKNIFTY, OptionsUnderlying.SENSEX],
+    )
+    def test_has_weekly_across_2020(self, instrument: OptionsUnderlying) -> None:
+        for d in [date(2020, 1, 1), date(2020, 6, 15), date(2020, 12, 31)]:
+            assert has_weekly(instrument, d)
+
+    @pytest.mark.parametrize(
+        "instrument",
+        [OptionsUnderlying.NIFTY, OptionsUnderlying.BANKNIFTY],
+    )
+    def test_next_weekly_expiry_2020(self, instrument: OptionsUnderlying) -> None:
+        # Mon 2020-06-15 → next Thursday = 2020-06-18.
+        assert next_weekly_expiry(instrument, date(2020, 6, 15)) == date(2020, 6, 18)
+
+    def test_next_weekly_expiry_2020_sensex_unverified_continuity(self) -> None:
+        # SENSEX rides the SAME Thursday table row — UNVERIFIED continuity
+        # (see class docstring); the pin is deliberate, not a verification.
+        assert next_weekly_expiry(OptionsUnderlying.SENSEX, date(2020, 6, 15)) == date(2020, 6, 18)
+
+    @pytest.mark.parametrize(
+        "instrument",
+        [OptionsUnderlying.NIFTY, OptionsUnderlying.BANKNIFTY],
+    )
+    def test_next_monthly_expiry_march_2020(self, instrument: OptionsUnderlying) -> None:
+        # Last Thursday of March 2020 = 2020-03-26.
+        assert next_monthly_expiry(instrument, date(2020, 3, 1)) == date(2020, 3, 26)
+
+    def test_next_monthly_expiry_march_2020_sensex_unverified_continuity(self) -> None:
+        assert next_monthly_expiry(OptionsUnderlying.SENSEX, date(2020, 3, 1)) == date(2020, 3, 26)
+
+    def test_pull_floor_start_covered(self) -> None:
+        # 2020-01-01 itself (== GROWW_HISTORY_FLOOR) resolves.
+        assert get_weekly_dow(OptionsUnderlying.NIFTY, date(2020, 1, 1)) == THURSDAY
+
+
 class TestPreHistoryRejected:
-    def test_before_2021_raises(self) -> None:
+    def test_before_2020_raises(self) -> None:
+        # The coverage floor moved 2021 → 2020 (DEC-EXPIRY-REGIME-2020-001);
+        # a pre-floor date STILL refuses rather than guess (Golden Rule #1).
         with pytest.raises(ValueError, match="before recorded history"):
-            get_weekly_dow(OptionsUnderlying.NIFTY, date(2020, 12, 31))
+            get_weekly_dow(OptionsUnderlying.NIFTY, date(2019, 12, 31))
+
+    def test_2020_no_longer_raises(self) -> None:
+        # Regression: 2020-12-31 raised before the extension.
+        assert get_weekly_dow(OptionsUnderlying.NIFTY, date(2020, 12, 31)) == THURSDAY
+
+    @pytest.mark.parametrize(
+        "instrument",
+        [OptionsUnderlying.NIFTY, OptionsUnderlying.BANKNIFTY, OptionsUnderlying.SENSEX],
+    )
+    def test_monthly_before_2020_raises(self, instrument: OptionsUnderlying) -> None:
+        with pytest.raises(ValueError, match="before recorded history"):
+            get_monthly_dow(instrument, date(2019, 12, 31))

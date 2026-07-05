@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+from typing import ClassVar
 
 import pytest
 from brutex.calendars.nse import (
@@ -161,12 +162,15 @@ class TestExpectedBarsPerDay:
     @pytest.mark.parametrize(
         "tf_minutes,expected_bars",
         [
+            # Non-divisors of 375 count the truncated final bucket
+            # (DEC-CALENDAR-BARS-CEIL-001 — ceil, matching the
+            # resample_1m_to_tf oracle; was floor: 2->187, 30->12, 60->6).
             (1, 375),
-            (2, 187),
+            (2, 188),
             (5, 75),
             (15, 25),
-            (30, 12),
-            (60, 6),
+            (30, 13),
+            (60, 7),
             (375, 1),  # full session = 1 bar
             (1440, 1),  # 1d → 1 bar
         ],
@@ -944,31 +948,201 @@ class TestFacadeIntegration:
         assert cal.expected_bars_per_day_for_tf(5) == 75
 
 
-class TestHolidays2026HonestyFix:
-    """DEC-CALENDAR-OBSERVED-SESSIONS-001 — the HOLIDAYS_2026 honesty fix.
+class TestExchangeSplit:
+    """DEC-CALENDAR-EXCHANGE-SPLIT-001: per-exchange NSE/BSE holiday sets over
+    ONE common per-year core, with a keyword-only ``exchange`` selector on every
+    lookup function (``None`` = the exchange-agnostic pre-split behaviour)."""
 
-    The previously-listed 2026-02-15 "Mahashivratri" was per-line UNVERIFIED AND
-    provably a SUNDAY — an arithmetic no-op in ``is_trading_day`` — so it was
-    removed WITHOUT a substitute date (Golden Rule #1: the real NSE 2026
-    observance date is UNKNOWN pending the official circular).
+    def test_nse_equals_bse_equals_all_today(self) -> None:
+        # NO citable NSE-vs-BSE divergent equity-segment holiday exists for
+        # 2020-2026 (secondary-corroborated; primary circulars 403'd), so the
+        # three sets are IDENTICAL today — the split is a divergence MECHANISM.
+        from brutex.calendars.nse import BSE_HOLIDAYS, NSE_HOLIDAYS
+
+        assert NSE_HOLIDAYS == BSE_HOLIDAYS == ALL_HOLIDAYS
+
+    def test_only_sets_are_empty_by_verified_fact(self) -> None:
+        from brutex.calendars.nse import BSE_ONLY_HOLIDAYS, NSE_ONLY_HOLIDAYS
+
+        assert not NSE_ONLY_HOLIDAYS
+        assert not BSE_ONLY_HOLIDAYS
+
+    def test_holidays_for_exchange_dispatch(self) -> None:
+        from brutex.calendars.nse import (
+            BSE_HOLIDAYS,
+            NSE_HOLIDAYS,
+            holidays_for_exchange,
+        )
+
+        assert holidays_for_exchange("NSE") is NSE_HOLIDAYS
+        assert holidays_for_exchange("BSE") is BSE_HOLIDAYS
+
+    def test_holidays_for_exchange_invalid_raises_naming_valid_values(self) -> None:
+        from brutex.calendars.nse import holidays_for_exchange
+
+        with pytest.raises(ValueError, match="'NSE' and 'BSE'"):
+            holidays_for_exchange("MCX")
+        with pytest.raises(ValueError, match="unknown exchange 'nse'"):
+            holidays_for_exchange("nse")  # exact match, no case folding
+
+    @pytest.mark.parametrize("exchange", ["NSE", "BSE"])
+    def test_exchange_threading_matches_default_on_every_function(self, exchange: str) -> None:
+        # With NSE == BSE == ALL, every function must answer identically for
+        # exchange=None / "NSE" / "BSE" — the byte-compat contract.
+        holiday = date(2024, 1, 26)  # Republic Day (Fri)
+        weekday = date(2024, 2, 20)  # regular Tuesday
+        weekend = date(2024, 5, 11)  # Saturday
+        budget = date(2025, 2, 1)  # special weekend session (SHARED)
+        muhurat = date(2024, 11, 1)  # Muhurat (SHARED)
+        assert is_holiday(holiday, exchange=exchange) is is_holiday(holiday) is True
+        assert is_holiday(weekday, exchange=exchange) is is_holiday(weekday) is False
+        assert is_holiday_checked(holiday, exchange=exchange) is True
+        assert is_trading_day(weekday, exchange=exchange) is True
+        assert is_trading_day(holiday, exchange=exchange) is False
+        assert is_trading_day(budget, exchange=exchange) is True  # special session shared
+        assert is_trading_day_checked(weekday, exchange=exchange) is True
+        assert is_trading_day_checked(weekend, exchange=exchange) is False
+        assert get_session(weekday, exchange=exchange) == get_session(weekday)
+        assert get_session(holiday, exchange=exchange) is None
+        muhurat_session = get_session(muhurat, exchange=exchange)
+        assert muhurat_session is not None
+        assert muhurat_session.session_type is SessionType.MUHURAT
+        assert get_session_checked(weekday, exchange=exchange) == get_session_checked(weekday)
+        span = (date(2024, 1, 22), date(2024, 1, 28))
+        assert trading_days_between(*span, exchange=exchange) == trading_days_between(*span)
+        assert trading_days_between_checked(*span, exchange=exchange) == (
+            trading_days_between_checked(*span)
+        )
+
+    def test_checked_variants_still_raise_out_of_coverage_with_exchange(self) -> None:
+        out_weekday = date(2019, 12, 31)  # Tuesday, below the 2020 floor
+        with pytest.raises(HolidayDataUnavailableError):
+            is_holiday_checked(out_weekday, exchange="NSE")
+        with pytest.raises(HolidayDataUnavailableError):
+            is_trading_day_checked(out_weekday, exchange="BSE")
+
+    def test_invalid_exchange_raises_on_every_function(self) -> None:
+        d = date(2024, 2, 20)
+        with pytest.raises(ValueError, match="unknown exchange"):
+            is_holiday(d, exchange="XSE")
+        with pytest.raises(ValueError, match="unknown exchange"):
+            is_holiday_checked(d, exchange="XSE")
+        with pytest.raises(ValueError, match="unknown exchange"):
+            is_trading_day(d, exchange="XSE")
+        with pytest.raises(ValueError, match="unknown exchange"):
+            is_trading_day_checked(d, exchange="XSE")
+        with pytest.raises(ValueError, match="unknown exchange"):
+            get_session(d, exchange="XSE")
+        with pytest.raises(ValueError, match="unknown exchange"):
+            get_session_checked(d, exchange="XSE")
+        with pytest.raises(ValueError, match="unknown exchange"):
+            trading_days_between(d, d, exchange="XSE")
+        with pytest.raises(ValueError, match="unknown exchange"):
+            trading_days_between_checked(d, d, exchange="XSE")
+
+    def test_invalid_exchange_raises_even_when_date_path_short_circuits(self) -> None:
+        # Eager validation: a Muhurat / special-weekend / weekend date would
+        # short-circuit before the holiday set is consulted — the invalid
+        # exchange must STILL raise (never a silent typo).
+        with pytest.raises(ValueError, match="unknown exchange"):
+            get_session(date(2024, 11, 1), exchange="XSE")  # Muhurat date
+        with pytest.raises(ValueError, match="unknown exchange"):
+            is_trading_day(date(2025, 2, 1), exchange="XSE")  # Budget Saturday
+        with pytest.raises(ValueError, match="unknown exchange"):
+            is_trading_day_checked(date(2024, 5, 11), exchange="XSE")  # Saturday
+        with pytest.raises(ValueError, match="unknown exchange"):
+            get_session_checked(date(2024, 5, 11), exchange="XSE")  # Saturday
+
+    def test_facade_exports_exchange_surface(self) -> None:
+        import brutex.calendars as cal
+
+        for name in ("NSE_HOLIDAYS", "BSE_HOLIDAYS", "holidays_for_exchange"):
+            assert name in cal.__all__
+            assert hasattr(cal, name)
+
+
+class TestHolidays2026Complete:
+    """DEC-CALENDAR-2026-COMPLETE-001: the corroborated full-year 2026 list
+    (secondary-corroborated across both research rounds; the primary NSE
+    circular CMTR71775 PDF was unreachable — HTTP 403 — so NOT primary-verified).
     """
 
-    def test_2026_02_15_not_in_holidays_and_still_nontrading(self) -> None:
-        removed = date(2026, 2, 15)
-        assert removed.weekday() == 6  # Sunday — the no-op proof
-        assert removed not in ALL_HOLIDAYS
-        assert not is_holiday(removed)  # flipped True -> False by the removal
-        assert not is_trading_day(removed)  # verdict UNCHANGED (weekend)
-        assert not is_special_weekend_session(removed)
+    #: The 15 weekday trading holidays both research rounds agree on.
+    _WEEKDAY_HOLIDAYS_2026: ClassVar[list[date]] = [
+        date(2026, 1, 26),  # Mon Republic Day
+        date(2026, 3, 3),  # Tue Holi
+        date(2026, 3, 26),  # Thu Ram Navami
+        date(2026, 3, 31),  # Tue Mahavir Jayanti
+        date(2026, 4, 3),  # Fri Good Friday
+        date(2026, 4, 14),  # Tue Dr Ambedkar Jayanti
+        date(2026, 5, 1),  # Fri Maharashtra Day
+        date(2026, 5, 28),  # Thu Bakri Id
+        date(2026, 6, 26),  # Fri Muharram
+        date(2026, 9, 14),  # Mon Ganesh Chaturthi
+        date(2026, 10, 2),  # Fri Gandhi Jayanti
+        date(2026, 10, 20),  # Tue Dussehra
+        date(2026, 11, 10),  # Tue Diwali Balipratipada
+        date(2026, 11, 24),  # Tue Guru Nanak Jayanti
+        date(2026, 12, 25),  # Fri Christmas
+    ]
 
-    def test_holiday_coverage_last_year_still_2026(self) -> None:
-        # The removal must not shrink the derived coverage span.
-        assert HOLIDAY_COVERAGE_LAST_YEAR == 2026
-        assert HOLIDAY_COVERAGE_FIRST_YEAR == 2020
+    #: Weekend-falling published dates (kept per the earlier-years convention).
+    _WEEKEND_DATES_2026: ClassVar[list[date]] = [
+        date(2026, 2, 15),  # Sun Mahashivratri
+        date(2026, 3, 21),  # Sat Id-ul-Fitr
+        date(2026, 8, 15),  # Sat Independence Day
+        date(2026, 11, 8),  # Sun Diwali Laxmi Pujan (Muhurat day, timings TBD)
+    ]
 
-    def test_holidays_2026_count_eight(self) -> None:
+    def test_every_weekday_holiday_is_not_a_trading_day(self) -> None:
+        for d in self._WEEKDAY_HOLIDAYS_2026:
+            assert d.weekday() < 5, d  # genuinely a weekday
+            assert is_holiday(d), d
+            for exchange in (None, "NSE", "BSE"):
+                assert is_trading_day(d, exchange=exchange) is False, (d, exchange)
+
+    def test_weekend_published_dates_listed_but_weekend_anyway(self) -> None:
+        for d in self._WEEKEND_DATES_2026:
+            assert d.weekday() >= 5, d
+            assert is_holiday(d), d
+            assert is_trading_day(d) is False, d
+
+    def test_2026_holiday_set_is_exactly_the_corroborated_19(self) -> None:
         from brutex.calendars.nse import HOLIDAYS_2026
 
-        assert len(HOLIDAYS_2026) == 8
-        assert date(2026, 1, 26) in HOLIDAYS_2026  # Republic Day retained
-        assert date(2026, 8, 15) in HOLIDAYS_2026  # fixed-date Saturday retained
+        expected = frozenset(self._WEEKDAY_HOLIDAYS_2026 + self._WEEKEND_DATES_2026)
+        assert expected == HOLIDAYS_2026
+
+    def test_ram_navami_2026_fixed_to_march_26(self) -> None:
+        # REGRESSION (the real bug this pack fixes): the prior list had Ram
+        # Navami on 2026-03-27 — a FRIDAY, a normal trading day. Both research
+        # rounds independently confirm Thu 2026-03-26.
+        assert date(2026, 3, 26).weekday() == 3  # Thursday
+        assert is_holiday(date(2026, 3, 26))
+        assert not is_holiday(date(2026, 3, 27))
+        for exchange in (None, "NSE", "BSE"):
+            assert is_trading_day(date(2026, 3, 26), exchange=exchange) is False
+            assert is_trading_day(date(2026, 3, 27), exchange=exchange) is True
+
+    def test_january_2026_has_exactly_21_sessions(self) -> None:
+        # 22 January weekdays minus Republic Day (the ONLY January holiday per
+        # both rounds). The vendor-observed 20-session drift stays UNVERIFIED —
+        # no date is fabricated to reconcile it (Golden Rule #1).
+        days = trading_days_between(date(2026, 1, 1), date(2026, 1, 31))
+        assert len(days) == 21
+        assert date(2026, 1, 26) not in days
+
+    def test_known_open_2026_weekdays_are_trading_days(self) -> None:
+        assert is_trading_day(date(2026, 4, 1))  # Wed — between the Mar/Apr holidays
+        assert is_trading_day(date(2026, 7, 3))  # Fri — no July holiday
+        assert is_trading_day(date(2026, 12, 24))  # Thu — day before Christmas
+
+    def test_muhurat_2026_honestly_absent_until_timings_notified(self) -> None:
+        # The 2026-11-08 Muhurat session is ANNOUNCED but its timings are NOT
+        # yet notified — fabricating an hour would be a guess (Golden Rule #1).
+        assert not has_muhurat_session(date(2026, 11, 8))
+        assert get_session(date(2026, 11, 8)) is None  # Sunday + holiday
+
+    def test_coverage_span_still_2020_to_2026(self) -> None:
+        assert HOLIDAY_COVERAGE_FIRST_YEAR == 2020
+        assert HOLIDAY_COVERAGE_LAST_YEAR == 2026

@@ -2,6 +2,7 @@
 
 from brutex.calendars.nse import (
     ALL_HOLIDAYS,
+    BSE_HOLIDAYS,
     FIRST_USABLE_BAR_IST,
     FORCED_EXIT_IST,
     HOLIDAY_COVERAGE_FIRST_YEAR,
@@ -9,6 +10,7 @@ from brutex.calendars.nse import (
     IST,
     MUHURAT_SESSIONS,
     NIFTY50_REBALANCE_EVENTS,
+    NSE_HOLIDAYS,
     PRE_OPEN_END_IST,
     SESSION_CLOSE_IST,
     SESSION_DURATION_MINUTES,
@@ -25,6 +27,7 @@ from brutex.calendars.nse import (
     get_session,
     get_session_checked,
     has_muhurat_session,
+    holidays_for_exchange,
     is_forced_exit_bar,
     is_holiday,
     is_holiday_checked,
@@ -43,6 +46,7 @@ from brutex.calendars.nse import (
 
 __all__ = [
     "ALL_HOLIDAYS",
+    "BSE_HOLIDAYS",
     "FIRST_USABLE_BAR_IST",
     "FORCED_EXIT_IST",
     "HOLIDAY_COVERAGE_FIRST_YEAR",
@@ -50,6 +54,7 @@ __all__ = [
     "IST",
     "MUHURAT_SESSIONS",
     "NIFTY50_REBALANCE_EVENTS",
+    "NSE_HOLIDAYS",
     "PRE_OPEN_END_IST",
     "SESSION_CLOSE_IST",
     "SESSION_DURATION_MINUTES",
@@ -66,6 +71,7 @@ __all__ = [
     "get_session",
     "get_session_checked",
     "has_muhurat_session",
+    "holidays_for_exchange",
     "is_forced_exit_bar",
     "is_holiday",
     "is_holiday_checked",
