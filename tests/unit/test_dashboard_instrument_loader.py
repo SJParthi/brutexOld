@@ -23,12 +23,11 @@ usage follows ``tests/integration/test_universe_explorer_store.py``.
 
 from __future__ import annotations
 
-import threading
-
 # Whitebox tests of the cache-first TTL helper (_ntm_cache_ttl_seconds) read
 # module-private names by design (DEC-P0-017 convention).
 # pyright: reportPrivateUsage=false
 import json
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import date
 from decimal import Decimal

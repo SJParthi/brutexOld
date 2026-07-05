@@ -4514,7 +4514,6 @@ def test_blank_underlying_health_key_falls_back_to_contract_symbol() -> None:
     assert spy.defers == ["NSE/FNO/NSE-NIFTY-02Jan25-28500-CE/1day/2024-01"]
 
 
-
 # ── make_breaker_canary_probe (DEC-EMPTY-BREAKER-CANARY-001) ─────────────────
 
 
