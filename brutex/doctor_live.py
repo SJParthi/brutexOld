@@ -92,8 +92,9 @@ from brutex.adapters.groww.probe import (
 from brutex.adapters.groww.token_cache import CachedToken, current_session
 from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
 from brutex.adapters.rate_common import RateController
+from brutex.calendars.nse import HolidayDataUnavailableError
 from brutex.calendars.observed_sessions import (
-    is_trading_day_observed,
+    is_trading_day_checked_observed,
     load_observed_holidays,
 )
 from brutex.config.credentials import resolve_groww_aws_credentials
@@ -2441,14 +2442,39 @@ def resolve_probe_day(now: datetime, *, observed: AbstractSet[date] = frozenset(
     ``# pragma: no cover`` real-composition factory — the factory keeps only the
     binding. Steps backwards from IST-yesterday over weekends, listed holidays
     AND observably-untraded overlay days (DEC-CALENDAR-OBSERVED-SESSIONS-001,
-    remove-only), so the live vendor probe never targets a day the vendor
-    demonstrably served no bars for. Bounded: the NSE week always contains a
-    trading day and the loaded overlay set is finite.
+    remove-only), using the STRICT
+    :func:`brutex.calendars.observed_sessions.is_trading_day_checked_observed`,
+    so the live vendor probe never targets a day the vendor demonstrably served
+    no bars for. Bounded: the NSE week always contains a trading day and the
+    loaded overlay set is finite.
+
+    LOUD out-of-coverage handling (DEC-CALENDAR-EXCHANGE-SPLIT-001 pack): once
+    the walk reaches a weekday OUTSIDE the published holiday span (from
+    2027-01-01 on, until the list is extended), the checked calendar raises
+    rather than silently guessing "trading day". This helper catches that,
+    emits ONE ``calendar.coverage_exhausted`` structlog warning, and returns
+    that weekday as the BEST-EFFORT probe day — explicitly flagged degraded
+    (it may be an unlisted holiday, in which case the probe reads an empty
+    session), never a silent guess and never a crash of the whole doctor run.
     """
     day = now.astimezone(IST).date() - timedelta(days=1)
-    while not is_trading_day_observed(day, observed=observed):
+    while True:
+        try:
+            if is_trading_day_checked_observed(day, observed=observed):
+                return day
+        except HolidayDataUnavailableError:
+            _LOG.warning(
+                "calendar.coverage_exhausted",
+                probe_day=day.isoformat(),
+                detail=(
+                    "holiday list exhausted while resolving the vendor probe day; "
+                    "using this weekday as a BEST-EFFORT probe day — it may be an "
+                    "unlisted holiday (extend the calendar to restore a verified "
+                    "probe day)"
+                ),
+            )
+            return day
         day -= timedelta(days=1)
-    return day
 
 
 def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/clock composition
@@ -2525,9 +2551,9 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
     observed_holidays = load_observed_holidays(resolve_lake_root(os.environ, home=Path.home()))
 
     def _probe_day() -> date:
-        # Binding only — the probe-day rule itself is the PURE, 100%-covered
-        # module-level resolve_probe_day (an observably-untraded overlay day is
-        # NOT a probe day; stepped over like a holiday).
+        # Binding only — the loud, coverage-aware, overlay-aware walk lives in
+        # the module-level (and unit-tested) ``resolve_probe_day``; this shim
+        # only supplies the clock + the loaded overlay.
         return resolve_probe_day(datetime.now(UTC), observed=observed_holidays)
 
     def _controller() -> RateController:

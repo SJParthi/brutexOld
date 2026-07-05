@@ -267,6 +267,43 @@ def test_bar_timestamps_bad_interval_raises() -> None:
         list(bar_timestamps("7minute", _MON, _TUE))
 
 
+def test_bar_timestamps_out_of_coverage_range_warns_once_but_still_generates() -> None:
+    # Calendar-correctness pack: the generator DELIBERATELY stays unguarded (it
+    # fabricates data by design), but an out-of-coverage span is no longer
+    # SILENT — one synthetic.calendar_coverage_exceeded warning per call, and
+    # the out-of-coverage weekday still yields a full regular session of bars.
+    from structlog.testing import capture_logs
+
+    out_mon, out_tue = date(2027, 1, 4), date(2027, 1, 5)  # above the 2026 ceiling
+    with capture_logs() as logs:
+        stamps = list(bar_timestamps("1day", out_mon, out_tue))
+    assert len(stamps) == 1  # the weekday is generated as a regular session
+    events = [log for log in logs if log["event"] == "synthetic.calendar_coverage_exceeded"]
+    assert len(events) == 1
+    assert events[0]["start"] == "2027-01-04"
+
+
+def test_bar_timestamps_in_coverage_range_does_not_warn() -> None:
+    # In-coverage behaviour byte-identical: no warning, same bars as before.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        stamps = list(bar_timestamps("1day", _MON, _TUE))
+    assert len(stamps) == 1
+    assert not [log for log in logs if log["event"] == "synthetic.calendar_coverage_exceeded"]
+
+
+def test_bar_timestamps_empty_range_does_not_warn() -> None:
+    # start == end (no days at all) short-circuits the endpoint check — no
+    # warning even for an out-of-coverage anchor (nothing is generated).
+    from structlog.testing import capture_logs
+
+    far = date(2027, 1, 4)
+    with capture_logs() as logs:
+        assert list(bar_timestamps("1day", far, far)) == []
+    assert not [log for log in logs if log["event"] == "synthetic.calendar_coverage_exceeded"]
+
+
 def test_generate_candles_matches_adapter_path() -> None:
     spec = next(s for s in SYMBOL_SPECS if s.symbol == "NIFTY")
     direct = generate_candles(
