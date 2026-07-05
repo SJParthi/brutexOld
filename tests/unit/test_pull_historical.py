@@ -2356,6 +2356,8 @@ class TestGreeksEnrichWiring:
                 bars_solved=1,
                 bars_null=0,
                 bars_reused=0,
+                spot_reads=0,
+                spot_hits=0,
             )
 
         monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
@@ -2409,6 +2411,8 @@ class TestGreeksEnrichWiring:
                 bars_solved=1,
                 bars_null=0,
                 bars_reused=0,
+                spot_reads=0,
+                spot_hits=0,
             )
 
         monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
