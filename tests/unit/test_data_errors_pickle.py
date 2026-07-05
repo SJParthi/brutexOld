@@ -1,18 +1,24 @@
-"""Pickle round-trip regression for the lake exceptions (DEC-HARDWARE-ENVELOPE-001, M2).
+"""Pickle round-trip suite for :mod:`brutex.data.errors` (DEC-GREEKS-PARALLEL-001).
 
-A worker in the (historic ProcessPool design of the) parallel prebuild pickled a
-raised exception back to the parent; two custom-``__init__`` lake exceptions
-FAILED to unpickle — ``PartitionLockTimeout`` / ``WriteDeadlineExceeded`` fed the
-already-formatted message STRING back through ``f"{x:g}"`` and raised
-``ValueError: Unknown format code 'g'``, and ``LakeWriteHalt`` double-prefixed its
-``reason``. Even though the shipped prebuild uses a THREAD pool (no pickling),
-these are real correctness bugs — any code that pickles a lake error (a process
-pool, a multiprocessing queue, a cross-process audit) would hit them. This test
-pins a clean round-trip for every ``DataLakeError`` a worker can raise.
+A lake exception raised INSIDE a spawn ``ProcessPoolExecutor`` worker crosses
+the process boundary via pickle. The default ``BaseException`` reduce re-feeds
+``args`` — the already-FORMATTED message — to ``__init__``, which broke every
+constructor that formats its arguments:
 
-This file is ALSO the module's auto-discovered scoped 100% coverage gate
-(``coverage_gate_discovery`` maps ``brutex/data/errors.py`` here), so it covers
-the module's one non-exception function (:func:`parquet_read_skip_errors`) too.
+* ``PartitionLockTimeout(5.0)`` / ``WriteDeadlineExceeded(90.0)`` —
+  ``pickle.loads`` RAISED ``ValueError: Unknown format code 'g' for object of
+  type 'str'`` (the ``:g`` spec re-applied to the message string). An
+  unpicklable exception escaping a pool worker poisons the WHOLE pool into a
+  generic ``BrokenProcessPool`` (the real error surviving only as a traceback
+  string), so this was a whole-pool-kill class of bug.
+* ``LakeWriteHalt("disk_full")`` — round-tripped but with a DOUBLED message
+  (``"lake write halted: lake write halted: disk_full"``).
+
+Both empirically proven pre-fix; the ``__reduce__`` constructor-arg fixes are
+pinned here per class (type / ``str`` / ``args`` / attribute fidelity). This
+file is also the module's discovery-gate test: it exercises every class +
+:func:`~brutex.data.errors.parquet_read_skip_errors` so
+``brutex/data/errors.py`` reads 100% line+branch standalone.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import pytest
 from brutex.data.errors import (
     CatalogError,
     DataLakeError,
+    GreeksEnrichPoolBroken,
     LakeWriteHalt,
     PartitionError,
     PartitionLockTimeout,
@@ -33,65 +40,120 @@ from brutex.data.errors import (
 )
 
 
-def _round_trip(exc: DataLakeError) -> DataLakeError:
-    """Pickle then unpickle *exc* (trusted, in-test data — never untrusted)."""
-    return pickle.loads(pickle.dumps(exc))  # noqa: S301 — trusted in-test round-trip
+def _roundtrip(exc: BaseException) -> BaseException:
+    return pickle.loads(pickle.dumps(exc))  # noqa: S301 — self-produced bytes
 
 
-class TestCustomInitRoundTrip:
-    def test_partition_lock_timeout(self) -> None:
-        r = _round_trip(PartitionLockTimeout(1.5))
-        assert isinstance(r, PartitionLockTimeout)
-        assert r.timeout_seconds == 1.5
-        assert "1.5s" in str(r)
+class TestConstructorArgReduce:
+    """The four formatted-constructor classes round-trip EXACTLY."""
 
-    def test_write_deadline_exceeded(self) -> None:
-        r = _round_trip(WriteDeadlineExceeded(90.0))
-        assert isinstance(r, WriteDeadlineExceeded)
-        assert r.deadline_seconds == 90.0
-        assert "90s" in str(r)
+    def test_lake_write_halt_message_not_doubled(self) -> None:
+        """Pre-fix regression: the default reduce re-fed the formatted message
+        to ``__init__`` and the copy read ``lake write halted: lake write
+        halted: disk_full``. Post-fix: exactly one prefix, ``reason`` intact."""
+        exc = LakeWriteHalt("disk_full")
+        copy = _roundtrip(exc)
+        assert type(copy) is LakeWriteHalt
+        assert str(copy) == "lake write halted: disk_full"
+        assert str(copy) == str(exc)
+        assert copy.args == exc.args
+        assert isinstance(copy, LakeWriteHalt)
+        assert copy.reason == "disk_full"
 
-    def test_lake_write_halt_reason_not_double_prefixed(self) -> None:
-        r = _round_trip(LakeWriteHalt("disk_full"))
-        assert isinstance(r, LakeWriteHalt)
-        assert r.reason == "disk_full"  # NOT "lake write halted: disk_full"
-        assert str(r) == "lake write halted: disk_full"
+    def test_partition_lock_timeout_roundtrips(self) -> None:
+        """Pre-fix regression: ``pickle.loads`` raised ``ValueError: Unknown
+        format code 'g' for object of type 'str'`` (empirically proven) —
+        the default reduce re-called the ctor with the formatted string."""
+        exc = PartitionLockTimeout(5.0)
+        copy = _roundtrip(exc)
+        assert type(copy) is PartitionLockTimeout
+        assert str(copy) == str(exc)
+        assert copy.args == exc.args
+        assert isinstance(copy, PartitionLockTimeout)
+        assert copy.timeout_seconds == 5.0
+
+    def test_write_deadline_exceeded_roundtrips(self) -> None:
+        """Same latent ``:g``-re-format bug as ``PartitionLockTimeout`` —
+        adapter-only today (not on the Greeks worker path), fixed as cheap
+        hardening while in this file."""
+        exc = WriteDeadlineExceeded(90.0)
+        copy = _roundtrip(exc)
+        assert type(copy) is WriteDeadlineExceeded
+        assert str(copy) == str(exc)
+        assert isinstance(copy, WriteDeadlineExceeded)
+        assert copy.deadline_seconds == 90.0
+
+    def test_greeks_enrich_pool_broken_roundtrips(self) -> None:
+        """The NEW class carries the same discipline from birth — it can never
+        re-introduce the doubled-message bug (it is parent-side by design and
+        should never actually cross a pool boundary; consistency, honestly)."""
+        exc = GreeksEnrichPoolBroken("a worker process died before completing its unit")
+        copy = _roundtrip(exc)
+        assert type(copy) is GreeksEnrichPoolBroken
+        assert str(copy) == str(exc)
+        assert str(copy).count("greeks enrichment worker pool broken:") == 1
+        assert isinstance(copy, GreeksEnrichPoolBroken)
+        assert copy.detail == "a worker process died before completing its unit"
 
     def test_lake_write_halt_worker_pool_broken(self) -> None:
-        r = _round_trip(LakeWriteHalt("worker_pool_broken"))
-        assert isinstance(r, LakeWriteHalt)
-        assert r.reason == "worker_pool_broken"
+        """The DEC-HARDWARE-ENVELOPE-001 RESERVED token round-trips like any
+        other ``reason`` — pinned so a future process-pool stage adopting it
+        inherits the clean round-trip."""
+        copy = _roundtrip(LakeWriteHalt("worker_pool_broken"))
+        assert isinstance(copy, LakeWriteHalt)
+        assert copy.reason == "worker_pool_broken"
+
+    def test_double_roundtrip_is_stable(self) -> None:
+        """A second hop (paranoia: nested pools / re-pickled results) is a fixpoint."""
+        exc = LakeWriteHalt("out_of_memory")
+        twice = _roundtrip(_roundtrip(exc))
+        assert isinstance(twice, LakeWriteHalt)
+        assert str(twice) == "lake write halted: out_of_memory"
+        assert twice.reason == "out_of_memory"
 
 
-class TestDefaultInitRoundTrip:
-    """The no-custom-``__init__`` lake errors round-trip via the default reduce."""
+class TestMessageOnlyClasses:
+    """The plain message-only classes keep the default (working) reduce."""
 
     @pytest.mark.parametrize(
-        "exc",
-        [
-            DataLakeError("x"),
-            PartitionError("x"),
-            WriterError("x"),
-            ResampleInputError("x"),
-            CatalogError("x"),
-        ],
+        "cls",
+        [DataLakeError, PartitionError, WriterError, ResampleInputError, CatalogError],
     )
-    def test_round_trips(self, exc: DataLakeError) -> None:
-        r = _round_trip(exc)
-        assert type(r) is type(exc)
-        assert str(r) == str(exc)
+    def test_roundtrip(self, cls: type[DataLakeError]) -> None:
+        exc = cls("boom: details")
+        copy = _roundtrip(exc)
+        assert type(copy) is cls
+        assert str(copy) == "boom: details"
+        assert copy.args == exc.args
+
+    def test_safe_message_survives(self) -> None:
+        """``BruteXError.safe_message`` rides the pickled ``__dict__`` state."""
+        exc = WriterError("raw with secret", safe_message="redacted")
+        copy = _roundtrip(exc)
+        assert isinstance(copy, WriterError)
+        assert str(copy) == "redacted"
 
 
 class TestParquetReadSkipErrors:
-    """The module's ONE non-exception function (scoped-gate completeness)."""
+    """The one data-layer unreadable-file predicate — narrow on purpose."""
 
-    def test_returns_polars_and_oserror(self) -> None:
-        pl = pytest.importorskip("polars")
+    def test_members(self) -> None:
+        import polars as pl
+
         skip = parquet_read_skip_errors()
         assert skip == (pl.exceptions.PolarsError, OSError)
 
-    def test_narrow_a_value_error_is_not_in_the_set(self) -> None:
-        pytest.importorskip("polars")
+    def test_pool_broken_is_not_a_skip_error(self) -> None:
+        """A dead worker pool is a HOST halt, never a quarantine-this-file
+        signal — the movers/db resilient-skip paths must not swallow it."""
         skip = parquet_read_skip_errors()
+        assert not isinstance(GreeksEnrichPoolBroken("x"), skip)
+
+    def test_lake_write_halt_is_not_a_skip_error(self) -> None:
+        skip = parquet_read_skip_errors()
+        assert not isinstance(LakeWriteHalt("disk_full"), skip)
+
+    def test_narrow_a_value_error_is_not_in_the_set(self) -> None:
         # NARROW on purpose (Golden Rule #1): a genuine code bug still propagates.
+        skip = parquet_read_skip_errors()
         assert not issubclass(ValueError, skip)

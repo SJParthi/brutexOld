@@ -74,19 +74,17 @@ class LakeWriteHalt(DataLakeError):
         self.reason = reason
 
     def __reduce__(self) -> tuple[type[LakeWriteHalt], tuple[str]]:
-        """Pickle round-trip on the ORIGINAL ``reason``, not the formatted message.
+        """Pickle as constructor args — REQUIRED for a process-pool crossing.
 
-        The default ``BaseException`` reduce reconstructs from ``self.args`` (the
-        already-formatted ``"lake write halted: <reason>"`` string), which
-        ``__init__`` would then RE-wrap → a double-prefixed reason. STANDALONE
-        latent-bug hardening (DEC-HARDWARE-ENVELOPE-001 review find M2): the
-        shipped prebuild uses THREADS (no pickling), but any code that pickles a
-        lake error — a future process pool, a multiprocessing queue, a
-        cross-process audit — would hit the corruption; reconstructing from the
-        raw ``reason`` round-trips cleanly (Golden Rule #7). Pinned by a
-        pickle-round-trip regression test.
+        The default ``BaseException`` reduce re-feeds ``args`` (the FORMATTED
+        message) to ``__init__``, so an unpickled copy read
+        ``"lake write halted: lake write halted: <reason>"`` — a doubled
+        message (empirically proven; the DEC-GREEKS-PARALLEL-001 pickle
+        round-trip suite pins the fix). ``type(self)`` keeps a same-signature
+        subclass safe; a subclass CHANGING the constructor signature must
+        override ``__reduce__``.
         """
-        return (self.__class__, (self.reason,))
+        return (type(self), (self.reason,))
 
 
 class PartitionLockTimeout(DataLakeError):
@@ -114,19 +112,18 @@ class PartitionLockTimeout(DataLakeError):
         self.timeout_seconds = timeout_seconds
 
     def __reduce__(self) -> tuple[type[PartitionLockTimeout], tuple[float]]:
-        """Pickle round-trip on the ORIGINAL ``timeout_seconds`` float.
+        """Pickle as constructor args — REQUIRED for a process-pool crossing.
 
-        STANDALONE latent-bug hardening (DEC-HARDWARE-ENVELOPE-001 review find
-        M2 — the shipped prebuild uses THREADS, which never pickle, but the
-        defect is real for ANY pickling context): the default reduce
-        reconstructs from ``self.args`` (the formatted message STRING), so
-        ``__init__``'s ``f"{timeout_seconds:g}"`` would receive that string and
-        raise ``ValueError: Unknown format code 'g'`` at UNPICKLE — in a process
-        pool that surfaces as an anonymous ``BrokenProcessPool`` masking the
-        root cause. Reconstructing from the raw float round-trips cleanly
-        (Golden Rule #7). Pinned by a pickle-round-trip regression test.
+        The default ``BaseException`` reduce re-calls
+        ``PartitionLockTimeout(<formatted message string>)``, and the ``:g``
+        format spec then blows up on the string — ``pickle.loads`` raised
+        ``ValueError: Unknown format code 'g' for object of type 'str'``
+        (empirically proven pre-fix). An unpicklable exception escaping a
+        pool worker poisons the WHOLE pool into a generic
+        ``BrokenProcessPool`` (DEC-GREEKS-PARALLEL-001), so the round-trip
+        must be exact. Same subclass note as :class:`LakeWriteHalt`.
         """
-        return (self.__class__, (self.timeout_seconds,))
+        return (type(self), (self.timeout_seconds,))
 
 
 class WriteDeadlineExceeded(DataLakeError):
@@ -168,17 +165,44 @@ class WriteDeadlineExceeded(DataLakeError):
         self.deadline_seconds = deadline_seconds
 
     def __reduce__(self) -> tuple[type[WriteDeadlineExceeded], tuple[float]]:
-        """Pickle round-trip on the ORIGINAL ``deadline_seconds`` float.
+        """Pickle as constructor args — same latent ``:g``-re-format bug as
+        :class:`PartitionLockTimeout` (``pickle.loads`` raised ``ValueError``
+        pre-fix). Not reachable from the Greeks pool workers today (the
+        deadline wrapper is Groww-adapter-only), fixed as cheap latent-bug
+        hardening while in this file (DEC-GREEKS-PARALLEL-001)."""
+        return (type(self), (self.deadline_seconds,))
 
-        Same defect + STANDALONE hardening rationale as
-        :meth:`PartitionLockTimeout.__reduce__` (DEC-HARDWARE-ENVELOPE-001 review
-        find M2 — the shipped prebuild uses threads, but any pickling context is
-        exposed): the default reduce would feed the formatted message string
-        back through ``f"{deadline_seconds:g}"`` at unpickle and raise
-        ``ValueError``. Reconstruct from the raw float (Golden Rule #7). Pinned
-        by a pickle-round-trip regression test.
-        """
-        return (self.__class__, (self.deadline_seconds,))
+
+class GreeksEnrichPoolBroken(DataLakeError):
+    """The Greeks-enrichment worker POOL died before completing its units.
+
+    Raised by the parallel :func:`~brutex.data.greeks_enrich.enrich_greeks_for_targets`
+    driver when :class:`concurrent.futures.process.BrokenProcessPool` surfaces — a
+    worker process terminated ABRUPTLY (killed, crashed) instead of returning a
+    result. HONEST envelope (Golden Rule #10): an OOM SIGKILL, an operator ``kill
+    -9`` and a hard interpreter crash are NOT distinguishable from
+    ``BrokenProcessPool`` (worker exit codes are not observable through the public
+    executor API), so ``detail`` states the ambiguity instead of guessing a cause.
+
+    Like :class:`LakeWriteHalt` this is a HOST-RESOURCE condition, not a
+    per-contract data fault: it is recognised by the dashboard job layer's
+    :func:`~brutex.dashboard.pull_jobs.is_pull_halt` global-stop predicate, so it
+    re-raises through the fenced ``_enrich_greeks_from_minute`` wrapper and fires
+    the CRITICAL Telegram pull-halt alert (DEC-GREEKS-PARALLEL-001). The
+    just-pulled 1-minute candles are already durable; the overlay is re-derivable
+    on the next pull (idempotent, stamp-driven — Golden Rule #7).
+
+    ``detail`` is the non-secret honest description carried into the message.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"greeks enrichment worker pool broken: {detail}")
+        self.detail = detail
+
+    def __reduce__(self) -> tuple[type[GreeksEnrichPoolBroken], tuple[str]]:
+        """Pickle as constructor args — the same discipline as the fixes above,
+        so this class can never re-introduce the doubled-message bug."""
+        return (type(self), (self.detail,))
 
 
 class CatalogError(DataLakeError):
