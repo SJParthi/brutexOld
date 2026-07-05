@@ -69,18 +69,21 @@ import structlog
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.error_storm_breaker import (
     ErrorStormBreaker,
+    observe_authorisation_failure,
     observe_window_failure,
     observe_window_success,
 )
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.client import client_self_paces
 from brutex.adapters.groww.errors import (
+    GrowwAuthorisationError,
     GrowwError,
     is_rate_limit,
     is_retryable,
     steps_timeout_ladder,
 )
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
+from brutex.adapters.groww.vendor_floor import VendorFloorLearner, observe_boundary_floor
 from brutex.adapters.groww.write_deadline import append_with_deadline
 from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
@@ -304,6 +307,7 @@ def ingest_spot(
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -390,6 +394,17 @@ def ingest_spot(
         dry-run / synthetic / unit-test caller) observes nothing; ONLY the
         real-vendor production sites arm it (the ``detect_completeness_gaps``
         gating pattern).
+    floor_learner
+        Optional per-pull :class:`~brutex.adapters.groww.vendor_floor.VendorFloorLearner`
+        (DEC-VENDOR-FLOOR-LAZY-PROBE-001), shared by every window worker. When a
+        window STARTING AT the configured history floor settles CONFIRMED
+        clean-empty, the learner runs ONE bounded, breaker-gated depth probe per
+        symbol per pull and — on a clean verdict — persists the learned vendor
+        floor + mass-settles the wholly pre-floor windows ``SKIPPED``
+        (reversible via ``brutex reopen-skipped``). ``None`` (the default —
+        dry-run / synthetic / unit-test callers) never probes; ONLY the
+        real-vendor production sites arm it (the ``storm_breaker`` gating
+        pattern). Best-effort: a learner failure can never crash the pull.
 
     Returns
     -------
@@ -471,6 +486,7 @@ def ingest_spot(
                 observed_holidays=observed_holidays,
                 empty_breaker=empty_breaker,
                 storm_breaker=storm_breaker,
+                floor_learner=floor_learner,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -605,6 +621,7 @@ def _ingest_one_window(
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -646,6 +663,7 @@ def _ingest_one_window(
         old_cutoff=old_cutoff,
         empty_breaker=empty_breaker,
         storm_breaker=storm_breaker,
+        floor_learner=floor_learner,
     )
     if raw is None:
         # Producer-resolved (skip / transient / terminal-raised): never touches the tail.
@@ -751,6 +769,7 @@ def _fetch_window_raw(
     old_cutoff: date | None,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> tuple[_WindowOutcome, _RawWindow | None]:
     """The PRODUCER half — pace + fetch + EMPTY-retry + controller feedback. STAYS on the fetch thread.
 
@@ -883,6 +902,19 @@ def _fetch_window_raw(
             # A TERMINAL (non-retryable) Groww error — including auth, which has no
             # fail-fast latch here (the documented divergence): it simply propagates to
             # the outer run_groww_spot_ingest quarantine, never swallowed.
+            # AUTHORISATION-storm observation (DEC-GROWW-AUTHZ-QUARANTINE-001): the
+            # terminal authorisation rejection is fed to the per-pull breaker's
+            # authorisation arm BEFORE the quarantine raise (previously ONLY the
+            # retryable branch above observed anything, so the terminal path was
+            # invisible to the breaker). Below the distinct-symbol threshold this is
+            # a no-op and the per-symbol quarantine raise follows; at/after the
+            # threshold it RAISES GrowwAuthorisationStormError — the fleet-wide
+            # account-suspension global stop. None (dry-run / synthetic / tests)
+            # observes nothing.
+            if isinstance(exc, GrowwAuthorisationError):
+                observe_authorisation_failure(
+                    storm_breaker, symbol=instrument.symbol_name, window_key=key, exc=exc
+                )
             raise
         if raw_bars:
             break  # bars on this attempt — the (possibly glitched) empty is recovered
@@ -938,6 +970,22 @@ def _fetch_window_raw(
     # record time (``allow_settle``), so a settle computed here but recorded after a trip is
     # still suppressed (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
     confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
+    # Lazy vendor-depth-floor learning (DEC-VENDOR-FLOOR-LAZY-PROBE-001): a window
+    # STARTING AT the configured history floor that just settled CONFIRMED clean-empty
+    # is the honest "vendor depth may be shallower than the floor" signal — feed it to
+    # the per-pull learner (producer-side, riding the SAME paced adapter). The learner
+    # itself enforces the floor-boundary check, the mass-empty-breaker gate (probe
+    # NOTHING + cement NOTHING under a suspected soft-throttle) and the ONE-probe-per-
+    # symbol-per-pull single-flight; None (dry-run / synthetic / tests) observes
+    # nothing; best-effort — a learner failure never crashes the pull.
+    if confirmed_empty_after_retry:
+        observe_boundary_floor(
+            floor_learner,
+            instrument=instrument,
+            window_start=window_start,
+            ledger=ledger,
+            empty_breaker=empty_breaker,
+        )
     is_old = old_cutoff is not None and window_end < old_cutoff
     settle_empty = confirmed_empty_after_retry and is_old
     return (
