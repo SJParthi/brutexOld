@@ -328,15 +328,30 @@ _REFERENCE_ONLY_SYMBOLS: Final[frozenset[str]] = frozenset(
     symbol for _, symbol in REFERENCE_ONLY_INDEX_UNDERLYINGS
 )
 
-#: The ``FuturesContract.series_key`` shape (``NIFTY-FUT-YYYY-MM-DD``,
-#: :meth:`brutex.data.futures_roll.FuturesContract.series_key`) for the
-#: operator-authorized NIFTY-futures dynamic-strategy track (ADR-0012 /
-#: DEC-NIFTY-DYNAMIC-STRATEGY-001). NIFTY ONLY — ADR-0012 authorizes NIFTY
-#: futures, NOT BANKNIFTY/SENSEX futures. No ``futures_roll`` import here
-#: (that module pulls the trading_core wheel); a drift-pin test asserts this
-#: regex fullmatches a real ``FuturesContract(...).series_key`` so the two
-#: can never rot apart.
-_NIFTY_FUTURES_SERIES_RE: Final[re.Pattern[str]] = re.compile(r"^NIFTY-FUT-\d{4}-\d{2}-\d{2}$")
+#: The PINNED engine addressing label for the ADR-0012 NIFTY-futures track
+#: (DEC-FUTURES-ADDRESSING-PIN-001, supersedes the #1178 dual-acceptance
+#: envelope): ONE roll-aware series ALIAS — never a lake dir itself — resolved
+#: at launch into per-contract ``bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT``
+#: partitions by :mod:`brutex.data.futures_series` (which imports THIS
+#: constant; this module deliberately does NOT import that one — it lazily
+#: pulls the trading_core wheel). ``parse_fno_symbol`` returns ``None`` for it
+#: (3 hyphen tokens < the 4-token future minimum), so no vendor contract
+#: symbol can ever collide with the alias (test-pinned).
+NIFTY_FUTURES_SERIES_SYMBOL: Final[str] = "NSE-NIFTY-FUT"
+
+#: The RETIRED ``FuturesContract.series_key`` shape (``NIFTY-FUT-YYYY-MM-DD``,
+#: :meth:`brutex.data.futures_roll.FuturesContract.series_key`) — one of the
+#: two pre-launch addressing envelopes DEC-FUTURES-ADDRESSING-PIN-001 retired
+#: in favour of :data:`NIFTY_FUTURES_SERIES_SYMBOL`. Kept ONLY as the
+#: did-you-mean refusal-hint matcher in
+#: :func:`_looks_like_retired_futures_shape` (never an admit path). No
+#: ``futures_roll`` import here (that module pulls the trading_core wheel); a
+#: drift-pin test asserts this regex still fullmatches a real
+#: ``FuturesContract(...).series_key`` so the hint can never rot apart from
+#: the real retired shape.
+_RETIRED_NIFTY_FUTURES_SERIES_RE: Final[re.Pattern[str]] = re.compile(
+    r"^NIFTY-FUT-\d{4}-\d{2}-\d{2}$"
+)
 
 #: The NIFTY-futures underlying symbol (the ADR-0012 authorization is
 #: exactly this one underlying).
@@ -361,22 +376,35 @@ def is_engine_sweep_symbol(symbol: str) -> bool:
 
     * a bare spot symbol of the 3 brute-forced indexes (``NIFTY`` /
       ``BANKNIFTY`` / ``SENSEX`` — CLAUDE.md §2 Rule 3), OR
-    * a NIFTY futures shape (ADR-0012 / DEC-NIFTY-DYNAMIC-STRATEGY-001),
-      in EITHER of the two addressing forms in the repo today —
-      the ``FuturesContract.series_key`` form (``NIFTY-FUT-YYYY-MM-DD``) or
-      a parseable lake contract ``groww_symbol``
-      (``NSE-NIFTY-<DDMmmYY>-FUT``). The futures-track launch PR MUST pin
-      its final addressing shape here (dual acceptance is the honest
-      pre-launch envelope, not a solved contract).
+    * the PINNED NIFTY-futures series alias ``NSE-NIFTY-FUT`` (ADR-0012 /
+      DEC-FUTURES-ADDRESSING-PIN-001 — the final addressing shape; the two
+      pre-launch shapes ``NIFTY-FUT-YYYY-MM-DD`` and
+      ``NSE-NIFTY-<DDMmmYY>-FUT`` are RETIRED —
+      :func:`classify_engine_sweep_target` refuses them with a did-you-mean
+      hint).
 
     Everything else — India VIX, the ~212 F&O stocks, NTM constituents,
-    BANKNIFTY/SENSEX futures, every option — is False. Exact-case (lake
-    keys are case-exact). O(1): two frozenset probes + at most one regex +
-    one :func:`~brutex.data.fno_symbol.parse_fno_symbol`.
+    BANKNIFTY/SENSEX futures, every option, every per-contract futures
+    symbol — is False. Exact-case (lake keys are case-exact). O(1): one
+    frozenset probe + one string compare.
     """
     if symbol in _ENGINE_SWEEP_SPOT_SYMBOLS:
         return True
-    if _NIFTY_FUTURES_SERIES_RE.fullmatch(symbol) is not None:
+    return symbol == NIFTY_FUTURES_SERIES_SYMBOL
+
+
+def _looks_like_retired_futures_shape(symbol: str) -> bool:
+    """Hint matcher for the two RETIRED pre-launch NIFTY-futures shapes.
+
+    DEC-FUTURES-ADDRESSING-PIN-001 refusal-hint ONLY (never an admit path):
+    matches the retired ``FuturesContract.series_key`` form
+    (``NIFTY-FUT-YYYY-MM-DD``) or a parseable per-contract NIFTY futures
+    ``groww_symbol`` (``NSE-NIFTY-<DDMmmYY>-FUT``), so
+    :func:`classify_engine_sweep_target` can point the operator at the ONE
+    pinned series alias. Non-NIFTY futures (``NSE-BANKNIFTY-…-FUT``) do NOT
+    match — they keep the generic out-of-scope refusal.
+    """
+    if _RETIRED_NIFTY_FUTURES_SERIES_RE.fullmatch(symbol) is not None:
         return True
     parts = parse_fno_symbol(symbol)
     return (
@@ -437,21 +465,23 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
             ),
         )
     if is_engine_sweep_symbol(symbol) and symbol not in _ENGINE_SWEEP_SPOT_SYMBOLS:
-        # A NIFTY-futures shape: allowed ONLY under the NSE/FNO lake coordinates.
+        # The NIFTY-futures series alias: allowed ONLY under the NSE/FNO lake
+        # coordinates (DEC-FUTURES-ADDRESSING-PIN-001).
         if exchange == _NIFTY_FUTURES_EXCHANGE and segment == _ENGINE_SWEEP_FNO_SEGMENT:
             return EngineSweepVerdict(
                 allowed=True,
                 tier="nifty_future",
                 reason=(
-                    f"{symbol} is a NIFTY futures shape — the operator-authorized "
-                    "dynamic-strategy track (ADR-0012 / DEC-NIFTY-DYNAMIC-STRATEGY-001)"
+                    f"{symbol} is the pinned NIFTY-futures series alias — the "
+                    "operator-authorized dynamic-strategy track (ADR-0012 / "
+                    "DEC-FUTURES-ADDRESSING-PIN-001)"
                 ),
             )
         return EngineSweepVerdict(
             allowed=False,
             tier="refused",
             reason=(
-                f"{symbol} is a NIFTY futures shape but "
+                f"{symbol} is the NIFTY-futures series alias but "
                 f"{exchange}/{segment} is not its lake coordinate — expected "
                 f"{_NIFTY_FUTURES_EXCHANGE}/{_ENGINE_SWEEP_FNO_SEGMENT} (ADR-0012)"
             ),
@@ -487,14 +517,29 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
                 f"case-exact; did you mean {upper!r}?"
             ),
         )
+    # RETIRED-shape did-you-mean hint (DEC-FUTURES-ADDRESSING-PIN-001):
+    # hint-never-admit, mirroring the case-hint branch above — a pre-launch
+    # futures addressing form is refused pointing at the ONE pinned alias.
+    if _looks_like_retired_futures_shape(symbol):
+        return EngineSweepVerdict(
+            allowed=False,
+            tier="refused",
+            reason=(
+                f"{symbol!r} is a RETIRED per-contract NIFTY-futures addressing form — "
+                "the ADR-0012 track is addressed by the ONE series alias "
+                f"{NIFTY_FUTURES_SERIES_SYMBOL!r} (DEC-FUTURES-ADDRESSING-PIN-001), "
+                "resolved roll-aware into per-contract lake partitions; "
+                "did you mean that?"
+            ),
+        )
     return EngineSweepVerdict(
         allowed=False,
         tier="refused",
         reason=(
             f"{symbol} is outside the brute-force engine scope — the engine sweeps "
-            "only NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) plus NIFTY "
-            "futures (ADR-0012); F&O stocks, NTM constituents and options are "
-            "lake/REFERENCE_ONLY"
+            "only NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) plus the "
+            f"NIFTY-futures series alias {NIFTY_FUTURES_SERIES_SYMBOL!r} (ADR-0012); "
+            "F&O stocks, NTM constituents and options are lake/REFERENCE_ONLY"
         ),
     )
 
@@ -1034,6 +1079,7 @@ __all__ = [
     "BRUTE_FORCE_INDICES",
     "ENGINE_SWEEP_SPOT_TRIPLES",
     "INDEX_UNDERLYINGS",
+    "NIFTY_FUTURES_SERIES_SYMBOL",
     "REFERENCE_ONLY_INDICES",
     "V1_INDICES",
     "V1_UNDERLYINGS",

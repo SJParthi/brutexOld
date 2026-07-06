@@ -76,10 +76,12 @@ class TestSymbolRegistry:
     def test_table_pinned_literally(self) -> None:
         # The full assignment table, pinned in the MUTATION-gated unit file
         # (the golden pins it too): a renumber, rename, or drift fails here.
+        # Row 4 appended by DEC-FUTURES-ADDRESSING-PIN-001 (ADR-0012).
         assert dict(SYMBOL_IDS) == {
             "NSE-NIFTY": 1,
             "NSE-BANKNIFTY": 2,
             "BSE-SENSEX": 3,
+            "NSE-NIFTY-FUT": 4,
         }
 
     def test_unregistered_label_raises(self) -> None:
@@ -89,14 +91,14 @@ class TestSymbolRegistry:
             symbol_id_for("NSE-NOSUCH")
         assert str(exc.value) == (
             "symbol_id_for: unregistered instrument label 'NSE-NOSUCH' "
-            "(registered: ['BSE-SENSEX', 'NSE-BANKNIFTY', 'NSE-NIFTY'])"
+            "(registered: ['BSE-SENSEX', 'NSE-BANKNIFTY', 'NSE-NIFTY', 'NSE-NIFTY-FUT'])"
         )
 
     def test_unregistered_id_raises(self) -> None:
         with pytest.raises(StrategyError) as exc:
             symbol_label_for(999)
         assert str(exc.value) == (
-            "symbol_label_for: unregistered symbol_id 999 (registered: [1, 2, 3])"
+            "symbol_label_for: unregistered symbol_id 999 (registered: [1, 2, 3, 4])"
         )
 
     def test_registry_is_readonly(self) -> None:
