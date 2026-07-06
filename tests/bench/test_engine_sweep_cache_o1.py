@@ -46,7 +46,19 @@ _NET_CEILING_BYTES = 64 * 1024
 
 
 def _digest(seed: int) -> bytes:
-    return combo_digest(seed % (1 << 52), "NIFTY", "5m", "bull", _PARAMS)
+    return combo_digest(
+        seed % (1 << 52),
+        "NIFTY",
+        "5m",
+        "bull",
+        _PARAMS,
+        # The three STRUCTURAL reproducibility hashes
+        # (DEC-COMBO-DIGEST-REPRO-HASHES-001) — fixed here; the perf/memory
+        # envelope is what these suites measure, not the identity.
+        data_snapshot_hash="snap-aaaa",
+        indicator_version="ind-v1",
+        code_commit_sha="c0ffee01",
+    )
 
 
 class TestComboDigestLatencyIsO1:
