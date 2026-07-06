@@ -113,6 +113,7 @@ from brutex.data.session import (
 )
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.write_breaker import WriteHealthBreaker, partition_health_key
 from brutex.models import Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
@@ -329,6 +330,7 @@ def ingest_spot(
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
@@ -508,6 +510,7 @@ def ingest_spot(
                 observed_holidays=observed_holidays,
                 empty_breaker=empty_breaker,
                 storm_breaker=storm_breaker,
+                write_breaker=write_breaker,
                 floor_learner=floor_learner,
             )
 
@@ -655,6 +658,7 @@ def _ingest_one_window(
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
@@ -714,6 +718,7 @@ def _ingest_one_window(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            write_breaker=write_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED outcome immediately and re-paces + fetches the next
@@ -739,6 +744,7 @@ def _ingest_one_window(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            write_breaker=write_breaker,
         )
         if result_outcome.transient:
             # A tail-side PartitionLockTimeout DEFERRED this window (a wedged peer held the
@@ -1049,6 +1055,7 @@ def _process_window_tail(
     detect_completeness_gaps: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -1066,6 +1073,11 @@ def _process_window_tail(
     Any other sink error (a :class:`~brutex.data.errors.LakeWriteHalt` disk-full) propagates —
     in async mode the pipeline captures it into its pool-wide stop, re-raised on the next
     submit / drain so the pull halts through ``_GLOBAL_STOP_ERRORS``.
+
+    A wired *write_breaker* (DEC-WRITE-HEALTH-BREAKER-001) observes each defer per
+    partition; once enough DISTINCT partitions are wedged it raises
+    ``LakeWriteHalt("volume_wedged")`` — riding the SAME global-stop + Telegram paths —
+    instead of burning the whole pull deferring window after window on a dead volume.
     """
     instrument = raw.instrument
     interval = raw.interval
@@ -1140,6 +1152,15 @@ def _process_window_tail(
         session_bars=len(bars),
         **series_fields,
     )
+    # The per-partition write-health key (DEC-WRITE-HEALTH-BREAKER-001) — series + the
+    # window-start month, from what this tail already has (no extra lookup).
+    health_key = partition_health_key(
+        exchange=instrument.exch_id.value,
+        segment=instrument.segment.value,
+        symbol=instrument.symbol_name,
+        interval=interval,
+        month=window_start.strftime("%Y-%m"),
+    )
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
@@ -1183,7 +1204,16 @@ def _process_window_tail(
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
             )
+        # Cross-window write-health accounting (DEC-WRITE-HEALTH-BREAKER-001): AFTER the
+        # ledger row is durably FAILED (so the deferred window is never lost even if the
+        # breaker trips here), observe the defer; a volume-wedged trip raises
+        # LakeWriteHalt("volume_wedged") which propagates as a global stop.
+        if write_breaker is not None:
+            write_breaker.observe_defer(health_key)
         return _WindowOutcome(transient=1, window=window, error_type=type(exc).__name__)
+    if write_breaker is not None:
+        # A durable write landed on this partition — reset its consecutive-defer streak.
+        write_breaker.observe_success(health_key)
     _LOG.debug(
         "ingest.window",
         pull_id=pull_id,
