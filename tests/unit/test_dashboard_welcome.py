@@ -63,6 +63,20 @@ def test_welcome_has_animated_stat_targets() -> None:
     assert "requestAnimationFrame" in html  # the count-up is genuinely animated
 
 
+def test_welcome_o1_card_states_two_tier_enforcement() -> None:
+    # DEC-O1-CLAIMS-HONESTY-001: the "O(1) everything" card states the TRUE
+    # two-tier enforcement of tests/bench/_o1_tiers.py — the robust 3–10×
+    # shared-CI ceiling, the strict 1.1× decree tier on the self-hosted
+    # M4 Pro runner, and the measured 3× CPU cache-tier allowance — instead
+    # of the stale absolute "CI-gated at p99 ≤ 1.1×" claim, which is
+    # HARD-asserted absent so it can never silently return.
+    html = _render_welcome_html()
+    assert "CI-gated at p99 ≤ 1.1×" not in html
+    assert "3–10×" in html
+    assert "strict 1.1×" in html
+    assert "cache tier" in html
+
+
 def test_welcome_honest_envelope_no_hype() -> None:
     # Golden Rule #10: the headline SLA names its hardware, and the page DISAVOWS
     # the classic hype phrase rather than claiming it (it appears only inside its

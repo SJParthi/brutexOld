@@ -18,7 +18,16 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
+_Last updated: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1522 — the O(1)-claims honesty +
+preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
+cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
+interval-bounded at walk descent (sanctioned: F&O contract partitions no longer report symbols), the manifest
+rebuild stamps ONLY a post==pre ledger token (mid-walk race → explicit skip + one db_view INFO event, never a
+stale-on-arrival write), welcome.html + Golden Rule #5 reworded to the TRUE two-tier O(1) enforcement of
+tests/bench/_o1_tiers.py (robust 3–10× shared-CI / strict 1.1× M4-Pro via BRUTEX_M4PRO_STRICT=1 / measured 3×
+cache-tier — words only, NO gate weakened), and two new bench pins (u128 two-limb mask + orchestrator audit
+append). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
 MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
 adversarial audit's confirmed defects fixed as ONE change set: (a) price
 POSITIVITY is enforced at the ENGINE READ BOUNDARY
@@ -428,7 +437,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
+- **Active branch:** `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1522** —
+  the O(1)-claims honesty + preopen-discovery pack: the `/reports` preopen symbol discovery memoised in the
+  COMMON #896 generation-keyed `_db_datasets_cache` (per-basis `preopen_datasets_key`, seeded post-pull by
+  `warm_discovery_memos` off its ONE unfiltered walk, `_MEMOS_SEEDED` 5→7; pullability tagging deliberately
+  live — the keyless `load-instruments` `master_revision` trap); `resolve_report_datasets` discovers FILTERED
+  at the source (`exclude_segments={FNO}` prunes the contract tree at walk descent + `intervals={required}`;
+  SANCTIONED: an F&O contract partition is no longer offered as a report symbol) with a NEW `datasets=`
+  pre-walked seam; the `db_view.list_candle_datasets` manifest rebuild stamps ONLY a post==pre ledger token
+  (mid-walk race → explicit SKIP + one `db_view.manifest_rebuild_skipped` INFO — a wasted-write save, the
+  load-side token gate was already false-fresh-safe); welcome.html + Golden Rule #5 reworded to the TRUE
+  two-tier O(1) enforcement of `tests/bench/_o1_tiers.py` (robust 3–10× shared-CI / strict 1.1× M4-Pro via
+  `BRUTEX_M4PRO_STRICT=1` / measured 3× cache-tier — words only, NO gate weakened); two NEW bench pins
+  (u128 two-limb mask + `AuditWriter.append` flat vs chain length, prefill via the COMMON
+  `tests/fakes/audit_chain.py`). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; dashboard read-side + docs +
+  bench only; touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  pre-change baseline).
+  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
   DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
   the ENGINE READ BOUNDARY (`arrow_table_to_bars`, partition-naming corrupt-bar errors) — NOT the general bar
   constructor, which stays permissive for the Greeks BAD_INPUT / executor-guard / trade-sim-fallback classifiers; the NEW COMMON
@@ -1677,8 +1702,23 @@ hostile-review pass._
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
-   append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
-   for each hot path. Any regression fails CI.
+   append must all be O(1). The decree TARGET is
+   `p99(N=1M) / p99(N=1K) ≤ 1.1` per hot path; ENFORCEMENT is the
+   two-tier gate defined once in `tests/bench/_o1_tiers.py`
+   (DEC-O1-CLAIMS-HONESTY-001 wording reconcile — no gate value
+   changed): every O(1) bench asserts a robust/mean-based **3–10×**
+   ratio ceiling on the shared 2-core GitHub runners (DEC-P0-020 —
+   the raw 1.1× is too noisy to gate there without flaking), and the
+   decreed strict **1.1×** tier is enforced where
+   `BRUTEX_M4PRO_STRICT=1` on the dedicated self-hosted M4-Pro runner
+   (DEC-O1-STRICT-TIER-001; per `bench-m4pro.yml` that tier is DORMANT
+   until the operator registers the runner — the shared-CI tier is what
+   actually gates every push today), with a measured **3×** cache-tier
+   allowance for ratio tests whose big/small workloads cross a CPU
+   cache tier (DEC-O1-CACHE-TIER-001 — memory-tier physics, not an
+   algorithmic regression; `cache_tier_ceiling` never returns looser
+   than the shared default). Any regression past its tier's ceiling
+   fails CI.
 6. **Rate-limit safety.** Groww publishes type-level limits (the
    **"Live Data"** group — Market Quote / LTP / OHLC — is **10 r/s,
    300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
@@ -1821,7 +1861,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/stored-data-validation`
+- **Active feature branch:** `claude/kind-goldberg-wln56a`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
