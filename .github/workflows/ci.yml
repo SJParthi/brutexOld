@@ -2866,7 +2866,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: typos
-        uses: crate-ci/typos@v1.47.2
+        uses: crate-ci/typos@v1.48.0
         continue-on-error: true  # report but don't block
       - name: codespell
         run: |
