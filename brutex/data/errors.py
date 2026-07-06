@@ -57,11 +57,16 @@ class LakeWriteHalt(DataLakeError):
 
     ``reason`` is a non-secret machine token: ``"disk_full"`` (an ``OSError`` with
     errno ``ENOSPC``), ``"out_of_memory"`` (a ``MemoryError``), or
-    ``"volume_wedged"`` (the lake volume failed its keepalive write-probe for
-    longer than the ``BRUTEX_VOLUME_WEDGE_HALT_S`` bound — a spun-down / wedged
-    external volume; raised FROM THE PRODUCER THREAD at the
+    ``"volume_wedged"`` — the lake volume itself is judged wedged, from EITHER of two
+    detectors: the keepalive write-probe failing for longer than the
+    ``BRUTEX_VOLUME_WEDGE_HALT_S`` bound (a spun-down / wedged external volume; raised
+    FROM THE PRODUCER THREAD at the
     :meth:`~brutex.adapters.groww.fetch_pipeline.FetchPipeline.submit` wedge gate,
-    DEC-VOLUME-KEEPALIVE-001).
+    DEC-VOLUME-KEEPALIVE-001), or the per-partition write-health breaker
+    (:class:`~brutex.data.write_breaker.WriteHealthBreaker`,
+    DEC-WRITE-HEALTH-BREAKER-001 — 2 consecutive write-defers open a partition, 3
+    DISTINCT open partitions trip the halt; raised from the window TAIL that observed
+    the tripping defer).
     """
 
     def __init__(self, reason: str) -> None:
@@ -146,8 +151,16 @@ class WriteDeadlineExceeded(DataLakeError):
     **Honest envelope (Golden Rule #10):** the abandoned write runs in a daemon worker thread,
     so a C-level wedged ``fsync`` thread CANNOT be killed — it dies with the process. The
     guarantee is "the fetch lane is never blocked" (the producer is released + the window is
-    deferred), NOT "the zombie write thread is terminated". A persistently-wedged volume defers
-    the same window every pull until the volume recovers (the operator's signal to act).
+    deferred), NOT "the zombie write thread is terminated". A persistently-wedged volume no
+    longer burns the whole pull deferring window after window: the write-health breaker
+    (:class:`~brutex.data.write_breaker.WriteHealthBreaker`, DEC-WRITE-HEALTH-BREAKER-001)
+    accumulates these defers per health key — the spot series+month partition; the F&O
+    UNDERLYING (a per-contract key could never reach the shipped consecutive limit, so the
+    F&O key groups the chain's sibling contracts) — and escalates a multi-key wedge to
+    ``LakeWriteHalt("volume_wedged")`` — a graceful pull-wide halt with the CRITICAL
+    Telegram alert (the operator's signal to act, now pushed not just logged). Honest
+    floor: a pull whose defers span fewer than 3 distinct health keys still defers
+    per-window without a halt.
 
     ``deadline_seconds`` is the deadline that was exhausted (non-secret) for the log.
     """

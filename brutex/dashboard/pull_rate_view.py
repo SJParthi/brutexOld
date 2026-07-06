@@ -514,9 +514,11 @@ def build_pull_rate_view_merged(
         wins the freshness pick. The dashboard route passes its
         ``BackgroundPullJob.running`` as ``panel_pull_active``, so a just-completed
         dashboard pull reads ``done``/``idle``, never ``stalled``. The CLI bridge file
-        carries NO active flag, so ``bridge_pull_active`` stays ``None`` (the honest
-        tick-freshness fallback) until the bridge publishes one — an explicit follow-up,
-        NOT claimed here.
+        NOW carries the flag too (schema v3, DEC-CLI-BRIDGE-PULL-ACTIVE-001): each
+        per-window publish stamps ``pull_active=True`` and ``cmd_fetch``'s ``finally``
+        publishes one final ``pull_active=False`` — so a just-finished CLI pull ALSO
+        reads ``done``/``idle``. ``None`` remains the honest tick-freshness fallback for
+        a pre-v3 / absent / flagless bridge file.
     panel_phase
         The dashboard pipeline's CURRENT ``set_phase`` label threaded into the
         PANEL-side projection only (DEC-PIPELINE-PHASE-UI-HONESTY-001) — the CLI
