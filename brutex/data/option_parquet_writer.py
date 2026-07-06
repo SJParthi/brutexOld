@@ -47,6 +47,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
+
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
 from brutex.data.models import OptionBar
@@ -57,6 +59,8 @@ from brutex.money import round_money
 
 if TYPE_CHECKING:
     import polars as pl
+
+_LOG = structlog.get_logger("brutex.data.option_parquet_writer")
 
 #: Subdirectory under the lake root holding the expired-options table.
 _OPTIONS_SUBDIR: str = "options"
@@ -248,6 +252,10 @@ class OptionParquetWriter:
         thereby discarded when its source copy is removed; canonical wins), an
         absent key is added (row REASSIGNED). Rows move VERBATIM (all stored
         columns) — never re-validated, never re-rendered, never value-edited.
+        The returned count is baselined on the destination's UNIQUE stored key
+        set (a dup-poisoned destination can never cancel a genuinely-new moved
+        key), and a poisoned destination is force-rewritten keep-first-deduped
+        on touch (``lake.partition.dedup_healed`` — the bars twin's law).
 
         Raises
         ------
@@ -293,6 +301,7 @@ class OptionParquetWriter:
             lake_write_guard(),
         ):
             new_df = render()  # validates the polars import on the write path
+            dedup_dropped = 0
             if dest.exists():
                 # GAP #1: a CORRUPT existing partition (a polars PolarsError, or an
                 # OSError fault) must quarantine THIS one series — raising a
@@ -304,11 +313,20 @@ class OptionParquetWriter:
                     existing = pl.read_parquet(dest)
                 except parquet_read_skip_errors() as exc:
                     raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
-                # int() coercion keeps the return concretely int even in the CI
-                # type-check env where polars is NOT installed (`[dev]`-only env, without the `[data]` extra)
-                # — there `.height` is Any (ignore_missing_imports) and an un-coerced
-                # return would trip mypy --strict's no-any-return.
-                before = int(existing.height)
+                # `added` is baselined on the UNIQUE stored key count, NEVER the raw
+                # physical row count (the bars twin's `stored_unique` law,
+                # DEC-LAKE-WRITE-UNIQUE-001): a dup-POISONED destination collapses
+                # inside the keep-first union below, and a physical-row baseline would
+                # cancel genuinely-new keys against that collapse — `added == 0` would
+                # then SKIP the rewrite and a reassignment heal's moved key would land
+                # NOWHERE while the source copy is removed (silent row LOSS — the
+                # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 hostile-review BLOCKER). int()
+                # coercion keeps the return concretely int even in the CI type-check
+                # env where polars is NOT installed (`[dev]`-only env, without the
+                # `[data]` extra) — there `.height` is Any (ignore_missing_imports)
+                # and an un-coerced return would trip mypy --strict's no-any-return.
+                before = int(existing.unique(subset=["side", "timestamp"]).height)
+                dedup_dropped = int(existing.height) - before
                 combined = (
                     pl.concat([existing, new_df])
                     .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
@@ -320,7 +338,22 @@ class OptionParquetWriter:
                     subset=["side", "timestamp"], keep="first", maintain_order=True
                 ).sort(["side", "timestamp"])
             added = int(combined.height) - before
-            if added > 0:
+            if dedup_dropped > 0:
+                # The stored destination physically carried duplicate (side, timestamp)
+                # keys — the rewrite below persists the keep-first collapse even when
+                # the merge itself adds nothing (the bars `heal_dropped` forced-rewrite
+                # mirror, DEC-LAKE-WRITE-UNIQUE-001), so a poisoned destination
+                # self-heals on touch instead of silently returning poisoned bytes.
+                # Same pinned event as the bars writer; sanctioned no-quarantine
+                # self-heal (the merge is not a heal_partition call — the collapse is
+                # observable here, and the healer's own dup pass quarantines).
+                _LOG.warning(
+                    "lake.partition.dedup_healed",
+                    partition=str(dest),
+                    kept=before,
+                    dropped=dedup_dropped,
+                )
+            if added > 0 or dedup_dropped > 0:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 _atomic_write_parquet(dest, combined)
             return added

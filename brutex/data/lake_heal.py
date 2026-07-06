@@ -90,6 +90,7 @@ from brutex.data.lake_invariants import (
     LegacyKeyDrift,
     OptionForeignMonthRows,
     OptionIntraFileDup,
+    is_foreign_timestamp,
     scan_lake_invariants,
     utc_aware,
 )
@@ -876,19 +877,16 @@ def _option_foreign_frame(home: tuple[int, int], frame: pl.DataFrame) -> pl.Data
     Keep-first ``(side, timestamp)`` dedup BEFORE the split (a physically
     duplicated foreign key moves ONCE, first physical row wins — mirrors
     ``read_partition_bars``'s collapse on the bars path), then a Python row
-    mask: foreign iff the timestamp is a real datetime AND
-    ``partition_for_timestamp(utc_aware(ts)) != home``. A null timestamp
-    abstains (kept home, never moved) — the bars null-abstain twin. Side is
-    NEVER consulted (the timestamp-only routing law,
+    mask over the ONE shared routing predicate
+    (:func:`~brutex.data.lake_invariants.is_foreign_timestamp` — §11 COMMON).
+    A null timestamp abstains (kept home, never moved) — the bars null-abstain
+    twin. Side is NEVER consulted (the timestamp-only routing law,
     DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
     """
     import polars as pl
 
     deduped = frame.unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
-    mask = [
-        isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
-        for ts in deduped.get_column("timestamp").to_list()
-    ]
+    mask = [is_foreign_timestamp(home, ts) for ts in deduped.get_column("timestamp").to_list()]
     return deduped.filter(pl.Series(mask))
 
 
@@ -949,6 +947,7 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     _LOG.warning(
         "lake_heal.rows_reassigned",  # the SAME pinned event as bars
         partition=partition,
+        series=repr(finding.series),  # RAW filesystem dir name — the #907 repr() convention
         tree="options",
         moved=len(keys),
         added=added,

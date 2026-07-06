@@ -42,7 +42,23 @@ denominator; NO catalog/raw_hash/recall for options (uncatalogued; NOTHING
 derives from `options/`). Wiring: L1 reconcile-piggyback is STRUCTURALLY N/A
 for options (catalog-walk only — documented); L2 `heal_after_pull` gains
 `include_options` (default False) wired True at the F&O post-pull seam ONLY;
-L3 startup sweep rides automatically (zero change). HONEST: no production
+L3 startup sweep rides automatically (zero change). HOSTILE-REVIEW FOLDS
+(round 1, refuter-confirmed, every fix mutant/pre-fix-verified): BLOCKER —
+`merge_partition_frame` baselined `added` on RAW physical rows, so a
+dup-poisoned canonical destination cancelled a genuinely-new moved key
+(`added==0` skipped the rewrite while the source removal ran — silent
+permanent row loss, second sweep clean); FIXED on the bars twin's law:
+unique-stored-key baseline + forced dedup rewrite on touch + the SAME pinned
+`lake.partition.dedup_healed` event (production `write()` byte-unchanged).
+MAJOR — one crafted Unicode-digit filename (`'²²'.isdigit()` True,
+`int('²²')` raises) crashed the WHOLE scan (all healing inert); `int()`
+guarded (bars `_file_month` twin) + ONLY the writer's canonical zero-padded
+stem parses (the same-month twin-file blind spot). MAJOR/MINOR test gaps —
+multi-destination-month reassignment (options + bars twin) + overlap-across-
+months pinned, truncation mutants killed. NITs: symlinked series dirs
+skipped LOUDLY (heal primitives would otherwise mutate outside the lake
+root); ONE `is_foreign_timestamp` predicate (4 copies killed, §11 COMMON);
+new options events carry `series=repr(…)` (#907). HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
 deterministically (canonical/path-ordered-first wins, originals in
@@ -371,10 +387,34 @@ hostile-review pass._
   out of scope; no current production pull WRITES `options/` — opportunistic census of a legacy table); L3 startup
   sweep already scanned `include_options=True` so the new findings ride automatically (sentinel gate G9-pinned);
   recall stays `None` for options findings (NOTHING derives from `options/`; bars recall machinery reused as-is in
-  mixed batches — no new recall invented). STRICTLY row-removing/row-reassigning — never value-editing. Remaining
+  mixed batches — no new recall invented). STRICTLY row-removing/row-reassigning — never value-editing.
+  HOSTILE-REVIEW FOLDS (round 1, refuter-confirmed; every fix pre-fix/mutant-verified): (1) BLOCKER —
+  `merge_partition_frame` baselined `added` on RAW physical destination rows, so a dup-POISONED canonical (an
+  `OptionIntraFileDup` state this healer exists to fix) collapsed inside the keep-first union and CANCELLED a
+  genuinely-new moved key: `added==0` skipped the rewrite while the source removal still ran — the reassigned key
+  existed in NEITHER lake file and a second sweep was CLEAN (silent permanent loss, empirically reproduced pre-fix).
+  FIXED on the bars twin's law (DEC-LAKE-WRITE-UNIQUE-001): `_merge_frame_locked` baselines `added` on the UNIQUE
+  stored `(side, timestamp)` count and FORCE-rewrites a physically-dup-poisoned destination even at `added==0`
+  (self-heal on touch), emitting the SAME pinned `lake.partition.dedup_healed` event (kept/dropped — closing the
+  unobservable-collapse MINOR too; sanctioned no-quarantine merge-touch self-heal, the bars precedent); production
+  `write()` byte-unchanged (writer-written partitions carry no dups; G10 parity green). (2) MAJOR —
+  `_option_file_month` gated on `str.isdigit()` then called `int()` unguarded; `'²²'.isdigit()` is True but
+  `int('²²')` raises, so ONE crafted `options/` filename crashed `scan_lake_invariants` pre-read — 500-ing the
+  `/universe` lake-uniqueness route, leaving the L3 boot sweep permanently inert (ALL healing off) and discarding
+  L2 batches. FIXED: both `int()` calls guarded (the bars `_file_month` twin) AND only the writer's canonical
+  zero-padded `f"{y:04d}-{m:02d}"` stem parses — a parsable-but-non-canonical `2024-6` would claim the SAME month
+  as its canonical twin file (the hand-planted twin-file blind spot NIT) and now abstains to dup-only. (3)
+  MAJOR/MINOR test gaps — the multi-destination-month reassignment loop + the per-month overlap grouping loop were
+  never driven with >1 month (truncation mutants `[:1]` survived the suite = silent multi-month loss/undercount);
+  NEW two-destination-month heal pins (options AND the bars twin — the same pre-existing bars gap) + the
+  overlap-across-two-canonical-months scan pin, ALL three mutants applied + verified KILLED. NITs: symlinked series
+  dirs are SKIPPED loudly (`lake.invariant.symlink_skipped` — the heal primitives unlink/rmdir/create INSIDE a
+  series dir, so a followed symlink would mutate files OUTSIDE the lake root); the foreign-routing predicate is
+  ONE `is_foreign_timestamp` (§11 COMMON, 4 inline copies killed); the new options events carry `series=repr(…)`
+  (the #907 raw-name convention). Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (426/142) + `option_parquet_writer.py`
-  (141/24) + `lake_heal.py` (588/162) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (437/146) + `option_parquet_writer.py`
+  (147/26) + `lake_heal.py` (588/162) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

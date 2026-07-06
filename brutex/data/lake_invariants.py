@@ -255,6 +255,21 @@ def utc_aware(ts: datetime) -> datetime:
     return ts
 
 
+def is_foreign_timestamp(home: tuple[int, int], ts: object) -> bool:
+    """True iff *ts* is a real datetime whose UTC month routes OUTSIDE *home*.
+
+    THE one foreign-routing predicate (§11 COMMON — a hostile-review fold
+    killed four inline copies): a non-datetime (null) abstains — it carries no
+    month to route (the bars null-abstain law); routing is
+    :func:`utc_aware`-normalised so a hand-planted naive column routes
+    as-if-UTC instead of raising. Shared by the bars classifiers
+    (:func:`_count_foreign_rows` / :func:`_foreign_timestamps`), the options
+    key builder (:func:`_option_foreign_keys`) AND the healer's row mask
+    (``lake_heal._option_foreign_frame``).
+    """
+    return isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
+
+
 def _count_foreign_rows(home: tuple[int, int], timestamps: pl.Series) -> int:
     """Count ROWS whose UTC month differs from the *home* month (O(1) fast path).
 
@@ -274,11 +289,7 @@ def _count_foreign_rows(home: tuple[int, int], timestamps: pl.Series) -> int:
         and partition_for_timestamp(utc_aware(last)) == home
     ):
         return 0
-    return sum(
-        1
-        for ts in timestamps.to_list()
-        if isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
-    )
+    return sum(1 for ts in timestamps.to_list() if is_foreign_timestamp(home, ts))
 
 
 def _foreign_timestamps(home: tuple[int, int], timestamps: pl.Series) -> set[datetime]:
@@ -287,11 +298,7 @@ def _foreign_timestamps(home: tuple[int, int], timestamps: pl.Series) -> set[dat
     Anomaly-only cost: called solely for files :func:`classify_bar_keys` already
     flagged foreign, to drive the targeted canonical-sibling overlap read.
     """
-    return {
-        utc_aware(ts)
-        for ts in timestamps.to_list()
-        if isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
-    }
+    return {utc_aware(ts) for ts in timestamps.to_list() if is_foreign_timestamp(home, ts)}
 
 
 def classify_bar_keys(
@@ -434,7 +441,8 @@ def log_lake_finding(finding: LakeFinding) -> None:
     exchange, segment, files`` — drifted/canonical via ``repr()``, the #907
     convention), ``lake.invariant.option_intra_file_dup`` (``partition,
     physical_rows, unique_keys``), ``lake.invariant.option_foreign_month_rows``
-    (``partition, foreign_rows, overlap_rows``).
+    (``partition, series, foreign_rows, overlap_rows`` — ``series`` is the RAW
+    filesystem dir name, so it rides via ``repr()``, the #907 convention).
     """
     if isinstance(finding, IntraFileDup):
         _LOG.warning(
@@ -463,6 +471,7 @@ def log_lake_finding(finding: LakeFinding) -> None:
         _LOG.warning(
             "lake.invariant.option_foreign_month_rows",
             partition=f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}",
+            series=repr(finding.series),
             foreign_rows=finding.foreign_rows,
             overlap_rows=finding.overlap_rows,
         )
@@ -590,14 +599,32 @@ def _option_file_month(path: Path) -> tuple[int, int] | None:
     ``None`` for an unparsable stem (non-numeric / missing separator / month
     outside 1..12) — such a file keeps today's dup-only treatment and honestly
     abstains from foreign classification (no home month to route against).
+
+    Hardened (hostile-review folds, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001):
+    ``str.isdigit`` accepts Unicode digit-PROPERTY characters ``int()``
+    rejects (``"²²".isdigit()`` is True but ``int("²²")`` raises), so the
+    ``int()`` calls are guarded — one crafted filename must abstain, never
+    crash the whole scan (the bars ``_file_month`` guard twin). Only the
+    CANONICAL zero-padded form the writer renders (``f"{year:04d}-{month:02d}"``)
+    parses: a non-canonical-but-parsable stem (``2024-6`` / a non-ASCII-digit
+    year) would claim the SAME month as its canonical twin file — two files
+    addressing one month is exactly the state the one-file-per-month
+    invariant forbids, so such a stem honestly abstains to dup-only instead
+    of masquerading as the month's home file.
     """
     stem, sep, month_text = path.stem.rpartition("-")
     if not sep or not stem.isdigit() or not month_text.isdigit():
         return None
-    month = int(month_text)
+    try:
+        year = int(stem)
+        month = int(month_text)
+    except ValueError:
+        return None  # Unicode digit-property chars pass isdigit() but not int()
     if not 1 <= month <= _MAX_MONTH:
         return None
-    return int(stem), month
+    if path.stem != f"{year:04d}-{month:02d}":
+        return None  # non-canonical stem — the same-month twin-file blind spot
+    return year, month
 
 
 def _option_foreign_keys(
@@ -616,9 +643,7 @@ def _option_foreign_keys(
     sides = frame.get_column("side").to_list()
     stamps = frame.get_column("timestamp").to_list()
     return {
-        (side, ts)
-        for side, ts in zip(sides, stamps, strict=True)
-        if isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
+        (side, ts) for side, ts in zip(sides, stamps, strict=True) if is_foreign_timestamp(home, ts)
     }
 
 
@@ -892,8 +917,15 @@ def scan_lake_invariants(
         options_root = lake_root / OPTIONS_DIR_NAME
         if options_root.is_dir():
             # Any dir containing *.parquet is scanned — no regex gate, an
-            # unrecognized series dir is still checked (Golden Rule #1).
+            # unrecognized series dir is still checked (Golden Rule #1). A
+            # SYMLINKED series dir is skipped LOUDLY (hostile-review fold):
+            # the healer's primitives unlink/rmdir/create INSIDE a series dir,
+            # so findings under a followed symlink would let a heal mutate
+            # files OUTSIDE the lake root — never scanned, never healed.
             for series_dir in sorted(p for p in options_root.iterdir() if p.is_dir()):
+                if series_dir.is_symlink():
+                    _LOG.warning("lake.invariant.symlink_skipped", path=str(series_dir))
+                    continue
                 option_canonical_cache: dict[
                     tuple[int, int], set[tuple[str | None, datetime]] | None
                 ] = {}

@@ -669,6 +669,48 @@ class TestForeignRowReassignment:
         assert reassigned[0]["months"] == ["2024-05"]
         assert finding.path == june
 
+    def test_reassign_two_destination_months(self, tmp_path: Path) -> None:
+        """The bars twin of the options two-destination-month pin (the
+        pre-existing single-month test gap): one June file carrying strays to
+        BOTH May and July — every month group is written home (a grouping-loop
+        truncation mutant loses every month after the first, silently)."""
+        lake = tmp_path / "lake"
+        june = _dest(lake, month=6)
+        _poison(
+            june,
+            [
+                (_ts(1, month=5), 55.0, 7),  # May stray
+                (_ts(2, month=7), 77.0, 9),  # July stray
+                (_ts(0, month=6), 101.0, 12),  # a legitimate June row (kept)
+            ],
+        )
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, ForeignMonthRows)
+        assert finding.foreign_rows == 2
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.healed == 1
+        assert report.errors == 0
+        may_frame = _stored_frame(_dest(lake, month=5))
+        assert may_frame["timestamp"].to_list() == [_ts(1, month=5)]
+        assert may_frame["close"].to_list() == [55.0]
+        july_frame = _stored_frame(_dest(lake, month=7))
+        assert july_frame["timestamp"].to_list() == [_ts(2, month=7)]
+        assert july_frame["close"].to_list() == [77.0]
+        assert _stored_frame(june)["timestamp"].to_list() == [_ts(0, month=6)]
+        reassigned = _events(logs, "lake_heal.rows_reassigned")
+        assert reassigned[0]["months"] == ["2024-05", "2024-07"]
+        assert reassigned[0]["moved"] == 2
+        assert scan_lake_invariants(lake).findings == ()  # nothing lost, nothing left
+
     def test_reassign_crash_between_copy_and_remove_converges(self, tmp_path: Path) -> None:
         """Idempotent convergence: a crash AFTER copy-forward but BEFORE the
         removal leaves the rows in BOTH files; the re-run cleans the source and
@@ -1277,6 +1319,7 @@ class TestOptionForeignHeal:
         assert len(reassigned) == 1
         assert reassigned[0]["tree"] == "options"
         assert reassigned[0]["partition"] == f"options/{_OPT_SERIES}/2024-06.parquet"
+        assert reassigned[0]["series"] == repr(_OPT_SERIES)  # raw fs name — #907 repr()
         assert reassigned[0]["moved"] == 2
         assert reassigned[0]["added"] == 1
         assert reassigned[0]["months"] == ["2024-07"]
@@ -1323,6 +1366,135 @@ class TestOptionForeignHeal:
         assert july_frame["timestamp"].to_list() == [_ts(2, month=7, day=1)]
         assert july_frame["close"].to_list() == [55.0]
         assert pl.read_parquet(june)["timestamp"].to_list() == [_ts(0)]
+
+    def test_option_reassign_into_dup_poisoned_canonical_lands_key(self, tmp_path: Path) -> None:
+        """BLOCKER regression (hostile review, EMPIRICALLY reproduced pre-fix):
+        a dup-POISONED canonical destination must never cancel the moved key.
+        Pre-fix, ``merge_partition_frame`` baselined ``added`` on RAW physical
+        rows, so July's dup collapse cancelled the genuinely-new June key —
+        ``added == 0`` skipped the rewrite, the source removal still ran, and
+        the key existed in NEITHER lake file (silent, permanent, invisible to
+        a second sweep). Post-fix: the key LANDS, July self-heals its dup on
+        touch (``lake.partition.dedup_healed``), second sweep clean."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(1, month=7, day=1), close="200.00")],
+        )
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        series_dir = _opt_series_dir(lake)
+        june = series_dir / "2024-06.parquet"
+        july = series_dir / "2024-07.parquet"
+        # Poison the CANONICAL July with a physical dup pair of its own row —
+        # exactly the OptionIntraFileDup state this healer exists to fix.
+        july_df = pl.read_parquet(july)
+        pl.concat([july_df, july_df[0:1]]).write_parquet(july)
+        # June carries ONE pure-misplaced July key ABSENT from canonical July.
+        june_df = pl.read_parquet(june)
+        misplaced = june_df[0:1].with_columns(
+            pl.lit(_ts(2, month=7, day=2)).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit("PE").alias("side"),
+            pl.lit(55.0).alias("close"),
+        )
+        pl.concat([june_df, misplaced]).write_parquet(june)
+        scan = scan_lake_invariants(lake)
+        assert {type(f).__name__ for f in scan.findings} == {
+            "OptionForeignMonthRows",
+            "OptionIntraFileDup",
+        }
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 0
+        assert report.healed == 1  # the foreign reassignment
+        assert report.skipped == 1  # July's dup already collapsed by the merge touch
+        july_after = pl.read_parquet(july).sort(["side", "timestamp"])
+        # THE pin: the moved key is PRESENT at its canonical destination.
+        assert july_after["side"].to_list() == ["CE", "PE"]
+        assert july_after["timestamp"].to_list() == [_ts(1, month=7, day=1), _ts(2, month=7, day=2)]
+        assert july_after["close"].to_list() == [200.0, 55.0]
+        assert pl.read_parquet(june)["timestamp"].to_list() == [_ts(0)]  # source cleaned
+        healed_logs = _events(logs, "lake.partition.dedup_healed")
+        assert len(healed_logs) == 1  # the destination collapse is observable
+        assert healed_logs[0]["kept"] == 1
+        assert healed_logs[0]["dropped"] == 1
+        assert scan_lake_invariants(lake).findings == ()  # second sweep clean — no loss
+
+    def test_option_reassign_two_destination_months(self, tmp_path: Path) -> None:
+        """MAJOR regression (mutation gap): ONE June source carrying strays to
+        BOTH May and July — every destination-month group must be copied
+        forward (a ``sorted(set(routes))[:1]`` truncation mutant silently
+        loses every month after the first while the source removal still runs
+        and a second sweep stays clean)."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        series_dir = _opt_series_dir(lake)
+        june = series_dir / "2024-06.parquet"
+        june_df = pl.read_parquet(june)
+        may_stray = june_df[0:1].with_columns(
+            pl.lit(_ts(1, month=5, day=2)).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit(66.0).alias("close"),
+        )
+        july_stray = june_df[0:1].with_columns(
+            pl.lit(_ts(2, month=7, day=2)).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit(77.0).alias("close"),
+        )
+        pl.concat([june_df, may_stray, july_stray]).write_parquet(june)
+        audit = _FakeAudit()
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.foreign_rows == 2
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                audit=audit,
+                recall=False,
+                now=_now,
+            )
+        assert report.healed == 1
+        assert report.errors == 0
+        may_frame = pl.read_parquet(series_dir / "2024-05.parquet")
+        assert may_frame["timestamp"].to_list() == [_ts(1, month=5, day=2)]
+        assert may_frame["close"].to_list() == [66.0]
+        july_frame = pl.read_parquet(series_dir / "2024-07.parquet")
+        assert july_frame["timestamp"].to_list() == [_ts(2, month=7, day=2)]
+        assert july_frame["close"].to_list() == [77.0]
+        assert pl.read_parquet(june)["timestamp"].to_list() == [_ts(0)]  # home row only
+        (line,) = audit.lines
+        payload = line[2]
+        assert payload is not None
+        assert payload["months"] == ["2024-05", "2024-07"]  # BOTH months, sorted
+        assert payload["moved"] == 2
+        assert payload["added"] == 2
+        reassigned = _events(logs, "lake_heal.rows_reassigned")
+        assert reassigned[0]["months"] == ["2024-05", "2024-07"]
+        assert reassigned[0]["moved"] == 2
+        assert scan_lake_invariants(lake).findings == ()  # nothing lost, nothing left
 
     def test_option_wholly_foreign_file_quarantine_moved(self, tmp_path: Path) -> None:
         """Every row foreign ⇒ source unlinked, rows home, kept=0; the series

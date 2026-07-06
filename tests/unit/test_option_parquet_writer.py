@@ -28,6 +28,7 @@ from brutex.data.option_parquet_writer import (
     OptionWriterError,
 )
 from brutex.data.partition_lock import partition_lock_path
+from structlog.testing import capture_logs
 
 
 def _partition_lock_is_held(lock_path: Path) -> bool:
@@ -869,6 +870,56 @@ class TestMergePartitionFrame:
         assert added == 1
         assert observed["held_during_read"] is True
         assert _partition_lock_is_held(partition_lock_path(tmp_path, dest)) is False
+
+    def test_dup_poisoned_destination_never_cancels_new_keys(self, tmp_path: Path) -> None:
+        """BLOCKER regression (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 hostile review):
+        ``added`` is baselined on the destination's UNIQUE stored keys, so a
+        physical dup in the destination can never cancel a genuinely-new merged
+        key (the pre-fix physical-row baseline read ``added == 0``, skipped the
+        rewrite, and a reassignment heal's moved key landed NOWHERE while its
+        source copy was removed — silent row loss)."""
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        ts1 = datetime(2021, 1, 4, 4, 1, tzinfo=UTC)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+        # Poison the destination with a physical dup copy (raw rewrite — the
+        # writer itself refuses to store duplicates, the #1067 convention).
+        stored = pl.read_parquet(dest)
+        pl.concat([stored, stored[0:1]]).write_parquet(dest)
+        with capture_logs() as logs:
+            added = w.merge_partition_frame(dest, self._frame([("PE", ts1, 2.0)]))
+        assert added == 1  # NOT cancelled by the dup collapse
+        after = pl.read_parquet(dest).sort(["side", "timestamp"])
+        assert after["side"].to_list() == ["CE", "PE"]  # deduped AND the new key landed
+        assert after["close"].to_list() == [1.0, 2.0]
+        healed = [e for e in logs if e["event"] == "lake.partition.dedup_healed"]
+        assert len(healed) == 1  # the collapse is OBSERVABLE (the bars twin's event)
+        assert healed[0]["partition"] == str(dest)
+        assert healed[0]["kept"] == 1
+        assert healed[0]["dropped"] == 1
+
+    def test_dup_poisoned_destination_forced_rewrite_on_zero_added(self, tmp_path: Path) -> None:
+        """``added == 0`` but the poisoned destination is STILL rewritten
+        keep-first-deduped (the bars ``heal_dropped`` forced-rewrite mirror) —
+        a poisoned destination self-heals on touch instead of silently
+        returning the poisoned bytes forever."""
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+        stored = pl.read_parquet(dest)
+        pl.concat([stored, stored[0:1]]).write_parquet(dest)
+        with capture_logs() as logs:
+            added = w.merge_partition_frame(dest, self._frame([("CE", ts0, 999.0)]))
+        assert added == 0  # every incoming key already stored
+        after = pl.read_parquet(dest)
+        assert after.height == 1  # the physical dup pair collapsed on touch
+        assert after["close"].to_list() == [1.0]  # FIRST stored row won, never restated
+        healed = [e for e in logs if e["event"] == "lake.partition.dedup_healed"]
+        assert len(healed) == 1
+        assert healed[0]["kept"] == 1
+        assert healed[0]["dropped"] == 1
 
     def test_merge_enospc_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

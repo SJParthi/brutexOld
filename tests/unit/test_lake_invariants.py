@@ -638,6 +638,16 @@ class TestOptionFileMonth:
             ("2024-00", None),
             ("2024-06-x", None),
             ("-06", None),
+            # Unicode digit-PROPERTY chars: isdigit() True but int() raises —
+            # must abstain, never ValueError (the scan-crash hostile-review MAJOR).
+            ("²²-06", None),
+            ("2024-²", None),
+            # Parsable but NON-canonical stems abstain: they would claim the
+            # SAME month as their zero-padded canonical twin (the twin-file
+            # blind spot NIT) — only the writer's own f"{y:04d}-{m:02d}" parses.
+            ("2024-6", None),
+            ("02024-06", None),
+            ("٢٠٢٤-٠٦", None),  # Arabic-Indic digits: int() ACCEPTS these — non-canonical
         ],
     )
     def test_stem_parse_matrix(self, stem: str, expected: tuple[int, int] | None) -> None:
@@ -730,6 +740,7 @@ class TestOptionForeignScan:
         assert len(warns) == 1
         assert warns[0]["log_level"] == "warning"
         assert warns[0]["partition"] == "options/SERIES/2024-07.parquet"
+        assert warns[0]["series"] == repr("SERIES")  # raw fs name — the #907 repr() convention
         assert warns[0]["foreign_rows"] == 1
         assert warns[0]["overlap_rows"] == 0
 
@@ -847,6 +858,70 @@ class TestOptionForeignScan:
         assert report.option_files_skipped == 0
         assert calls == [_opt_dest(tmp_path, "2024-06")]
         assert report.findings == ()
+
+    def test_overlap_counted_across_two_canonical_months(self, tmp_path: Path) -> None:
+        """MINOR regression (mutation gap): overlap is SUMMED across ALL
+        affected canonical months — a ``sorted(grouped)[:1]`` truncation
+        mutant in ``_classify_option_overlap`` undercounts a file whose
+        foreign keys route to two different months."""
+        _plant_option_raw(_opt_dest(tmp_path, "2024-05"), [("CE", _ts(1, month=5, day=2))])
+        _plant_option_raw(_opt_dest(tmp_path, "2024-07"), [("CE", _ts(2, month=7, day=2))])
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-06"),
+            [("CE", _ts(0)), ("CE", _ts(1, month=5, day=2)), ("CE", _ts(2, month=7, day=2))],
+        )
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1  # only the June file carries foreign rows
+        assert foreigns[0].foreign_rows == 2
+        assert foreigns[0].overlap_rows == 2  # 1 (May) + 1 (July) — both months counted
+
+    def test_crafted_unicode_digit_filename_never_crashes_scan(self, tmp_path: Path) -> None:
+        """MAJOR regression: ``'²²'.isdigit()`` is True but ``int('²²')``
+        raises — pre-fix ONE crafted filename crashed the whole scan (500-ing
+        the /universe chip, disabling the L3 boot sweep + ALL healing, and
+        discarding the L2 batch). It must abstain to dup-only instead."""
+        dest = _opt_dest(tmp_path, "²²-06")
+        _plant_option_raw(dest, [("CE", _ts(1)), ("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))])
+        report = scan_lake_invariants(tmp_path)
+        (finding,) = report.findings
+        assert isinstance(finding, OptionIntraFileDup)  # dup-only honest abstain
+        assert finding.physical_rows == 3
+        assert finding.unique_keys == 2
+        # The months-scoped L2 path parses the home BEFORE the scope check —
+        # it must not crash either (unprovable-in-scope ⇒ skipped unread).
+        scoped = scan_lake_invariants(tmp_path, months={(2024, 6)}, include_bars=False)
+        assert scoped.option_files_scanned == 0
+        assert scoped.findings == ()
+
+    def test_non_canonical_stem_abstains_to_dup_only(self, tmp_path: Path) -> None:
+        """A parsable-but-NON-canonical stem (``2024-6``) would claim the SAME
+        month as its canonical twin ``2024-06`` (the hand-planted twin-file
+        blind spot) — it abstains from foreign routing (``home=None``)."""
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-6"), [("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))]
+        )
+        report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()  # no home month — foreign abstained; no dup either
+        assert report.option_files_scanned == 1
+
+    def test_symlinked_series_dir_skipped(self, tmp_path: Path) -> None:
+        """A SYMLINKED series dir is never scanned (hostile-review NIT): the
+        heal primitives unlink/rmdir/create INSIDE a series dir, so a finding
+        under a followed symlink would let a heal mutate files OUTSIDE the
+        lake root. Skipped loudly, poison outside stays untouched-and-unseen."""
+        outside = tmp_path / "outside" / "SERIES"
+        _plant_option_raw(outside / "2024-06.parquet", [("CE", _ts(1)), ("CE", _ts(1))])
+        lake = tmp_path / "lake"
+        (lake / "options").mkdir(parents=True)
+        (lake / "options" / "LINKED").symlink_to(outside, target_is_directory=True)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(lake)
+        assert report.findings == ()
+        assert report.option_files_scanned == 0
+        skips = _events(logs, "lake.invariant.symlink_skipped")
+        assert len(skips) == 1
+        assert skips[0]["path"] == str(lake / "options" / "LINKED")
 
     def test_no_scope_unparsable_name_still_dup_scanned(self, tmp_path: Path) -> None:
         # Today's behaviour pinned: without a months scope an unparsable-name
