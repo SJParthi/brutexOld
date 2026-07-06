@@ -47,6 +47,7 @@ _LOG = structlog.get_logger("brutex.adapters.groww.expiry_scope")
 __all__ = [
     "ScopePartition",
     "expiry_in_scope",
+    "log_expiry_scope_summary",
     "log_out_of_scope_expiries",
     "normalize_expiry_scope",
     "partition_contracts_by_scope",
@@ -173,6 +174,17 @@ class ScopePartition:
         """Distinct ``(underlying, expiry)`` groups excluded by the scope."""
         return len(self.out_by_expiry)
 
+    @property
+    def expiries_in_scope(self) -> int:
+        """Distinct ``(underlying, expiry)`` groups KEPT in scope — O(in_scope).
+
+        The in-scope twin of :attr:`expiries_out_of_scope`, feeding the
+        ``fno.expiry_scope_summary`` observe-only telemetry
+        (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001) so a bounded pull's log
+        states BOTH sides of the partition, not only the skipped one.
+        """
+        return len({(row.underlying, row.expiry_date) for row in self.in_scope})
+
 
 def partition_contracts_by_scope(
     contracts: Sequence[ContractRow],
@@ -222,3 +234,37 @@ def log_out_of_scope_expiries(
             scope_end=scope_end.isoformat() if scope_end is not None else None,
             contracts_skipped=skipped,
         )
+
+
+def log_expiry_scope_summary(
+    partition: ScopePartition,
+    *,
+    scope_start: date | None,
+    scope_end: date | None,
+) -> None:
+    """Emit ONE ``fno.expiry_scope_summary`` INFO for a BOUNDED scope — observe-only.
+
+    DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001. The existing per-group
+    ``fno.expiry_out_of_scope`` lines name only the SKIPPED side; this single
+    summary states BOTH sides of the partition — in-scope contract + expiry
+    counts, out-of-scope contract + expiry counts, and the bounds — so a
+    bounded pull's log answers "what did the scope actually keep?" without
+    counting per-group lines.
+
+    Emitted ONLY when at least one bound is set. The DEFAULT ``(None, None)``
+    (no-dates) pull emits NOTHING — zero new log calls, preserving the
+    DEC-FNO-EXPIRY-SCOPE-001 default-parity pin (the unscoped pull stays
+    byte-identical, logging included). Pure read of *partition* — no return
+    value, no state change, never raises (isoformat over already-typed dates).
+    """
+    if scope_start is None and scope_end is None:
+        return
+    _LOG.info(
+        "fno.expiry_scope_summary",
+        contracts_in_scope=len(partition.in_scope),
+        expiries_in_scope=partition.expiries_in_scope,
+        contracts_out_of_scope=partition.contracts_out_of_scope,
+        expiries_out_of_scope=partition.expiries_out_of_scope,
+        scope_start=scope_start.isoformat() if scope_start is not None else None,
+        scope_end=scope_end.isoformat() if scope_end is not None else None,
+    )
