@@ -125,7 +125,8 @@ class ScopeReport:
         lines.extend(f"  - {verdict.symbol}: {verdict.reason}" for verdict in self.refused)
         lines.append(
             "The engine sweeps ONLY NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) "
-            "plus NIFTY futures (ADR-0012 / DEC-NIFTY-DYNAMIC-STRATEGY-001). "
+            "plus the NIFTY-futures series alias 'NSE-NIFTY-FUT' (ADR-0012 / "
+            "DEC-FUTURES-ADDRESSING-PIN-001). "
             f"Rationale: {_CORP_ACTION_HAZARD} "
             "Remedy: drop the out-of-scope symbol(s), or — CLI research runs ONLY — "
             "re-run with --allow-out-of-scope (loud + audit-stamped; no dashboard "

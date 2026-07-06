@@ -51,6 +51,7 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -265,6 +266,65 @@ def recorded_context_from_audit(audit_path: Path) -> RecordedContext | None:
                 f"inconsistent recorded context in {audit_path}: {context} vs {found}"
             )
     return context
+
+
+def recorded_roll_schedules_from_audit(audit_path: Path) -> dict[str, tuple[int, ...]]:
+    """Read per-instrument RECORDED roll schedules from the tree's audit log.
+
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 (F16): a futures run's ``SWEEP_START``
+    payload carries ``params["roll_schedule"]`` (via ``canonical_trade_params``
+    — the run is SELF-DESCRIBING), so Tier 2 re-derives futures row identities
+    from the tree's OWN recorded schedule, and the Tier-3 recount compares the
+    resolver's re-derived schedule against this recorded one — a lake that
+    gained/lost a contract is surfaced with evidence, never a bare hash diff.
+
+    Returns an empty mapping when the audit file is absent or no entry carries
+    a schedule (every spot tree).
+
+    Raises
+    ------
+    SweepVerifyError
+        If the audit log is unreadable/corrupt, a recorded schedule is not a
+        list of ints, or two entries disagree for one instrument (an
+        inconsistent tree is not a verifiable tree — refuse, Golden Rule #1).
+    """
+    if not audit_path.exists():
+        return {}
+    from brutex.orchestrator.audit import AuditError, read_entries
+
+    try:
+        entries: list[AuditEntry] = list(read_entries(audit_path))
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+    schedules: dict[str, tuple[int, ...]] = {}
+    for entry in entries:
+        if entry.action != "SWEEP_START":
+            continue
+        payload = entry.payload
+        params = payload.get("params")
+        if not isinstance(params, dict) or "roll_schedule" not in params:
+            continue
+        raw = params["roll_schedule"]
+        instrument = str(payload.get("instrument", ""))
+        if (
+            not instrument
+            or not isinstance(raw, list)
+            or not all(isinstance(item, int) and not isinstance(item, bool) for item in raw)
+        ):
+            raise SweepVerifyError(
+                f"malformed recorded roll_schedule in {audit_path} (seq {entry.seq}): "
+                f"instrument={instrument!r} roll_schedule={raw!r}"
+            )
+        schedule = tuple(raw)
+        prior = schedules.get(instrument)
+        if prior is None:
+            schedules[instrument] = schedule
+        elif prior != schedule:
+            raise SweepVerifyError(
+                f"inconsistent recorded roll_schedule for {instrument!r} in "
+                f"{audit_path}: {prior} vs {schedule}"
+            )
+    return schedules
 
 
 # ── Tier 1 — STRUCTURAL ──────────────────────────────────────────────────────
@@ -519,6 +579,7 @@ def _verify_store_rows(
     is_grid_tuple: bool,
     vocabulary_trusted: bool,
     findings: list[VerifyFinding],
+    roll_schedule: tuple[int, ...] | None = None,
 ) -> None:
     """Re-derive every row's identity in one attributed store (Tier 2 per-store)."""
 
@@ -539,7 +600,18 @@ def _verify_store_rows(
             f"{len(rows)} rows > top_k={grid.top_k} — the #650 subset-re-rank "
             f"inflation signature (impossible legitimately, pre- AND post-#654)",
         )
-    cfg = tuple_.to_run_config(grid)
+    try:
+        cfg = tuple_.to_run_config(grid, roll_schedule=roll_schedule)
+    except ValueError as exc:
+        # A futures tuple with no recorded schedule (or vice versa) cannot be
+        # re-derived — an honest WARN finding, never a crash (the tree stays
+        # Tier-1 verifiable; DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16).
+        add(
+            "row_identity_underivable",
+            "warn",
+            f"cannot rebuild the tuple's run config for identity re-derivation: {exc}",
+        )
+        return
     params = canonical_trade_params(
         sl_paisa=cfg.sl_paisa,
         tp_paisa=cfg.tp_paisa,
@@ -547,6 +619,7 @@ def _verify_store_rows(
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
+        roll_schedule=cfg.roll_schedule,
     )
     expected_label = _direction_label(tuple_.direction)
     bits_mask = 0
@@ -608,6 +681,7 @@ def verify_identity(
     *,
     stage3: Stage3ManifestRecord | None = None,
     vocabulary_trusted: bool = False,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
 ) -> TreeVerifyReport:
     """Tier 2: re-derive every expected path + every row identity — grid, no bars.
 
@@ -631,6 +705,14 @@ def verify_identity(
         Run the ``has_conflict`` row check — valid ONLY when the current
         vocabulary matches the tree's recorded ``code_commit_sha`` /
         ``indicator_version`` (ADR-0008's drift channel); default off.
+    roll_schedule_by_instrument
+        ADR-0012 futures roll schedules keyed by instrument symbol
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): a futures row's ``run_id`` folds
+        ``roll_schedule`` into its params, so the Tier-2 re-derivation must
+        carry the SAME schedule (sourced from the tree's own recorded audit
+        params — :func:`recorded_roll_schedules_from_audit` — never the
+        operator's memory). ``None`` (the default / every spot tree) is the
+        byte-identical pre-launch derivation.
 
     Raises
     ------
@@ -687,6 +769,11 @@ def verify_identity(
             is_grid_tuple=is_grid_tuple,
             vocabulary_trusted=vocabulary_trusted,
             findings=findings,
+            roll_schedule=(
+                roll_schedule_by_instrument.get(tuple_.instrument)
+                if roll_schedule_by_instrument is not None
+                else None
+            ),
         )
     for expected in sorted(set(plan) - set(found)):
         findings.append(
@@ -1051,6 +1138,7 @@ __all__ = [
     "compare_recount",
     "plan_expected_stores",
     "recorded_context_from_audit",
+    "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
     "verify_identity",
     "verify_structural",

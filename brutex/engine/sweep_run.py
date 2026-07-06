@@ -103,7 +103,7 @@ from brutex.engine.combo_mask import (
 )
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
-from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
@@ -144,6 +144,7 @@ from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.types import FibAnchorKind, Side
+from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 from brutex.vocabulary import ProximityParams, has_conflict
 
 if TYPE_CHECKING:
@@ -517,11 +518,40 @@ class SweepRunConfig:
     top_k: int | None = None
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
+    #: ADR-0012 NIFTY-futures roll schedule (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001
+    #: / DEC-STAGE1A-ROLL-RESET-001): strictly increasing owning-expiry
+    #: day-ordinals from ``resolve_futures_series`` — the roll boundaries the
+    #: Stage-1A build hard-resets on. PRESENCE IS A TOTAL FUNCTION OF THE
+    #: ``instrument`` IDENTITY FIELD (the ``__post_init__`` hard invariant,
+    #: both directions), so no instrument can ever mint both a with-key and a
+    #: without-key run identity (the #1062 conditional-params bug class is
+    #: contained). ``None`` — every spot config — emits NO params key, so spot
+    #: run_ids stay byte-identical.
+    roll_schedule: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
             if not getattr(self, name):
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
+        # Instrument ⟺ schedule hard invariant (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
+        # the futures alias REQUIRES a schedule, everything else FORBIDS one —
+        # presence is a pure function of the identity field, never a caller mood.
+        if (self.instrument == NIFTY_FUTURES_SERIES_SYMBOL) != (self.roll_schedule is not None):
+            raise ValueError(
+                "SweepRunConfig: roll_schedule is required for (and only for) the "
+                f"NIFTY-futures series alias {NIFTY_FUTURES_SERIES_SYMBOL!r} — got "
+                f"instrument={self.instrument!r} with roll_schedule="
+                f"{self.roll_schedule!r}"
+            )
+        if self.roll_schedule is not None and (
+            not self.roll_schedule
+            or list(self.roll_schedule) != sorted(set(self.roll_schedule))
+            or self.roll_schedule[0] < 0
+        ):
+            raise ValueError(
+                "SweepRunConfig.roll_schedule must be a non-empty strictly increasing "
+                f"tuple of non-negative day ordinals, got {self.roll_schedule!r}"
+            )
         for name in ("data_snapshot_hash", "indicator_version", "code_commit_sha"):
             if not getattr(self, name):
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
@@ -630,6 +660,7 @@ def canonical_trade_params(
     proximity: ProximityParams | None,
     start_equity_paisa: int,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    roll_schedule: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Return the deterministic trade-sim params dict for the run-identity hash.
 
@@ -649,6 +680,19 @@ def canonical_trade_params(
     default), so the honest run-identity carries the anchor for every family; there
     is no production sweep tree yet, so this is a zero-cost identity choice.
 
+    The ADR-0012 futures ``roll_schedule`` enters CONDITIONALLY
+    (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): ``bar_bits`` are a function of
+    ``(bars, schedule)`` and the schedule derives from LAKE state (dir names) —
+    ``code_commit_hash`` cannot capture it — so Golden Rule #4 demands it in
+    the recorded identity, and the recorded key makes each futures run
+    SELF-DESCRIBING for the recount's evidence check. The conditional emission
+    can never re-open the #1062 bug class because
+    :class:`SweepRunConfig.__post_init__` pins presence ⟺ the futures alias
+    (both directions) — a spot config emits NO key and stays byte-identical.
+    ``canonical_spec_params`` (the spec-axis params builder) deliberately does
+    NOT carry ``roll_schedule`` — the spec axis has no futures sweep tree and
+    its params vocabulary stays dormant (test-pinned on both builders).
+
     This is the ONE source of the params layout inside every persisted mask
     run-identity (CLAUDE.md §11 COMMON): the sweep hashes through it via
     :func:`_canonical_params`, and the Stage-3 wiring re-derives survivor
@@ -664,7 +708,7 @@ def canonical_trade_params(
             proximity.pdh_pdl_proximity_bps,
             proximity.fib_proximity_bps,
         ]
-    return {
+    params: dict[str, Any] = {
         "sl_paisa": sl_paisa,
         "tp_paisa": tp_paisa,
         "prior_n": prior_n,
@@ -672,6 +716,9 @@ def canonical_trade_params(
         "fib_anchor": fib_anchor.value,
         "start_equity_paisa": start_equity_paisa,
     }
+    if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
+        params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
+    return params
 
 
 def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
@@ -683,6 +730,7 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
+        roll_schedule=cfg.roll_schedule,
     )
 
 
@@ -1378,7 +1426,12 @@ def run_persisted_sweep(
 
     if kernel is None:
         bar_bits = build_bar_bits(
-            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, fib_anchor=cfg.fib_anchor
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            fib_anchor=cfg.fib_anchor,
+            roll_schedule=cfg.roll_schedule,
+            apply_1day_mask=apply_1day_mask_for(cfg.instrument, cfg.tf),
         )
     else:
         if kernel.n_bars != len(bars):
@@ -1395,6 +1448,16 @@ def run_persisted_sweep(
                 f"run_persisted_sweep: kernel was built for Fib anchor "
                 f"{kernel.fib_anchor.value!r} but the tuple sweeps "
                 f"{cfg.fib_anchor.value!r} — the kernel must match this tuple's anchor"
+            )
+        # ADR-0012 roll-schedule twin of the anchor guard: the ``bar_bits``
+        # matrix is schedule-SPECIFIC (the per-contract hard resets), so a
+        # kernel built under a different schedule would silently misplace
+        # every roll boundary (DEC-STAGE1A-ROLL-RESET-001).
+        if kernel.roll_schedule != cfg.roll_schedule:
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built for roll_schedule "
+                f"{kernel.roll_schedule!r} but the tuple sweeps "
+                f"{cfg.roll_schedule!r} — the kernel must match this tuple's schedule"
             )
         bar_bits = kernel.bar_bits
 

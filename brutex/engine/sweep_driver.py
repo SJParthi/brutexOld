@@ -414,6 +414,8 @@ def sweep_masks(
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
     min_hits: int = 0,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> list[tuple[int, ResultMetrics]]:
     """Backtest MANY masks over the same bars → ``(mask, metrics)`` pairs.
 
@@ -440,6 +442,11 @@ def sweep_masks(
         with fewer hits than the ``MIN_TRADES`` gate can never be rankable, so
         pruning it does not change any *ranked* leaderboard — it only skips dead
         work. ``0`` (default) disables the pre-filter (every mask is simulated).
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs into
+        :func:`~brutex.engine.stage1a.build_bar_bits`
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). Defaults (``None`` / ``False``)
+        are the byte-identical spot path.
 
     Returns
     -------
@@ -454,7 +461,13 @@ def sweep_masks(
     """
     if not bars:
         raise ValueError("sweep_masks: bars must be non-empty")
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    bar_bits = build_bar_bits(
+        bars,
+        proximity=proximity,
+        prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
+    )
     swept = masks
     if min_hits > 0:
         # Count each mask's superset hits once (one batched Rust call), then keep
@@ -491,6 +504,8 @@ def rank_sweep(
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
     min_hits: int = 0,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> list[RankedCombo]:
     """Sweep a set of masks and return the **ranked leaderboard** — the top combos.
 
@@ -500,7 +515,9 @@ def rank_sweep(
     returned list is the top-performing combo for this
     ``(instrument, TF, direction, params)``. ``min_hits`` (default ``0`` = off) only
     skips masks that could never clear the trade-count gate, so it never changes the
-    ranked result — see :func:`sweep_masks`.
+    ranked result — see :func:`sweep_masks`. ``roll_schedule`` /
+    ``apply_1day_mask`` are the ADR-0012 futures pass-throughs (defaults are the
+    byte-identical spot path).
     """
     return rank_combos(
         sweep_masks(
@@ -514,6 +531,8 @@ def rank_sweep(
             proximity=proximity,
             prior_n=prior_n,
             min_hits=min_hits,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
         )
     )
 
@@ -532,6 +551,8 @@ def rank_sweep_over_bits(
     prior_n: int = 3,
     max_combos: int = DEFAULT_MAX_COMBOS,
     min_hits: int = MIN_TRADES,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> list[RankedCombo]:
     """Sweep + rank over the **K-of-the-chosen-condition-bits** mask space → top combos.
 
@@ -571,6 +592,9 @@ def rank_sweep_over_bits(
         trade-count gate can never be rankable, so it is pruned before the trade sim
         (identical leaderboard, less work). Pass ``0`` to disable (simulate every
         enumerated mask). See :func:`sweep_masks`.
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001);
+        defaults are the byte-identical spot path. See :func:`sweep_masks`.
 
     Returns
     -------
@@ -607,6 +631,8 @@ def rank_sweep_over_bits(
         proximity=proximity,
         prior_n=prior_n,
         min_hits=min_hits,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
     )
 
 

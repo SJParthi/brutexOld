@@ -110,7 +110,7 @@ import heapq
 import multiprocessing
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED as _FIRST_COMPLETED
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
@@ -528,6 +528,11 @@ class _WorkerContext:
 
     grid: SweepGridConfig
     root: Path
+    #: ADR-0012 futures roll schedules keyed by instrument symbol
+    #: (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — a picklable plain dict, threaded
+    #: into every worker's ``run_one_tuple`` (identity-safe argument plumbing;
+    #: ``None`` — every spot grid — is the byte-identical pre-launch path).
+    roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
 
 
 #: The per-worker-PROCESS context, set ONCE by :func:`_worker_init`. A module
@@ -591,6 +596,7 @@ def _run_tuple_in_worker(
             dedup=_NoDedup(),
             audit=collector,
             skip_empty=True,
+            roll_schedule_by_instrument=ctx.roll_schedule_by_instrument,
         )
     except SweepComboError as exc:
         return TupleWorkResult(
@@ -713,6 +719,7 @@ class ParallelGridDriver:
         "_ingest_audit",
         "_monotonic",
         "_next_apply",
+        "_roll_schedule_by_instrument",
         "_root",
         "_stall_seconds",
         "_subject",
@@ -730,6 +737,7 @@ class ParallelGridDriver:
         workers: int,
         stall_seconds: float = DEFAULT_STALL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
+        roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -757,6 +765,12 @@ class ParallelGridDriver:
             while work is in flight.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
+        roll_schedule_by_instrument
+            ADR-0012 futures roll schedules keyed by instrument symbol
+            (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) — marshalled to every worker
+            via the pool context (identity-safe argument plumbing; see
+            :func:`~brutex.engine.sweep_orchestrator.run_sweep_grid`). ``None``
+            (the default) is the byte-identical spot path.
 
         Raises
         ------
@@ -777,6 +791,9 @@ class ParallelGridDriver:
         self._workers = workers
         self._stall_seconds = stall_seconds
         self._monotonic = monotonic
+        self._roll_schedule_by_instrument = (
+            dict(roll_schedule_by_instrument) if roll_schedule_by_instrument is not None else None
+        )
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
@@ -822,7 +839,11 @@ class ParallelGridDriver:
         pool_size = self._workers - 1
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
         heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
-        ctx = _WorkerContext(grid=self._grid, root=self._root)
+        ctx = _WorkerContext(
+            grid=self._grid,
+            root=self._root,
+            roll_schedule_by_instrument=self._roll_schedule_by_instrument,
+        )
         try:
             with ProcessPoolExecutor(
                 max_workers=pool_size,
@@ -1259,6 +1280,7 @@ def run_parallel_grid(
     workers: int,
     stall_seconds: float = DEFAULT_STALL_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -1289,6 +1311,7 @@ def run_parallel_grid(
         workers=workers,
         stall_seconds=stall_seconds,
         monotonic=monotonic,
+        roll_schedule_by_instrument=roll_schedule_by_instrument,
     )
     return driver.run()
 

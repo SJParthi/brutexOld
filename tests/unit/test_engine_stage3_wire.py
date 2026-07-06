@@ -29,7 +29,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 from brutex.data.models import CandleBar
@@ -85,8 +85,19 @@ _CTX: dict[str, str] = {
     "indicator_version": "ind-v1",
     "code_commit_sha": "deadbeef",
 }
+
+
 #: The bars-context scope the pass hashes its train slices with.
-_SCOPE: dict[str, str] = {
+class _Scope(TypedDict):
+    """The exact data-scope kwargs ``run_stage3_pass`` takes (typed unpack)."""
+
+    exchange: str
+    segment: str
+    start: str
+    end: str
+
+
+_SCOPE: _Scope = {
     "exchange": "NSE",
     "segment": "INDEX",
     "start": "2026-01-01",

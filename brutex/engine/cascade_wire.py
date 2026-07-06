@@ -118,6 +118,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     import numpy as np
     import numpy.typing as npt
 
+    from brutex.data.catalog_reconcile import ReconcileResult
     from brutex.data.models import CandleBar
     from brutex.engine.results_store import ResultRow
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
@@ -796,6 +797,7 @@ def candidates_for_spec(
     *,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    roll_schedule: tuple[int, ...] | None = None,
 ) -> list[CandidateInput]:
     """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
 
@@ -803,8 +805,12 @@ def candidates_for_spec(
     projects each winning mask through :func:`build_candidate_input`. The lockbox
     window params are threaded through unchanged (see
     :func:`build_candidate_input` — they MUST match the cascade config's).
+    ``roll_schedule`` is the ADR-0012 futures pass-through seam (default
+    ``None`` — byte-identical for every spot spec; manifest carriage of a
+    futures winner's schedule is a NAMED follow-up of
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, not yet wired).
     """
-    from brutex.engine.stage1a import build_bar_bits
+    from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
     from brutex.vocabulary import ProximityParams
 
     proximity = (
@@ -817,7 +823,12 @@ def candidates_for_spec(
         )
     )
     bar_bits = build_bar_bits(
-        bars, proximity=proximity, prior_n=spec.prior_n, fib_anchor=spec.fib_anchor
+        bars,
+        proximity=proximity,
+        prior_n=spec.prior_n,
+        fib_anchor=spec.fib_anchor,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask_for(spec.instrument, spec.tf_label),
     )
     return [
         build_candidate_input(
@@ -1765,10 +1776,9 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     from datetime import UTC, datetime
 
     from brutex.data.catalog import Catalog
-    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
     from brutex.data.lake_heal import heal_after_reconcile, lake_heal_audit
     from brutex.data.lake_read import dedup_bars
-    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.series_load import load_sweep_slice
     from brutex.notifications.sweep_alerts import emit_lake_heal_alert
 
     def _parse(value: str) -> datetime:
@@ -1780,15 +1790,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     coords = {(spec.instrument, spec.tf_label) for spec in manifest.specs}
     slices: dict[tuple[str, str], list[CandleBar]] = {}
     with Catalog.open(catalog) as cat:
-        for instrument, tf_label in coords:
-            result = reconcile_catalog_from_lake(
-                lake_root=lake_root,
-                catalog=cat,
-                exchange=ctx.exchange,
-                segment=ctx.segment,
-                symbol=instrument,
-                interval=tf_label,
-            )
+
+        def _heal_on_reconcile(result: ReconcileResult) -> None:
             if result.findings:
                 # DEC-LAKE-HEAL-001 L1: heal what the reconcile detected for
                 # free, so the sweep/replay reads clean bars. The audit sink is
@@ -1801,22 +1804,29 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
                         audit=audit,
                         on_report=lambda r: emit_lake_heal_alert(r, scope="reconcile"),
                     )
-            feed = ReplayFeed(
-                catalog=cat,
+
+        for instrument, tf_label in coords:
+            # The ONE alias-aware slice loader (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
+            # spot/verbatim dirs take the moved reconcile + ReplayFeed block
+            # byte-identically; the NIFTY-futures series alias is roll-stitched.
+            # The L1 heal hook rides the loader's on_reconcile seam.
+            loaded = load_sweep_slice(
+                cat=cat,
                 lake_root=lake_root,
                 exchange=ctx.exchange,
                 segment=ctx.segment,
-                symbols=[instrument],
+                symbol=instrument,
                 interval=tf_label,
                 start=_parse(ctx.start),
                 end=_parse(ctx.end),
+                on_reconcile=_heal_on_reconcile,
             )
             # Belt-and-braces read gate (DEC-LAKE-READ-UNIQUE-001): the feed's
             # Catalog.get_bars already collapses stored duplicates keep-FIRST;
             # this idempotent second pass pins the invariant at the cascade's
             # own input mouth (a clean stream passes through byte-identically).
             clean_bars, _dropped = dedup_bars(
-                [event.bar for event in feed],
+                loaded,
                 source=f"cascade_wire:{instrument}/{tf_label}",
             )
             slices[(instrument, tf_label)] = clean_bars
