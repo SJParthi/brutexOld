@@ -884,8 +884,12 @@ class RateController:
         if self._smooth_pacing:
             iterations = 0
             while True:
+                # ``gap_evt`` NEEDS the None initializer (the finally reads it on an
+                # in-lock exception path); ``wait`` deliberately has NO initializer —
+                # every path that reads it is dominated by the in-lock assignment
+                # below (an in-lock exception propagates past all reads), and a dead
+                # ``wait = 0.0`` here was flagged by CodeQL (py/multiple-definition).
                 gap_evt: _PendingLog | None = None
-                wait = 0.0
                 try:
                     with self._lock:
                         now = self._clock()
@@ -928,8 +932,11 @@ class RateController:
         if self._ceiling_per_min is not None:
             iterations = 0
             while True:
+                # Mirrors gate 0: ``gov_gap_evt`` keeps its None initializer (read in
+                # the finally on an in-lock exception); ``gov_wait`` has NO initializer
+                # — the in-lock assignment dominates every read (CodeQL
+                # py/multiple-definition on the dead ``gov_wait = 0.0``).
                 gov_gap_evt: _PendingLog | None = None
-                gov_wait = 0.0
                 try:
                     with self._lock:
                         now = self._clock()
