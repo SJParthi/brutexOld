@@ -2166,6 +2166,25 @@ def pull_all_spot(
             ``pull.step.order_violation`` ERROR (and raised under the test
             oracle). A no-op on the single-phase production pull (the cursor
             starts ``None``); the law stays enforced WITHIN each phase.
+
+            DISCLOSED envelope (round-3 review, Golden Rule #10 — the SPOT
+            twin of the F&O per-BUCKET narrowing disclosed in round 2): each
+            group's ``_run_phase`` pass resolves a FRESH mass-empty
+            ``EmptySettleBreaker`` inside ``run_groww_spot_ingest`` ("one
+            breaker per PASS"), so the trip-EVIDENCE population narrowed from
+            the whole ~750-underlying universe to ONE step group. The
+            ~4-series INDICES-SPOT group runs first and alone; on an
+            incremental pull it sits below every trip threshold, so a vendor
+            soft-throttle's clean empties can settle the ENGINE's index
+            windows SKIPPED (``EMPTY_TERMINAL_THRESHOLD``) with no halt
+            before the ~746-series stocks group's breaker trips (remediation:
+            ``brutex reopen-skipped``; the stocks-group trip still halts the
+            phase + alerts). Sharing one breaker across the groups is a
+            possible future tightening, deliberately NOT done — the groups
+            run sequentially to settlement, so cross-group evidence cannot
+            protect the FIRST group; see the resolve-seam comment in
+            :func:`brutex.adapters.groww.run_ingest.run_groww_spot_ingest` +
+            MIGRATION.md #1482 (R9).
             """
             _step_monitor.begin_phase()
             for step, group in spot_groups:

@@ -43,10 +43,15 @@ resolved once at launch → clean 400; pure `step_settle_verdict` +
 ~seconds added per pull (bounded analysis, not measured); in async-pipeline
 mode a step's k→k+1 settle is PRODUCER-side (fetch-issue order strict; tail
 writes drain terminally — observed + counted as `pull.step.late_write`)
-while the POST-step barrier is fully drain-guarded; the F&O mass-empty
-breaker's trip evidence is now per-(market, index/stock)-BUCKET pass (a
-disclosed narrowing — evidence resets at the index/stock boundary;
-thresholds/canary/bounded-settle machinery unchanged); the CLI `brutex fetch`
+while the POST-step barrier is fully drain-guarded; the mass-empty
+breaker's trip evidence is now per-STEP-GROUP pass on BOTH spines — F&O
+per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a
+disclosed narrowing, #1482 R6+R9 — evidence resets at the group boundary;
+the ~4-series INDICES-SPOT group on an incremental pull is below every trip
+threshold, so throttle-poisoned ENGINE index windows can settle SKIPPED
+before the stocks group's breaker trips — remediation `brutex
+reopen-skipped`; thresholds/canary/bounded-settle machinery unchanged); the
+CLI `brutex fetch`
 spot path is the NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, NOT
 claimed. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 touched modules 100% line+branch).
@@ -376,8 +381,15 @@ hostile-review pass._
   terminally — monitored `pull.step.late_write`; the settle events' `bars`/`clean` are producer-side counts, deferred
   0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain; the
   SPOT settle event's sync counts SUM every until-clean pass and its `clean` folds the group's terminal quarantines —
-  round-2 review, F&O-twin parity); the F&O mass-empty breaker's trip evidence is per-BUCKET pass (a disclosed
-  narrowing — resets at the index/stock boundary; thresholds/canary/bounded-settle machinery unchanged); on a
+  round-2 review, F&O-twin parity); the mass-empty breaker's trip evidence is per-STEP-GROUP pass on BOTH spines —
+  F&O per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a disclosed narrowing, #1482 R6+R9 — evidence
+  resets at the group boundary; the ~4-series INDICES-SPOT group on an incremental pull sits below every trip
+  threshold, so a vendor soft-throttle's clean empties can settle ENGINE index windows SKIPPED with no halt before
+  the stocks group's breaker trips — remediation `brutex reopen-skipped`; sharing one breaker across a phase's groups
+  deliberately NOT done, the groups run sequentially so cross-group evidence cannot protect the FIRST group;
+  thresholds/canary/bounded-settle machinery unchanged); `historical_pull.py` gains a dedicated STATIC ci.yml
+  per-module 100% gate (round-3 R10 — its suites are stem-inverted `test_pull_historical*.py`, so the discovery gate
+  warn-skips it; measured 100.00% over the curated five-file suite); on a
   mid-pull global stop a never-started later group's symbols read honest unknown-ZEROS in the per-symbol rollup (not
   synthesized FAILED — the ledger stays the retry authority); the CLI spot path is the NAMED follow-up
   DEC-PULL-SIX-STEP-ORDER-CLI-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; every touched module 100% line+branch;

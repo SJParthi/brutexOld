@@ -461,7 +461,25 @@ def run_groww_spot_ingest(
     pull_id = current_pull_id()
     # One breaker per PASS (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): resolved here — not
     # inside ingest_spot — so ALL pairs of this pass share ONE counter (a vendor
-    # soft-throttle hits every symbol) and a fresh pass/pull always starts clean.
+    # soft-throttle hits every pair of the pass) and a fresh pass/pull always starts
+    # clean. DISCLOSED envelope (DEC-PULL-SIX-STEP-ORDER-001 round-3 review, Golden
+    # Rule #10): under the six-step spot order the dashboard pull invokes this spine
+    # once per STEP GROUP (INDICES-SPOT, then STOCKS-SPOT) per until-clean round, so
+    # "this pass" spans ONE group — no longer the whole ~750-underlying universe the
+    # original rationale assumed. The ~4-series indices group (the ENGINE's
+    # NIFTY/BANKNIFTY/SENSEX + VIX) runs FIRST and ALONE: on an incremental pull its
+    # handful of outstanding windows sits below EVERY trip threshold
+    # (`EMPTY_BREAKER_CONSECUTIVE_LIMIT` / `EMPTY_BREAKER_MIN_OBSERVATIONS` /
+    # `EMPTY_BREAKER_FRACTION_MIN_SERIES`), so a vendor soft-throttle's clean
+    # empties there cannot trip a halt and the index windows can settle SKIPPED
+    # (`EMPTY_TERMINAL_THRESHOLD` after ~3 group-scoped rounds) before the
+    # ~746-series stocks group's breaker trips — remediation `brutex
+    # reopen-skipped`, the idempotent keep-first sink re-pulls them. Sharing one
+    # breaker across a phase's groups is a possible future tightening, deliberately
+    # NOT done here: an injected instance bypasses the per-pass resolve seam (the
+    # documented `empty_breaker=` contract, mirroring the F&O twin's reasoning), and
+    # the groups run SEQUENTIALLY to settlement, so cross-group evidence could never
+    # protect the FIRST (indices) group anyway. Full disclosure: MIGRATION.md #1482.
     breaker = empty_breaker if empty_breaker is not None else resolve_empty_breaker()
     # One WRITE-health breaker per PASS (DEC-WRITE-HEALTH-BREAKER-001), mirroring the
     # empty breaker above: all pairs share ONE per-partition defer accounting (a wedged
