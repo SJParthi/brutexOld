@@ -18,7 +18,41 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522 —
+_Last updated: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
+the options exchange-transaction-charge (ETC) regime tables STOP charging a
+fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
+rate>)` UNVERIFIED placeholder rows are DELETED and replaced by explicit
+rate-less REFUSAL rows (`RegimeRow.rate_bps_x100 = None`) — the ONE COMMON
+`rate_for_date` raises the NEW typed `UnverifiedCostRegimeError` (window +
+identified circulars + remediation), and the options executor SKIPS-AND-COUNTS
+per trade (`RejectReason.COST_REGIME_UNVERIFIED`,
+`OptionsRuleResult.n_rejected_cost_regime_unverified`, per-trade
+`options.reject.cost_regime_unverified` WARN + ONE aggregate
+`options.sim.unverified_cost_window` WARN + a CLI leaderboard footer), exactly
+like the LOT_SIZE_UNKNOWN precedent — the sim completes, is loud, and NEVER
+invents a rate. VERDICT BASIS (the 2026-07-06 4-strategy fetch round,
+HARD-LINE Golden Rule #1): ZERO official-trace retrievals (every official
+host + web.archive.org egress-blocked) — the six pre-boundary regimes were
+reconstructed to circular-number precision but reconstruction is NOT
+verification, and they are structurally member-monthly-turnover SLAB ladders
+with no honest flat per-trade equivalent. Exactly TWO rate rows survive (NSE
+0.03503% / BSE 0.03250%, both eff. 2024-10-01, VERIFIED on the pre-existing
+COSTS_VERIFIED §2 rows 3-4). NO runtime escape hatch; override paths are DATA
+only (a cited RegimeRow, or the ADR-gated top-slab-ASSUMED path). SANCTIONED
+HONEST BREAKAGE: options trades 2021-01-01→2024-09-30 are now counted refusals
+(previously silently priced at the invented current rate — likely
+UNDER-costed); the honestly-priceable window is [2024-10-01 → today] until
+circulars land; the FA73061 forward alert (NSE split 3,552+1/cr eff.
+2026-03-01, total unchanged) stays UNVERIFIED + NOT encoded (§20 row 6,
+highest-priority fetch). Costs + options-executor + CLI-footer + tests + docs
+only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap
+change; brutex.costs + executor 100% line+branch; the CLI leaderboard
+renderer's pre-existing `# pragma: no cover` LIFTED after the round-1 review
+caught the honesty footer riding it with ZERO executing tests —
+`_render_options_leaderboard` is now directly unit-tested at 100% line+branch
+with fail-loud direct attribute access instead of the silent `getattr`
+default, tests/unit/test_cli_options_leaderboard.py).
+Earlier: 2026-07-06 (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522 —
 the `GET /api/v1/pull/rate` CLI-bridge file read moved OFF the uvicorn event loop: a NEW
 `brutex/dashboard/rate_bridge_cache.py` `RateBridgeCache` memoises the decoded bridge
 snapshot behind a 2 s TTL + an `mtime_ns:size:ino` stat content token (NEW public
@@ -483,7 +517,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/vibrant-knuth-itozu6` (**DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522** —
+- **Active branch:** `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
+  pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
+  explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
+  carries its citation or its honest gap; import-time `validate_regime_table`); the ONE COMMON `rate_for_date`
+  (allocation-free bisect) raises the NEW typed `UnverifiedCostRegimeError` on a refusal row, and the options executor
+  prechecks the date BEFORE any lake I/O and skips-and-counts (`RejectReason.COST_REGIME_UNVERIFIED`; reject order
+  pinned lot_size → cost_regime → no_data → stale_bar → tick_floor; ONE aggregate `options.sim.unverified_cost_window`
+  WARN; CLI leaderboard footer derived from `etc_unverified_windows()` DATA). NEW `exchange_for_instrument` kills the
+  two copy-pasted SENSEX branches (unknown instrument now fail-loud). Exactly TWO verified ETC rate rows exist (NSE
+  3_503 / BSE 3_250, eff. 2024-10-01, COSTS_VERIFIED §2 rows 3-4); every pre-boundary regime (NSE FA46730/FA56129/
+  FA61137, BSE 20231020-46/20240430-42 — identified, NEVER officially retrieved) stays UNVERIFIED text-only; FA73061
+  (eff. 2026-03-01) is a documented UNVERIFIED follow-up, NOT encoded. Goldens relocated 2024-05-02 → 2024-10-03 with
+  every literal hand-re-derived + a boundary-exact 2024-10-01 golden + a pre-boundary refusal golden (zero lake reads
+  proven). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; brutex.costs + executor 100%
+  line+branch; the CLI leaderboard renderer's `# pragma: no cover` LIFTED post-round-1-review —
+  `_render_options_leaderboard` directly unit-tested at 100% line+branch, `getattr` default → fail-loud direct access
+  (tests/unit/test_cli_options_leaderboard.py); ruff/ruff-format clean, `mypy --strict` clean, pyright 0 errors).
+  Earlier: `claude/vibrant-knuth-itozu6` (**DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522** —
   the `GET /api/v1/pull/rate` CLI-bridge file read (`<lake_root>/.rate/pull_rate.json`, previously a synchronous
   `Path.read_bytes()` executed ON the uvicorn event loop on EVERY ~3 s site-wide widget poll — a slow/stalled external
   lake volume froze the WHOLE dashboard) is moved off the loop behind a NEW `brutex/dashboard/rate_bridge_cache.py`
