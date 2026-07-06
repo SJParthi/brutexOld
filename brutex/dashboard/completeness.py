@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import csv
 import io
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -145,6 +146,69 @@ _RECONCILE_SAMPLE_CAP: Final[int] = 10
 #: while its lake partition keys on a divergent form like ``"M&M "`` / ``"NSE-M&M"``).
 RECONCILE_MISMATCH_EVENT: Final[str] = "completeness.symbol_reconcile_mismatch"
 
+#: The structlog event name for the BENIGN reconcile shape (DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001):
+#: ZERO stray lake keys — every on-disk partition is scored — while some scored symbols simply
+#: have NO lake data yet (a deliberately-partial lake mid-backfill). That is NOT a key-drift
+#: mismatch, so it is a counts-only INFO, never the ``RECONCILE_MISMATCH_EVENT`` WARNING (which
+#: previously fired on EVERY scoreboard build of a partial lake — the 953x/night log storm).
+SYMBOLS_NOT_YET_PULLED_EVENT: Final[str] = "completeness.symbols_not_yet_pulled"
+
+
+class ReconcileLogGate:
+    """Thread-safe fingerprint gate that suppresses byte-identical reconcile log repeats.
+
+    DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001 — the scoreboard rebuilds on every poll, so a
+    STABLE reconcile state (the same report, hence the same log line) would re-log on every
+    build (the 953x/night storm). This gate tracks ONE latest fingerprint covering BOTH log
+    shapes (the ``RECONCILE_MISMATCH_EVENT`` WARNING and the
+    :data:`SYMBOLS_NOT_YET_PULLED_EVENT` INFO — the fingerprint is the whole frozen
+    :class:`SymbolReconcileReport`, and the shape is a pure function of it): a byte-identical
+    repeat is SUPPRESSED (counted, not logged); a fingerprint CHANGE logs again and carries
+    the ``suppressed_repeats`` count of the previous fingerprint so nothing is silently lost.
+
+    OBSERVE-ONLY + injected (CLAUDE.md §4 "inject dependencies"): the production call site
+    (``app.py``'s completeness-inputs build) wires one per-app instance; a ``None`` gate at
+    the seam means UNGATED (log every time — the pre-gate behaviour, which the existing unit
+    tests keep exercising deterministically). All state transitions run under ONE
+    :class:`threading.Lock`, so concurrent scoreboard builds can never double-log one
+    fingerprint. O(1) per observation.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._fingerprint: object | None = None
+        self._suppressed = 0
+
+    def observe(self, fingerprint: object) -> tuple[bool, int]:
+        """Record *fingerprint*; return ``(should_log, suppressed_repeats)``.
+
+        A fingerprint equal to the latest one is a byte-identical repeat →
+        ``(False, 0)`` (suppressed + counted). A NEW fingerprint → ``(True, n)`` where
+        ``n`` is how many repeats of the PREVIOUS fingerprint were suppressed (0 on the
+        first observation), so the next log line carries the honest suppression tally.
+        """
+        with self._lock:
+            if fingerprint == self._fingerprint:
+                self._suppressed += 1
+                return (False, 0)
+            carried = self._suppressed
+            self._fingerprint = fingerprint
+            self._suppressed = 0
+            return (True, carried)
+
+    def flush(self) -> int:
+        """Reset the gate; return the suppressed-repeats count of the flushed fingerprint.
+
+        After a flush the NEXT observation always logs (fingerprint cleared). The returned
+        count lets a caller/test account for suppressed repeats that no later fingerprint
+        change would otherwise surface.
+        """
+        with self._lock:
+            carried = self._suppressed
+            self._fingerprint = None
+            self._suppressed = 0
+            return carried
+
 
 @dataclass(frozen=True, slots=True)
 class SymbolReconcileReport:
@@ -238,37 +302,71 @@ def reconcile_symbol_coverage(
     )
 
 
-def _log_symbol_reconcile_mismatch(report: SymbolReconcileReport) -> None:
-    """Emit ONE :data:`RECONCILE_MISMATCH_EVENT` WARNING when *report* has a mismatch.
+def _log_symbol_reconcile_mismatch(
+    report: SymbolReconcileReport, gate: ReconcileLogGate | None = None
+) -> None:
+    """Emit ONE severity-split, gate-deduplicated log line when *report* has a mismatch.
 
-    DEC-COMPLETENESS-RECONCILE-DIAG-001 — the observe-only SINK for
-    :func:`reconcile_symbol_coverage`. When either side diverged it logs ONE structured
-    ``structlog`` WARNING carrying the full counts plus the ``repr()`` of the capped sample
-    keys on BOTH sides, so whitespace / encoding differences are visible — for the
-    ``M&M``-empty symptom the line would read e.g. ``stray_lake_symbols=["'M&M '"]`` (an
-    ILLUSTRATIVE trailing space) AND ``unmatched_scored_symbols=["'M&M'"]``, PINPOINTING the
-    exact (live-box-`repr()`-named, not assumed) divergence. ``repr()`` is
-    used on every sampled key so an invisible trailing space / non-ASCII byte is rendered
-    literally; the counts are the full totals (the samples are truncated, not the counts).
-    Nothing is logged when *report* has no mismatch — the healthy steady state stays SILENT.
+    DEC-COMPLETENESS-RECONCILE-DIAG-001 (sink) + DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001
+    (severity split + fingerprint gate) — the observe-only SINK for
+    :func:`reconcile_symbol_coverage`. Severity is split by SHAPE:
+
+    * ``stray_lake_count > 0`` (real key drift — on-disk data invisible on the board) →
+      the :data:`RECONCILE_MISMATCH_EVENT` WARNING carrying the full counts plus the
+      ``repr()`` of the capped sample keys on BOTH sides, so whitespace / encoding
+      differences are visible — for the ``M&M``-empty symptom the line reads e.g.
+      ``stray_lake_symbols=["'M&M '"]`` (an ILLUSTRATIVE trailing space) AND
+      ``unmatched_scored_symbols=["'M&M'"]``, PINPOINTING the exact
+      (live-box-``repr()``-named, not assumed) divergence. ``repr()`` on every sampled key
+      renders an invisible trailing space / non-ASCII byte literally; the counts are the
+      full totals (the samples are truncated, not the counts).
+    * ``stray_lake_count == 0`` with unmatched scored symbols (a deliberately-partial lake
+      — symbols simply not pulled yet, NOT a drift) → the counts-only
+      :data:`SYMBOLS_NOT_YET_PULLED_EVENT` INFO (this shape previously WARNed on every
+      scoreboard build — 953x/night on a partial lake).
+
+    A non-``None`` *gate* (:class:`ReconcileLogGate`) suppresses byte-identical repeats of
+    either shape — the log line carries ``suppressed_repeats`` (how many identical lines the
+    gate swallowed since the previous fingerprint change; 0 when ungated). A clean report is
+    still observed by the gate (re-arming it so a later re-appearing mismatch re-logs) but
+    stays SILENT — the healthy steady state logs nothing, exactly as before.
 
     It changes NO classification and adds / removes / alters NO scoreboard row (Golden Rule
     #1) — pure observability. The caller :func:`log_symbol_reconcile_from_board` wraps this
     so a diagnostic failure can never break the page.
     """
     if not report.has_mismatch():
+        if gate is not None:
+            # Re-arm: a clean state is a fingerprint CHANGE (silent by design — the
+            # suppressed tally of the prior mismatch era is dropped with it), so a
+            # mismatch that RE-appears after a clean interlude logs again.
+            gate.observe(report)
         return
-    _LOG.warning(
-        RECONCILE_MISMATCH_EVENT,
-        stray_lake_count=report.stray_lake_count,
+    should_log, suppressed = (True, 0) if gate is None else gate.observe(report)
+    if not should_log:
+        return
+    if report.stray_lake_count > 0:
+        _LOG.warning(
+            RECONCILE_MISMATCH_EVENT,
+            stray_lake_count=report.stray_lake_count,
+            unmatched_scored_count=report.unmatched_scored_count,
+            stray_lake_symbols=[repr(symbol) for symbol in report.stray_lake_symbols],
+            unmatched_scored_symbols=[repr(symbol) for symbol in report.unmatched_scored_symbols],
+            suppressed_repeats=suppressed,
+        )
+        return
+    _LOG.info(
+        SYMBOLS_NOT_YET_PULLED_EVENT,
         unmatched_scored_count=report.unmatched_scored_count,
-        stray_lake_symbols=[repr(symbol) for symbol in report.stray_lake_symbols],
-        unmatched_scored_symbols=[repr(symbol) for symbol in report.unmatched_scored_symbols],
+        suppressed_repeats=suppressed,
     )
 
 
 def log_symbol_reconcile_from_board(
-    spot_rows: Iterable[Mapping[str, Any]], spot_categories: Mapping[str, str]
+    spot_rows: Iterable[Mapping[str, Any]],
+    spot_categories: Mapping[str, str],
+    *,
+    gate: ReconcileLogGate | None = None,
 ) -> SymbolReconcileReport:
     """Reconcile the scoreboard's OWN spot inputs + log ONE WARNING on a mismatch.
 
@@ -281,9 +379,12 @@ def log_symbol_reconcile_from_board(
     would mis-count every backfilled F&O contract as a stray and drown the real signal) and
     the scored set from *spot_categories* (the engine ``symbol_name`` map the board iterates),
     runs :func:`reconcile_symbol_coverage`, and emits the diagnostic via
-    :func:`_log_symbol_reconcile_mismatch`. Returns the report (so a caller / test can inspect
-    it). It is BEST-EFFORT + OBSERVE-ONLY: the whole body is wrapped so it NEVER raises into,
-    nor mutates, the scoreboard payload — a malformed row logs ONE
+    :func:`_log_symbol_reconcile_mismatch` (severity-split + deduplicated by the injected
+    *gate*, a :class:`ReconcileLogGate` — ``None`` = ungated, log every time; the production
+    call site wires one per-app instance so a stable state logs ONCE per change, not once per
+    poll — DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001). Returns the report (so a caller / test can
+    inspect it). It is BEST-EFFORT + OBSERVE-ONLY: the whole body is wrapped so it NEVER
+    raises into, nor mutates, the scoreboard payload — a malformed row logs ONE
     ``completeness.symbol_reconcile_error`` WARNING and returns an empty report rather than
     breaking the page. O(spot_rows).
     """
@@ -297,7 +398,7 @@ def log_symbol_reconcile_from_board(
         report = reconcile_symbol_coverage(
             lake_symbols=lake_symbols, scored_symbols=spot_categories.keys()
         )
-        _log_symbol_reconcile_mismatch(report)
+        _log_symbol_reconcile_mismatch(report, gate)
         return report
     except Exception as exc:
         # Observe-only diagnostic must NEVER break the page: any error (e.g. a malformed row)
@@ -1212,6 +1313,8 @@ __all__ = [
     "OPT_STABLE",
     "RECONCILE_MISMATCH_EVENT",
     "SPOT_DIMENSIONS",
+    "SYMBOLS_NOT_YET_PULLED_EVENT",
+    "ReconcileLogGate",
     "SymbolReconcileReport",
     "build_completeness_scoreboard",
     "categorize_instruments",

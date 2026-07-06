@@ -13,6 +13,7 @@ import errno
 import fcntl
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -32,6 +33,8 @@ from brutex.data.window_ledger import (
     WindowLedger,
 )
 from brutex.data.window_ledger_store import (
+    DEFAULT_LEDGER_SAVE_SLOW_WARN_S,
+    LEDGER_SAVE_SLOW_WARN_ENV,
     LedgerRow,
     append_ledger_delta,
     begin_pull_ledger,
@@ -49,6 +52,7 @@ from brutex.data.window_ledger_store import (
     plan_windows,
     reconcile_ledger_windows,
     reconcile_ledger_with_lake,
+    resolve_ledger_save_slow_warn_seconds,
     save_window_ledger,
     seed_enclosed_windows,
 )
@@ -1933,6 +1937,268 @@ class TestLoadFailedFlag:
     def test_migrate_path_is_not_flagged(self, tmp_path: Path) -> None:
         # No parquet at all → the one-shot sidecar migration, not a reload failure.
         assert load_or_migrate_window_ledger(tmp_path).load_failed is False
+
+
+def _two_step_clock(start: float, end: float) -> Callable[[], float]:
+    """A deterministic monotonic source: first call → *start*, second → *end*.
+
+    ``save_window_ledger`` reads its clock exactly twice (body start / body end), so a
+    two-value script pins the measured duration bit-exactly.
+    """
+    values = iter((start, end))
+    return lambda: next(values)
+
+
+class TestSaveTelemetry:
+    """DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001 — save-duration telemetry on the ONE common
+    save chokepoint (``save_window_ledger``). Observe-only: logging is the only delta; the
+    stored rows, control flow and error contracts are pinned byte-identical."""
+
+    def test_save_completed_emitted_with_rows_and_duration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(LEDGER_SAVE_SLOW_WARN_ENV, raising=False)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        ledger.record(_key("BANKNIFTY"), raw_bars=3, error_type=None, bars_appended=3, now=_NOW)
+        with capture_logs() as logs:
+            save_window_ledger(ledger, tmp_path, clock=_two_step_clock(100.0, 100.5))
+        completed = [e for e in logs if e.get("event") == "window_ledger.save_completed"]
+        assert len(completed) == 1
+        entry = completed[0]
+        assert entry["log_level"] == "info"
+        assert entry["rows"] == 2  # the merged row count actually written
+        assert entry["duration_ms"] == 500.0  # (100.5 - 100.0) s, bit-exact via the clock
+        # Under the 10 s default the healthy save never WARNs.
+        assert [e for e in logs if e.get("event") == "window_ledger.save_slow"] == []
+
+    def test_save_rows_byte_identical_with_telemetry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Parity pin (Session-B contract): the telemetry-carrying save stores EXACTLY the
+        rows the ledger holds (the load→save→load row fixed point), and the logged ``rows``
+        equals the restored count — logging is the only delta."""
+        monkeypatch.delenv(LEDGER_SAVE_SLOW_WARN_ENV, raising=False)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        with capture_logs() as logs:
+            save_window_ledger(ledger, tmp_path, clock=_two_step_clock(0.0, 0.1))
+        restored = load_window_ledger(tmp_path)
+        assert restored.to_rows() == ledger.to_rows()  # byte-identical stored row content
+        completed = [e for e in logs if e.get("event") == "window_ledger.save_completed"]
+        assert len(completed) == 1
+        assert completed[0]["rows"] == restored.count == 1
+
+    def test_default_wall_clock_branch_still_saves_and_logs(self, tmp_path: Path) -> None:
+        """``clock=None`` → the real ``time.monotonic`` (the production default) — the save
+        lands and emits one ``save_completed`` with a non-negative measured duration."""
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        with capture_logs() as logs:
+            save_window_ledger(ledger, tmp_path)
+        assert load_window_ledger(tmp_path).count == 1
+        completed = [e for e in logs if e.get("event") == "window_ledger.save_completed"]
+        assert len(completed) == 1
+        assert completed[0]["duration_ms"] >= 0.0
+
+    def test_save_slow_warns_when_duration_exceeds_default_threshold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(LEDGER_SAVE_SLOW_WARN_ENV, raising=False)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        with capture_logs() as logs:
+            save_window_ledger(ledger, tmp_path, clock=_two_step_clock(100.0, 111.0))
+        slow = [e for e in logs if e.get("event") == "window_ledger.save_slow"]
+        assert len(slow) == 1
+        entry = slow[0]
+        assert entry["log_level"] == "warning"
+        assert entry["rows"] == 1
+        assert entry["duration_ms"] == 11_000.0
+        assert entry["threshold_s"] == DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+        # save_completed STILL fires — save_slow is additive, never a replacement.
+        assert len([e for e in logs if e.get("event") == "window_ledger.save_completed"]) == 1
+
+    def test_save_at_exactly_the_threshold_is_not_slow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The WARN fires only when the duration EXCEEDS the threshold (strict >) — an
+        exactly-at-threshold save stays INFO-only (the boundary pin)."""
+        monkeypatch.delenv(LEDGER_SAVE_SLOW_WARN_ENV, raising=False)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        with capture_logs() as logs:
+            save_window_ledger(
+                ledger,
+                tmp_path,
+                clock=_two_step_clock(100.0, 100.0 + DEFAULT_LEDGER_SAVE_SLOW_WARN_S),
+            )
+        assert [e for e in logs if e.get("event") == "window_ledger.save_slow"] == []
+        assert len([e for e in logs if e.get("event") == "window_ledger.save_completed"]) == 1
+
+    def test_save_slow_threshold_env_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(LEDGER_SAVE_SLOW_WARN_ENV, "0.2")
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        with capture_logs() as logs:
+            save_window_ledger(ledger, tmp_path, clock=_two_step_clock(100.0, 100.5))
+        slow = [e for e in logs if e.get("event") == "window_ledger.save_slow"]
+        assert len(slow) == 1
+        assert slow[0]["threshold_s"] == 0.2
+
+    def test_backwards_clock_clamps_duration_to_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A (theoretical) backwards clock never fabricates a negative duration — clamped 0."""
+        monkeypatch.delenv(LEDGER_SAVE_SLOW_WARN_ENV, raising=False)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        with capture_logs() as logs:
+            save_window_ledger(ledger, tmp_path, clock=_two_step_clock(100.0, 99.0))
+        completed = [e for e in logs if e.get("event") == "window_ledger.save_completed"]
+        assert completed[0]["duration_ms"] == 0.0
+
+    def test_lock_timeout_skip_emits_no_save_completed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lock-timeout SKIP keeps its existing loud warning and emits NEITHER
+        ``save_completed`` NOR ``save_slow`` — nothing completed, so nothing is claimed
+        (the honest-telemetry pin; also proves the skip control flow is unchanged)."""
+        monkeypatch.setenv("BRUTEX_PARTITION_LOCK_TIMEOUT_S", "0.05")
+        path = ledger_path(tmp_path)
+        lock_path = partition_lock_path(tmp_path, path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        try:
+            with capture_logs() as logs:
+                save_window_ledger(ledger, tmp_path)  # returns — never raises
+            assert any(e["event"] == "window_ledger.save_lock_timeout" for e in logs)
+            assert [e for e in logs if e.get("event") == "window_ledger.save_completed"] == []
+            assert [e for e in logs if e.get("event") == "window_ledger.save_slow"] == []
+            assert not path.exists()  # the skipped save wrote nothing (unchanged)
+        finally:
+            os.close(fd)
+
+
+class TestResolveLedgerSaveSlowWarnSeconds:
+    """The fail-safe env parse (mirrors ``pull_stall.resolve_stall_timeout_seconds``)."""
+
+    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(LEDGER_SAVE_SLOW_WARN_ENV, raising=False)
+        assert resolve_ledger_save_slow_warn_seconds() == DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+
+    def test_blank_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEDGER_SAVE_SLOW_WARN_ENV, "   ")
+        assert resolve_ledger_save_slow_warn_seconds() == DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+
+    def test_non_numeric_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEDGER_SAVE_SLOW_WARN_ENV, "fast")
+        assert resolve_ledger_save_slow_warn_seconds() == DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+
+    def test_zero_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEDGER_SAVE_SLOW_WARN_ENV, "0")
+        assert resolve_ledger_save_slow_warn_seconds() == DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+
+    def test_negative_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEDGER_SAVE_SLOW_WARN_ENV, "-3")
+        assert resolve_ledger_save_slow_warn_seconds() == DEFAULT_LEDGER_SAVE_SLOW_WARN_S
+
+    def test_valid_float_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEDGER_SAVE_SLOW_WARN_ENV, "2.5")
+        assert resolve_ledger_save_slow_warn_seconds() == 2.5
+
+
+class TestFlushPacingTelemetry:
+    """DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001 — the ``window_ledger.flush_paced`` DEBUG in
+    ``make_live_ledger_flush``: the throttle's ALREADY-measured flush duration is now logged;
+    the throttle decisions + write call sequence are pinned byte-identical. ADAPTED to the
+    DEC-LEDGER-DELTA-FLUSH-001 seam: the flush's write is :func:`append_ledger_delta`
+    (the O(dirty) delta append), not the pre-delta ``save_window_ledger`` — the telemetry
+    contract (ONE ``flush_paced`` per actual write attempt, carrying the measured
+    ``duration_ms`` + the derived ``next_interval_s``) is unchanged."""
+
+    def test_write_logs_measured_duration_and_next_interval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data import window_ledger_store as store_module
+
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        clock = [100.0]
+        saves: list[float] = []
+
+        def _slow_counting_append(_ledger: WindowLedger, _root: Path) -> int:
+            saves.append(clock[0])
+            clock[0] += 4.0  # the delta append itself takes 4 simulated seconds
+            return 1
+
+        monkeypatch.setattr(store_module, "append_ledger_delta", _slow_counting_append)
+        flush = make_live_ledger_flush(ledger, tmp_path, min_interval_s=2.0, clock=lambda: clock[0])
+        with capture_logs() as logs:
+            flush()
+        paced = [e for e in logs if e.get("event") == "window_ledger.flush_paced"]
+        assert len(paced) == 1
+        entry = paced[0]
+        assert entry["log_level"] == "debug"
+        assert entry["duration_ms"] == 4_000.0  # EXACTLY the throttle's measured duration
+        assert entry["next_interval_s"] == 20.0  # 5 (duty factor) x 4 s > the 2 s floor
+
+    def test_throttled_skip_logs_nothing_and_save_cadence_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Parity pin: the SAME clock script as the pre-change adaptive-throttle test yields
+        the SAME write call sequence (1 → 1 → 2) — a throttled skip emits no pacing line, and
+        logging is the only delta on the writes."""
+        from brutex.data import window_ledger_store as store_module
+
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        clock = [100.0]
+        saves: list[float] = []
+
+        def _slow_counting_append(_ledger: WindowLedger, _root: Path) -> int:
+            saves.append(clock[0])
+            clock[0] += 4.0
+            return 1
+
+        monkeypatch.setattr(store_module, "append_ledger_delta", _slow_counting_append)
+        flush = make_live_ledger_flush(ledger, tmp_path, min_interval_s=2.0, clock=lambda: clock[0])
+        with capture_logs() as logs:
+            flush()  # writes (measures 4 s)
+            assert len(saves) == 1
+            clock[0] += 3.0  # past the fixed 2 s, inside the adaptive 20 s → skipped
+            flush()
+            assert len(saves) == 1  # byte-identical throttle decision
+            clock[0] += 25.0  # past the adaptive interval → writes again
+            flush()
+            assert len(saves) == 2
+        paced = [e for e in logs if e.get("event") == "window_ledger.flush_paced"]
+        assert len(paced) == 2  # one per ACTUAL write — the skip logged nothing
+
+    def test_fast_save_next_interval_floors_at_min_interval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data import window_ledger_store as store_module
+
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+
+        def _instant_append(_ledger: WindowLedger, _root: Path) -> int:
+            return 1  # zero simulated duration
+
+        monkeypatch.setattr(store_module, "append_ledger_delta", _instant_append)
+        clock = [50.0]
+        flush = make_live_ledger_flush(ledger, tmp_path, min_interval_s=2.0, clock=lambda: clock[0])
+        with capture_logs() as logs:
+            flush()
+        paced = [e for e in logs if e.get("event") == "window_ledger.flush_paced"]
+        assert paced[0]["duration_ms"] == 0.0
+        assert paced[0]["next_interval_s"] == 2.0  # the fixed floor wins for a fast save
 
 
 class TestLedgerDeltaFlush:
