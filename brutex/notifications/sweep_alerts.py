@@ -544,6 +544,46 @@ class SweepAlerter:
             dedupe_key=f"pull-degraded:{rule}",
         )
 
+    def soak_drift(self, *, rule: str, observed: float, threshold: float, detail: str) -> bool:
+        """Alert that a long soak drifted past a drift-detector rule (CRITICAL; deduped by *rule*).
+
+        Fired by :class:`brutex.observability.soak_drift.SoakDriftMonitor` on a
+        rule OK→BREACH edge (DEC-SOAK-REAL-TIER-001) — an RSS ceiling crossed, an
+        fd count that grew above its baseline, or a p99 latency that drifted above
+        the first window. Mirrors :meth:`pull_degraded`: a best-effort,
+        fire-and-forget push deduped on the rule name so a single sustained breach
+        coalesces into ONE message instead of one per observe window. CRITICAL
+        because a multi-hour soak drift is the exact leak/regression the tier
+        exists to catch — the operator must look. Silent no-op when Telegram is
+        disabled (the default), so a Telegram outage can never mask the breach.
+
+        Parameters
+        ----------
+        rule
+            The breached rule name (the dedupe key — e.g. ``"soak.rss_ceiling"``).
+        observed
+            The measured value at the breach (RSS KiB / fd growth / p99 ratio).
+        threshold
+            The rule's trigger level.
+        detail
+            Short free-form context naming what to check.
+        """
+        message = escape_markdown_v2(
+            f"⚠️ Soak drift ({rule}): observed {observed:.2f} vs threshold "
+            f"{threshold:.2f}. {detail}."
+        )
+        # PHASE_BLOCKED (0.0 coalescing window) — the CRITICAL-severity precedent
+        # pull_halted / vendor_down / credential_dead use, so a real drift is
+        # never swallowed by a coalescing window; the per-rule dedupe_key still
+        # collapses a repeated same-rule breach (SLADetector hysteresis already
+        # fires only the OK→BREACH edge, so this is belt-and-suspenders).
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"soak-drift:{rule}",
+        )
+
     def vendor_conflict_drift(
         self, *, conflicts: int, max_close_delta_display: str, dup_rows: int
     ) -> bool:
