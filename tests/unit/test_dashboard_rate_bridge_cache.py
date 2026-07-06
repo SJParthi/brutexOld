@@ -801,8 +801,18 @@ class TestWedgedReadBounded:
 class TestConcurrency:
     """Single-flight + lock hygiene under real threads."""
 
-    def test_barrier_race_single_reader_no_exceptions(self) -> None:
-        """N threads racing a cold get(): exactly ONE read, zero exceptions."""
+    def test_barrier_race_single_reader_no_exceptions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N threads racing a cold get(): exactly ONE read, zero exceptions.
+
+        Escapes of ANY tier out of ``get()`` — ``Exception`` AND
+        ``BaseException`` (the owner-arm re-raise surface) — are captured via
+        a ``threading.excepthook`` override instead of a literal
+        ``except BaseException:`` handler in the worker (CodeQL
+        py/catch-base-exception), so the teeth are unchanged: any uncaught
+        worker raise lands in ``errors`` and fails ``assert not errors``.
+        """
         n = 8
         barrier = threading.Barrier(n)
         reads = {"n": 0}
@@ -816,12 +826,14 @@ class TestConcurrency:
         results: list[BridgeReadResult] = []
         errors: list[BaseException] = []
 
+        def capture(args: threading.ExceptHookArgs) -> None:
+            errors.append(args.exc_value if args.exc_value is not None else args.exc_type())
+
+        monkeypatch.setattr(threading, "excepthook", capture)
+
         def worker() -> None:
-            try:
-                barrier.wait(10.0)
-                results.append(cache.get(_LAKE))
-            except BaseException as exc:
-                errors.append(exc)
+            barrier.wait(10.0)
+            results.append(cache.get(_LAKE))
 
         threads = [threading.Thread(target=worker) for _ in range(n)]
         for thread in threads:
