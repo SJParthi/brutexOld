@@ -394,3 +394,41 @@ def test_with_pace_twice_rebinds_and_keeps_shared_meter() -> None:
         for f in [ex.submit(_one) for _ in range(2)]:
             f.result(timeout=10.0)
     assert len(second) == 2 and first == []  # the LATEST pace fired; the first was rebound away
+
+
+def test_pool_self_reports_only_when_every_leaf_is_hooked() -> None:
+    """``self_reports_rate_limits`` / ``self_reports_successes`` — the feedback
+    twins of ``self_paces`` (DEC-SUSPICION-SWEEP-FIXES-001): True iff EVERY leaf
+    carries the bound hook, so the ingest spines stand their own feedback down
+    only when NO connection's 429s/successes can go unreported."""
+    pool = _pool_of(_RecordingSDK(), _RecordingSDK())
+    assert pool.self_reports_rate_limits is False
+    assert pool.self_reports_successes is False
+    rebound = pool.with_rate_hooks(on_rate_limit=lambda: None, on_success=lambda: None)
+    assert rebound.self_reports_rate_limits is True
+    assert rebound.self_reports_successes is True
+    assert rebound.self_paces is False  # pace untouched (None kept the no-op)
+    # A mixed pool (one hooked leaf, one not) must read False (all-leaves rule).
+    shared = CallMeter(emit_log=False)
+    mixed = ClientPool(
+        [
+            GrowwClient(sdk=_RecordingSDK(), on_rate_limit=lambda: None, meter=shared),  # type: ignore[arg-type]
+            GrowwClient(sdk=_RecordingSDK(), meter=shared),  # type: ignore[arg-type]
+        ]
+    )
+    assert mixed.self_reports_rate_limits is False
+    assert mixed.self_reports_successes is False
+
+
+def test_pool_with_rate_hooks_fans_triple_to_every_leaf_and_keeps_meter() -> None:
+    """``with_rate_hooks`` re-fans the FULL controller hook triple into ALL K
+    leaves (the spot-spine D1 seam) and preserves the ONE shared meter."""
+    pool = _pool_of(_RecordingSDK(), _RecordingSDK(), _RecordingSDK())
+    rebound = pool.with_rate_hooks(
+        pace=lambda: None, on_rate_limit=lambda: None, on_success=lambda: None
+    )
+    assert rebound.self_paces is True
+    assert rebound.self_reports_rate_limits is True
+    assert rebound.self_reports_successes is True
+    assert rebound.size == 3
+    assert rebound.meter is pool.meter  # the shared aggregate meter survives the rebind

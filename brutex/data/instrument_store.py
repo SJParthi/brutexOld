@@ -90,6 +90,7 @@ from typing import Any, Final, Self
 
 import structlog
 
+from brutex.config.hardware_envelope import apply_duckdb_thread_bound
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.errors import CatalogError
 from brutex.data.fno_candle_lake import register_fno_candle_lake
@@ -879,8 +880,16 @@ class InstrumentStore(metaclass=_StoreMeta):
         return _LockedReadConn(self._read_conn, self._read_lock)
 
     @classmethod
-    def open(cls, path: Path) -> Self:
+    def open(cls, path: Path, *, threads: int | None = None) -> Self:
         """Open or create an instrument store at *path*.
+
+        *threads* bounds this connection's DuckDB thread pool (``None`` = the
+        envelope-derived
+        :func:`brutex.config.hardware_envelope.duckdb_thread_budget` — DuckDB
+        defaults to ALL logical cores PER CONNECTION, so the dashboard's
+        concurrently-live connections would otherwise stack several full-width
+        pools; DEC-THREAD-BUDGET-BOUNDS-001). Parallelism only — query results
+        are byte-identical.
 
         The parent directory is created on first open. The full schema
         (tables + indexes + schema_meta row) is applied idempotently via
@@ -911,6 +920,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             conn = duckdb.connect(str(path))
+            apply_duckdb_thread_bound(conn, threads=threads)
             # schema_meta first so we can read the existing version before
             # touching the renamed tables.
             conn.execute(_DDL_SCHEMA_META)

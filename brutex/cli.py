@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from brutex import __version__
+from brutex.config.hardware_envelope import apply_polars_thread_bound
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
@@ -2974,6 +2975,15 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     talks through its SDK client, not a urllib transport — and no preset
     instrument list: the adapter carries the whole master index and resolves
     each fetched symbol in O(1).
+
+    Rate-controller hooks (DEC-SUSPICION-SWEEP-FIXES-001 D1): this builder wires
+    NO ``pace`` / ``on_rate_limit`` / ``on_success`` — ``cmd_fetch`` constructs the
+    :class:`~brutex.adapters.rate_common.RateController` AFTER this build. The FULL
+    hook triple is bound downstream at the ONE COMMON spine seam
+    (``run_ingest.with_paced_client``, called by ``run_groww_spot_ingest`` with
+    the hooks ``cmd_fetch`` threads into ``run_groww_spot_ingest_with_retry``), so
+    every client-absorbed 429 still decrements the shared AIMD ladder — pinned by
+    the production-wiring test in ``tests/unit/test_groww_spot_rate_feedback.py``.
     """
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.auth import GrowwCredentials
@@ -3668,15 +3678,12 @@ def cmd_fetch(
     # Golden Rule #8 audit trail (DEC-INGEST-AUDIT-CHAIN-001): a real live pull
     # writes a hash-chained JSONL trail under <lake>/audit/ (RUN_START → per-pair
     # → RUN_COMPLETE). --inspect / --dry-run write no real data, so they get a
-    # null context (no audit). # pragma: no cover — live path (the audit-write
-    # core is 100%-tested in test_groww_run_ingest.py).
-    audit_ctx: Any = contextlib.nullcontext(None)
-    if not (dry_run or inspect):  # pragma: no cover — live
-        from brutex.orchestrator.audit import AuditWriter
+    # null context (no audit). The path + resume semantics live in the ONE COMMON
+    # ``open_ingest_audit`` factory the dashboard pulls now bind too
+    # (DEC-INGEST-AUDIT-WIRING-001) — the CLI behaviour is byte-identical.
+    from brutex.orchestrator.audit import open_ingest_audit
 
-        _ingest_audit_path = resolved / "audit" / "spot-ingest.jsonl"
-        _ingest_audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_ctx = AuditWriter.open(_ingest_audit_path, resume=_ingest_audit_path.exists())
+    audit_ctx: Any = open_ingest_audit(resolved, enabled=not (dry_run or inspect))
     # Integration merge: keep BOTH the ingest-audit context (base-13,
     # DEC-INGEST-AUDIT-CHAIN-001) AND the retry-storm ExitStack (main, #533).
     # The dry-run temp-lake cleanup is OUTERMOST so it removes the ephemeral tree
@@ -4604,6 +4611,37 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"[brutex] WARNING: sweeping PARTIAL coverage (--allow-missing-slices): "
             f"{len(preflight.missing)} empty pairs will skip as no-bars: {missing_str}"
         )
+
+    # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
+    # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
+    # the last prebuild) would feed the engine stale bars AND hash them into the run
+    # identity as if canonical (Golden Rule #4) — refuse the launch loudly with the
+    # exact remedy instead. Verifiable pairs only (derived intraday TFs with BOTH a
+    # stored partition and a 1-minute base — the zero-bar preflight above owns the
+    # missing-data refusal; abstains never block). NO escape flag by design:
+    # Correctness > everything (the merge-readiness priority law) — the remedy is
+    # the pipeline's prebuild, never sweeping known-stale data.
+    from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
+    from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+    freshness = preflight_derived_freshness(
+        lake_derived_freshness_verdicts(
+            resolved_lake,
+            exchange=exchange,
+            segment=segment,
+            symbols=symbol_list,
+            intervals=interval_list,
+        )
+    )
+    if not freshness.ok:
+        stale_str = ", ".join(f"{s}/{i}" for s, i in freshness.stale)
+        print(
+            f"[brutex] REFUSED: {len(freshness.stale)} of {freshness.checked} verifiable "
+            f"derived (symbol, interval) pairs are STALE vs a fresh 1-minute "
+            f"re-derivation: {stale_str}. Remedy: {freshness.remediation()}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
 
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [
@@ -6636,6 +6674,18 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command is None or args.command == "version":
         return cmd_version()
+    # DEC-THREAD-BUDGET-BOUNDS-001 — bound the polars global thread pool ONCE
+    # per process, at the ONE entrypoint every BruteX process (CLI fetch AND
+    # the in-process uvicorn dashboard) enters, BEFORE the first lazy `import
+    # polars` any dispatch below can trigger (verified: importing brutex.cli
+    # pulls in neither polars nor duckdb; the polars-free `version` fast path
+    # above stays log-free — its byte-exact stdout contract is test-pinned).
+    # Runs AFTER bootstrap_env so a persisted BRUTEX_POLARS_THREADS /
+    # POLARS_MAX_THREADS in ~/.brutex/.env is honoured. Safe by construction:
+    # an operator-preset POLARS_MAX_THREADS is respected, and an
+    # already-imported polars logs one loud too-late warning per process
+    # instead of pretending a bound applied.
+    apply_polars_thread_bound()
     if args.command == "status":
         return cmd_status(run_id=args.run_id)
     if args.command == "audit":

@@ -1712,8 +1712,8 @@ _OPTION_SEGMENT_SEP: Final = "__"
 
 #: The option series directory segment's part arity: the writer's partition
 #: key is ``<exchange_segment>|<security_id>|<expiry_flag>|<expiry_code>|
-#: <strike>|<drv_option_type>`` (``option_sink.append_option_bars``), so the
-#: on-disk segment splits into exactly 6 parts on ``__``.
+#: <strike>|<drv_option_type>`` (``option_parquet_writer.partition_key``), so
+#: the on-disk segment splits into exactly 6 parts on ``__``.
 _OPTION_SERIES_ARITY: Final = 6
 
 
@@ -3613,6 +3613,58 @@ def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
     return records
 
 
+#: mtime-keyed cache for the /db window-ledger grid's SERIALISED row tuples —
+#: the projection of ``_ledger_records_cached`` through the canonical
+#: :func:`~brutex.data.window_ledger.ledger_record_row` shape. Kept SEPARATE from
+#: ``_WINDOW_CACHE`` (which holds the record objects several readers share) so a
+#: grid poll never rebuilds the O(rows) tuple projection either. Same
+#: invalidation rule — the composite :func:`_ledger_cache_stamp` (base mtime PLUS
+#: the pending delta name set, DEC-LEDGER-DELTA-FLUSH-001), so a mid-pull delta
+#: append refreshes this cache exactly as a full save does — same lock
+#: (DEC-SUSPICION-SWEEP-FIXES-001 D3).
+_WINDOW_ROWS_CACHE: dict[str, tuple[tuple[int, tuple[str, ...]], tuple[tuple[Any, ...], ...]]] = {}
+
+
+def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
+    """The /db window-ledger grid's row tuples, parsed ONCE per ledger flush.
+
+    DEC-SUSPICION-SWEEP-FIXES-001 (D3): the ``/api/v1/db/window-ledger`` route
+    previously ran an UNCACHED ``load_window_ledger(...).to_rows()`` — a full
+    Parquet re-parse of the whole ledger (a pre-planned full-universe options
+    pull holds ~841k rows, the measured shape behind :data:`WINDOW_ROWS_CAP`) on
+    EVERY paging click. This helper routes the read through the SAME mtime-keyed
+    ``_ledger_records_cached`` single parse the other ledger readers share, then
+    memoises the row projection (the canonical
+    :func:`~brutex.data.window_ledger.ledger_record_row` per record — byte-equal
+    to ``WindowLedger.to_rows`` by construction, ONE source of the shape). A
+    paging click within one ledger generation is an O(1) cache handoff; the
+    composite :func:`_ledger_cache_stamp` (base mtime PLUS the pending delta name
+    set, DEC-LEDGER-DELTA-FLUSH-001) invalidates it on a full save OR a mid-pull
+    delta append → ONE fresh parse + projection (never stale, Golden Rule #1). A
+    lake with no ledger Parquet returns ``()`` — the same empty grid the uncached
+    read produced. HONEST envelope (Golden Rule #10): the first read per
+    generation is still O(rows) (parse + projection); only the REPEAT read is
+    O(1) — true O(page) needs a write-time manifest, NOT claimed (the #867/#1025
+    envelope).
+    """
+    from brutex.data.window_ledger import ledger_record_row
+    from brutex.data.window_ledger_store import ledger_path
+
+    path = ledger_path(lake_root)
+    if not path.is_file():
+        return ()
+    stamp = _ledger_cache_stamp(path)
+    key = str(path)
+    with _WINDOW_CACHE_LOCK:
+        hit = _WINDOW_ROWS_CACHE.get(key)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+    rows = tuple(ledger_record_row(r) for r in _ledger_records_cached(lake_root))
+    with _WINDOW_CACHE_LOCK:
+        _WINDOW_ROWS_CACHE[key] = (stamp, rows)
+    return rows
+
+
 def _window_market_bucket(market: str) -> str:
     """Map a ledger ``market`` namespace to the page's display/filter bucket.
 
@@ -3800,27 +3852,69 @@ def _window_severity_order_sql() -> str:
     return f"CASE status {whens} ELSE 9 END"
 
 
+def _fold_status_counts(
+    grouped_rows: Iterable[tuple[Any, Any, Any]],
+) -> tuple[dict[str, dict[str, int]], int]:
+    """Fold ``(market, status, n)`` GROUP BY rows into the bucketed counts + total.
+
+    The ONE fold (CLAUDE.md §11 COMMON) shared by :func:`_window_counts_total`
+    (lifetime) and :func:`_window_counts_since` (per-run,
+    DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): each ``market`` namespace folds to
+    the page's spot/options/futures bucket via the shared
+    :func:`_window_market_bucket`. No rows → all-zero buckets + ``total=0``.
+    """
+    counts: dict[str, dict[str, int]] = {"spot": {}, "options": {}, "futures": {}}
+    total = 0
+    for market_value, status_value, n in grouped_rows:
+        count = int(n)
+        total += count
+        bucket = counts[_window_market_bucket(str(market_value))]
+        bucket[str(status_value)] = bucket.get(str(status_value), 0) + count
+    return counts, total
+
+
 def _window_counts_total(conn: Any, ledger_glob: str) -> tuple[dict[str, dict[str, int]], int]:
     """ONE DuckDB ``GROUP BY market, status`` → bucketed counts + grand total.
 
     Replaces the O(N) Python count loop with a single columnar aggregate over the ledger
     Parquet (O(files-footer + groups), milliseconds at 340k rows). The ``market``
     namespace is folded to the page's spot/options/futures bucket via the shared
-    :func:`_window_market_bucket` (CLAUDE.md §11 COMMON). An empty Parquet yields all-zero
+    :func:`_fold_status_counts` (CLAUDE.md §11 COMMON). An empty Parquet yields all-zero
     buckets + ``total=0`` (the GROUP BY returns no rows).
     """
-    counts: dict[str, dict[str, int]] = {"spot": {}, "options": {}, "futures": {}}
-    total = 0
     cursor = conn.execute(
         "SELECT market, status, COUNT(*) FROM read_parquet(?) GROUP BY market, status",
         [ledger_glob],
     )
-    for market_value, status_value, n in cursor.fetchall():
-        count = int(n)
-        total += count
-        bucket = counts[_window_market_bucket(str(market_value))]
-        bucket[str(status_value)] = bucket.get(str(status_value), 0) + count
-    return counts, total
+    return _fold_status_counts(cursor.fetchall())
+
+
+def _window_counts_since(
+    conn: Any, ledger_glob: str, since_iso: str
+) -> tuple[dict[str, dict[str, int]], int]:
+    """The PER-RUN twin of :func:`_window_counts_total` — windows attempted since *since_iso*.
+
+    DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001. The lifetime GROUP BY answers "88 EMPTY
+    ever"; this answers "24 EMPTY THIS run" by filtering to rows whose
+    ``last_attempt_at`` (the ledger's per-window last-fetch stamp) is on/after the
+    current pull's journal ``started`` instant. ATTEMPTED statuses only: ``PLANNED``
+    rows are excluded explicitly AND carry a NULL/empty ``last_attempt_at`` anyway
+    (never fetched — a planned row is not "this run's work done"). The comparison is
+    lexicographic over the SAME aware-UTC ``datetime.isoformat()`` shape BOTH writers
+    produce (the ledger stamps ``now.isoformat()`` from ``datetime.now(UTC)``; the
+    journal stamps ``datetime.now(UTC).isoformat()``), which orders chronologically
+    for that fixed shape. One columnar aggregate — O(files-footer + groups), the same
+    envelope as the lifetime query, and memoised by the caller behind the SAME
+    generation+mtime cache key family (plus the pull-start token).
+    """
+    cursor = conn.execute(
+        "SELECT market, status, COUNT(*) FROM read_parquet(?) "
+        "WHERE status != 'PLANNED' AND last_attempt_at IS NOT NULL "
+        "AND last_attempt_at != '' AND last_attempt_at >= ? "
+        "GROUP BY market, status",
+        [ledger_glob, since_iso],
+    )
+    return _fold_status_counts(cursor.fetchall())
 
 
 #: The three window-phase buckets, in pull order (spot → futures → options), the
@@ -4047,6 +4141,7 @@ def _build_window_payload_duckdb(
     offset: int,
     count_cache: WindowCountsCache | None,
     generation: int,
+    since: str | None = None,
 ) -> dict[str, Any]:
     """O(page) ``/coverage/windows`` payload via DuckDB (DEC-COVERAGE-WINDOWS-O1-001).
 
@@ -4059,6 +4154,14 @@ def _build_window_payload_duckdb(
     Returns the same payload dict shape + values as the pyarrow path — severity-first,
     with within-a-status-tier rows ordered deterministically by ``(security_id,
     interval, window_start, window_end)``.
+
+    *since* (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the current pull's journal
+    ``started`` wall-UTC instant, or ``None`` when no real pull-start is known.
+    When set, the payload ADDITIONALLY carries ``counts_since_pull_start`` (the
+    :func:`_window_counts_since` per-run buckets, memoised in the SAME cache keyed
+    generation+mtime+pull-start) and echoes it as ``pull_start_utc``. ``None`` adds
+    ZERO keys and ZERO queries — the payload stays byte-identical (never a
+    fabricated per-run figure, Golden Rule #1).
     """
     from types import SimpleNamespace
 
@@ -4077,8 +4180,11 @@ def _build_window_payload_duckdb(
     }
     if not {"empty_streak", "in_pull_fetches"}.issubset(available):
         raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
+    counts_since: dict[str, dict[str, int]] | None = None
     if count_cache is None:
         counts, total = _window_counts_total(conn, ledger_glob)
+        if since is not None:
+            counts_since, _since_total = _window_counts_since(conn, ledger_glob, since)
     else:
         # Key the cache on the ledger's mtime AS WELL as the generation so a CROSS-PROCESS
         # write (a CLI `brutex fetch` while the dashboard is open — which does NOT bump the
@@ -4091,6 +4197,17 @@ def _build_window_payload_duckdb(
             generation=generation,
             compute=lambda: _window_counts_total(conn, ledger_glob),
         )
+        if since is not None:
+            # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
+            # DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the pull-start token joins the
+            # key so a NEW pull (new journal `started`) can never be served the prior
+            # run's per-run figures even within one (generation, mtime).
+            since_key = f"window-counts-since|{ledger_glob}|{mtime_ns}|{since}"
+            counts_since, _since_total = count_cache.get_or_compute(
+                since_key,
+                generation=generation,
+                compute=lambda: _window_counts_since(conn, ledger_glob, since),
+            )
 
     wanted_status = status.upper() if status else None
     valid_buckets = ("spot", "options", "futures")
@@ -4169,7 +4286,7 @@ def _build_window_payload_duckdb(
                 record, first_seen_at=cell.get("first_seen_at"), symbol_for_id=symbol_for_id
             )
         )
-    return {
+    payload: dict[str, Any] = {
         "source": "ledger",
         "count": total,
         "counts": counts,
@@ -4179,6 +4296,37 @@ def _build_window_payload_duckdb(
         "capped": matched > limit,
         "windows": rows,
     }
+    if counts_since is not None:
+        # Per-run honesty keys (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001) — present
+        # ONLY when a real pull-start is known; an unknown start OMITS them entirely
+        # (the page then shows the lifetime figure alone, never a fabricated 0).
+        payload["counts_since_pull_start"] = counts_since
+        payload["pull_start_utc"] = since
+    return payload
+
+
+def last_pull_start_utc(lake_root: Path) -> str | None:
+    """The wall-UTC instant the LAST real (non-dry-run) pull STARTED — or ``None``.
+
+    DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001. Reads the durable pull journal
+    (``<lake_root>/journal/pull_journal.jsonl`` — written by the dashboard
+    spot/pipeline pull's ``record_pull_start``, DEC-DOCTOR-LIVE-PROOF-KIT-001) and
+    returns the LATEST ``started`` record's ``wall_utc``, SKIPPING dry-run starts
+    (a dry-run touches no ledger row, so anchoring the per-run window on it would
+    zero the figure right after a real pull). HONEST ``None`` when no journal /
+    no real ``started`` record exists — the journal is written ONLY by
+    ``pull_all_spot`` today (an F&O-only historical pull and the CLI ``brutex
+    fetch`` write none), and the caller then OMITS the per-run figure entirely,
+    never fabricating one (Golden Rule #1). O(journal bytes) per call — the
+    tolerant reader skips crash-truncated lines; lazy import keeps this module's
+    import surface unchanged.
+    """
+    from brutex.observability.pull_journal import EVENT_STARTED, read_journal
+
+    for event in reversed(read_journal(lake_root)):
+        if event.event == EVENT_STARTED and event.dry_run is not True:
+            return event.wall_utc
+    return None
 
 
 def build_window_payload(
@@ -4192,9 +4340,18 @@ def build_window_payload(
     conn: Any = None,
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
+    since: str | None = None,
     retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
+
+    *since* (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the current pull's journal
+    ``started`` wall-UTC instant (see :func:`last_pull_start_utc`). Honoured on the
+    DuckDB fast path ONLY — the payload then adds ``counts_since_pull_start`` +
+    ``pull_start_utc`` (per-run attempted-window counts). The legacy pyarrow /
+    ``window_status.json`` paths OMIT the per-run figure (honest omission — no
+    fabricated per-run count on a backing that cannot answer it); ``None`` (the
+    default, and every pre-existing caller) is byte-identical everywhere.
 
     DEC-WINDOW-LEDGER-001 (PR-3). Reads the durable ledger Parquet
     (``<lake>/window_ledger/ledger.parquet``) when it exists — surfacing EVERY
@@ -4284,6 +4441,7 @@ def build_window_payload(
                 offset=clamp_offset(offset),
                 count_cache=count_cache,
                 generation=generation,
+                since=since,
             )
 
         try:
@@ -4690,5 +4848,6 @@ __all__ = [
     "summarize_spot_datasets",
     "summarize_spot_verdict_datasets",
     "table_summary",
+    "window_ledger_rows_cached",
     "window_status_label",
 ]

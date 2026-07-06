@@ -65,7 +65,7 @@ leaves it ``none``). A contract that quarantined or left a transient window is l
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -87,6 +87,7 @@ from brutex.adapters.groww.contract_bounds import default_fno_minute_window, fno
 from brutex.adapters.groww.contracts import parse_contract_symbol
 from brutex.adapters.groww.errors import GrowwAuthError, is_terminal_auth_failure
 from brutex.adapters.groww.expiry_scope import (
+    log_expiry_scope_summary,
     log_out_of_scope_expiries,
     partition_contracts_by_scope,
 )
@@ -105,6 +106,7 @@ from brutex.adapters.groww.option_ingest import (
 from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
+    DEFAULT_EMPTY_RETRY_ATTEMPTS,
     PullVerdict,
     UntilCleanRound,
     classify_pull,
@@ -123,7 +125,7 @@ from brutex.data.registry_store import (
     RegistryStore,
 )
 from brutex.data.sink import BarSink, NullBarSink
-from brutex.data.window_ledger import WindowLedger
+from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
     end_pull_ledger,
@@ -131,11 +133,13 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.data.write_consumer import WriteConsumer
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
+from brutex.orchestrator.audit import open_ingest_audit
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
+    from brutex.orchestrator.audit import AuditWriter
 
 #: The ONLY granularity fetched from Groww for an F&O contract
 #: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the heavy ``1minute`` fill. ``1day`` is DERIVED
@@ -886,6 +890,107 @@ def _mark_complete(
     return marked
 
 
+#: The per-window ledger identity — ``(market, security_id, interval, window_start,
+#: window_end)`` — used by the strike_chain.realized THIS-pull baseline below.
+_WindowAttemptKey = tuple[str, str, str, str, str]
+
+
+def _bounded_window_attempts(
+    ledger: WindowLedger, empty_retry_by_symbol: Mapping[str, int]
+) -> dict[_WindowAttemptKey, int]:
+    """Snapshot the bounded symbols' per-window ``attempts`` — the pre-phase baseline.
+
+    DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001 (item: deep-budget realized savings).
+    The durable ledger loaded at phase start already carries PRIOR pulls' rows
+    (each with the LAST pull's ``in_pull_fetches``), so the post-phase
+    ``strike_chain.realized`` summary must restrict itself to windows attempted
+    THIS pull. ``attempts`` bumps exactly once per pull that records a window,
+    so "this pull" = ``attempts`` grew past this baseline (a never-seen window
+    keys to the 0 default). Bounded symbols only (the sparse reduced-budget
+    map), so the snapshot is O(bounded windows) not O(ledger). Read-only.
+    """
+    return {
+        (
+            record.market,
+            record.security_id,
+            record.interval,
+            record.window_start,
+            record.window_end,
+        ): record.attempts
+        for record in ledger.records()
+        if record.security_id in empty_retry_by_symbol
+    }
+
+
+def _emit_strike_chain_realized(
+    ledger: WindowLedger,
+    *,
+    interval: str,
+    empty_retry_by_symbol: Mapping[str, int],
+    pre_attempts: Mapping[_WindowAttemptKey, int],
+) -> None:
+    """Emit ONE ``strike_chain.realized`` INFO for the phase — observe-only, guarded.
+
+    DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001, closing the #1026 observability gap:
+    the deep-strike EMPTY-retry budget (DEC-FETCH-PER-WINDOW-GUARANTEE-001) shipped
+    with NO per-pull realized signal, so the operator could not see whether the
+    bounding actually engaged on a real pull. This scans the ledger's THIS-pull
+    rows (``attempts`` grew past *pre_attempts* — see
+    :func:`_bounded_window_attempts`) for the reduced-budget symbols at this
+    phase's *interval* and reports:
+
+    * ``strikes_bounded`` — contracts carrying a REDUCED budget this pull;
+    * ``bounded_windows_attempted`` — their windows actually attempted this pull;
+    * ``realized_confirms`` — of those, the clean-EMPTY confirms (status ``EMPTY``
+      or settled ``SKIPPED``, zero bars) — the bounded fetches that would have
+      re-fired the full retry loop without the budget;
+    * ``fetches_saved_estimate`` — ``Σ max(full_budget − in_pull_fetches, 0)`` over
+      the confirms. HONEST estimate (Golden Rule #10): the unbounded pull would
+      have spent the FULL budget only on a strike that stayed empty every retry —
+      which is exactly what a confirm observed — but the counterfactual is not
+      re-run, so this is an estimate, never a measured A/B.
+
+    Observe-only + fully guarded (the house `emit_underlying_all_empty` pattern):
+    changes NO return value / ledger row / fetch behaviour; an internal error logs
+    ``strike_chain.realized_error`` and NEVER breaks the pull. The caller emits
+    only when a reduced-budget map exists AND a real ledger is open — a dry-run or
+    an unbounded chain emits NOTHING (default-parity, zero new log calls).
+    """
+    try:
+        bounded_windows_attempted = 0
+        realized_confirms = 0
+        fetches_saved_estimate = 0
+        for record in ledger.records():
+            if record.security_id not in empty_retry_by_symbol or record.interval != interval:
+                continue
+            key = (
+                record.market,
+                record.security_id,
+                record.interval,
+                record.window_start,
+                record.window_end,
+            )
+            if record.attempts <= pre_attempts.get(key, 0):
+                continue  # a prior pull's row — not attempted THIS pull
+            bounded_windows_attempted += 1
+            if record.status in (EMPTY, SKIPPED) and record.bars == 0:
+                realized_confirms += 1
+                fetches_saved_estimate += max(
+                    DEFAULT_EMPTY_RETRY_ATTEMPTS - record.in_pull_fetches, 0
+                )
+        _LOG.info(
+            "strike_chain.realized",
+            interval=interval,
+            strikes_bounded=len(empty_retry_by_symbol),
+            bounded_windows_attempted=bounded_windows_attempted,
+            realized_confirms=realized_confirms,
+            fetches_saved_estimate=fetches_saved_estimate,
+            full_budget=DEFAULT_EMPTY_RETRY_ATTEMPTS,
+        )
+    except Exception as exc:  # observe-only telemetry must never break the pull
+        _LOG.warning("strike_chain.realized_error", interval=interval, error=str(exc))
+
+
 def _run_phase(
     *,
     interval: str,
@@ -910,6 +1015,7 @@ def _run_phase(
     run_parallel: RunParallel | None,
     write_pool: WriteConsumer | None,
     fetch_pipeline: FetchPipeline | None,
+    audit: AuditWriter | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
 ) -> _PhaseResult:
@@ -970,6 +1076,16 @@ def _run_phase(
         # false-flag each other against the pre-pull span read). Zero extra I/O.
         census_spans = spans
         census_rows = ledger.to_rows()
+    # THIS-pull baseline for the observe-only ``strike_chain.realized`` summary
+    # (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): snapshot the reduced-budget symbols'
+    # per-window ``attempts`` BEFORE any pass runs, so the post-phase emit counts only
+    # windows this pull actually attempted. ``None`` for a dry-run (no ledger) or an
+    # unbounded chain (empty budget map) — then nothing is emitted (default parity).
+    bounded_pre_attempts = (
+        _bounded_window_attempts(ledger, empty_retry_by_symbol)
+        if ledger is not None and empty_retry_by_symbol
+        else None
+    )
     flush = make_live_ledger_flush(ledger, lake_root) if ledger is not None else None
 
     # Honest live F&O progress (DEC-PULL-PROGRESS-HONESTY-001): a THROTTLED, market/
@@ -1093,6 +1209,7 @@ def _run_phase(
                     observed_holidays=observed_holidays,
                     breaker_health_probe=breaker_canary,
                     storm_breaker=storm_breaker,
+                    audit=audit,
                 )
             except GrowwAuthError as exc:
                 # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1225,6 +1342,19 @@ def _run_phase(
         # until durable, so its synchronous tail already records the ledger before this point.
         _drain_fetch_pipeline_in_phase(fetch_pipeline)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+
+    # Observe-only realized-savings summary (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001):
+    # AFTER the drain + persist the ledger's in-memory rows are final (async tails
+    # folded), so the THIS-pull realized reduced-budget confirms are countable. Fires
+    # ONLY when a reduced-budget map exists and a real ledger is open; fully guarded —
+    # the pull's control flow, counts and return value are byte-identical either way.
+    if bounded_pre_attempts is not None and ledger is not None and empty_retry_by_symbol:
+        _emit_strike_chain_realized(
+            ledger,
+            interval=interval,
+            empty_retry_by_symbol=empty_retry_by_symbol,
+            pre_attempts=bounded_pre_attempts,
+        )
 
     # Observe-only written-vs-settled census (DEC-WRITTEN-SETTLED-CENSUS-001):
     # one guarded post-drain emit over the PRE-plan snapshot captured above —
@@ -1796,6 +1926,11 @@ def pull_contract_candles(
     # Stored lake bars for a scoped-out expiry are NEVER touched.
     scoped = partition_contracts_by_scope(contracts, scope_start=scope_start, scope_end=scope_end)
     log_out_of_scope_expiries(scoped, scope_start=scope_start, scope_end=scope_end)
+    # Observe-only in-scope summary (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): ONE
+    # ``fno.expiry_scope_summary`` INFO naming BOTH sides of the partition + the bounds,
+    # emitted ONLY when a from/to bound is actually set — the default (None, None) pull
+    # emits nothing (the #1146 default-parity pin, logging included).
+    log_expiry_scope_summary(scoped, scope_start=scope_start, scope_end=scope_end)
     rebuilt = _rebuild_contracts(scoped.in_scope)
 
     # Per-contract 1-minute window (DEC-1MINUTE-ONLY-DERIVE-1DAY-001): explicit operator
@@ -1834,43 +1969,52 @@ def pull_contract_candles(
     empty_retry_by_symbol = dict(empty_retry_budget.by_symbol) or None
 
     # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
-    try:
-        minute = _run_phase(
-            interval=_MINUTE_INTERVAL,
-            by_market=by_market,
-            selected_symbols=selected_symbols,
-            client=client,
-            sink=sink,
-            lake_root=lake_root,
-            dry_run=dry_run,
-            start=start,
-            end=end,
-            pace=pace,
-            on_rate_limit=on_rate_limit,
-            on_timeout=on_timeout,
-            on_success=on_success,
-            on_progress=on_progress,
-            session_rate=session_rate,
-            until_clean=until_clean,
-            until_clean_rounds=until_clean_rounds,
-            contract_windows=minute_windows,
-            empty_retry_by_symbol=empty_retry_by_symbol,
-            run_parallel=run_parallel,
-            write_pool=write_pool,
-            fetch_pipeline=fetch_pipeline,
-            on_bars=on_bars,
-            on_ledger_sync=on_ledger_sync,
-        )
-    finally:
-        # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute lake
-        # (every settled window must be durable first) and BEFORE returning (so the caller's
-        # ledger persist sees a fully-flushed lake). Drain the fetch_pipeline FIRST (it owns the
-        # tail incl. ``sink.append`` → ``ledger.record``), then the write_pool — mirroring the
-        # #951 MAJOR-4 drain-order fix (the producer must flush before the writer). Only ONE is
-        # ever non-``None`` (they are mutually exclusive above), so this is a single real drain;
-        # both helpers are best-effort + a no-op on ``None``.
-        _drain_fetch_pipeline(fetch_pipeline)
-        _drain_write_consumer(write_pool)
+    # Golden Rule #8 (DEC-INGEST-AUDIT-WIRING-001): the F&O twin of the spot pull's
+    # hash-chained ingest audit — the ONE COMMON factory opens
+    # ``<lake>/audit/fno-ingest.jsonl`` (resume = continue the existing chain) for a
+    # REAL pull and a null context for a dry-run (no real data → no audit), and the
+    # spine appends RUN_START → per-pair → RUN_COMPLETE on its controller drain
+    # thread. Held open across the whole phase (every until-clean round + market
+    # bucket rides one chain), closed after the drains below.
+    with open_ingest_audit(lake_root, name="fno-ingest", enabled=not dry_run) as ingest_audit:
+        try:
+            minute = _run_phase(
+                interval=_MINUTE_INTERVAL,
+                by_market=by_market,
+                selected_symbols=selected_symbols,
+                client=client,
+                sink=sink,
+                lake_root=lake_root,
+                dry_run=dry_run,
+                start=start,
+                end=end,
+                pace=pace,
+                on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
+                on_success=on_success,
+                on_progress=on_progress,
+                session_rate=session_rate,
+                until_clean=until_clean,
+                until_clean_rounds=until_clean_rounds,
+                contract_windows=minute_windows,
+                empty_retry_by_symbol=empty_retry_by_symbol,
+                run_parallel=run_parallel,
+                write_pool=write_pool,
+                fetch_pipeline=fetch_pipeline,
+                audit=ingest_audit,
+                on_bars=on_bars,
+                on_ledger_sync=on_ledger_sync,
+            )
+        finally:
+            # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute
+            # lake (every settled window must be durable first) and BEFORE returning (so the
+            # caller's ledger persist sees a fully-flushed lake). Drain the fetch_pipeline FIRST
+            # (it owns the tail incl. ``sink.append`` → ``ledger.record``), then the write_pool —
+            # mirroring the #951 MAJOR-4 drain-order fix (the producer must flush before the
+            # writer). Only ONE is ever non-``None`` (they are mutually exclusive above), so this
+            # is a single real drain; both helpers are best-effort + a no-op on ``None``.
+            _drain_fetch_pipeline(fetch_pipeline)
+            _drain_write_consumer(write_pool)
 
     # Fold the async pipeline's post-drain per-series totals back into the phase result
     # (DEC-FNO-ASYNC-PIPELINE-WIRE-001 completion-count fix): in async mode the producer returned

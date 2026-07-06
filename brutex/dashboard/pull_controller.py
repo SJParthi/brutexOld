@@ -129,6 +129,7 @@ from brutex.models import Instrument
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.correlation import pull_id_scope
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
+from brutex.orchestrator.audit import open_ingest_audit
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
@@ -647,6 +648,16 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     so the single-instrument / bulk builder seams stay shape-identical
     (the fan-out worklist still drives WHICH symbols are pulled).
     ``# pragma: no cover`` — needs real credentials + network, absent in CI.
+
+    Rate-controller hooks (DEC-SUSPICION-SWEEP-FIXES-001 D1): this builder wires
+    NO ``pace`` / ``on_rate_limit`` / ``on_success`` — the session controller does
+    not exist here yet. The FULL hook triple is bound downstream at the ONE COMMON
+    spine seam (``run_ingest.with_paced_client``, called by
+    ``run_groww_spot_ingest`` with the ``_live_rate_runtime`` quad), so every 429
+    the client's bounded fast-retry absorbs still decrements the shared AIMD
+    ladder — pinned by the production-wiring test in
+    ``tests/unit/test_groww_spot_rate_feedback.py`` (which monkeypatches NO
+    builders).
     """
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.auth import GrowwCredentials
@@ -1515,7 +1526,16 @@ def pull_all_spot(
     # the ingest spine's ``ingest.*`` events, AND the already-lit transport
     # (``groww.call``) + rate (``rate.*``) events — shares one ``pull_id``
     # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
-    with pull_id_scope(pull_id) as pid:
+    # Golden Rule #8 hash-chained ingest audit (DEC-INGEST-AUDIT-WIRING-001): bind
+    # the SAME COMMON trail the CLI ``brutex fetch`` pull writes —
+    # ``<lake>/audit/spot-ingest.jsonl`` via the ONE ``open_ingest_audit`` factory
+    # (resume = continue the existing chain; a dry-run gets the null context — no
+    # real data, no audit). The spine appends RUN_START → per-pair → RUN_COMPLETE
+    # on its controller drain thread, O(1) per event, never on a fetch worker.
+    with (
+        pull_id_scope(pull_id) as pid,
+        open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
+    ):
         # DURABLE pull journal (G5, DEC-DOCTOR-LIVE-PROOF-KIT-001): a start record
         # that survives a mid-pull process death, paired with the finish record at
         # the bottom — ``brutex doctor --live`` stage 12 reads a start-without-finish
@@ -1798,6 +1818,7 @@ def pull_all_spot(
                     ledger=ledger,
                     run_parallel=run_parallel,
                     auto_retry=do_retry,
+                    audit=ingest_audit,
                     on_window=window_observer,
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
@@ -2455,7 +2476,16 @@ def pull_candles(
     # summary, the ingest spine's ``ingest.*`` events, and the already-lit
     # transport (``groww.call``) + rate (``rate.*``) events all share one
     # ``pull_id``. Always unbinds on exit (no leak).
-    with pull_id_scope(pull_id) as pid:
+    # Golden Rule #8 hash-chained ingest audit (DEC-INGEST-AUDIT-WIRING-001): bind
+    # the SAME COMMON trail the CLI ``brutex fetch`` pull writes —
+    # ``<lake>/audit/spot-ingest.jsonl`` via the ONE ``open_ingest_audit`` factory
+    # (resume = continue the existing chain; a dry-run gets the null context — no
+    # real data, no audit). The spine appends RUN_START → per-pair → RUN_COMPLETE
+    # on its controller drain thread, O(1) per event, never on a fetch worker.
+    with (
+        pull_id_scope(pull_id) as pid,
+        open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
+    ):
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
         # `reconcile_ledger_with_lake` below are the sole skip source (the
@@ -2636,6 +2666,7 @@ def pull_candles(
                     on_progress=_progress_then_flush,
                     ledger=ledger,
                     run_parallel=run_parallel,
+                    audit=ingest_audit,
                     on_window=window_observer,
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,

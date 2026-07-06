@@ -4716,7 +4716,7 @@ def build_app(
         ledger read is mtime-cached so the 4 s page poll stops re-paying the
         full Parquet load at pre-planned-universe scale (~841k rows measured).
         """
-        from brutex.dashboard.db_view import build_window_payload
+        from brutex.dashboard.db_view import build_window_payload, last_pull_start_utc
 
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -4749,6 +4749,10 @@ def build_app(
                 conn=store.connection,
                 count_cache=_window_counts_cache,
                 generation=_summary_cache.generation,
+                # Per-run honesty (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the last
+                # REAL pull's journal `started` instant — None (no journal / dry-run
+                # only) OMITS the per-run figure entirely, never fabricates it.
+                since=last_pull_start_utc(lake),
             )
 
         return JSONResponse(await run_in_threadpool(_payload))
@@ -6136,14 +6140,22 @@ def build_app(
 
         The response is now ONE ``LIMIT``/``OFFSET`` page with a real ``total``
         (DEC-DB-VIEWER-PAGINATE-ALL-001) so the /db viewer renders O(visible), not
-        every window. Honest envelope (Golden Rule #10): the ledger is a SMALL
-        bounded sidecar (one row per fetch window — thousands, not the millions a
-        candle partition holds), so the read stays O(windows); only the page's rows
-        are IST-formatted + serialized, and the page-slice preserves the canonical
-        :meth:`~brutex.data.window_ledger_store.WindowLedger.to_rows` sort + derived
-        columns byte-for-byte.
+        every window. Honest envelope (Golden Rule #10,
+        DEC-SUSPICION-SWEEP-FIXES-001 D3): the ledger is NOT small — a pre-planned
+        full-universe options pull holds ~841k rows (the measured shape behind
+        ``db_view.WINDOW_ROWS_CAP``), and this route previously re-PARSED the whole
+        Parquet (``load_window_ledger(...).to_rows()``) on EVERY paging click. The
+        read now rides :func:`~brutex.dashboard.db_view.window_ledger_rows_cached`
+        — the SAME mtime-keyed single parse the other ledger readers share — so a
+        paging click within one ledger generation is an O(1) cache handoff + an
+        O(page) slice/format; the FIRST read after a ledger flush still pays one
+        real O(rows) parse (true O(page) needs a write-time manifest, NOT claimed).
+        The page-slice preserves the canonical
+        :meth:`~brutex.data.window_ledger.WindowLedger.to_rows` sort + derived
+        columns byte-for-byte (ONE row-shape source:
+        ``window_ledger.ledger_record_row``).
         """
-        from brutex.data.window_ledger_store import load_window_ledger
+        from brutex.dashboard.db_view import window_ledger_rows_cached
 
         columns = [
             "market",
@@ -6170,10 +6182,10 @@ def build_app(
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
-            """Load the ledger, then slice + IST-format ONLY the requested page."""
+            """Read the cached ledger rows, then slice + IST-format ONLY the page."""
             from brutex.data.session import format_ist_clock
 
-            all_rows = load_window_ledger(lake).to_rows()
+            all_rows = window_ledger_rows_cached(lake)
             total = len(all_rows)
             # Slice BEFORE formatting → only the page's rows are IST-coerced (O(page)).
             # An offset past the end is a clean empty page (Python slice never raises).

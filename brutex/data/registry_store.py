@@ -41,6 +41,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final, Self
 
+from brutex.config.hardware_envelope import apply_duckdb_thread_bound
 from brutex.models import BruteXError
 
 #: Registry schema version — bump on any non-additive shape change (the cache is
@@ -193,8 +194,14 @@ class RegistryStore:
         self._closed = False
 
     @classmethod
-    def open(cls, path: Path) -> Self:
+    def open(cls, path: Path, *, threads: int | None = None) -> Self:
         """Open or create the registry cache at *path*.
+
+        *threads* bounds this connection's DuckDB thread pool (``None`` = the
+        envelope-derived
+        :func:`brutex.config.hardware_envelope.duckdb_thread_budget`;
+        DEC-THREAD-BUDGET-BOUNDS-001 — parallelism only, query results
+        byte-identical).
 
         Applies the schema idempotently (``CREATE ... IF NOT EXISTS``). An older
         recorded ``schema_version`` drops + recreates the data tables (the cache
@@ -211,6 +218,7 @@ class RegistryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             conn = duckdb.connect(str(path))
+            apply_duckdb_thread_bound(conn, threads=threads)
             conn.execute(_DDL_SCHEMA_META)
             existing = conn.execute(
                 "SELECT value FROM schema_meta WHERE key = ?", ["schema_version"]

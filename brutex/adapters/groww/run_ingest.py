@@ -71,6 +71,7 @@ from brutex.adapters.groww.errors import (
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.groww.vendor_floor import VendorFloorLearner
+from brutex.adapters.ingest_common import maybe_audit
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
@@ -148,8 +149,13 @@ SpotJob = tuple[Instrument, str]
 _DEFAULT_MAX_RETRY_ROUNDS: int = 3
 
 
-def with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
-    """Return *adapter* with its Groww client's ``pace`` hook wired to the shared bucket.
+def with_paced_client(
+    adapter: MarketAdapter,
+    pace: Pacer | None,
+    on_rate_limit: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
+) -> MarketAdapter:
+    """Return *adapter* with its Groww client's controller hooks wired to the shared bucket.
 
     The client's per-attempt ``pace()`` (inside ``GrowwClient._call``) is the ONE
     canonical admission point per physical fetch — first attempts AND the client's
@@ -166,8 +172,27 @@ def with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapt
     constructing the learner over ``with_paced_client(adapter, pace)`` at the
     production build sites (DEC-VENDOR-FLOOR-LAZY-PROBE-001 review fold).
 
+    DEC-SUSPICION-SWEEP-FIXES-001 (D1): this seam now ALSO binds the controller's
+    ``on_rate_limit`` + ``on_success`` feedback hooks into the client — the spot
+    twin of what the F&O build sites always did
+    (``historical_pull._build_live_client`` bakes all three into
+    :func:`~brutex.adapters.groww.live.build_live_client`). Before this, the seam
+    rebound ONLY ``pace``: the client's bounded fast-retry absorbed 429s against a
+    NO-OP ``on_rate_limit``, so the AIMD ladder saw a 429 only after the whole
+    ``max_attempts`` budget was exhausted and the error propagated to the spine —
+    ~3× ``max_attempts`` vendor rejections per designed step-down, and any
+    sub-exhaustion 429 burst was INVISIBLE to the ladder. Both production spot
+    build sites (``dashboard/pull_controller`` + ``cli``) feed every pull through
+    :func:`run_groww_spot_ingest`, so this ONE COMMON seam (CLAUDE.md §11) covers
+    them both; the spine's own per-window hooks then stand down
+    (:func:`~brutex.adapters.groww.client.client_self_reports_rate_limits` /
+    ``client_self_reports_successes`` in ``ingest_spot``) so the final propagated
+    occurrence is never double-counted. Rate CAPS are untouched — this wires
+    FEEDBACK, never the ceiling/governor values (CLAUDE.md §2 Rule 6).
+
     A no-op (returns *adapter* unchanged) when there is nothing to wire: an
-    unthrottled run (*pace* is ``None``), or any adapter that is not the live
+    unthrottled run (*pace* is ``None`` — the dry-run / injected-factory quad is
+    all-``None`` together), or any adapter that is not the live
     :class:`~brutex.adapters.groww.adapter.GrowwMarketAdapter`. The adapter +
     client are frozen dataclasses, so this rebuilds via :func:`replace` rather than
     mutating. The import is local to avoid an import cycle and is paid once per pull.
@@ -176,12 +201,18 @@ def with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapt
 
     if pace is None or not isinstance(adapter, GrowwMarketAdapter):
         return adapter
-    # ``with_pace`` (the GrowwClientProtocol seam) re-binds pace immutably — for a single
-    # client it is a ``dataclasses.replace``; for a multi-connection ClientPool it re-fans
-    # the pace into EVERY leaf (DEC-GROWW-CLIENT-POOL-001), so no connection bypasses the
-    # shared bucket. (Was ``replace(adapter.client, pace=pace)`` — which only worked for a
-    # bare dataclass client and would have skipped the pool's leaves.)
-    return replace(adapter, client=adapter.client.with_pace(pace))
+    # ``with_rate_hooks`` (the GrowwClientProtocol seam) re-binds the hook triple
+    # immutably — for a single client it is a ``dataclasses.replace``; for a
+    # multi-connection ClientPool it re-fans the hooks into EVERY leaf
+    # (DEC-GROWW-CLIENT-POOL-001), so no connection bypasses the shared bucket or
+    # under-reports its 429s. A ``None`` feedback hook keeps the client's current
+    # binding (pace-only callers keep the pre-D1 behaviour byte-for-byte).
+    return replace(
+        adapter,
+        client=adapter.client.with_rate_hooks(
+            pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
+        ),
+    )
 
 
 def _resolve_spot_window(
@@ -285,22 +316,6 @@ class GrowwIngestReport:
         a token death — retrying is futile until re-auth.
         """
         return any(f.auth_failure for f in self.failures)
-
-
-def _maybe_audit(
-    audit: AuditWriter | None,
-    action: str,
-    subject: str,
-    payload: dict[str, object],
-) -> None:
-    """Append one hash-chained audit line when an ``audit`` writer is wired.
-
-    A no-op when ``audit is None``. Called ONLY from the single controller thread
-    (the fan-out drain loop), so the not-thread-safe :class:`AuditWriter` is never
-    touched concurrently (Golden Rule #8).
-    """
-    if audit is not None:
-        audit.append(action=action, subject=subject, payload=payload)
 
 
 def run_groww_spot_ingest(
@@ -476,12 +491,15 @@ def run_groww_spot_ingest(
     # the fetch worker until the durable write returns, so settle-after-durable holds.
     if write_pool is not None:
         sink = WriteConsumerSink(consumer=write_pool)
-    # Wire the shared bucket's *pace* into the adapter's Groww client — the ONE
-    # canonical admission point per physical fetch, retries included; the spine's
-    # per-window pace then stands down (DEC-RATE-SINGLE-ADMISSION-001). No-op for
+    # Wire the shared bucket's *pace* PLUS the controller's on_rate_limit/on_success
+    # feedback into the adapter's Groww client — the ONE canonical admission +
+    # feedback point per physical fetch, retries included; the spine's per-window
+    # pace AND feedback hooks then stand down (DEC-RATE-SINGLE-ADMISSION-001 +
+    # DEC-SUSPICION-SWEEP-FIXES-001 D1: without the feedback binding the client's
+    # bounded fast-retry absorbed 429s invisibly to the AIMD ladder). No-op for
     # adapters without a paceable client (fakes) or when unthrottled — those keep
-    # the per-window pace as the fallback admission.
-    adapter = with_paced_client(adapter, pace)
+    # the per-window pace + hooks as the fallback.
+    adapter = with_paced_client(adapter, pace, on_rate_limit, on_success)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
 
     # Deterministic worklist: one job per (instrument, interval) pair, in the
@@ -547,7 +565,7 @@ def run_groww_spot_ingest(
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
-    _maybe_audit(
+    maybe_audit(
         audit,
         "INGEST_RUN_START",
         f"pull:{pull_id}",
@@ -569,7 +587,7 @@ def run_groww_spot_ingest(
             if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[instrument.symbol_name, interval] = report
-            _maybe_audit(
+            maybe_audit(
                 audit,
                 "INGEST_PAIR_DONE",
                 f"{instrument.symbol_name}:{interval}",
@@ -627,7 +645,7 @@ def run_groww_spot_ingest(
                 auth_failure=auth_failed,
             )
         )
-        _maybe_audit(
+        maybe_audit(
             audit,
             "INGEST_PAIR_FAILED",
             f"{instrument.symbol_name}:{interval}",
@@ -674,7 +692,7 @@ def run_groww_spot_ingest(
             retried_windows=inst_retried,
             still_failed_windows=inst_still_failed,
         )
-    _maybe_audit(
+    maybe_audit(
         audit,
         "INGEST_RUN_COMPLETE",
         f"pull:{pull_id}",

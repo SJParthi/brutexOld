@@ -1308,6 +1308,16 @@ def greeks_pool_workers(cpu_count: int | None) -> int:
     (``os.cpu_count()`` may return ``None`` on exotic platforms) resolves to
     1 — never guess parallelism on an undetectable machine. O(1).
 
+    Since DEC-HW-ENVELOPE-CONSOLIDATE-001 this DELEGATES to the COMMON
+    :func:`brutex.config.hardware_envelope.cpu_pool_workers`
+    (``reserve=_GREEKS_WORKERS_RESERVED_CPUS``, ``cap=_GREEKS_WORKERS_CAP``,
+    sized off the logical count with ``prefer_performance=False`` and an
+    empty env so no override applies) — the ONE sizing formula (CLAUDE.md
+    §11), the EXACT ``auto_sweep_workers`` delegation shape — with a
+    byte-unchanged result: ``min(max(1, n - 2), 8) == max(1, min(n - 2, 8))``
+    for the cap ``8 >= 1`` (regression-pinned across cpu counts in
+    ``tests/unit/test_greeks_enrich_parallel.py``).
+
     Parameters
     ----------
     cpu_count
@@ -1318,9 +1328,16 @@ def greeks_pool_workers(cpu_count: int | None) -> int:
     int
         The auto worker count (``>= 1``).
     """
-    if cpu_count is None:
-        cpu_count = 1
-    return max(1, min(cpu_count - _GREEKS_WORKERS_RESERVED_CPUS, _GREEKS_WORKERS_CAP))
+    from brutex.config.hardware_envelope import cpu_pool_workers, envelope_from
+
+    logical = cpu_count if cpu_count is not None and cpu_count >= 1 else 1
+    return cpu_pool_workers(
+        {},
+        reserve=_GREEKS_WORKERS_RESERVED_CPUS,
+        cap=_GREEKS_WORKERS_CAP,
+        prefer_performance=False,
+        envelope=envelope_from({"logical_cores": logical}),
+    )
 
 
 def resolve_greeks_workers(
