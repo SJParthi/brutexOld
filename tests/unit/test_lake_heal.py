@@ -60,12 +60,17 @@ from brutex.data.lake_invariants import (
     ForeignMonthRows,
     IntraFileDup,
     LakeScanReport,
+    OptionForeignMonthRows,
     OptionIntraFileDup,
     PartitionCoords,
     scan_lake_invariants,
 )
 from brutex.data.models import CandleBar, OptionBar
-from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
+from brutex.data.option_parquet_writer import (
+    OptionParquetWriter,
+    OptionSeriesCoordinate,
+    OptionWriterError,
+)
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.partition import build_partition_path
 from brutex.data.spot_daily_resample import ist_span_partition_months
@@ -264,6 +269,36 @@ class TestObserveMode:
         assert audit.actions() == [AUDIT_HEAL_BATCH]
         assert audit.lines[0][2] == {"mode": "observe", "findings": 1, "healed": 0}
 
+    def test_observe_mode_option_foreign_touches_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An option-foreign finding under observe: report + audit + alert,
+        ZERO mutation anywhere (whole-tree byte pin) — no quarantine, no move
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison_option_foreign(lake)
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        before = _tree_state(lake)
+        audit = _FakeAudit()
+        reports: list[HealReport] = []
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            audit=audit,
+            on_report=reports.append,
+            now=_now,
+        )
+        assert _tree_state(lake) == before  # byte-identical, recursively
+        assert report.mode == "observe"
+        assert report.healed == 0
+        assert report.quarantine_root is None
+        assert audit.actions() == [AUDIT_HEAL_BATCH]
+        assert reports == [report]  # the alert seam fired once
+
     def test_observe_mode_clean_scan_is_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Zero findings in observe: no WARNING, no audit line, on_report fires."""
         monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
@@ -351,6 +386,49 @@ class TestMassHealRefusal:
         )
         assert report.refused_mass_heal is False
         assert report.healed == 1
+
+    def test_mass_heal_refused_over_option_foreign_files(self, tmp_path: Path) -> None:
+        """The rail counts OPTION files end-to-end: 21 scanned option files,
+        11 flagged foreign (> 50%) ⇒ the WHOLE batch refused byte-untouched
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 — option files ride BOTH the
+        numerator and the denominator)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        series = lake / "options" / "SERIES"
+        series.mkdir(parents=True)
+        for idx in range(21):
+            year = 2020 + idx // 12
+            month = 1 + idx % 12
+            home_ts = datetime(year, month, 3, 4, 0, tzinfo=UTC)
+            rows: list[datetime] = [home_ts]
+            if idx < 11:  # 11 of 21 carry ONE foreign row
+                rows.append(datetime(2019, 12, 2, 4, 0, tzinfo=UTC))
+            pq.write_table(
+                pa.table(
+                    {
+                        "side": pa.array(["CE"] * len(rows), type=pa.string()),
+                        "timestamp": pa.array(rows, type=pa.timestamp("us", tz="UTC")),
+                    }
+                ),
+                series / f"{year:04d}-{month:02d}.parquet",
+            )
+        scan = scan_lake_invariants(lake)
+        assert scan.option_files_scanned == 21
+        assert len(scan.findings) == 11
+        before = _tree_state(lake)
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.files_scanned + scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.refused_mass_heal is True
+        assert report.healed == 0
+        assert _tree_state(lake) == before  # not one byte moved
 
 
 # ── the dedup heal, end-to-end (audit + catalog + stats + recall) ──────────
@@ -1075,12 +1153,592 @@ class TestOptionDupHeal:
         assert report.healed == 0
 
 
+# ── options-tree foreign-month reassignment (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) ──
+
+
+_OPT_SERIES = "NSE_FNO__13__WEEK__0__ATM__CALL"
+
+
+def _opt_bar(*, side: str = "CE", ts: datetime, close: str = "105.00") -> OptionBar:
+    c = Decimal(close)  # a flat bar keeps the OHLC-ordering validator happy
+    return OptionBar(
+        timestamp=ts,
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=250,
+        open_interest=1200,
+        side=side,
+        strike=Decimal("17500.00"),
+        spot=Decimal("17480.57"),
+        iv=Decimal("0.1523"),
+    )
+
+
+def _opt_series_dir(lake: Path, *, partition_key: str = "NSE_FNO|13|WEEK|0|ATM|CALL") -> Path:
+    return lake / "options" / partition_key.replace("|", "__")
+
+
+def _poison_option_foreign(
+    lake: Path, *, partition_key: str = "NSE_FNO|13|WEEK|0|ATM|CALL"
+) -> tuple[Path, Path]:
+    """Canonical July + June seeded through the REAL writer, June raw-poisoned.
+
+    June then carries (a) an OVERLAP copy of the July CE key with a DRIFTED
+    close (canonical must win by REMOVAL, value asserted unchanged) and (b) a
+    pure-misplaced July PE row absent from canonical. Returns (june, july).
+    """
+    import polars as pl
+
+    writer = OptionParquetWriter(lake_root=lake)
+    writer.write(
+        partition_key=partition_key,
+        coordinate=_OPT_COORD,
+        bars=[_opt_bar(side="CE", ts=_ts(1, month=7, day=1), close="200.00")],
+    )
+    writer.write(
+        partition_key=partition_key,
+        coordinate=_OPT_COORD,
+        bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+    )
+    series_dir = _opt_series_dir(lake, partition_key=partition_key)
+    june = series_dir / "2024-06.parquet"
+    july = series_dir / "2024-07.parquet"
+    june_df = pl.read_parquet(june)
+    july_df = pl.read_parquet(july)
+    drifted_overlap = july_df[0:1].with_columns((pl.col("close") + 999.0).alias("close"))
+    misplaced = july_df[0:1].with_columns(pl.lit("PE").alias("side"), pl.lit(55.0).alias("close"))
+    pl.concat([june_df, drifted_overlap, misplaced]).write_parquet(june)
+    return june, july
+
+
+class TestOptionForeignHeal:
+    def test_option_reassign_moves_foreign_rows_home(self, tmp_path: Path) -> None:
+        """The end-to-end pin: overlap copy REMOVED (canonical value wins,
+        drifted close never restated), misplaced row REASSIGNED, source
+        cleaned, quarantine copy restorable, audit + log + stats exact."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        june, july = _poison_option_foreign(lake)
+        june_original = june.read_bytes()
+        audit = _FakeAudit()
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.foreign_rows == 2
+        assert finding.overlap_rows == 1
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned + scan.option_files_scanned,
+                mode="auto",
+                audit=audit,
+                recall=True,
+                now=_now,
+            )
+        assert report.healed == 1
+        assert report.errors == 0
+        assert report.recall is None  # NOTHING derives from options/
+        july_frame = pl.read_parquet(july).sort(["side", "timestamp"])
+        # BOTH keys home with CANONICAL values — the drifted overlap copy was
+        # REMOVED, never restated (keep-first at the destination).
+        assert july_frame["side"].to_list() == ["CE", "PE"]
+        assert july_frame["close"].to_list() == [200.00, 55.0]
+        june_frame = pl.read_parquet(june)
+        assert june_frame["side"].to_list() == ["CE"]
+        assert june_frame["timestamp"].to_list() == [_ts(0)]
+        quarantine = lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)
+        assert quarantine.read_bytes() == june_original
+        (action,) = report.actions
+        assert action.action == AUDIT_HEAL_REASSIGN
+        assert action.partition == f"options/{_OPT_SERIES}/2024-06.parquet"
+        assert action.moved == 2
+        assert action.conflicts == 0
+        assert action.kept == 1
+        assert action.dropped == 2
+        assert action.raw_hash_before is None  # uncatalogued tree
+        assert action.raw_hash_after is None
+        (line,) = audit.lines
+        assert line[0] == AUDIT_HEAL_REASSIGN
+        assert line[1] == f"options/{_OPT_SERIES}/2024-06.parquet"
+        payload = line[2]
+        assert payload is not None
+        assert payload["tree"] == "options"
+        assert payload["moved"] == 2
+        assert payload["added"] == 1  # the overlap copy added 0 (canonical won)
+        assert payload["months"] == ["2024-07"]
+        assert payload["kept"] == 1
+        assert payload["dropped_duplicates"] == 0
+        assert payload["dropped_removed"] == 2
+        reassigned = _events(logs, "lake_heal.rows_reassigned")
+        assert len(reassigned) == 1
+        assert reassigned[0]["tree"] == "options"
+        assert reassigned[0]["partition"] == f"options/{_OPT_SERIES}/2024-06.parquet"
+        assert reassigned[0]["moved"] == 2
+        assert reassigned[0]["added"] == 1
+        assert reassigned[0]["months"] == ["2024-07"]
+        assert reassigned[0]["conflicts"] == 0
+        stats = load_heal_stats(lake)
+        assert stats["healed_partitions_total"] == 1
+        assert stats["quarantined_files_total"] == 1
+
+    def test_option_reassign_creates_missing_canonical_sibling(self, tmp_path: Path) -> None:
+        """No July file exists — the moved row CREATES it through the writer path."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        series_dir = _opt_series_dir(lake)
+        june = series_dir / "2024-06.parquet"
+        june_df = pl.read_parquet(june)
+        misplaced = june_df[0:1].with_columns(
+            pl.lit(_ts(2, month=7, day=1)).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit(55.0).alias("close"),
+        )
+        pl.concat([june_df, misplaced]).write_parquet(june)
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.overlap_rows == 0  # missing sibling — pure misplacement
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1
+        july = series_dir / "2024-07.parquet"
+        assert july.exists()
+        july_frame = pl.read_parquet(july)
+        assert july_frame["timestamp"].to_list() == [_ts(2, month=7, day=1)]
+        assert july_frame["close"].to_list() == [55.0]
+        assert pl.read_parquet(june)["timestamp"].to_list() == [_ts(0)]
+
+    def test_option_wholly_foreign_file_quarantine_moved(self, tmp_path: Path) -> None:
+        """Every row foreign ⇒ source unlinked, rows home, kept=0; the series
+        dir is NOT pruned — the destination lives in it (the writer-level
+        prune arm is defensive, unit-tested at the writer)."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[
+                _opt_bar(side="CE", ts=_ts(0), close="100.00"),
+                _opt_bar(side="PE", ts=_ts(1), close="101.00"),
+            ],
+        )
+        series_dir = _opt_series_dir(lake)
+        june = series_dir / "2024-06.parquet"
+        df = pl.read_parquet(june)
+        shifted = df.with_columns((pl.col("timestamp") + pl.duration(days=30)).alias("timestamp"))
+        shifted.write_parquet(june)
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.foreign_rows == 2
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1
+        assert not june.exists()  # quarantine-MOVED away
+        assert series_dir.exists()  # the July destination lives in it
+        july = series_dir / "2024-07.parquet"
+        assert pl.read_parquet(july).height == 2
+        (action,) = report.actions
+        assert action.kept == 0
+        quarantine = lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)
+        assert quarantine.exists()
+
+    def test_option_reassign_crash_between_copy_and_remove_converges(self, tmp_path: Path) -> None:
+        """Twin-lake convergence: a crash AFTER copy-forward re-runs clean."""
+        import polars as pl
+
+        one_shot = tmp_path / "one-shot"
+        crashed = tmp_path / "crashed"
+        _poison_option_foreign(one_shot)
+        june_crashed, july_crashed = _poison_option_foreign(crashed)
+        # Simulate the crash on the twin: copy-forward ALREADY happened.
+        june_frame = pl.read_parquet(june_crashed)
+        foreign_rows = june_frame.filter(pl.col("timestamp") >= _ts(0, month=7, day=1))
+        OptionParquetWriter(lake_root=crashed).merge_partition_frame(july_crashed, foreign_rows)
+        for lake in (one_shot, crashed):
+            scan = scan_lake_invariants(lake)
+            assert len(scan.findings) == 1
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+            assert report.healed == 1
+        assert _tree_state(one_shot / "options") == _tree_state(crashed / "options")
+
+    def test_same_key_two_non_canonical_files(self, tmp_path: Path) -> None:
+        """G6: the same foreign key in TWO non-canonical files — the
+        path-ordered-FIRST copy wins at the destination, both sources
+        cleaned, a second sweep finds NOTHING (deterministic convergence)."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0, month=8, day=1), close="102.00")],
+        )
+        series_dir = _opt_series_dir(lake)
+        june = series_dir / "2024-06.parquet"
+        august = series_dir / "2024-08.parquet"
+        may_key_ts = _ts(3, month=5, day=1)
+        for path, close in ((june, 111.0), (august, 222.0)):
+            df = pl.read_parquet(path)
+            stray = df[0:1].with_columns(
+                pl.lit(may_key_ts).dt.replace_time_zone("UTC").alias("timestamp"),
+                pl.lit(close).alias("close"),
+            )
+            pl.concat([df, stray]).write_parquet(path)
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 2
+        may = series_dir / "2024-05.parquet"
+        may_frame = pl.read_parquet(may)
+        assert may_frame["timestamp"].to_list() == [may_key_ts]
+        assert may_frame["close"].to_list() == [111.0]  # path-ordered FIRST (June) won
+        assert pl.read_parquet(june)["timestamp"].to_list() == [_ts(0)]
+        assert pl.read_parquet(august)["timestamp"].to_list() == [_ts(0, month=8, day=1)]
+        rescan = scan_lake_invariants(lake)
+        assert rescan.findings == ()  # a second sweep finds NOTHING
+
+    def test_option_foreign_vanished_or_stale_skipped(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        series_dir = _opt_series_dir(lake)
+        clean = series_dir / "2024-06.parquet"
+        stale = OptionForeignMonthRows(
+            path=clean, series=_OPT_SERIES, year=2024, month=6, foreign_rows=1, overlap_rows=0
+        )
+        vanished = OptionForeignMonthRows(
+            path=series_dir / "2099-01.parquet",
+            series=_OPT_SERIES,
+            year=2099,
+            month=1,
+            foreign_rows=1,
+            overlap_rows=0,
+        )
+        report = heal_findings(
+            (stale, vanished), lake_root=lake, files_scanned=2, mode="auto", recall=False, now=_now
+        )
+        assert report.healed == 0
+        assert report.skipped == 2
+        assert report.errors == 0
+
+    def test_option_foreign_then_dup_same_file_single_quarantine(self, tmp_path: Path) -> None:
+        """G7: one file carries BOTH findings — foreign heals first (its
+        rewrite fully dedups), the dup heal reads changed=False, and exactly
+        ONE quarantine copy exists whose bytes == the ORIGINAL pre-heal."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        june = _opt_series_dir(lake) / "2024-06.parquet"
+        df = pl.read_parquet(june)
+        dup_copy = df[0:1].with_columns((pl.col("close") + 999.0).alias("close"))
+        misplaced = df[0:1].with_columns(
+            pl.lit(_ts(2, month=7, day=1)).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit("PE").alias("side"),
+        )
+        pl.concat([df, dup_copy, misplaced]).write_parquet(june)
+        original = june.read_bytes()
+        scan = scan_lake_invariants(lake)
+        assert {type(f).__name__ for f in scan.findings} == {
+            "OptionIntraFileDup",
+            "OptionForeignMonthRows",
+        }
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1
+        assert report.skipped == 1  # the dup finding read changed=False
+        assert [a.action for a in report.actions] == [AUDIT_HEAL_REASSIGN]
+        quarantined = list((lake / ".quarantine").rglob("*.parquet"))
+        assert len(quarantined) == 1  # exactly ONE copy — never a second write
+        assert quarantined[0].read_bytes() == original
+        healed = pl.read_parquet(june)
+        assert healed.height == 1  # dup collapsed by the SAME rewrite
+        assert healed["close"].to_list() == [100.0]  # first physical row won
+
+    def test_option_foreign_heal_changed_false_guard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The defensive convergence guard: a changed=False removal is a SKIP —
+        not counted, not audited, no quarantine tally."""
+        from brutex.data.option_parquet_writer import OptionHealResult
+
+        lake = tmp_path / "lake"
+        _poison_option_foreign(lake)
+        scan = scan_lake_invariants(lake)
+
+        def _abstain(self: OptionParquetWriter, dest: Path, **_kw: Any) -> OptionHealResult:
+            return OptionHealResult(
+                path=dest,
+                changed=False,
+                kept=3,
+                dropped_duplicates=0,
+                quarantined_original=None,
+                dropped_removed=0,
+            )
+
+        monkeypatch.setattr(OptionParquetWriter, "heal_partition", _abstain)
+        audit = _FakeAudit()
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                audit=audit,
+                recall=False,
+                now=_now,
+            )
+        assert report.healed == 0
+        assert report.skipped == 1
+        assert report.errors == 0
+        assert report.actions == ()
+        assert report.quarantine_root is None
+        assert AUDIT_HEAL_REASSIGN not in audit.actions()
+        assert _events(logs, "lake_heal.rows_reassigned") == []
+        assert load_heal_stats(lake) == {}
+
+    def test_option_foreign_error_isolated(self, tmp_path: Path) -> None:
+        """A corrupt source errors in ISOLATION; a sibling finding still heals."""
+        lake = tmp_path / "lake"
+        _poison_option_lake(lake)  # a healable dup in the CALL series (single file)
+        june, _july = _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        june.write_bytes(b"not a parquet file at all")  # corrupt AFTER the scan
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 1
+        assert report.healed == 1  # the option-dup sibling still healed
+        errors = _events(logs, "lake_heal.partition_error")
+        assert len(errors) == 1
+        assert errors[0]["finding"] == "OptionForeignMonthRows"
+
+    def test_lake_write_halt_propagates_from_option_merge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lake = tmp_path / "lake"
+        _poison_option_foreign(lake)
+        scan = scan_lake_invariants(lake)
+
+        def _halt(self: OptionParquetWriter, dest: Path, frame: Any) -> int:
+            raise LakeWriteHalt("disk_full")
+
+        monkeypatch.setattr(OptionParquetWriter, "merge_partition_frame", _halt)
+        with pytest.raises(LakeWriteHalt):
+            heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+
+    def test_option_naive_timestamp_rows_route_as_utc_and_heal(self, tmp_path: Path) -> None:
+        """G12: a hand-planted NAIVE column routes as-if-UTC and heals clean
+        (fresh destination — the union core never concats)."""
+        import polars as pl
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        june = lake / "options" / "SERIES" / "2024-06.parquet"
+        june.parent.mkdir(parents=True, exist_ok=True)
+        naive_home = datetime(2024, 6, 3, 4, 0)  # NO tzinfo
+        naive_foreign = datetime(2024, 7, 1, 4, 2)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "PE"], type=pa.string()),
+                    "timestamp": pa.array(
+                        [naive_home, naive_foreign],
+                        type=pa.timestamp("us"),  # NO tz
+                    ),
+                }
+            ),
+            june,
+        )
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1
+        assert report.errors == 0
+        july = june.parent / "2024-07.parquet"
+        assert pl.read_parquet(july)["timestamp"].to_list() == [naive_foreign]
+        assert pl.read_parquet(june)["timestamp"].to_list() == [naive_home]
+
+    def test_option_naive_vs_aware_destination_isolated_error(self, tmp_path: Path) -> None:
+        """G12 companion: a naive source vs a tz-AWARE existing destination —
+        the polars schema error is an ISOLATED counted error (never a silent
+        cast), and the copy-forward-first order leaves the source untouched."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="SERIES",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(1, month=7, day=1), close="200.00")],
+        )
+        june = lake / "options" / "SERIES" / "2024-06.parquet"
+        naive_home = datetime(2024, 6, 3, 4, 0)
+        naive_foreign = datetime(2024, 7, 1, 4, 2)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "PE"], type=pa.string()),
+                    "timestamp": pa.array([naive_home, naive_foreign], type=pa.timestamp("us")),
+                }
+            ),
+            june,
+        )
+        june_bytes = june.read_bytes()
+        scan = scan_lake_invariants(lake)
+        foreigns = [f for f in scan.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        with capture_logs() as logs:
+            report = heal_findings(
+                foreigns,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 1
+        assert report.healed == 0
+        assert june.read_bytes() == june_bytes  # copy-forward failed FIRST — untouched
+        errors = _events(logs, "lake_heal.partition_error")
+        assert len(errors) == 1
+
+    def test_option_null_side_moved_null_ts_abstains(self, tmp_path: Path) -> None:
+        """M15 (the routing-law pin): a null-SIDE row with a foreign ts IS
+        moved (scanner count == healable set — no permanent finding); a
+        null-TS row stays home untouched; the second sweep is clean."""
+        import polars as pl
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        june = lake / "options" / "SERIES" / "2024-06.parquet"
+        june.parent.mkdir(parents=True, exist_ok=True)
+        july_ts = _ts(2, month=7, day=1)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", None, "PE"], type=pa.string()),
+                    "timestamp": pa.array(
+                        [_ts(0), july_ts, None], type=pa.timestamp("us", tz="UTC")
+                    ),
+                }
+            ),
+            june,
+        )
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.foreign_rows == 1
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1
+        july = june.parent / "2024-07.parquet"
+        july_frame = pl.read_parquet(july)
+        assert july_frame["side"].to_list() == [None]  # the null side rode verbatim
+        assert july_frame["timestamp"].to_list() == [july_ts]
+        june_frame = pl.read_parquet(june).sort("side")
+        assert june_frame["side"].to_list() == ["CE", "PE"]  # null-TS row stayed home
+        rescan = scan_lake_invariants(lake)
+        assert rescan.findings == ()  # the second sweep is clean
+
+
 # ── heal order + idempotent re-run + failure envelopes ─────────────────────
 
 
 class TestBatchOrderAndIdempotence:
     def _seed_kitchen_sink(self, lake: Path) -> None:
-        """All four finding classes in ONE lake."""
+        """All five finding classes in ONE lake."""
         # Drift: legacy NSE-M&M vs canonical M&M.
         _write_spot(lake, [_bar(_ts(0), close="100.00")], segment="CASH", symbol="M&M")
         _poison(
@@ -1098,14 +1756,16 @@ class TestBatchOrderAndIdempotence:
             _dest(lake, symbol="BANKNIFTY", month=6),
             [(_ts(0), 200.0, 10), (_ts(0), 999.0, 11), (_ts(1), 201.0, 12)],
         )
-        # Option dup.
+        # Option dup (the CALL series).
         _poison_option_lake(lake)
+        # Option foreign (a DISTINCT PUT series — DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
+        _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
 
     def test_heal_order_drift_foreign_dup_option(self, tmp_path: Path) -> None:
         lake = tmp_path / "lake"
         self._seed_kitchen_sink(lake)
         scan = scan_lake_invariants(lake)
-        assert len(scan.findings) == 4
+        assert len(scan.findings) == 5
         report = heal_findings(
             scan.findings,
             lake_root=lake,
@@ -1114,15 +1774,53 @@ class TestBatchOrderAndIdempotence:
             recall=False,
             now=_now,
         )
-        assert report.healed == 4
+        assert report.healed == 5
         assert [a.action for a in report.actions] == [
             AUDIT_HEAL_DRIFT_MERGE,
             AUDIT_HEAL_REASSIGN,
             AUDIT_HEAL_DEDUP,
+            AUDIT_HEAL_REASSIGN,
             AUDIT_HEAL_DEDUP,
         ]
+        assert report.actions[1].partition.startswith("bars/")
         assert report.actions[2].partition == "bars/NSE/INDEX/BANKNIFTY/1minute/2024/06.parquet"
-        assert report.actions[3].partition.startswith("options/")
+        assert report.actions[3].partition == (
+            "options/NSE_FNO__13__WEEK__0__ATM__PUT/2024-06.parquet"
+        )
+        assert report.actions[4].partition.startswith("options/NSE_FNO__13__WEEK__0__ATM__CALL/")
+
+    def test_order_findings_five_class_law(self, tmp_path: Path) -> None:
+        """Direct unit: option-foreign sorts between dup and option-dup, by path."""
+        coords = PartitionCoords(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", year=2024, month=6
+        )
+        option_dup = OptionIntraFileDup(
+            path=tmp_path / "options" / "A" / "2024-06.parquet",
+            series="A",
+            physical_rows=2,
+            unique_keys=1,
+        )
+        option_foreign_b = OptionForeignMonthRows(
+            path=tmp_path / "options" / "B" / "2024-06.parquet",
+            series="B",
+            year=2024,
+            month=6,
+            foreign_rows=1,
+            overlap_rows=0,
+        )
+        option_foreign_a = OptionForeignMonthRows(
+            path=tmp_path / "options" / "A" / "2024-07.parquet",
+            series="A",
+            year=2024,
+            month=7,
+            foreign_rows=1,
+            overlap_rows=0,
+        )
+        bar_dup = IntraFileDup(path=Path("x"), coords=coords, physical_rows=2, unique_keys=1)
+        ordered = lake_heal._order_findings(
+            (option_dup, option_foreign_b, option_foreign_a, bar_dup)
+        )
+        assert list(ordered) == [bar_dup, option_foreign_a, option_foreign_b, option_dup]
 
     def test_idempotent_second_run_no_actions(self, tmp_path: Path) -> None:
         """Spec-mandated: the re-scan of a healed lake finds ZERO findings and
@@ -1728,6 +2426,80 @@ class TestHealAfterPull:
         assert _stored_frame(in_span)["timestamp"].to_list() == [_ts(0)]
         assert out_of_span.read_bytes() == out_bytes  # out of scope — untouched
 
+    def test_heal_after_pull_default_leaves_options_poison_untouched(self, tmp_path: Path) -> None:
+        """The default (``include_options=False``) byte-preserves the options
+        tree — every existing caller unchanged."""
+        lake = tmp_path / "lake"
+        june, _july = _poison_option_foreign(lake)
+        june_bytes = june.read_bytes()
+        report = heal_after_pull(
+            lake_root=lake,
+            targets=[("NSE", "INDEX", "NIFTY")],
+            start=date(2024, 6, 1),
+            end=date(2024, 7, 1),
+            scope="pull:t3",
+        )
+        assert report.findings == 0
+        assert june.read_bytes() == june_bytes
+
+    def test_heal_after_pull_include_options_heals_in_span(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``include_options=True``: a months-in-scope poisoned options file is
+        healed; ``option_files_scanned`` folds into the mass-rail DENOMINATOR;
+        the ``post_pull_scan`` event carries ``option_files``
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        june, july = _poison_option_foreign(lake)
+        captured: list[dict[str, Any]] = []
+        real_heal_findings = lake_heal.heal_findings
+
+        def _spy(findings: Any, **kwargs: Any) -> Any:
+            captured.append(dict(kwargs))
+            return real_heal_findings(findings, **kwargs)
+
+        monkeypatch.setattr(lake_heal, "heal_findings", _spy)
+        with capture_logs() as logs:
+            report = heal_after_pull(
+                lake_root=lake,
+                targets=[("NSE", "FNO", "NSE-NIFTY-27Jun24-24000-CE")],
+                start=date(2024, 6, 1),
+                end=date(2024, 7, 1),
+                scope="pull:t4",
+                include_options=True,
+            )
+        assert report.healed == 1
+        july_frame = pl.read_parquet(july).sort(["side", "timestamp"])
+        assert july_frame["side"].to_list() == ["CE", "PE"]  # reassigned home
+        assert pl.read_parquet(june).height == 1  # source cleaned
+        # The denominator folds the 2 scanned option files (0 bars files).
+        assert captured[0]["files_scanned"] == 2
+        (scan_event,) = _events(logs, "lake_heal.post_pull_scan")
+        assert scan_event["option_files"] == 2
+        assert scan_event["files"] == 2
+        assert scan_event["findings"] == 1
+
+    def test_heal_after_pull_include_options_is_month_bounded(self, tmp_path: Path) -> None:
+        """An options poison OUTSIDE the pulled span is not even READ
+        (bytes + mtime pinned) — the bounded law, filename-parsed."""
+        lake = tmp_path / "lake"
+        june, _july = _poison_option_foreign(lake)
+        before_bytes = june.read_bytes()
+        before_mtime = june.stat().st_mtime_ns
+        report = heal_after_pull(
+            lake_root=lake,
+            targets=[("NSE", "FNO", "NSE-NIFTY-27Jun24-24000-CE")],
+            start=date(2023, 1, 5),
+            end=date(2023, 1, 20),
+            scope="pull:t5",
+            include_options=True,
+        )
+        assert report.findings == 0
+        assert june.read_bytes() == before_bytes
+        assert june.stat().st_mtime_ns == before_mtime
+
 
 class TestHealAfterReconcile:
     def test_clean_reconcile_returns_none(self, tmp_path: Path) -> None:
@@ -1870,6 +2642,24 @@ class TestRunStartupSweep:
         sentinel.write_text("{corrupt", encoding="utf-8")
         assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
 
+    def test_startup_sweep_heals_option_foreign_and_stamps(self, tmp_path: Path) -> None:
+        """G9(a): an options-foreign poison rides the DEFAULT L3 sweep
+        automatically (``include_options=True`` default) — healed + sentinel
+        stamped on the clean completion (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        june, july = _poison_option_foreign(lake)
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.healed == 1
+        assert pl.read_parquet(july).height == 2  # both keys home
+        assert pl.read_parquet(june).height == 1  # source cleaned
+        assert load_last_sweep(lake) is not None  # stamped — genuinely complete
+        again = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert again.ran is False  # token match over the healed tree
+
 
 class TestSentinelStampGate:
     """The sentinel stamps ONLY a genuinely-completed auto sweep (fix-pass).
@@ -1969,6 +2759,32 @@ class TestSentinelStampGate:
         assert load_last_sweep(lake) is None
         (skip,) = self._skip_events(logs)
         assert skip["reason"] == "unhealed_findings"
+
+    def test_errored_option_foreign_sweep_skips_sentinel_and_reattempts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """G9(b): an ERRORED options batch must NOT stamp the sentinel — the
+        next boot re-attempts instead of token-matching past live poison
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _poison_option_foreign(lake)
+
+        def _boom(self: OptionParquetWriter, dest: Path) -> Any:
+            raise OptionWriterError("simulated corrupt option source")
+
+        monkeypatch.setattr(OptionParquetWriter, "read_partition_frame", _boom)
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.errors == 1
+        assert load_last_sweep(lake) is None  # NOT stamped
+        (skip,) = self._skip_events(logs)
+        assert skip["reason"] == "heal_errors"
+        # The next boot re-attempts (no sentinel → no token match).
+        second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is True
 
 
 class TestStartupSweeper:

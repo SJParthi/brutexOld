@@ -46,6 +46,12 @@ Audit/alert are INJECTED seams (:class:`LakeAuditSink` Protocol + callbacks) so
 ``brutex/data`` gains no ``orchestrator``/``notifications`` module-level edge;
 the one production convenience :func:`open_lake_heal_audit` uses a
 function-local import (the ``window_ledger_store`` precedent).
+
+**Heal order** (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 extends the original 4-class
+order): drift → foreign → dup → option-foreign → option-dup, by path within
+each class. **L1 honesty:** the reconcile-piggyback heal is structurally N/A
+for ``options/`` — the reconcile walks the CATALOG, and the options tree is
+uncatalogued by design.
 """
 
 from __future__ import annotations
@@ -82,8 +88,10 @@ from brutex.data.lake_invariants import (
     LakeFinding,
     LakeScanReport,
     LegacyKeyDrift,
+    OptionForeignMonthRows,
     OptionIntraFileDup,
     scan_lake_invariants,
+    utc_aware,
 )
 from brutex.data.lake_manifest import invalidate_manifest
 from brutex.data.models import CandleBar
@@ -105,6 +113,8 @@ from brutex.data.timeframe_materialize import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover
+    import polars as pl
+
     from brutex.data.catalog_reconcile import ReconcileResult
 
 _LOG = structlog.get_logger("brutex.data.lake_heal")
@@ -391,12 +401,17 @@ def _audit_append(
 
 
 def _order_findings(findings: Sequence[LakeFinding]) -> tuple[LakeFinding, ...]:
-    """Deterministic heal order: drift → foreign → dup → option-dup, by path.
+    """Deterministic heal order: drift → foreign → dup → option-foreign → option-dup, by path.
 
     A drift merge changes which files exist, so it heals FIRST; the later
     per-partition healers find consumed paths gone and skip them (counted
     ``skipped``, re-found next scan if still relevant — idempotent
-    convergence, never a double-heal).
+    convergence, never a double-heal). Option-foreign heals BEFORE option-dup
+    for the same reason bars foreign precedes dup: the reassignment's
+    remove-rewrite also collapses the source file's dups, so a same-file
+    ``OptionIntraFileDup`` afterwards reads ``changed=False`` → counted
+    ``skipped``, never a double-heal and never a second quarantine copy
+    (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
     """
 
     def key(finding: LakeFinding) -> tuple[int, str]:
@@ -406,7 +421,9 @@ def _order_findings(findings: Sequence[LakeFinding]) -> tuple[LakeFinding, ...]:
             return (1, str(finding.path))
         if isinstance(finding, IntraFileDup):
             return (2, str(finding.path))
-        return (3, str(finding.path))
+        if isinstance(finding, OptionForeignMonthRows):
+            return (3, str(finding.path))
+        return (4, str(finding.path))
 
     return tuple(sorted(findings, key=key))
 
@@ -853,6 +870,122 @@ def _heal_option_dup(finding: OptionIntraFileDup, state: _BatchState) -> bool:
     return True  # no catalog (the options tree is not catalogued), no recall
 
 
+def _option_foreign_frame(home: tuple[int, int], frame: pl.DataFrame) -> pl.DataFrame:
+    """The keep-first-unique foreign-month rows of one raw options frame (all columns).
+
+    Keep-first ``(side, timestamp)`` dedup BEFORE the split (a physically
+    duplicated foreign key moves ONCE, first physical row wins — mirrors
+    ``read_partition_bars``'s collapse on the bars path), then a Python row
+    mask: foreign iff the timestamp is a real datetime AND
+    ``partition_for_timestamp(utc_aware(ts)) != home``. A null timestamp
+    abstains (kept home, never moved) — the bars null-abstain twin. Side is
+    NEVER consulted (the timestamp-only routing law,
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
+    """
+    import polars as pl
+
+    deduped = frame.unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
+    mask = [
+        isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
+        for ts in deduped.get_column("timestamp").to_list()
+    ]
+    return deduped.filter(pl.Series(mask))
+
+
+def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) -> bool:
+    """Reassign one options-tree file's foreign-month rows home; ``True`` iff rows moved.
+
+    The options twin of :func:`_heal_foreign` — SAME crash-safe order:
+    copy-forward FIRST (keep-first union into the canonical month siblings via
+    :meth:`~brutex.data.option_parquet_writer.OptionParquetWriter.merge_partition_frame`
+    — an existing canonical ``(side, ts)`` key WINS, the foreign copy is then
+    simply REMOVED; an absent key is added = REASSIGNED), remove SECOND
+    (:meth:`~brutex.data.option_parquet_writer.OptionParquetWriter.heal_partition`
+    with ``remove_keys`` built from the SAME consistent read's RAW stored
+    values). A crash between the two leaves the rows in BOTH files; the
+    finding re-appears next scan and the keep-first union converges
+    (idempotent). Locks are taken per partition SEQUENTIALLY (read source →
+    release; merge sibling → release; heal source) — never two partitions
+    locked at once, no deadlock. Routing is timestamp-only through
+    :func:`~brutex.data.lake_invariants.utc_aware` (a hand-planted naive
+    column routes as-if-UTC instead of crashing the batch —
+    ``PartitionError`` is NOT in ``_PER_FINDING_HEAL_ERRORS``); removal keys
+    are the RAW stored tuples. A wholly-foreign file is quarantine-MOVED by
+    the writer. No catalog (the options tree is uncatalogued), no
+    ``state.touch`` (NOTHING derives from ``options/`` — recall stays
+    ``None``), ``conflicts=0`` honestly (option vendor-drift detection is the
+    writer's own deferred follow-up — no ``BarConflict`` twin exists).
+    STRICTLY row-removing/row-reassigning — moved rows keep their stored
+    column values verbatim.
+    """
+    import polars as pl
+
+    src = finding.path
+    if not src.exists():
+        return False  # consumed earlier / vanished — skipped
+    frame = state.option_writer.read_partition_frame(src)  # OptionWriterError → isolated
+    home = (finding.year, finding.month)
+    foreign = _option_foreign_frame(home, frame)  # keep-first unique foreign rows, all cols
+    if foreign.height == 0:
+        return False  # stale finding (a prior crashed run) — skipped
+    sides = foreign.get_column("side").to_list()
+    stamps = foreign.get_column("timestamp").to_list()
+    keys = frozenset(zip(sides, stamps, strict=True))  # RAW stored values
+    routes = [partition_for_timestamp(utc_aware(ts)) for ts in stamps]
+    added = 0
+    target_months = sorted(set(routes))
+    for target in target_months:
+        group = foreign.filter(pl.Series([r == target for r in routes]))
+        dest = src.parent / f"{target[0]:04d}-{target[1]:02d}.parquet"
+        added += state.option_writer.merge_partition_frame(dest, group)
+    result = state.option_writer.heal_partition(
+        src, remove_keys=keys, quarantine_to=state.quarantine_path(src)
+    )
+    if not result.changed:
+        return False  # defensive convergence guard (the _heal_foreign symmetry)
+    state.quarantined_files += 1
+    partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{src.name}"
+    months_str = [f"{y:04d}-{m:02d}" for y, m in target_months]
+    _LOG.warning(
+        "lake_heal.rows_reassigned",  # the SAME pinned event as bars
+        partition=partition,
+        tree="options",
+        moved=len(keys),
+        added=added,
+        months=months_str,
+        conflicts=0,
+    )
+    state.actions.append(
+        HealAction(
+            action=AUDIT_HEAL_REASSIGN,
+            partition=partition,
+            kept=result.kept,
+            dropped=result.dropped_duplicates + result.dropped_removed,
+            moved=len(keys),
+            conflicts=0,
+            raw_hash_before=None,  # uncatalogued — the _heal_option_dup precedent
+            raw_hash_after=None,
+            quarantine_path=str(state.quarantine_path(src)),
+        )
+    )
+    _audit_append(
+        state.audit,
+        action=AUDIT_HEAL_REASSIGN,
+        subject=partition,
+        payload={
+            "tree": "options",  # the _heal_option_dup convention
+            "moved": len(keys),
+            "added": added,
+            "months": months_str,
+            "kept": result.kept,
+            "dropped_duplicates": result.dropped_duplicates,
+            "dropped_removed": result.dropped_removed,
+            "quarantine_path": str(state.quarantine_path(src)),
+        },
+    )
+    return True
+
+
 def _heal_one(finding: LakeFinding, state: _BatchState) -> bool:
     """Dispatch one finding to its heal algorithm; ``True`` iff it healed."""
     if isinstance(finding, LegacyKeyDrift):
@@ -861,6 +994,8 @@ def _heal_one(finding: LakeFinding, state: _BatchState) -> bool:
         return _heal_foreign(finding, state)
     if isinstance(finding, IntraFileDup):
         return _heal_dup(finding, state)
+    if isinstance(finding, OptionForeignMonthRows):
+        return _heal_option_foreign(finding, state)
     return _heal_option_dup(finding, state)
 
 
@@ -1146,7 +1281,8 @@ def heal_findings(
     """Heal one batch of scanner *findings* — the ONE heal chokepoint.
 
     Order: LegacyKeyDrift first (dir merges change which files exist), then
-    ForeignMonthRows (reassignment), then IntraFileDup, then OptionIntraFileDup
+    ForeignMonthRows (reassignment), then IntraFileDup, then
+    OptionForeignMonthRows (options reassignment), then OptionIntraFileDup
     — sorted by path within each class. Observe mode short-circuits with ZERO
     file mutation of any kind (no quarantine dir, no locks, no catalog writes,
     no stats bump — byte-pinned); the mass-heal rail refuses a
@@ -1329,6 +1465,7 @@ def heal_after_pull(
     audit: LakeAuditSink | None = None,
     on_report: Callable[[HealReport], None] | None = None,
     on_healed: Callable[[], None] | None = None,
+    include_options: bool = False,
 ) -> HealReport:
     """L2 post-pull heal: scan the pulled coordinates × span months, then heal.
 
@@ -1336,8 +1473,15 @@ def heal_after_pull(
     UTC months the pulled IST span ``[start, end)`` touches
     (:func:`~brutex.data.spot_daily_resample.ist_span_partition_months` — the
     ±1-day pad already covers the midnight-IST 1day straddle). Options tree
-    excluded (a spot/F&O pull never writes it). Runs BEFORE the pull's own
-    daily derive at the wiring seams, so the derive reads clean 1-minute.
+    excluded by default; the F&O seam opts in (``include_options=True``,
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) — a bounded, months-scoped
+    (filename-parsed, zero reads out of scope) census+heal of the legacy
+    expired-options table, run ONCE (not per target — the whole tree would
+    otherwise be walked O(targets) times; no current production pull WRITES
+    ``options/``, so this is opportunistic — the always-on coverage is L3).
+    Its ``option_files_scanned`` folds into the mass-heal denominator. Runs
+    BEFORE the pull's own daily derive at the wiring seams, so the derive
+    reads clean 1-minute.
 
     Parameters
     ----------
@@ -1351,6 +1495,9 @@ def heal_after_pull(
         A log/alert token, e.g. ``f"pull:{pull_id}"``.
     catalog, audit, on_report, on_healed
         Forwarded to :func:`heal_findings`.
+    include_options
+        ALSO scan+heal the ``options/`` tree, bounded to the span months by
+        FILENAME (default ``False`` — every existing caller byte-preserved).
 
     Returns
     -------
@@ -1372,6 +1519,16 @@ def heal_after_pull(
         )
         findings.extend(scan.findings)
         files_scanned += scan.files_scanned
+    option_files = 0
+    if include_options:
+        option_scan = scan_lake_invariants(
+            lake_root, months=months, include_bars=False, include_options=True
+        )
+        findings.extend(option_scan.findings)
+        option_files = option_scan.option_files_scanned
+        # An include_bars=False scan reports files_scanned == 0 — folded anyway
+        # for form; the addition puts option files in the mass-rail DENOMINATOR.
+        files_scanned += option_scan.files_scanned + option_files
     _LOG.info(
         "lake_heal.post_pull_scan",
         scope=scope,
@@ -1379,6 +1536,7 @@ def heal_after_pull(
         months=len(months),
         files=files_scanned,
         findings=len(findings),
+        option_files=option_files,
     )
     return heal_findings(
         findings,
