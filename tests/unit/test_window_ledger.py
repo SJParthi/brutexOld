@@ -1915,3 +1915,28 @@ class TestDegradedOldWindowInteraction:
         rec = ledger.records()[0]
         assert rec.last_error == "ALL_FILTERED"  # the demotion reason, never the stamp
         assert not is_expired_window_settle_reason(rec.last_error)
+
+
+class TestLedgerRecordRow:
+    """``ledger_record_row`` — the ONE row-shape source (DEC-SUSPICION-SWEEP-FIXES-001 D3)."""
+
+    def test_to_rows_delegates_to_the_module_function(self) -> None:
+        """``to_rows()`` equals a per-record ``ledger_record_row`` projection —
+        so the /db grid's cached projection can never drift from the store shape."""
+        from brutex.data.window_ledger import ledger_record_row
+
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            bars_net_new=3,
+            now=_NOW,
+        )
+        records = ledger.records()
+        assert ledger.to_rows() == [ledger_record_row(r) for r in records]
+        row = ledger_record_row(records[0])
+        assert len(row) == 14
+        assert row[0] == records[0].market
+        assert row[13] == 3  # bars_net_new is the LAST field (back-compat append order)
