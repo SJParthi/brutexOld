@@ -192,13 +192,17 @@ def test_worker_thread_reenters_while_orchestrator_holds(tmp_path: Path) -> None
 
 def test_nested_body_raise_still_balances_depth(tmp_path: Path) -> None:
     """A raising nested block decrements its depth; the outer release still frees."""
-    with pytest.raises(RuntimeError, match="boom"), derive_write_lock(tmp_path):
-        with derive_write_lock(tmp_path):
-            _boom()
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        derive_write_lock(tmp_path),
+        derive_write_lock(tmp_path),
+    ):
+        _boom()
     assert derive_in_progress(tmp_path) is False
     # Reusable afterwards (no stale depth entry wedging future acquires).
     with derive_write_lock(tmp_path, timeout_seconds=0.05):
         assert derive_in_progress(tmp_path) is True
+
 
 def test_outer_exit_with_live_nested_holder_keeps_registry_balanced(tmp_path: Path) -> None:
     """DEFENSIVE branch: the outer holder exiting while a nested holder is still
