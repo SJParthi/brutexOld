@@ -25,6 +25,15 @@ month-partition lake (identical to the spot
 (same ``(side, ts)`` with different OHLCV) is deferred — existing rows win on
 merge; the dedup index prevents in-run drift, cross-run drift is a tracked
 follow-up.
+
+The lake healer's option-tree primitives live here too
+(DEC-LAKE-HEAL-001 dedup; DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 foreign-row
+reassignment): :meth:`OptionParquetWriter.heal_partition` (keep-first dedup +
+RAW keyed removal + the wholly-removed quarantine-MOVE),
+:meth:`OptionParquetWriter.read_partition_frame` (the healer's truthful raw
+consistent read) and :meth:`OptionParquetWriter.merge_partition_frame` (the
+reassignment's keep-first write-home entry) — all through the SAME lock stack
+as :meth:`OptionParquetWriter.write`.
 """
 
 from __future__ import annotations
