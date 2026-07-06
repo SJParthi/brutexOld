@@ -1,9 +1,14 @@
-"""Unit tests for the COMMON hardware-envelope module (DEC-HARDWARE-ENVELOPE-001).
+"""Unit tests for the COMMON CPU hardware-envelope module (DEC-HARDWARE-ENVELOPE-001).
 
 100% line + branch of :mod:`brutex.config.hardware_envelope` — every detection
-cascade (macOS / Linux / fallback), every probe failure mode, and every sizing
-helper, all via dependency injection so the branches are deterministic on a
-Linux CI box that is neither an M4 Pro nor able to run ``sysctl``.
+cascade (macOS / Linux / fallback), every probe failure mode, and every CPU
+sizing helper, all via dependency injection so the branches are deterministic
+on a Linux CI box that is neither an M4 Pro nor able to run ``sysctl``.
+
+RAM detection + RAM-scaled budgets are OWNED by the sibling
+:mod:`brutex.hardware_envelope` (DEC-RAM-BUDGETS-001, MIGRATION.md #1360) and
+are tested in ``tests/unit/test_hardware_envelope.py`` — the delegation pin
+below guards the one-source-of-truth split.
 """
 
 from __future__ import annotations
@@ -17,7 +22,43 @@ from brutex.config import hardware_envelope as hw
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Delegation pin — RAM budgets live in brutex.hardware_envelope, NOT here
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRamDelegationPin:
+    def test_config_module_defines_no_ram_surface(self) -> None:
+        """The contradictory RAM half must never come back (one source of truth).
+
+        An earlier draft duplicated a ``memory_budget_bytes`` here with
+        DIFFERENT semantics (available-RAM-preferring, floor-clamped,
+        silent-ignore fraction override) from the authoritative
+        :func:`brutex.hardware_envelope.memory_budget_bytes` (total-RAM,
+        floor-only-on-undetected, fail-LOUD override). This pin fails if the
+        duplicate surface reappears.
+        """
+        for name in (
+            "memory_budget_bytes",
+            "_resolve_fraction",
+            "MEM_FRACTION_ENV",
+            "DEFAULT_MEMORY_FLOOR_BYTES",
+            "_read_meminfo",
+        ):
+            assert not hasattr(hw, name), f"RAM surface leaked back into config leaf: {name}"
+
+    def test_authoritative_ram_module_is_importable(self) -> None:
+        from brutex.hardware_envelope import detect_total_ram_bytes, memory_budget_bytes
+
+        assert callable(memory_budget_bytes)
+        assert callable(detect_total_ram_bytes)
+
+    def test_envelope_has_no_ram_fields(self) -> None:
+        env = hw.envelope_from({"logical_cores": 2})
+        assert not hasattr(env, "total_ram_bytes")
+        assert not hasattr(env, "available_ram_bytes")
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -31,9 +72,9 @@ def _proc(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
 
 class TestRunSysctlInt:
     def test_default_runner_returns_none_or_int(self) -> None:
-        # On Linux CI ``sysctl -n hw.memsize`` is absent/incompatible → None; on a
-        # Mac it is a positive int. Either way exercises the DEFAULT runner path.
-        result = hw._run_sysctl_int("hw.memsize")
+        # On Linux CI ``sysctl -n hw.logicalcpu`` is absent/incompatible → None;
+        # on a Mac it is a positive int. Either way exercises the DEFAULT runner path.
+        result = hw._run_sysctl_int("hw.logicalcpu")
         assert result is None or (isinstance(result, int) and result > 0)
 
     def test_parses_positive_int(self) -> None:
@@ -91,36 +132,6 @@ class TestSchedAffinity:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# _read_meminfo
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestReadMeminfo:
-    def test_parses_total_and_available(self, tmp_path: Path) -> None:
-        p = tmp_path / "meminfo"
-        p.write_text(
-            "MemTotal:       16305672 kB\nMemFree:          123 kB\nMemAvailable:    8000000 kB\n",
-            encoding="utf-8",
-        )
-        out = hw._read_meminfo(p)
-        assert out == {"MemTotal": 16305672 * 1024, "MemAvailable": 8000000 * 1024}
-
-    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
-        assert hw._read_meminfo(tmp_path / "nope") == {}
-
-    def test_malformed_lines_skipped(self, tmp_path: Path) -> None:
-        p = tmp_path / "meminfo"
-        # a no-colon line, a wanted key with no numeric field, a non-int field.
-        p.write_text("garbage line\nMemTotal:\nMemAvailable: notanumber kB\n", encoding="utf-8")
-        assert hw._read_meminfo(p) == {}
-
-    def test_default_path_real(self) -> None:
-        # /proc/meminfo on Linux → populated; elsewhere {} — exercises the default.
-        out = hw._read_meminfo()
-        assert isinstance(out, dict)
-
-
-# ────────────────────────────────────────────────────────────────────────
 # detect_envelope — macOS / Linux / fallback cascades
 # ────────────────────────────────────────────────────────────────────────
 
@@ -141,7 +152,6 @@ class TestDetectMacos:
                     "hw.physicalcpu": 14,
                     "hw.perflevel0.logicalcpu": 10,
                     "hw.perflevel1.logicalcpu": 4,
-                    "hw.memsize": 48 * 1024**3,
                 }
             ),
         )
@@ -149,8 +159,6 @@ class TestDetectMacos:
         assert env.physical_cores == 14
         assert env.performance_cores == 10
         assert env.efficiency_cores == 4
-        assert env.total_ram_bytes == 48 * 1024**3
-        assert env.available_ram_bytes == 0
         assert env.source == "macos_sysctl"
 
     def test_perf_present_eff_missing(self) -> None:
@@ -176,7 +184,6 @@ class TestDetectMacos:
         assert env.performance_cores == 6
         assert env.efficiency_cores == 0
         assert env.physical_cores == 6  # physical absent → logical
-        assert env.total_ram_bytes == 0
 
     def test_logical_absent_falls_back_to_cpu_count(self) -> None:
         env = hw.detect_envelope(
@@ -188,18 +195,15 @@ class TestDetectMacos:
 
 
 class TestDetectLinux:
-    def test_affinity_and_meminfo(self) -> None:
+    def test_affinity_sizes_logical(self) -> None:
         env = hw.detect_envelope(
             platform_system="Linux",
             affinity_fn=lambda _pid: {0, 1, 2, 3},
-            meminfo_fn=lambda: {"MemTotal": 100, "MemAvailable": 40},
         )
         assert env.logical_cores == 4
         assert env.physical_cores == 4
         assert env.performance_cores == 4
         assert env.efficiency_cores == 0
-        assert env.total_ram_bytes == 100
-        assert env.available_ram_bytes == 40
         assert env.source == "linux"
 
     def test_no_affinity_falls_back(self) -> None:
@@ -210,14 +214,11 @@ class TestDetectLinux:
             platform_system="Linux",
             affinity_fn=_raise,
             cpu_count_fn=lambda: 5,
-            meminfo_fn=lambda: {},
         )
         assert env.logical_cores == 5
-        assert env.total_ram_bytes == 0
-        assert env.available_ram_bytes == 0
 
     def test_real_default_probes(self) -> None:
-        # No probe injection → real _sched_affinity + _read_meminfo defaults.
+        # No probe injection → real _sched_affinity default.
         env = hw.detect_envelope(platform_system="Linux")
         assert env.logical_cores >= 1
         assert env.source == "linux"
@@ -230,7 +231,6 @@ class TestDetectFallback:
         assert env.physical_cores == 4
         assert env.performance_cores == 4
         assert env.efficiency_cores == 0
-        assert env.total_ram_bytes == 0
         assert env.source == "fallback"
 
     def test_cpu_count_none_floors_to_one(self) -> None:
@@ -260,8 +260,6 @@ class TestEnvelopeFrom:
                 "physical_cores": 14,
                 "performance_cores": 10,
                 "efficiency_cores": 4,
-                "total_ram_bytes": 100,
-                "available_ram_bytes": 40,
                 "source": "test",
             }
         )
@@ -273,7 +271,6 @@ class TestEnvelopeFrom:
         assert env.physical_cores == 8
         assert env.performance_cores == 8
         assert env.efficiency_cores == 0
-        assert env.total_ram_bytes == 0
         assert env.source == "override"
 
 
@@ -371,69 +368,3 @@ class TestLibraryThreadBudget:
     def test_uses_cached_envelope(self) -> None:
         hw.reset_envelope_cache()
         assert hw.library_thread_budget({}, 2) >= 1
-
-
-# ────────────────────────────────────────────────────────────────────────
-# memory_budget_bytes + _resolve_fraction
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestMemoryBudget:
-    def test_available_preferred(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 1000, "available_ram_bytes": 400})
-        assert hw.memory_budget_bytes({}, fraction=0.5, floor=1, envelope=env) == 200
-
-    def test_falls_back_to_total_when_no_available(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 1000, "available_ram_bytes": 0})
-        assert hw.memory_budget_bytes({}, fraction=0.5, floor=1, envelope=env) == 500
-
-    def test_undetected_ram_returns_floor(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 0, "available_ram_bytes": 0})
-        assert hw.memory_budget_bytes({}, fraction=0.5, floor=777, envelope=env) == 777
-
-    def test_divided_by_workers(self) -> None:
-        env = hw.envelope_from({"total_ram_bytes": 1000, "available_ram_bytes": 1000})
-        assert hw.memory_budget_bytes({}, fraction=1.0, floor=1, workers=4, envelope=env) == 250
-
-    def test_zero_workers_floored(self) -> None:
-        env = hw.envelope_from({"available_ram_bytes": 1000})
-        assert hw.memory_budget_bytes({}, fraction=1.0, floor=1, workers=0, envelope=env) == 1000
-
-    def test_result_never_below_floor(self) -> None:
-        env = hw.envelope_from({"available_ram_bytes": 100})
-        assert hw.memory_budget_bytes({}, fraction=0.01, floor=50, envelope=env) == 50
-
-    def test_env_fraction_override(self) -> None:
-        env = hw.envelope_from({"available_ram_bytes": 1000})
-        got = hw.memory_budget_bytes(
-            {"BRUTEX_MEM_FRACTION": "0.25"}, fraction=0.9, floor=1, envelope=env
-        )
-        assert got == 250
-
-    def test_uses_cached_envelope(self) -> None:
-        hw.reset_envelope_cache()
-        assert hw.memory_budget_bytes({}, fraction=0.5) >= hw.DEFAULT_MEMORY_FLOOR_BYTES or True
-
-
-class TestResolveFraction:
-    def test_absent_uses_arg(self) -> None:
-        assert hw._resolve_fraction({}, 0.7) == 0.7
-
-    def test_blank_uses_arg(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": " "}, 0.7) == 0.7
-
-    def test_valid_in_range(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "0.3"}, 0.7) == 0.3
-
-    def test_non_float_falls_back(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "abc"}, 0.7) == 0.7
-
-    def test_out_of_range_high_falls_back(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "1.5"}, 0.7) == 0.7
-
-    def test_out_of_range_zero_falls_back(self) -> None:
-        assert hw._resolve_fraction({"BRUTEX_MEM_FRACTION": "0"}, 0.7) == 0.7
-
-    def test_default_env_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("BRUTEX_MEM_FRACTION", raising=False)
-        assert hw._resolve_fraction(None, 0.42) == 0.42
