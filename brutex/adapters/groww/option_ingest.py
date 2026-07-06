@@ -80,7 +80,12 @@ from brutex.adapters.error_storm_breaker import (
     observe_window_success,
 )
 from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
-from brutex.adapters.groww.client import GrowwClientProtocol, client_self_paces
+from brutex.adapters.groww.client import (
+    GrowwClientProtocol,
+    client_self_paces,
+    client_self_reports_rate_limits,
+    client_self_reports_successes,
+)
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
@@ -483,6 +488,20 @@ def ingest_option_contract(
     # solely at the window level).
     if client_self_paces(client):
         pace = None
+    # SINGLE FEEDBACK (DEC-SUSPICION-SWEEP-FIXES-001, D2): a live client self-hooks —
+    # ``build_live_client`` / ``build_live_pool`` bake the shared controller's
+    # ``on_rate_limit`` into ``GrowwClient._call``, which fires it on EVERY 429
+    # occurrence INCLUDING the final one before the exhausted error propagates here.
+    # The spine firing its own hook again on that propagated error double-counted the
+    # final occurrence — 7 ladder hits per exhausted window instead of 6, two+
+    # step-downs from one window's storm — so it stands down (the feedback twin of
+    # the ``client_self_paces`` stand-down above). Same for the per-window
+    # ``on_success`` recovery credit (the client already recovers per clean call).
+    # ``on_timeout`` stays spine-owned — the client never fires the timeout ladder.
+    if client_self_reports_rate_limits(client):
+        on_rate_limit = None
+    if client_self_reports_successes(client):
+        on_success = None
     attempt = 0
     # LOGICAL vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001)
     # — counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
