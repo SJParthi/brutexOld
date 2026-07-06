@@ -211,28 +211,9 @@ class StoreWriteDeadlineGuard:
         token: object = object()
         self._active = token
 
-        def _attempt() -> T:
-            try:
-                return fn()
-            finally:
-                # Token-identity-matched self-recovery: only the run that OWNS the
-                # current token may clear it (a stale zombie from an earlier breach
-                # can never clobber a newer run's state). When this run had been
-                # abandoned (a breach set ``_abandoned_op``), the volume has now
-                # recovered — log ONE INFO so the operator sees the self-heal.
-                if self._active is token:
-                    self._active = None
-                    if self._abandoned_op is not None:
-                        _LOG.info(
-                            STORE_WRITE_RECOVERED_EVENT,
-                            store=self._store_label,
-                            op=self._abandoned_op,
-                        )
-                        self._abandoned_op = None
-
         try:
             result = run_with_deadline(
-                _attempt,
+                lambda: self._guarded_call(fn, token),
                 seconds,
                 what=f"{self._store_label} write",
                 thread_name=f"{self._store_label}-write-deadline",
@@ -243,7 +224,8 @@ class StoreWriteDeadlineGuard:
             # worst case a missing INFO if the zombie completes this instant). Only
             # the DeadlineExceeded subclass is re-typed — a real TimeoutError from
             # ``fn`` itself takes run_with_deadline's failure path and propagates
-            # UNCHANGED (and ``_attempt``'s finally has already cleared the token).
+            # UNCHANGED (and ``_guarded_call``'s finally has already cleared the
+            # token).
             self._abandoned_op = op
             _LOG.warning(
                 STORE_WRITE_DEADLINE_EVENT,
@@ -258,8 +240,8 @@ class StoreWriteDeadlineGuard:
             # ``RuntimeError("can't start new thread")`` under thread exhaustion
             # (realistic in EXACTLY the storm this guard targets: a persistently
             # wedged volume accumulates abandoned zombie daemons), or an
-            # interrupted deadline wait. On a spawn failure ``_attempt`` NEVER
-            # ran, so NO zombie exists to self-clear the token — without this
+            # interrupted deadline wait. On a spawn failure ``_guarded_call``
+            # NEVER ran, so NO zombie exists to self-clear the token — without this
             # clear the latch would stick for the PROCESS LIFETIME (every write
             # instantly ``latched=True``, every read the terminal wedged error,
             # ``close()`` skipping the raw close — a false "wedged volume"
@@ -274,3 +256,30 @@ class StoreWriteDeadlineGuard:
                 self._active = None
             raise
         return result
+
+    def _guarded_call[T](self, fn: Callable[[], T], token: object) -> T:
+        """Run *fn*, then token-identity self-clear the wedge state (daemon side).
+
+        A method with its OWN type parameter — not a closure over :meth:`run`'s —
+        so no nested scope ever references an enclosing function's PEP 695 type
+        variable (the shape CodeQL's uninitialized-local analysis cannot model).
+        Behavior is byte-identical to the previous nested closure.
+
+        Token-identity-matched self-recovery: only the run that OWNS the current
+        token may clear it (a stale zombie from an earlier breach can never
+        clobber a newer run's state). When this run had been abandoned (a breach
+        set ``_abandoned_op``), the volume has now recovered — log ONE INFO so
+        the operator sees the self-heal.
+        """
+        try:
+            return fn()
+        finally:
+            if self._active is token:
+                self._active = None
+                if self._abandoned_op is not None:
+                    _LOG.info(
+                        STORE_WRITE_RECOVERED_EVENT,
+                        store=self._store_label,
+                        op=self._abandoned_op,
+                    )
+                    self._abandoned_op = None
