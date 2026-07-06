@@ -22,9 +22,12 @@ futures) and materialises each contract OI-aware. The OPTIONS phase does the
 SAME for the underlying's CE/PE contracts (:func:`discover_option_contracts`)
 when the options callables are injected — DEC-PIPELINE-AUTOPREBUILD-001
 supersedes the earlier "options stay on-demand" no-op; honest cost (Golden
-Rule #10): a fully-materialised options lake is ~2-3× its 1-minute footprint,
-operator-accepted. When the options callables are NOT injected the phase is an
-explicit, REPORTED no-op (never a silent skip).
+Rule #10, DEC-LAKE-FOOTPRINT-MEASURED-001): a fully-materialised lake costs a
+MEASURED multiple of its 1-minute footprint (observed multiplier persisted to
+``schema_meta``; conservative 6.5× fallback — the retired "~2-3×" guess ignored
+the Greeks-enriched 17-column 1-minute rewrite), operator-accepted. When the
+options callables are NOT injected the phase is an explicit, REPORTED no-op
+(never a silent skip).
 
 Pure orchestration — the spot materialise, the contract discovery, and the
 contract materialise are all INJECTED callables, so the whole control flow
@@ -190,9 +193,12 @@ def discover_option_contracts(
     ``instrument_type`` is ``CE`` or ``PE``. Bounded to the contracts the lake
     ACTUALLY holds candles for (the cascade is derived from the stored
     partitions), so an unpulled strike is never enumerated. Honest cost
-    (Golden Rule #10): the chain is large (every pulled strike × CE/PE) —
-    O(contracts-in-lake) per underlying, and materialising them all costs
-    ~2-3× the options 1-minute lake footprint (operator-accepted).
+    (Golden Rule #10, DEC-LAKE-FOOTPRINT-MEASURED-001): the chain is large
+    (every pulled strike × CE/PE) — O(contracts-in-lake) per underlying, and
+    materialising them all costs a MEASURED multiple of the 1-minute footprint
+    (observed ``schema_meta`` multiplier; conservative 6.5× fallback — the
+    retired "~2-3×" guess ignored the Greeks-enriched 1-minute rewrite),
+    operator-accepted.
     """
     return _discover_contracts(instrument, cascade, want=lambda t: t in _OPTION_TYPES)
 
@@ -465,7 +471,10 @@ def run_gated_prebuild(
     * **OPTIONS** — the SAME per-contract loop over the underlying's CE/PE
       contracts (*options_contracts_for* + *materialize_option*,
       DEC-PIPELINE-AUTOPREBUILD-001 — supersedes the on-demand-only no-op;
-      honest cost: ~2-3× the options 1-minute lake once fully materialised).
+      honest cost per DEC-LAKE-FOOTPRINT-MEASURED-001: a MEASURED multiple of
+      the 1-minute footprint once fully materialised — observed ``schema_meta``
+      multiplier, conservative 6.5× fallback; the retired "~2-3×" guess
+      ignored the Greeks-enriched 1-minute rewrite).
       When EITHER options callable is ``None`` the phase is an explicit,
       REPORTED no-op (back-compat — never a silent skip).
 

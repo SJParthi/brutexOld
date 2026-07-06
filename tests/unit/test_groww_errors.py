@@ -49,7 +49,9 @@ class GrowwAPIException(Exception): ...  # bare parent — unmapped
     ("exc", "expected"),
     [
         (GrowwAPIAuthenticationException("x"), e.GrowwAuthError),
-        (GrowwAPIAuthorisationException("x"), e.GrowwAuthError),
+        # DEC-GROWW-AUTHZ-QUARANTINE-001: an AUTHORISATION rejection is a per-symbol
+        # entitlement verdict, no longer the halt-driving GrowwAuthError family.
+        (GrowwAPIAuthorisationException("x"), e.GrowwAuthorisationError),
         (GrowwAPIBadRequestException("x"), e.GrowwBadRequestError),
         (GrowwAPINotFoundException("x"), e.GrowwNotFoundError),
         (GrowwAPIRateLimitException("x"), e.GrowwRateLimitError),
@@ -565,6 +567,64 @@ def test_is_terminal_auth_failure_non_groww_exception_is_false() -> None:
     """A non-Groww exception (typed BaseException at the halt-path call sites) is never auth."""
     assert e.is_terminal_auth_failure(RuntimeError("boom")) is False
     assert e.is_terminal_auth_failure(BruteXError("domain")) is False
+
+
+# ── DEC-GROWW-AUTHZ-QUARANTINE-001 — authorisation split + storm escalation ──
+
+
+class TestAuthorisationErrorSplit:
+    """The vendor AUTHORISATION rejection is split OUT of the GrowwAuthError family.
+
+    Fail-before/pass-after: on the pre-fix mapping (``GrowwAPIAuthorisationException``
+    → ``GrowwAuthError``) every assertion on the classified error's hierarchy below
+    FAILS — the classified error WAS a ``GrowwAuthError``, ``is_auth_failure`` read
+    True and ``is_terminal_auth_failure`` read True (the pull-wide halt shape) —
+    verified by running this class against the original ``_SDK_NAME_TO_ERROR`` row.
+    """
+
+    def test_classified_authz_error_is_not_auth_family(self) -> None:
+        mapped = e.from_groww_exception(GrowwAPIAuthorisationException("scope"))
+        assert type(mapped) is e.GrowwAuthorisationError
+        assert not isinstance(mapped, e.GrowwAuthError)
+        assert isinstance(mapped, e.GrowwError)
+
+    def test_authz_error_is_terminal_not_retryable(self) -> None:
+        err = e.GrowwAuthorisationError("restricted instrument")
+        assert e.is_retryable(err) is False
+        assert e.is_auth_failure(err) is False  # never triggers the token re-mint branch
+        assert e.is_terminal_auth_failure(err) is False  # never the pull-wide auth halt
+
+    def test_storm_error_is_terminal_auth_family_global_stop(self) -> None:
+        """The ESCALATED storm error rides the EXISTING GrowwAuthError halt plumbing."""
+        storm = e.GrowwAuthorisationStormError(distinct_symbols=5, symbols=("A", "B"))
+        assert isinstance(storm, e.GrowwAuthError)
+        assert e.is_retryable(storm) is False
+        assert e.is_auth_failure(storm) is True
+        assert e.is_terminal_auth_failure(storm) is True  # the restored HALT semantics
+
+    def test_storm_error_default_message_names_symbols_and_counts(self) -> None:
+        storm = e.GrowwAuthorisationStormError(distinct_symbols=2, symbols=("AAA", "BBB"))
+        msg = str(storm)
+        assert "AUTHORISATION STORM" in msg
+        assert "2 distinct symbols" in msg
+        assert "AAA, BBB" in msg
+        assert storm.distinct_symbols == 2
+        assert storm.symbols == ("AAA", "BBB")
+
+    def test_storm_error_message_caps_named_symbols(self) -> None:
+        symbols = tuple(f"S{i:02d}" for i in range(13))
+        storm = e.GrowwAuthorisationStormError(distinct_symbols=13, symbols=symbols)
+        msg = str(storm)
+        assert "S09" in msg  # the 10th named symbol (cap = 10)
+        assert "S10" not in msg  # the 11th is folded into the +N suffix
+        assert "(+3 more)" in msg
+
+    def test_storm_error_bare_message_construction(self) -> None:
+        """The generic construct-from-a-bare-message contract (drift-pin shape)."""
+        storm = e.GrowwAuthorisationStormError("plain message")
+        assert str(storm) == "plain message"
+        assert storm.distinct_symbols == 0
+        assert storm.symbols == ()
 
 
 # ── steps_timeout_ladder (DEC-AUTH-LADDER-EXCLUDE-001) ───────────────────────

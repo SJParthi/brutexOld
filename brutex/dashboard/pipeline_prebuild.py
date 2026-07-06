@@ -16,9 +16,17 @@ Honest envelope (Golden Rule #10):
 
 * the run is O(symbols × bars) — a full-universe prebuild re-reads + resamples
   every 1-minute partition once; NOT an O(1)-total claim;
-* materialising the options chain costs **~2-3× the options 1-minute lake**
-  once all 19 intraday + ``1day`` partitions exist — operator-accepted by the
-  decree (supersedes the earlier options-on-demand design);
+* a fully-materialised lake costs a MEASURED multiple of its 1-minute
+  footprint (DEC-LAKE-FOOTPRINT-MEASURED-001: the observed multiplier is
+  persisted to ``schema_meta`` ``lake_footprint.*`` after every prebuild run;
+  a conservative **6.5×** fallback applies before the first observation —
+  the retired "~2-3×" estimate IGNORED the 17-column Greeks-enriched option
+  1-minute rewrite of :mod:`brutex.data.greeks_enrich`, which alone pushes
+  the realistic all-in cost toward ~5-6×); a PRE-RUN disk guard
+  (:func:`brutex.data.lake_footprint.make_disk_guard`, escape hatch
+  ``BRUTEX_PREBUILD_DISK_GUARD=off``) SKIPS the phase gracefully — never a
+  half-write — when the volume's free space is below the estimated need;
+  the operator ACCEPTED the materialisation cost (decree items #19+#21);
 * per-symbol failures are quarantined + named (never a stage abort); a
   global-stop error (disk-full :class:`~brutex.data.errors.LakeWriteHalt`, a
   quota stop) escapes :func:`run_pipeline_prebuild` AND
@@ -68,6 +76,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.dashboard.fno_cascade import FnoCascadeIndex, FnoContract
+    from brutex.data.lake_footprint import DiskGuardDecision
     from brutex.data.timeframe_materialize import MaterializeResult
     from brutex.models import Instrument
 
@@ -147,6 +156,18 @@ class PrebuildOutcome:
         when the filesystem is fine-grained, the probe was unavailable, or no
         ``lake_root`` was given. Folded into ``PipelinePullReport``'s
         ``fs_allocation_note`` + note by the pipeline.
+    disk_guard_blocked
+        ``True`` when the PRE-RUN disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001)
+        SKIPPED the whole prebuild because the lake volume's free space is
+        below the estimated derived-write need — nothing was materialised
+        (never a half-write), ``ok`` is ``False`` (so the movers warm — gated
+        on ``ok`` — is consequently skipped), and the pipeline headline
+        carries :attr:`disk_guard_detail`.
+    disk_guard_detail
+        The guard's honest one-line clause naming the ACTUAL numbers
+        (estimated need, multiplier + its provenance, free space, the
+        ``BRUTEX_PREBUILD_DISK_GUARD=off`` override); ``None`` unless
+        :attr:`disk_guard_blocked`.
     opens_substituted
         The observe-only daily-open substitution total
         (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001): (symbol, date) SESSIONS whose
@@ -169,7 +190,50 @@ class PrebuildOutcome:
     crashed: str | None = None
     fs_note: str | None = None
     unchanged_skips: int = 0
+    disk_guard_blocked: bool = False
+    disk_guard_detail: str | None = None
     opens_substituted: int = 0
+
+
+def _disk_guard_outcome(
+    disk_guard: Callable[[], DiskGuardDecision | None] | None,
+) -> PrebuildOutcome | None:
+    """Run the injected pre-run disk guard; a BLOCKED verdict → the honest outcome.
+
+    The ONE preflight both the sequential and the parallel prebuild paths share
+    (CLAUDE.md §11 COMMON — DEC-LAKE-FOOTPRINT-MEASURED-001 over EITHER path, so
+    ``workers > 1`` can never bypass the disk-space safety gate). Fails OPEN: a
+    ``None`` guard, a raising guard (logged ``pipeline.prebuild.disk_guard_error``)
+    or a non-blocked verdict all return ``None`` — the caller proceeds.
+    """
+    if disk_guard is None:
+        return None
+    decision: DiskGuardDecision | None = None
+    try:
+        decision = disk_guard()
+    except Exception:  # pylint: disable=broad-except - the guard fails OPEN, never blocks
+        _LOG.exception("pipeline.prebuild.disk_guard_error")
+    if decision is None or not decision.blocked:
+        return None
+    _LOG.warning(
+        "pipeline.prebuild.disk_guard",
+        free_bytes=decision.free_bytes,
+        estimated_need_bytes=decision.estimated_need_bytes,
+        source_1m_bytes=decision.source_1m_bytes,
+        derived_bytes=decision.derived_bytes,
+        multiplier=str(decision.multiplier),
+        multiplier_source=decision.multiplier_source,
+        margin=str(decision.margin),
+    )
+    return PrebuildOutcome(
+        symbols_built=0,
+        total_bars=0,
+        failed=(),
+        failed_count=0,
+        ok=False,
+        disk_guard_blocked=True,
+        disk_guard_detail=decision.detail,
+    )
 
 
 def run_pipeline_prebuild(
@@ -181,6 +245,7 @@ def run_pipeline_prebuild(
     source: str = "pipeline",
     exclude_symbols: frozenset[str] = frozenset(),
     lake_root: Path | None = None,
+    disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
 ) -> PrebuildOutcome:
     """Compose + run the SPOT → FUTURES → OPTIONS prebuild over *instruments*.
 
@@ -237,12 +302,29 @@ def run_pipeline_prebuild(
         slack is spent); the probe's one-line note rides
         :attr:`PrebuildOutcome.fs_note` + the start log. ``None`` (the
         default) skips the probe — byte-identical to the pre-probe behaviour.
+    disk_guard
+        OPTIONAL pre-run disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001 — the
+        route binds :func:`brutex.data.lake_footprint.make_disk_guard`). A
+        zero-arg callable returning a
+        :class:`~brutex.data.lake_footprint.DiskGuardDecision` (or ``None`` =
+        no verdict: guard disabled via ``BRUTEX_PREBUILD_DISK_GUARD=off``, or
+        a measurement error — the guard FAILS OPEN). A ``blocked`` decision
+        SKIPS the whole prebuild BEFORE any materialise (never a half-write):
+        one loud ``pipeline.prebuild.disk_guard`` WARNING naming the actual
+        numbers, an ``ok=False`` outcome flagged ``disk_guard_blocked`` (the
+        movers warm — gated on ``ok`` — is consequently skipped). A guard
+        callable that RAISES is caught + logged
+        (``pipeline.prebuild.disk_guard_error``) and treated as no-verdict —
+        a guard bug never blocks the data stage.
 
     Returns
     -------
     PrebuildOutcome
         The built/bars/failures rollup for the pipeline report.
     """
+    blocked = _disk_guard_outcome(disk_guard)
+    if blocked is not None:
+        return blocked
     started = time.monotonic()
     # Allocation probe FIRST (DEC-LAKE-FS-PROBE-001): warn about a coarse
     # cluster BEFORE the tiny-file fan-out spends the slack. Best-effort by
@@ -450,6 +532,7 @@ def run_pipeline_prebuild_parallel(
     fno_segment: str = FNO_CANDLE_LAKE_SEGMENT,
     source: str = "pipeline",
     exclude_symbols: frozenset[str] = frozenset(),
+    disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
 ) -> PrebuildOutcome:
     """PARALLEL twin of :func:`run_pipeline_prebuild` — fan the per-symbol derive across cores.
 
@@ -479,8 +562,13 @@ def run_pipeline_prebuild_parallel(
     Parameters mirror :func:`run_pipeline_prebuild` except for the explicit
     materialise arguments above and *workers* (``>= 2``; the caller resolves it
     via :func:`~brutex.dashboard.prebuild_parallel.resolve_prebuild_workers` and
-    routes ``<= 1`` to the sequential path).
+    routes ``<= 1`` to the sequential path). ``disk_guard`` runs the SAME
+    pre-run disk preflight as the sequential path (:func:`_disk_guard_outcome`
+    — DEC-LAKE-FOOTPRINT-MEASURED-001; a parallel run can never bypass it).
     """
+    blocked = _disk_guard_outcome(disk_guard)
+    if blocked is not None:
+        return blocked
     started = time.monotonic()
     fs_probe = probe_allocation_granularity(lake_root)
     fs_note = fs_probe.note
@@ -672,6 +760,7 @@ def run_pipeline_prebuild_guarded(
     include_daily: bool = True,
     daily_before: date | None = None,
     incremental: bool | None = None,
+    disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
 ) -> PrebuildOutcome:
     """Crash-guarded :func:`run_pipeline_prebuild` for the route seam.
 
@@ -682,7 +771,9 @@ def run_pipeline_prebuild_guarded(
     byte-identically (the kill switch). Both share the ONE crash guard below.
 
     ``exclude_symbols`` is forwarded verbatim — the clean-set exclusion of
-    DEC-PREBUILD-CLEANSET-001 (see :func:`run_pipeline_prebuild`).
+    DEC-PREBUILD-CLEANSET-001 (see :func:`run_pipeline_prebuild`). ``disk_guard``
+    is forwarded to WHICHEVER path runs (sequential or parallel) — the pre-run
+    disk preflight of DEC-LAKE-FOOTPRINT-MEASURED-001 gates both.
 
     The fetch already succeeded when the prebuild runs, so no ORDINARY error
     here may kill the job — an unexpected NON-halt error (a cascade-build
@@ -715,6 +806,7 @@ def run_pipeline_prebuild_guarded(
                 fno_segment=fno_segment,
                 source=source,
                 exclude_symbols=exclude_symbols,
+                disk_guard=disk_guard,
             )
         return run_pipeline_prebuild(
             instruments=instruments,
@@ -724,6 +816,7 @@ def run_pipeline_prebuild_guarded(
             source=source,
             exclude_symbols=exclude_symbols,
             lake_root=lake_root,
+            disk_guard=disk_guard,
         )
     except Exception as exc:  # pylint: disable=broad-except - the route seam must never crash the job
         # Imported inside the handler (mirrors is_pull_halt's own lazy-import

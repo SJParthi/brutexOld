@@ -31,6 +31,7 @@ from brutex.dashboard.pipeline_prebuild import (
     run_pipeline_prebuild_parallel,
 )
 from brutex.data.errors import LakeWriteHalt
+from brutex.data.lake_footprint import DiskGuardDecision
 from brutex.data.timeframe_materialize import MaterializeResult, PrebuildKind
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from structlog.testing import capture_logs
@@ -439,3 +440,77 @@ def test_guard_parallel_global_stop_reraises(
             workers=3,
             daily_before=date(2025, 2, 1),
         )
+
+
+# ── the pre-run disk guard gates the PARALLEL path too (COMMON preflight) ───
+
+
+def _guard_decision(*, blocked: bool) -> DiskGuardDecision:
+    return DiskGuardDecision(
+        blocked=blocked,
+        free_bytes=1024,
+        estimated_need_bytes=4096,
+        source_1m_bytes=512,
+        derived_bytes=128,
+        multiplier=Decimal("6.5"),
+        multiplier_source="fallback",
+        margin=Decimal("0.10"),
+    )
+
+
+class TestParallelDiskGuard:
+    """DEC-LAKE-FOOTPRINT-MEASURED-001 × DEC-HARDWARE-ENVELOPE-001: ``workers > 1``
+    can never bypass the disk-space preflight (`_disk_guard_outcome` is the ONE
+    shared gate)."""
+
+    def test_blocked_guard_skips_the_parallel_prebuild(
+        self, patched: _FakeMaterialize, tmp_path: Path
+    ) -> None:
+        decision = _guard_decision(blocked=True)
+        with capture_logs() as logs:
+            outcome = run_pipeline_prebuild_parallel(
+                instruments=[_spot("NSE-NIFTY")],
+                cascade=_cascade(),
+                lake_root=tmp_path,
+                workers=3,
+                daily_before=date(2025, 2, 1),
+                disk_guard=lambda: decision,
+            )
+        assert outcome.ok is False
+        assert outcome.disk_guard_blocked is True
+        assert outcome.disk_guard_detail == decision.detail
+        assert outcome.symbols_built == 0
+        assert patched.calls == []  # nothing materialised — trip is BEFORE the pool
+        warned = [e for e in logs if e["event"] == "pipeline.prebuild.disk_guard"]
+        assert len(warned) == 1
+
+    def test_clear_guard_runs_parallel_normally(
+        self, patched: _FakeMaterialize, tmp_path: Path
+    ) -> None:
+        outcome = run_pipeline_prebuild_parallel(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            lake_root=tmp_path,
+            workers=3,
+            daily_before=date(2025, 2, 1),
+            disk_guard=lambda: _guard_decision(blocked=False),
+        )
+        assert outcome.ok is True
+        assert outcome.disk_guard_blocked is False
+        assert outcome.symbols_built == 4
+
+    def test_guarded_forwards_disk_guard_to_parallel_path(
+        self, patched: _FakeMaterialize, tmp_path: Path
+    ) -> None:
+        decision = _guard_decision(blocked=True)
+        outcome = run_pipeline_prebuild_guarded(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade_or_error=_cascade,
+            materialize=lambda _t: MaterializeResult(written={}, skipped=()),
+            lake_root=tmp_path,
+            workers=3,
+            daily_before=date(2025, 2, 1),
+            disk_guard=lambda: decision,
+        )
+        assert outcome.disk_guard_blocked is True
+        assert patched.calls == []  # the parallel path was gated, not entered

@@ -79,6 +79,15 @@ class ProgressSnapshot:
         terminal failure (``state`` stays ``running``; the run may still succeed).
         ``stall_detail`` names the silent phase + the silence duration. Cleared on a
         heartbeat recovery and on ``finish`` / ``fail``.
+    wedged, wedge_detail
+        The wedged-worker TERMINAL escalation marker (DEC-PULL-WEDGE-ESCALATE-001,
+        STAGE 1): ``wedged=True`` means the stall watchdog observed the DUAL wedge
+        signal — zero heartbeats for the wedge multiple of the stall timeout AND no
+        lake-revision movement since the HUNG edge — so the run needs an operator
+        RESTART (surfaced as ``restart_required`` in :meth:`to_dict`). Terminal for
+        the run: a later heartbeat does NOT clear it (``clear_stalled`` leaves it);
+        only ``finish`` / ``fail`` / a fresh ``start`` reset it. The worker is NOT
+        killed and the single-flight stays held — auto-restart is a NAMED follow-up.
     started_at
         The injected clock's value at the last :meth:`PullProgress.start`
         (DEC-PULL-PROGRESS-HONESTY-001 — the ETA anchor, ported from the engine's
@@ -113,6 +122,8 @@ class ProgressSnapshot:
     phase: str = ""
     stalled: bool = False
     stall_detail: str = ""
+    wedged: bool = False
+    wedge_detail: str = ""
     started_at: float = 0.0
     phase_started_at: float = 0.0
     phase_base_completed: int = 0
@@ -192,6 +203,11 @@ class ProgressSnapshot:
             "phase": self.phase,
             "stalled": self.stalled,
             "stall_detail": self.stall_detail,
+            "wedged": self.wedged,
+            "wedge_detail": self.wedge_detail,
+            # The operator-facing verdict alias (DEC-PULL-WEDGE-ESCALATE-001): a wedged
+            # run requires a process restart to release the single-flight + the worker.
+            "restart_required": self.wedged,
             # DEC-PULL-PROGRESS-HONESTY-001 — ADDITIVE keys only (the integration
             # suite pins that no existing flat key is ever dropped).
             "started_at": self.started_at,
@@ -233,6 +249,8 @@ class PullProgress:
         self._phase = ""
         self._stalled = False
         self._stall_detail = ""
+        self._wedged = False
+        self._wedge_detail = ""
         # ETA state (DEC-PULL-PROGRESS-HONESTY-001): the run anchor + the PHASE-scoped
         # rate baseline. ``_baseline_pending`` defers the baseline stamp to the FIRST
         # counter mutation after start()/set_phase(), so a ledger sync that opens on
@@ -262,6 +280,9 @@ class PullProgress:
             self._phase = ""
             self._stalled = False
             self._stall_detail = ""
+            self._wedged = False
+            self._wedge_detail = ""
+            self._updated_at = self._clock()
             now = self._clock()
             # A fresh run re-anchors the ETA clock + clears the sticky open-ended
             # marker (DEC-PULL-PROGRESS-HONESTY-001) — the ONLY place that clears it.
@@ -455,10 +476,35 @@ class PullProgress:
             self._updated_at = self._clock()
 
     def clear_stalled(self) -> None:
-        """Clear the stalled-suspect marker (a heartbeat recovered) — O(1)."""
+        """Clear the stalled-suspect marker (a heartbeat recovered) — O(1).
+
+        Deliberately does NOT clear the :meth:`mark_wedged` marker
+        (DEC-PULL-WEDGE-ESCALATE-001): WEDGED is terminal for the run — a stray late
+        heartbeat after the wedge verdict never silently withdraws the
+        restart-required state; only ``finish`` / ``fail`` / a fresh ``start`` reset it.
+        """
         with self._lock:
             self._stalled = False
             self._stall_detail = ""
+            self._updated_at = self._clock()
+
+    def mark_wedged(self, detail: str) -> None:
+        """Flag the run WEDGED (terminal — restart required) — O(1).
+
+        DEC-PULL-WEDGE-ESCALATE-001, STAGE 1: the stall watchdog observed the DUAL
+        wedge signal (zero heartbeats for the wedge multiple of the timeout AND no
+        lake-revision movement since the HUNG edge). The state stays ``running`` —
+        the worker thread is NOT killed and the single-flight stays held (the
+        DEC-PIPELINE-STALL-HEARTBEAT-001 double-run-race fix is preserved); the marker
+        + the ``restart_required`` verdict tell the operator a process restart is the
+        recovery path. A no-op unless the job is RUNNING, so a late timer edge can
+        never stamp a settled run.
+        """
+        with self._lock:
+            if self._state != STATE_RUNNING:
+                return
+            self._wedged = True
+            self._wedge_detail = detail
             self._updated_at = self._clock()
 
     def finish(self, *, detail: str = "") -> None:
@@ -472,6 +518,8 @@ class PullProgress:
             self._detail = detail
             self._stalled = False
             self._stall_detail = ""
+            self._wedged = False
+            self._wedge_detail = ""
             self._updated_at = self._clock()
 
     def fail(self, detail: str) -> None:
@@ -485,6 +533,8 @@ class PullProgress:
             self._detail = detail
             self._stalled = False
             self._stall_detail = ""
+            self._wedged = False
+            self._wedge_detail = ""
             self._updated_at = self._clock()
 
     def snapshot(self) -> ProgressSnapshot:
@@ -503,6 +553,8 @@ class PullProgress:
                 phase=self._phase,
                 stalled=self._stalled,
                 stall_detail=self._stall_detail,
+                wedged=self._wedged,
+                wedge_detail=self._wedge_detail,
                 started_at=self._started_at,
                 phase_started_at=self._phase_started_at,
                 phase_base_completed=self._phase_base_completed,

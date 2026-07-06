@@ -56,6 +56,7 @@ import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -88,8 +89,16 @@ from brutex.adapters.groww.run_ingest import (
     ProgressHook,
     run_groww_spot_ingest,
     run_groww_spot_ingest_with_retry,
+    with_paced_client,
 )
 from brutex.adapters.groww.spot_bounds import SpotWindows
+from brutex.adapters.groww.vendor_floor import (
+    VendorFloorLearner,
+    VendorFloorMetaStore,
+    floor_symbol_windows,
+    load_vendor_floors,
+    make_vendor_floor_learner,
+)
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     GROWW_COVERAGE_MARKET,
@@ -104,6 +113,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
+from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -741,6 +751,18 @@ class BulkSpotReport:
     ledger tally) — the honest-verdict count every verdict kind must surface
     (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001; never "No action needed" over a
     settling pull)."""
+    conflicts: int = 0
+    """Keep-first vendor re-statements recorded across the whole spot pull
+    (DEC-VENDOR-CONFLICT-SURFACE-001 — previously visible ONLY in the
+    ``ingest.conflict.summary`` log lines). The stored bar always won."""
+    vendor_dup_rows_dropped: int = 0
+    """WITHIN-BATCH duplicate vendor rows the writer collapsed across the pull
+    (DEC-VENDOR-CONFLICT-SURFACE-001 — the sum the ``lake.vendor_duplicate_rows``
+    WARNINGs previously swallowed)."""
+    max_close_delta: Decimal | None = None
+    """MAX absolute keep-first close delta across the pull's conflicts — exact
+    Decimal rupees (never float, CLAUDE.md §6 price-unit row); ``None`` when no
+    conflict was recorded."""
 
     @property
     def total_symbols(self) -> int:
@@ -804,6 +826,11 @@ class BulkSpotReport:
             "total_no_data": self.total_no_data,
             "windows_skipped": self.windows_skipped,
             "ledger_load_failed": self.ledger_load_failed,
+            "conflicts": self.conflicts,
+            "vendor_dup_rows_dropped": self.vendor_dup_rows_dropped,
+            # JSON-safe: the exact Decimal renders as its string (never a float
+            # round-trip — CLAUDE.md §4 money rule); None stays null.
+            "max_close_delta": None if self.max_close_delta is None else str(self.max_close_delta),
             "verdict": self.verdict.to_dict(),
             "symbols": [
                 {
@@ -911,7 +938,7 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     from brutex.adapters.groww.constants import (
         GROWW_RATE_LIMIT_PER_MIN,
         GROWW_RATE_LIMIT_RPS_CEILING,
-        resolve_smooth_pacing,
+        resolve_smooth_pacing_mode,
     )
     from brutex.adapters.rate_common import RateController
 
@@ -928,16 +955,18 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     # recovers UP only as far as the vendor tolerates. Raised back to 8 once Lever 2 (pool
     # 2→4, DEC-FETCH-WRITE-OVERLAP-001) gave the pull enough connections to generate demand
     # toward the ceiling; SUSTAINED 8 is UNVERIFIED (the vendor 429s as low as 3–5 r/s).
-    # OPTIONAL anti-burst smooth pacing (DEC-GROWW-SMOOTH-PACING-001): default OFF
-    # (byte-identical), enabled only when BRUTEX_GROWW_SMOOTH_PACING is truthy. When
-    # ON, issuance is spread evenly at a ``1/current_rps`` minimum interval so the
-    # per-second issue count never exceeds the current AIMD rate (no sub-second 9-burst
-    # that trips a vendor 429). It only ADDS spacing — the 8 r/s ceiling, the 500/min
-    # governor, and the AIMD ladder are UNCHANGED.
+    # Anti-burst smooth pacing (DEC-GROWW-SMOOTH-PACING-001 +
+    # DEC-SMOOTH-PACING-AUTOLATCH-001): the tri-state mode is threaded — a truthy
+    # BRUTEX_GROWW_SMOOTH_PACING forces the gate ON from construction, an explicit
+    # falsy value disables gate AND latch, and the unset DEFAULT is ADAPTIVE:
+    # pacing starts byte-identical and the controller one-way latches smoothing ON
+    # on the first 429 that carries measured per-1s burst evidence above the
+    # then-current allowed rate. Whatever the mode, smoothing only ADDS spacing —
+    # the 8 r/s ceiling, the 500/min governor, and the AIMD ladder are UNCHANGED.
     return RateController(
         ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
         ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
-        smooth_pacing=resolve_smooth_pacing(),
+        smooth_pacing_mode=resolve_smooth_pacing_mode(),
     )
 
 
@@ -1363,6 +1392,7 @@ def pull_all_spot(
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
     on_ledger_sync: OnLedgerSync | None = None,
+    floor_store: VendorFloorMetaStore | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
 
@@ -1435,6 +1465,18 @@ def pull_all_spot(
         ledger flush (the per-pair flush is suppressed so there is one writer); a final
         unthrottled push lands the exact end state. ``None`` keeps the prior per-pair flush
         + no window sync (byte-unchanged for every non-dashboard caller).
+    floor_store
+        Optional :class:`~brutex.adapters.groww.vendor_floor.VendorFloorMetaStore`
+        (DEC-VENDOR-FLOOR-LAZY-PROBE-001 — the dashboard routes pass their open
+        :class:`~brutex.data.instrument_store.InstrumentStore`, whose generic
+        ``schema_meta`` sidecar satisfies the Protocol structurally). Read at pull
+        start for the per-symbol learned-floor PLANNING clamp
+        (``max(GROWW_HISTORY_FLOOR, learned floor)`` via the existing
+        ``symbol_windows`` seam) and written by the in-pull lazy depth learner on
+        a clean boundary-empty probe. ``None`` (CLI / tests / dry-run) keeps the
+        full-range planning byte-identical and learns un-persisted (this pull's
+        mass-settle still applies; the CLI ``brutex fetch`` path stays unwired —
+        an explicit follow-up, mirroring DEC-PULL-HEALTH-WIRING-001's envelope).
 
     Returns
     -------
@@ -1601,6 +1643,39 @@ def pull_all_spot(
         # threads ``None`` so it can never observe synthetic outcomes (the same gating
         # as ``detect_completeness_gaps``).
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
+        # per-pull instance over the PACED replica of THIS pull's adapter. The live
+        # pool factory hands every leaf a no-op pace (`build_live_pool` without a
+        # `pace`), and the session controller is bound only inside the spine
+        # (`run_ingest.with_paced_client`) — so the learner MUST bind the SAME
+        # `pace` here or its probe fetches would bypass the 8 r/s ceiling + the
+        # 500/min governor (the review BLOCKER this closes; every probe fetch now
+        # admits through `GrowwClient._call`'s per-attempt pace —
+        # DEC-RATE-SINGLE-ADMISSION-001). Armed ONLY for a real pull (the
+        # _storm_breaker gating pattern); ``today`` = the resolved pull end (the
+        # bisect's upper bound never reaches past the envelope).
+        _floor_learner: VendorFloorLearner | None = (
+            None
+            if dry_run
+            else make_vendor_floor_learner(
+                with_paced_client(adapter, pace),
+                history_floor=GROWW_HISTORY_FLOOR,
+                today=end.date(),
+                store=floor_store,
+            )
+        )
+        # Learned-floor PLANNING clamp (DEC-VENDOR-FLOOR-LAZY-PROBE-001): a symbol
+        # with a persisted learned floor plans its 1-minute windows from
+        # ``max(GROWW_HISTORY_FLOOR, learned floor)`` via the EXISTING per-symbol
+        # ``symbol_windows`` seam (plan_windows / reconcile / _resolve_spot_window
+        # — planned keys stay == fetched keys). A ``None`` floor_store / no learned
+        # floors resolves to ``None`` — full-range planning, byte-identical.
+        _floor_windows = floor_symbol_windows(
+            (i.symbol_name for i in instruments),
+            start=start.date(),
+            end=end.date(),
+            floors=load_vendor_floors(floor_store, [i.symbol_name for i in instruments]),
+        )
         # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
         # per pull and threaded into the completeness detectors' margin arithmetic
         # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
@@ -1729,6 +1804,7 @@ def pull_all_spot(
                     fetch_pipeline=_fetch_pipeline,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
+                    floor_learner=_floor_learner,
                 )
                 passes.append(res)
                 return res
@@ -1989,6 +2065,7 @@ def pull_all_spot(
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
+                            symbol_windows=_floor_windows,
                         )
                         # Pre-plan ledger snapshot — pairs with the pre-pull spans
                         # above so this pull's own settles can never false-flag.
@@ -2013,8 +2090,14 @@ def pull_all_spot(
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
+                            symbol_windows=_floor_windows,
                         )
-                    _run_phase(minute_intervals, instruments, None)
+                    # Learned-floor clamp (DEC-VENDOR-FLOOR-LAZY-PROBE-001): a symbol
+                    # with a persisted learned floor pulls its 1-minute range from
+                    # ``max(GROWW_HISTORY_FLOOR, learned floor)`` — the SAME
+                    # ``_floor_windows`` the plan above tiled, so planned keys ==
+                    # fetched keys; ``None`` (no learned floors) is byte-identical.
+                    _run_phase(minute_intervals, instruments, _floor_windows)
             # Fetch phases done — arm the post-drain L2 lake heal in the finally.
             fetch_phases_ok = True
         finally:
@@ -2134,6 +2217,14 @@ def pull_all_spot(
             results.append(
                 SymbolPullResult(symbol=symbol, completed=completed, failed=failed, no_data=no_data)
             )
+        # Vendor-behaviour honesty counters (DEC-VENDOR-CONFLICT-SURFACE-001): the
+        # post-reconcile merged pairs carry the real per-series counts on BOTH the
+        # sync and async paths, so the report-level sums/max-fold are path-invariant.
+        bulk_conflicts = sum(pair.conflicts for pair in merged_pairs.values())
+        bulk_dup_rows = sum(pair.vendor_dup_rows_dropped for pair in merged_pairs.values())
+        bulk_max_delta: Decimal | None = None
+        for pair in merged_pairs.values():
+            bulk_max_delta = fold_max_close_delta(bulk_max_delta, pair.max_close_delta)
         bulk = BulkSpotReport(
             dry_run=dry_run,
             start_date=start.date().isoformat(),
@@ -2143,6 +2234,9 @@ def pull_all_spot(
             auth_cause=final_auth_cause,
             still_failed_windows=final_still_failed,
             quota_exhausted=final_quota_exhausted,
+            conflicts=bulk_conflicts,
+            vendor_dup_rows_dropped=bulk_dup_rows,
+            max_close_delta=bulk_max_delta,
             # Each phase's FIRST pass's settled-window skips (until-clean rounds
             # re-skip the same windows by design — summing passes would double-count).
             windows_skipped=sum(pr.skipped_windows for pr in phase_reports),
@@ -2265,6 +2359,7 @@ def pull_candles(
     pull_id: str | None = None,
     rate_observer: RateObserver | None = None,
     session_rate: SessionRateController | None = None,
+    floor_store: VendorFloorMetaStore | None = None,
 ) -> PullCandlesReport:
     """Ingest *instrument*'s spot candles over a date range (Groww model).
 
@@ -2312,6 +2407,12 @@ def pull_candles(
         synthetic builder when *dry_run* is ``True`` and to the live Groww
         builder otherwise. Tests inject a fake factory to exercise the
         non-dry-run branch and the per-interval outcomes without network.
+    floor_store
+        Optional :class:`~brutex.adapters.groww.vendor_floor.VendorFloorMetaStore`
+        (DEC-VENDOR-FLOOR-LAZY-PROBE-001) — the single-symbol twin of the
+        :func:`pull_all_spot` wiring: read for the learned-floor planning clamp,
+        written by the in-pull lazy depth learner. ``None`` (tests / dry-run) is
+        byte-identical full-range planning.
 
     Returns
     -------
@@ -2450,6 +2551,31 @@ def pull_candles(
         # live pull (a dry-run threads ``None`` — the ``detect_completeness_gaps``
         # gating below).
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # Lazy vendor-depth-floor learner + learned-floor planning clamp
+        # (DEC-VENDOR-FLOOR-LAZY-PROBE-001) — the single-symbol twin of the
+        # pull_all_spot wiring: armed only for a real pull, probing through the
+        # PACED replica of THIS pull's adapter (`with_paced_client(adapter, pace)`
+        # — the live pool leaves carry a no-op pace, so binding the session `pace`
+        # here is what keeps the probe inside the 8 r/s ceiling + 500/min
+        # governor, the review BLOCKER; DEC-RATE-SINGLE-ADMISSION-001); a ``None``
+        # floor_store / no learned floor resolves ``_floor_windows`` to ``None``
+        # — byte-identical planning.
+        _floor_learner: VendorFloorLearner | None = (
+            None
+            if dry_run
+            else make_vendor_floor_learner(
+                with_paced_client(adapter, pace),
+                history_floor=GROWW_HISTORY_FLOOR,
+                today=end.date(),
+                store=floor_store,
+            )
+        )
+        _floor_windows = floor_symbol_windows(
+            (symbol,),
+            start=start.date(),
+            end=end.date(),
+            floors=load_vendor_floors(floor_store, (symbol,)),
+        )
         # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
         # per pull and threaded into the completeness detectors' margin arithmetic
         # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
@@ -2522,6 +2648,7 @@ def pull_candles(
                     detect_completeness_gaps=True,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
+                    floor_learner=_floor_learner,
                 )
             except GrowwAuthError as exc:
                 # A TERMINAL dead-credential auth failure HALTED the spine mid-phase
@@ -2592,6 +2719,7 @@ def pull_candles(
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
+                            symbol_windows=_floor_windows,
                         )
                         plan_windows(
                             ledger,
@@ -2601,8 +2729,12 @@ def pull_candles(
                             end=end.date(),
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
+                            symbol_windows=_floor_windows,
                         )
-                    _run_phase(minute_intervals, None)
+                    # Learned-floor clamp (DEC-VENDOR-FLOOR-LAZY-PROBE-001): the SAME
+                    # ``_floor_windows`` the plan above tiled (planned keys ==
+                    # fetched keys); ``None`` (no learned floor) is byte-identical.
+                    _run_phase(minute_intervals, _floor_windows)
             # Fetch phases done — arm the post-drain L2 lake heal in the finally.
             fetch_phases_ok = True
         finally:

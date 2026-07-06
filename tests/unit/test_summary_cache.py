@@ -664,3 +664,224 @@ def test_concurrent_counter_adds_are_thread_safe() -> None:
     assert snap.total_bars == n_threads * per_thread
     assert snap.by_label == {"shared": n_threads * per_thread}
     assert snap.updates == n_threads * per_thread
+
+
+# ────────────────────────────────────────────────────────────────────────
+# PULL duty-degrade (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_pull_widens_floor_regression_27s_scan() -> None:
+    """REGRESSION (fail-before proven): on origin/main ``SummaryCache`` has no
+    ``set_pull_active_probe`` (this test errors with ``AttributeError``) and
+    behaviourally a dirty read 30 s after a 27 s scan RECOMPUTED (the adaptive
+    floor was exactly 27 s) — the measured p50 68 ms → 27.1 s scan re-fired on
+    every poll during a pull. After the fix, with the pull probe True the
+    effective floor widens to min(9 × 27, 600) = 243 s: the 30 s read serves
+    the stale entry, and only a read past 243 s rescans (still bounded)."""
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(lambda: True)
+    rc = _SlowRecompute(clock, duration=27.0)
+    cache.get_or_refresh(SPOT, recompute=rc)  # cold → scans, duration=27
+    assert rc.calls == 1
+    cache.mark_dirty()
+    clock.advance(30.0)  # past today's 27 s adaptive floor — main RE-FIRED here
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 1  # widened pull floor (243 s) holds it back
+    meta = cache.entry_meta(SPOT)
+    assert meta is not None
+    assert meta.duty_degraded is True  # the staleness is VISIBLE, never silent
+    clock.advance(215.0)  # 245 s since the scan > the 243 s widened floor
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2  # bounded: even mid-pull the scan eventually re-fires
+    assert cache.entry_meta(SPOT) is not None
+    meta_after = cache.entry_meta(SPOT)
+    assert meta_after is not None
+    assert meta_after.duty_degraded is False  # fresh recompute clears the flag
+
+
+def test_pull_widened_floor_capped_at_600() -> None:
+    # 9 × 100 s = 900 s would exceed the cap → 600 s bounds the mid-pull staleness.
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(lambda: True)
+    rc = _SlowRecompute(clock, duration=100.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(610.0)  # past the 600 s cap (< the uncapped 900 s)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2
+
+
+def test_pull_floor_never_below_base_floor() -> None:
+    # A fast scan (0.1 s) under pull: widened = 0.9 s < base 2 s → the base wins
+    # (the widening can only ever RAISE the floor, never lower it).
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(lambda: True)
+    rc = _SlowRecompute(clock, duration=0.1)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(1.0)  # inside the base 2 s floor
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 1  # still throttled by the BASE floor
+    clock.advance(1.5)  # 2.5 s > base 2 s AND > widened 0.9 s
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2
+
+
+def test_no_probe_is_byte_identical_to_today() -> None:
+    # Default (no probe wired): the 27 s scan re-fires at 30 s exactly as today.
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    rc = _SlowRecompute(clock, duration=27.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(30.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2  # today's exact semantics preserved
+
+
+def test_probe_false_is_byte_identical_to_today() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(lambda: False)
+    rc = _SlowRecompute(clock, duration=27.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(30.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2
+
+
+def test_probe_exception_swallowed_to_false() -> None:
+    def _boom() -> bool:
+        raise RuntimeError("probe blew up")
+
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(_boom)
+    rc = _SlowRecompute(clock, duration=27.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(30.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2  # the raising probe reads "no pull" — never a crash
+
+
+def test_probe_reset_to_none_disables_widening() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(lambda: True)
+    cache.set_pull_active_probe(None)  # un-wire → today's semantics
+    rc = _SlowRecompute(clock, duration=27.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(30.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 2
+
+
+def test_entry_meta_none_before_first_compute() -> None:
+    cache = SummaryCache(clock=_FakeClock())
+    assert cache.entry_meta(SPOT) is None
+
+
+def test_entry_meta_age_tracks_clock() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)
+    clock.advance(12.5)
+    meta = cache.entry_meta(SPOT)
+    assert meta is not None
+    assert meta.age_s == 12.5
+    assert meta.duty_degraded is False
+
+
+def test_non_pull_throttle_is_not_duty_degraded() -> None:
+    # A plain (no-pull) base-floor throttle serves stale but duty_degraded stays
+    # False — the flag means "held back BY THE PULL", never a generic staleness bit.
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(1.0)  # inside the base 2 s floor, no pull
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 1  # throttled
+    meta = cache.entry_meta(SPOT)
+    assert meta is not None
+    assert meta.duty_degraded is False
+
+
+def test_clean_hit_clears_duty_degraded() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(lambda: True)
+    rc = _SlowRecompute(clock, duration=27.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(30.0)
+    cache.get_or_refresh(SPOT, recompute=rc)  # stale-under-pull → degraded True
+    meta = cache.entry_meta(SPOT)
+    assert meta is not None and meta.duty_degraded is True
+    # The pull ends; the next read is dirty + past the floor → fresh recompute…
+    cache.set_pull_active_probe(lambda: False)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    meta2 = cache.entry_meta(SPOT)
+    assert meta2 is not None and meta2.duty_degraded is False
+    # …and a subsequent CLEAN hit keeps it False (the clean-hit path clears too).
+    cache.get_or_refresh(SPOT, recompute=rc)
+    meta3 = cache.entry_meta(SPOT)
+    assert meta3 is not None and meta3.duty_degraded is False
+
+
+def test_stamp_freshness_with_entry_and_without() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    # No entry yet: honest False / 0.0 (a degrade payload built fresh this request).
+    empty: dict[str, object] = {"rows": []}
+    stamped = cache.stamp_freshness(SPOT, empty)
+    assert stamped is empty  # stamped in place + returned (route ergonomics)
+    assert stamped["duty_degraded"] is False
+    assert stamped["snapshot_age_s"] == 0.0
+    # A fresh (NOT duty-degraded) entry: the age is deliberately 0.0 — an
+    # always-ticking age would defeat the DEC-DASHBOARD-JS-PERF-001
+    # exact-body-text skip-render pollers in the steady state; the honesty
+    # surface is the PULL-time staleness (the sibling test below).
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)
+    clock.advance(1.23456)
+    stamped2 = cache.stamp_freshness(SPOT, {"rows": []})
+    assert stamped2["snapshot_age_s"] == 0.0
+    assert stamped2["duty_degraded"] is False
+
+
+def test_stamp_freshness_reports_age_while_duty_degraded() -> None:
+    # While a pull holds the entry stale, the stamp carries the REAL served age
+    # (rounded to 3 dp) — visible, growing per poll, never silent.
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    cache.set_pull_active_probe(lambda: True)
+    rc = _SlowRecompute(clock, duration=27.0)
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    clock.advance(30.12345)
+    cache.get_or_refresh(SPOT, recompute=rc)  # stale-under-pull -> degraded
+    stamped = cache.stamp_freshness(SPOT, {"rows": []})
+    assert stamped["duty_degraded"] is True
+    assert stamped["snapshot_age_s"] == 30.123
+
+
+def test_entry_meta_age_clamped_nonnegative() -> None:
+    # A backwards clock (injected skew) never yields a negative age.
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)
+    clock.advance(-5.0)
+    meta = cache.entry_meta(SPOT)
+    assert meta is not None
+    assert meta.age_s == 0.0

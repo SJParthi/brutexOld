@@ -273,6 +273,11 @@ def reconcile_pairs_with_pipeline(
             conflicts=totals.conflicts,
             transient_failures=totals.transient,
             still_failed_windows=totals.transient,
+            # DEC-VENDOR-CONFLICT-SURFACE-001: the deferred producer report read 0/None
+            # for the vendor-behaviour counters (the consumer did the durable write) —
+            # fold the consumer's real per-series totals back in, like bars/conflicts.
+            vendor_dup_rows_dropped=totals.vendor_dup_rows_dropped,
+            max_close_delta=totals.max_close_delta,
         )
     return reconciled
 
