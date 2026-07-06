@@ -1173,12 +1173,16 @@ class TestJournalHeartbeat:
         assert len(beats) == 2
         assert {b.pull_id for b in beats} == {"abc123def456"}
 
-    def test_unbound_pull_id_journals_nothing(self, tmp_path: object) -> None:
-        """A beat outside any ``pull_id_scope`` (no started record could group it) skips
-        the durable write — a missing heartbeat is a weaker signal, never a wrong one."""
+    def test_in_run_beat_without_explicit_scope_journals_under_run_id(
+        self, tmp_path: object
+    ) -> None:
+        """RE-PINNED (DEC-PULL-BEAT-PERRUN-001, was ``test_unbound_pull_id_journals_nothing``):
+        ``_run`` now binds the run's ``pull_id_scope``, so a beat inside the work with NO
+        explicit scope is no longer unbound — the durable heartbeat records the RUN's id
+        (the ``if not pull_id`` skip no longer fires during the run's own phases)."""
         from pathlib import Path
 
-        from brutex.observability.pull_journal import read_journal
+        from brutex.observability.pull_journal import EVENT_HEARTBEAT, read_journal
 
         root = Path(str(tmp_path))
         job = self._job(root, self._manual_clock([0.0, 1.0, 2.0]), 0.5)
@@ -1187,6 +1191,24 @@ class TestJournalHeartbeat:
             on_progress("NSE-NIFTY 1minute", 10, False, False)
 
         assert job.start(work, total=1) is True
+        beats = [e for e in read_journal(root) if e.event == EVENT_HEARTBEAT]
+        assert beats  # the post-fetch-phase beat is now durably attributed
+        assert {b.pull_id for b in beats} == {job.pull_id}
+        assert len(job.pull_id) == 12  # the minted run id, never ""
+
+    def test_unbound_pull_id_journals_nothing(self, tmp_path: object) -> None:
+        """A beat from a context with NO bound ``pull_id`` (a stale between-runs beat on
+        a foreign thread — nothing could group it) still skips the durable write — a
+        missing heartbeat is a weaker signal, never a wrong one."""
+        from pathlib import Path
+
+        from brutex.observability.pull_journal import read_journal
+
+        root = Path(str(tmp_path))
+        job = self._job(root, self._manual_clock([0.0]), 0.5)
+        # Whitebox: drive the throttle body directly OUTSIDE any pull_id_scope (the
+        # only production shape left with no bound id — _run now always binds one).
+        job._maybe_journal_heartbeat()  # pyright: ignore[reportPrivateUsage]
         assert read_journal(root) == []
 
     def test_none_lake_root_journals_nothing(self, tmp_path: object) -> None:

@@ -127,7 +127,7 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.models import Instrument
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
-from brutex.observability.correlation import pull_id_scope
+from brutex.observability.correlation import inherited_pull_id_scope
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
@@ -1515,7 +1515,15 @@ def pull_all_spot(
     # the ingest spine's ``ingest.*`` events, AND the already-lit transport
     # (``groww.call``) + rate (``rate.*``) events — shares one ``pull_id``
     # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
-    with pull_id_scope(pull_id) as pid:
+    # INHERIT-aware (DEC-PULL-BEAT-PERRUN-001, LOAD-BEARING): under the dashboard job's
+    # RUN scope a plain ``pull_id_scope(None)`` would shadow-MINT a fresh id here, so
+    # every spot-phase fan-out worker (run_ingest capture-then-rebind) would carry the
+    # minted id ≠ the job's registered beat-channel key → all pace/flock seam beats
+    # DROP → under heavy 429 throttling (zero completed windows → zero direct
+    # _on_progress beats) the run would FALSE-STALL. ``inherited_pull_id_scope`` binds
+    # the ambient run id when one exists; a standalone call (no ambient) still mints —
+    # byte-identical to before.
+    with inherited_pull_id_scope(pull_id) as pid:
         # DURABLE pull journal (G5, DEC-DOCTOR-LIVE-PROOF-KIT-001): a start record
         # that survives a mid-pull process death, paired with the finish record at
         # the bottom — ``brutex doctor --live`` stage 12 reads a start-without-finish
@@ -2454,8 +2462,11 @@ def pull_candles(
     # bound into the structlog contextvars for the whole pass, so this start/done
     # summary, the ingest spine's ``ingest.*`` events, and the already-lit
     # transport (``groww.call``) + rate (``rate.*``) events all share one
-    # ``pull_id``. Always unbinds on exit (no leak).
-    with pull_id_scope(pull_id) as pid:
+    # ``pull_id``. Always unbinds on exit (no leak). INHERIT-aware
+    # (DEC-PULL-BEAT-PERRUN-001): under the dashboard job's RUN scope the entrypoint
+    # inherits the run id instead of shadow-minting (see :func:`pull_all_spot`); a
+    # standalone call (no ambient) still mints — byte-identical to before.
+    with inherited_pull_id_scope(pull_id) as pid:
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
         # `reconcile_ledger_with_lake` below are the sole skip source (the

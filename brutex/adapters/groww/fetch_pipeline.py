@@ -116,6 +116,7 @@ import structlog
 from brutex.adapters.groww.fetch_spill import FetchSpillArea, SpilledWindow
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.parquet_writer import fold_max_close_delta
+from brutex.observability.correlation import current_pull_id, pull_id_scope
 
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
@@ -513,6 +514,15 @@ class FetchPipeline:
         self._pause_lock = threading.Lock()
         self._monotonic = monotonic
         self._on_bars = on_bars
+        # Run correlation for the consumer threads (DEC-PULL-BEAT-PERRUN-001): the
+        # pipeline is constructed on the DRIVER thread inside the pull's run scope, so
+        # the ambient pull_id captured here is the run's id; each consumer thread
+        # re-binds it once for its whole loop (the pipeline object is strictly
+        # per-run — constructed and drained within one pull), so the consumers' seam
+        # beats (partition lock-wait / write paths) attribute to the run's keyed
+        # channel. A captured "" (the CLI path — no scope) binds "" → routes to the
+        # legacy channel → byte-identical no-op there.
+        self._pull_id = current_pull_id()
         # `object` poison-pill sentinel: a unique instance per pipeline so a stray
         # RawFetchResult can never be mistaken for the stop signal.
         self._poison: object = object()
@@ -948,33 +958,39 @@ class FetchPipeline:
         wedged on ``sink.append`` and the producer's bounded poison ``put`` was skipped — still
         notices :attr:`_draining` and exits once its OWN queue + overflow drain (the
         guaranteed-exit companion to the best-effort producer poison; the BLOCKER fix).
+
+        The whole loop runs inside ``pull_id_scope(self._pull_id)``
+        (DEC-PULL-BEAT-PERRUN-001) — bound ONCE per consumer thread, safe because the
+        pipeline object is strictly per-run — so the tails' seam beats attribute to the
+        run's keyed progress-beat channel.
         """
         q = self._queues[shard]
-        while True:
-            try:
-                item = q.get(timeout=_CONSUMER_GET_POLL_SECONDS)
-            except queue.Empty:
-                # No queued work right now: first drain any spilled overflow (a full queue spilled
-                # windows here), then — if the pull is draining and BOTH the queue and overflow are
-                # empty — this consumer is done (exit even without a poison-pill, which may never
-                # have been enqueued on a full queue).
-                self._drain_overflow(shard)
-                if self._draining.is_set() and not self._overflow[shard]:
+        with pull_id_scope(self._pull_id):
+            while True:
+                try:
+                    item = q.get(timeout=_CONSUMER_GET_POLL_SECONDS)
+                except queue.Empty:
+                    # No queued work right now: first drain any spilled overflow (a full queue
+                    # spilled windows here), then — if the pull is draining and BOTH the queue and
+                    # overflow are empty — this consumer is done (exit even without a poison-pill,
+                    # which may never have been enqueued on a full queue).
+                    self._drain_overflow(shard)
+                    if self._draining.is_set() and not self._overflow[shard]:
+                        return
+                    continue
+                if item is self._poison:
+                    # Drain any remaining spilled overflow BEFORE honouring the poison so no
+                    # spilled window is stranded behind the stop signal.
+                    self._drain_overflow(shard)
                     return
-                continue
-            if item is self._poison:
-                # Drain any remaining spilled overflow BEFORE honouring the poison so no spilled
-                # window is stranded behind the stop signal.
+                # `item` is a RawFetchResult here: the queue only ever carries a RawFetchResult
+                # or the unique poison-pill sentinel, and the sentinel already returned above.
+                result = item if isinstance(item, RawFetchResult) else None
+                if result is None:  # pragma: no cover — only poison + RawFetchResult are queued
+                    continue
+                self._process_one(result)
+                # Drain any spilled overflow that built up while this in-memory window processed.
                 self._drain_overflow(shard)
-                return
-            # `item` is a RawFetchResult here: the queue only ever carries a RawFetchResult
-            # or the unique poison-pill sentinel, and the sentinel already returned above.
-            result = item if isinstance(item, RawFetchResult) else None
-            if result is None:  # pragma: no cover — only poison + RawFetchResult are queued
-                continue
-            self._process_one(result)
-            # Drain any spilled overflow that built up while this in-memory window processed.
-            self._drain_overflow(shard)
 
     def _drain_overflow(self, shard: int) -> None:
         """Process every spilled window currently in shard *shard*'s overflow deque (FIFO).
