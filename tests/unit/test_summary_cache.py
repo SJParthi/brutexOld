@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import threading
 
+import pytest
 from brutex.dashboard.summary_cache import (
     DEFAULT_TTL_FLOOR_S,
+    LAKE_UNIQUENESS,
     OPTIONS,
     SPOT,
     CoverageCounters,
@@ -885,3 +887,118 @@ def test_entry_meta_age_clamped_nonnegative() -> None:
     meta = cache.entry_meta(SPOT)
     assert meta is not None
     assert meta.age_s == 0.0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# COLD single-flight (DEC-SCAN-SINGLE-FLIGHT-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_cold_concurrent_cross_thread_single_flight() -> None:
+    """N cold concurrent readers of one kind → exactly ONE scan, all served.
+
+    DEC-SCAN-SINGLE-FLIGHT-001: the 2026-07-05 restart log measured SIX
+    concurrent 58-68 min duplicate lake-uniqueness census scans — one per cold
+    poller — because the pre-fix cold path deliberately fell through to a
+    "transient double-scan". Now the waiters block on the in-flight event and
+    serve the stored payload: the scan spy must count EXACTLY one call.
+    """
+    cache = SummaryCache(ttl_floor_s=2.0)
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    calls = {"n": 0}
+
+    def slow_scan() -> list[dict[str, object]]:
+        calls["n"] += 1
+        scan_started.set()
+        assert release_scan.wait(timeout=10)
+        return [{"census": "payload"}]
+
+    results: list[list[dict[str, object]]] = []
+
+    def leader() -> None:
+        results.append(cache.get_or_refresh(LAKE_UNIQUENESS, recompute=slow_scan))
+
+    def waiter() -> None:
+        results.append(cache.get_or_refresh(LAKE_UNIQUENESS, recompute=slow_scan))
+
+    lead = threading.Thread(target=leader)
+    lead.start()
+    assert scan_started.wait(timeout=10)  # the leader is REGISTERED + scanning
+    waiters = [threading.Thread(target=waiter) for _ in range(5)]
+    for t in waiters:
+        t.start()
+    release_scan.set()
+    lead.join(timeout=10)
+    for t in waiters:
+        t.join(timeout=10)
+    assert not lead.is_alive() and not any(t.is_alive() for t in waiters)
+    assert calls["n"] == 1  # ONE scan total — never six
+    assert results == [[{"census": "payload"}]] * 6
+
+
+def test_cold_waiter_takes_over_after_scan_exception() -> None:
+    """A raised in-flight cold scan wakes the waiters; exactly one takes over."""
+    cache = SummaryCache(ttl_floor_s=0.0)
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    class _Boom(RuntimeError):
+        pass
+
+    def failing_scan() -> list[dict[str, object]]:
+        scan_started.set()
+        assert release_scan.wait(timeout=10)
+        raise _Boom
+
+    good = _CountingRecompute()
+    errors: list[BaseException] = []
+    results: list[list[dict[str, object]]] = []
+
+    def leader() -> None:
+        try:
+            cache.get_or_refresh(SPOT, recompute=failing_scan)
+        except _Boom as exc:
+            errors.append(exc)
+
+    def waiter() -> None:
+        results.append(cache.get_or_refresh(SPOT, recompute=good))
+
+    lead = threading.Thread(target=leader)
+    lead.start()
+    assert scan_started.wait(timeout=10)
+    wait_thread = threading.Thread(target=waiter)
+    wait_thread.start()
+    release_scan.set()
+    lead.join(timeout=10)
+    wait_thread.join(timeout=10)
+    assert not lead.is_alive() and not wait_thread.is_alive()
+    assert len(errors) == 1  # the leader's exception propagated untouched
+    assert results == [[{"call": 1}]]  # the waiter took over with ONE fresh scan
+    assert good.calls == 1
+
+
+def test_cold_reentrant_outer_exception_after_inner_success() -> None:
+    """The OUTER cold scan raising AFTER its re-entrant inner succeeded is clean.
+
+    The inner (re-entrant, unregistered) recompute stores an entry and releases
+    the outer's registration on completion; the outer's exception path then
+    finds NOTHING left to release (the ``aborted is None`` arm) — the guard is
+    fully cleared, the inner's payload survives, and no waiter can hang.
+    """
+    cache = SummaryCache(ttl_floor_s=0.0)
+    inner = _CountingRecompute()
+
+    class _Boom(RuntimeError):
+        pass
+
+    def outer_recompute() -> list[dict[str, object]]:
+        cache.get_or_refresh(SPOT, recompute=inner)  # inner stores + releases
+        raise _Boom
+
+    with pytest.raises(_Boom):
+        cache.get_or_refresh(SPOT, recompute=outer_recompute)
+    # The inner's stored payload serves as a clean hit — nothing wedged.
+    follow_up = _CountingRecompute()
+    assert cache.get_or_refresh(SPOT, recompute=follow_up) == [{"call": 1}]
+    assert follow_up.calls == 0
