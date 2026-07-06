@@ -11,25 +11,36 @@ feeds each window's RSS / fd / per-op latency into the pure
 in that COMMON module (unit-tested to 100% line+branch on synthetic series); THIS
 file is the honest wall-clock exerciser.
 
-The failure signal is AUTOMATIC (CLAUDE.md §11, never eyeball-only). Every
-per-window RSS-ceiling / fd-growth / p99-latency-drift breach (a) fires the
-monitor's best-effort ``on_breach`` alert IN REAL TIME — the driver WIRES it to
+The failure signal is AUTOMATIC (CLAUDE.md §11, never eyeball-only). A per-window
+RSS-ceiling or fd-growth breach (a) fires the monitor's best-effort ``on_breach``
+alert IN REAL TIME — the driver WIRES it to
 :meth:`brutex.notifications.sweep_alerts.SweepAlerter.soak_drift` (mirroring
 DEC-PULL-HEALTH-WIRING-001, which bound the originally-dormant pull-health
-monitor), a CRITICAL, trigger-independent push that fires the INSTANT a rule
-edges into breach and is a silent no-op when Telegram is disabled (CI/dev), so it
-never sends spuriously nor blocks the run.
+monitor), a CRITICAL, trigger-independent push that fires the INSTANT a
+DETERMINISTIC rule edges into breach and is a silent no-op when Telegram is
+disabled (CI/dev), so it never sends spuriously nor blocks the run. The noisy
+``soak.p99_drift`` rule is DELIBERATELY EXCLUDED from this real-time push (see
+below), so an oscillating sub-second p99 cannot storm the operator.
 
 The **hard CI gate** (b) is the DETERMINISTIC oracles only — the RSS ceiling, the
 fd-growth count, and the audit-chain integrity are asserted at end-of-run so a
-leak fails CI. ``soak.p99_drift`` is deliberately **alert-only, NOT a hard gate**:
-a sub-second window's p99 is dominated by transient fsync/GC/scheduler spikes
-(the ingest ``audit.append`` fsyncs per record), so comparing a later window's
-p99 to a single warm first-window baseline at ratio 2.0 fires on NOISE, not
-drift — reproduced as a ~15% false-fail rate on an idle box (ratios up to 8–9×).
-It still fires its real-time ``soak_drift`` alert (the operator sees a genuine
-sustained p99 climb over hours), but it never red-fails the pytest gate, so the
-nightly cron cannot cry-wolf and open false CRITICAL issues (DEC-SOAK-REAL-TIER-001).
+leak fails CI. ``soak.p99_drift`` is deliberately **observe-only** — neither a
+hard CI gate NOR a real-time CRITICAL push: a sub-second window's p99 is
+dominated by transient fsync/GC/scheduler spikes (the ingest ``audit.append``
+fsyncs per record), so comparing a later window's p99 to a single warm
+first-window baseline at ratio 2.0 fires on NOISE, not drift — reproduced as a
+~15% false-fail rate on an idle box (ratios up to 8–9×). Because that noise
+OSCILLATES (not a monotone leak), the ``SLADetector`` hysteresis fires a fresh
+OK→BREACH edge on every up-crossing, so wiring it to the CRITICAL ``soak_drift``
+push would emit thousands of pushes over a 6h soak and train the operator to
+ignore soak alerts (§11) — the exact anti-pattern that motivated demoting it from
+the gate. So the driver excludes it from BOTH the gate (:func:`_assert_healthy`)
+AND the real-time push (:func:`_drive._on_breach`) via ONE shared predicate
+(:func:`_fires_realtime_push`); the p99 signal stays visible via the monitor's
+structlog breach warning and the ``brutex_soak_p99_ratio`` /metrics gauge, never
+via a phone push (DEC-SOAK-REAL-TIER-001). The deterministic MONOTONE rules —
+``soak.rss_ceiling`` and ``soak.fd_growth`` — DO both hard-gate CI and fire the
+real-time push: a genuine leak crosses once, so one honest CRITICAL.
 
 ## Two entry points, ONE driver (honest tier split)
 
@@ -63,7 +74,12 @@ from brutex.notifications.sweep_alerts import SweepAlerter
 from brutex.observability.metrics import MetricRegistry
 from brutex.observability.process_probe import read_fd_count, read_rss_kib
 from brutex.observability.sla import SLAEvent
-from brutex.observability.soak_drift import RULE_P99_DRIFT, SoakDriftMonitor
+from brutex.observability.soak_drift import (
+    RULE_FD_GROWTH,
+    RULE_P99_DRIFT,
+    RULE_RSS_CEILING,
+    SoakDriftMonitor,
+)
 from brutex.orchestrator.audit import AuditWriter, verify_chain
 
 # NOTE: NO module-level ``pytestmark = pytest.mark.stress`` here — that would tag
@@ -84,6 +100,33 @@ _OPS_PER_BATCH: int = 200
 #: The self-hosted sustained default when ``STRESS_DURATION_S`` is unset — a few
 #: seconds, so a plain ``-m soak`` dev run is quick; the workflow overrides it.
 _DEFAULT_SUSTAINED_S: float = 2.0
+
+#: The p99-drift rule is fsync/GC/scheduler-jitter-bound on a sub-second window
+#: (documented ~15% false-breach on an idle box, ratios up to 8-9x). Because that
+#: noise OSCILLATES rather than climbing monotonically, the ``SLADetector``
+#: hysteresis fires a FRESH OK->BREACH edge on every up-crossing — so a 6h soak
+#: would emit thousands of edges. It is therefore excluded from BOTH the hard CI
+#: gate (:func:`_assert_healthy`) AND the real-time CRITICAL push
+#: (:func:`_drive._on_breach`) via ONE predicate below, so it can never storm the
+#: operator into ignoring soak alerts (§11) — the exact anti-pattern that
+#: motivated demoting it from the gate. The p99 signal stays visible via the
+#: monitor's structlog breach warning + the ``brutex_soak_p99_ratio`` /metrics
+#: gauge, just never as a phone push (DEC-SOAK-REAL-TIER-001). The deterministic
+#: MONOTONE rules (RSS ceiling / fd growth) both hard-gate CI and fire the push:
+#: a genuine leak crosses once, so ONE honest CRITICAL.
+_NOISY_OBSERVE_ONLY_RULES: frozenset[str] = frozenset({RULE_P99_DRIFT})
+
+
+def _fires_realtime_push(rule_name: str) -> bool:
+    """A soak breach warrants a real-time CRITICAL push iff it is a deterministic rule.
+
+    The SAME predicate gates the hard CI oracle in :func:`_assert_healthy`, so the
+    push and the gate can never drift apart (COMMON, Golden Rule #11): the noisy,
+    oscillating ``soak.p99_drift`` rule is observe-only on both; the monotone
+    RSS-ceiling / fd-growth rules count on both.
+    """
+    return rule_name not in _NOISY_OBSERVE_ONLY_RULES
+
 
 #: Fixed reproducibility stand-ins for the combo-dedup key (NOT real BLAKE3 run
 #: identities — the sweep hot path shape is what the soak exercises, Golden
@@ -167,12 +210,20 @@ def _drive(tmp_path: Path, duration_s: float) -> _SoakResult:
 
     def _on_breach(event: SLAEvent) -> None:
         recorded.append(event.rule_name)
-        # Best-effort CRITICAL push the INSTANT a rule edges into breach.
+        # Best-effort CRITICAL push the INSTANT a DETERMINISTIC rule edges into
+        # breach. The noisy ``soak.p99_drift`` rule is EXCLUDED (``_fires_realtime_push``):
+        # its sub-second-window p99 oscillates, so the hysteresis fires a fresh
+        # OK->BREACH edge per up-crossing and pushing each would storm the operator
+        # on non-regression noise (DEC-SOAK-REAL-TIER-001, §11) — the same reason
+        # ``_assert_healthy`` excludes it from the hard gate. p99 stays visible via
+        # the monitor's structlog warning + the ``brutex_soak_p99_ratio`` gauge.
+        if not _fires_realtime_push(event.rule_name):
+            return
         alerter.soak_drift(
             rule=event.rule_name,
             observed=event.observed_value,
             threshold=event.threshold,
-            detail="soak drift breach — check RSS / fd / p99 latency over the run",
+            detail="soak drift breach — check RSS / fd over the run",
         )
 
     def _on_recovery(_event: SLAEvent) -> None:
@@ -188,8 +239,9 @@ def _drive(tmp_path: Path, duration_s: float) -> _SoakResult:
         monitor=monitor,
         audit_path=tmp_path / "soak_audit.jsonl",
     )
-    # The real-time alert edge and the returned events must agree (both are the
-    # automatic drift signal).
+    # The observed breach edges and the returned events must agree (``recorded``
+    # is appended for EVERY monitor edge, before the push-vs-observe-only
+    # decision, so it mirrors the full drift signal — not only the pushed subset).
     assert list(result.breaches) == recorded
     return result
 
@@ -199,13 +251,17 @@ def _assert_healthy(result: _SoakResult, audit_path: Path) -> None:
 
     Only the DETERMINISTIC drift oracles hard-gate CI: the RSS ceiling and the
     fd-growth count (plus the audit-chain integrity below). ``soak.p99_drift`` is
-    alert-only — a sub-second window's p99 is fsync/GC/scheduler-jitter-bound, so
+    observe-only — a sub-second window's p99 is fsync/GC/scheduler-jitter-bound, so
     asserting on it false-fails the nightly cron (~15% locally) and spams CRITICAL
-    issues for a non-regression (DEC-SOAK-REAL-TIER-001); it still fires its
-    real-time ``soak_drift`` alert but is filtered out of the hard gate here.
+    issues for a non-regression (DEC-SOAK-REAL-TIER-001); it is filtered out of the
+    hard gate here via the SAME ``_fires_realtime_push`` predicate that filters it
+    out of the real-time push, so the gate and the push can never drift apart.
     """
     assert result.windows >= 1, "the soak must produce at least one drift window"
-    hard_breaches = tuple(rule for rule in result.breaches if rule != RULE_P99_DRIFT)
+    # The hard gate and the real-time push share ONE predicate: p99 is
+    # observe-only on both (a noise-driven up-crossing must not red-fail CI nor
+    # push a CRITICAL); the monotone RSS/fd rules count on both.
+    hard_breaches = tuple(rule for rule in result.breaches if _fires_realtime_push(rule))
     assert hard_breaches == (), (
         f"soak drift breach(es) detected: {hard_breaches} — a memory/fd "
         f"regression over {result.windows} windows (DEC-SOAK-REAL-TIER-001)"
@@ -241,3 +297,19 @@ def test_soak_sustained(tmp_path: Path) -> None:
     duration_s = float(os.environ.get("STRESS_DURATION_S", str(_DEFAULT_SUSTAINED_S)))
     result = _drive(tmp_path, duration_s)
     _assert_healthy(result, tmp_path / "soak_audit.jsonl")
+
+
+@pytest.mark.stress
+def test_p99_drift_is_observe_only_not_a_realtime_push() -> None:
+    """The noisy ``soak.p99_drift`` rule fires NEITHER the hard gate NOR the push.
+
+    Regression pin for the storm-anti-pattern (DEC-SOAK-REAL-TIER-001): a
+    sub-second p99 oscillates, so the hysteresis emits an OK→BREACH edge per
+    up-crossing; routing each to the CRITICAL ``soak_drift`` push would flood the
+    operator on the very noise that got p99 demoted from the CI gate. The ONE
+    shared :func:`_fires_realtime_push` predicate keeps p99 observe-only on BOTH
+    the gate and the push, while the deterministic monotone rules fire on both.
+    """
+    assert not _fires_realtime_push(RULE_P99_DRIFT)
+    assert _fires_realtime_push(RULE_RSS_CEILING)
+    assert _fires_realtime_push(RULE_FD_GROWTH)
