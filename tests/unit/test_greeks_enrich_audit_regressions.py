@@ -203,8 +203,7 @@ def _seed_master(lake: Path, *symbols: str) -> None:
     from brutex.data.instrument_store import Instrument, InstrumentStore
     from brutex.models import Exchange, InstrumentType, Segment
 
-    store = InstrumentStore.open(lake / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
         store.upsert_many(
             [
                 Instrument(
@@ -231,8 +230,6 @@ def _seed_master(lake: Path, *symbols: str) -> None:
             run_id="test-stock-drift",
             csv_source_sha256="0" * 64,
         )
-    finally:
-        store.close()
 
 
 class TestSpotKeyRecoveryLadder:
@@ -592,7 +589,7 @@ class TestStockDriftBuildGate:
 
     @staticmethod
     def _install_raising_spy(monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.data.greeks_enrich as greeks_enrich_module
+        from brutex.data import greeks_enrich as greeks_enrich_module
 
         def _must_not_build(
             _lake_root: Path,

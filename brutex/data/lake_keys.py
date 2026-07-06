@@ -55,7 +55,11 @@ from typing import Final
 #: carries data). Built and verified in :mod:`brutex.data.spot_drift`; this
 #: module stays pure and I/O-free — the map is passed IN. Treat as frozen: the
 #: production value is a plain ``dict`` so it can cross the spawn pickle
-#: boundary (never a ``MappingProxyType``).
+#: boundary (never a ``MappingProxyType``). Importable by name
+#: (``from brutex.data.lake_keys import StockDriftMap``) but intentionally
+#: NOT listed in ``__all__``: it is a PEP 695 ``type`` statement, which some
+#: static analysers (CodeQL) do not yet model as an ``__all__`` binding, and
+#: type aliases are idiomatically not part of the ``import *`` surface anyway.
 type StockDriftMap = Mapping[tuple[str, str], tuple[str, ...]]
 
 
@@ -270,7 +274,6 @@ def spot_recovery_candidates(
 
 __all__ = [
     "FNO_INDEX_ALIASES_ENV",
-    "StockDriftMap",
     "fno_index_alias_pairs",
     "resolve_spot_key",
     "spot_key_candidates",

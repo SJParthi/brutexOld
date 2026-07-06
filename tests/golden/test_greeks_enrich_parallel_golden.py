@@ -161,8 +161,7 @@ def _build_drifted_stock_lake(lake: Path) -> list[GreeksEnrichTarget]:
         sink.append(
             exchange="NSE", segment="FNO", symbol=option_symbol, interval="1minute", bars=bars
         )
-    store = InstrumentStore.open(lake / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
         store.upsert_many(
             [
                 Instrument(
@@ -189,8 +188,6 @@ def _build_drifted_stock_lake(lake: Path) -> list[GreeksEnrichTarget]:
             run_id="golden-stock-drift",
             csv_source_sha256="0" * 64,
         )
-    finally:
-        store.close()
     return [
         GreeksEnrichTarget(exchange="NSE", symbol=bajaj_ce, start=_WINDOW_A[0], end=_WINDOW_A[1]),
         GreeksEnrichTarget(exchange="NSE", symbol=mm_ce, start=_WINDOW_A[0], end=_WINDOW_A[1]),

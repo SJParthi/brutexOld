@@ -488,8 +488,7 @@ def _seed_master(lake: Path, *symbols: str) -> None:
     from brutex.data.instrument_store import InstrumentStore
 
     lake.mkdir(parents=True, exist_ok=True)
-    store = InstrumentStore.open(lake / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
         if symbols:
             store.upsert_many(
                 [_eq_instrument(s) for s in symbols],
@@ -497,8 +496,6 @@ def _seed_master(lake: Path, *symbols: str) -> None:
                 run_id="test-spot-drift",
                 csv_source_sha256="0" * 64,
             )
-    finally:
-        store.close()
 
 
 class TestLoadStockDriftMap:
@@ -584,7 +581,7 @@ class TestLoadStockDriftMap:
         def _must_not_scan(_lake_root: Path) -> dict[str, tuple[str, ...]]:
             raise AssertionError("the empty-master short-circuit must not walk the lake")
 
-        import brutex.data.spot_drift as spot_drift_module
+        from brutex.data import spot_drift as spot_drift_module
 
         monkeypatch.setattr(spot_drift_module, "scan_spot_symbol_dirs", _must_not_scan)
         with capture_logs() as logs:

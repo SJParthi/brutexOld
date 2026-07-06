@@ -473,8 +473,7 @@ class TestStockDriftHeldOpenStore:
             exchange="NSE", segment="FNO", symbol=self._BAJAJ_CE, interval="1minute", bars=option
         )
         # The dashboard-style handle: opened BEFORE the pass, held THROUGHOUT.
-        held = InstrumentStore.open(lake / "instruments.duckdb")
-        try:
+        with InstrumentStore.open(lake / "instruments.duckdb") as held:
             held.upsert_many(
                 [
                     Instrument(
@@ -504,8 +503,6 @@ class TestStockDriftHeldOpenStore:
                 report = enrich_greeks_for_targets(
                     targets=_targets(self._BAJAJ_CE), lake_root=lake, rate_source=_RATE
                 )
-        finally:
-            held.close()
         # The map LOADED (no fail-soft degrade masked the conflict) …
         assert not [e for e in logs if e["event"] == "spot_drift.master_error"]
         assert [e for e in logs if e["event"] == "spot_drift.map_built"]

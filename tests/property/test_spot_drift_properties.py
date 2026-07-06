@@ -98,7 +98,7 @@ def test_module_import_is_wheel_light() -> None:
     collecting this file."""
     import sys
 
-    import brutex.data.spot_drift as spot_drift_module
+    from brutex.data import spot_drift as spot_drift_module
 
     assert hasattr(spot_drift_module, "build_stock_drift_map")
     # The loader's heavy deps stay function-local; importing the module cannot
