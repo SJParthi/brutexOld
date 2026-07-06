@@ -2077,7 +2077,11 @@ jobs:
         # soak via BRUTEX_STRESS_YEARS / STRESS_EVENTS on workflow_dispatch).
         run: |
           if [ -d tests/stress ]; then
-            pytest tests/stress -q
+            # SOAK-1: honor the deliberately-isolated @soak marker — the
+            # full-budget soak runs ONLY on soak-selfhosted.yml, NEVER in the
+            # per-PR gate (pyproject.toml soak-marker contract + tests/stress/
+            # __init__.py). Matches stress-nightly.yml's exclusion.
+            pytest tests/stress -m 'not soak' -q
           else
             echo "⏸  tests/stress does not exist yet — skipping"
           fi
