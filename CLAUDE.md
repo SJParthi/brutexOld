@@ -43,7 +43,10 @@ resolved once at launch → clean 400; pure `step_settle_verdict` +
 ~seconds added per pull (bounded analysis, not measured); in async-pipeline
 mode a step's k→k+1 settle is PRODUCER-side (fetch-issue order strict; tail
 writes drain terminally — observed + counted as `pull.step.late_write`)
-while the POST-step barrier is fully drain-guarded; the CLI `brutex fetch`
+while the POST-step barrier is fully drain-guarded; the F&O mass-empty
+breaker's trip evidence is now per-(market, index/stock)-BUCKET pass (a
+disclosed narrowing — evidence resets at the index/stock boundary;
+thresholds/canary/bounded-settle machinery unchanged); the CLI `brutex fetch`
 spot path is the NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, NOT
 claimed. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 touched modules 100% line+branch).
@@ -371,7 +374,10 @@ hostile-review pass._
   ordering regression + fetch-count parity bench pin "reorders, never re-fetches". HONEST: ~seconds added per pull,
   NOT a speedup (bounded analysis, not measured); async-mode step settles are PRODUCER-side (tail writes drain
   terminally — monitored `pull.step.late_write`; the settle events' `bars`/`clean` are producer-side counts, deferred
-  0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain); on a
+  0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain; the
+  SPOT settle event's sync counts SUM every until-clean pass and its `clean` folds the group's terminal quarantines —
+  round-2 review, F&O-twin parity); the F&O mass-empty breaker's trip evidence is per-BUCKET pass (a disclosed
+  narrowing — resets at the index/stock boundary; thresholds/canary/bounded-settle machinery unchanged); on a
   mid-pull global stop a never-started later group's symbols read honest unknown-ZEROS in the per-symbol rollup (not
   synthesized FAILED — the ledger stays the retry authority); the CLI spot path is the NAMED follow-up
   DEC-PULL-SIX-STEP-ORDER-CLI-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; every touched module 100% line+branch;

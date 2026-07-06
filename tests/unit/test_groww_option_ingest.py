@@ -65,6 +65,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.window_ledger_store import index_lake_spans
 from brutex.models import BruteXError, OutOfScopeError
 from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
@@ -3639,6 +3640,39 @@ class TestReconcileFnoLedgerWindows:
         )
         assert seeded == 1
         assert ledger.records()[0].status == "SUCCESS"
+
+    def test_prebuilt_span_index_reused_never_rebuilt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Round-2 review polish (DEC-PULL-SIX-STEP-ORDER-001): a caller-supplied
+        # ``span_index`` (the step-major 4-bucket loop builds it ONCE per phase)
+        # skips the per-call O(spans) rebuild — byte-identical seeding, and the
+        # in-function ``index_lake_spans`` provably NOT invoked.
+        ledger = WindowLedger()
+        contract = _ce()
+        spans = [_fno_span(contract)]
+        prebuilt = index_lake_spans(spans)
+
+        def _must_not_rebuild(_spans: object) -> dict[object, object]:
+            raise AssertionError("index_lake_spans must not run when span_index is supplied")
+
+        monkeypatch.setattr(_oi, "index_lake_spans", _must_not_rebuild)
+        seeded = reconcile_fno_ledger_windows(
+            ledger,
+            spans,
+            contracts=[contract],
+            intervals=["1minute"],
+            start=_FNO_START,
+            end=_FNO_END,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            now=_FNO_NOW,
+            now_ist=lambda: _FNO_NOW,
+            span_index=prebuilt,
+        )
+        # Byte-identical outcome to the default (rebuild) path over the same spans.
+        assert seeded == 1
+        assert ledger.records()[0].status == "SUCCESS"
+        assert ledger.is_skippable(_fetched_key(contract))
 
 
 class TestReconcileFnoLedgerWithLake:

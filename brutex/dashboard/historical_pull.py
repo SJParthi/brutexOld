@@ -129,6 +129,7 @@ from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
     end_pull_ledger,
+    index_lake_spans,
     make_live_ledger_flush,
 )
 from brutex.data.write_consumer import WriteConsumer
@@ -1053,7 +1054,11 @@ def _run_phase(
         spans = load_lake_spans(lake_root)
         # Buckets REFINE (never cross) the market split, so the per-bucket
         # reconcile with ``market=key[0]`` is byte-equivalent to the legacy
-        # per-market reconcile (DEC-PULL-SIX-STEP-ORDER-001).
+        # per-market reconcile (DEC-PULL-SIX-STEP-ORDER-001). The span index
+        # is built ONCE for the phase and shared across the 4 bucket
+        # reconciles (round-2 review polish — the per-call ``index_lake_spans``
+        # rebuild was a pure O(spans) dict build repeated per bucket).
+        span_index = index_lake_spans(spans)
         for (reconcile_market, _is_index), reconcile_bucket in by_bucket.items():
             reconcile_fno_ledger_windows(
                 ledger,
@@ -1064,6 +1069,7 @@ def _run_phase(
                 end=end,
                 market=reconcile_market,
                 contract_windows=contract_windows,
+                span_index=span_index,
             )
         # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
         # capture BOTH sides pre-plan — the SAME already-loaded spans + the
@@ -1327,6 +1333,20 @@ def _run_phase(
                 # quota stops) — before the next step's first vendor call: the
                 # until-clean rounds are scoped PER BUCKET (the round-major cross-step
                 # retry pass no longer exists — a law-sanctioned change).
+                # DISCLOSED envelope (round-2 review, Golden Rule #10): the mass-empty
+                # ``EmptySettleBreaker`` is resolved fresh per ``run_groww_option_ingest``
+                # invocation ("one breaker per PASS"), and passes are now per BUCKET —
+                # so its trip-EVIDENCE population (consecutive clean-empties / the
+                # fraction over min-observations) RESETS at the index/stock boundary
+                # within each market, half the per-market pass population main
+                # accumulated over. A mass-empty burst spanning that boundary trips
+                # later (or, on a tiny bucket below the min-observations floor, not at
+                # all — extra poisoned windows can settle SKIPPED before the halt);
+                # the env-tunable thresholds, the vendor-health canary and the #919/
+                # #1031 bounded-settle machinery are unchanged and still bound the
+                # damage. Sharing one breaker per market across its two buckets is a
+                # possible future tightening, NOT done here (an injected instance
+                # bypasses the per-pass expected-empty predicate + canary wiring).
                 run_until_clean(
                     _bucket_round_runner(bucket_key, bucket),
                     max_rounds=until_clean_rounds,

@@ -12,6 +12,7 @@ auth / mass-empty halt propagation (``pull.step.halted``). Fully offline.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -846,3 +847,19 @@ class TestGreeksStrictGate:
         assert len(calls) == 1
         assert report.greeks_enrich_ok is True
         assert "withheld" not in report.note
+
+
+class TestSpanIndexHoistPin:
+    """(round-2 review) The per-bucket cold-start reconcile shares ONE span index.
+
+    The step-major 4-bucket split runs ``reconcile_fno_ledger_windows`` once per
+    bucket; the O(spans) ``index_lake_spans`` dict build is hoisted OUT of that
+    loop and threaded via the new ``span_index=`` param (behavioural teeth live
+    in ``test_groww_option_ingest.py::test_prebuilt_span_index_reused_never_rebuilt``;
+    this source pin holds the phase to the hoist, the (g)/(i) pin pattern).
+    """
+
+    def test_span_index_built_once_outside_bucket_loop(self) -> None:
+        src = inspect.getsource(hp._run_phase)
+        assert "span_index = index_lake_spans(spans)" in src
+        assert "span_index=span_index" in src

@@ -58,7 +58,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import structlog
 
@@ -1207,6 +1207,34 @@ def make_step_write_observer(
     return _on_window
 
 
+class _GroupSettle(NamedTuple):
+    """One step group's producer-side settle counts for ``pull.step.settled``.
+
+    DEC-PULL-SIX-STEP-ORDER-001 (review round 2) — the spot settle event's
+    counting contract, aligned with the F&O twin in
+    :mod:`brutex.dashboard.historical_pull`:
+
+    - ``bars`` / ``windows`` SUM every completed until-clean pass of the group
+      (the F&O event sums its bucket passes), NOT the first-pass-only
+      ``phase_reports`` rollup convention — a synchronous round-2 recovery is
+      counted, so the event's "real counts on the sync path" claim holds.
+    - ``skipped`` is the FIRST pass's already-complete skips (the F&O
+      ``bucket_passes[0].skipped_windows`` convention — later rounds re-skip
+      the same settled windows, so summing would double-count).
+    - ``quarantined`` is the LAST pass's TERMINAL per-pair quarantine count
+      (``GrowwIngestReport.failed_pairs`` — the F&O ``failed_pairs`` term)
+      plus any synthesized auth-halt rows; folded into the event's ``clean``
+      so a terminally quarantined symbol can never settle ``clean=True``
+      (``still_failed`` counts only the PAIRS-side transient residual and is
+      structurally blind to quarantines — the round-2 repro).
+    """
+
+    bars: int
+    windows: int
+    skipped: int
+    quarantined: int
+
+
 def _build_pull_health_monitor(
     controller: RateController | None,
 ) -> PullHealthMonitor | None:
@@ -1822,7 +1850,7 @@ def pull_all_spot(
             phase_windows: SpotWindows | None,
             *,
             step: PullStep,
-        ) -> None:
+        ) -> _GroupSettle:
             """Run ONE phase (1-day or 1-minute) over the SHARED ledger; fold its outcome.
 
             The single ingest call site (CLAUDE.md §11 COMMON) — both phases funnel
@@ -1844,6 +1872,12 @@ def pull_all_spot(
             (``progress_counts(symbols=…)``) so the indices group exits
             ``stop_clean`` honestly instead of burning a vendor-call-free
             ``stop_no_progress`` round against the stock group's PLANNED rows.
+
+            Returns the group's :class:`_GroupSettle` for the caller's
+            ``pull.step.settled`` event — bars/windows summed across ALL
+            completed passes + the last pass's terminal quarantine count
+            (review round 2; the first-pass-only ``phase_reports`` rollup
+            convention above is deliberately NOT reused for the event).
             """
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
             nonlocal final_mass_empty_cause
@@ -2093,6 +2127,20 @@ def pull_all_spot(
             phase_reports.append(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=auth_failures)
             )
+            # The step-settle counting contract (see :class:`_GroupSettle`):
+            # bars/windows sum EVERY completed pass (F&O-twin parity — a sync
+            # round-2 recovery is counted); ``quarantined`` reads the LAST
+            # pass's terminal per-pair failures (+ the synthesized auth rows,
+            # empty on every non-auth path) so the event's ``clean`` is not
+            # blind to a quarantined symbol.
+            return _GroupSettle(
+                bars=sum(p.report.bars_appended for p in passes),
+                windows=sum(p.report.windows for p in passes),
+                skipped=passes[0].report.skipped_windows if passes else 0,
+                quarantined=(
+                    (passes[-1].report.failed_pairs if passes else 0) + len(auth_failures)
+                ),
+            )
 
         def _run_grouped(
             phase_intervals: tuple[str, ...],
@@ -2150,8 +2198,7 @@ def pull_all_spot(
                     pull_id=pid,
                 )
                 before_failed = final_still_failed
-                _run_phase(phase_intervals, group, phase_windows, step=step)
-                group_report = phase_reports[-1]
+                group_settle = _run_phase(phase_intervals, group, phase_windows, step=step)
                 group_failed = final_still_failed - before_failed
                 # HONESTY (review fix, Golden Rule #1): the counts below are
                 # PRODUCER-side. In the DEFAULT async-pipeline mode every
@@ -2163,22 +2210,30 @@ def pull_all_spot(
                 # explicit ``bars_deferred`` flag discloses that envelope on
                 # the event itself (never a fabricated number presented as a
                 # settled total); the SYNCHRONOUS path (pipeline off / dry-run)
-                # logs real counts with ``bars_deferred=False``.
+                # logs real counts with ``bars_deferred=False`` — SUMMED across
+                # ALL of the group's until-clean passes (round-2 review fix:
+                # the F&O twin's per-bucket sum, so a sync round-2 recovery is
+                # counted instead of the first-round-only undercount), and
+                # ``clean`` folds the group's TERMINAL quarantine count
+                # (``_GroupSettle.quarantined`` — the F&O ``failed_pairs``
+                # term; ``still_failed`` alone is the pairs-side transient
+                # residual and reads 0 over a quarantined symbol).
                 _LOG.info(
                     "pull.step.settled",
                     step=step.label,
                     ordinal=int(step),
                     clean=(
                         group_failed == 0
+                        and group_settle.quarantined == 0
                         and not final_auth_aborted
                         and not final_quota_exhausted
                         and final_mass_empty_cause is None
                     ),
-                    bars=group_report.bars_appended,
+                    bars=group_settle.bars,
                     bars_deferred=_fetch_pipeline is not None,
-                    windows=group_report.windows,
+                    windows=group_settle.windows,
                     still_failed=group_failed,
-                    skipped=group_report.skipped_windows,
+                    skipped=group_settle.skipped,
                     pull_id=pid,
                 )
 

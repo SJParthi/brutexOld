@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from brutex.adapters.groww.errors import GrowwAuthError, GrowwTimeoutError
+from brutex.adapters.groww.errors import GrowwAuthError, GrowwBadRequestError, GrowwTimeoutError
 from brutex.adapters.ingest_common import (
     StepOrderMonitor,
     SyntheticSpotAdapter,
@@ -144,6 +144,64 @@ class _StockTimeoutAdapter(_DelegatingAdapter):
         return super().fetch_ohlcv(
             symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
         )
+
+
+class _TerminalStockAdapter(_DelegatingAdapter):
+    """Synthetic bars for indices; a TERMINAL (non-auth) error for every STOCK fetch.
+
+    Drives the per-pair QUARANTINE path: the pair lands in ``failures`` (not
+    ``pairs``), so ``still_failed_windows`` — a pairs-only transient residual —
+    reads 0 over it (the round-2 ``pull.step.settled`` honesty repro).
+    """
+
+    def __init__(self, stock_symbols: frozenset[str]) -> None:
+        super().__init__()
+        self._stock_symbols = stock_symbols
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Raise a terminal bad-request for a stock; synthetic bars otherwise."""
+        if symbol in self._stock_symbols:
+            raise GrowwBadRequestError("invalid instrument")
+        return super().fetch_ohlcv(
+            symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
+        )
+
+
+class _EmptyThenBarsAdapter(_DelegatingAdapter):
+    """One stock answers clean-EMPTY for its whole FIRST until-clean round, bars after.
+
+    ``empty_calls`` must cover the ingest's full in-pass EMPTY-retry budget
+    (1 initial + ``_DEFAULT_EMPTY_RETRY_ATTEMPTS`` re-fetches) so round 1 ends
+    with the window EMPTY (not settled → outstanding) and the RECOVERY lands in
+    round 2 — the sync multi-round shape the summed ``pull.step.settled``
+    bars/windows counts must include. ``bars_returned`` tallies every bar the
+    adapter actually served per symbol (the independent oracle the event's
+    summed ``bars`` is asserted against — a fresh lake stores each exactly once).
+    """
+
+    def __init__(self, empty_symbol: str, empty_calls: int) -> None:
+        super().__init__()
+        self._empty_symbol = empty_symbol
+        self._empty_budget = empty_calls
+        self._empty_seen = 0
+        self.bars_returned: dict[str, int] = {}
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Serve [] for the empty symbol's budgeted calls; synthetic bars otherwise."""
+        with self._record_lock:
+            if symbol == self._empty_symbol and self._empty_seen < self._empty_budget:
+                self._empty_seen += 1
+                return []
+        bars = super().fetch_ohlcv(
+            symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
+        )
+        with self._record_lock:
+            self.bars_returned[symbol] = self.bars_returned.get(symbol, 0) + len(bars)
+        return bars
 
 
 def _real_sink(lake_root: Path) -> BarSink:
@@ -279,6 +337,89 @@ class TestSpotStepOrdering:
             # The producer-side count is honest but DEFERRED (reads 0 here; the
             # real totals land in the post-drain reconcile / the final report).
             assert isinstance(event["bars"], int)
+
+
+class TestSettleEventHonestyRound2:
+    """Round-2 review: the spot settle event's quarantine + multi-round honesty.
+
+    (1) A terminally QUARANTINED symbol must not settle ``clean=True`` —
+    ``still_failed`` is the pairs-only transient residual (0 over a quarantine),
+    so ``clean`` folds the group's terminal quarantine count (the F&O twin's
+    ``failed_pairs`` term). (2) The sync path's ``bars``/``windows`` SUM every
+    until-clean pass (the F&O per-bucket sum), so a round-2 recovery is counted
+    instead of the first-round-only undercount.
+    """
+
+    def test_settled_event_not_clean_over_terminal_quarantine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The round-2 repro: quarantined ADANIENT logged ``clean=True still_failed=0``."""
+        monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("NIFTY"), _stock("ADANIENT")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_NOW,
+                from_date=_FROM,
+                to_date=_TO,
+                adapter_factory=lambda root, _insts: (
+                    _TerminalStockAdapter(frozenset({"ADANIENT"})),
+                    _real_sink(root),
+                ),
+            )
+        settled = {e["step"]: e for e in _events(logs, "pull.step.settled")}
+        assert settled["indices-spot"]["clean"] is True
+        stocks = settled["stocks-spot"]
+        # The pairs-only transient residual is structurally 0 over a quarantine …
+        assert stocks["still_failed"] == 0
+        # … and the event must STILL read unclean (fails-before: clean=True while
+        # the pull's own verdict reads quarantined_symbols — the Golden-Rule-#1 gap).
+        assert stocks["clean"] is False
+        assert report.verdict.kind == "quarantined_symbols"
+
+    def test_settled_event_sync_bars_sum_across_until_clean_rounds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sync round-2 recovery is counted in the settle event's ``bars``/``windows``.
+
+        TCS lands its bars in round 1; ADANIENT answers clean-EMPTY for round 1's
+        whole in-pass empty-retry budget and recovers in round 2 (a RECENT window,
+        so the OLD-gap fast-settle stays out of the way). First-round-only (the old
+        read) logs TCS's bars alone; last-round-only would log ADANIENT's alone —
+        the event must carry the SUM (the F&O twin's semantics).
+        """
+        from brutex.adapters.groww.ingest import _DEFAULT_EMPTY_RETRY_ATTEMPTS
+
+        monkeypatch.setattr("brutex.adapters.ingest_common._time_sleep", lambda _s: None)
+        monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
+        adapter = _EmptyThenBarsAdapter("ADANIENT", empty_calls=_DEFAULT_EMPTY_RETRY_ATTEMPTS)
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("NIFTY"), _stock("TCS"), _stock("ADANIENT")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_NOW,
+                # RECENT window (within OLD_GAP_HORIZON_DAYS of _NOW): round 1's
+                # confirmed clean-empty keeps the conservative EMPTY streak instead
+                # of fast-settling SKIPPED, so round 2 genuinely re-fetches.
+                from_date="2026-05-26",
+                to_date="2026-05-27",
+                adapter_factory=lambda root, _insts: (adapter, _real_sink(root)),
+                until_clean=True,
+                until_clean_rounds=5,
+            )
+        assert report.verdict.kind == "clean"
+        done = _events(logs, "until_clean.done")
+        rounds = done[-1]["rounds"]
+        assert isinstance(rounds, int) and rounds >= 2, "the stock group never ran a recovery round"
+        assert adapter.bars_returned["ADANIENT"] > 0, "the round-2 recovery never fetched bars"
+        stocks = {e["step"]: e for e in _events(logs, "pull.step.settled")}["stocks-spot"]
+        # SUM across ALL rounds (fails-before: the first-round-only read == TCS alone).
+        assert stocks["bars"] == adapter.bars_returned["TCS"] + adapter.bars_returned["ADANIENT"]
+        assert isinstance(stocks["windows"], int) and stocks["windows"] >= 2
+        assert stocks["clean"] is True
+        assert stocks["still_failed"] == 0
 
 
 class TestHomogeneousGroup:
