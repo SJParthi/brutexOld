@@ -204,6 +204,19 @@ def parse_candle_rows(
         raise CandleParseError(f"'candles' must be an array, got {type(candles).__name__}")
 
     bars: list[CandleBar] = []
+    # OHLC-clamp counter (DEC-STORED-DATA-VALIDATION-001): the vendor-OHLC
+    # normalization (``assemble_candle``'s high=max/low=min clamp,
+    # DEC-OHLC-VENDOR-NORMALIZE-001) used to fire with NO counter and NO log —
+    # a vendor systematically under-reporting highs would never surface.
+    # OBSERVE-ONLY: parsed bars are byte-identical; ONE
+    # ``groww.parse.ohlc_clamped`` WARNING per parsed window payload (this
+    # function is called once per fetched window) carries the count.
+    clamped_bars = 0
+
+    def _count_clamp() -> None:
+        nonlocal clamped_bars
+        clamped_bars += 1
+
     for index, row in enumerate(candles):
         if not isinstance(row, (list, tuple)) or len(row) not in _ACCEPTED_ROW_LENS:
             raise CandleParseError(
@@ -231,10 +244,18 @@ def parse_candle_rows(
                 close=close,
                 volume=None if drop_volume else volume,
                 open_interest=open_interest,
+                on_clamp=_count_clamp,
             )
         except EmptyCandleRow:
             continue  # graceful skip — no-trade minute
         bars.append(bar)
+    if clamped_bars:
+        _LOG.warning(
+            "groww.parse.ohlc_clamped",
+            clamped_bars=clamped_bars,
+            total_rows=len(candles),
+            pull_id=current_pull_id(),
+        )
     return bars
 
 

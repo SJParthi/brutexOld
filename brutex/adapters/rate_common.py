@@ -178,11 +178,14 @@ STEP_DOWN_TIMEOUT_HITS: int = 5
 #: → step UP 1 r/s (the INCREMENTAL half of the AIMD ladder). Set to ONE
 #: :data:`STEP_DOWN_WINDOW` (60 s) — symmetric with the rolling window the step-DOWN
 #: ladder watches: after a single clean 60 s window the controller probes up one rung,
-#: so it climbs the soft floor (3) back to the operator-DIRECTED 5 r/s ceiling
-#: (``GROWW_RATE_LIMIT_RPS_CEILING``) in ~2 clean windows (~2 min) instead of the prior
-#: 300 s/rung (~25 min — longer than a whole pull, so a stepped-down pull never reached
-#: the ceiling; the operator-observed "stuck at ~3 r/s with 2.4x headroom",
-#: DEC-GROWW-RATE-RECOVER-8-001). SAFETY is unchanged: the DECREMENTAL ladder still steps
+#: so it climbs the soft floor (3) back toward the INJECTED ceiling — the production
+#: Groww ceiling is the operator-DIRECTED **8 r/s** (``GROWW_RATE_LIMIT_RPS_CEILING``,
+#: RAISED 5 → 8 by DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral :data:`CEILING_RPS`
+#: DEFAULT here stays 5) — at ~1 rung/clean-minute (3→8 in ~5 clean windows, ~5 min)
+#: instead of the prior 300 s/rung (~25 min — longer than a whole pull, so a
+#: stepped-down pull never reached the ceiling; the operator-observed "stuck at
+#: ~3 r/s with 2.4x headroom", DEC-GROWW-RATE-RECOVER-8-001; stale "5 r/s ceiling"
+#: wording reconciled by DEC-SUSPICION-SWEEP-FIXES-001 G4). SAFETY is unchanged: the DECREMENTAL ladder still steps
 #: DOWN immediately on a 429 / timeout storm, so a too-eager probe self-corrects (AIMD) —
 #: faster recovery can only REACH the sustainable rate sooner, never exceed it (the rate.*
 #: + the new rate.snapshot telemetry make the real trajectory visible, DEC-GROWW-RATE-

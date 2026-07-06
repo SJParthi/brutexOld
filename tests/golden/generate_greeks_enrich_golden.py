@@ -48,11 +48,17 @@ def build_scenario_lake(lake: Path) -> None:
     from brutex.data.sink import ParquetBarSink
 
     def bar(ts: datetime, close: str, *, oi: int | None) -> CandleBar:
+        # The synthetic low is floored at the real 0.05 tick: the original
+        # `close - 2` fabricated a NEGATIVE low (-0.95) for the 1.05 at-expiry
+        # premium bar — corrupt fixture data the read-boundary price-positivity
+        # gate now rightly refuses (DEC-STORED-DATA-VALIDATION-001; the frozen
+        # fixture was regenerated — ONLY that bar's low moved, -0.95 → 0.05;
+        # low is not a Greeks input, so every enriched value is unchanged).
         return CandleBar(
             timestamp=ts,
             open=Decimal(close),
             high=Decimal(close) + 2,
-            low=Decimal(close) - 2,
+            low=max(Decimal(close) - 2, Decimal("0.05")),
             close=Decimal(close),
             volume=7,
             open_interest=oi,

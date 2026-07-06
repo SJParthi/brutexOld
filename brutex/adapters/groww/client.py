@@ -180,6 +180,35 @@ class GrowwClient:
         """
         return self.pace is not _noop_pace
 
+    @property
+    def self_reports_rate_limits(self) -> bool:
+        """Whether this client itself feeds every 429 occurrence to a REAL ``on_rate_limit``.
+
+        ``True`` once the shared controller's decrement hook has been bound (a live
+        build site's ``on_rate_limit=`` argument or :meth:`with_rate_hooks`);
+        ``False`` on the no-op default. The ingest spines consult this via
+        :func:`client_self_reports_rate_limits` to pick ONE canonical feedback
+        point per vendor 429 (DEC-SUSPICION-SWEEP-FIXES-001): :meth:`_call` already
+        fires :attr:`on_rate_limit` on EVERY 429 occurrence — the FINAL,
+        budget-exhausting one included — so a spine that fired its own hook again
+        on the propagated error would DOUBLE-COUNT that final occurrence into the
+        AIMD ladder (7 hits per exhausted window instead of 6 — two step-downs
+        from one window's storm).
+        """
+        return self.on_rate_limit is not _noop_hook
+
+    @property
+    def self_reports_successes(self) -> bool:
+        """Whether this client itself feeds every clean call to a REAL ``on_success``.
+
+        The recovery twin of :attr:`self_reports_rate_limits`: :meth:`_call` fires
+        :attr:`on_success` on every clean physical call, so a spine firing its own
+        per-window recovery hook on top would double-credit the ladder's step-up
+        evidence. Consulted via :func:`client_self_reports_successes`
+        (DEC-SUSPICION-SWEEP-FIXES-001).
+        """
+        return self.on_success is not _noop_hook
+
     def _resolve_sdk(self) -> GrowwSDK:
         """Return the SDK to call against — the refresher's live one, else :attr:`sdk`.
 
@@ -456,6 +485,36 @@ ClientPool` (DEC-GROWW-CLIENT-POOL-001). Frozen dataclass → :func:`replace`, n
         """
         return replace(self, pace=pace)
 
+    def with_rate_hooks(
+        self,
+        *,
+        pace: Callable[[], None] | None = None,
+        on_rate_limit: Callable[[], None] | None = None,
+        on_success: Callable[[], None] | None = None,
+    ) -> GrowwClient:
+        """Return a copy with the shared controller's FULL hook triple rebound (O(1), immutable).
+
+        The DEC-SUSPICION-SWEEP-FIXES-001 widening of :meth:`with_pace`: the spot
+        ingest seam (:func:`~brutex.adapters.groww.run_ingest.with_paced_client`)
+        historically rebound ONLY ``pace``, so the client's internal bounded
+        fast-retry absorbed 429s with a NO-OP :attr:`on_rate_limit` — the AIMD
+        ladder saw a 429 only after the whole ``max_attempts`` budget was exhausted
+        and the error propagated to the spine (~3× ``max_attempts`` vendor
+        rejections per designed step-down, sub-exhaustion bursts invisible). This
+        seam binds all three hooks the way the F&O build sites always did
+        (``historical_pull._build_live_client`` → :func:`~brutex.adapters.groww.\
+live.build_live_client`), so every 429 occurrence decrements and every clean call
+        recovers the SHARED bucket. A ``None`` hook keeps the current binding
+        (never downgrades a bound hook back to the no-op). Frozen dataclass →
+        :func:`replace`; the shared :attr:`meter` is carried through unchanged.
+        """
+        return replace(
+            self,
+            pace=pace if pace is not None else self.pace,
+            on_rate_limit=on_rate_limit if on_rate_limit is not None else self.on_rate_limit,
+            on_success=on_success if on_success is not None else self.on_success,
+        )
+
 
 def client_self_paces(client: object) -> bool:
     """Return whether *client* already acquires a rate-bucket token per physical call.
@@ -481,6 +540,34 @@ def client_self_paces(client: object) -> bool:
         ``True`` iff the client exposes a truthy ``self_paces`` attribute.
     """
     return bool(getattr(client, "self_paces", False))
+
+
+def client_self_reports_rate_limits(client: object) -> bool:
+    """Return whether *client* already feeds every 429 occurrence to the shared ladder.
+
+    The 429-feedback twin of :func:`client_self_paces`
+    (DEC-SUSPICION-SWEEP-FIXES-001): a :class:`GrowwClient` (or a
+    :class:`~brutex.adapters.groww.pool.ClientPool`) whose ``on_rate_limit`` hook
+    is bound to the shared controller fires it inside :meth:`GrowwClient._call`
+    on EVERY 429 occurrence — the final, budget-exhausting one included — so the
+    ingest spines must NOT fire their own hook again on the propagated error (a
+    double count of the final occurrence over-brakes the AIMD ladder). An object
+    without the surface (a test fake / an unhooked client) reads ``False``,
+    keeping the spine-level hook as the fallback feedback point.
+    """
+    return bool(getattr(client, "self_reports_rate_limits", False))
+
+
+def client_self_reports_successes(client: object) -> bool:
+    """Return whether *client* already feeds every clean call to the shared ladder.
+
+    The recovery twin of :func:`client_self_reports_rate_limits`: a client whose
+    ``on_success`` hook is bound fires it per clean physical call inside
+    :meth:`GrowwClient._call`, so the spine's per-window recovery hook must stand
+    down or the step-up evidence is double-credited. ``False`` for any object
+    without the surface (the spine hook stays the fallback).
+    """
+    return bool(getattr(client, "self_reports_successes", False))
 
 
 @runtime_checkable
@@ -541,6 +628,16 @@ ClientPool` (a ``@property`` over its ONE aggregate meter) satisfy it.
         """Return a copy with the rate-bucket ``pace`` hook rebound (re-fanned to leaves)."""
         raise NotImplementedError  # structural Protocol stub — never executed
 
+    def with_rate_hooks(
+        self,
+        *,
+        pace: Callable[[], None] | None = None,
+        on_rate_limit: Callable[[], None] | None = None,
+        on_success: Callable[[], None] | None = None,
+    ) -> Self:
+        """Return a copy with the full controller hook triple rebound (re-fanned to leaves)."""
+        raise NotImplementedError  # structural Protocol stub — never executed
+
 
 __all__ = [
     "REAUTH_RETRY_BACKOFF_SECONDS",
@@ -548,5 +645,7 @@ __all__ = [
     "GrowwClientProtocol",
     "GrowwSDK",
     "client_self_paces",
+    "client_self_reports_rate_limits",
+    "client_self_reports_successes",
     "run_with_deadline",
 ]
