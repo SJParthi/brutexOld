@@ -963,7 +963,7 @@ class TestSharedRankInternals:
     def test_composite_scores_wrong_column_count_rejected(self) -> None:
         from brutex.ranking import composite_scores
 
-        with pytest.raises(ValueError, match="expects 7 term columns, got 2"):
+        with pytest.raises(ValueError, match=r"^composite_scores expects 7 term columns, got 2$"):
             composite_scores(([0.0], [0.0]), [0.0])
 
     def test_dsr_z_contributions_inactive_is_all_zero(self) -> None:
