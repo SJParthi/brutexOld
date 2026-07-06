@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -148,6 +149,57 @@ def _poison_partition(dest: Path, rows: Sequence[tuple[datetime, float, int]]) -
 def _fno_ts(minute: int) -> datetime:
     """A UTC instant inside the January-2024 partition (Wed 3 Jan, IST session)."""
     return datetime(2024, 1, 3, 4, minute, tzinfo=UTC)
+
+
+def _seed_option_tree_foreign(lake: Path, *, home_ts: datetime, foreign_ts: datetime) -> Path:
+    """One REAL-writer options partition raw-rewritten to carry a foreign row.
+
+    Seeds through :class:`OptionParquetWriter` (the #1067 convention: clean
+    data via the real writer, poison via a raw re-render — the writer routes
+    by month so it can never store a misplaced row itself). Returns the
+    poisoned month file (named for *home_ts*'s UTC month).
+    """
+    import polars as pl
+    from brutex.data.models import OptionBar
+    from brutex.data.option_parquet_writer import (
+        OptionParquetWriter,
+        OptionSeriesCoordinate,
+    )
+
+    price = Decimal("105.00")
+    writer = OptionParquetWriter(lake_root=lake)
+    writer.write(
+        partition_key="NSE_FNO|13|WEEK|0|ATM",
+        coordinate=OptionSeriesCoordinate(
+            exch_id="NSE",
+            exchange_segment="NSE_FNO",
+            security_id=13,
+            underlying_symbol="NIFTY",
+            expiry_flag="WEEK",
+            expiry_code=0,
+            strike_offset="ATM",
+        ),
+        bars=[
+            OptionBar(
+                timestamp=home_ts,
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                volume=10,
+                open_interest=100,
+                side="CE",
+                strike=Decimal("21000.00"),
+                spot=None,
+                iv=None,
+            )
+        ],
+    )
+    (dest,) = (lake / "options").rglob("*.parquet")
+    df = pl.read_parquet(dest)
+    stray = df[0:1].with_columns(pl.lit(foreign_ts).dt.replace_time_zone("UTC").alias("timestamp"))
+    pl.concat([df, stray]).write_parquet(dest)
+    return dest
 
 
 def _poisoned_fno_dest(lake: Path) -> Path:
@@ -279,6 +331,72 @@ class TestFnoPullSeam:
         assert len(events) == 1
         assert "heal bug" in str(events[0]["error"])
 
+    def test_fno_pull_heals_options_tree_foreign(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        """DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 seam pin: a foreign row in an
+        in-pull-span ``options/`` month file is reassigned home by the REAL
+        pull, source cleaned, quarantine copy kept, event tree-tagged."""
+        import polars as pl
+
+        dest = _seed_option_tree_foreign(
+            tmp_lake,
+            home_ts=_fno_ts(16),
+            foreign_ts=datetime(2023, 12, 15, 4, 16, tzinfo=UTC),
+        )
+        original_bytes = dest.read_bytes()
+
+        with capture_logs() as logs:
+            _pull(registry, tmp_lake, dry_run=False)
+
+        stored = pl.read_parquet(dest)
+        assert stored["timestamp"].to_list() == [_fno_ts(16)]  # source cleaned
+        moved_home = dest.parent / "2023-12.parquet"
+        assert moved_home.exists()
+        assert pl.read_parquet(moved_home)["timestamp"].to_list() == [
+            datetime(2023, 12, 15, 4, 16, tzinfo=UTC)
+        ]
+        quarantined = list((tmp_lake / ".quarantine").rglob("2024-01.parquet"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == original_bytes
+        events = [
+            e
+            for e in logs
+            if e["event"] == "lake_heal.rows_reassigned" and e.get("tree") == "options"
+        ]
+        assert len(events) == 1
+        assert events[0]["moved"] == 1
+
+    def test_options_scan_month_bounded(self, registry: RegistryStore, tmp_lake: Path) -> None:
+        """An options poison OUTSIDE the pulled span is never even read
+        (bytes + mtime pinned) — the L2 bound covers options too."""
+        dest = _seed_option_tree_foreign(
+            tmp_lake,
+            home_ts=datetime(2022, 6, 15, 4, 16, tzinfo=UTC),
+            foreign_ts=datetime(2022, 7, 1, 4, 16, tzinfo=UTC),
+        )
+        before_bytes = dest.read_bytes()
+        before_mtime = dest.stat().st_mtime_ns
+
+        _pull(registry, tmp_lake, dry_run=False)
+
+        assert dest.read_bytes() == before_bytes
+        assert dest.stat().st_mtime_ns == before_mtime
+
+    def test_dry_run_leaves_options_poison_byte_untouched(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        """The dry-run pin extended to the options tree: not one byte moves."""
+        dest = _seed_option_tree_foreign(
+            tmp_lake,
+            home_ts=_fno_ts(16),
+            foreign_ts=datetime(2023, 12, 15, 4, 16, tzinfo=UTC),
+        )
+        before = dest.read_bytes()
+        _pull(registry, tmp_lake, dry_run=True)
+        assert dest.read_bytes() == before
+        assert not (tmp_lake / ".quarantine").exists()
+
 
 class TestFnoGlueTargets:
     """Direct pins on ``_heal_lake_after_pull``'s target/span derivation."""
@@ -305,6 +423,19 @@ class TestFnoGlueTargets:
         assert calls[0]["targets"] == [("NSE", "FNO", _CE_SYMBOL)]
         assert calls[0]["start"] == date(2024, 1, 1)
         assert calls[0]["end"] == date(2024, 1, 20)
+
+    def test_fno_seam_opts_into_the_options_census(
+        self, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The F&O seam passes ``include_options=True`` — the ONE seam owning
+        the options/ wiring (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(lake_heal_module, "heal_after_pull", lambda **kw: calls.append(kw))
+        rebuilt = cast(Any, [(None, _contract())])
+        windows = {_CE_SYMBOL: (date(2024, 1, 1), date(2024, 1, 20))}
+        hp._heal_lake_after_pull(rebuilt=rebuilt, windows=windows, lake_root=tmp_lake)
+        assert len(calls) == 1
+        assert calls[0]["include_options"] is True
 
     def test_span_is_union_of_windows(
         self, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
@@ -408,6 +539,25 @@ class TestSpotGlue:
         events = [e for e in logs if e["event"] == "lake_heal.post_pull_error"]
         assert len(events) == 1
         assert events[0]["pull_id"] == "pid-3"
+
+    def test_spot_glue_leaves_options_poison_untouched(self, tmp_lake: Path) -> None:
+        """The spot seam keeps the default ``include_options=False`` — ONE
+        seam (the F&O glue) owns the options wiring
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        dest = _seed_option_tree_foreign(
+            tmp_lake,
+            home_ts=datetime(2024, 6, 3, 4, 16, tzinfo=UTC),
+            foreign_ts=datetime(2024, 7, 1, 4, 16, tzinfo=UTC),
+        )
+        before = dest.read_bytes()
+        pc._heal_after_pull(
+            instruments=[_instrument()],
+            lake_root=tmp_lake,
+            start=date(2024, 6, 1),
+            end=date(2024, 6, 30),
+            pull_id="pid-4",
+        )
+        assert dest.read_bytes() == before  # byte-untouched — spot never opts in
 
 
 # ── L2 catalog rotation (fix-pass: the seams open <lake>/catalog.duckdb) ─────
