@@ -25,6 +25,7 @@ real threads.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -39,7 +40,7 @@ from brutex.adapters.groww.pull_singleflight import (
 )
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
-from brutex.dashboard.pull_stall import PullWatchdog
+from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S, PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.progress_beat import (
@@ -321,6 +322,20 @@ class BackgroundPullJob:
         ``None`` from the resolver SKIPS the account lock gracefully (logged) — a
         credential-less run makes no vendor calls, so there is no account rate to
         protect; the lake-root lock still guards same-lake peers.
+
+    journal_heartbeat_interval_s
+        Minimum seconds between two DURABLE pull-journal heartbeat records
+        (DEC-PULL-TELEMETRY-TRIAD-001; default
+        :data:`~brutex.dashboard.pull_stall.ALIVE_LOG_MIN_INTERVAL_S` — the same
+        ≤ 18/hour bound the watchdog alive-beat log derives from the check cadence).
+        Each throttled record appends via
+        :func:`~brutex.observability.pull_journal.record_pull_heartbeat` under the
+        resolved lake root, carrying the pull's bound ``pull_id`` so
+        :func:`~brutex.observability.pull_journal.last_run` groups it with the run's
+        ``started`` record. O(1) + best-effort — a write failure never affects the pull.
+    journal_clock
+        Monotonic source for the heartbeat throttle (default :func:`time.monotonic`);
+        injected for deterministic tests.
     """
 
     def __init__(
@@ -335,6 +350,8 @@ class BackgroundPullJob:
         singleflight_factory: SingleflightFactory = pull_singleflight_lock,
         account_singleflight_factory: AccountSingleflightFactory = account_pull_singleflight_lock,
         account_key_resolver: AccountKeyResolver | None = None,
+        journal_heartbeat_interval_s: float = ALIVE_LOG_MIN_INTERVAL_S,
+        journal_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._progress = progress if progress is not None else PullProgress()
         self._spawn = spawn
@@ -359,6 +376,22 @@ class BackgroundPullJob:
         self._account_key_resolver: AccountKeyResolver = (
             _default_account_key_resolver if account_key_resolver is None else account_key_resolver
         )
+
+        #: DURABLE watchdog-liveness heartbeat (DEC-PULL-TELEMETRY-TRIAD-001): each real
+        #: progress beat that feeds the stall watchdog ALSO — throttled to at most once
+        #: per this interval (default the SAME ≤ 18/hour bound the alive-beat log uses) —
+        #: appends one :func:`~brutex.observability.pull_journal.record_pull_heartbeat`
+        #: record, so a post-mortem can SEE the run was alive (and ``sleep_gaps`` gets
+        #: narrower windows) instead of inferring it from a start-without-finish. O(1),
+        #: best-effort: a write failure can NEVER affect the pull. The clock is injected
+        #: for deterministic tests.
+        self._journal_heartbeat_interval_s = journal_heartbeat_interval_s
+        self._journal_clock = journal_clock
+        #: Dedicated tiny lock for the heartbeat throttle stamp so concurrent worker
+        #: beats never race the baseline; the journal WRITE happens OUTSIDE it (a slow
+        #: disk must never serialise the progress hooks behind a held lock).
+        self._journal_lock = threading.Lock()
+        self._last_journal_heartbeat = float("-inf")
         self._lock = threading.Lock()
         self._running = False
         #: The CURRENT run's account-wide single-flight lock context manager (entered in
@@ -909,9 +942,53 @@ class BackgroundPullJob:
         self._beat()
 
     def _beat(self) -> None:
-        """Beat the current run's stall watchdog, if one is wired — O(1)."""
+        """Beat the current run's stall watchdog, if one is wired — O(1).
+
+        Also appends the THROTTLED durable pull-journal heartbeat
+        (DEC-PULL-TELEMETRY-TRIAD-001) — only while a run is active (a stale beat between
+        runs, when :attr:`_watchdog` is ``None``, journals nothing).
+        """
         if self._watchdog is not None:
             self._watchdog.beat()
+            self._maybe_journal_heartbeat()
+
+    def _maybe_journal_heartbeat(self) -> None:
+        """Durably journal ONE throttled watchdog-liveness heartbeat — O(1), best-effort.
+
+        DEC-PULL-TELEMETRY-TRIAD-001 (wiring the existing, previously call-site-less
+        :func:`~brutex.observability.pull_journal.record_pull_heartbeat`). Every real
+        progress beat funnels here; at most one journal append lands per
+        :attr:`_journal_heartbeat_interval_s`. The record reuses the pull's BOUND
+        ``pull_id`` (:func:`~brutex.observability.correlation.current_pull_id` — the
+        progress hooks fire inside the pull's ``pull_id_scope``, re-bound per worker
+        thread by the ingest spine) so :func:`~brutex.observability.pull_journal.last_run`
+        groups it with the run's ``started`` record and ``sleep_gaps`` gets narrower
+        suspend windows. Honest envelope (Golden Rule #10): a beat from a context with NO
+        bound ``pull_id`` (it would never group) and a ``None`` lake root each skip the
+        write — a missing heartbeat is a weaker forensic signal, never a wrong one; the
+        write itself is the journal's never-raise append, and this whole path is wrapped
+        so ANY failure is logged + swallowed — the pull is NEVER affected. The lazy
+        imports mirror :func:`is_pull_halt`'s import-hygiene discipline.
+        """
+        from brutex.observability.correlation import current_pull_id
+
+        pull_id = current_pull_id()
+        if not pull_id:
+            return
+        with self._journal_lock:
+            now = self._journal_clock()
+            if now - self._last_journal_heartbeat < self._journal_heartbeat_interval_s:
+                return
+            self._last_journal_heartbeat = now
+        try:
+            lake_root = self._lake_root_resolver()
+            if lake_root is None:
+                return
+            from brutex.observability.pull_journal import record_pull_heartbeat
+
+            record_pull_heartbeat(lake_root, pull_id=pull_id)
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never affect the pull
+            _LOG.exception("pull_job.journal_heartbeat failed; the pull is unaffected")
 
     @property
     def running(self) -> bool:
