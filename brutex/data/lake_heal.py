@@ -83,6 +83,7 @@ from brutex.data.lake_invariants import (
     LakeScanReport,
     LegacyKeyDrift,
     OptionIntraFileDup,
+    PriceSanityRows,
     scan_lake_invariants,
 )
 from brutex.data.lake_manifest import invalidate_manifest
@@ -391,7 +392,13 @@ def _audit_append(
         _LOG.warning("lake_heal.audit_append_failed", action=action, error=str(exc))
 
 
-def _order_findings(findings: Sequence[LakeFinding]) -> tuple[LakeFinding, ...]:
+#: The finding kinds the healer can ACT on. PriceSanityRows is deliberately
+#: absent (observe-only, DEC-STORED-DATA-VALIDATION-001) — the type system
+#: makes routing it into a healer impossible, not merely untested.
+type _HealableFinding = LegacyKeyDrift | ForeignMonthRows | IntraFileDup | OptionIntraFileDup
+
+
+def _order_findings(findings: Sequence[_HealableFinding]) -> tuple[_HealableFinding, ...]:
     """Deterministic heal order: drift → foreign → dup → option-dup, by path.
 
     A drift merge changes which files exist, so it heals FIRST; the later
@@ -400,7 +407,7 @@ def _order_findings(findings: Sequence[LakeFinding]) -> tuple[LakeFinding, ...]:
     convergence, never a double-heal).
     """
 
-    def key(finding: LakeFinding) -> tuple[int, str]:
+    def key(finding: _HealableFinding) -> tuple[int, str]:
         if isinstance(finding, LegacyKeyDrift):
             return (0, str(finding.drifted_dir))
         if isinstance(finding, ForeignMonthRows):
@@ -854,8 +861,16 @@ def _heal_option_dup(finding: OptionIntraFileDup, state: _BatchState) -> bool:
     return True  # no catalog (the options tree is not catalogued), no recall
 
 
-def _heal_one(finding: LakeFinding, state: _BatchState) -> bool:
-    """Dispatch one finding to its heal algorithm; ``True`` iff it healed."""
+def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
+    """Dispatch one finding to its heal algorithm; ``True`` iff it healed.
+
+    Typed over :data:`_HealableFinding` — a
+    :class:`~brutex.data.lake_invariants.PriceSanityRows` finding NEVER
+    reaches this dispatch (:func:`heal_findings` filters it up-front,
+    observe-only — DEC-STORED-DATA-VALIDATION-001), and the narrowed union
+    makes routing a non-healable type here a TYPE error, not a silent
+    mis-heal.
+    """
     if isinstance(finding, LegacyKeyDrift):
         return _heal_drift(finding, state)
     if isinstance(finding, ForeignMonthRows):
@@ -1148,7 +1163,11 @@ def heal_findings(
 
     Order: LegacyKeyDrift first (dir merges change which files exist), then
     ForeignMonthRows (reassignment), then IntraFileDup, then OptionIntraFileDup
-    — sorted by path within each class. Observe mode short-circuits with ZERO
+    — sorted by path within each class. A
+    :class:`~brutex.data.lake_invariants.PriceSanityRows` finding is FILTERED
+    OUT up-front (observe-only — never healed, never counted in ``findings``;
+    one ``lake_heal.price_findings_observe_only`` WARNING names the count —
+    DEC-STORED-DATA-VALIDATION-001). Observe mode short-circuits with ZERO
     file mutation of any kind (no quarantine dir, no locks, no catalog writes,
     no stats bump — byte-pinned); the mass-heal rail refuses a
     ``≥ MASS_HEAL_MIN_FILES ∧ > MASS_HEAL_FRACTION`` batch untouched. Each
@@ -1190,7 +1209,24 @@ def heal_findings(
     """
     resolved: LakeHealMode = resolve_lake_heal_mode() if mode is None else mode
     now_fn = _utc_now if now is None else now
-    ordered = _order_findings(findings)
+    # DEC-STORED-DATA-VALIDATION-001: a PriceSanityRows finding is OBSERVE-ONLY
+    # by design — the healer is STRICTLY row-removing/row-reassigning, never
+    # value-editing (a machine-"repaired" price would fabricate data, Golden
+    # Rule #1). It is filtered out here (the ONE heal chokepoint) so an L2/L3
+    # scan that surfaces price corruption can never route it into a per-file
+    # healer built for a different finding shape; remediation stays a re-pull /
+    # operator quarantine, guided by the scan's own pinned WARNING + census.
+    actionable: list[_HealableFinding] = []
+    for candidate in findings:
+        if isinstance(candidate, PriceSanityRows):
+            continue
+        actionable.append(candidate)
+    if len(actionable) != len(findings):
+        _LOG.warning(
+            "lake_heal.price_findings_observe_only",
+            price_findings=len(findings) - len(actionable),
+        )
+    ordered = _order_findings(actionable)
     if resolved == "observe":
         report = HealReport(
             mode="observe",

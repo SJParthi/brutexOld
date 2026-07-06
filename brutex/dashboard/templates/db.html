@@ -250,6 +250,11 @@
 
   <div id="copytoast">✓ copied to clipboard</div>
 
+<!-- Shared half-up 2dp display formatter (DEC-STORED-DATA-VALIDATION-001):
+     deliberately NON-defer so bxFixed2 is defined before the inline script
+     below parses — the pinned ROUND_HALF_UP display law
+     (preopen_report._round2 / the #1154 half-up cells). -->
+<script src="/static/bx-format.js"></script>
 <script>
 /* ── BruteX database viewer (DEC-DB-VIEWER-001) ──
    Read-only browse of the 5 DuckDB tables. Every column name + cell is
@@ -329,7 +334,10 @@ const GREEK_DP = { delta: 3, gamma: 5, theta: 2, vega: 3, rho: 2 };
    blank (null) cell is handled by the caller before fmtCell is reached. */
 function fmtCell(col, cell) {
   const n = Number(cell);
-  if (PCT_COLS.has(col)) return Number.isFinite(n) ? n.toFixed(2) : cell;
+  /* PCT_COLS render via the SHARED half-up bxFixed2 (DEC-STORED-DATA-
+     VALIDATION-001): IEEE toFixed(2) diverged from the pinned ROUND_HALF_UP
+     display law at exact half-boundaries ("1.005" → "1.00" vs pinned "1.01"). */
+  if (PCT_COLS.has(col)) return Number.isFinite(n) ? bxFixed2(n) : cell;
   if (col === "iv") return Number.isFinite(n) ? (n * 100).toFixed(2) : cell;
   if (Object.prototype.hasOwnProperty.call(GREEK_DP, col)) {
     return Number.isFinite(n) ? n.toFixed(GREEK_DP[col]) : cell;
