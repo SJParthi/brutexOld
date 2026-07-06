@@ -130,6 +130,13 @@
     <div class="kpi"><span class="v ok" id="winc">—</span><span class="l">windows recorded</span></div>
     <div class="kpi"><span class="v bad" id="failc">—</span><span class="l">failed windows</span></div>
     <div class="kpi"><span class="v" id="planc">—</span><span class="l">planned (pending)</span></div>
+    <!-- Per-run vs lifetime EMPTY honesty (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001):
+         the lifetime GROUP BY alone reads "88 empty" even when only 24 happened
+         tonight. When the server knows the current pull's journal start it ships
+         counts_since_pull_start and this tile reads "24 this run · 88 lifetime";
+         with no journal (CLI-only lake / F&O-only pull) the per-run figure is
+         OMITTED — the tile shows the lifetime figure alone, never a fabricated 0. -->
+    <div class="kpi"><span class="v" id="emptyc">—</span><span class="l">empty windows</span></div>
     <!-- Server-side filters (DEC-WINDOW-OPTION-DECODE-001 +
          DEC-OPTION-WINDOW-PLAN-001 C3): the row list is filtered + capped on
          the SERVER (counts stay complete), so a pre-planned universe-scale
@@ -362,6 +369,19 @@ async function poll() {
     failcEl.textContent = num(countStatus(body.counts, "FAILED"));
     const planEl = document.getElementById("planc");
     if (planEl) planEl.textContent = num(countStatus(body.counts, "PLANNED"));
+    /* Per-run vs lifetime EMPTY (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001):
+       counts_since_pull_start ships ONLY when the server knows the current
+       pull's journal start — absent, the tile shows the lifetime figure alone
+       (never a fabricated per-run 0). textContent (never innerHTML) — the
+       repo's CodeQL XSS discipline for new DOM writes. */
+    const emptyEl = document.getElementById("emptyc");
+    if (emptyEl) {
+      const lifetimeEmpty = countStatus(body.counts, "EMPTY");
+      const since = body.counts_since_pull_start;
+      emptyEl.textContent = since
+        ? num(countStatus(since, "EMPTY")) + " this run · " + num(lifetimeEmpty) + " lifetime"
+        : num(lifetimeEmpty);
+    }
     statusEl.textContent = num(body.matched ?? rows.length) + " matched · "
       + num(body.returned ?? rows.length) + " shown"
       + (body.capped ? " · CAPPED (severity-first — FAILED/EMPTY always shown)" : "");
