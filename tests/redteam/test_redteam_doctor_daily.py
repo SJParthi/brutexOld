@@ -10,16 +10,23 @@ envelope. These pins keep its safety properties from silently rotting:
   observability contract must never gate PRs or join ci-ok).
 * **Envelope honesty** — the workflow ASSERTS the 5 operator-envelope
   checks stay SKIP-with-reason and BOTH wheel-freshness handshakes stay
-  PASS (never fake-green, never quietly hollow); ``--live`` (the
-  sandbox-blind Mac kit) never runs; ``BRUTEX_SKIP_WHEEL_FRESHNESS`` is
-  never set (the wheel handshakes are the cron's substantive teeth).
-  The assert step's bash is FUNCTIONALLY executed here against fixture
-  reports (the DEC-CI-FORK-PR-HARDEN-001 executed-script precedent), so
-  hollowing mutations (``exit 1`` -> ``exit 0``, a ``true`` body) fail
-  loudly instead of surviving textual grep pins.
+  PASS (never fake-green, never quietly hollow); the check-set contract
+  is TWO-sided: a MISSING/renamed name reds via the per-name asserts and
+  an ADDED check reds via the exact-7 row-count pin (a future check that
+  fabricates PASS against the hermetic envelope can never sail through
+  unclassified); ``--live`` (the sandbox-blind Mac kit) never runs;
+  ``BRUTEX_SKIP_WHEEL_FRESHNESS`` is never set (the wheel handshakes are
+  the cron's substantive teeth). The assert step's bash is FUNCTIONALLY
+  executed here against fixture reports (the DEC-CI-FORK-PR-HARDEN-001
+  executed-script precedent), so hollowing mutations (``exit 1`` ->
+  ``exit 0``, a ``true`` body) fail loudly instead of surviving textual
+  grep pins.
 * **Alerting** — every alert step fires on ``cancelled()`` too
   (DEC-MUTATION-ALERT-CANCELLED-001: a job killed by its own
-  ``timeout-minutes`` reports CANCELLED, live-probed run 28748795864);
+  ``timeout-minutes`` reports CANCELLED, live-probed run 28748795864)
+  and is STEP-SCOPED to the doctor/assert outcomes (bare ``failure()``
+  is job-scoped — a post-doctor summary/upload flake on a GREEN doctor
+  day must never file a 'doctor is RED' alarm over an all-green table);
   the tracking issue title is STABLE (SHA-free) so red days fold into
   ONE open issue via ``createComment`` and a green day closes it; BOTH
   issue-lifecycle steps are ref-gated to ``refs/heads/main`` (the issue
@@ -182,10 +189,19 @@ def test_checkout_never_persists_credentials() -> None:
 
 
 def test_concurrency_never_cancels_in_flight() -> None:
-    """cancel-in-progress false: a CANCELLED conclusion stays alert-worthy."""
+    """cancel-in-progress false + the EXACT per-ref group value.
+
+    The group must be pinned exactly: the issue-lifecycle safety argument
+    (main-ref-gated find-then-create is genuinely serialized) leans on
+    every main run sharing the ONE ``doctor-daily-refs/heads/main``
+    group. A per-run group (e.g. ``doctor-daily-${{ github.run_id }}``)
+    would keep the substring pin green while giving ZERO serialization —
+    two concurrent red main runs could both pass the listForRepo dedupe
+    and mint two same-titled 'critical' issues.
+    """
     concurrency = _load()["concurrency"]
     assert concurrency["cancel-in-progress"] is False
-    assert "doctor-daily" in concurrency["group"]
+    assert concurrency["group"] == "doctor-daily-${{ github.ref }}"
 
 
 def test_job_timeout_bounded() -> None:
@@ -238,12 +254,19 @@ def test_both_wheels_installed() -> None:
 
 
 def test_envelope_honesty_contract_asserted() -> None:
-    """All 7 check verdicts are pinned: 5 SKIP-with-reason + 2 PASS."""
+    """All 7 check verdicts are pinned: 5 SKIP-with-reason + 2 PASS.
+
+    Plus the TWO-sided check-set pin: the per-name asserts red a
+    REMOVED/RENAMED check, and the exact-7 row-count pin reds an ADDED
+    one (functionally proven by
+    ``test_assert_step_reds_an_added_unclassified_check``).
+    """
     run = _assert_step_run()
     for name, want in EXPECTED_STATUSES.items():
         assert f"assert_status {name} {want}" in run, (
             f"envelope contract line for {name} -> {want} is missing"
         )
+    assert '"$n" -ne 7' in run, "the exact-7 check-row count pin is missing"
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +342,20 @@ def test_assert_step_reds_a_missing_check_name(tmp_path: Path) -> None:
     assert _run_assert_step(tmp_path, statuses) == 1
 
 
+def test_assert_step_reds_an_added_unclassified_check(tmp_path: Path) -> None:
+    """An ADDED check reds too — the check-set contract is two-sided.
+
+    A future check appended to ``run_doctor()`` that fabricates PASS (or
+    quietly SKIPs, hiding hollowed teeth) against the hermetic hosted
+    envelope is the exact class the assert step exists to catch; without
+    the row-count pin it would sail through green because the per-name
+    asserts only query the 7 listed names.
+    """
+    statuses = dict(EXPECTED_STATUSES)
+    statuses["vendor_reachability"] = "PASS"
+    assert _run_assert_step(tmp_path, statuses) == 1
+
+
 def test_alert_steps_fire_on_cancelled() -> None:
     """Every alert step's guard includes cancelled().
 
@@ -328,6 +365,29 @@ def test_alert_steps_fire_on_cancelled() -> None:
     """
     for step in _alert_steps(_load()):
         assert "cancelled()" in str(step["if"])
+
+
+def test_alert_guards_are_step_scoped_to_doctor_and_assert() -> None:
+    """Alert guards key on the doctor/assert step outcomes, never bare failure().
+
+    ``failure()`` alone is JOB-scoped: a transient post-doctor infra
+    failure (summary write / artifact upload — a real recurring GHA
+    failure mode) on a GREEN doctor day would file/extend the
+    'brutex doctor is RED' critical issue whose own body shows an
+    all-green report table — an alarm overclaiming a doctor verdict the
+    run never produced (Golden Rule #1). Step-scoping fires the alert
+    only when the doctor or its envelope-honesty assert did not succeed
+    (``!= 'success'`` also covers a setup/bootstrap failure — the doctor
+    step is then SKIPPED) or the run was cancelled.
+    """
+    data = _load()
+    assert _doctor_step(data).get("id") == "doctor"
+    assert_step = next(s for s in _steps(data) if "assert_status" in str(s.get("run", "")))
+    assert assert_step.get("id") == "assert"
+    for step in _alert_steps(data):
+        guard = str(step["if"])
+        assert "steps.doctor.outcome != 'success'" in guard
+        assert "steps.assert.outcome != 'success'" in guard
 
 
 def test_issue_title_stable_and_lifecycle_wired() -> None:

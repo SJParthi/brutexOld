@@ -101,6 +101,40 @@ class TestDoctorReport:
         assert "❌" in text
         assert "FAIL" in text
 
+    def test_format_line_shape_pins_the_awk_field_contract(self) -> None:
+        """Pin the ``<glyph> <name> <status> <detail>`` check-line shape.
+
+        ``.github/workflows/doctor-daily.yml``'s envelope-honesty assert
+        step awk-parses every check line as ``$2 == name / $3 == status``
+        AND pins the exact check-row count between the two ``====`` rules
+        (``tests/redteam/test_redteam_doctor_daily.py`` renders its
+        fixture reports in this same shape). Any format change here —
+        column swap, an inserted timestamp column, a ``name: status``
+        style — must red THIS test on the offending PR itself, not
+        post-merge via doctor-daily's paths-filtered push smoke (which
+        would file a false 'doctor is RED' critical issue).
+        """
+        expected = [
+            ("alpha", "PASS"),
+            ("beta", "FAIL"),
+            ("gamma", "SKIP"),
+            ("delta", "WARN"),
+        ]
+        report = DoctorReport()
+        for name, status in expected:
+            report.add(CheckResult(name=name, status=status, detail="detail with spaces"))
+        lines = report.format().splitlines()
+        # Check rows sit strictly between the two ==== rules — the framing
+        # the workflow's added-check count pin relies on.
+        rules = [i for i, line in enumerate(lines) if line and set(line) == {"="}]
+        assert len(rules) == 2
+        check_lines = lines[rules[0] + 1 : rules[1]]
+        assert len(check_lines) == len(expected)
+        for line, (name, status) in zip(check_lines, expected, strict=True):
+            fields = line.split()
+            assert fields[1] == name, "awk $2 must be the check name"
+            assert fields[2] == status, "awk $3 must be the status"
+
 
 # ────────────────────────────────────────────────────────────────────────
 # check_audit_chain
