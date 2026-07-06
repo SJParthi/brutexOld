@@ -28,7 +28,7 @@ adapters + fake SDKs, zero network, zero credentials.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -36,12 +36,18 @@ from pathlib import Path
 import pytest
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.ingest_common import StepOrderMonitor, SyntheticSpotAdapter
+from brutex.adapters.protocol import (
+    DerivativeContract,
+    InstrumentPage,
+    MarketCapabilities,
+)
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
     _underlying_kind_map,
 )
 from brutex.dashboard.historical_pull import pull_contract_candles
-from brutex.dashboard.metadata_pull import pull_expiries_contracts
+from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
+from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_pull import (
     PipelinePullReport,
@@ -72,6 +78,9 @@ _ADANI_FUT = "NSE-ADANIENT-25Jan24-FUT"
 _ADANI_CE = "NSE-ADANIENT-25Jan24-3000-CE"
 
 #: The decreed full six-step label sequence (DEC-PULL-SIX-STEP-ORDER-001).
+#: The captured-log event shape (structlog ``capture_logs`` yields these).
+type _LogEvent = MutableMapping[str, object]
+
 _SIX_STEPS = (
     "indices-spot",
     "stocks-spot",
@@ -124,15 +133,17 @@ class _RecordingSpotAdapter:
         self._lock = threading.Lock()
 
     @property
-    def capabilities(self) -> object:
+    def capabilities(self) -> MarketCapabilities:
         """Delegate the capability surface."""
         return self._inner.capabilities
 
-    def list_instruments(self, *, cursor: str | None = None) -> object:
+    def list_instruments(self, *, cursor: str | None = None) -> InstrumentPage:
         """Delegate the instrument page."""
         return self._inner.list_instruments(cursor=cursor)
 
-    def list_derivatives(self, *, underlying_symbol: str, exchange: Exchange) -> object:
+    def list_derivatives(
+        self, *, underlying_symbol: str, exchange: Exchange
+    ) -> Iterator[DerivativeContract]:
         """Delegate the (empty) derivatives iterator."""
         return self._inner.list_derivatives(underlying_symbol=underlying_symbol, exchange=exchange)
 
@@ -234,7 +245,7 @@ def _real_sink(lake_root: Path) -> BarSink:
     return ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
 
 
-def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+def _events(logs: Sequence[_LogEvent], name: str) -> list[_LogEvent]:
     """All captured events with ``event == name`` (in emission order)."""
     return [e for e in logs if e["event"] == name]
 
@@ -247,7 +258,7 @@ class _PostStepProbe:
     after the last ``pull.step.settled``" is positional, not inferential.
     """
 
-    def __init__(self, logs: list[Mapping[str, object]]) -> None:
+    def __init__(self, logs: Sequence[_LogEvent]) -> None:
         self._logs = logs
         self.prebuild_at: int | None = None
         self.warm_at: int | None = None
@@ -256,14 +267,10 @@ class _PostStepProbe:
         """Record the position + the exclusion set; report a clean prebuild."""
         del exclude_symbols
         self.prebuild_at = len(self._logs)
-        return PrebuildOutcome(
-            symbols_built=1, total_bars=1, failed=(), failed_count=0, ok=True
-        )
+        return PrebuildOutcome(symbols_built=1, total_bars=1, failed=(), failed_count=0, ok=True)
 
-    def warm(self) -> object:
+    def warm(self) -> MoversWarmResult:
         """Record the movers-warm position; report one warmed snapshot."""
-        from brutex.dashboard.movers_warm import MoversWarmResult
-
         self.warm_at = len(self._logs)
         return MoversWarmResult(warmed=1, failed=0, total=1)
 
@@ -310,7 +317,7 @@ def _run_pipeline(
             step_monitor=step_monitor,
         )
 
-    def _run_metadata() -> object:
+    def _run_metadata() -> MetadataPullReport:
         return pull_expiries_contracts(
             tradable,
             registry=registry,
@@ -356,7 +363,7 @@ def _run_pipeline(
 
     return run_full_pipeline(
         run_spot=_run_spot,
-        run_metadata=lambda: _run_metadata(),  # type: ignore[return-value]
+        run_metadata=_run_metadata,
         run_historical=_run_historical,
         warm_spot_movers=probe.warm if probe is not None else None,
         run_prebuild=probe.run_prebuild if probe is not None else None,
@@ -565,11 +572,15 @@ class TestUnknownSelectionFailsClosed:
         fastapi_testclient = pytest.importorskip(
             "fastapi.testclient", reason="the route gate needs the [ui] extra"
         )
+        import brutex.dashboard.app as app_module
         from brutex.config.credentials import ENV_CREDENTIALS_FILE
         from brutex.dashboard.app import DashboardState, build_app
         from brutex.data.instrument_store import InstrumentStore
 
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+        # Pin the credential gate OPEN (its own suite owns the 503 refusal) so
+        # the SELECTION validation is what this test reaches.
+        monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
         store = InstrumentStore.open(tmp_path / "instruments.duckdb")
         try:
             store.upsert_many(
@@ -584,9 +595,7 @@ class TestUnknownSelectionFailsClosed:
                 ) as client,
                 capture_logs() as logs,
             ):
-                resp = client.post(
-                    "/api/v1/universe/pull-pipeline", params={"symbols": "99999"}
-                )
+                resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "99999"})
             assert resp.status_code == 400
             assert "99999" in resp.json()["detail"]
             # ZERO step events: the sequencer never launched (fail-CLOSED).

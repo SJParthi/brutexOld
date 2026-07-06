@@ -16,7 +16,6 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
 
 import polars as pl
 import pytest
@@ -25,6 +24,7 @@ from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
 )
+from brutex.adapters.groww.sdk_protocol import GrowwSDK
 from brutex.adapters.ingest_common import StepOrderMonitor
 from brutex.dashboard import historical_pull as hp
 from brutex.dashboard.composite_pull import _underlying_kind_map
@@ -142,12 +142,12 @@ class _RecordingSink:
         return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
 
 
-def _client(sdk: object) -> GrowwClient:
+def _client(sdk: GrowwSDK) -> GrowwClient:
     """Wrap *sdk* in a no-sleep, single-attempt :class:`GrowwClient` (offline)."""
     return GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
 
 
-def _factory(sdk: object, sink: BarSink) -> tuple[GrowwClient, BarSink]:
+def _factory(sdk: GrowwSDK, sink: BarSink) -> tuple[GrowwClient, BarSink]:
     """Return a fixed ``(client, sink)`` pair for the injected ``client_factory``."""
     return _client(sdk), sink
 
@@ -594,9 +594,7 @@ class TestStepMajorUntilClean:
                 registry=registry,
                 from_date=_FROM,
                 to_date=_TO,
-                client_factory=lambda _root: _factory(
-                    cast("_FakeSDK", _EmptySDK()), _RecordingSink()
-                ),
+                client_factory=lambda _root: _factory(_EmptySDK(), _RecordingSink()),
                 now=_NOW,
                 underlying_kinds=_KINDS,
             )
@@ -663,7 +661,7 @@ class TestGreeksStrictGate:
         self,
         tmp_path: Path,
         *,
-        sdk: object | None = None,
+        sdk: GrowwSDK | None = None,
         prior_steps: PriorStepsVerdict | None = None,
     ) -> HistoricalPullReport:
         registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)

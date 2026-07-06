@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import inspect
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, MutableMapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +22,11 @@ from brutex.adapters.groww.errors import GrowwAuthError, GrowwTimeoutError
 from brutex.adapters.ingest_common import (
     StepOrderMonitor,
     SyntheticSpotAdapter,
+)
+from brutex.adapters.protocol import (
+    DerivativeContract,
+    InstrumentPage,
+    MarketCapabilities,
 )
 from brutex.dashboard import pull_controller
 from brutex.dashboard.pull_controller import pull_all_spot
@@ -79,15 +84,17 @@ class _DelegatingAdapter:
         self._record_lock = threading.Lock()
 
     @property
-    def capabilities(self) -> object:
+    def capabilities(self) -> MarketCapabilities:
         """Delegate the capability surface."""
         return self._inner.capabilities
 
-    def list_instruments(self, *, cursor: str | None = None) -> object:
+    def list_instruments(self, *, cursor: str | None = None) -> InstrumentPage:
         """Delegate the instrument page."""
         return self._inner.list_instruments(cursor=cursor)
 
-    def list_derivatives(self, *, underlying_symbol: str, exchange: Exchange) -> object:
+    def list_derivatives(
+        self, *, underlying_symbol: str, exchange: Exchange
+    ) -> Iterator[DerivativeContract]:
         """Delegate the (empty) derivatives iterator."""
         return self._inner.list_derivatives(underlying_symbol=underlying_symbol, exchange=exchange)
 
@@ -147,7 +154,11 @@ def _real_sink(lake_root: Path) -> BarSink:
     return ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
 
 
-def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+#: The captured-log event shape (structlog ``capture_logs`` yields these).
+type _LogEvent = MutableMapping[str, object]
+
+
+def _events(logs: Sequence[_LogEvent], name: str) -> list[_LogEvent]:
     """All captured events with ``event == name`` (in emission order)."""
     return [e for e in logs if e["event"] == name]
 
