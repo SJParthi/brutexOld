@@ -105,6 +105,16 @@ class TestBuildDbDatasetsPayload:
 
 
 class TestWarmSeedsAllMemos:
+    def test_memos_seeded_derived_from_report_bases(self) -> None:
+        # Round-1 review drift pin (DEC-O1-CLAIMS-HONESTY-001): the warm's
+        # log/return contract is DERIVED — the 5 legacy memos plus ONE preopen
+        # memo per REPORT_BASES entry — never a hand-summed literal. A future
+        # third basis then moves _MEMOS_SEEDED automatically instead of
+        # `discovery.warm_done` silently under-reporting a stale hardcoded 7.
+        assert dw._LEGACY_MEMOS == 5
+        assert dw._LEGACY_MEMOS + len(REPORT_BASES) == dw._MEMOS_SEEDED
+        assert dw._MEMOS_SEEDED == 7  # honest today: 5 legacy + 2 bases
+
     def test_all_seven_memos_seeded_at_generation(self, lake: Path) -> None:
         caches = _caches()
         with capture_logs() as logs:

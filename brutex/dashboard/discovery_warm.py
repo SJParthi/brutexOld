@@ -115,8 +115,16 @@ def preopen_datasets_key(basis: str) -> str:
     return f"{PREOPEN_DATASETS_KEY_PREFIX}|{basis}"
 
 
-#: How many memos one successful warm seeds (the log + return contract).
-_MEMOS_SEEDED: Final[int] = 7
+#: The five discovery memos seeded OUTSIDE the per-basis preopen loop
+#: (db datasets · movers datasets · spot cascade · fno cascade · latest date).
+_LEGACY_MEMOS: Final[int] = 5
+
+#: How many memos one successful warm seeds (the log + return contract) —
+#: DERIVED from :data:`REPORT_BASES`, never a hand-summed literal: a new
+#: report basis moves this contract automatically, so ``discovery.warm_done``
+#: can never silently under-report the seeded count (round-1 review fix,
+#: DEC-O1-CLAIMS-HONESTY-001).
+_MEMOS_SEEDED: Final[int] = _LEGACY_MEMOS + len(REPORT_BASES)
 
 
 def filter_spot_datasets(candle_datasets: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -183,8 +191,10 @@ def warm_discovery_memos(
     """Seed every discovery memo at *generation* off ONE shared walk — best-effort.
 
     Runs the ``bars/`` candle walk ONCE (plus the F&O decode walk and the
-    expired-options walk once each) and seeds the seven memos listed in the
-    module docstring via ``get_or_compute(..., force_fresh=True)`` — the
+    expired-options walk once each) and seeds every memo listed in the module
+    docstring (:data:`_MEMOS_SEEDED` of them — five fixed plus one preopen
+    memo per :data:`REPORT_BASES` entry) via
+    ``get_or_compute(..., force_fresh=True)`` — the
     ``force_fresh`` matters because the warm executes while the pull job is
     still ``running``, so an opted-in pull-active floor would otherwise serve
     the stale pre-pull entry instead of storing the fresh one.

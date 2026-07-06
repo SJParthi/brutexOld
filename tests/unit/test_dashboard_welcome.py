@@ -77,6 +77,21 @@ def test_welcome_o1_card_states_two_tier_enforcement() -> None:
     assert "cache tier" in html
 
 
+def test_welcome_o1_card_discloses_strict_tier_dormancy() -> None:
+    # Round-1 review fix (DEC-O1-CLAIMS-HONESTY-001): the strict 1.1× tier is
+    # DORMANT until the operator registers the self-hosted [self-hosted,
+    # macos, m4pro] runner (bench-m4pro.yml sits queued until then), so the
+    # customer-facing card must not present it as a gate that runs today
+    # (Golden Rule #10 / Rule #13(b): never claim "gated" for a dormant
+    # tier). The dormancy qualifier + the today-gating attribution to the
+    # shared-CI tier are HARD-asserted so the overstatement can never
+    # silently return.
+    html = _render_welcome_html()
+    assert "dormant until the operator registers it" in html
+    assert "reserved for the self-hosted M4 Pro runner" in html
+    assert "gates every push today" in html
+
+
 def test_welcome_honest_envelope_no_hype() -> None:
     # Golden Rule #10: the headline SLA names its hardware, and the page DISAVOWS
     # the classic hype phrase rather than claiming it (it appears only inside its
