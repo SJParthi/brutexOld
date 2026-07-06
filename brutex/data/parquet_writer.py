@@ -92,6 +92,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import itertools
+import os
 import time
 from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
@@ -106,8 +107,16 @@ import structlog
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import WriterError, parquet_read_skip_errors
 from brutex.data.lake_manifest import invalidate_manifest, record_dataset
+from brutex.data.lake_stats_manifest import (
+    KIND_BARS,
+    record_partition_stats,
+    remove_partition_stats,
+    stats_manifest_enabled,
+)
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, CandleBar, CatalogEntry, FnoGreeksBar
 from brutex.data.partition import (
+    BAR_DIR_NAME,
+    PARTITION_PATH_COMPONENTS,
     build_partition_path,
     partition_for_timestamp,
 )
@@ -439,6 +448,16 @@ class WriteResult:
         either way). STORED-poison heals (``lake.partition.dedup_healed`` — rows
         a PRIOR write landed) are deliberately NOT counted here: they are a heal
         surface, not this batch's vendor behaviour.
+    file_rewritten
+        ``True`` iff THIS call RENDERED and atomically replaced the partition's
+        bytes (DEC-LAKE-STATS-MANIFEST-001): a fresh write, a merge that added
+        bars, a merge that RESTATED bytes without adding (the latest-wins
+        Greeks-enrich / dedup-heal rewrite where ``bars_added == 0``), or a
+        heal rewrite. ``False`` ONLY for the merge NO-OP fast path (every
+        incoming bar already stored identically — the file was not touched).
+        The stats-manifest write hook keys on THIS flag — bytes RENDERED,
+        never ``bars_added`` — so a no-op merge stays zero-cost while every
+        byte change re-stamps the shard's stat token.
     """
 
     path: Path
@@ -450,6 +469,7 @@ class WriteResult:
     bars_added: int = 0
     conflicts: tuple[BarConflict, ...] = ()
     vendor_dup_rows_dropped: int = 0
+    file_rewritten: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,8 +761,22 @@ class ParquetWriter:
                     bytes_written=len(content_bytes),
                     bars_added=len(fresh_bars),
                     conflicts=tuple(batch_conflicts),
+                    file_rewritten=True,  # a fresh write always renders bytes
                 )
             append_ms = (time.perf_counter() - write_start) * 1000.0
+            if result.file_rewritten:
+                # Stats-manifest upsert (DEC-LAKE-STATS-MANIFEST-001): the write
+                # RENDERED new partition bytes, so the dataset's stats shard —
+                # when one exists (lazy accretion: an absent shard costs one
+                # failed ``os.stat`` and nothing else) — is re-stamped with the
+                # file's fresh stat token, distinct-timestamp count, bounds and
+                # raw_hash. Runs INSIDE the still-held partition locks so no
+                # concurrent replace can slip between the ``os.replace`` above
+                # and the ``os.stat`` here (the token is the durable file's).
+                # Best-effort by contract — it can never raise into the pull.
+                # The merge NO-OP fast path (``file_rewritten=False``) touches
+                # nothing: an existing shard row is still stat-valid.
+                self._record_stats_hook(dest, result)
 
         # Emit the per-partition write telemetry AFTER the locks are released (the
         # log call is not itself part of the serialised critical section). One
@@ -902,6 +936,7 @@ class ParquetWriter:
                 bytes_written=len(existing_bytes),
                 bars_added=added,  # 0 on the no-op path (every incoming bar already stored)
                 conflicts=tuple(conflicts),
+                file_rewritten=False,  # NO-OP: the stored bytes were not touched
             )
 
         if heal_dropped > 0:
@@ -927,6 +962,9 @@ class ParquetWriter:
             bytes_written=len(content_bytes),
             bars_added=added,
             conflicts=tuple(conflicts),
+            # Bytes RENDERED — including the ``added == 0`` latest-wins restate
+            # and the dedup self-heal rewrite (DEC-LAKE-STATS-MANIFEST-001).
+            file_rewritten=True,
         )
 
     def _dedup_batch(
@@ -1185,6 +1223,12 @@ class ParquetWriter:
             # manifest may now over-list — invalidate it (best-effort, O(1));
             # the next discovery walks + rebuilds (DEC-LAKE-MANIFEST-O1-001).
             invalidate_manifest(self._lake_root)
+            # Stats-manifest twin (DEC-LAKE-STATS-MANIFEST-001): the moved
+            # file's row leaves the dataset's stats shard beside the manifest
+            # invalidation (best-effort; the LAST row's removal unlinks the
+            # whole shard — an empty dataset has no shard). Still under both
+            # held partition locks.
+            self._remove_stats_hook(dest)
             return PartitionHealResult(
                 path=dest,
                 changed=True,
@@ -1218,7 +1262,15 @@ class ParquetWriter:
             bytes_written=len(content_bytes),
             bars_added=0,  # a heal never adds bars (Golden Rule #1)
             conflicts=(),
+            file_rewritten=True,  # the heal rendered + replaced the bytes
         )
+        # Stats-manifest re-stamp (DEC-LAKE-STATS-MANIFEST-001): the heal
+        # rewrite rendered new bytes, so the shard row is upserted under the
+        # SAME held locks — it carries the ROTATED raw_hash, the post-removal
+        # distinct count and a fresh stat token (the shard and the catalog
+        # therefore agree). The probe-failure ABSTAIN + unchanged branches
+        # above return earlier and touch neither the file nor the shard.
+        self._record_stats_hook(dest, write)
         return PartitionHealResult(
             path=dest,
             changed=True,
@@ -1231,6 +1283,99 @@ class ParquetWriter:
         )
 
     # ── Private ────────────────────────────────────────────────────
+
+    def _record_stats_hook(self, dest: Path, result: WriteResult) -> None:
+        """Best-effort stats-manifest upsert for a just-rendered partition.
+
+        DEC-LAKE-STATS-MANIFEST-001 write hook: called by :meth:`write` (both
+        branches, when ``result.file_rewritten``) and by the heal rewrite —
+        always INSIDE the already-held partition locks, so the ``os.stat``
+        taken here is the durable file's content token (no concurrent
+        ``os.replace`` is possible). Delegates to
+        :func:`~brutex.data.lake_stats_manifest.record_partition_stats`, which
+        is lazy-accreting (an ABSENT shard costs one failed stat and returns)
+        and best-effort by contract (a shard failure logs + unlinks + returns
+        — it NEVER raises into the pull; a
+        :class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation
+        on a genuinely full disk deliberately propagates). The kill switch
+        (``BRUTEX_LAKE_STATS_MANIFEST=off``) makes this a pure no-op — not
+        even the ``os.stat`` runs (byte-identical legacy behaviour). A *dest*
+        outside the canonical ``bars/`` layout or a vanished-file stat is
+        logged and skipped — never an error into the write path.
+        """
+        if not stats_manifest_enabled():
+            return
+        key = self._stats_key_for_dest(dest)
+        if key is None:
+            _LOG.warning("lake.stats_manifest.key_underivable", partition=str(dest))
+            return
+        try:
+            stat = os.stat(dest)
+        except OSError as exc:
+            _LOG.warning(
+                "lake.stats_manifest.stat_failed",
+                partition=str(dest),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+        record_partition_stats(
+            self._lake_root,
+            kind=KIND_BARS,
+            key=key,
+            dest=dest,
+            rows=result.row_count,
+            min_ts=result.first_ts,
+            max_ts=result.last_ts,
+            raw_hash=result.raw_hash,
+            stat=stat,
+        )
+
+    def _remove_stats_hook(self, dest: Path) -> None:
+        """Best-effort stats-manifest row removal for a quarantine-MOVED file.
+
+        DEC-LAKE-STATS-MANIFEST-001 heal hook: called by the
+        :meth:`_heal_partition_locked` quarantine-MOVE branch beside
+        ``invalidate_manifest``, under the SAME held partition locks.
+        Delegates to
+        :func:`~brutex.data.lake_stats_manifest.remove_partition_stats`
+        (lazy + best-effort — never raises into the heal; the last row's
+        removal unlinks the whole shard). Kill switch off ⇒ pure no-op.
+        """
+        if not stats_manifest_enabled():
+            return
+        key = self._stats_key_for_dest(dest)
+        if key is None:
+            _LOG.warning("lake.stats_manifest.key_underivable", partition=str(dest))
+            return
+        remove_partition_stats(self._lake_root, kind=KIND_BARS, key=key, dest=dest)
+
+    def _stats_key_for_dest(self, dest: Path) -> dict[str, str] | None:
+        """Derive the stats-manifest dataset key VERBATIM from *dest*'s path.
+
+        The ONE derivation both hook sites share (CLAUDE.md §11 COMMON): a
+        canonical partition path is
+        ``<lake_root>/bars/<exchange>/<segment>/<symbol>/<interval>/<yyyy>/<mm>.parquet``,
+        so the key is the four dataset components exactly as they appear ON
+        DISK (a #911-drift dir stays its own dataset — the shard-key verbatim
+        rule). Returns ``None`` for any other shape (outside the lake, outside
+        ``bars/``, wrong depth) — the hooks abstain rather than guess. O(1).
+        """
+        try:
+            rel = dest.relative_to(self._lake_root / BAR_DIR_NAME)
+        except ValueError:
+            return None
+        parts = rel.parts
+        # PARTITION_PATH_COMPONENTS counts the leading ``bars`` component,
+        # which ``relative_to`` above already consumed.
+        if len(parts) != PARTITION_PATH_COMPONENTS - 1:
+            return None
+        return {
+            "exchange": parts[0],
+            "segment": parts[1],
+            "symbol": parts[2],
+            "interval": parts[3],
+        }
 
     @staticmethod
     def _read_existing_bytes(dest: Path) -> bytes:
