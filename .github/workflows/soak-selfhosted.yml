@@ -93,9 +93,16 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Show runner identity (real hardware proof)
+        # Never interpolate the dispatch input into the script text: pass it via
+        # env and reference the shell variable, so a value with shell
+        # metacharacters is DATA not code (same pattern as stress-nightly.yml's
+        # stress_events). The fromJSON()-guarded uses (job/step timeout, duration)
+        # are already injection-safe; this raw echo was the one exception.
+        env:
+          SOAK_MINUTES: ${{ github.event.inputs.soak_minutes || '360' }}
         run: |
           echo "Runner: $(uname -a)"
-          echo "Soak minutes: ${{ github.event.inputs.soak_minutes || '360' }}"
+          echo "Soak minutes: $SOAK_MINUTES"
 
       - name: Set up Python
         uses: actions/setup-python@v6
