@@ -2975,6 +2975,15 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     talks through its SDK client, not a urllib transport — and no preset
     instrument list: the adapter carries the whole master index and resolves
     each fetched symbol in O(1).
+
+    Rate-controller hooks (DEC-SUSPICION-SWEEP-FIXES-001 D1): this builder wires
+    NO ``pace`` / ``on_rate_limit`` / ``on_success`` — ``cmd_fetch`` constructs the
+    :class:`~brutex.adapters.rate_common.RateController` AFTER this build. The FULL
+    hook triple is bound downstream at the ONE COMMON spine seam
+    (``run_ingest.with_paced_client``, called by ``run_groww_spot_ingest`` with
+    the hooks ``cmd_fetch`` threads into ``run_groww_spot_ingest_with_retry``), so
+    every client-absorbed 429 still decrements the shared AIMD ladder — pinned by
+    the production-wiring test in ``tests/unit/test_groww_spot_rate_feedback.py``.
     """
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.auth import GrowwCredentials
@@ -4649,6 +4658,37 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"[brutex] WARNING: sweeping PARTIAL coverage (--allow-missing-slices): "
             f"{len(preflight.missing)} empty pairs will skip as no-bars: {missing_str}"
         )
+
+    # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
+    # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
+    # the last prebuild) would feed the engine stale bars AND hash them into the run
+    # identity as if canonical (Golden Rule #4) — refuse the launch loudly with the
+    # exact remedy instead. Verifiable pairs only (derived intraday TFs with BOTH a
+    # stored partition and a 1-minute base — the zero-bar preflight above owns the
+    # missing-data refusal; abstains never block). NO escape flag by design:
+    # Correctness > everything (the merge-readiness priority law) — the remedy is
+    # the pipeline's prebuild, never sweeping known-stale data.
+    from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
+    from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+    freshness = preflight_derived_freshness(
+        lake_derived_freshness_verdicts(
+            resolved_lake,
+            exchange=exchange,
+            segment=segment,
+            symbols=symbol_list,
+            intervals=interval_list,
+        )
+    )
+    if not freshness.ok:
+        stale_str = ", ".join(f"{s}/{i}" for s, i in freshness.stale)
+        print(
+            f"[brutex] REFUSED: {len(freshness.stale)} of {freshness.checked} verifiable "
+            f"derived (symbol, interval) pairs are STALE vs a fresh 1-minute "
+            f"re-derivation: {stale_str}. Remedy: {freshness.remediation()}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
 
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [

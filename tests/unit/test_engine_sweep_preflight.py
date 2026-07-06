@@ -71,3 +71,50 @@ class TestRemediation:
 
     def test_ok_report_remediation_is_empty(self) -> None:
         assert PreflightReport(missing=(), requested=2).remediation() == ""
+
+
+class TestFreshnessPreflight:
+    """DEC-SUSPICION-SWEEP-FIXES-001 (G1) — the derived-TF freshness gate core."""
+
+    def test_all_fresh_is_ok(self) -> None:
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        report = preflight_derived_freshness(
+            {("NIFTY", "5minute"): "fresh", ("SENSEX", "15minute"): "fresh"}
+        )
+        assert report.ok is True
+        assert report.stale == ()
+        assert report.checked == 2
+
+    def test_stale_pairs_named_sorted_deterministic(self) -> None:
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        report = preflight_derived_freshness(
+            {
+                ("SENSEX", "5minute"): "stale",
+                ("NIFTY", "15minute"): "stale",
+                ("NIFTY", "5minute"): "fresh",
+            }
+        )
+        assert report.ok is False
+        assert report.stale == (("NIFTY", "15minute"), ("SENSEX", "5minute"))
+        assert report.checked == 3
+        assert "prebuild" in report.remediation()
+        assert "DEC-PIPELINE-AUTOPREBUILD-001" in report.remediation()
+
+    def test_unexpected_verdict_fails_closed(self) -> None:
+        """Anything not EXACTLY 'fresh' counts stale — an unknown verdict string
+        can never silently pass the gate (fail-closed)."""
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        report = preflight_derived_freshness({("NIFTY", "5minute"): "weird"})
+        assert report.ok is False
+        assert report.stale == (("NIFTY", "5minute"),)
+
+    def test_empty_verdicts_ok(self) -> None:
+        """No verifiable pairs (all abstained) → the gate never blocks a launch."""
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        report = preflight_derived_freshness({})
+        assert report.ok is True
+        assert report.checked == 0

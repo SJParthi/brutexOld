@@ -18,7 +18,47 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
+_Last updated: 2026-07-06 (DEC-SUSPICION-SWEEP-FIXES-001, MIGRATION.md #1492 —
+the 19-agent suspicion-sweep fix + hardening pack, 3 confirmed defects + 4 gap pins in ONE
+change set: **(D1, MED)** the SPOT pull's AIMD ladder is no longer blind to client-absorbed
+429s — the spot build sites bind NO controller feedback hooks into the Groww client and
+`run_ingest._with_paced_client` rebound pace ONLY, so the client's bounded fast-retry
+(`max_attempts=6`) swallowed 429s against a NO-OP `on_rate_limit` (~18 vendor rejections per
+designed 3-hit step-down; sub-exhaustion bursts invisible — empirically proven: 0 ladder hits
+for 2 vendor 429s pre-fix). The FULL hook triple (pace + on_rate_limit + on_success) is now
+bound at that ONE COMMON spine seam (every production spot pull — dashboard bulk + single +
+CLI — flows through `run_groww_spot_ingest`), via NEW `GrowwClient.with_rate_hooks` /
+`ClientPool.with_rate_hooks` (re-fanned to every leaf); the spine's own per-window hooks stand
+DOWN when the client self-reports (NEW `client_self_reports_rate_limits`/`_successes`
+predicates — the feedback twins of `client_self_paces`; `on_timeout` stays spine-owned, the
+client never fires the timeout ladder). **(D2, LOW)** the F&O spine no longer double-counts a
+propagated 429: the client fires `on_rate_limit` per occurrence INCLUDING the final one before
+the exhausted error propagates, and `ingest_option_contract` fired once more → 7 ladder hits
+per exhausted window instead of 6 (proven: 3 hits for 2 occurrences pre-fix) — the spine hook
+now stands down on a self-reporting client (same predicates). Groww rate CAPS untouched —
+FEEDBACK wiring only, never the ceiling/governor values (§2 Rule 6). **(D3, MED)** the /db
+window-ledger route no longer re-parses the whole ledger Parquet (~841k rows measured) per
+paging click — it rides the mtime-keyed `db_view.window_ledger_rows_cached` (the SHARED
+`_ledger_records_cached` parse + a memoised projection through the ONE row-shape source, NEW
+`window_ledger.ledger_record_row`, which `to_rows` also delegates to); the route's stale
+"thousands / small sidecar" honesty note rewritten (#864 blurb reconciled below). **(G1)**
+sweep-preflight FRESHNESS gate: `cmd_sweep_all` now refuses (loud, remediation-naming) when a
+requested derived TF's stored partition drifts from a fresh 1-minute re-derivation (NEW
+`tf_autoderive.lake_derived_freshness_verdicts` — sharing ONE lake reader with the doctor via
+extracted `read_lake_bars_frame` — folded through the pure
+`sweep_preflight.preflight_derived_freshness`; abstains never block: non-derived intervals /
+no stored partition / no 1m base). **(G2)** a calendar-suite enumeration pin: no MUHURAT_SESSIONS
+entry on/after 2025 may close after 15:30 IST (a future evening session would silently re-arm
+the `clamp_window_end` partial-settle hazard — adding one now fails loudly, forcing a
+Muhurat-aware clamp decision). **(G3)** an AST drift pin: the epoch-anchored legacy
+`feed.resample_bars` is imported by NO production module (definition + feed re-export only) —
+the dual-resampler split can never silently reach a production path (DEC-RESAMPLE-ANCHOR-002).
+**(G4)** `rate_common.py`'s stale "operator-DIRECTED 5 r/s ceiling
+(GROWW_RATE_LIMIT_RPS_CEILING)" recovery docstring reconciled to the production 8 r/s
+(DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral `CEILING_RPS=5` DEFAULT unchanged). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100%
+line+branch).
+Earlier: 2026-07-06 (DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
 MIGRATION.md #1490–#1491 — the hardware-envelope CONSOLIDATION + thread-bounding pack:
 (1) the TWO hardware-envelope modules (#1360's `brutex/hardware_envelope.py` + #1401's
 `brutex/config/hardware_envelope.py`) are consolidated into ONE at
@@ -50,8 +90,7 @@ Parallelism-only — results byte-identical; measured A/B on the small CI fixtur
 concurrency, NO M4-Pro speedup claimed (Golden Rule #10). The Groww fetch pool / rate
 ceiling / governor + the sweep + Greeks per-worker determinism pins +
 `data/catalog.py` are UNTOUCHED. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched
-modules 100% line+branch).
-Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+modules 100% line+branch).Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -194,8 +233,12 @@ EVERY `/db` tab is now O(page): the last two whole-table reads — the F&O regis
 completing the candle/option/F&O/DuckDB-table pages already bounded. The registry is
 fully O(page) (DuckDB `LIMIT/OFFSET` over its index + a cheap FILTERED `COUNT(*)`;
 bench: first-page 1.04× for 10× more legs); the window-ledger is O(page) render+serialize
-with a deliberately-kept O(windows) bounded read (a small sidecar — honest envelope,
-NOT claimed O(page)-read). `registry_store.py` + `db_view.py` at 100% line+branch;
+over an O(windows) read [RECONCILED by DEC-SUSPICION-SWEEP-FIXES-001, MIGRATION.md #1492:
+the "small sidecar" claim was STALE — a pre-planned full-universe options pull holds ~841k
+ledger rows, and this route re-PARSED the whole Parquet per paging click; the read now rides
+the mtime-keyed `db_view.window_ledger_rows_cached` (ONE parse per ledger flush, O(1) repeat
+click; the FIRST read per generation stays O(rows) — honest envelope, still NOT claimed
+O(page)-read)]. `registry_store.py` + `db_view.py` at 100% line+branch;
 read-only viewer, ENGINE UNCHANGED. Earlier: 2026-06-20 (DEC-DB-UNIVERSE-O1-LATENCY-001, MIGRATION.md #863 —
 the `/db` + `/universe` dashboard pages made INSTANT per interaction with ZERO
 correctness change: `/db`'s candle pager no longer scans the WHOLE multi-year
@@ -350,7 +393,18 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-thread-bounds` (**DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
+- **Active branch:** `claude/suspicion-sweep-fixes` (**DEC-SUSPICION-SWEEP-FIXES-001, MIGRATION.md #1492** — the
+  19-agent suspicion-sweep fix pack: D1 the spot AIMD ladder now sees every client-absorbed 429 (the FULL controller
+  hook triple bound at the ONE COMMON `run_ingest._with_paced_client` spine seam both spot build sites feed; NEW
+  `with_rate_hooks` on `GrowwClient`+`ClientPool`; spine hooks stand down via the NEW `client_self_reports_*`
+  predicates — rate CAPS untouched, feedback wiring only); D2 the F&O spine's propagated-429 double count suppressed
+  (the `client_self_paces` stand-down twin); D3 the /db window-ledger route reads the mtime-cached
+  `window_ledger_rows_cached` instead of re-parsing ~841k rows per paging click (honesty note rewritten); G1 the
+  sweep-all derived-TF FRESHNESS refusal gate (`lake_derived_freshness_verdicts` + `preflight_derived_freshness`);
+  G2 the future-Muhurat clamp-hazard enumeration pin; G3 the no-production-`resample_bars` AST pin; G4 the
+  rate_common 5→8 ceiling docstring reconcile. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100%
+  line+branch; ruff/ruff-format clean, `mypy --strict` clean, pyright at the 36-error pre-change baseline, 0 new).
+  Earlier: `claude/hw-thread-bounds` (**DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
   MIGRATION.md #1490–#1491** — ONE hardware-envelope module at `brutex/config/hardware_envelope.py` (the #1360 sibling
   `brutex/hardware_envelope.py` DELETED, consumers repointed, the #1360 RAM-budget contract ported verbatim, the
   interim #1167-resolution RAM-delegation pin superseded, `greeks_pool_workers` delegated to the COMMON
@@ -358,8 +412,7 @@ hostile-review pass._
   first polars import (default = FULL physical width — prebuild throughput priority) and every concurrent-reader
   DuckDB connection bounded at creation (`physical_cores // 2` per connection — the contention fix), kill switches
   `BRUTEX_POLARS_THREADS`/`BRUTEX_DUCKDB_THREADS`;
-  parallelism-only, byte-identical results; ENGINE UNCHANGED). Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
-  budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
+  parallelism-only, byte-identical results; ENGINE UNCHANGED). Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory  budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
   the floor on the detected path). Derived call sites (BOTH exact-parity at the §8 48 GiB box, regression-pinned):

@@ -647,6 +647,16 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     so the single-instrument / bulk builder seams stay shape-identical
     (the fan-out worklist still drives WHICH symbols are pulled).
     ``# pragma: no cover`` — needs real credentials + network, absent in CI.
+
+    Rate-controller hooks (DEC-SUSPICION-SWEEP-FIXES-001 D1): this builder wires
+    NO ``pace`` / ``on_rate_limit`` / ``on_success`` — the session controller does
+    not exist here yet. The FULL hook triple is bound downstream at the ONE COMMON
+    spine seam (``run_ingest.with_paced_client``, called by
+    ``run_groww_spot_ingest`` with the ``_live_rate_runtime`` quad), so every 429
+    the client's bounded fast-retry absorbs still decrements the shared AIMD
+    ladder — pinned by the production-wiring test in
+    ``tests/unit/test_groww_spot_rate_feedback.py`` (which monkeypatches NO
+    builders).
     """
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.auth import GrowwCredentials
