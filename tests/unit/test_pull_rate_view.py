@@ -14,6 +14,7 @@ from brutex.dashboard.pull_rate_view import (
     CEILING_PER_MIN_LIMIT,
     CEILING_RPS_LIMIT,
     FLOW_DONE,
+    FLOW_FAILING,
     FLOW_FLOWING,
     FLOW_IDLE,
     FLOW_LOCAL,
@@ -1006,3 +1007,177 @@ def test_merged_bridge_never_receives_a_phase() -> None:
         bridge_seconds_since_update=1.0,
     )
     assert view.flow_state == FLOW_STALLED  # the bridge's unchanged legacy verdict
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# failed_rps → the distinct FAILING verdict (DEC-PULL-TELEMETRY-TRIAD-001 —
+# closing the #1022 flagged follow-up: "issued-but-all-failing needs the
+# meter's failed rate"). Meter-fed path only; the default is byte-identical.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_failed_rps_default_is_byte_identical() -> None:
+    """PARITY PIN (Session-B contract): omitting ``failed_rps`` and passing the 0.0
+    default produce the SAME view — and the verdict matrix is unchanged at 0.0."""
+    kwargs: dict[str, float | int] = {
+        "effective_rps": 0.0,
+        "current_rps": 8.0,
+        "recent_minute": 240,
+        "recent_429_count": 0,
+        "last_update_monotonic": 100.0,
+        "now_monotonic": 101.0,
+    }
+    omitted = build_pull_rate_view(**kwargs)  # type: ignore[arg-type]
+    explicit = build_pull_rate_view(failed_rps=0.0, **kwargs)  # type: ignore[arg-type]
+    assert omitted == explicit
+    assert omitted.flow_state == FLOW_STALLED  # the pre-decision verdict, unchanged
+    assert omitted.req_per_sec_failed == 0.0
+
+
+def test_issuing_but_all_failing_reads_failing_with_evidence() -> None:
+    """Meter-fed + completed-rate at/below the floor + failures burning → the DISTINCT
+    ``failing`` verdict (stalled stays True for red-light consumers) with the measured
+    failed-calls rate carried as evidence."""
+    view = build_pull_rate_view(
+        effective_rps=0.0,  # nothing completing…
+        current_rps=8.0,
+        recent_minute=240,  # …while calls ARE being issued…
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=True,
+        failed_rps=2.5,  # …and the meter MEASURES them failing
+    )
+    assert view.flow_state == FLOW_FAILING
+    assert view.stalled is True  # failing IS a degraded/red state
+    assert view.active is True
+    assert view.req_per_sec_achieved == 0.0
+    assert view.req_per_sec_failed == 2.5
+
+
+def test_flowing_with_some_failures_stays_flowing() -> None:
+    """A healthy completed-rate above the floor stays FLOWING even with failures —
+    ``failing`` is reserved for the all-failing (at/below-floor) case."""
+    view = build_pull_rate_view(
+        effective_rps=5.0,
+        current_rps=8.0,
+        recent_minute=300,
+        recent_429_count=1,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        failed_rps=1.0,
+    )
+    assert view.flow_state == FLOW_FLOWING
+    assert view.stalled is False
+    assert view.req_per_sec_failed == 1.0
+
+
+def test_meter_absent_never_fabricates_failing() -> None:
+    """meter_present=False ⇒ no measured failure rate exists — the verdict keeps the
+    admission fallback and the carried failed rate is an honest 0.0 (never fabricated),
+    even if a stray nonzero ``failed_rps`` is passed."""
+    view = build_pull_rate_view(
+        effective_rps=0.0,
+        current_rps=8.0,
+        recent_minute=240,  # admissions happening → the fallback reads flowing
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=False,
+        failed_rps=3.0,  # must be IGNORED — there is no meter to have measured it
+    )
+    assert view.flow_state == FLOW_FLOWING  # the pre-decision meter-less fallback verdict
+    assert view.req_per_sec_failed == 0.0
+
+
+def test_quiet_views_zero_the_failed_rate() -> None:
+    """Idle / done / stale views zero ``req_per_sec_failed`` like every live number."""
+    idle = build_pull_rate_view(
+        effective_rps=4.0,
+        current_rps=8.0,
+        recent_minute=200,
+        recent_429_count=0,
+        last_update_monotonic=0.0,
+        now_monotonic=STALE_AFTER_S + 100.0,
+        failed_rps=9.9,
+    )
+    assert idle.flow_state == FLOW_IDLE
+    assert idle.req_per_sec_failed == 0.0
+    done = build_pull_rate_view(
+        effective_rps=4.0,
+        current_rps=8.0,
+        recent_minute=200,
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        failed_rps=9.9,
+        pull_active=False,
+    )
+    assert done.flow_state == FLOW_DONE
+    assert done.req_per_sec_failed == 0.0
+
+
+def test_to_dict_carries_req_per_sec_failed() -> None:
+    """The JSON payload exposes the additive ``req_per_sec_failed`` key for the widget."""
+    view = build_pull_rate_view(
+        effective_rps=0.0,
+        current_rps=8.0,
+        recent_minute=100,
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        failed_rps=1.7,
+    )
+    data = view.to_dict()
+    assert data["req_per_sec_failed"] == 1.7
+    assert data["flow_state"] == FLOW_FAILING
+
+
+def test_merged_threads_panel_failed_rps() -> None:
+    """The merged builder threads ``panel_failed_rps`` into the panel-side projection
+    (default 0.0 — byte-identical) and defaults an absent bridge field to 0.0."""
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=120,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=1.0,
+        panel_failed_rps=2.0,
+    )
+    assert view.flow_state == FLOW_FAILING
+    assert view.req_per_sec_failed == 2.0
+
+
+def test_merged_bridge_failed_rps_threaded_and_none_defaults_zero() -> None:
+    """A fresher bridge wins with ITS failed rate; a ``None`` (older bridge file)
+    projects an honest 0.0 → the plain stalled verdict, never a fabricated failing."""
+    fresher_bridge = build_pull_rate_view_merged(
+        panel_effective_rps=5.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=300,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=50.0,
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=100,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+        bridge_failed_rps=4.0,
+    )
+    assert fresher_bridge.flow_state == FLOW_FAILING
+    assert fresher_bridge.req_per_sec_failed == 4.0
+    legacy_bridge = build_pull_rate_view_merged(
+        panel_effective_rps=5.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=300,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=50.0,
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=100,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+        bridge_failed_rps=None,
+    )
+    assert legacy_bridge.flow_state == FLOW_STALLED  # no failure measurement → plain stalled
+    assert legacy_bridge.req_per_sec_failed == 0.0
