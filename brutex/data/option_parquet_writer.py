@@ -29,8 +29,11 @@ follow-up.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextlib
+from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -139,15 +142,21 @@ class OptionHealResult:
     path
         The options-tree partition file the heal targeted.
     changed
-        ``False`` when the file was left byte-untouched (already unique —
-        the idempotence oracle).
+        ``False`` when the file was left byte-untouched (already unique AND
+        no ``remove_keys`` entry present — the idempotence oracle); ``True``
+        iff ``dropped_duplicates > 0 or dropped_removed > 0``.
     kept
-        Rows remaining after the keep-first ``(side, timestamp)`` collapse.
+        Rows remaining after the keep-first ``(side, timestamp)`` collapse +
+        the keyed removal (``0`` when the file was quarantine-moved away —
+        every row removed, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
     dropped_duplicates
         Physically-duplicated stored rows dropped.
     quarantined_original
         Where the ORIGINAL bytes were copied before the rewrite, or ``None``
         for an unchanged file.
+    dropped_removed
+        ``remove_keys`` entries actually present and dropped (the foreign-row
+        reassignment hook, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
     """
 
     path: Path
@@ -155,6 +164,7 @@ class OptionHealResult:
     kept: int
     dropped_duplicates: int
     quarantined_original: Path | None
+    dropped_removed: int = 0
 
 
 class OptionParquetWriter:
@@ -211,6 +221,39 @@ class OptionParquetWriter:
     ) -> int:
         """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new rows.
 
+        Thin delegate to :meth:`_merge_frame_locked` — the render callable runs
+        INSIDE ``lake_write_guard`` (its allocation keeps the ENOSPC/OOM →
+        ``LakeWriteHalt`` mapping), preserving the pre-refactor contract
+        byte-for-byte (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, golden byte-parity
+        pinned).
+        """
+        return self._merge_frame_locked(dest, lambda: _render_df(coordinate, new_bars))
+
+    def merge_partition_frame(self, dest: Path, frame: pl.DataFrame) -> int:
+        """Union *frame* into *dest* keyed ``(side, timestamp)`` through the NORMAL
+        locked write path; return rows actually added.
+
+        The reassignment heal's write-home entry
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): keep-FIRST at the destination —
+        an existing stored key WINS (a foreign overlap copy adds 0 rows and is
+        thereby discarded when its source copy is removed; canonical wins), an
+        absent key is added (row REASSIGNED). Rows move VERBATIM (all stored
+        columns) — never re-validated, never re-rendered, never value-edited.
+
+        Raises
+        ------
+        OptionWriterError
+            A corrupt existing destination partition.
+        LakeWriteHalt
+            Disk-full / OOM anywhere inside the read-modify-write.
+        PartitionLockTimeout
+            The cross-process lock could not be acquired in time.
+        """
+        return self._merge_frame_locked(dest, lambda: frame)
+
+    def _merge_frame_locked(self, dest: Path, render: Callable[[], pl.DataFrame]) -> int:
+        """The ONE read-modify-write union core (locks → guard → render → union → write).
+
         The existence-check → read → union → atomic-rename below is a
         read-modify-write, so it runs under this partition's shared lock
         (DEC-OPTION-PARTITION-LOCK-001, mirroring the spot writer's
@@ -240,7 +283,7 @@ class OptionParquetWriter:
             partition_write_lock(self._lake_root, dest),
             lake_write_guard(),
         ):
-            new_df = _render_df(coordinate, new_bars)  # validates the polars import
+            new_df = render()  # validates the polars import on the write path
             if dest.exists():
                 # GAP #1: a CORRUPT existing partition (a polars PolarsError, or an
                 # OSError fault) must quarantine THIS one series — raising a
@@ -273,23 +316,77 @@ class OptionParquetWriter:
                 _atomic_write_parquet(dest, combined)
             return added
 
-    def heal_partition(self, dest: Path, *, quarantine_to: Path | None = None) -> OptionHealResult:
-        """Heal ONE options-tree partition: keep-FIRST ``(side, timestamp)`` dedup (DEC-LAKE-HEAL-001).
+    def read_partition_frame(self, dest: Path) -> pl.DataFrame:
+        """Read one stored options partition RAW (physical rows preserved) under the write locks.
 
-        The options twin of :meth:`brutex.data.parquet_writer.ParquetWriter.heal_partition`,
-        under this writer's OWN established lock stack + ``lake_write_guard``
-        (the :meth:`_merge_partition` discipline): read the stored frame,
+        The options twin of :meth:`ParquetWriter.read_partition_bars`
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): the reassignment heal needs the
+        stored rows of a SOURCE partition before moving them home. Takes the
+        SAME two locks in :meth:`write`'s order (no ``lake_write_guard`` —
+        read-only) so the read can never interleave a concurrent
+        read-modify-write; a vanished/corrupt file raises the quarantinable
+        :class:`OptionWriterError`. Deliberately NO keep-first collapse here —
+        the healer dedups explicitly, keeping this method a truthful raw read.
+        """
+        import io
+
+        import polars as pl
+
+        with (
+            _PARTITION_LOCKS.acquire(dest),
+            partition_write_lock(self._lake_root, dest),
+        ):
+            try:
+                return pl.read_parquet(io.BytesIO(dest.read_bytes()))
+            except parquet_read_skip_errors() as exc:
+                raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
+
+    def heal_partition(
+        self,
+        dest: Path,
+        *,
+        remove_keys: AbstractSet[tuple[str | None, datetime]] = frozenset(),
+        quarantine_to: Path | None = None,
+    ) -> OptionHealResult:
+        """Heal ONE options-tree partition: keep-FIRST ``(side, timestamp)`` dedup + keyed removal.
+
+        The options twin of :meth:`brutex.data.parquet_writer.ParquetWriter.heal_partition`
+        (DEC-LAKE-HEAL-001 dedup; *remove_keys* + the wholly-removed move added
+        by DEC-LAKE-HEAL-OPTIONS-FOREIGN-001), under this writer's OWN
+        established lock stack + ``lake_write_guard`` (the
+        :meth:`_merge_frame_locked` discipline): read the stored frame,
         collapse to unique ``(side, timestamp)`` keys keeping the FIRST physical
         row (``polars.unique(keep="first", maintain_order=True)`` — the writer's
-        own merge key), and — only when rows were dropped — quarantine-copy the
-        ORIGINAL bytes then atomically rewrite. No P9 tripwire: options files
-        sort by ``(side, timestamp)``, not strictly-increasing timestamps.
-        STRICTLY row-removing — kept rows keep their stored values.
+        own merge key), drop every *remove_keys* row by RAW stored-value
+        membership, and — only when rows were dropped — quarantine-copy the
+        ORIGINAL bytes then atomically rewrite (or, when EVERY row was removed,
+        quarantine-MOVE the file: ``unlink`` + prune a now-emptied series dir).
+        No P9 tripwire: options files sort by ``(side, timestamp)``, not
+        strictly-increasing timestamps. No footer probe / probe-abstain branch
+        either — the bars probe exists because its overlay decode collapses
+        dups before counting (the #1067 "never guess" pin); this read keeps the
+        RAW frame, so ``frame.height`` IS the physical count and there is
+        nothing to guess. STRICTLY row-removing — kept rows keep their stored
+        values. Removal is KEYED, never positional: a row appended between the
+        healer's consistent read and this removal is untouched and re-found by
+        the next scan. Raw stored-value membership is immune to the
+        naive-vs-aware dtype mismatch a hand-planted naive ``timestamp`` column
+        would give a tz-cast join. Deliberately NO ``invalidate_manifest`` on
+        the wholly-removed move — the dataset manifest records ``bars/``
+        coordinates only (this module has no ``lake_manifest`` import); ``/db``
+        options discovery walks ``options/`` directly and rides the
+        ``on_healed`` generation bump.
 
         Parameters
         ----------
         dest
             The ``options/<series>/<YYYY>-<MM>.parquet`` file to heal.
+        remove_keys
+            Stored ``(side, timestamp)`` keys to DROP (whole rows) — the
+            reassignment heal moves them to their canonical month file first,
+            then removes them here. Absent keys are silently ignored (count
+            only what was present). ``side`` may be ``None`` for a
+            hand-planted null-side row (key payload, never routing input).
         quarantine_to
             Where the ORIGINAL bytes are copied before the rewrite. Required
             whenever the heal would change the file
@@ -298,7 +395,8 @@ class OptionParquetWriter:
         Returns
         -------
         OptionHealResult
-            The heal outcome (``changed=False`` = byte-untouched).
+            The heal outcome (``changed=False`` = byte-untouched; ``kept=0``
+            with ``changed=True`` = the file was quarantine-moved away).
 
         Raises
         ------
@@ -327,14 +425,28 @@ class OptionParquetWriter:
             deduped = existing.unique(
                 subset=["side", "timestamp"], keep="first", maintain_order=True
             ).sort(["side", "timestamp"])
+            dropped_duplicates = physical - int(deduped.height)
+            dropped_removed = 0
+            if remove_keys:
+                # RAW stored-value boolean-mask removal (never a tz-cast join):
+                # exact membership against the stored (side, timestamp) values.
+                keyset = set(remove_keys)
+                sides = deduped.get_column("side").to_list()
+                stamps = deduped.get_column("timestamp").to_list()
+                mask = [(s, t) not in keyset for s, t in zip(sides, stamps, strict=True)]
+                if not all(mask):
+                    before_remove = int(deduped.height)
+                    deduped = deduped.filter(pl.Series(mask))
+                    dropped_removed = before_remove - int(deduped.height)
             kept = int(deduped.height)
-            if kept == physical:
+            if dropped_duplicates == 0 and dropped_removed == 0:
                 return OptionHealResult(
                     path=dest,
                     changed=False,
                     kept=kept,
                     dropped_duplicates=0,
                     quarantined_original=None,
+                    dropped_removed=0,
                 )
             if quarantine_to is None:
                 raise OptionWriterError(
@@ -343,13 +455,32 @@ class OptionParquetWriter:
                 )
             quarantine_to.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_via(quarantine_to, lambda tmp: tmp.write_bytes(existing_bytes))
+            if kept == 0:
+                # Every row removed (a wholly-foreign file): quarantine-MOVE —
+                # the writer never renders an empty partition (write()'s law).
+                # The series-dir prune is DEFENSIVE: in the reassignment flow
+                # the destination file lives in the SAME series dir, so the
+                # rmdir is suppressed there; a direct writer call on a
+                # single-file series does prune it.
+                dest.unlink()
+                with contextlib.suppress(OSError):
+                    dest.parent.rmdir()
+                return OptionHealResult(
+                    path=dest,
+                    changed=True,
+                    kept=0,
+                    dropped_duplicates=dropped_duplicates,
+                    quarantined_original=quarantine_to,
+                    dropped_removed=dropped_removed,
+                )
             _atomic_write_parquet(dest, deduped)
             return OptionHealResult(
                 path=dest,
                 changed=True,
                 kept=kept,
-                dropped_duplicates=physical - kept,
+                dropped_duplicates=dropped_duplicates,
                 quarantined_original=quarantine_to,
+                dropped_removed=dropped_removed,
             )
 
 

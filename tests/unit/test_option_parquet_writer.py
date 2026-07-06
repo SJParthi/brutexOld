@@ -526,3 +526,405 @@ class TestHealPartition:
         assert result.changed is True
         assert observed["held_during_read"] is True
         assert _partition_lock_is_held(partition_lock_path(tmp_path, dest)) is False
+
+
+# ── heal_partition remove_keys (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) ──────────
+
+
+def _only_partition(tmp_path: Path) -> Path:
+    (dest,) = (tmp_path / "options").rglob("*.parquet")
+    return dest
+
+
+def _plant_naive_option_raw(dest: Path, rows: list[tuple[str, datetime]]) -> None:
+    """A hand-planted options file whose ``timestamp`` column is tz-NAIVE."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "side": pa.array([side for side, _ in rows], type=pa.string()),
+            "timestamp": pa.array([ts for _, ts in rows], type=pa.timestamp("us")),  # NO tz
+        }
+    )
+    pq.write_table(table, dest)
+
+
+class TestHealPartitionRemoveKeys:
+    """Keyed row removal — the foreign-row reassignment hook."""
+
+    def _seed(self, tmp_path: Path) -> Path:
+        w = _writer(tmp_path)
+        w.write(
+            partition_key=_PK,
+            coordinate=_COORD,
+            bars=[_bar(side="CE", minute=0), _bar(side="PE", minute=0), _bar(side="CE", minute=1)],
+        )
+        return _only_partition(tmp_path)
+
+    def test_heal_remove_keys_drops_only_named_keys(self, tmp_path: Path) -> None:
+        dest = self._seed(tmp_path)
+        before = pl.read_parquet(dest)
+        ce0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        quarantine_to = tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        result = _writer(tmp_path).heal_partition(
+            dest,
+            remove_keys={
+                ("CE", ce0),  # present — dropped
+                ("CE", datetime(2099, 1, 1, tzinfo=UTC)),  # absent — silently ignored
+            },
+            quarantine_to=quarantine_to,
+        )
+        assert result.changed is True
+        assert result.dropped_removed == 1
+        assert result.dropped_duplicates == 0
+        assert result.kept == 2
+        healed = pl.read_parquet(dest)
+        # The other-side same-ts row (PE @ ce0) is KEPT — the key includes side —
+        # and every kept row's FULL column tuple is byte-value-identical to the
+        # original (STRICTLY row-removing, never value-editing).
+        expected = before.filter(~((pl.col("side") == "CE") & (pl.col("timestamp") == ce0))).sort(
+            ["side", "timestamp"]
+        )
+        assert healed.rows() == expected.rows()
+
+    def test_heal_remove_keys_plus_dup_accounting(self, tmp_path: Path) -> None:
+        """A removed key ALSO physically duplicated: N−1 dup-dropped, 1 removed."""
+        dest = self._seed(tmp_path)
+        df = pl.read_parquet(dest)
+        ce0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        dup_row = df.filter((pl.col("side") == "CE") & (pl.col("timestamp") == ce0))
+        pl.concat([df, dup_row, dup_row]).write_parquet(dest)  # 3 physical copies
+        result = _writer(tmp_path).heal_partition(
+            dest,
+            remove_keys={("CE", ce0)},
+            quarantine_to=tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path),
+        )
+        assert result.changed is True
+        assert result.dropped_duplicates == 2  # N−1 physical copies collapsed
+        assert result.dropped_removed == 1  # the keep-first survivor removed
+        assert result.kept == 2
+
+    def test_heal_remove_all_rows_quarantine_moves_file(self, tmp_path: Path) -> None:
+        """Wholly-removed: unlink + the emptied series dir pruned; kept=0."""
+        dest = self._seed(tmp_path)
+        original = dest.read_bytes()
+        keys = {
+            (side, ts)
+            for side, ts in zip(
+                pl.read_parquet(dest)["side"].to_list(),
+                pl.read_parquet(dest)["timestamp"].to_list(),
+                strict=True,
+            )
+        }
+        quarantine_to = tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        result = _writer(tmp_path).heal_partition(
+            dest, remove_keys=keys, quarantine_to=quarantine_to
+        )
+        assert result.changed is True
+        assert result.kept == 0
+        assert result.dropped_removed == len(keys)
+        assert result.quarantined_original == quarantine_to
+        assert quarantine_to.read_bytes() == original
+        assert not dest.exists()
+        assert not dest.parent.exists()  # the emptied series dir was pruned
+
+    def test_heal_remove_all_rows_sibling_keeps_series_dir(self, tmp_path: Path) -> None:
+        """A sibling month file keeps the series dir (the suppressed-rmdir arm)."""
+        w = _writer(tmp_path)
+        w.write(
+            partition_key=_PK,
+            coordinate=_COORD,
+            bars=[_bar(month=1, minute=0), _bar(month=2, minute=0)],
+        )
+        series_dir = tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL"
+        jan = series_dir / "2021-01.parquet"
+        result = w.heal_partition(
+            jan,
+            remove_keys={("CE", datetime(2021, 1, 4, 4, 0, tzinfo=UTC))},
+            quarantine_to=tmp_path / ".quarantine" / "ts" / jan.relative_to(tmp_path),
+        )
+        assert result.changed is True and result.kept == 0
+        assert not jan.exists()
+        assert series_dir.exists()  # the February sibling keeps the dir alive
+        assert (series_dir / "2021-02.parquet").exists()
+
+    def test_heal_remove_keys_noop_is_byte_identical(self, tmp_path: Path) -> None:
+        """Absent keys only ⇒ ``changed=False``, dest byte-untouched, no quarantine."""
+        dest = self._seed(tmp_path)
+        before = dest.read_bytes()
+        quarantine_to = tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        result = _writer(tmp_path).heal_partition(
+            dest,
+            remove_keys={("CE", datetime(2099, 1, 1, tzinfo=UTC))},
+            quarantine_to=quarantine_to,
+        )
+        assert result.changed is False
+        assert result.dropped_removed == 0
+        assert result.kept == 3
+        assert dest.read_bytes() == before
+        assert not quarantine_to.exists()
+
+    def test_heal_remove_keys_requires_quarantine(self, tmp_path: Path) -> None:
+        dest = self._seed(tmp_path)
+        before = dest.read_bytes()
+        with pytest.raises(OptionWriterError, match="quarantine destination"):
+            _writer(tmp_path).heal_partition(
+                dest, remove_keys={("CE", datetime(2021, 1, 4, 4, 0, tzinfo=UTC))}
+            )
+        assert dest.read_bytes() == before
+
+    def test_heal_remove_keys_matches_naive_timestamp_column(self, tmp_path: Path) -> None:
+        """RAW stored-value membership heals a hand-planted NAIVE column.
+
+        A tz-cast anti-join would raise on the naive-vs-aware dtype mismatch
+        and leave the file permanently unhealable; the raw boolean mask
+        matches the stored values exactly.
+        """
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        naive0 = datetime(2021, 1, 4, 4, 0)  # NO tzinfo
+        naive1 = datetime(2021, 1, 4, 4, 1)
+        _plant_naive_option_raw(dest, [("CE", naive0), ("CE", naive1)])
+        result = _writer(tmp_path).heal_partition(
+            dest,
+            remove_keys={("CE", naive0)},
+            quarantine_to=tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path),
+        )
+        assert result.changed is True
+        assert result.dropped_removed == 1
+        healed = pl.read_parquet(dest)
+        assert healed["timestamp"].to_list() == [naive1]
+
+    def test_heal_remove_null_side_key_matches_verbatim(self, tmp_path: Path) -> None:
+        """A hand-planted NULL side rides the key tuple verbatim (M15)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        ts1 = datetime(2021, 1, 4, 4, 1, tzinfo=UTC)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array([None, "CE"], type=pa.string()),
+                    "timestamp": pa.array([ts0, ts1], type=pa.timestamp("us", tz="UTC")),
+                }
+            ),
+            dest,
+        )
+        result = _writer(tmp_path).heal_partition(
+            dest,
+            remove_keys={(None, ts0)},
+            quarantine_to=tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path),
+        )
+        assert result.changed is True
+        assert result.dropped_removed == 1
+        assert pl.read_parquet(dest)["side"].to_list() == ["CE"]
+
+    def test_heal_remove_keys_oom_maps_to_lake_write_halt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An allocation failure inside the guard is a LakeWriteHalt, never raw."""
+        from brutex.data.errors import LakeWriteHalt
+
+        dest = self._seed(tmp_path)
+
+        def _oom(*_a: object, **_k: object) -> object:
+            raise MemoryError("heal read OOM")
+
+        monkeypatch.setattr(pl, "read_parquet", _oom)
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            _writer(tmp_path).heal_partition(
+                dest,
+                remove_keys={("CE", datetime(2021, 1, 4, 4, 0, tzinfo=UTC))},
+                quarantine_to=tmp_path / ".quarantine" / "x.parquet",
+            )
+        assert exc_info.value.reason == "out_of_memory"
+
+
+class TestReadPartitionFrame:
+    """The healer's consistent RAW source read (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+
+    def test_raw_physical_rows_preserved(self, tmp_path: Path) -> None:
+        """A planted physical duplicate SURVIVES the read (truthful raw read)."""
+        w = _writer(tmp_path)
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        dest = _only_partition(tmp_path)
+        df = pl.read_parquet(dest)
+        pl.concat([df, df[0:1]]).write_parquet(dest)  # plant a physical dup
+        frame = w.read_partition_frame(dest)
+        assert frame.height == 2  # NOT keep-first collapsed
+
+    def test_corrupt_and_missing_raise_option_writer_error(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        dest = _only_partition(tmp_path)
+        dest.write_bytes(b"not a parquet file at all")
+        with pytest.raises(OptionWriterError, match="corrupt existing partition"):
+            w.read_partition_frame(dest)
+        with pytest.raises(OptionWriterError, match="corrupt existing partition"):
+            w.read_partition_frame(tmp_path / "options" / "missing" / "2021-01.parquet")
+
+    def test_read_holds_partition_flock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w = _writer(tmp_path)
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        dest = _only_partition(tmp_path)
+        observed: dict[str, bool] = {}
+        original_read = pl.read_parquet
+
+        def _spy_read(source: object, *args: object, **kwargs: object) -> pl.DataFrame:
+            observed["held_during_read"] = _partition_lock_is_held(
+                partition_lock_path(tmp_path, dest)
+            )
+            return original_read(source, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pl, "read_parquet", _spy_read)
+        frame = w.read_partition_frame(dest)
+        assert frame.height == 1
+        assert observed["held_during_read"] is True
+        assert _partition_lock_is_held(partition_lock_path(tmp_path, dest)) is False
+
+
+class TestMergePartitionFrame:
+    """The reassignment heal's write-home entry — keep-first at the destination."""
+
+    def _frame(self, rows: list[tuple[str, datetime, float]]) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "side": pl.Series([side for side, _, _ in rows], dtype=pl.Utf8),
+                "timestamp": pl.Series([ts for _, ts, _ in rows], dtype=pl.Datetime("us", "UTC")),
+                "close": pl.Series([close for _, _, close in rows], dtype=pl.Float64),
+            }
+        )
+
+    def test_fresh_destination_created_uniqued_sorted(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        ts1 = datetime(2021, 1, 4, 4, 1, tzinfo=UTC)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        frame = self._frame([("PE", ts1, 3.0), ("CE", ts0, 1.0), ("CE", ts0, 999.0)])
+        added = w.merge_partition_frame(dest, frame)
+        assert added == 2  # the in-frame dup collapsed keep-first
+        stored = pl.read_parquet(dest)
+        assert stored["side"].to_list() == ["CE", "PE"]  # sorted (side, ts)
+        assert stored["close"].to_list() == [1.0, 3.0]  # FIRST physical row won
+
+    def test_existing_destination_keep_first_never_restates(self, tmp_path: Path) -> None:
+        """A value-conflicting same-key row does NOT restate the stored value."""
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        ts1 = datetime(2021, 1, 4, 4, 1, tzinfo=UTC)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+        added = w.merge_partition_frame(dest, self._frame([("CE", ts0, 999.0), ("PE", ts1, 2.0)]))
+        assert added == 1  # the conflicting key added 0; PE added
+        stored = pl.read_parquet(dest).sort(["side", "timestamp"])
+        assert stored["close"].to_list() == [1.0, 2.0]  # canonical value KEPT
+
+    def test_pure_remerge_returns_zero_and_rewrites_nothing(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+        before_bytes = dest.read_bytes()
+        before_mtime = dest.stat().st_mtime_ns
+        added = w.merge_partition_frame(dest, self._frame([("CE", ts0, 999.0)]))
+        assert added == 0
+        assert dest.read_bytes() == before_bytes
+        assert dest.stat().st_mtime_ns == before_mtime  # not even rewritten
+
+    def test_corrupt_destination_raises_option_writer_error(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"garbage")
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        with pytest.raises(OptionWriterError, match="corrupt existing partition"):
+            w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+
+    def test_merge_holds_partition_flock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cross-process lock is HELD during the union's read-modify-write."""
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        ts1 = datetime(2021, 1, 4, 4, 1, tzinfo=UTC)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+        observed: dict[str, bool] = {}
+        original_read = pl.read_parquet
+
+        def _spy_read(source: object, *args: object, **kwargs: object) -> pl.DataFrame:
+            observed["held_during_read"] = _partition_lock_is_held(
+                partition_lock_path(tmp_path, dest)
+            )
+            return original_read(source, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pl, "read_parquet", _spy_read)
+        added = w.merge_partition_frame(dest, self._frame([("PE", ts1, 2.0)]))
+        assert added == 1
+        assert observed["held_during_read"] is True
+        assert _partition_lock_is_held(partition_lock_path(tmp_path, dest)) is False
+
+    def test_merge_enospc_maps_to_lake_write_halt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full disk during the union write is a graceful LakeWriteHalt."""
+        import errno
+
+        from brutex.data.errors import LakeWriteHalt
+
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+
+        def _enospc(src: object, dst: object) -> None:
+            raise OSError(errno.ENOSPC, "no space left on device")
+
+        monkeypatch.setattr("brutex.data.atomic_io.os.replace", _enospc)
+        with pytest.raises(LakeWriteHalt) as exc_info:
+            w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+        assert exc_info.value.reason == "disk_full"
+
+
+class TestWriteByteParityAfterRefactor:
+    """G10: the `_merge_frame_locked` extraction renders byte-identical files."""
+
+    def test_write_byte_parity_after_refactor(self, tmp_path: Path) -> None:
+        from brutex.data.option_parquet_writer import _render_df
+
+        jan_bars = [_bar(month=1, minute=1), _bar(month=1, minute=0), _bar(side="PE", minute=0)]
+        feb_bars = [_bar(month=2, minute=0)]
+        w = _writer(tmp_path)
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[*jan_bars, *feb_bars])
+        # A SECOND overlapping write exercises the MERGE arm's parity too.
+        second = [_bar(month=2, minute=0), _bar(month=2, minute=1)]
+        w.write(partition_key=_PK, coordinate=_COORD, bars=second)
+        series = tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL"
+        # Independent expectation: the SAME documented union expression applied
+        # inline (version-robust — both sides render in-run, no stored bytes).
+        expected_jan = (
+            _render_df(_COORD, jan_bars)
+            .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
+            .sort(["side", "timestamp"])
+        )
+        expected_feb_first = (
+            _render_df(_COORD, feb_bars)
+            .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
+            .sort(["side", "timestamp"])
+        )
+        expected_feb = (
+            pl.concat([expected_feb_first, _render_df(_COORD, second)])
+            .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
+            .sort(["side", "timestamp"])
+        )
+        scratch_jan = tmp_path / "expected-jan.parquet"
+        scratch_feb = tmp_path / "expected-feb.parquet"
+        expected_jan.write_parquet(scratch_jan)
+        expected_feb.write_parquet(scratch_feb)
+        assert (series / "2021-01.parquet").read_bytes() == scratch_jan.read_bytes()
+        assert (series / "2021-02.parquet").read_bytes() == scratch_feb.read_bytes()
