@@ -18,7 +18,36 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+_Last updated: 2026-07-06 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1482 —
+write-time PER-FILE lake STATS manifest: NEW leaf
+`brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
+dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
+row counts + timestamp bounds + `mtime_ns:size` stat tokens captured under
+the still-held partition flock), the per-file stats/paging EXTENSION of the
+shipped DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-DISCOVERY manifest —
+claiming the #867/#1025 named future work: the `/db` candle +
+expired-options pagers serve totals / pages / stored-life spans
+MANIFEST-FIRST in O(page-files), served ONLY after full per-request
+revalidation (parse + key echo + sum invariant · file-SET equality ·
+per-file stat-token equality · month-bounds sanity; ANY failure ⇒ the
+byte-identical legacy live scan + one fallback log + read-side reseed;
+post-query TOCTOU re-stat; a manifest total is NEVER paired with a degraded
+page). Write hooks at all five partition-locked chokepoints (spot writer
+both branches + heal rewrite/quarantine + option writer merge/heal +
+`lake_heal._quarantine_move`) are best-effort + incremental + LAZILY
+accreted (absent shard = one failed `os.stat`; the prebuild storm costs one
+probe per write; seeding is read-side only), keyed on the NEW explicit
+`WriteResult.file_rewritten` (bytes RENDERED, never `bars_added`). Kill
+switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ byte-identical legacy behavior.
+HONEST: a hit is O(page-files) Parquet work + an O(D) per-consult
+revalidation stat sweep (D = the ONE dataset's month files) — NOT literal
+O(1); the first view per dataset pays today's O(files) once (the seed); a
+same-`(mtime_ns,size)` in-place overwrite stays the documented stat-token
+residual. Results-safe — never in run identity / partition bytes /
+`data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
+parity-pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; all five touched
+modules 100% line+branch).
+Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -317,7 +346,40 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1482** — the
+  write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
+  DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
+  O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
+  `partition_lock` + `lake_manifest` only — cycle discipline; one atomically-replaced 0o600 JSON shard per dataset
+  carrying per-file DISTINCT-identity-key row counts, timestamp bounds, and `mtime_ns:size` stat tokens captured
+  under the still-held partition flock). The `/db` candle + expired-options pagers serve totals / pages /
+  stored-life spans MANIFEST-FIRST — the page query binds ONLY the files the (bounds, direction, offset, limit)
+  window needs via a prefix-sum planner + rebased OFFSET — and ONLY after full per-request revalidation
+  (parse+version+key echo+sum invariant · file-SET equality walk · per-file stat-token equality · month-bounds
+  sanity vs the rel-path UTC month); ANY failure ⇒ the byte-identical legacy live scan + one
+  `lake.stats_manifest.fallback` log + best-effort read-side reseed; post-query TOCTOU re-stat of every touched
+  file; the degrade law reruns total+page+span together on the full legacy path — a manifest total is never paired
+  with a degraded page. Five write hooks (spot writer both branches keyed on the NEW `WriteResult.file_rewritten` —
+  bytes RENDERED, never `bars_added` · heal rewrite/quarantine · option writer merge/heal ·
+  `lake_heal._quarantine_move` shard unlink) are ALL inside the already-held partition locks, best-effort (never
+  raise into the pull; `LakeWriteHalt` from `.locks/` creation deliberately propagates), incremental (one row
+  upsert, never a rescan), and LAZILY accreted (absent shard = one failed `os.stat`; seeding is read-side only — the
+  prebuild's ~10⁵-10⁶ derived-TF writes cost one probe each). Kill switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ hooks +
+  reads no-op ⇒ byte-identical legacy; shard flock via the COMMON `partition_write_lock` with fail-loud
+  `STATS_LOCK_TIMEOUT_S=5.0` (env `BRUTEX_STATS_LOCK_TIMEOUT_S`; 5+75 < 90 s write-deadline pin). SANCTIONED
+  behavior change: both pagers' ORDER BY gains the physical `filename, file_row_number` tiebreaker so an options
+  CE+PE same-minute tie has ONE total order on the pruned AND the full path. HONEST (Golden Rule #10): a hit is
+  O(page-files) Parquet work + an O(D) per-consult revalidation stat sweep (D = the dataset's month files, ~80) —
+  NOT literal O(1); the FIRST view per dataset/invalidation pays today's O(files) scan once; a viewed dataset's
+  write pays one bounded shard flock + small fsync'd JSON rewrite (gated A/B pins the median overhead under the
+  12 ms merge-budget floor; unviewed = one stat, pinned); a same-`(mtime_ns,size)` in-place overwrite is the
+  documented stat-token residual; the new module's mutation score rides the weekly Mutation workflow (not verified
+  in-session). Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
+  Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  `lake_stats_manifest.py` (431/136) + `parquet_writer.py` (400/112) + `option_parquet_writer.py` (130/22) +
+  `lake_heal.py` (563/154) + `db_view.py` (1236/424) ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  clean, pyright 0 errors in every touched/new file).
+  Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
