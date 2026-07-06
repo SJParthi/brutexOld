@@ -11,12 +11,15 @@ fix), never exceeds 5, and `pace()` delegates to the bucket.
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from brutex.adapters import rate_common
 from brutex.adapters.rate_common import (
     _GOVERNOR_LOOP_CAP,
     _SMOOTH_LOOP_CAP,
@@ -1495,3 +1498,386 @@ class TestSmoothPacingAutoLatch:
             ctl.on_rate_limit()
         assert ctl.smooth_pacing_active is True
         assert ctl.current_rps == CEILING_RPS - STEP_RPS  # the ladder stepped exactly once
+
+
+# ── DEC-RATE-LOG-OUTSIDE-LOCK-001: no potentially-blocking I/O under _lock ──────
+
+
+class _WedgedSink:
+    """A deliberately-BLOCKING log sink: every emission wedges until released.
+
+    ``entered`` is set the instant an emission begins; ``release`` unwedges it.
+    The wait is BOUNDED (30 s) so the test itself can never hang CI even if the
+    release event is never set (a red assertion fires long before).
+    """
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.events: list[tuple[str, str, dict[str, object]]] = []
+
+    def _emit(self, level: str, event: str, fields: dict[str, object]) -> None:
+        self.entered.set()
+        self.release.wait(timeout=30.0)
+        self.events.append((level, event, fields))
+
+    def warning(self, event: str, **fields: object) -> None:
+        self._emit("warning", event, dict(fields))
+
+    def info(self, event: str, **fields: object) -> None:
+        self._emit("info", event, dict(fields))
+
+
+class _LockFreeProbe:
+    """Asserts the controller lock is NOT held at every emission; records events.
+
+    ``acquire(blocking=False)`` succeeding at emit time proves the emitter
+    released ``_lock`` before calling into the (potentially blocking) sink —
+    the permanent "no emission under _lock anywhere in this module" audit pin.
+    """
+
+    def __init__(self, ctl: RateController) -> None:
+        self._ctl = ctl
+        self.records: list[tuple[str, str, bool]] = []
+
+    def _record(self, level: str, event: str) -> None:
+        acquired = self._ctl._lock.acquire(blocking=False)
+        if acquired:
+            self._ctl._lock.release()
+        self.records.append((level, event, acquired))
+
+    def warning(self, event: str, **fields: object) -> None:
+        self._record("warning", event)
+
+    def info(self, event: str, **fields: object) -> None:
+        self._record("info", event)
+
+    def assert_lock_free(self, *expected_events: str) -> None:
+        assert all(free for (_lvl, _evt, free) in self.records), (
+            f"an emission ran while _lock was held: {self.records}"
+        )
+        seen = [evt for (_lvl, evt, _free) in self.records]
+        for event in expected_events:
+            assert event in seen, f"expected {event} in {seen}"
+
+
+class _RaisingSink:
+    """A log sink that RAISES on every emission (the failure-injection twin)."""
+
+    def warning(self, event: str, **fields: object) -> None:
+        raise RuntimeError(f"sink failed on {event}")
+
+    def info(self, event: str, **fields: object) -> None:
+        raise RuntimeError(f"sink failed on {event}")
+
+
+class TestLogEmissionOutsideLock:
+    """DEC-RATE-LOG-OUTSIDE-LOCK-001 — every rate.* emission runs OUTSIDE ``_lock``.
+
+    Pre-fix, ``rate.429`` / ``rate.stepdown`` / ``rate.timeout`` / ``rate.stepup``
+    / ``rate.clock_gap`` / ``rate.smooth_pacing_latched`` were emitted WHILE
+    HOLDING ``RateController._lock``, so one wedged/slow log sink froze every
+    worker's ``pace()`` and the dashboard sampler's ``snapshot()`` read path —
+    stalling the whole pull's pacing. The fix captures each event's fields under
+    the lock (at the original emission program point) and emits after release
+    via ``_flush_rate_logs``. Pacing DECISIONS are byte-identical — pinned here
+    and by every pre-existing suite in this file passing unmodified.
+    """
+
+    # ── T1: the REQUIRED blocking-sink regression (deadlocks pre-fix) ──────────
+
+    def test_pace_and_snapshot_never_block_on_a_wedged_log_sink(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FROZEN fake clock: the probe thread emits nothing itself (the snapshot
+        # throttle sits inside its warm-up grace; zero delta → no clock gap).
+        clock = _Clock()
+        ctl = RateController(clock=clock, sleep=lambda _s: None)
+        sink = _WedgedSink()
+        monkeypatch.setattr(rate_common, "_LOG", sink)
+
+        probe_result: dict[str, object] = {}
+        done = threading.Event()
+
+        def _wedge() -> None:
+            ctl.on_rate_limit()  # emits rate.429 → wedges inside the sink
+
+        def _probe() -> None:
+            ctl.pace()
+            probe_result["current_rps"] = ctl.current_rps
+            probe_result["smooth_active"] = ctl.smooth_pacing_active
+            probe_result["snapshot"] = ctl.snapshot()
+            ctl.on_success()  # at the ceiling + no gap → nothing to emit
+            done.set()
+
+        wedged = threading.Thread(target=_wedge, daemon=True)
+        probe = threading.Thread(target=_probe, daemon=True)
+        try:
+            wedged.start()
+            assert sink.entered.wait(5.0), "the sink was never entered"
+            probe.start()
+            # PRE-FIX: the wedged thread holds _lock inside the rate.429 emission,
+            # so the probe blocks on its FIRST lock acquisition → this times out RED.
+            # POST-FIX: the lock was released before the emission → the probe's
+            # pace() + property reads + snapshot() + on_success() complete in ms.
+            assert done.wait(5.0), "pace()/snapshot() blocked behind the wedged log sink"
+            snap = probe_result["snapshot"]
+            assert isinstance(snap, dict)
+            # The 429 DECISION committed under the lock BEFORE the wedged telemetry.
+            assert snap["recent_hits"] == 1
+            assert probe_result["current_rps"] == CEILING_RPS
+            assert not ctl._lock.locked(), "a thread is parked holding the pacing lock"
+        finally:
+            sink.release.set()
+            wedged.join(timeout=5.0)
+            probe.join(timeout=5.0)
+        assert not wedged.is_alive() and not probe.is_alive()
+        # Nothing lost: the wedged event emitted exactly once, fields captured at
+        # the decision point (current_rps/recent_hits as of the 429, not later).
+        assert sink.events == [("warning", "rate.429", {"current_rps": 5.0, "recent_hits": 1})]
+
+    # ── T2: the scripted-scenario byte-identity golden ─────────────────────────
+
+    def test_deferred_emit_scenario_pacing_and_log_order(self) -> None:
+        # One deterministic fake-clock run: 429-burst stepdown 5→4 → pace →
+        # timeout storm 4→3 → clean 60 s recovery 3→4 → mid-run 400 s clock gap.
+        # The expected sleep list, _rps trajectory, and ordered (event, fields)
+        # list are HARD-CODED from pre-change semantics — the golden that pins
+        # pacing decisions AND telemetry byte-identical across the refactor.
+        clock = _Clock()
+        slept: list[float] = []
+
+        def _sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock.advance(seconds)
+
+        ctl = RateController(clock=clock, sleep=_sleep)
+        with capture_logs() as logs:
+            for _ in range(STEP_DOWN_HITS):  # 429 burst at one instant → 5→4
+                ctl.on_rate_limit()
+            assert ctl.current_rps == 4.0
+            ctl.pace()  # drained bucket at the new rate → exactly one 1/4 s sleep
+            for _ in range(STEP_DOWN_TIMEOUT_HITS):  # timeout storm → 4→3
+                ctl.on_timeout()
+            assert ctl.current_rps == 3.0
+            clock.advance(STEP_UP_WINDOW)  # one clean recovery window
+            ctl.on_success()  # → 3→4
+            assert ctl.current_rps == 4.0
+            clock.advance(400.0)  # mid-run sleep/wake clock gap (> 300 s threshold)
+            ctl.on_success()  # gap re-bases anchors → no stepup, one rate.clock_gap
+            assert ctl.current_rps == 4.0
+        assert slept == [1.0 / 4.0]  # the EXACT pre-change sleep sequence
+        actual = [
+            (e["event"], {k: v for k, v in e.items() if k not in ("event", "log_level")})
+            for e in logs
+        ]
+        expected: list[tuple[str, dict[str, object]]] = [
+            ("rate.429", {"current_rps": 5.0, "recent_hits": 1}),
+            ("rate.429", {"current_rps": 5.0, "recent_hits": 2}),
+            ("rate.429", {"current_rps": 5.0, "recent_hits": 3}),
+            ("rate.stepdown", {"from_rps": 5.0, "to_rps": 4.0, "floor_rps": FLOOR_RPS}),
+            ("rate.timeout", {"current_rps": 4.0, "recent_timeouts": 1}),
+            ("rate.timeout", {"current_rps": 4.0, "recent_timeouts": 2}),
+            ("rate.timeout", {"current_rps": 4.0, "recent_timeouts": 3}),
+            ("rate.timeout", {"current_rps": 4.0, "recent_timeouts": 4}),
+            ("rate.timeout", {"current_rps": 4.0, "recent_timeouts": 5}),
+            (
+                "rate.stepdown",
+                {
+                    "from_rps": 4.0,
+                    "to_rps": 3.0,
+                    "floor_rps": TIMEOUT_FLOOR_RPS,
+                    "cause": "timeout",
+                },
+            ),
+            ("rate.stepup", {"from_rps": 3.0, "to_rps": 4.0, "ceiling_rps": CEILING_RPS}),
+            ("rate.clock_gap", {"gap_s": 400.0, "current_rps": 4.0}),
+        ]
+        assert actual == expected
+
+    # ── T3: the all-sites lock-free-emission audit pin ─────────────────────────
+
+    def test_every_emission_site_runs_lock_free(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Drive EVERY rate.* emission site in the module and assert the emitter
+        # does NOT hold _lock at emit time. Pre-fix this fails at every site;
+        # post-fix it is the permanent AUTOMATED "no emission under _lock
+        # anywhere in this file" audit — any future in-lock emission fails it.
+        def _advancing(clock: _Clock) -> Callable[[float], None]:
+            def _sleep(seconds: float) -> None:
+                clock.advance(seconds)
+
+            return _sleep
+
+        # (1) on_rate_limit: rate.429 ×3 + rate.stepdown.
+        clock = _Clock()
+        ctl = _controller(clock)
+        probe = _LockFreeProbe(ctl)
+        monkeypatch.setattr(rate_common, "_LOG", probe)
+        for _ in range(STEP_DOWN_HITS):
+            ctl.on_rate_limit()
+        probe.assert_lock_free("rate.429", "rate.stepdown")
+
+        # (2) the adaptive latch: rate.smooth_pacing_latched.
+        ctl2, clock2, _slept2 = _adaptive(ceiling_rps=8.0)
+        probe2 = _LockFreeProbe(ctl2)
+        monkeypatch.setattr(rate_common, "_LOG", probe2)
+        _seed_burst(ctl2, second=int(clock2.t), count=9)
+        ctl2.on_rate_limit()
+        probe2.assert_lock_free("rate.429", "rate.smooth_pacing_latched")
+
+        # (3) on_timeout: rate.timeout ×5 + rate.stepdown (cause=timeout).
+        clock3 = _Clock()
+        ctl3 = _controller(clock3)
+        probe3 = _LockFreeProbe(ctl3)
+        monkeypatch.setattr(rate_common, "_LOG", probe3)
+        for _ in range(STEP_DOWN_TIMEOUT_HITS):
+            ctl3.on_timeout()
+        probe3.assert_lock_free("rate.timeout", "rate.stepdown")
+
+        # (4) on_success: rate.stepup.
+        clock4 = _Clock()
+        ctl4 = _controller(clock4)
+        probe4 = _LockFreeProbe(ctl4)
+        monkeypatch.setattr(rate_common, "_LOG", probe4)
+        _hammer(ctl4, clock4, hits=STEP_DOWN_HITS)  # 5→4
+        clock4.advance(STEP_UP_WINDOW)
+        ctl4.on_success()
+        probe4.assert_lock_free("rate.stepup")
+
+        # (5) pace(): the throttled rate.snapshot.
+        clock5 = _Clock()
+        ctl5 = RateController(clock=clock5, sleep=_advancing(clock5))
+        probe5 = _LockFreeProbe(ctl5)
+        monkeypatch.setattr(rate_common, "_LOG", probe5)
+        ctl5.pace()  # warm-up grace — no snapshot yet
+        clock5.advance(SNAPSHOT_LOG_INTERVAL_S + 1.0)
+        ctl5.pace()  # past the interval → rate.snapshot
+        probe5.assert_lock_free("rate.snapshot")
+
+        # (6) rate.clock_gap from ALL SIX call sites.
+        gap = CLOCK_GAP_THRESHOLD_S + 100.0
+        # (6a) on_rate_limit / (6b) on_timeout / (6c) on_success.
+        for method in ("on_rate_limit", "on_timeout", "on_success"):
+            clock6 = _Clock()
+            ctl6 = _controller(clock6)
+            probe6 = _LockFreeProbe(ctl6)
+            monkeypatch.setattr(rate_common, "_LOG", probe6)
+            clock6.advance(gap)
+            getattr(ctl6, method)()
+            probe6.assert_lock_free("rate.clock_gap")
+        # (6d) pace() gate 0 — the smooth-pacing loop.
+        clock7 = _Clock()
+        ctl7 = RateController(clock=clock7, sleep=_advancing(clock7), smooth_pacing=True)
+        probe7 = _LockFreeProbe(ctl7)
+        monkeypatch.setattr(rate_common, "_LOG", probe7)
+        clock7.advance(gap)
+        ctl7.pace()
+        probe7.assert_lock_free("rate.clock_gap")
+        # (6e) pace() gate 1 — the per-minute governor loop.
+        clock8 = _Clock()
+        ctl8 = RateController(clock=clock8, sleep=_advancing(clock8), ceiling_per_min=500)
+        probe8 = _LockFreeProbe(ctl8)
+        monkeypatch.setattr(rate_common, "_LOG", probe8)
+        clock8.advance(gap)
+        ctl8.pace()
+        probe8.assert_lock_free("rate.clock_gap")
+        # (6f) pace() on a DEFAULT controller — the _maybe_log_snapshot site.
+        clock9 = _Clock()
+        ctl9 = RateController(clock=clock9, sleep=_advancing(clock9))
+        probe9 = _LockFreeProbe(ctl9)
+        monkeypatch.setattr(rate_common, "_LOG", probe9)
+        clock9.advance(gap)
+        ctl9.pace()
+        probe9.assert_lock_free("rate.clock_gap")
+
+    # ── T4: capture-at-the-decision-point field pins (kill the lazy-read mutant) ─
+
+    def test_429_fields_captured_before_stepdown_mutation(self) -> None:
+        # The 3rd 429 at the ceiling steps 5→4 and CLEARS _hits in the same
+        # critical section — yet the emitted rate.429 must carry the values AT
+        # its original program point (current_rps=5.0, recent_hits=3). A lazy
+        # re-read-at-flush mutant would emit 4.0/0 and die here.
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS - 1)
+        with capture_logs() as logs:
+            ctl.on_rate_limit()  # 3rd hit → stepdown in the SAME call
+        assert [e["event"] for e in logs] == ["rate.429", "rate.stepdown"]
+        assert logs[0]["current_rps"] == 5.0  # pre-stepdown value
+        assert logs[0]["recent_hits"] == 3  # pre-clear count
+        assert logs[0]["log_level"] == "warning"
+        assert logs[1]["log_level"] == "warning"
+        assert ctl.current_rps == 4.0  # the decision itself committed
+
+    def test_clock_gap_fields_captured_before_baseline_overwrite(self) -> None:
+        # gap_s must be the REAL observed jump (400.0) — a post-overwrite read of
+        # _last_seen would emit 0.0. current_rps is the pre-gap rate (3.0).
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # 5→4→3
+        assert ctl.current_rps == FLOOR_RPS
+        ctl.on_success()  # syncs _last_seen to now (1 s since the step → no stepup)
+        clock.advance(400.0)
+        with capture_logs() as logs:
+            ctl.on_success()
+        gap_events = [e for e in logs if e["event"] == "rate.clock_gap"]
+        assert len(gap_events) == 1
+        assert gap_events[0]["gap_s"] == 400.0  # not 0.0 — captured pre-overwrite
+        assert gap_events[0]["current_rps"] == FLOOR_RPS
+        assert gap_events[0]["log_level"] == "warning"
+
+    def test_stepup_is_emitted_at_info_level(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # 5→4
+        clock.advance(STEP_UP_WINDOW)
+        with capture_logs() as logs:
+            ctl.on_success()
+        up = [e for e in logs if e["event"] == "rate.stepup"]
+        assert len(up) == 1
+        assert up[0]["log_level"] == "info"  # _flush_rate_logs' info branch
+
+    # ── T5: a RAISING sink can no longer abort rate decisions ──────────────────
+
+    def test_raising_sink_commits_decisions_and_releases_the_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The ONE sanctioned behavioral delta: pre-fix a raise from the rate.429
+        # emission ABORTED the latch + stepdown (they ran after the in-lock
+        # emit); post-fix decisions commit under the lock and telemetry raises
+        # afterward, outside it. Decisions-before-telemetry is strictly safer.
+        clock = _Clock()
+        ctl = _controller(clock)
+        monkeypatch.setattr(rate_common, "_LOG", _RaisingSink())
+        for _ in range(STEP_DOWN_HITS):
+            with pytest.raises(RuntimeError, match="sink failed on rate.429"):
+                ctl.on_rate_limit()
+        assert ctl.current_rps == 4.0  # the stepdown committed despite the raise
+        assert not ctl._lock.locked()  # the raise happened OUTSIDE the lock
+        # snapshot() emits nothing — safe under the raising sink — and shows the
+        # stepdown's _hits.clear() committed too.
+        assert ctl.snapshot()["recent_hits"] == 0
+
+    # ── T6: multi-event same-call ordering with the latch ──────────────────────
+
+    def test_multi_event_same_call_order_with_latch(self) -> None:
+        # One on_rate_limit call firing all three events preserves the pre-change
+        # in-lock emission order: rate.429 → rate.smooth_pacing_latched →
+        # rate.stepdown (per-thread order only; cross-thread interleaving is
+        # deliberately unpinned — observability, not state).
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        ctl.on_rate_limit()  # hits=1, no burst evidence yet → no latch, no step
+        ctl.on_rate_limit()  # hits=2
+        _seed_burst(ctl, second=int(clock.t), count=9)  # 9 > 8.0 — burst evidence
+        with capture_logs() as logs:
+            ctl.on_rate_limit()  # hits=3 → 429 + latch + stepdown in ONE call
+        assert [e["event"] for e in logs] == [
+            "rate.429",
+            "rate.smooth_pacing_latched",
+            "rate.stepdown",
+        ]
+        assert logs[1]["current_rps"] == 8.0  # latch captured PRE-stepdown
+        assert logs[2]["from_rps"] == 8.0
+        assert logs[2]["to_rps"] == 7.0
+        assert ctl.current_rps == 7.0
+        assert ctl.smooth_pacing_active is True
