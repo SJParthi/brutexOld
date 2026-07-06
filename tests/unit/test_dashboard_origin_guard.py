@@ -139,6 +139,51 @@ class TestTrustedHost:
             assert refused.status_code == 400
 
 
+class TestTrustedHostIPv6Loopback:
+    """The bracketed IPv6 loopback rides the default guard (DEC-ENGINE-MISC-PACK-002).
+
+    Through the REAL ``build_app`` middleware stack: an ``http://[::1]:port``
+    client sends ``Host: [::1]:port`` (the RFC 3986 bracketed form), which
+    Starlette's naive ``split(":")[0]`` port-strip used to mangle to ``[`` —
+    a 400 despite being loopback. The ``BracketAwareTrustedHostMiddleware``
+    subclass + the ``[::1]`` default-allowlist entries fix it, and — the HARD
+    CONSTRAINT — the guard still covers the ``/ws`` WEBSOCKET route (a pure
+    ASGI middleware, never an http-only shim).
+    """
+
+    def test_ipv6_loopback_get_passes_default_allowlist(self, client: TestClient) -> None:
+        """`[::1]` on any port passes the DEFAULT allowlist (was a 400 before)."""
+        for host in ("[::1]", "[::1]:8000", "[::1]:9095"):
+            resp = client.get("/api/v1/state", headers={"Host": host})
+            assert resp.status_code == 200, host
+
+    def test_foreign_bracketed_host_still_400(self, client: TestClient) -> None:
+        """A NON-loopback IPv6 literal is still refused — no fail-open."""
+        resp = client.get("/api/v1/state", headers={"Host": "[2401:db00::1]:8000"})
+        assert resp.status_code == 400
+        assert resp.text == "Invalid host header"
+
+    def test_ws_route_admits_ipv6_loopback(self, client: TestClient) -> None:
+        """The live /ws websocket handshake passes with the IPv6-loopback Host."""
+        with client.websocket_connect("/ws", headers={"host": "[::1]:8000"}) as socket:
+            payload = socket.receive_json()
+            assert "phases" in payload
+
+    def test_ws_route_still_guards_foreign_host(self, client: TestClient) -> None:
+        """REGRESSION (the HARD CONSTRAINT): /ws keeps Host-guard coverage.
+
+        An ``@app.middleware("http")`` swap would have silently dropped this —
+        the WEBSOCKET scope must still refuse a foreign / rebound Host.
+        """
+        from starlette.testclient import WebSocketDenialResponse
+
+        with (
+            pytest.raises(WebSocketDenialResponse),
+            client.websocket_connect("/ws", headers={"host": "evil.example"}),
+        ):
+            pytest.fail("foreign-Host /ws handshake must never connect")
+
+
 # ── Pure helpers — 100% line+branch ──────────────────────────────────────────
 
 
@@ -146,8 +191,12 @@ class TestTrustedHostPatterns:
     """`_trusted_host_patterns` normalization for Starlette."""
 
     def test_default_list_normalized_and_deduped(self) -> None:
-        """None → the loopback-only default set, `:*` stripped, order-preserving dedupe."""
-        assert _trusted_host_patterns(None) == ["127.0.0.1", "localhost"]
+        """None → the loopback-only default set, `:*` stripped, order-preserving dedupe.
+
+        The bracketed IPv6 spelling rides the SAME `:*` strip
+        (``"[::1]:*"`` → ``"[::1]"`` — DEC-ENGINE-MISC-PACK-002).
+        """
+        assert _trusted_host_patterns(None) == ["127.0.0.1", "localhost", "[::1]"]
 
     def test_custom_entries_port_wildcard_stripped(self) -> None:
         """A `host:*` entry collapses to its bare host."""
@@ -165,7 +214,8 @@ class TestTrustedHostPatterns:
     def test_default_constant_is_loopback_only(self) -> None:
         """No non-loopback name — in particular no `testserver` — ships in production."""
         assert all(
-            entry.split(":")[0] in {"127.0.0.1", "localhost"} for entry in DEFAULT_ALLOWED_HOSTS
+            entry.removesuffix(":*") in {"127.0.0.1", "localhost", "[::1]"}
+            for entry in DEFAULT_ALLOWED_HOSTS
         )
 
 

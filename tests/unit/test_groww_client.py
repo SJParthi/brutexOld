@@ -15,6 +15,7 @@ from brutex.adapters.groww.errors import (
     GrowwTokenStillStaleError,
 )
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 
 # Fakes named like the SDK exceptions so from_groww_exception maps them.
@@ -1120,3 +1121,124 @@ def test_historical_candles_epoch_bound_unchanged_by_normalize() -> None:
     )
     assert sdk.kwargs["start_time"] == "1700000000"
     assert sdk.kwargs["end_time"] == "1710000000"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Failed-attempt observability (DEC-PULL-TELEMETRY-TRIAD-001) — one
+# ``groww.call`` outcome=failed line per FAILED attempt, real elapsed_ms.
+# ════════════════════════════════════════════════════════════════════════
+
+
+def _failed_calls(logs: list[EventDict]) -> list[EventDict]:
+    """The captured ``groww.call`` events whose outcome is ``failed``."""
+    return [e for e in logs if e["event"] == "groww.call" and e.get("outcome") == "failed"]
+
+
+def test_terminal_failure_logs_one_failed_call_with_real_elapsed() -> None:
+    """A terminal (non-retryable) SDK error logs EXACTLY one outcome=failed line whose
+    ``elapsed_ms`` is the REAL wall-clock of the attempt (the shared success-path local
+    stays 0.0 on failures — the 06:00 blip's burned calls become readable, not inferred)."""
+    from brutex.adapters.groww.errors import GrowwError
+
+    sdk = _FakeSDK(raises=[RuntimeError("boom")])  # → neutral terminal GrowwError
+    times = iter([10.0, 10.3])  # started, failed-log read → 300 ms
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None, clock=lambda: next(times))
+    with capture_logs() as logs, pytest.raises(GrowwError):
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    failed = _failed_calls(logs)
+    assert len(failed) == 1
+    assert failed[0]["method"] == "get_expiries"
+    assert failed[0]["attempt"] == 1
+    assert failed[0]["elapsed_ms"] == 300.0
+    assert failed[0]["error_type"] == "GrowwError"
+    # No success line — the call never completed.
+    assert not [e for e in logs if e["event"] == "groww.call" and e.get("outcome") == "success"]
+
+
+def test_retry_storm_logs_one_failed_line_per_attempt_then_success() -> None:
+    """PER-ATTEMPT accounting (not per window): two timeouts + a success = two failed
+    lines (attempts 1 + 2, ``error_type=GrowwTimeoutError``) + one outcome=success line
+    — and the PULL PATH is byte-identical (same SDK calls, same backoffs, same payload,
+    the Session-B parity pin: logging is the only delta)."""
+    sdk = _FakeSDK(
+        raises=[GrowwAPITimeoutException("t1"), GrowwAPITimeoutException("t2")],
+        payload={"ok": True},
+    )
+    client, slept = _client(sdk)
+    with capture_logs() as logs:
+        out = client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert out == {"ok": True}  # parity: same return value
+    assert sdk.calls == 3  # parity: same physical call count
+    assert slept == [0.1, 0.2]  # parity: same linear backoff sequence
+    failed = _failed_calls(logs)
+    assert [e["attempt"] for e in failed] == [1, 2]
+    assert {e["error_type"] for e in failed} == {"GrowwTimeoutError"}
+    success = [e for e in logs if e["event"] == "groww.call" and e.get("outcome") == "success"]
+    assert len(success) == 1
+    assert success[0]["attempt"] == 3
+    # Meter parity + the new lifetime accounting: 3 issued = 1 completed + 2 failed.
+    snap = client.meter.snapshot()
+    assert snap["in_flight"] == 0
+    assert (snap["issued"], snap["completed"], snap["failed"]) == (3, 1, 2)
+
+
+def test_rate_limit_failure_logs_failed_line_and_still_fires_hook() -> None:
+    """A 429 keeps firing ``on_rate_limit`` (the decremental contract — parity) AND now
+    logs its failed attempt with the neutral ``GrowwRateLimitError`` class name."""
+    hits: list[int] = []
+    sdk = _FakeSDK(raises=[GrowwAPIRateLimitException("429")], payload={"ok": True})
+    client = GrowwClient(
+        sdk=sdk,
+        sleep=lambda _s: None,
+        on_rate_limit=lambda: hits.append(1),
+        max_attempts=3,
+    )
+    with capture_logs() as logs:
+        out = client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    assert out == {"ok": True}
+    assert hits == [1]  # parity: the shared-bucket decrement fired exactly once
+    failed = _failed_calls(logs)
+    assert len(failed) == 1
+    assert failed[0]["error_type"] == "GrowwRateLimitError"
+
+
+def test_reauth_attempt_logs_failed_line_before_the_self_heal() -> None:
+    """The 06:00 auth-expiry attempt IS a failed attempt: one outcome=failed line
+    (``GrowwAuthError``) lands alongside the existing ``groww.token.reauth`` WARNING,
+    then the refreshed retry logs its success — one line per attempt, never per window."""
+    stale = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired or invalid")])
+    fresh = _FakeSDK(payload={"candles": []})
+    refresher = _FakeRefresher([stale, fresh])
+    client = GrowwClient(sdk=stale, refresher=refresher, sleep=lambda _s: None)  # type: ignore[arg-type]
+    with capture_logs() as logs:
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    failed = _failed_calls(logs)
+    assert len(failed) == 1
+    assert failed[0]["error_type"] == "GrowwAuthError"
+    assert [e["event"] for e in logs].count("groww.token.reauth") == 1
+    success = [e for e in logs if e["event"] == "groww.call" and e.get("outcome") == "success"]
+    assert len(success) == 1  # the post-re-mint retry completed
+
+
+def test_reauth_raise_path_still_logged_exactly_once_per_attempt() -> None:
+    """When ``refresher.reauth`` itself raises (the issuance throttle), the attempt that
+    TRIGGERED the re-mint was already logged failed — exactly one line, and the throttle
+    error propagates out exactly as before (parity)."""
+    from brutex.adapters.groww.errors import GrowwTokenIssuanceThrottled
+
+    stale = _FakeSDK(raises=[GrowwAPIAuthenticationException("token expired or invalid")])
+
+    class _ThrottledRefresher(_FakeRefresher):
+        def reauth(self, seen_generation: int) -> int:
+            raise GrowwTokenIssuanceThrottled("issuance throttled — cached token still stale")
+
+    client = GrowwClient(
+        sdk=stale,
+        refresher=_ThrottledRefresher([stale]),  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
+    with capture_logs() as logs, pytest.raises(GrowwTokenIssuanceThrottled):
+        client.expiries(exchange="NSE", underlying_symbol="NIFTY")
+    failed = _failed_calls(logs)
+    assert len(failed) == 1  # the attempt logged ONCE; the reauth raise adds no second line
+    assert failed[0]["error_type"] == "GrowwAuthError"

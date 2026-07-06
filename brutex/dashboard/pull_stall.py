@@ -52,9 +52,16 @@ import time
 from collections.abc import Callable
 from typing import Final
 
+import structlog
+
 from brutex.observability.watchdog import Watchdog, WorkerEvent, WorkerState
 
 logger = logging.getLogger(__name__)
+
+#: Structured channel for the throttled alive-beat (DEC-PULL-TELEMETRY-TRIAD-001) — the
+#: happy path's ONE periodic proof-of-life line (the stall events above stay on the
+#: pre-existing stdlib logger, byte-unchanged).
+_LOG = structlog.get_logger("brutex.dashboard.pull_stall")
 
 #: The single worker name the dashboard pull beats under. One job runs at a time
 #: (single-flight), so one worker name is enough.
@@ -77,6 +84,16 @@ DEFAULT_WEDGE_MULTIPLIER: Final[float] = 6.0
 
 #: Environment override for the wedge multiplier (operator escape hatch, no code change).
 PULL_WEDGE_ENV: Final[str] = "BRUTEX_PULL_WEDGE_MULTIPLIER"
+
+#: Minimum seconds between two ``pull_stall.watchdog_alive`` INFO lines — the ≤ 18
+#: lines/hour bound (``3600 / 18 = 200``), DERIVED from the existing default check
+#: cadence: the poll interval is ``timeout / 3`` and the audited default timeout is
+#: :data:`DEFAULT_STALL_TIMEOUT_SECONDS` (600 s) → one check every 200 s = exactly 18
+#: checks/hour, so at the default ONE line per check tick already satisfies the bound.
+#: A SHRUNK env timeout (:data:`PULL_STALL_ENV`) raises the check frequency, so the
+#: alive log throttles against ``max(check_interval, this floor)`` — the bound holds
+#: for EVERY configuration, with no new thread (DEC-PULL-TELEMETRY-TRIAD-001).
+ALIVE_LOG_MIN_INTERVAL_S: Final[float] = 200.0
 
 
 def resolve_stall_timeout_seconds() -> float:
@@ -207,6 +224,18 @@ class PullWatchdog:
         #: DUAL signal must cover the full ``wedge_multiplier x timeout`` window from
         #: that observation before a verdict.
         self._wedge_window_restart_at: float | None = None
+
+        #: Monotonic source for the alive-beat throttle (DEC-PULL-TELEMETRY-TRIAD-001) —
+        #: the SAME injected clock the underlying watchdog reads, so tests drive both
+        #: deterministically; defaults to the watchdog's own ``time.monotonic`` default.
+        self._alive_clock: Callable[[], float] = clock if clock is not None else time.monotonic
+        #: Throttle floor between two alive-beat INFO lines: the check cadence, but never
+        #: below :data:`ALIVE_LOG_MIN_INTERVAL_S` (the ≤ 18 lines/hour bound). Recomputed
+        #: by :meth:`start` when an explicit ``poll_seconds`` changes the cadence.
+        self._alive_interval: float = max(self._timeout / 3.0, ALIVE_LOG_MIN_INTERVAL_S)
+        #: Last alive-beat instant (``-inf`` ⇒ the FIRST check logs — an early proof of
+        #: life; every later one throttles against :attr:`_alive_interval`).
+        self._last_alive_log: float = float("-inf")
         #: Optional HUNG→HEALTHY edge callback (DEC-PIPELINE-STALL-HEARTBEAT-001): the
         #: dashboard job clears its stalled-suspect marker here when a heartbeat lands
         #: again after a HUNG declaration (e.g. the greeks/prebuild/movers seams resume
@@ -403,6 +432,11 @@ class PullWatchdog:
             # (mirrors Watchdog.register's own last-beat seed).
             self._last_beat_at = self._clock_fn()
         interval = self._timeout / 3.0 if poll_seconds is None else poll_seconds
+        # Re-derive the alive-beat throttle from the ACTUAL cadence (an explicit
+        # ``poll_seconds`` may differ from the ``timeout / 3`` default), floored at
+        # :data:`ALIVE_LOG_MIN_INTERVAL_S` so the ≤ 18 lines/hour bound always holds
+        # (DEC-PULL-TELEMETRY-TRIAD-001 — one throttled INFO per check tick, no new thread).
+        self._alive_interval = max(interval, ALIVE_LOG_MIN_INTERVAL_S)
         self._stop.clear()
         self._spawn(lambda: self._drive(interval))
 
@@ -436,6 +470,16 @@ class PullWatchdog:
         hold so a beat landing during the read still defers the verdict. A wedged
         probe can now stall only the timer thread itself (escalation degrades to
         abstention) — never the worker's heartbeat path.
+
+        Also emits the THROTTLED ``pull_stall.watchdog_alive`` INFO
+        (DEC-PULL-TELEMETRY-TRIAD-001): the happy path was previously SILENT (only stall
+        edges logged), so post-mortem forensics could not tell "the watchdog was alive
+        and saw a healthy worker" from "the watchdog never ran". One line at most per
+        :attr:`_alive_interval` (≥ :data:`ALIVE_LOG_MIN_INTERVAL_S` — ≤ 18 lines/hour,
+        derived from the existing check cadence; NO new thread), carrying the worker's
+        current state + the audited timeout. Logging only — the underlying
+        ``Watchdog.check_once`` call, its returned events and every edge callback are
+        byte-identical.
         """
         with self._lock:
             events = self._wd.check_once()
@@ -443,6 +487,7 @@ class PullWatchdog:
             # SAME poll cadence, after the HUNG/recovery edges have fired.
             capture_baseline = self._baseline_capture_pending
             want_probe = capture_baseline or self._escalation_wants_probe_locked()
+            alive = self._alive_payload_locked()
         if want_probe:
             token = self._probe_token()  # OUTSIDE the lock — may block, never holds it
             with self._lock:
@@ -455,7 +500,32 @@ class PullWatchdog:
                     self._baseline_capture_pending = False
                 else:
                     self._maybe_escalate_locked(token)
+        if alive is not None:
+            _LOG.info("pull_stall.watchdog_alive", **alive)
         return events
+
+    def _alive_payload_locked(self) -> dict[str, object] | None:
+        """Return the alive-beat payload when the throttle allows one, else ``None``.
+
+        Caller holds ``self._lock``. Reads the SAME clock the watchdog uses; stamps the
+        throttle baseline only when a line will actually be emitted. A never-``start``-ed
+        wrapper (a bare ``check_once`` in a test) reads ``state="unregistered"`` honestly
+        instead of raising off :meth:`Watchdog.state_of`'s KeyError.
+        """
+        now = self._alive_clock()
+        if now - self._last_alive_log < self._alive_interval:
+            return None
+        self._last_alive_log = now
+        state = (
+            self._wd.state_of(PULL_WORKER_NAME).value
+            if PULL_WORKER_NAME in self._wd.workers()
+            else "unregistered"
+        )
+        return {
+            "state": state,
+            "timeout_seconds": self._timeout,
+            "interval_seconds": self._alive_interval,
+        }
 
     def stop(self) -> None:
         """Stop the background poll loop (called from the worker's ``finally``)."""
@@ -468,6 +538,7 @@ class PullWatchdog:
 
 
 __all__ = [
+    "ALIVE_LOG_MIN_INTERVAL_S",
     "DEFAULT_STALL_TIMEOUT_SECONDS",
     "DEFAULT_WEDGE_MULTIPLIER",
     "PULL_STALL_ENV",

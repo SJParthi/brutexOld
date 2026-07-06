@@ -1559,7 +1559,10 @@ def run_until_clean(
     rounds: list[UntilCleanRound] = []
     if max_rounds <= 0:
         # Disabled — run nothing, report a spent budget (mirrors retry_failed_windows's
-        # max_rounds=0 opt-out, never infinite).
+        # max_rounds=0 opt-out, never infinite). Still terminally OBSERVED
+        # (DEC-PULL-TELEMETRY-TRIAD-001): the disabled loop says so in /logs instead of
+        # ending silently; ``outstanding=None`` — no round ran, so no residual was measured.
+        _LOG.info("until_clean.done", rounds=0, outstanding=None, verdict="stop_budget")
         return UntilCleanOutcome(verdict="stop_budget", rounds_run=0, rounds=())
     round_index = 0
     verdict: LoopVerdict = "continue"
@@ -1614,8 +1617,29 @@ def run_until_clean(
             outstanding_windows=outcome.outstanding_windows,
         )
         prev_failed = outcome.still_failed_windows
+        # Per-round observability (DEC-PULL-TELEMETRY-TRIAD-001): the loop that rescues
+        # FAILED windows overnight previously ran SILENT — one INFO per round makes its
+        # convergence (or stall) readable live in /logs. ``outstanding`` is the ledger's
+        # genuinely-outstanding count when the round carries it
+        # (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001), else the legacy still-failed count.
+        # Logging ONLY — the round count, verdicts and returned outcome are byte-identical.
+        outstanding = (
+            outcome.outstanding_windows
+            if outcome.outstanding_windows is not None
+            else outcome.still_failed_windows
+        )
+        _LOG.info(
+            "until_clean.round",
+            round=round_index,
+            outstanding=outstanding,
+            made_progress=made_progress,
+            verdict=verdict,
+        )
         if verdict != "continue":
             break
+    # Terminal observability (DEC-PULL-TELEMETRY-TRIAD-001): one INFO naming the final
+    # verdict + the residual the loop ended on, so an overnight run's outcome is one grep.
+    _LOG.info("until_clean.done", rounds=round_index, outstanding=outstanding, verdict=verdict)
     return UntilCleanOutcome(verdict=verdict, rounds_run=round_index, rounds=tuple(rounds))
 
 
