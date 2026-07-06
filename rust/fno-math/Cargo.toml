@@ -73,6 +73,14 @@ rkyv = { version = "0.8.13", features = ["alloc"] }
 # either) are pinned in deny.toml.
 rayon = "1.10"
 
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into the
+# artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` / `__source_digest__`.
+# Same version as the runtime dependency above (a build script cannot see
+# regular [dependencies], so the pin is repeated here deliberately).
+blake3 = "1.5"
+
 [dev-dependencies]
 proptest = "1.6.0"
 
