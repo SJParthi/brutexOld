@@ -576,6 +576,52 @@ class AuditWriter:
 # ────────────────────────────────────────────────────────────────────────
 
 
+def open_ingest_audit(
+    lake_root: Path,
+    *,
+    name: str = "spot-ingest",
+    enabled: bool = True,
+) -> contextlib.AbstractContextManager[AuditWriter | None]:
+    """Open the lake's hash-chained ingest audit trail (Golden Rule #8).
+
+    The ONE COMMON factory (CLAUDE.md §11 COMMON — DEC-INGEST-AUDIT-WIRING-001)
+    every production ingest entrypoint binds — the CLI ``brutex fetch`` spot
+    pull, the dashboard ``pull_all_spot`` / ``pull_candles`` spot pulls, and the
+    dashboard F&O ``pull_contract_candles`` historical pull — so the audit path
+    convention (``<lake>/audit/<name>.jsonl``) and the resume-the-existing-chain
+    semantics can never drift between entrypoints. Each ``append`` through the
+    returned writer is O(1) (one canonical-JSON line + flush + fsync) and, per
+    the ingest spines' contract, is invoked ONLY from the single controller
+    drain thread — never from a fetch worker — so wiring it can never block the
+    fetch lane.
+
+    Parameters
+    ----------
+    lake_root
+        The data-lake root; the trail lives at ``<lake_root>/audit/<name>.jsonl``
+        (:meth:`AuditWriter.open` creates the parent directory).
+    name
+        The trail's basename — ``"spot-ingest"`` (the spot spine, the
+        DEC-INGEST-AUDIT-CHAIN-001 path, unchanged byte-for-byte) or
+        ``"fno-ingest"`` (the F&O spine).
+    enabled
+        ``False`` (a ``--dry-run`` / ``--inspect`` / synthetic pull that writes
+        no real data) returns ``contextlib.nullcontext(None)`` — no file, no
+        directory, a ``None`` writer the spines' ``maybe_audit`` guard no-ops on.
+
+    Returns
+    -------
+    contextlib.AbstractContextManager[AuditWriter | None]
+        An open-for-append :class:`AuditWriter` continuing the existing chain
+        (``resume=True`` when the file exists), or the null context when
+        *enabled* is ``False``.
+    """
+    if not enabled:
+        return contextlib.nullcontext(None)
+    path = lake_root / "audit" / f"{name}.jsonl"
+    return AuditWriter.open(path, resume=path.exists())
+
+
 @dataclass(frozen=True, slots=True)
 class BufferedAuditRecord:
     """One buffered ``append`` call — the *data* of an audit line, un-hashed.
@@ -1148,6 +1194,7 @@ __all__ = [
     "BufferedAuditCollector",
     "BufferedAuditRecord",
     "iter_entries",
+    "open_ingest_audit",
     "read_entries",
     "verify_chain",
 ]
