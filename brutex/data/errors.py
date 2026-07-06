@@ -66,7 +66,13 @@ class LakeWriteHalt(DataLakeError):
     (:class:`~brutex.data.write_breaker.WriteHealthBreaker`,
     DEC-WRITE-HEALTH-BREAKER-001 — 2 consecutive write-defers open a partition, 3
     DISTINCT open partitions trip the halt; raised from the window TAIL that observed
-    the tripping defer).
+    the tripping defer);
+    or ``"worker_pool_broken"`` (RESERVED —
+    DEC-HARDWARE-ENVELOPE-001: NO shipped code raises it today; the parallel
+    prebuild pivoted to a ``ThreadPoolExecutor``, where a worker cannot die
+    separately from the process. The token is kept so a FUTURE process-pool
+    stage can map a ``BrokenProcessPool`` to an honest pull-wide halt — reaching
+    the CRITICAL Telegram alert — instead of an anonymous crash).
     """
 
     def __init__(self, reason: str) -> None:
