@@ -86,11 +86,15 @@ ABSENT_TOKEN: Final[str] = "absent"  # noqa: S105  # nosec B105 — a freshness 
 _SWEEPS_DIRNAME: Final[str] = "sweeps"
 
 
-def _stat_token(target: Path, *, event: str) -> str | None:
+def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
     """One path's ``"<mtime_ns>:<size>"`` stat token — the shared O(1) probe core.
 
     Returns :data:`ABSENT_TOKEN` when the path does not exist yet, ``None``
-    (logged under *event*) on any other :class:`OSError`.
+    (logged under *event*) on any other :class:`OSError`. ``include_ino=True``
+    appends ``":<st_ino>"`` — sound for an atomic-``os.replace`` writer (every
+    publish swaps the inode), so the token moves even on a coarse-mtime
+    filesystem with an equal-size rewrite; the default ``False`` keeps every
+    pre-existing token byte-unchanged (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
     """
     try:
         st = os.stat(target)
@@ -104,6 +108,8 @@ def _stat_token(target: Path, *, event: str) -> str | None:
             error=str(exc),
         )
         return None
+    if include_ino:
+        return f"{st.st_mtime_ns}:{st.st_size}:{st.st_ino}"
     return f"{st.st_mtime_ns}:{st.st_size}"
 
 
@@ -201,6 +207,50 @@ def sweeps_revision(lake_root: Path) -> str | None:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
+def rate_bridge_revision(lake_root: Path) -> str | None:
+    """Return the CLI rate-bridge file's stat content token, or ``None``.
+
+    DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001. One ``os.stat`` of
+    ``<lake_root>/.rate/pull_rate.json`` (the COMMON
+    :func:`brutex.data.rate_bridge.rate_bridge_path` — lazily imported, the
+    ``_ledger_revision`` precedent, keeping this probe surface lean) folded to
+    ``"<mtime_ns>:<size>:<st_ino>"``. The inode is included because the bridge
+    publisher is an atomic tmp → ``fsync`` → ``os.replace``: every publish
+    swaps the inode, so the token moves even on a coarse-mtime filesystem when
+    an equal-size snapshot lands within one mtime granule (the lake is an
+    external SSD — CLAUDE.md §8).
+
+    Inherited :func:`_stat_token` semantics verbatim: a missing file → the
+    stable :data:`ABSENT_TOKEN` (its creation moves the token exactly once);
+    any other :class:`OSError` → a structlog WARN
+    (``lake_revision.rate_bridge_stat_failed``) + ``None`` = "unknown, no
+    signal — make NO freshness decision".
+
+    HONESTY NOTE (Golden Rule #10): this token exists for the live-vs-cached
+    PROVENANCE distinction and to skip a redundant decode of an unchanged file
+    — it is NOT wedge protection: ``os.stat`` wedges exactly like
+    ``read_bytes`` on a stalled mount, so the cache runs this probe INSIDE its
+    deadline guard, never unbounded on a caller.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (the ``.rate`` sidecar dir lives directly under it).
+
+    Returns
+    -------
+    str | None
+        The stat token, :data:`ABSENT_TOKEN`, or ``None`` on a probe error.
+    """
+    from brutex.data.rate_bridge import rate_bridge_path
+
+    return _stat_token(
+        rate_bridge_path(lake_root),
+        event="lake_revision.rate_bridge_stat_failed",
+        include_ino=True,
+    )
+
+
 def lake_revision(lake_root: Path) -> str | None:
     """Return the composite O(1)/O(dirs) content token for *lake_root*, or ``None``.
 
@@ -237,4 +287,4 @@ def lake_revision(lake_root: Path) -> str | None:
     return f"{ledger}|{sweeps}"
 
 
-__all__ = ["ABSENT_TOKEN", "lake_revision", "sweeps_revision"]
+__all__ = ["ABSENT_TOKEN", "lake_revision", "rate_bridge_revision", "sweeps_revision"]

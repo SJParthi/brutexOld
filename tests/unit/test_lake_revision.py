@@ -27,8 +27,15 @@ import os
 from pathlib import Path
 
 import pytest
-from brutex.dashboard.lake_revision import ABSENT_TOKEN, lake_revision, sweeps_revision
+from brutex.dashboard.lake_revision import (
+    ABSENT_TOKEN,
+    lake_revision,
+    rate_bridge_revision,
+    sweeps_revision,
+)
+from brutex.data.rate_bridge import rate_bridge_path
 from brutex.data.window_ledger_store import deltas_dir, ledger_path
+from structlog.testing import capture_logs
 
 
 def _write_ledger_bytes(lake_root: Path, payload: bytes) -> Path:
@@ -287,3 +294,67 @@ class TestLedgerDeltaComponent:
 
         monkeypatch.setattr(os, "stat", _denying_stat)
         assert lake_revision(tmp_path) is None
+
+
+class TestRateBridgeRevision:
+    """The CLI rate-bridge file's stat token (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001)."""
+
+    def test_present_bridge_file_matches_stat_with_inode(self, tmp_path: Path) -> None:
+        """A present bridge file tokens as the exact ``mtime_ns:size:st_ino`` triple."""
+        target = rate_bridge_path(tmp_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'{"schema":3}')
+        st = os.stat(target)
+        assert rate_bridge_revision(tmp_path) == f"{st.st_mtime_ns}:{st.st_size}:{st.st_ino}"
+
+    def test_absent_bridge_file_returns_stable_sentinel(self, tmp_path: Path) -> None:
+        """No bridge file (no CLI pull has run) → the stable ``absent`` sentinel."""
+        assert rate_bridge_revision(tmp_path) == ABSENT_TOKEN
+        assert rate_bridge_revision(tmp_path) == ABSENT_TOKEN
+
+    def test_atomic_replace_moves_the_token_even_at_equal_size(self, tmp_path: Path) -> None:
+        """The inode fold: an ``os.replace`` publish of EQUAL-SIZE content with a
+        pinned-equal mtime still moves the token (the coarse-mtime-filesystem case)."""
+        target = rate_bridge_path(tmp_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'{"schema":3,"n":1}')
+        pinned_ns = 1_000_000_000
+        os.utime(target, ns=(pinned_ns, pinned_ns))
+        first = rate_bridge_revision(tmp_path)
+        # An atomic publish: same byte COUNT, same pinned mtime — new inode.
+        tmp = target.parent / "pull_rate.json.tmp"
+        tmp.write_bytes(b'{"schema":3,"n":2}')
+        os.replace(tmp, target)
+        os.utime(target, ns=(pinned_ns, pinned_ns))
+        second = rate_bridge_revision(tmp_path)
+        assert first is not None and second is not None
+        assert second != first
+
+    def test_unreadable_bridge_stat_returns_none_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError → structlog WARN + ``None`` ("no signal")."""
+        target = rate_bridge_path(tmp_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'{"schema":3}')
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(target):
+                raise PermissionError(13, "denied", str(target))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        with capture_logs() as logs:
+            assert rate_bridge_revision(tmp_path) is None
+        assert any(entry["event"] == "lake_revision.rate_bridge_stat_failed" for entry in logs)
+
+    def test_default_stat_tokens_stay_ino_free_regression(self, tmp_path: Path) -> None:
+        """``include_ino`` defaults False: the ledger component token format is
+        byte-unchanged (two colon-separated fields, no inode) — the pre-change pin."""
+        target = _write_ledger_bytes(tmp_path, b"v1")
+        st = os.stat(target)
+        token = lake_revision(tmp_path)
+        assert token is not None
+        ledger_component = token.split("+", 1)[0]
+        assert ledger_component == f"{st.st_mtime_ns}:{st.st_size}"
