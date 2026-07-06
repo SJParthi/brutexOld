@@ -147,6 +147,69 @@ class TestScanSpotSymbolDirs:
         with pytest.raises(MemoryError):
             scan_spot_symbol_dirs(lake)
 
+    def test_segment_is_dir_stat_error_skips_that_subtree_partial_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fix-round MAJOR: pathlib's ``is_dir`` swallows only
+        ENOENT-class errnos and RE-RAISES EACCES/EPERM/EIO, so the seg-dir
+        stat probe must degrade exactly like the iterdir sites — the INDEX
+        subtree still contributes, one ``scan_error`` WARN, never a raise
+        (deterministic monkeypatch injection, NOT chmod — unreliable under
+        root CI)."""
+        lake = _mk_lake(tmp_path, {"NSE/INDEX": ["NIFTY"], "NSE/CASH": ["M&M"]})
+        real_is_dir = Path.is_dir
+
+        def _flaky(self: Path) -> bool:
+            if self.name == "CASH":
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _flaky)
+        with capture_logs() as logs:
+            result = scan_spot_symbol_dirs(lake)
+        assert result == {"NSE": ("NIFTY",)}
+        errors = [e for e in logs if e["event"] == "spot_drift.scan_error"]
+        assert len(errors) == 1
+        assert errors[0]["error_type"] == "PermissionError"
+        assert errors[0]["path"].endswith(os.path.join("NSE", "CASH"))
+
+    def test_bars_is_dir_stat_error_is_an_empty_scan_with_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bars-level head probe rides the SAME ``_safe_is_dir`` degrade:
+        an EIO stat on ``bars/`` is an empty scan + one WARN, never a raise."""
+        lake = _mk_lake(tmp_path, {"NSE/CASH": ["M&M"]})
+        real_is_dir = Path.is_dir
+
+        def _flaky(self: Path) -> bool:
+            if self.name == "bars":
+                raise OSError(5, "Input/output error", str(self))
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _flaky)
+        with capture_logs() as logs:
+            assert scan_spot_symbol_dirs(lake) == {}
+        errors = [e for e in logs if e["event"] == "spot_drift.scan_error"]
+        assert len(errors) == 1
+        assert errors[0]["path"].endswith("bars")
+
+    @pytest.mark.parametrize("failing_dir_name", ["bars", "CASH"])
+    def test_memory_error_at_is_dir_reraises_raw(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_dir_name: str
+    ) -> None:
+        """``_safe_is_dir`` keeps the honest-OOM convention at BOTH stat sites."""
+        lake = _mk_lake(tmp_path, {"NSE/CASH": ["M&M"]})
+        real_is_dir = Path.is_dir
+
+        def _oom(self: Path) -> bool:
+            if self.name == failing_dir_name:
+                raise MemoryError("stat OOM")
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _oom)
+        with pytest.raises(MemoryError):
+            scan_spot_symbol_dirs(lake)
+
 
 class TestPrefixStrippedFold:
     def test_own_prefix_stripped_case_robust(self) -> None:
@@ -166,6 +229,17 @@ class TestPrefixStrippedFold:
         # "NSE-" strips to "" — the builder treats a falsy stripped fold as
         # unverified, so this can never bucket.
         assert _prefix_stripped_fold("NSE-", "NSE") == ""
+
+    def test_tab_or_newline_wrapped_prefix_dir_is_none(self) -> None:
+        """The fix-round docstring-honesty NIT: the strip is ASCII-space-ONLY,
+        so a tab-/newline-wrapped own-prefix dir is NOT recognised — the
+        ``stock_drift_fold`` "tab-bearing dir is junk → unverified" pledge
+        holds on the prefix arm too."""
+        assert _prefix_stripped_fold("\tNSE-FOO", "NSE") is None
+        assert _prefix_stripped_fold("\nNSE-FOO", "NSE") is None
+        # A TRAILING newline survives both the strip and the fold — the fold
+        # result can never match a (newline-free) master, so still unverified.
+        assert _prefix_stripped_fold("NSE-FOO\n", "NSE") == "FOO\n"
 
 
 class TestBuildStockDriftMap:
@@ -191,6 +265,18 @@ class TestBuildStockDriftMap:
     def test_own_prefix_dir_verifies_disk_side_only(self) -> None:
         mapping = build_stock_drift_map({"NSE": ["NSE-BAJAJ-AUTO"]}, {"NSE": ["BAJAJ-AUTO"]})
         assert mapping == {("NSE", "BAJAJAUTO"): ("NSE-BAJAJ-AUTO",)}
+
+    def test_tab_wrapped_own_prefix_dir_is_unverified(self) -> None:
+        """The fix-round NIT repro pinned CLOSED: ``'\\tNSE-BAJAJ-AUTO'`` was
+        mapped pre-fix (the old ``.strip()`` stripped the tab); the
+        ASCII-space-only strip now leaves it unverified — the tab-junk pledge
+        holds on every arm."""
+        with capture_logs():
+            mapping, stats = _build_stock_drift_map_with_stats(
+                {"NSE": ["\tNSE-BAJAJ-AUTO"]}, {"NSE": ["BAJAJ-AUTO"]}
+            )
+        assert mapping == {}
+        assert stats.unverified_dirs == 1
 
     def test_percent26_form_is_refused(self) -> None:
         """The honest-envelope refusal pin: the stored-key %26 encoding is
@@ -370,6 +456,43 @@ class TestLoadStockDriftMap:
         events = [e for e in logs if e["event"] == "spot_drift.no_master"]
         assert len(events) == 1
         assert events[0]["log_level"] == "debug"
+
+    def test_master_exists_stat_error_degrades_to_none_with_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fix-round MAJOR, loader arm: pathlib's ``exists`` re-raises a
+        non-ENOENT stat errno (EACCES on the master file), which must degrade
+        to the SAME honest ``master_error`` → ``None`` as a store-read error —
+        never a raise out to the #1188 fence."""
+        real_exists = Path.exists
+
+        def _flaky(self: Path, **kwargs: bool) -> bool:
+            if self.name == "instruments.duckdb":
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_exists(self, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", _flaky)
+        with capture_logs() as logs:
+            assert load_stock_drift_map(tmp_path) is None
+        errors = [e for e in logs if e["event"] == "spot_drift.master_error"]
+        assert len(errors) == 1
+        assert errors[0]["error_type"] == "PermissionError"
+        # ENOENT (a genuinely absent master) keeps its OWN no_master branch.
+        assert not [e for e in logs if e["event"] == "spot_drift.no_master"]
+
+    def test_master_exists_memory_error_reraises_raw(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_exists = Path.exists
+
+        def _oom(self: Path, **kwargs: bool) -> bool:
+            if self.name == "instruments.duckdb":
+                raise MemoryError("stat OOM")
+            return real_exists(self, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", _oom)
+        with pytest.raises(MemoryError):
+            load_stock_drift_map(tmp_path)
 
     def test_real_master_and_lake_builds_verified_map(self, tmp_path: Path) -> None:
         pytest.importorskip("duckdb")

@@ -74,7 +74,10 @@ def stock_drift_fold(symbol: str) -> str:
     :mod:`brutex.data.spot_drift`, never applied to master symbols or
     lookup-time underlyings). ``replace(" ", "")`` folds interior AND
     trailing/leading ASCII spaces; other whitespace is deliberately NOT
-    folded (a tab-bearing dir is junk → unverified).
+    folded (a tab-bearing dir is junk → unverified — on EVERY arm: the
+    disk-side prefix strip in :mod:`brutex.data.spot_drift` is likewise
+    ASCII-space-only, ``strip(" ")``, so it cannot launder a tab-/
+    newline-wrapped dir past this pledge).
     """
     return symbol.upper().replace(" ", "").replace("-", "")
 

@@ -576,6 +576,81 @@ class TestSpotKeyRecoveryLadder:
         assert hashlib.sha256(part.read_bytes()).hexdigest() == digest1
 
 
+class TestStockDriftBuildGate:
+    """The #1482 gated-build contract, mutation-pinned (fix-round MINOR).
+
+    ``stock_drift = load_stock_drift_map(lake_root) if (ordered and read_spot
+    is None) else None`` is a conditional EXPRESSION — coverage.py's branch
+    metric is structurally blind to its arms, and a gate-removal mutant
+    (unconditional build) survived the whole paired suite. Each arm is now
+    pinned with a raising spy: an injected ``read_spot`` seam and an empty
+    target list must both cost ZERO scans / store stats (design §3.5 +
+    MIGRATION.md #1482), while the default-spot-seam pass must REACH the
+    build (the positive control proving the spy guards the live call site,
+    killing gate-inversion mutants too).
+    """
+
+    @staticmethod
+    def _install_raising_spy(monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex.data.greeks_enrich as greeks_enrich_module
+
+        def _must_not_build(
+            _lake_root: Path,
+        ) -> dict[tuple[str, str], tuple[str, ...]] | None:
+            raise AssertionError("the gated stock-drift build must not run here")
+
+        monkeypatch.setattr(greeks_enrich_module, "load_stock_drift_map", _must_not_build)
+
+    def _target(self) -> GreeksEnrichTarget:
+        return GreeksEnrichTarget(
+            exchange="NSE", symbol=_CE_SYMBOL, start=_WINDOW[0], end=_WINDOW[1]
+        )
+
+    def test_injected_read_spot_seam_never_builds_the_map(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An injected spot seam OWNS spot semantics — zero scans, zero
+        ``spot_drift.*`` log noise, the pass completes normally."""
+        self._install_raising_spy(monkeypatch)
+        with capture_logs() as logs:
+            report = enrich_greeks_for_targets(
+                targets=[self._target()],
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row()],
+                read_spot=lambda _t, _p: SpotJoin({_BAR_TS: _SPOT}, "INDEX"),
+                write_bars=lambda _t, _b: 0,
+            )
+        assert report.enriched == 1
+        assert not [e for e in logs if str(e["event"]).startswith("spot_drift.")]
+
+    def test_empty_targets_never_build_the_map(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install_raising_spy(monkeypatch)
+        with capture_logs() as logs:
+            report = enrich_greeks_for_targets(targets=[], lake_root=tmp_path, rate_source=_RATE)
+        assert report.targets == 0
+        assert not [e for e in logs if str(e["event"]).startswith("spot_drift.")]
+
+    def test_default_spot_seam_reaches_the_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Positive control: with the DEFAULT spot reader (``read_spot=None``)
+        and non-empty targets the build is the first thing the pass does —
+        the spy fires, proving it intercepts the live call site (so the two
+        never-builds tests above genuinely pin the gate, not a dead spy)."""
+        self._install_raising_spy(monkeypatch)
+        with pytest.raises(AssertionError, match="must not run here"):
+            enrich_greeks_for_targets(
+                targets=[self._target()],
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row()],
+                write_bars=lambda _t, _b: 0,
+            )
+
+
 class TestFormulaV2Restamp:
     """FIX-3: the designed staleness lever — v1 stamps recompute under v2.
 

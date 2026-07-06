@@ -249,8 +249,12 @@ class TestStockDriftFold:
 
         assert stock_drift_fold(raw) == normalize_underlying_symbol(raw)
 
-    @given(st.text(alphabet="ABZaz&-% 0123456789\t", max_size=24))
+    @given(st.text(max_size=24))
     def test_mirror_pins_universe_normalizer_property(self, raw: str) -> None:
+        """UNRESTRICTED alphabet (fix-round NIT): both folds are total on
+        ``str``, so the pin costs nothing to make total — a one-sided future
+        edit on ANY character class (``_``, ``.``, unicode case folds) now
+        breaks the mirror instead of hiding outside a curated alphabet."""
         from brutex.universe import normalize_underlying_symbol
 
         assert stock_drift_fold(raw) == normalize_underlying_symbol(raw)

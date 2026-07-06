@@ -27,7 +27,10 @@ fragment carries data.
 Fail-soft by design: the loader returns ``None`` on a missing / unreadable
 master (the ladder stays byte-identical → the honest ``NO_SPOT``), a
 per-``(exchange, segment)`` scan error skips THAT subtree (partial evidence,
-never a raise), and a raw ``MemoryError`` ALWAYS re-raises (the honest-OOM
+never a raise — STAT probes included: pathlib's ``is_dir``/``exists`` swallow
+only ``ENOENT``-class errnos and RE-RAISE ``EACCES``/``EPERM``/``EIO``, so
+every probe goes through :func:`_safe_is_dir` / the loader's guarded
+``exists``), and a raw ``MemoryError`` ALWAYS re-raises (the honest-OOM
 convention). No blanket ``except Exception`` — a genuinely unexpected defect
 propagates to the #1188 ``fno.greeks_enrich.error`` fence (loud ``ok=False``,
 the pull still never fails).
@@ -66,6 +69,32 @@ _MASTER_DB_NAME: Final[str] = "instruments.duckdb"
 _AMBIGUITY_LOG_CAP: Final[int] = 20
 
 
+def _safe_is_dir(path: Path) -> bool:
+    """``Path.is_dir`` under the scan's fail-soft contract.
+
+    pathlib's ``is_dir`` swallows only ``ENOENT``/``ENOTDIR``/``EBADF``/
+    ``ELOOP`` and RE-RAISES every other stat ``OSError`` (``EACCES``/
+    ``EPERM``/``EIO`` — in-envelope on the §8 external SSD), so an unguarded
+    probe would abort the WHOLE scan and, through it, the entire Greeks pass
+    (the fix-round MAJOR). Any such error degrades to ONE
+    ``spot_drift.scan_error`` WARNING + ``False`` — the subtree is skipped,
+    PARTIAL evidence, never a raise. ``MemoryError`` re-raises raw (the
+    honest-OOM convention).
+    """
+    try:
+        return path.is_dir()
+    except MemoryError:
+        raise
+    except OSError as exc:
+        _LOG.warning(
+            "spot_drift.scan_error",
+            path=str(path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+
+
 def scan_spot_symbol_dirs(lake_root: Path) -> dict[str, tuple[str, ...]]:
     """Enumerate the on-disk spot symbol dirs — the EVIDENCE side of the map.
 
@@ -87,15 +116,18 @@ def scan_spot_symbol_dirs(lake_root: Path) -> dict[str, tuple[str, ...]]:
     imports ``brutex/dashboard``) and NOT ``lake_invariants._bar_files``
     (private; O(files) — this needs O(dirs)).
 
-    A per-``(exchange, segment)`` ``OSError`` logs ONE
-    ``spot_drift.scan_error`` WARNING and skips THAT subtree — PARTIAL
-    evidence, never a raise (safe: multi-dir entries are offered not refused,
-    so a partial scan can only shorten an offered tuple; the probe still
-    decides). A missing ``bars/`` (a fresh lake) is an empty scan, not an
-    error. ``MemoryError`` re-raises raw.
+    A per-``(exchange, segment)`` ``OSError`` — from the ``iterdir`` OR its
+    ``is_dir`` stat probe (:func:`_safe_is_dir`; pathlib re-raises
+    non-``ENOENT``-class stat errnos) — logs ONE ``spot_drift.scan_error``
+    WARNING and skips THAT subtree — PARTIAL evidence, never a raise (safe:
+    multi-dir entries are offered not refused, so a partial scan can only
+    shorten an offered tuple; the probe still decides). A missing ``bars/``
+    (a fresh lake) is an empty scan, not an error; an UNREADABLE ``bars/``
+    (stat or ``iterdir`` error) is an empty scan with one WARN.
+    ``MemoryError`` re-raises raw.
     """
     bars = lake_root / "bars"
-    if not bars.is_dir():
+    if not _safe_is_dir(bars):
         return {}
     try:
         exchange_dirs = sorted(child for child in bars.iterdir() if child.is_dir())
@@ -114,7 +146,7 @@ def scan_spot_symbol_dirs(lake_root: Path) -> dict[str, tuple[str, ...]]:
         names: set[str] = set()
         for segment in SPOT_PROBE_SEGMENTS:
             seg_dir = exchange_dir / segment
-            if not seg_dir.is_dir():
+            if not _safe_is_dir(seg_dir):
                 continue
             try:
                 names.update(child.name for child in seg_dir.iterdir() if child.is_dir())
@@ -136,14 +168,19 @@ def _prefix_stripped_fold(dir_name: str, exchange: str) -> str | None:
     """DISK-SIDE ONLY legacy-``"<EXCH>-"``-prefix strip, then the fold.
 
     Case-robust: checked on the stripped-and-uppered form, so a dir
-    ``'nse-bajaj-auto'`` is still recognised. NEVER applied to master symbols
-    or lookup-time underlyings — so a pathological master symbol literally
+    ``'nse-bajaj-auto'`` is still recognised. The surrounding-whitespace strip
+    is ASCII-SPACE-ONLY (``strip(" ")``) — EXACTLY the whitespace class
+    :func:`~brutex.data.lake_keys.stock_drift_fold` folds — so a tab-/
+    newline-wrapped dir stays unverified on this arm too (the fold's
+    "a tab-bearing dir is junk → unverified" pledge holds on EVERY arm; the
+    fix-round docstring-honesty NIT). NEVER applied to master symbols or
+    lookup-time underlyings — so a pathological master symbol literally
     starting ``"NSE-"`` can never be falsely bridged (raw-fold precedence in
     the builder makes the raw interpretation FINAL first). A blank *exchange*
     yields no prefix → ``None``.
     """
-    probe = dir_name.strip().upper()
-    prefix = f"{exchange.strip().upper()}-"
+    probe = dir_name.strip(" ").upper()
+    prefix = f"{exchange.strip(' ').upper()}-"
     if len(prefix) > 1 and probe.startswith(prefix):
         return stock_drift_fold(probe[len(prefix) :])
     return None
@@ -297,13 +334,27 @@ def load_stock_drift_map(lake_root: Path) -> dict[tuple[str, str], tuple[str, ..
     Fail-soft — never fails the pass: an absent master file returns ``None``
     (``spot_drift.no_master`` DEBUG — a CLI-built lake, tests, the golden
     fixture); a CONFIRMED store-read error class (:func:`_master_read_errors`)
-    returns ``None`` (``spot_drift.master_error`` WARNING). ``MemoryError``
+    returns ``None`` (``spot_drift.master_error`` WARNING); a stat ``OSError``
+    at the ``exists`` probe itself (pathlib re-raises non-``ENOENT``-class
+    errnos — ``EACCES``/``EIO`` on the §8 external SSD) degrades the SAME way
+    (``master_error`` WARNING → ``None``, the fix-round MAJOR). ``MemoryError``
     ALWAYS re-raises raw (the honest-OOM convention of ``_run_unit``); NO
     blanket ``except Exception`` — a genuinely unexpected defect propagates to
     the #1188 ``fno.greeks_enrich.error`` fence.
     """
     db_path = lake_root / _MASTER_DB_NAME
-    if not db_path.exists():
+    try:
+        master_present = db_path.exists()
+    except MemoryError:
+        raise
+    except OSError as exc:
+        _LOG.warning(
+            "spot_drift.master_error",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
+    if not master_present:
         _LOG.debug("spot_drift.no_master", lake_root=str(lake_root))
         return None
     masters_by_exchange: dict[str, set[str]] = {}
