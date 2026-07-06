@@ -42,7 +42,10 @@ resolved once at launch → clean 400; pure `step_settle_verdict` +
 "reorders, never re-fetches". HONEST: an ORDERING change, NOT a speedup —
 ~seconds added per pull (bounded analysis, not measured); in async-pipeline
 mode a step's k→k+1 settle is PRODUCER-side (fetch-issue order strict; tail
-writes drain terminally — observed + counted as `pull.step.late_write`)
+writes drain terminally but are INVISIBLE to the producer-fed
+`StepOrderMonitor` — `pull.step.late_write` observes only producer-side
+writes and stays 0 on a healthy async pull; submit-time step stamping
+through `FetchPipeline` is a named follow-up, NOT claimed)
 while the POST-step barrier is fully drain-guarded; the mass-empty
 breaker's trip evidence is now per-STEP-GROUP pass on BOTH spines — F&O
 per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a
@@ -378,7 +381,9 @@ hostile-review pass._
   events + observe-only `StepOrderMonitor` (test oracle `raise_on_violation=True`); the 2026-07-05 log-shaped
   ordering regression + fetch-count parity bench pin "reorders, never re-fetches". HONEST: ~seconds added per pull,
   NOT a speedup (bounded analysis, not measured); async-mode step settles are PRODUCER-side (tail writes drain
-  terminally — monitored `pull.step.late_write`; the settle events' `bars`/`clean` are producer-side counts, deferred
+  terminally but are INVISIBLE to the producer-fed `StepOrderMonitor` — `pull.step.late_write` observes only
+  producer-side writes, stays 0 on a healthy async pull; submit-time step stamping through `FetchPipeline` is a
+  named follow-up, NOT claimed; the settle events' `bars`/`clean` are producer-side counts, deferred
   0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain; the
   SPOT settle event's sync counts SUM every until-clean pass and its `clean` folds the group's terminal quarantines —
   round-2 review, F&O-twin parity); the mass-empty breaker's trip evidence is per-STEP-GROUP pass on BOTH spines —
