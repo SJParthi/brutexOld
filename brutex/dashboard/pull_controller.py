@@ -2313,6 +2313,10 @@ def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 10
     pull. Marked ``no cover`` per the raw-lake-I/O-glue convention; the core
     is 100%-unit-tested and the glue contract is pinned by
     ``tests/integration/test_lake_heal_pull_seam.py``.
+
+    Also bound at the CLI ``brutex fetch`` post-drain seam (``brutex/cli.py``
+    ``cmd_fetch`` finally — DEC-CLI-LAKE-HEAL-L2-001); keep the signature
+    stable for both call sites.
     """
     from brutex.data.errors import LakeWriteHalt
     from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog

@@ -425,7 +425,7 @@ hostile-review pass._
   O(files) NOT O(1) (bench-pinned); options tree = census + `(side,ts)` dup heal only
   (foreign/overlap heal a named follow-up); STRICTLY row-removing/row-reassigning, never
   value-editing; the CLI `brutex fetch` path has no L2 seam (covered by L1/L3/census, a named
-  follow-up). All new modules + every touched module 100% line+branch; the #1067 pin suites
+  follow-up) [CLOSED — DEC-CLI-LAKE-HEAL-L2-001]. All new modules + every touched module 100% line+branch; the #1067 pin suites
   pass unmodified. ENGINE UNCHANGED, F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
   Prior merged: **DEC-PIPELINE-AUTOPREBUILD-001 + DEC-FNO-EXPIRY-SCOPE-001,
   MIGRATION.md #1145–#1146** — the pipeline pack. **#1145:** ONE automatic timeframe PREBUILD phase — the 19 derived
