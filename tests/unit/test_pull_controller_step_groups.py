@@ -243,6 +243,42 @@ class TestSpotStepOrdering:
             assert isinstance(event["bars"], int) and event["bars"] > 0
             assert isinstance(event["windows"], int) and event["windows"] > 0
             assert event["still_failed"] == 0
+            # Synchronous path: the counts are REAL, and the event says so.
+            assert event["bars_deferred"] is False
+
+    def test_settled_event_discloses_deferred_bars_in_async_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DEFAULT async-pipeline settle event carries ``bars_deferred=True``.
+
+        Review fix (Golden Rule #1): in async-pipeline mode (the production
+        DEFAULT) each deferred per-pair report reads ``bars_appended == 0``
+        until the post-drain reconcile, so the step-boundary ``bars`` count is
+        systematically 0 on a real pull — the event now DISCLOSES that
+        envelope on itself instead of presenting a fabricated-0 as a settled
+        total.
+        """
+        monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+        with capture_logs() as logs:
+            pull_all_spot(
+                [_index("NIFTY"), _stock("ADANIENT")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_NOW,
+                from_date=_FROM,
+                to_date=_TO,
+                adapter_factory=lambda root, _insts: (
+                    SyntheticSpotAdapter(),
+                    _real_sink(root),
+                ),
+            )
+        settled = _events(logs, "pull.step.settled")
+        assert settled, "no pull.step.settled events captured"
+        for event in settled:
+            assert event["bars_deferred"] is True
+            # The producer-side count is honest but DEFERRED (reads 0 here; the
+            # real totals land in the post-drain reconcile / the final report).
+            assert isinstance(event["bars"], int)
 
 
 class TestHomogeneousGroup:

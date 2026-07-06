@@ -2153,6 +2153,17 @@ def pull_all_spot(
                 _run_phase(phase_intervals, group, phase_windows, step=step)
                 group_report = phase_reports[-1]
                 group_failed = final_still_failed - before_failed
+                # HONESTY (review fix, Golden Rule #1): the counts below are
+                # PRODUCER-side. In the DEFAULT async-pipeline mode every
+                # deferred per-pair report carries ``bars_appended == 0`` until
+                # the post-drain ``_reconcile_pairs_with_pipeline`` restores the
+                # real durable counts — so ``bars`` systematically reads 0 at
+                # this step boundary on a production pull, and ``clean`` /
+                # ``still_failed`` cannot see still-queued consumer tails. The
+                # explicit ``bars_deferred`` flag discloses that envelope on
+                # the event itself (never a fabricated number presented as a
+                # settled total); the SYNCHRONOUS path (pipeline off / dry-run)
+                # logs real counts with ``bars_deferred=False``.
                 _LOG.info(
                     "pull.step.settled",
                     step=step.label,
@@ -2164,6 +2175,7 @@ def pull_all_spot(
                         and final_mass_empty_cause is None
                     ),
                     bars=group_report.bars_appended,
+                    bars_deferred=_fetch_pipeline is not None,
                     windows=group_report.windows,
                     still_failed=group_failed,
                     skipped=group_report.skipped_windows,

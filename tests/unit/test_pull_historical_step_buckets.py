@@ -268,6 +268,60 @@ class TestStepBucketOrder:
         assert report.contracts_completed == 4
         assert report.class_unresolved == 0
 
+    def test_settled_event_discloses_deferred_bars_in_async_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DEFAULT async-pipeline settle events carry ``bars_deferred=True``.
+
+        Review fix (Golden Rule #1): in async-pipeline mode (the production
+        DEFAULT) each pair's durable write runs on the background consumer, so
+        the step-boundary ``bars`` sum reads deferred 0s until the post-drain
+        reconcile — the event now DISCLOSES that envelope on itself.
+        """
+        monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)  # default ON
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        with capture_logs() as logs:
+            pull_contract_candles(
+                registry.list_contracts(),
+                lake_root=tmp_path / "lake",
+                dry_run=False,
+                intervals=("1minute",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(_FakeSDK(), _RecordingSink()),
+                now=_NOW,
+                underlying_kinds=_KINDS,
+            )
+        settled = _events(logs, "pull.step.settled")
+        assert len(settled) == 4
+        assert all(e["bars_deferred"] is True for e in settled)
+
+    def test_settled_event_sync_path_carries_real_bars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The synchronous path's settle events carry REAL counts + ``bars_deferred=False``."""
+        monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        with capture_logs() as logs:
+            pull_contract_candles(
+                registry.list_contracts(),
+                lake_root=tmp_path / "lake",
+                dry_run=False,
+                intervals=("1minute",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(_FakeSDK(), _RecordingSink()),
+                now=_NOW,
+                underlying_kinds=_KINDS,
+            )
+        settled = _events(logs, "pull.step.settled")
+        assert len(settled) == 4
+        for event in settled:
+            assert event["bars_deferred"] is False
+            assert isinstance(event["bars"], int) and event["bars"] > 0
+
     def test_bucket_contract_sets_equal_per_market_sets(self, tmp_path: Path) -> None:
         """The 4 buckets REFINE the market split — per-market unions are unchanged."""
         registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
@@ -563,6 +617,38 @@ class TestStepMajorUntilClean:
         started = _events(logs, "pull.step.started")
         assert [e["step"] for e in started] == ["indices-futures"]
 
+    def test_auth_halt_rounds_completed_is_halting_buckets_own_count(self, tmp_path: Path) -> None:
+        """``rounds_completed`` on the auth-halt event is the HALTING bucket's rounds.
+
+        Review fix (round 1 NIT): the flat ``passes`` list is phase-wide across
+        ALL buckets under the step-major split, so an auth death in step 4 after
+        step 3 completed a round logged ``rounds_completed=1`` — the phase-wide
+        pass count, neither the halting bucket's (0) nor any until-clean round
+        semantics. The event now reports the halting bucket's OWN completed
+        rounds (the aborted pass is not counted — the pre-split convention).
+        """
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        sdk = _FakeSDK(raise_for={_ADANI_FUT: (GrowwAPIAuthenticationException("dead"), 99)})
+        with capture_logs() as logs:
+            report = pull_contract_candles(
+                registry.list_contracts(),
+                lake_root=tmp_path / "lake",
+                dry_run=False,
+                intervals=("1minute",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, _RecordingSink()),
+                now=_NOW,
+                underlying_kinds=_KINDS,
+            )
+        assert report.auth_aborted is True
+        halts = _events(logs, "historical.pull.auth_halt")
+        assert len(halts) == 1
+        # Step 3 (indices-futures) completed 1 round before step 4 died — the
+        # halting STOCKS-FUTURES bucket itself completed ZERO rounds.
+        assert halts[0]["rounds_completed"] == 0
+
     def test_mass_empty_halts_phase_and_announces_remaining_steps(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -606,6 +692,18 @@ class TestStepMajorUntilClean:
         halted = _events(logs, "pull.step.halted")
         assert [e["step"] for e in halted] == ["indices-options", "stocks-options"]
         assert all(e["reason"] == "mass_empty_halt" for e in halted)
+        # Review fix (round 1 NIT): the halt event names the halting STEP and
+        # reports THAT bucket's own completed rounds (0 — the trip aborted its
+        # first pass mid-flight) plus the honest per-step breakdown, never the
+        # phase-wide flat pass count.
+        halt_events = _events(logs, "historical.pull.mass_empty_halt")
+        assert len(halt_events) == 1
+        assert halt_events[0]["step"] == "stocks-futures"
+        assert halt_events[0]["rounds_completed"] == 0
+        assert halt_events[0]["rounds_by_step"] == {"indices-futures": 1, "stocks-futures": 0}
+        # Synchronous tails (pipeline off): the settle counts are real, and say so.
+        settled = _events(logs, "pull.step.settled")
+        assert settled and all(e["bars_deferred"] is False for e in settled)
         # Committed work kept: step 3's settled window survives in the ledger.
         ledger_rows = load_window_ledger(tmp_path / "lake").records()
         assert any(r.security_id == _NIFTY_FUT for r in ledger_rows)

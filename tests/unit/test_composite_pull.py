@@ -837,11 +837,14 @@ def test_composite_note_has_no_greeks_clause_on_a_clean_pass(
 def test_prior_steps_threaded_to_candle_phase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``prior_steps`` reaches ``pull_contract_candles`` verbatim (DEC-PULL-SIX-STEP-ORDER-001).
+    """``prior_steps`` reaches ``pull_contract_candles`` (DEC-PULL-SIX-STEP-ORDER-001).
 
-    A capture spy on the candle spine proves the composite forwards the
-    sequencer's :class:`PriorStepsVerdict` unchanged — and that the DEFAULT is
-    ``None`` (every non-pipeline caller keeps today's behavior byte-identical).
+    A capture spy on the candle spine proves the composite forwards a verdict
+    EQUAL to the sequencer's when its own phase (a) enumerates cleanly (the
+    inner-metadata fold is an AND with ``True`` — see
+    ``test_prior_steps_folds_inner_metadata_failure`` for the unclean arm) —
+    and that the DEFAULT is ``None`` (every non-pipeline caller keeps today's
+    behavior byte-identical).
     """
     captured: list[dict[str, object]] = []
 
@@ -889,3 +892,83 @@ def test_prior_steps_threaded_to_candle_phase(
         coverage=_CoverageSink(),
     )
     assert captured[1]["prior_steps"] is None
+
+
+def test_prior_steps_folds_inner_metadata_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phase-(a) enumeration failure folds into the forwarded ``metadata_clean``.
+
+    Review fix (DEC-PULL-SIX-STEP-ORDER-001 round 1): the sequencer builds
+    :class:`PriorStepsVerdict` from the phase-2 metadata gate BEFORE the
+    composite re-enumerates; a phase-(a) expiry failure here (a transient
+    ``get_expiries`` raise on an open cell) previously left the Greeks seam
+    reading ``metadata_clean=True`` — the enrichment RAN while the sequencer's
+    post-step barrier withheld the prebuild + movers on the SAME signal. The
+    composite now ANDs its own inner re-run gate into the verdict, so all
+    three post-steps agree.
+    """
+
+    class _RaisingExpiriesSDK(_FakeSDK):
+        def get_expiries(self, **kw: object) -> Mapping[str, object]:
+            self.calls.append("get_expiries")
+            raise RuntimeError("transient enumeration failure")
+
+    captured: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> object:
+        captured.append(dict(kwargs))
+        from brutex.dashboard.historical_pull import HistoricalPullReport
+
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1day",),
+            contracts_selected=0,
+            contracts_completed=0,
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="spy",
+            phase1_clean=True,
+            phase1_complete=(),
+            start_dates={},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    monkeypatch.setattr(cp, "pull_contract_candles", _spy)
+    registry = _registry(tmp_path)
+    # Pre-seed the registry so phase (b) still has cached contracts to select
+    # (the exact production shape: an earlier pull cached the chain; today's
+    # phase-(a) re-run fails transiently but the candle phase proceeds).
+    registry.upsert_contract(
+        "NSE",
+        "NIFTY",
+        date(2024, 1, 25),
+        "NSE-NIFTY-25Jan24-21000-CE",
+        side="CE",
+        strike=21000.0,
+        run_id="r",
+        fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    verdict = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=True)
+    report = _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_RaisingExpiriesSDK(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+        prior_steps=verdict,
+    )
+    assert report.metadata is not None
+    assert report.metadata.expiry_failures > 0
+    assert len(captured) == 1
+    forwarded = captured[0]["prior_steps"]
+    assert isinstance(forwarded, PriorStepsVerdict)
+    # The fold flips ONLY the metadata arm; spot + strict thread through intact.
+    assert forwarded.metadata_clean is False
+    assert forwarded.spot_clean is True
+    assert forwarded.strict is True
+    assert forwarded.prior_clean is False

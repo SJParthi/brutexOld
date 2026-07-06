@@ -70,6 +70,11 @@ from brutex.dashboard.completeness import (
 )
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
+    # The ONE index/stock classification-map builder the six-step F&O order keys on
+    # (DEC-PULL-SIX-STEP-ORDER-001; CLAUDE.md §11 COMMON — the friend import is the
+    # established convention, pyproject reportPrivateUsage="warning" + per-site ignore
+    # at deliberate cross-module reuse sites — DEC-P0-017).
+    _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
 from brutex.dashboard.coverage_view import (
@@ -2914,6 +2919,18 @@ def build_app(
                     "(the ⛓ button), then select a contract / chain / underlying / all"
                 ),
             )
+        # Six-step order on the DIRECT-selection grammars too (DEC-PULL-SIX-STEP-ORDER-001
+        # review fix): this route's ?contract/?contracts/?underlying/?kind/?all paths ran
+        # the legacy 2-bucket FUT-then-OPT order because no ``underlying_kinds`` was
+        # threaded — reproducing the motivating 2026-07-05 inversion (stock options
+        # before index options) on a real vendor pull. Build the classification map over
+        # EVERY admitted underlying (both kinds) with the SAME resolved-key builder the
+        # composite uses; a selection whose underlying is somehow absent orders
+        # stock-side (WARNed + counted inside the spine, never dropped). Built at route
+        # time (request thread), captured by the job closure below.
+        underlying_kinds = _underlying_kind_map(
+            _select_bulk_targets("index") + _select_bulk_targets("stock")
+        )
         detail = f"{len(selected)} contracts historical"
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
@@ -2963,6 +2980,9 @@ def build_app(
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
+                    # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection
+                    # grammars run the SAME strict steps 3-6 order as the composite.
+                    underlying_kinds=underlying_kinds,
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is

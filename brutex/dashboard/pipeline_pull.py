@@ -130,10 +130,17 @@ def spot_phase_ok(report: BulkSpotReport) -> bool:
     The spot pull may proceed to the metadata phase only when it neither (a) died
     on a dead Groww token mid-pull (``auth_aborted`` — the loud ``auth_expired``
     verdict), (b) paused on the daily vendor quota (``quota_exhausted`` — resume
-    after the IST-midnight reset), nor (c) left any window still failing after the
-    in-run retry budget (``still_failed_windows``). A dry-run with zero bars is NOT
-    a failure (no creds is reported separately); the gate detects FAILURE signals,
-    not absence of work.
+    after the IST-midnight reset), (c) left any window still failing after the
+    in-run retry budget (``still_failed_windows``), nor (d) HALTED on the
+    mass-empty circuit breaker (``mass_empty_cause`` — the needs-operator
+    ``mass_empty_halt`` verdict; DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). The (d)
+    arm is a DEC-PULL-SIX-STEP-ORDER-001 review fix: the aborted pass never
+    appends, so a mass-empty halt left ``still_failed_windows == 0`` and this
+    gate read a HALTED spot step as clean — the chain proceeded to metadata +
+    F&O vendor calls and, under ``BRUTEX_PIPELINE_STRICT_GATE=1``, the strict
+    all-or-nothing barrier fired the post-steps after a pull-wide halt. A
+    dry-run with zero bars is NOT a failure (no creds is reported separately);
+    the gate detects FAILURE signals, not absence of work.
 
     Parameters
     ----------
@@ -147,7 +154,10 @@ def spot_phase_ok(report: BulkSpotReport) -> bool:
         ``True`` when the phase is clean enough to proceed to metadata.
     """
     return (
-        not report.auth_aborted and not report.quota_exhausted and report.still_failed_windows == 0
+        not report.auth_aborted
+        and not report.quota_exhausted
+        and report.still_failed_windows == 0
+        and report.mass_empty_cause is None
     )
 
 
@@ -192,8 +202,11 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
       when there was no tradable contract to pull — a dry-run / all-reference-only
       selection — a zero-call no-op, NOT a failure) is clean only when it neither
       died on auth (``auth_aborted``), left any window failing
-      (``still_failed_windows``), nor quarantined any contract pair on a terminal
-      error (``failed_pairs``).
+      (``still_failed_windows``), quarantined any contract pair on a terminal
+      error (``failed_pairs``), nor HALTED on the F&O mass-empty circuit breaker
+      (``mass_empty_cause`` — the DEC-PULL-SIX-STEP-ORDER-001 review fix, the
+      symmetric twin of the :func:`spot_phase_ok` (d) arm: a halted phase must
+      never read settled to the post-step barrier).
 
     Parameters
     ----------
@@ -212,7 +225,12 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
     hist = report.historical
     if hist is None:
         return True
-    return not hist.auth_aborted and hist.still_failed_windows == 0 and hist.failed_pairs == 0
+    return (
+        not hist.auth_aborted
+        and hist.still_failed_windows == 0
+        and hist.failed_pairs == 0
+        and hist.mass_empty_cause is None
+    )
 
 
 #: The strict post-step barrier's opt-in env knob (DEC-PULL-SIX-STEP-ORDER-001).

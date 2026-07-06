@@ -1142,8 +1142,9 @@ def _run_phase(
 
     passes: list[_PassResult] = []
     # Per-BUCKET pass lists (DEC-PULL-SIX-STEP-ORDER-001): each step's own rounds, so the
-    # fold below can read a bucket's FIRST-round skips + LAST-round residual while the
-    # flat ``passes`` list keeps the whole-phase sums + the rounds_completed telemetry.
+    # fold below can read a bucket's FIRST-round skips + LAST-round residual — and the
+    # halt logs can report the halting BUCKET's own ``rounds_completed`` (review fix) —
+    # while the flat ``passes`` list keeps the whole-phase sums.
     passes_by_bucket: dict[_BucketKey, list[_PassResult]] = {}
     # Merged per-pair reports + quarantined symbols across ALL rounds/buckets (last-round-wins),
     # kept ONLY for the async post-drain reconcile (DEC-FNO-ASYNC-PIPELINE-WIRE-001). The
@@ -1219,11 +1220,18 @@ def _run_phase(
                 raise
             emit_pull_halt_alert(exc)
             pass_auth = True
+            # ``rounds_completed`` is the HALTING BUCKET's own completed
+            # until-clean rounds (review fix): the flat ``passes`` list is now
+            # phase-wide across ALL buckets under the step-major split, so
+            # ``len(passes)`` was neither this bucket's nor the phase's round
+            # count (an auth halt in bucket 3 after buckets 1+2 ran 2+1 rounds
+            # read a meaningless 3). The current, aborted pass is not counted
+            # (it never appended) — same convention as before the split.
             _LOG.warning(
                 "historical.pull.auth_halt",
                 market=market,
                 error_type=type(exc).__name__,
-                rounds_completed=len(passes),
+                rounds_completed=len(passes_by_bucket.get(bucket_key, ())),
                 note=(
                     "terminal Groww auth failure — dead credential / re-mint budget "
                     "exhausted; committed work kept; re-pull after re-auth"
@@ -1331,6 +1339,15 @@ def _run_phase(
             last_pass = bucket_passes[-1] if bucket_passes else None
             step_failed = last_pass.still_failed_windows if last_pass is not None else 0
             step_auth = last_pass is not None and last_pass.auth_aborted
+            # HONESTY (review fix, Golden Rule #1): the counts below are
+            # PRODUCER-side. In the DEFAULT async-pipeline mode each pair's
+            # durable write runs on the background consumer, so ``bars`` sums
+            # deferred 0s until the post-drain ``_reconcile_phase_with_pipeline``
+            # (which runs AFTER this step loop) restores the real counts — and
+            # ``clean`` / ``still_failed`` cannot see tail transients still
+            # queued on the pipeline. ``bars_deferred`` discloses that envelope
+            # on the event itself; the SYNCHRONOUS path (pipeline off /
+            # dry-run) logs real counts with ``bars_deferred=False``.
             _LOG.info(
                 "pull.step.settled",
                 step=step.label,
@@ -1342,6 +1359,7 @@ def _run_phase(
                     and step_failed == 0
                 ),
                 bars=sum(p.bars for p in bucket_passes),
+                bars_deferred=fetch_pipeline is not None,
                 windows=sum(p.windows for p in bucket_passes),
                 still_failed=step_failed,
                 skipped=bucket_passes[0].skipped_windows if bucket_passes else 0,
@@ -1364,10 +1382,23 @@ def _run_phase(
         # construction).
         emit_pull_halt_alert(exc)
         mass_empty_cause = str(exc)
+        # The trip fired inside the bucket ENTERED last (``buckets_started`` was
+        # incremented at loop top, so index ``buckets_started - 1`` — the loop
+        # body ran at least once for the exception to raise). ``rounds_completed``
+        # is THAT bucket's own completed rounds (review fix — the flat ``passes``
+        # list is phase-wide under the step-major split, so ``len(passes)`` was
+        # neither any bucket's nor the phase's round count); ``rounds_by_step``
+        # carries the honest per-step breakdown.
+        halted_key = ordered_buckets[buckets_started - 1][0]
         _LOG.warning(
             "historical.pull.mass_empty_halt",
             error=str(exc),
-            rounds_completed=len(passes),
+            step=_STEP_FOR_BUCKET[halted_key].label,
+            rounds_completed=len(passes_by_bucket.get(halted_key, ())),
+            rounds_by_step={
+                _STEP_FOR_BUCKET[key].label: len(passes_by_bucket.get(key, ()))
+                for key, _bucket in ordered_buckets[:buckets_started]
+            },
             note=(
                 "mass clean-empty responses — F&O pull halted before settling; "
                 "committed work kept; un-settled windows stay retryable"
@@ -1926,8 +1957,12 @@ def pull_contract_candles(
         steps 3-6 ordering (INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS
         → STOCKS-OPTIONS); an unresolved underlying classifies STOCK-side
         (fail-closed for ORDER, never for DATA — still pulled, WARNed +
-        counted). ``None`` (a direct/legacy caller) degrades byte-identically
-        to the legacy 2-bucket FUT-then-OPT order.
+        counted). ``None`` (a legacy caller — the CLI, tests) degrades
+        byte-identically to the legacy 2-bucket FUT-then-OPT order; BOTH
+        production dashboard routes now thread the map (the composite via
+        ``_underlying_kind_map(tradable)``, the direct-selection
+        ``/pull-historical`` grammars via the whole-universe map — the review
+        fix closing the route gap that reproduced the 2026-07-05 inversion).
     step_monitor
         Optional :class:`~brutex.adapters.ingest_common.StepOrderMonitor`
         (DEC-PULL-SIX-STEP-ORDER-001). ``None`` (every production caller)

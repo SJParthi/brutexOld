@@ -78,6 +78,7 @@ def _spot(
     quota_exhausted: bool = False,
     still_failed_windows: int = 0,
     completed: int = 3,
+    mass_empty_cause: str | None = None,
 ) -> BulkSpotReport:
     """Build a :class:`BulkSpotReport` with one symbol carrying *completed* pairs."""
     return BulkSpotReport(
@@ -89,6 +90,7 @@ def _spot(
         auth_cause="token dead" if auth_aborted else None,
         still_failed_windows=still_failed_windows,
         quota_exhausted=quota_exhausted,
+        mass_empty_cause=mass_empty_cause,
     )
 
 
@@ -120,6 +122,7 @@ def _historical_inner(
     start_dates: dict[str, str] | None = None,
     greeks_enrich_ok: bool | None = None,
     greeks_enrich_error: str | None = None,
+    mass_empty_cause: str | None = None,
 ) -> HistoricalPullReport:
     """Build the inner :class:`HistoricalPullReport` (the candle sub-report)."""
     return HistoricalPullReport(
@@ -142,6 +145,7 @@ def _historical_inner(
         contracts_out_of_scope=contracts_out_of_scope,
         greeks_enrich_ok=greeks_enrich_ok,
         greeks_enrich_error=greeks_enrich_error,
+        mass_empty_cause=mass_empty_cause,
     )
 
 
@@ -205,6 +209,24 @@ def test_spot_phase_not_ok_on_still_failed_windows() -> None:
     assert spot_phase_ok(_spot(still_failed_windows=2)) is False
 
 
+def test_spot_phase_not_ok_on_mass_empty_halt() -> None:
+    """A spot mass-empty circuit-breaker halt is a BLOCKING gate failure.
+
+    Review fix (DEC-PULL-SIX-STEP-ORDER-001 round 1 MAJOR): the aborted pass
+    never appends, so a `MassEmptySettleHalt` left ``still_failed_windows == 0``
+    and this gate read a HALTED spot step as clean — the chain proceeded to
+    metadata + F&O vendor calls and the strict all-or-nothing barrier fired the
+    post-steps after a needs-operator pull-wide halt. The exact live-reproduced
+    shape: an otherwise-zero report whose only failure signal is the cause.
+    """
+    report = _spot(
+        completed=0,
+        mass_empty_cause="mass clean-empty responses — pull halted before settling",
+    )
+    assert report.verdict.kind == "mass_empty_halt"
+    assert spot_phase_ok(report) is False
+
+
 # --------------------------------------------------------------------------- #
 # metadata_phase_ok
 # --------------------------------------------------------------------------- #
@@ -248,6 +270,23 @@ def test_historical_phase_not_ok_on_still_failed_windows() -> None:
 
 def test_historical_phase_not_ok_on_failed_pairs() -> None:
     report = _composite(historical=_historical_inner(failed_pairs=1))
+    assert historical_phase_ok(report) is False
+
+
+def test_historical_phase_not_ok_on_mass_empty_halt() -> None:
+    """The F&O mass-empty halt is a BLOCKING gate failure (spot-arm symmetry).
+
+    Review fix: an F&O ``MassEmptySettleHalt`` with every OTHER signal clean
+    (no failed pairs, no still-failing windows — the halt aborts before
+    settling) previously read clean here; only the ``start_dates`` −
+    ``phase1_complete`` quarantine arm accidentally rescued the gate. The gate
+    now reads the halt directly.
+    """
+    report = _composite(
+        historical=_historical_inner(
+            mass_empty_cause="mass clean-empty responses — F&O pull halted before settling",
+        )
+    )
     assert historical_phase_ok(report) is False
 
 
@@ -326,6 +365,31 @@ def test_pipeline_stops_after_spot_failure() -> None:
     assert meta.called is False
     assert hist.called is False
     assert "stopped after spot" in report.note
+
+
+def test_pipeline_stops_after_spot_mass_empty_halt() -> None:
+    """A spot mass-empty halt STOPS the chain like the sibling auth/quota halts.
+
+    Review fix (round 1 MAJOR): the sequencer previously proceeded to the
+    metadata + F&O vendor calls after a needs-operator spot halt (a suspected
+    vendor soft-throttle episode — the LAST thing to hammer with more calls),
+    and under ``BRUTEX_PIPELINE_STRICT_GATE=1`` the "all-or-nothing" barrier
+    fired the post-steps over it.
+    """
+    spot = _Spy(_spot(completed=0, mass_empty_cause="mass clean-empty responses"))
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+
+    report = run_full_pipeline(run_spot=spot, run_metadata=meta, run_historical=hist)
+
+    assert report.stopped_after == PHASE_SPOT
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    assert meta.called is False
+    assert hist.called is False
+    # The stop note names the loud needs-operator verdict, never a generic stop.
+    assert "mass_empty_halt" in report.note
 
 
 def test_pipeline_stops_after_metadata_failure() -> None:

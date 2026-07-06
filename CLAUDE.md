@@ -355,17 +355,25 @@ hostile-review pass._
   group-scopes each until-clean — indices exit `stop_clean`, no wasted round); (b) F&O — 4-key
   `(ledger-market, is_index)` bucket sort + STEP-major until-clean (`_contract_market` KEPT verbatim, ledger
   namespaces byte-unchanged — no re-pull; write/read-symmetric `primary_fno_underlying` classification, unresolved →
-  stock-side + WARN + `class_unresolved`; `underlying_kinds=None` degrades to the legacy 2-bucket order
-  byte-identically); metadata stays between steps 2 and 3 (not a numbered step). POST-steps (Greeks → prebuild →
+  stock-side + WARN + `class_unresolved`; `underlying_kinds=None` — the CLI, tests — degrades to the legacy 2-bucket
+  order byte-identically; REVIEW ROUND 1: the `/pull-historical` DIRECT-selection grammars now build + thread the
+  whole-universe kinds map, so BOTH production dashboard routes run the six-step order); metadata stays between
+  steps 2 and 3 (not a numbered step). POST-steps (Greeks → prebuild →
   movers) fire only after ALL applicable steps SETTLE (settle-based, never `bars > 0`): cleanset default
   byte-compatible with DEC-PREBUILD-CLEANSET-001; NEW opt-in `BRUTEX_PIPELINE_STRICT_GATE=1` literal all-or-nothing
   barrier (fail-loud parse once at launch → clean 400; pure `step_settle_verdict` + `PriorStepsVerdict` threaded
   sequencer → composite → `pull_contract_candles` so even the Greeks seam sees spot+metadata cleanliness — withheld
-  reads "withheld (strict gate) — re-attempted next pull", never FAILED). COMMON `pull.step.started/settled/halted`
+  reads "withheld (strict gate) — re-attempted next pull", never FAILED; REVIEW ROUND 1: `spot_phase_ok` /
+  `historical_phase_ok` fold the MASS-EMPTY halt causes — a spot mass-empty halt now stops the chain like auth/quota
+  and can never read settled to the barrier — and the composite folds its phase-(a) re-run gate into the forwarded
+  verdict so Greeks/prebuild/movers agree). COMMON `pull.step.started/settled/halted`
   events + observe-only `StepOrderMonitor` (test oracle `raise_on_violation=True`); the 2026-07-05 log-shaped
   ordering regression + fetch-count parity bench pin "reorders, never re-fetches". HONEST: ~seconds added per pull,
   NOT a speedup (bounded analysis, not measured); async-mode step settles are PRODUCER-side (tail writes drain
-  terminally — monitored `pull.step.late_write`); the CLI spot path is the NAMED follow-up
+  terminally — monitored `pull.step.late_write`; the settle events' `bars`/`clean` are producer-side counts, deferred
+  0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain); on a
+  mid-pull global stop a never-started later group's symbols read honest unknown-ZEROS in the per-symbol rollup (not
+  synthesized FAILED — the ledger stays the retry authority); the CLI spot path is the NAMED follow-up
   DEC-PULL-SIX-STEP-ORDER-CLI-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; every touched module 100% line+branch;
   ruff/ruff-format/`mypy --strict`/`pyright` clean).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory

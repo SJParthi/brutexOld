@@ -67,7 +67,7 @@ BRUTE-FORCE ENGINE is UNCHANGED (NIFTY/BANKNIFTY/SENSEX only) — this is the LA
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -348,11 +348,19 @@ def pull_historical_for_underlyings(
         denominator). ``None`` (defaults) is byte-identical.
     prior_steps
         Optional :class:`~brutex.dashboard.pipeline_pull.PriorStepsVerdict`
-        (DEC-PULL-SIX-STEP-ORDER-001) forwarded VERBATIM to phase (b)'s
-        Greeks seam — the sequencer's spot + metadata cleanliness + the
-        strict flag, so the strict barrier can withhold the enrichment on a
-        prior-step uncleanliness. ``None`` (the default — every non-pipeline
-        caller) keeps today's behavior byte-identical.
+        (DEC-PULL-SIX-STEP-ORDER-001) forwarded to phase (b)'s Greeks seam —
+        the sequencer's spot + metadata cleanliness + the strict flag, so the
+        strict barrier can withhold the enrichment on a prior-step
+        uncleanliness. The composite folds its OWN phase-(a) inner metadata
+        re-run gate into ``metadata_clean`` before forwarding (the review fix:
+        the sequencer computes the verdict from the phase-2 gate BEFORE this
+        composite re-enumerates, so a phase-(a) enumeration failure was
+        invisible to the Greeks seam while the sequencer's post-step barrier —
+        which reads the SAME failure via ``historical_phase_ok`` — withheld
+        the prebuild + movers; the fold keeps the strict barrier internally
+        consistent across all three post-steps). A clean phase (a) forwards a
+        verdict EQUAL to the sequencer's; ``None`` (the default — every
+        non-pipeline caller) keeps today's behavior byte-identical.
 
     Returns
     -------
@@ -435,6 +443,26 @@ def pull_historical_for_underlyings(
             note=note,
         )
 
+    # Fold the composite's OWN phase-(a) re-run gate into the threaded verdict
+    # (DEC-PULL-SIX-STEP-ORDER-001 review fix): the sequencer built ``prior_steps``
+    # from the phase-2 metadata gate BEFORE this composite re-enumerated, so a
+    # phase-(a) expiry/contract enumeration failure (exactly what
+    # ``historical_phase_ok``'s inner-metadata clause catches AFTER the fact)
+    # would leave ``metadata_clean=True`` at the Greeks seam — the enrichment
+    # ran while the sequencer then withheld the prebuild + movers on the SAME
+    # blocking signal. AND-ing the inner gate keeps the strict barrier
+    # internally consistent (Greeks / prebuild / movers agree). The import is
+    # function-local: pipeline_pull imports this module at runtime, so a
+    # module-level import would cycle (mirrors the TYPE_CHECKING-only type
+    # import above).
+    if prior_steps is not None:
+        from brutex.dashboard.pipeline_pull import metadata_phase_ok
+
+        prior_steps = replace(
+            prior_steps,
+            metadata_clean=prior_steps.metadata_clean and metadata_phase_ok(metadata),
+        )
+
     historical = pull_contract_candles(
         selected,
         lake_root=lake_root,
@@ -455,7 +483,7 @@ def pull_historical_for_underlyings(
         on_ledger_sync=on_ledger_sync,
         # DEC-PULL-SIX-STEP-ORDER-001: the index/stock classification that drives the
         # strict steps 3-6 bucket order — SAME resolved keys as the registry read above
-        # — and the sequencer's prior-step verdict for the Greeks strict arm.
+        # — and the phase-(a)-folded prior-step verdict for the Greeks strict arm.
         underlying_kinds=_underlying_kind_map(tradable),
         prior_steps=prior_steps,
     )
