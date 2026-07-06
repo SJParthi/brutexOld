@@ -32,10 +32,12 @@ trigger an unbounded read.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import threading
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -73,6 +75,7 @@ from brutex.data.lake_manifest import (
 from brutex.data.lake_read import (
     DEDUP_PARQUET_SOURCE_SQL,
     DEDUP_STAR_SELECT_SQL,
+    dedup_latest_source_sql,
     dedup_qualify_sql,
     distinct_count_sql,
 )
@@ -3590,6 +3593,93 @@ def _ledger_cache_stamp(ledger_file: Path) -> tuple[int, tuple[str, ...]]:
     return (base_mtime, tuple(f.name for f in _ledger_delta_files(ledger_file)))
 
 
+#: The window-ledger fold identity — the leading 5 columns of the ledger schema
+#: (the ``row[0:5]`` key ``load_window_ledger``'s Python dict fold uses). MUST
+#: equal ``window_ledger_store._COLUMNS[:5]`` — pinned by test, not imported
+#: (the :data:`_LEDGER_DELTAS_DIRNAME` precedent: this module deliberately
+#: carries no module-level ``window_ledger_store`` edge).
+_WINDOW_KEY_COLUMNS: Final[tuple[str, ...]] = (
+    "market",
+    "security_id",
+    "interval",
+    "window_start",
+    "window_end",
+)
+
+
+@dataclass(frozen=True)
+class _LedgerScanSource:
+    """ONE assembled DuckDB scan source for the window-ledger fast paths.
+
+    DEC-LEDGER-DELTA-O-PAGE-001: the SINGLE assembly point every fast-path
+    consumer (:func:`_window_counts_total`, :func:`_window_counts_since`, the
+    page query) scans FROM, so the file-list + base-marker bind order can never
+    drift between them. ``from_sql`` is either the steady-state
+    ``"read_parquet(?)"`` literal (no pending deltas — SQL text byte-identical
+    to the pre-fold fast path) or the latest-wins fold subquery
+    (:func:`~brutex.data.lake_read.dedup_latest_source_sql`); ``params`` are its
+    binds in order (source params come FIRST in every consuming query);
+    ``stamp_token`` is the composite content token the count-cache keys ride.
+    """
+
+    from_sql: str
+    params: tuple[Any, ...]
+    stamp_token: str
+
+
+def _stamp_token_text(base_mtime: int, delta_names: tuple[str, ...]) -> str:
+    """Render one ledger stamp as the composite count-cache token — pure, O(deltas).
+
+    ``"<base mtime_ns>.<delta count>.<sha256(delta names)[:16]>"`` — bounded key
+    length regardless of how many deltas a multi-hour pull accumulates,
+    collision-resistant with no epoch reasoning: a full save moves the base
+    mtime, an append/prune moves the (immutable-once-written) delta name set,
+    and a CLI cross-process write moves both — never stale (Golden Rule #1). A
+    missing base stamps ``0`` (mirrors :func:`_ledger_cache_stamp`).
+    """
+    digest = hashlib.sha256("\n".join(delta_names).encode("utf-8")).hexdigest()[:16]
+    return f"{base_mtime}.{len(delta_names)}.{digest}"
+
+
+def _ledger_stamp_token(ledger_file: Path) -> str:
+    """The composite ledger content token for *ledger_file* — one stat + one listing."""
+    base_mtime, delta_names = _ledger_cache_stamp(ledger_file)
+    return _stamp_token_text(base_mtime, delta_names)
+
+
+def _ledger_scan_source(ledger_file: Path) -> _LedgerScanSource:
+    """Assemble the fast-path scan source from ONE fresh look at the ledger dir.
+
+    Re-listed on EVERY call (the callers rebuild it per retry attempt), so the
+    save-time flock prune race self-heals: a delta unlinked mid-query surfaces
+    as a ``duckdb.Error`` and the existing retry recomputes over a fresh listing
+    that sees the subsumed base-only state. Exactly ONE delta listing + one base
+    stat per call; the stamp token is computed from the SAME listing epoch as
+    the file list. With no pending deltas the source is the byte-identical
+    steady-state ``"read_parquet(?)"`` literal with the single base-path bind
+    (SQL-text spy-pinned); with deltas it is the latest-wins fold subquery whose
+    base-path marker is ALWAYS bound — an absent base then matches nothing and
+    the deltas order among themselves (one code path, live-verified).
+    """
+    deltas = _ledger_delta_files(ledger_file)  # the ONE listing this call performs
+    try:
+        base_mtime = ledger_file.stat().st_mtime_ns
+        base_present = True
+    except FileNotFoundError:
+        base_mtime = 0
+        base_present = False
+    token = _stamp_token_text(base_mtime, tuple(f.name for f in deltas))
+    base = ledger_file.as_posix()
+    if not deltas:
+        return _LedgerScanSource(from_sql="read_parquet(?)", params=(base,), stamp_token=token)
+    files = ([base] if base_present else []) + [f.as_posix() for f in deltas]
+    return _LedgerScanSource(
+        from_sql=dedup_latest_source_sql(_WINDOW_KEY_COLUMNS),
+        params=(files, base),
+        stamp_token=token,
+    )
+
+
 def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
     """Load the ledger's records with a stamp-keyed cache (C3 read path).
 
@@ -3685,7 +3775,8 @@ def _window_counts_from_records(records: Iterable[Any]) -> dict[str, dict[str, i
     The Python twin of :func:`_window_counts_total`'s SQL ``GROUP BY`` (ONE fold
     shape, CLAUDE.md §11 COMMON) — shared by the legacy
     :func:`build_window_payload` path and :func:`phase_progress_payload`'s
-    mid-pull delta branch (DEC-LEDGER-DELTA-FLUSH-001).
+    double-failure fallback (DEC-LEDGER-DELTA-O-PAGE-001 — the resilient
+    Python-fold degrade that survives a persistently malformed delta).
     """
     counts: dict[str, dict[str, int]] = {"spot": {}, "options": {}, "futures": {}}
     for r in records:
@@ -3873,24 +3964,29 @@ def _fold_status_counts(
     return counts, total
 
 
-def _window_counts_total(conn: Any, ledger_glob: str) -> tuple[dict[str, dict[str, int]], int]:
+def _window_counts_total(
+    conn: Any, source: _LedgerScanSource
+) -> tuple[dict[str, dict[str, int]], int]:
     """ONE DuckDB ``GROUP BY market, status`` → bucketed counts + grand total.
 
-    Replaces the O(N) Python count loop with a single columnar aggregate over the ledger
-    Parquet (O(files-footer + groups), milliseconds at 340k rows). The ``market``
-    namespace is folded to the page's spot/options/futures bucket via the shared
-    :func:`_fold_status_counts` (CLAUDE.md §11 COMMON). An empty Parquet yields all-zero
-    buckets + ``total=0`` (the GROUP BY returns no rows).
+    Replaces the O(N) Python count loop with a single columnar aggregate over the
+    assembled ledger *source* (DEC-LEDGER-DELTA-O-PAGE-001: the steady-state
+    ``read_parquet(?)`` literal, or mid-pull the latest-wins base+delta fold —
+    O(total physical rows + delta footers) per execution, memoised by the caller
+    behind the composite stamp token). The ``market`` namespace is folded to the
+    page's spot/options/futures bucket via the shared :func:`_fold_status_counts`
+    (CLAUDE.md §11 COMMON). An empty Parquet yields all-zero buckets + ``total=0``
+    (the GROUP BY returns no rows).
     """
     cursor = conn.execute(
-        "SELECT market, status, COUNT(*) FROM read_parquet(?) GROUP BY market, status",
-        [ledger_glob],
+        f"SELECT market, status, COUNT(*) FROM {source.from_sql} GROUP BY market, status",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
+        list(source.params),
     )
     return _fold_status_counts(cursor.fetchall())
 
 
 def _window_counts_since(
-    conn: Any, ledger_glob: str, since_iso: str
+    conn: Any, source: _LedgerScanSource, since_iso: str
 ) -> tuple[dict[str, dict[str, int]], int]:
     """The PER-RUN twin of :func:`_window_counts_total` — windows attempted since *since_iso*.
 
@@ -3903,16 +3999,18 @@ def _window_counts_since(
     lexicographic over the SAME aware-UTC ``datetime.isoformat()`` shape BOTH writers
     produce (the ledger stamps ``now.isoformat()`` from ``datetime.now(UTC)``; the
     journal stamps ``datetime.now(UTC).isoformat()``), which orders chronologically
-    for that fixed shape. One columnar aggregate — O(files-footer + groups), the same
-    envelope as the lifetime query, and memoised by the caller behind the SAME
-    generation+mtime cache key family (plus the pull-start token).
+    for that fixed shape. The WHERE predicates apply OUTSIDE the fold subquery
+    (never a resurrected superseded row); source params bind FIRST, then
+    *since_iso*. One columnar aggregate — the same envelope as the lifetime query,
+    memoised by the caller behind the SAME stamp-token cache key family (plus the
+    pull-start token).
     """
     cursor = conn.execute(
-        "SELECT market, status, COUNT(*) FROM read_parquet(?) "
+        f"SELECT market, status, COUNT(*) FROM {source.from_sql} "  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
         "WHERE status != 'PLANNED' AND last_attempt_at IS NOT NULL "
         "AND last_attempt_at != '' AND last_attempt_at >= ? "
         "GROUP BY market, status",
-        [ledger_glob, since_iso],
+        [*source.params, since_iso],
     )
     return _fold_status_counts(cursor.fetchall())
 
@@ -4029,10 +4127,10 @@ def phase_progress_payload(
     """The Universe pull's LIVE per-phase progress rows — REUSES the cached window counts.
 
     DEC-UNIVERSE-PER-PHASE-PROGRESS-001. Reads the per-segment window status counts
-    through the SAME generation-stamped ``_window_counts_total`` cache the
-    ``/coverage/windows`` page uses (NO new scan — a repeat poll within one
-    ``(generation, ledger-mtime)`` is an O(1) hit; two routes now share one cached
-    entry), then projects them into the spot/futures/options phase rows via
+    through the SAME stamp-token-keyed ``_window_counts_total`` cache the
+    ``/coverage/windows`` page uses (NO new scan — a repeat poll within one ledger
+    stamp is an O(1) hit; two routes now share one cached entry), then projects
+    them into the spot/futures/options phase rows via
     :func:`build_phase_progress` (highlighting the *current_phase*).
 
     *ledger_file* is the RESOLVED window-ledger Parquet path (the caller resolves it
@@ -4042,63 +4140,69 @@ def phase_progress_payload(
     ``db_view → window_ledger_store`` import edge (CodeQL ``py/cyclic-import``; the
     same reason :func:`_build_window_payload_duckdb` defers legacy derivation).
 
-    None-safe by construction: a lake with NO ledger Parquet yet (a dry-run / a
-    pull that has planned nothing) returns ``[]`` — the caller then serves an honest
-    empty ``phases`` list, never a fabricated window count. When *count_cache* is
-    ``None`` the counts are computed directly (used by the pure-fast-path tests); the
-    production route always injects the cache. O(1) on a cache hit; on a miss it runs
-    ONE ``GROUP BY market, status`` (:func:`_window_counts_total`).
+    None-safe by construction: a lake with NO ledger Parquet AND no pending deltas
+    (a dry-run / a pull that has planned nothing) returns ``[]`` — the caller then
+    serves an honest empty ``phases`` list, never a fabricated window count. When
+    *count_cache* is ``None`` the counts are computed directly (used by the
+    pure-fast-path tests); the production route always injects the cache. O(1) on a
+    cache hit; on a miss it runs ONE ``GROUP BY market, status``
+    (:func:`_window_counts_total`). The cache key rides the composite ledger stamp
+    token at a FIXED ``generation=0`` (DEC-LEDGER-DELTA-O-PAGE-001 — mid-pull
+    ``mark_dirty`` fires per window tick, far more often than the ≥2 s ledger
+    flush, so generation-keying would miss every poll; the stamp token is the
+    COMPLETE content signal — never stale, Golden Rule #1). The *generation*
+    parameter is retained for signature compatibility.
 
-    **Mid-pull deltas (DEC-LEDGER-DELTA-FLUSH-001):** while pending ledger deltas
-    exist, the DuckDB base-file read below would FREEZE these live phase rows for
-    the whole pull (the mid-pull flush appends deltas; it no longer rewrites the
-    base). The delta branch therefore counts over the fold-aware
-    :func:`_ledger_records_cached` records instead — O(rows) per delta append,
-    bounded to the pull's duration; the SQL-side delta fold that would restore
-    O(page) mid-pull is a NAMED follow-up. Steady state (no deltas) is
-    byte-identical to before.
+    **Mid-pull deltas (DEC-LEDGER-DELTA-O-PAGE-001, supersedes the O(records)
+    Python branch of DEC-LEDGER-DELTA-FLUSH-001):** pending deltas are folded
+    latest-wins IN SQL via the shared :func:`_ledger_scan_source` — the SAME
+    counts query, scanning the fold subquery instead of the bare base file.
+    HONEST envelope (Golden Rule #10): mid-pull the folded source is ONE O(total
+    physical rows incl. every delta file's footer) columnar hash-partition per
+    fresh stamp (the ≥2 s flush cadence bounds stamp movement), O(1)-cached
+    between stamps via the composite stamp token; NOT literal O(page) — the same
+    envelope ``query_candles`` already accepts. The O(delta-file-count)
+    footer-open term grows over a multi-hour pull until the pull-end save
+    subsumes the deltas; delta compaction is NAMED future work, not claimed.
+    Steady state (no deltas) is byte-identical to before.
 
     TORN-READ resilience (DEC-WINDOW-TORN-READ-RETRY-001): a concurrent pull's atomic
     ``os.replace`` of the ledger Parquet landing between this reader's independent
-    ``read_parquet`` opens surfaces as a transient ``duckdb.Error`` — previously
-    UNGUARDED here, so the 4 s ``/universe/pull-progress`` poll 500'd. The counts read
-    now RETRIES ONCE after :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable
-    for deterministic tests; ``None`` → the real aliased :func:`time.sleep`); a SECOND
-    ``duckdb.Error`` logs an enriched ``phase_progress.duckdb_fallback`` event and
-    returns ``[]`` — the SAME honest empty-phases shape the no-ledger contract already
-    serves, so the route can never 500. HONEST envelope (Golden Rule #10): the retry
-    bounds ONE transient race; a persistently corrupt ledger blanks the phases block
-    for that poll window (strictly better than the prior 500), and only
-    ``duckdb.Error`` is guarded — no row projection exists here, so KeyError/ValueError
-    stay genuine-bug propagation.
+    ``read_parquet`` opens — or a save-time flock prune unlinking a listed delta
+    mid-query — surfaces as a transient ``duckdb.Error``. The counts read RETRIES
+    ONCE after :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable for
+    deterministic tests; ``None`` → the real aliased :func:`time.sleep`) — the
+    scan source is re-listed inside ``_counts()``, so the retry sees the pruned
+    (subsumed) state. A SECOND ``duckdb.Error`` logs an enriched
+    ``phase_progress.duckdb_fallback`` event and degrades HONESTLY: with deltas
+    still pending it serves the resilient Python fold
+    (:func:`_ledger_records_cached` → :func:`_window_counts_from_records`, which
+    skips a persistently malformed delta file-granularly — the multi-file SQL
+    read cannot), so a bad delta can never blank the pull-progress phases for the
+    whole pull; base-only keeps today's honest ``[]``. Only ``duckdb.Error`` is
+    guarded — no row projection exists here, so KeyError/ValueError stay
+    genuine-bug propagation.
     """
-    deltas = _ledger_delta_files(ledger_file)
-    if not ledger_file.is_file() and not deltas:
+    if not ledger_file.is_file() and not _ledger_delta_files(ledger_file):
         return []
-    if deltas:
-        # ``ledger_file`` is ``<lake>/window_ledger/ledger.parquet`` (resolved by
-        # the caller via the store's ``ledger_path``), so the lake root is two
-        # levels up — derived here rather than re-plumbed through every caller.
-        records = _ledger_records_cached(ledger_file.parent.parent)
-        return build_phase_progress(
-            _window_counts_from_records(records), current_phase=current_phase
-        )
-    ledger_glob = ledger_file.as_posix()
 
     def _counts() -> dict[str, dict[str, int]]:
-        """ONE counts read — direct or through the injected generation-stamped cache."""
+        """ONE counts read — direct or through the injected stamp-keyed cache."""
+        # Re-assembled per attempt (fresh delta listing) so the torn-read retry
+        # below self-heals the save-time prune race (DEC-LEDGER-DELTA-O-PAGE-001).
+        source = _ledger_scan_source(ledger_file)
         if count_cache is None:
-            counts, _total = _window_counts_total(conn, ledger_glob)
+            counts, _total = _window_counts_total(conn, source)
         else:
-            # Key the cache on the ledger mtime AS WELL as the generation so a
-            # CROSS-PROCESS write (a CLI `brutex fetch` while the dashboard is open) still
-            # invalidates the cached counts — the SAME (generation, mtime) key
-            # `_build_window_payload_duckdb` uses, so the two routes share one warm entry.
-            mtime_ns = ledger_file.stat().st_mtime_ns
+            # The composite stamp token keys the cache (base mtime + delta name
+            # set), so a CROSS-PROCESS write (a CLI `brutex fetch` while the
+            # dashboard is open) AND a mid-pull delta append both invalidate —
+            # the SAME key `_build_window_payload_duckdb` uses, so the two
+            # routes share one warm entry.
             counts, _total = count_cache.get_or_compute(
-                f"window-counts|{ledger_glob}|{mtime_ns}",
-                generation=generation,
-                compute=lambda: _window_counts_total(conn, ledger_glob),
+                f"window-counts|{ledger_file.as_posix()}|{source.stamp_token}",
+                generation=0,
+                compute=lambda: _window_counts_total(conn, source),
             )
         return counts
 
@@ -4120,8 +4224,29 @@ def phase_progress_payload(
         try:
             counts = _counts()
         except duckdb.Error as exc2:
+            if _ledger_delta_files(ledger_file):
+                # Deltas still pending after two failures — a persistently
+                # malformed delta, which the multi-file SQL read cannot skip
+                # file-granularly. Serve the resilient Python fold instead of
+                # blanking the phases mid-pull (DEC-LEDGER-DELTA-O-PAGE-001;
+                # `load_window_ledger` skips the bad delta with
+                # `window_ledger.delta_load_failed`). ``ledger_file`` is
+                # ``<lake>/window_ledger/ledger.parquet``, so the lake root is
+                # two levels up.
+                _LOG.warning(
+                    "phase_progress.duckdb_fallback",
+                    fallback="records",
+                    error=str(exc2),
+                    error_type=type(exc2).__name__,
+                    **_ledger_stat_fields(ledger_file),
+                )
+                records = _ledger_records_cached(ledger_file.parent.parent)
+                return build_phase_progress(
+                    _window_counts_from_records(records), current_phase=current_phase
+                )
             _LOG.warning(
                 "phase_progress.duckdb_fallback",
+                fallback="empty",
                 error=str(exc2),
                 error_type=type(exc2).__name__,
                 **_ledger_stat_fields(ledger_file),
@@ -4143,11 +4268,11 @@ def _build_window_payload_duckdb(
     generation: int,
     since: str | None = None,
 ) -> dict[str, Any]:
-    """O(page) ``/coverage/windows`` payload via DuckDB (DEC-COVERAGE-WINDOWS-O1-001).
+    """O(page)-on-repeat ``/coverage/windows`` payload via DuckDB (DEC-COVERAGE-WINDOWS-O1-001).
 
-    Counts come from ONE generation-cached ``GROUP BY`` (:func:`_window_counts_total`);
+    Counts come from ONE stamp-cached ``GROUP BY`` (:func:`_window_counts_total`);
     the row page is a ``WHERE``-filtered, severity-ordered ``LIMIT``/``OFFSET`` query — so
-    a tab/filter click reads only the page (O(page)) instead of re-running an O(N) Python
+    a tab/filter click reads only the page instead of re-running an O(N) Python
     count+filter+sort over every window on every click + 4 s poll (the root cause). The
     ``matched`` total is DERIVED from the cached counts (no extra scan); the per-row
     projection reuses the shared :func:`_window_row` (ONE shape with the legacy path).
@@ -4155,58 +4280,90 @@ def _build_window_payload_duckdb(
     with within-a-status-tier rows ordered deterministically by ``(security_id,
     interval, window_start, window_end)``.
 
+    **Mid-pull deltas (DEC-LEDGER-DELTA-O-PAGE-001):** pending ledger deltas are
+    folded latest-wins IN SQL — every query scans the ONE assembled
+    :func:`_ledger_scan_source` (the steady-state ``read_parquet(?)`` literal
+    when no deltas exist — SQL text byte-identical, spy-pinned — else the
+    :func:`~brutex.data.lake_read.dedup_latest_source_sql` fold subquery), and
+    the count-cache keys ride the composite stamp token at a FIXED
+    ``generation=0`` (mid-pull ``mark_dirty`` fires per window tick, far more
+    often than the ≥2 s ledger flush, so generation-keying would miss every
+    poll; the stamp token is the COMPLETE content signal — a full save moves the
+    base mtime, an append/prune moves the delta name set, a CLI cross-process
+    write moves both — never stale, Golden Rule #1). The *generation* parameter
+    is retained for signature compatibility. HONEST envelope (Golden Rule #10):
+    mid-pull, the folded source is ONE O(total physical rows incl. every delta
+    file's footer) columnar hash-partition per fresh stamp (the ≥2 s flush
+    cadence bounds stamp movement), O(1)-cached between stamps via the composite
+    stamp token; NOT literal O(page) — the same envelope ``query_candles``
+    already accepts. The O(delta-file-count) footer-open term grows over a
+    multi-hour pull until the pull-end save subsumes the deltas; delta
+    compaction is NAMED future work, not claimed.
+
     *since* (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the current pull's journal
     ``started`` wall-UTC instant, or ``None`` when no real pull-start is known.
     When set, the payload ADDITIONALLY carries ``counts_since_pull_start`` (the
     :func:`_window_counts_since` per-run buckets, memoised in the SAME cache keyed
-    generation+mtime+pull-start) and echoes it as ``pull_start_utc``. ``None`` adds
+    stamp-token+pull-start) and echoes it as ``pull_start_utc``. ``None`` adds
     ZERO keys and ZERO queries — the payload stays byte-identical (never a
     fabricated per-run figure, Golden Rule #1).
     """
     from types import SimpleNamespace
 
+    # Re-assembled per invocation (fresh delta listing), so build_window_payload's
+    # retry-once machinery re-lists after a save-time flock prune race
+    # (DEC-LEDGER-DELTA-O-PAGE-001) — the second attempt sees the subsumed state.
+    source = _ledger_scan_source(ledger_file)
     ledger_glob = ledger_file.as_posix()
-    # A LEGACY pre-R1 Parquet lacks the empty_streak/in_pull_fetches columns; the legacy
-    # pyarrow path DERIVES them faithfully (window_ledger_store derive helpers), so DEFER
-    # the whole payload to it — the raise lands in build_window_payload's fallback — rather
-    # than re-deriving here, which would add a db_view → window_ledger_store import cycle
-    # (CodeQL py/cyclic-import). The probe is a metadata-only ``LIMIT 0`` describe (no data
-    # read); a wrong-shape Parquet (missing a core column) also fails the subset → defers.
-    available = {
-        str(col[0])
-        for col in (
-            conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description or []
-        )
-    }
-    if not {"empty_streak", "in_pull_fetches"}.issubset(available):
-        raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
+    if ledger_file.is_file():
+        # A LEGACY pre-R1 Parquet lacks the empty_streak/in_pull_fetches columns; the legacy
+        # pyarrow path DERIVES them faithfully (window_ledger_store derive helpers), so DEFER
+        # the whole payload to it — the raise lands in build_window_payload's fallback — rather
+        # than re-deriving here, which would add a db_view → window_ledger_store import cycle
+        # (CodeQL py/cyclic-import). The probe is a metadata-only ``LIMIT 0`` describe over the
+        # BASE file ONLY — never the union_by_name'd delta list, whose NULL-fill would mask a
+        # legacy base's missing columns until the int() projection below crashed. A wrong-shape
+        # Parquet (missing a core column) also fails the subset → defers. When the base is
+        # ABSENT (a first pull's delta-only checkpoint) the probe is SKIPPED — every delta is
+        # written by `append_ledger_delta` with the full 14-column schema (writer-pinned), so
+        # the residual union NULL-fill is `bars_net_new`-only on a base that predates that
+        # optional column — equal to the Python fold's honest ``None``, never fed to ``int()``.
+        available = {
+            str(col[0])
+            for col in (
+                conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
+                or []
+            )
+        }
+        if not {"empty_streak", "in_pull_fetches"}.issubset(available):
+            raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
     counts_since: dict[str, dict[str, int]] | None = None
     if count_cache is None:
-        counts, total = _window_counts_total(conn, ledger_glob)
+        counts, total = _window_counts_total(conn, source)
         if since is not None:
-            counts_since, _since_total = _window_counts_since(conn, ledger_glob, since)
+            counts_since, _since_total = _window_counts_since(conn, source, since)
     else:
-        # Key the cache on the ledger's mtime AS WELL as the generation so a CROSS-PROCESS
-        # write (a CLI `brutex fetch` while the dashboard is open — which does NOT bump the
-        # dashboard's own in-process generation) still invalidates the cached counts (the
-        # mtime-invalidation fidelity the legacy `_ledger_records_cached` read had). A repeat
-        # click within one (generation, mtime) stays an O(1) hit.
-        mtime_ns = ledger_file.stat().st_mtime_ns
+        # Key the cache on the composite stamp token (base mtime + the pending delta
+        # name set) at a FIXED generation=0 — so a CROSS-PROCESS write (a CLI `brutex
+        # fetch` while the dashboard is open — which does NOT bump the dashboard's own
+        # in-process generation) AND a mid-pull delta append both invalidate, while a
+        # mark_dirty storm at an unchanged ledger never thrashes the entry. A repeat
+        # click within one stamp stays an O(1) hit.
         counts, total = count_cache.get_or_compute(
-            f"window-counts|{ledger_glob}|{mtime_ns}",
-            generation=generation,
-            compute=lambda: _window_counts_total(conn, ledger_glob),
+            f"window-counts|{ledger_glob}|{source.stamp_token}",
+            generation=0,
+            compute=lambda: _window_counts_total(conn, source),
         )
         if since is not None:
             # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
             # DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the pull-start token joins the
             # key so a NEW pull (new journal `started`) can never be served the prior
-            # run's per-run figures even within one (generation, mtime).
-            since_key = f"window-counts-since|{ledger_glob}|{mtime_ns}|{since}"
+            # run's per-run figures even within one stamp.
+            since_key = f"window-counts-since|{ledger_glob}|{source.stamp_token}|{since}"
             counts_since, _since_total = count_cache.get_or_compute(
                 since_key,
-                generation=generation,
-                compute=lambda: _window_counts_since(conn, ledger_glob, since),
+                generation=0,
+                compute=lambda: _window_counts_since(conn, source, since),
             )
 
     wanted_status = status.upper() if status else None
@@ -4228,32 +4385,35 @@ def _build_window_payload_duckdb(
         matched = sum(v for b in buckets for s, v in counts[b].items() if s != "PLANNED")
 
     where: list[str] = []
-    params: list[Any] = [ledger_glob]
+    where_params: list[Any] = []
     if market == "options":
         where.append("market = ?")
-        params.append(_OPTION_WINDOW_MARKET)
+        where_params.append(_OPTION_WINDOW_MARKET)
     elif market == "futures":
         where.append("market = ?")
-        params.append(_FUTURE_WINDOW_MARKET)
+        where_params.append(_FUTURE_WINDOW_MARKET)
     elif market == "spot":
         where.append("market NOT IN (?, ?)")
-        params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
+        where_params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
     elif market is not None:
         where.append("1 = 0")  # unrecognized market → no rows (legacy parity)
     if wanted_status:
         where.append("status = ?")
-        params.append(wanted_status)
+        where_params.append(wanted_status)
     else:
         where.append("status != ?")
-        params.append("PLANNED")
+        where_params.append("PLANNED")
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     order_sql = (
         f" ORDER BY {_window_severity_order_sql()}, "
         '"security_id", "interval", "window_start", "window_end"'
     )
-    params.extend((limit, offset))
+    # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
+    # a superseded row version can never resurrect through a filter); the
+    # source params bind FIRST (the subquery precedes them in the SQL text).
+    params: list[Any] = [*source.params, *where_params, limit, offset]
     cursor = conn.execute(
-        f"SELECT * FROM read_parquet(?){where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a bound path; filters/page/order are bound or trusted constants
+        f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
         params,
     )
     out_columns = [str(col[0]) for col in (cursor.description or [])]
@@ -4263,9 +4423,11 @@ def _build_window_payload_duckdb(
         # int64 ones, None for a null) — pass them straight to the shared `_window_row`
         # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
         # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
-        # already str()/None-handle each field). The upfront schema probe guarantees this
-        # page carries empty_streak/in_pull_fetches (a legacy pre-R1 Parquet that lacks them
-        # was already deferred to the pyarrow derive path), so read them directly.
+        # already str()/None-handle each field). This page always carries
+        # empty_streak/in_pull_fetches: a legacy pre-R1 BASE that lacks them was already
+        # deferred to the pyarrow derive path by the base-only probe, and a base-LESS
+        # delta-only scan reads files `append_ledger_delta` writes with the full
+        # 14-column schema (writer-pinned) — so read them directly.
         cell = dict(zip(out_columns, raw, strict=True))
         record = SimpleNamespace(
             market=cell["market"],
@@ -4415,19 +4577,19 @@ def build_window_payload(
     limit = max(1, min(int(limit), WINDOW_ROWS_CAP))
     ledger_file = ledger_path(lake_root)
     ledger_deltas = _ledger_delta_files(ledger_file)
-    # FAST PATH (DEC-COVERAGE-WINDOWS-O1-001): with a DuckDB *conn* injected and the
-    # ledger Parquet present, push count/filter/sort/page DOWN into DuckDB — O(page)
-    # rows + a generation-cached GROUP BY — instead of the O(N) Python count+filter+sort
-    # that ran on EVERY click/poll (the 1.5–4 s root cause at 340k windows). A ``None``
-    # *conn* (or no Parquet) keeps the legacy pyarrow path below byte-for-byte
-    # (back-compat for existing callers + the ``window_status.json`` fallback).
-    # PENDING DELTAS defer to the fold-aware legacy path (DEC-LEDGER-DELTA-FLUSH-001):
-    # the SQL read below sees ONLY the base file, which the mid-pull flush no longer
-    # rewrites — serving it would freeze the page for the whole pull. The legacy path
-    # reads through the delta-folding ``_ledger_records_cached``, so mid-pull rows stay
-    # LIVE at the pre-#893 O(N) processing cost, bounded to the pull's duration (the
-    # SQL-side delta fold is the named follow-up); steady state is byte-identical.
-    if conn is not None and ledger_file.is_file() and not ledger_deltas:
+    # FAST PATH (DEC-COVERAGE-WINDOWS-O1-001): with a DuckDB *conn* injected and a
+    # LIVE ledger present (the base Parquet, pending deltas, or both), push
+    # count/filter/sort/page DOWN into DuckDB — page rows + a stamp-cached GROUP BY —
+    # instead of the O(N) Python count+filter+sort that ran on EVERY click/poll (the
+    # 1.5–4 s root cause at 340k windows). PENDING DELTAS are folded latest-wins IN
+    # SQL (DEC-LEDGER-DELTA-O-PAGE-001 — supersedes the defer-to-legacy stance of
+    # DEC-LEDGER-DELTA-FLUSH-001; steady state stays SQL-text byte-identical). The
+    # legacy pyarrow path below remains ONLY for: a ``None`` *conn* (back-compat
+    # callers), a legacy-shape base the probe defers wholesale, a double
+    # ``duckdb.Error`` fallback (which skips a persistently malformed delta
+    # file-granularly via ``load_window_ledger``), and the frozen
+    # ``window_status.json`` fallback when no ledger exists at all.
+    if conn is not None and (ledger_file.is_file() or ledger_deltas):
         sleeper = _default_sleep if retry_sleep is None else retry_sleep
 
         def _fast_path() -> dict[str, Any]:

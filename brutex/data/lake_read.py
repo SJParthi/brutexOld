@@ -258,6 +258,81 @@ def dedup_qualify_sql(key_columns: Sequence[str] = ("timestamp",)) -> str:
     )
 
 
+def dedup_qualify_latest_sql(key_columns: Sequence[str]) -> str:
+    """Return the ``QUALIFY`` fragment that keep-LAST folds a base+delta scan.
+
+    The keep-LAST twin of :func:`dedup_qualify_sql` — a WAL fold, provably equal
+    to a Python dict fold that starts from the base and overwrites per key in
+    ascending delta-filename order (the ``load_window_ledger`` fold;
+    NEWER-FILE-wins, never ``merge_ledger_rows`` — demotions survive). Appends
+    after the ``WHERE`` clause of a query whose source is
+    :data:`DEDUP_PARQUET_SOURCE_SQL`::
+
+        row_number() OVER (PARTITION BY <keys>
+                           ORDER BY (filename = ?) ASC, filename DESC,
+                                    file_row_number DESC) = 1
+
+    Ordering terms (live-verified on the pinned DuckDB engine):
+
+    * ``(filename = ?) ASC`` — the extra ``?`` binds the BASE file's exact
+      ``as_posix()`` path; ``True`` sorts after ``False``, so the base row ranks
+      LAST in every partition and deltas always beat the base — regardless of
+      lexicography (a base name sorting above ``deltas/``) and regardless of the
+      lake's own path containing ``deltas`` (bound equality, never ``LIKE``).
+      Bind the base's ``as_posix()`` even when the base file is absent — it then
+      matches nothing and the deltas order among themselves.
+    * ``filename DESC`` — among deltas the newest zero-padded ``time_ns`` name
+      wins (lexicographic == chronological by construction,
+      DEC-LEDGER-DELTA-LOCKED-TS-001).
+    * ``file_row_number DESC`` — a determinism belt only: keys are unique WITHIN
+      each ledger file by construction, so this fires only on a malformed
+      within-file dup, where the LAST written row wins deterministically.
+
+    Bind order law: the ``read_parquet`` file-list ``?`` first, then the
+    base-path marker ``?``. HONEST envelope (Golden Rule #10): the QUALIFY scan
+    is an O(total physical rows) columnar hash-partition per query plus
+    O(file-count) Parquet footer opens — NOT O(page); the same envelope
+    ``query_candles`` already accepts.
+
+    Raises
+    ------
+    ValueError
+        Via :func:`_quoted_key_columns` on a malformed key set.
+    """
+    keys = ", ".join(_quoted_key_columns(key_columns))
+    return (
+        f" QUALIFY row_number() OVER (PARTITION BY {keys} "
+        "ORDER BY (filename = ?) ASC, filename DESC, file_row_number DESC) = 1"
+    )
+
+
+def dedup_latest_source_sql(key_columns: Sequence[str]) -> str:
+    """Return the closed latest-wins subquery source for a base+delta fold scan.
+
+    Composes :data:`DEDUP_STAR_SELECT_SQL` over :data:`DEDUP_PARQUET_SOURCE_SQL`
+    with :func:`dedup_qualify_latest_sql` into ONE parenthesised subquery, so a
+    consumer's ``WHERE`` / ``GROUP BY`` / ``ORDER BY`` / ``LIMIT`` always apply
+    OUTSIDE the fold (a superseded row version can never resurrect through a
+    filter — ghost-row safe by construction). The ``EXCLUDE`` keeps the outer
+    ``SELECT *`` schema byte-identical to a plain ``read_parquet`` read.
+
+    Parameter-order law: the source binds (``[files_list, base_marker]``) come
+    FIRST in every consuming query — the subquery precedes WHERE/ORDER/LIMIT in
+    the text. HONEST envelope (Golden Rule #10): one such query is an O(total
+    physical rows) columnar hash-partition plus O(file-count) footer opens per
+    execution — NOT O(page); callers memoise per content stamp.
+
+    Raises
+    ------
+    ValueError
+        Via :func:`_quoted_key_columns` on a malformed key set.
+    """
+    return (
+        f"(SELECT {DEDUP_STAR_SELECT_SQL} FROM {DEDUP_PARQUET_SOURCE_SQL}"  # noqa: S608  # nosec B608 — module-constant fragments + identifier-validated keys; every value is bound
+        f"{dedup_qualify_latest_sql(key_columns)})"
+    )
+
+
 def distinct_count_sql(key_columns: Sequence[str] = ("timestamp",)) -> str:
     """Return the ``COUNT(DISTINCT …)`` select expression for a deduped page total.
 
@@ -285,6 +360,8 @@ __all__ = [
     "bars_by_ts_first",
     "dedup_bars",
     "dedup_bars_frame",
+    "dedup_latest_source_sql",
+    "dedup_qualify_latest_sql",
     "dedup_qualify_sql",
     "distinct_count_sql",
     "log_read_duplicates",
