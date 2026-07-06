@@ -30,6 +30,7 @@ from brutex.data import lake_manifest as lm
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.window_ledger_store import ledger_path
+from structlog.testing import capture_logs
 
 
 def _bar(minute: int = 0) -> CandleBar:
@@ -297,6 +298,60 @@ class TestManifestFirstDiscovery:
         listed = db_view.list_candle_datasets(tmp_path)
         assert any(d["symbol"] == "NIFTY" for d in listed)
         assert not lm.manifest_meta_path(tmp_path).exists()
+
+    def test_mid_walk_ledger_move_skips_rebuild_and_logs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ledger move DURING the walk → rebuild SKIPPED + one INFO event.
+
+        DEC-O1-CLAIMS-HONESTY-001 (PART 1c): the rebuild stamps ONLY a
+        post==pre ledger token, so a vendor write landing mid-walk converts
+        the old write-then-stale-on-next-read into an explicit skip; the next
+        quiescent unfiltered discovery walks again and self-heals. Fails
+        before the fix (a stale-stamped manifest meta WOULD exist).
+        """
+        _seed_lake(tmp_path)
+        real_walk = db_view._walk_candle_datasets
+
+        def _walk_then_move(*args: Any, **kwargs: Any) -> list[dict[str, str]]:
+            found = real_walk(*args, **kwargs)
+            # The mid-walk race: a pull checkpoints the ledger DURING the walk.
+            ledger_path(tmp_path).write_bytes(b"ledger-v2-moved-mid-walk")
+            return found
+
+        monkeypatch.setattr(db_view, "_walk_candle_datasets", _walk_then_move)
+        with capture_logs() as logs:
+            listed = db_view.list_candle_datasets(tmp_path)
+        assert any(d["symbol"] == "NIFTY" for d in listed)  # walk result correct
+        assert not lm.manifest_meta_path(tmp_path).exists()  # NOT persisted
+        skipped = [e for e in logs if e["event"] == "db_view.manifest_rebuild_skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["pre_walk_token"] is not None
+        assert skipped[0]["post_walk_token"] is not None
+        assert skipped[0]["pre_walk_token"] != skipped[0]["post_walk_token"]
+        # Self-heal: a SECOND (quiescent) unfiltered call walks + rebuilds.
+        monkeypatch.setattr(db_view, "_walk_candle_datasets", real_walk)
+        assert db_view.list_candle_datasets(tmp_path) == listed
+        assert lm.manifest_meta_path(tmp_path).exists()
+
+    def test_post_walk_token_none_skips_rebuild(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable post-walk stat (`None` — unknown) cannot PROVE equality → skip."""
+        _seed_lake(tmp_path)
+        real_token = db_view.ledger_stat_token(tmp_path)
+        assert real_token is not None
+        tokens = iter([real_token, None])
+        # Patch the db_view REBINDING (the monkeypatch-seam the gate must call).
+        monkeypatch.setattr(db_view, "ledger_stat_token", lambda _lake: next(tokens))
+        with capture_logs() as logs:
+            listed = db_view.list_candle_datasets(tmp_path)
+        assert any(d["symbol"] == "NIFTY" for d in listed)
+        assert not lm.manifest_meta_path(tmp_path).exists()
+        skipped = [e for e in logs if e["event"] == "db_view.manifest_rebuild_skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["pre_walk_token"] == real_token
+        assert skipped[0]["post_walk_token"] is None
 
 
 def test_manifest_rows_with_invalid_coordinates_are_screened(tmp_path: Path) -> None:

@@ -992,17 +992,32 @@ def list_candle_datasets(
             manifest_rows, exclude_segments=exclude_segments, intervals=intervals
         )
     # Capture the freshness token BEFORE the walk: a vendor write landing
-    # DURING the (potentially long) walk must stale the rebuilt manifest on the
-    # very next read — a post-walk stamp could claim freshness the walk never
-    # had (Golden Rule #1).
+    # DURING the (potentially long) walk must never let the rebuilt manifest
+    # claim freshness the walk did not have (Golden Rule #1).
     pre_walk_token = ledger_stat_token(lake_root)
     found = _walk_candle_datasets(lake_root, exclude_segments=exclude_segments, intervals=intervals)
     if not exclude_segments and intervals is None and pre_walk_token is not None:
         # Only an UNFILTERED walk sees the whole dataset population, so only it
         # may (re)build the manifest — a filtered walk would persist a
-        # silently-partial row set. Best-effort: a rebuild failure leaves the
-        # walk result (already correct) untouched.
-        rebuild_manifest(lake_root, found, ledger_token=pre_walk_token)
+        # silently-partial row set. DEC-O1-CLAIMS-HONESTY-001 hardening: stamp
+        # ONLY when the token re-read AFTER the walk still equals the pre-walk
+        # capture — the stamped token is then simultaneously the post-walk AND
+        # pre-walk token, satisfying the `rebuild_manifest` pre-walk contract
+        # verbatim while converting the mid-walk-race case from a wasted
+        # write-then-stale-on-next-read into an explicit SKIP (one INFO event;
+        # the next unfiltered discovery walks + rebuilds fresh). An unreadable
+        # post-walk stat (`None` — "unknown") cannot prove equality → SKIP.
+        # Best-effort: a rebuild failure leaves the walk result (already
+        # correct) untouched.
+        post_walk_token = ledger_stat_token(lake_root)
+        if post_walk_token == pre_walk_token:
+            rebuild_manifest(lake_root, found, ledger_token=pre_walk_token)
+        else:
+            _LOG.info(
+                "db_view.manifest_rebuild_skipped",
+                pre_walk_token=pre_walk_token,
+                post_walk_token=post_walk_token,
+            )
     return found
 
 
