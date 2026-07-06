@@ -100,6 +100,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from brutex.adapters.groww.option_ingest import ProgressHook
+
+    # Type-only (DEC-PULL-SIX-STEP-ORDER-001): pipeline_pull imports this module
+    # at runtime, so the verdict import must stay TYPE_CHECKING-only (no cycle —
+    # the composite only forwards the object, it never constructs one).
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
     from brutex.models import Instrument
 
@@ -262,6 +267,7 @@ def pull_historical_for_underlyings(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    prior_steps: PriorStepsVerdict | None = None,
 ) -> CompositePullReport:
     """One-click composite: refresh metadata THEN pull candles for the selected underlyings.
 
@@ -340,6 +346,13 @@ def pull_historical_for_underlyings(
         appended-bar delta (the frozen-bars fix); *on_ledger_sync* receives the
         throttled, F&O-scope-filtered absolute ledger counts (the honest
         denominator). ``None`` (defaults) is byte-identical.
+    prior_steps
+        Optional :class:`~brutex.dashboard.pipeline_pull.PriorStepsVerdict`
+        (DEC-PULL-SIX-STEP-ORDER-001) forwarded VERBATIM to phase (b)'s
+        Greeks seam — the sequencer's spot + metadata cleanliness + the
+        strict flag, so the strict barrier can withhold the enrichment on a
+        prior-step uncleanliness. ``None`` (the default — every non-pipeline
+        caller) keeps today's behavior byte-identical.
 
     Returns
     -------
@@ -441,8 +454,10 @@ def pull_historical_for_underlyings(
         on_bars=on_bars,
         on_ledger_sync=on_ledger_sync,
         # DEC-PULL-SIX-STEP-ORDER-001: the index/stock classification that drives the
-        # strict steps 3-6 bucket order — SAME resolved keys as the registry read above.
+        # strict steps 3-6 bucket order — SAME resolved keys as the registry read above
+        # — and the sequencer's prior-step verdict for the Greeks strict arm.
         underlying_kinds=_underlying_kind_map(tradable),
+        prior_steps=prior_steps,
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law

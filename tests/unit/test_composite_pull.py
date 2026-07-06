@@ -37,6 +37,7 @@ from brutex.dashboard.composite_pull import (
     CompositePullReport,
     pull_historical_for_underlyings,
 )
+from brutex.dashboard.pipeline_pull import PriorStepsVerdict
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.registry_store import RegistryStore
 from brutex.data.sink import BarSink, SinkAppendResult
@@ -230,6 +231,7 @@ def _run(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: Callable[[int, int, int, int, str], None] | None = None,
+    prior_steps: PriorStepsVerdict | None = None,
 ) -> CompositePullReport:
     if lake_root is None:
         # Each test gets its OWN lake (so the persisted WindowLedger never bleeds across
@@ -260,6 +262,7 @@ def _run(
         scope_end=scope_end,
         on_bars=on_bars,
         on_ledger_sync=on_ledger_sync,
+        prior_steps=prior_steps,
     )
 
 
@@ -790,3 +793,60 @@ def test_composite_note_has_no_greeks_clause_on_a_clean_pass(
     assert report.historical is not None
     assert report.historical.greeks_enrich_ok is True
     assert "Greeks enrichment FAILED" not in report.note
+
+
+def test_prior_steps_threaded_to_candle_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``prior_steps`` reaches ``pull_contract_candles`` verbatim (DEC-PULL-SIX-STEP-ORDER-001).
+
+    A capture spy on the candle spine proves the composite forwards the
+    sequencer's :class:`PriorStepsVerdict` unchanged — and that the DEFAULT is
+    ``None`` (every non-pipeline caller keeps today's behavior byte-identical).
+    """
+    captured: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> object:
+        captured.append(dict(kwargs))
+        from brutex.dashboard.historical_pull import HistoricalPullReport
+
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1day",),
+            contracts_selected=0,
+            contracts_completed=0,
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="spy",
+            phase1_clean=True,
+            phase1_complete=(),
+            start_dates={},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    monkeypatch.setattr(cp, "pull_contract_candles", _spy)
+    registry = _registry(tmp_path)
+    verdict = PriorStepsVerdict(spot_clean=False, metadata_clean=True, strict=True)
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_nifty_sdk(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+        prior_steps=verdict,
+    )
+    assert len(captured) == 1
+    assert captured[0]["prior_steps"] == verdict
+    # And the DEFAULT threads None (regression pin — non-pipeline callers untouched).
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_nifty_sdk(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+    )
+    assert captured[1]["prior_steps"] is None

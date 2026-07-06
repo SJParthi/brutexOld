@@ -137,6 +137,10 @@ from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
+    # Type-only (DEC-PULL-SIX-STEP-ORDER-001): pipeline_pull imports composite_pull
+    # → this module at runtime, so the verdict import must stay TYPE_CHECKING-only
+    # (the seam only reads attributes — no runtime import needed, no cycle).
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
 
 #: The ONLY granularity fetched from Groww for an F&O contract
@@ -813,6 +817,7 @@ def _build_note(
     greeks_enrich_ok: bool | None = None,
     greeks_enrich_error: str | None = None,
     class_unresolved: int = 0,
+    greeks_strict_withheld: bool = False,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -856,6 +861,12 @@ def _build_note(
     ", N contract(s) with unresolved index/stock class (ordered as stocks)" —
     the honest fail-closed-for-ORDER clause (the legs were still pulled, just
     ordered stock-side). The zero default renders byte-identically to before.
+
+    *greeks_strict_withheld* (DEC-PULL-SIX-STEP-ORDER-001): ``True`` appends
+    ", Greeks enrichment withheld (strict gate) — re-attempted next pull" —
+    the strict barrier withheld the pass on an unclean prior/F&O step. NEVER
+    a FAILED verdict (nothing ran, nothing is lost — the overlay is
+    re-derivable). The ``False`` default renders byte-identically to before.
     """
     prefix = (
         "window ledger reload FAILED — running full re-verify pull (no skip); "
@@ -883,6 +894,10 @@ def _build_note(
         if greeks_enrich_ok is False
         else ""
     )
+    if greeks_strict_withheld:
+        # DEC-PULL-SIX-STEP-ORDER-001: the strict-withheld pass is NAMED (never
+        # silence, never FAILED — the pass did not run; ok stays None).
+        greeks_suffix = ", Greeks enrichment withheld (strict gate) — re-attempted next pull"
     if contracts_selected == 0 and contracts_out_of_scope:
         base = (
             f"all {contracts_out_of_scope} selected contract(s) across "
@@ -1561,6 +1576,17 @@ _GREEKS_NOT_RUN: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
     ok=None, error=None, errored_targets=0
 )
 
+#: The strict-barrier WITHHELD outcome (DEC-PULL-SIX-STEP-ORDER-001): under
+#: ``BRUTEX_PIPELINE_STRICT_GATE=1`` an unclean prior step (spot/metadata —
+#: via the threaded ``PriorStepsVerdict``) or an unclean F&O phase withholds
+#: the enrichment pass. ``ok=None`` — the pass did NOT run; never a FAILED
+#: verdict (nothing is lost: the overlay is re-derivable and the next pull
+#: re-attempts it — the #1188 value-check reuse gate recomputes correctly).
+#: The note names it via the ``greeks_strict_withheld`` clause, never silence.
+_GREEKS_STRICT_WITHHELD: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
+    ok=None, error=None, errored_targets=0
+)
+
 
 def _heal_lake_after_pull(
     *,
@@ -1766,6 +1792,7 @@ def pull_contract_candles(
     on_ledger_sync: OnLedgerSync | None = None,
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
+    prior_steps: PriorStepsVerdict | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -1907,6 +1934,18 @@ def pull_contract_candles(
         builds a fresh observe-only monitor — ordering violations are logged +
         counted, never raised; tests inject ``raise_on_violation=True`` as the
         hard ordering oracle.
+    prior_steps
+        Optional :class:`~brutex.dashboard.pipeline_pull.PriorStepsVerdict`
+        (DEC-PULL-SIX-STEP-ORDER-001) — the sequencer's spot + metadata
+        cleanliness + the resolved strict flag, threaded through the
+        composite so the Greeks seam here can enforce the literal strict
+        barrier: with ``prior_steps.strict`` and ANY uncleanliness (a prior
+        step OR this F&O phase), the enrichment pass is WITHHELD
+        (``pipeline.greeks.strict_skipped`` WARN; the note reads "withheld
+        (strict gate) — re-attempted next pull", never FAILED — the overlay
+        is re-derivable, the next pull re-attempts). ``None`` (every
+        non-pipeline caller — the /db selection route, tests) keeps today's
+        best-effort behavior byte-identical.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -2139,22 +2178,46 @@ def pull_contract_candles(
     if not dry_run:
         # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
         # Greeks enrichment below (and the pipeline's later prebuild phase)
-        # reads clean 1-minute (LakeWriteHalt re-raises).
+        # reads clean 1-minute (LakeWriteHalt re-raises). Integrity, NOT a
+        # post-step — it always runs, strict gate or not.
         _heal_lake_after_pull(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
-        # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
-        # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
-        # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
-        # underlying spot, at the post-drain seam. Best-effort with a carved-out
-        # halt path: an ordinary enrich failure NEVER fails the pull (fenced
-        # inside), while a pull-wide HOST halt (LakeWriteHalt /
-        # GreeksEnrichPoolBroken) RE-RAISES to the job layer's CRITICAL alert
-        # (DEC-GREEKS-PARALLEL-001). FUT legs never get Greeks; skipped on a
-        # dry-run (nothing was written — the outcome honestly stays "did not
-        # run"). The pass verdict rides the report + note
-        # (DEC-GREEKS-ENRICH-OBSERVE-001).
-        greeks_outcome = _enrich_greeks_from_minute(
-            rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root
+        # The strict Greeks arm (DEC-PULL-SIX-STEP-ORDER-001): the literal
+        # all-or-nothing barrier needs BOTH the threaded prior-step verdict
+        # (spot/metadata — invisible from this F&O-local seam otherwise) AND
+        # this phase's own cleanliness. A withheld pass loses nothing — the
+        # overlay is re-derivable; the next pull re-attempts it.
+        fno_clean = (
+            not minute.auth_aborted
+            and minute.mass_empty_cause is None
+            and minute.failed_pairs == 0
+            and minute.still_failed_windows == 0
         )
+        if (
+            prior_steps is not None
+            and prior_steps.strict
+            and not (prior_steps.prior_clean and fno_clean)
+        ):
+            _LOG.warning(
+                "pipeline.greeks.strict_skipped",
+                prior_clean=prior_steps.prior_clean,
+                fno_clean=fno_clean,
+            )
+            greeks_outcome = _GREEKS_STRICT_WITHHELD
+        else:
+            # ── Greeks enrichment over the just-written option 1-minute (quarantined) ───
+            # greeks_enrich_after_pull (DEC-GREEKS-ENGINE-PR2B-001, plan §15.4): compute +
+            # STORE per-bar IV/Greeks for every OPTION contract by joining the same-minute
+            # underlying spot, at the post-drain seam. Best-effort with a carved-out
+            # halt path: an ordinary enrich failure NEVER fails the pull (fenced
+            # inside), while a pull-wide HOST halt (LakeWriteHalt /
+            # GreeksEnrichPoolBroken) RE-RAISES to the job layer's CRITICAL alert
+            # (DEC-GREEKS-PARALLEL-001). FUT legs never get Greeks; skipped on a
+            # dry-run (nothing was written — the outcome honestly stays "did not
+            # run"). The pass verdict rides the report + note
+            # (DEC-GREEKS-ENRICH-OBSERVE-001).
+            greeks_outcome = _enrich_greeks_from_minute(
+                rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root
+            )
 
     note = _build_note(
         dry_run=dry_run,
@@ -2173,6 +2236,7 @@ def pull_contract_candles(
         greeks_enrich_ok=greeks_outcome.ok,
         greeks_enrich_error=greeks_outcome.error,
         class_unresolved=class_unresolved,
+        greeks_strict_withheld=greeks_outcome is _GREEKS_STRICT_WITHHELD,
     )
     return HistoricalPullReport(
         dry_run=dry_run,

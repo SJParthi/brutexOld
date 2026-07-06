@@ -29,6 +29,7 @@ from brutex.adapters.ingest_common import StepOrderMonitor
 from brutex.dashboard import historical_pull as hp
 from brutex.dashboard.composite_pull import _underlying_kind_map
 from brutex.dashboard.historical_pull import HistoricalPullReport, pull_contract_candles
+from brutex.dashboard.pipeline_pull import PriorStepsVerdict
 from brutex.data.registry_store import ContractRow, RegistryStore
 from brutex.data.sink import BarSink, SinkAppendResult
 from brutex.data.window_ledger_store import load_window_ledger
@@ -635,3 +636,117 @@ class TestReportSurface:
         )
         assert report.class_unresolved == 0
         assert report.to_dict()["class_unresolved"] == 0
+
+
+class TestGreeksStrictGate:
+    """The strict Greeks arm at the seam (DEC-PULL-SIX-STEP-ORDER-001).
+
+    Matrix over (prior_clean × F&O-local clean × strict): a strict-withheld
+    pass never runs the enrichment (``_GREEKS_STRICT_WITHHELD`` + one WARN;
+    the note reads "withheld (strict gate)", never FAILED); the cleanset /
+    ``prior_steps=None`` paths keep today's behavior byte-identical.
+    """
+
+    @staticmethod
+    def _enrich_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+        """Spy on ``_enrich_greeks_from_minute`` — records calls, returns ok."""
+        calls: list[dict[str, object]] = []
+
+        def _spy(**kwargs: object) -> object:
+            calls.append(kwargs)
+            return hp._GreeksEnrichOutcome(ok=True, error=None, errored_targets=0)
+
+        monkeypatch.setattr(hp, "_enrich_greeks_from_minute", _spy)
+        return calls
+
+    def _pull(
+        self,
+        tmp_path: Path,
+        *,
+        sdk: object | None = None,
+        prior_steps: PriorStepsVerdict | None = None,
+    ) -> HistoricalPullReport:
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        return pull_contract_candles(
+            registry.list_contracts(),
+            lake_root=tmp_path / "lake",
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk or _FakeSDK(), _RecordingSink()),
+            now=_NOW,
+            underlying_kinds=_KINDS,
+            prior_steps=prior_steps,
+        )
+
+    def test_strict_all_clean_enriches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._enrich_spy(monkeypatch)
+        report = self._pull(
+            tmp_path,
+            prior_steps=PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=True),
+        )
+        assert len(calls) == 1  # clean everywhere → the pass RUNS under strict
+        assert report.greeks_enrich_ok is True
+        assert "withheld" not in report.note
+
+    def test_strict_prior_unclean_withholds_with_warn_and_note(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._enrich_spy(monkeypatch)
+        with capture_logs() as logs:
+            report = self._pull(
+                tmp_path,
+                prior_steps=PriorStepsVerdict(spot_clean=False, metadata_clean=True, strict=True),
+            )
+        assert calls == []  # WITHHELD — the pass never ran
+        assert report.greeks_enrich_ok is None  # not-run, NEVER a FAILED verdict
+        assert report.greeks_enrich_error is None
+        assert ", Greeks enrichment withheld (strict gate) — re-attempted next pull" in report.note
+        assert "Greeks enrichment FAILED" not in report.note
+        warns = _events(logs, "pipeline.greeks.strict_skipped")
+        assert len(warns) == 1
+        assert warns[0]["prior_clean"] is False
+        assert warns[0]["fno_clean"] is True
+
+    def test_strict_fno_unclean_withholds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._enrich_spy(monkeypatch)
+        sdk = _FakeSDK(raise_for={_NIFTY_FUT: (GrowwAPIAuthenticationException("dead"), 99)})
+        with capture_logs() as logs:
+            report = self._pull(
+                tmp_path,
+                sdk=sdk,
+                prior_steps=PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=True),
+            )
+        assert report.auth_aborted is True
+        assert calls == []  # the F&O phase itself is unclean → withheld
+        warns = _events(logs, "pipeline.greeks.strict_skipped")
+        assert len(warns) == 1
+        assert warns[0]["prior_clean"] is True
+        assert warns[0]["fno_clean"] is False
+
+    def test_cleanset_prior_unclean_still_enriches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._enrich_spy(monkeypatch)
+        report = self._pull(
+            tmp_path,
+            prior_steps=PriorStepsVerdict(spot_clean=False, metadata_clean=True, strict=False),
+        )
+        assert len(calls) == 1  # strict OFF ⇒ today's best-effort pass, byte-identical
+        assert report.greeks_enrich_ok is True
+        assert "withheld" not in report.note
+
+    def test_prior_steps_none_enriches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._enrich_spy(monkeypatch)
+        report = self._pull(tmp_path)  # the legacy / non-pipeline caller default
+        assert len(calls) == 1
+        assert report.greeks_enrich_ok is True
+        assert "withheld" not in report.note
