@@ -44,6 +44,16 @@ env:
   # Bounded smoke: per-target wall clock (seconds) + libFuzzer memory cap.
   FUZZ_SECONDS: "30"
   FUZZ_RSS_MB: "2048"
+  # Build/run the fuzz binaries for the GNU host triple EXPLICITLY. cargo-fuzz
+  # derives its default `--target` from `current_platform::CURRENT_PLATFORM` —
+  # the triple cargo-fuzz ITSELF was compiled for — NOT the running host. CI
+  # installs cargo-fuzz via taiki-e/install-action's cargo-binstall fallback,
+  # which fetches the prebuilt *musl* binary, so the default target became
+  # x86_64-unknown-linux-musl. musl links crt-static, which is incompatible
+  # with the address sanitizer ("sanitizer is incompatible with statically
+  # linked libc") and fails the build before any target compiles. Pinning the
+  # GNU host triple restores the dynamic-libc + ASan build the runner supports.
+  FUZZ_TARGET: "x86_64-unknown-linux-gnu"
 
 jobs:
   fuzz-smoke:
@@ -69,6 +79,9 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY }}
           components: rust-src
+          # Explicit GNU host triple (see FUZZ_TARGET note above): guarantees
+          # its rust-std is present for the sanitizer build.
+          targets: ${{ env.FUZZ_TARGET }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -86,7 +99,7 @@ jobs:
       # crate's API fails HERE (this exact rot shipped once — see
       # rust/trading-core/fuzz/README.md).
       - name: Build all fuzz targets
-        run: cargo +${{ env.NIGHTLY }} fuzz build
+        run: cargo +${{ env.NIGHTLY }} fuzz build --target ${{ env.FUZZ_TARGET }}
 
       - name: Run each target (bounded smoke)
         run: |
@@ -103,7 +116,7 @@ jobs:
               cp "fuzz/seeds/${t}"/* "fuzz/corpus/${t}/" || true
             fi
             # A crash/panic/sanitizer report/timeout/OOM exits non-zero → red.
-            cargo +${{ env.NIGHTLY }} fuzz run "${t}" -- \
+            cargo +${{ env.NIGHTLY }} fuzz run "${t}" --target "${FUZZ_TARGET}" -- \
               -max_total_time="${FUZZ_SECONDS}" \
               -timeout=10 \
               -rss_limit_mb="${FUZZ_RSS_MB}" \

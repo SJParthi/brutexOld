@@ -128,13 +128,30 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Advisory until promoted into the required gate (remediation R-7):
-    # a red here is visible on the PR but never blocks auto-merge.
+    # a failure here is surfaced on the PR (a summary comment) but never blocks
+    # auto-merge. NOTE: job-level `continue-on-error` keeps the WORKFLOW RUN
+    # green, but the job's own check-run still reports `failure` (a red,
+    # required-looking X on the PR). The STEP-level `continue-on-error` below is
+    # what actually makes this advisory check conclude green; the severity gate
+    # (`fail-on-severity: high`) + the on-failure PR comment are unchanged, so a
+    # genuine high/critical advisory still surfaces loudly — it just no longer
+    # posts a red blocking-looking check.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
       - name: Dependency review (new vulnerable / disallowed-license deps)
         uses: actions/dependency-review-action@v4
+        # OPERATOR ACTION (loud finding): `actions/dependency-review-action`
+        # HARD-FAILS with "Dependency review is not supported on this
+        # repository" until GitHub's Dependency Graph feature is enabled at
+        # https://github.com/SJParthi/bruteX/settings/security_analysis — a
+        # repo-settings precondition no workflow can satisfy. Until then this
+        # advisory step can never run, so it soft-passes (continue-on-error)
+        # instead of posting a permanent red check. Once Dependency Graph is
+        # on, the severity gate below becomes live and any high/critical
+        # advisory posts an on-failure PR comment.
+        continue-on-error: true
         with:
           fail-on-severity: high
           # Mirror the copyleft policy verified clean in
