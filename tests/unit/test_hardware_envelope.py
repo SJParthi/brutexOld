@@ -1,6 +1,6 @@
 """Unit tests for RAM detection + RAM-scaled budget derivation (DEC-RAM-BUDGETS-001).
 
-Every branch of :mod:`brutex.hardware_envelope` — the two detection probes
+Every branch of :mod:`brutex.config.hardware_envelope` — the two detection probes
 (``sysconf`` primary, ``sysctl`` macOS fallback — the latter UNVERIFIED on
 real macOS, seam-tested here with a mocked ``subprocess``), the once-per-
 process cache + reset seam, the input validation, the explicit env override
@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import pytest
-from brutex.hardware_envelope import (
+from brutex.config.hardware_envelope import (
     UNDETECTED_RAM,
     detect_total_ram_bytes,
     memory_budget_bytes,
@@ -50,8 +50,12 @@ def _simulate_ram(monkeypatch: pytest.MonkeyPatch, total_bytes: int) -> None:
     ``brutex.orchestrator.bloom``'s import-time derivation) may already have
     detected the sandbox's real RAM.
     """
-    monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: total_bytes)
-    monkeypatch.setattr("brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM)
+    monkeypatch.setattr(
+        "brutex.config.hardware_envelope._sysconf_total_ram_bytes", lambda: total_bytes
+    )
+    monkeypatch.setattr(
+        "brutex.config.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
+    )
     reset_hardware_envelope_cache()
 
 
@@ -77,7 +81,7 @@ class TestSysconfProbe:
 
         monkeypatch.setattr("os.sysconf", _boom)
         monkeypatch.setattr(
-            "brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
+            "brutex.config.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
         )
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
@@ -88,7 +92,7 @@ class TestSysconfProbe:
         values = {"SC_PAGE_SIZE": page, "SC_PHYS_PAGES": pages}
         monkeypatch.setattr("os.sysconf", lambda name: values[name])
         monkeypatch.setattr(
-            "brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
+            "brutex.config.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
         )
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
@@ -129,7 +133,7 @@ class TestSysctlFallback:
     def test_sysctl_success_detects(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._no_sysconf(monkeypatch)
         monkeypatch.setattr(
-            "brutex.hardware_envelope.subprocess.run", self._fake_run(f"{48 * GIB}\n")
+            "brutex.config.hardware_envelope.subprocess.run", self._fake_run(f"{48 * GIB}\n")
         )
         assert detect_total_ram_bytes() == 48 * GIB
 
@@ -139,7 +143,7 @@ class TestSysctlFallback:
         def _raise(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
             raise FileNotFoundError("/usr/sbin/sysctl")
 
-        monkeypatch.setattr("brutex.hardware_envelope.subprocess.run", _raise)
+        monkeypatch.setattr("brutex.config.hardware_envelope.subprocess.run", _raise)
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
     def test_sysctl_timeout_maps_to_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -148,20 +152,20 @@ class TestSysctlFallback:
         def _raise(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(cmd="sysctl", timeout=5.0)
 
-        monkeypatch.setattr("brutex.hardware_envelope.subprocess.run", _raise)
+        monkeypatch.setattr("brutex.config.hardware_envelope.subprocess.run", _raise)
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
     def test_sysctl_nonzero_exit_maps_to_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._no_sysconf(monkeypatch)
         monkeypatch.setattr(
-            "brutex.hardware_envelope.subprocess.run", self._fake_run("", returncode=1)
+            "brutex.config.hardware_envelope.subprocess.run", self._fake_run("", returncode=1)
         )
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
     def test_sysctl_garbage_output_maps_to_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._no_sysconf(monkeypatch)
         monkeypatch.setattr(
-            "brutex.hardware_envelope.subprocess.run", self._fake_run("hw.memsize: lots\n")
+            "brutex.config.hardware_envelope.subprocess.run", self._fake_run("hw.memsize: lots\n")
         )
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
@@ -170,7 +174,9 @@ class TestSysctlFallback:
         self, monkeypatch: pytest.MonkeyPatch, stdout: str
     ) -> None:
         self._no_sysconf(monkeypatch)
-        monkeypatch.setattr("brutex.hardware_envelope.subprocess.run", self._fake_run(stdout))
+        monkeypatch.setattr(
+            "brutex.config.hardware_envelope.subprocess.run", self._fake_run(stdout)
+        )
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
 
@@ -182,17 +188,21 @@ class TestDetectionCache:
             calls["n"] += 1
             return 48 * GIB
 
-        monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", _probe)
+        monkeypatch.setattr("brutex.config.hardware_envelope._sysconf_total_ram_bytes", _probe)
         assert detect_total_ram_bytes() == 48 * GIB
         # A changed probe result is IGNORED — no mid-run flapping.
-        monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: 8 * GIB)
+        monkeypatch.setattr(
+            "brutex.config.hardware_envelope._sysconf_total_ram_bytes", lambda: 8 * GIB
+        )
         assert detect_total_ram_bytes() == 48 * GIB
         assert calls["n"] == 1
 
     def test_undetected_sentinel_is_cached_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _simulate_ram(monkeypatch, UNDETECTED_RAM)
         assert detect_total_ram_bytes() == UNDETECTED_RAM
-        monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: 48 * GIB)
+        monkeypatch.setattr(
+            "brutex.config.hardware_envelope._sysconf_total_ram_bytes", lambda: 48 * GIB
+        )
         assert detect_total_ram_bytes() == UNDETECTED_RAM
 
     def test_reset_seam_re_detects(self, monkeypatch: pytest.MonkeyPatch) -> None:

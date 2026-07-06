@@ -1,19 +1,22 @@
 """Golden byte-stability freeze for the sweep dedup digest.
 
-DEC-ENGINE-DEDUP-NAN-CANON-001. :func:`brutex.engine.sweep_cache.combo_digest`
-gained an ``allow_nan=False`` guard so the membership-dedup key obeys the same
-one-NaN-policy as the run-identity hash + the completion sentinel (CLAUDE.md §2
-Rule 11 COMMON). ``allow_nan=False`` only ever REJECTS a non-finite float — it
-NEVER reshapes a finite value's JSON serialisation — so for any FINITE combo the
-digest must be byte-for-byte identical to before the change.
+DEC-ENGINE-DEDUP-NAN-CANON-001 froze the canonicalisation after the
+``allow_nan=False`` guard landed. DEC-COMBO-DIGEST-REPRO-HASHES-001 then made
+the three Golden-Rule-#4 reproducibility hashes (``data_snapshot_hash`` /
+``indicator_version`` / ``code_commit_sha``) STRUCTURAL keyword-only
+parameters of :func:`brutex.engine.sweep_cache.combo_digest` — previously they
+reached the digest only by CONVENTION (the supervisor injected them inside
+``canonical_params``), so a caller that forgot them silently ALIASED dedup
+entries across data snapshots (a stale-skip bug).
 
-This golden PINS the exact hex of two fixed FINITE combos (one carrying a finite
-float param, exercising the very ``allow_nan=False`` code path; one with
-``params=None``). The digests were frozen AFTER the guard landed and verified
-equal to the pre-change digests — they are the byte-stability contract: any
-future change to the canonicalisation (field order, ``sort_keys``, separators,
-the BLAKE3 primitive, or the guard) that moves a FINITE digest is caught
-byte-for-byte here (Golden Rule #4 reproducibility).
+The hex constants below were CAPTURED FROM THE PRE-CHANGE (main) code by
+injecting the hashes inside ``canonical_params`` — the legacy convention the
+live Bloom/LMDB dedup stores were keyed with. The structural-kwargs API must
+reproduce them EXACTLY: byte-identity is the hard contract that existing dedup
+stores and run identities are NOT invalidated (Golden Rule #4). Any future
+change to the canonicalisation (field order, ``sort_keys``, separators, the
+BLAKE3 primitive, the guard, or the internal repro-hash injection layout) that
+moves a digest is caught byte-for-byte here.
 
 BLAKE3 ships in the wheel-free ``blake3`` package, so this golden runs anywhere
 (no Rust wheel needed — see ``sweep_cache`` module docstring).
@@ -25,27 +28,40 @@ from brutex.engine.sweep_cache import combo_digest
 
 #: Frozen hex of a fixed FINITE combo carrying a FINITE float param
 #: (``proximity=0.25``) — exercises the ``allow_nan=False`` path on a finite
-#: value and proves it does NOT move the digest.
-_GOLDEN_FINITE_FLOAT = "f4980d0fe164ce4200e73cf1ef40cd1cbb5db64a0ec27506164432b72a4d4143"
+#: value. Captured pre-change with the three hashes inside ``canonical_params``.
+_GOLDEN_FINITE_FLOAT = "d6605c7476833543f7434b0afd9c570ed87ca724b1529bc0b5f321c4255c634a"
 
-#: Frozen hex of a fixed combo with ``params=None`` — identical to the
-#: pre-change digest (the ``{}`` empty-params branch is unaffected by the guard).
-_GOLDEN_NONE = "220151bac87f37f9cf170f7c70f2d0be91ee56da9212a58c077ee811c1d581d1"
+#: Frozen hex of a fixed combo with ``params=None`` — pre-change this was the
+#: ``{"params": {<the three hashes>}}`` payload (the hashes were ALWAYS present
+#: on the production path); the structural API rebuilds it byte-identically.
+_GOLDEN_NONE = "4505201a72dfa1d4c03e51ee9bae00f1ac1cf92b55522ff829bd82e020ee2f0e"
 
 
 def test_combo_digest_finite_float_byte_stable() -> None:
-    """A FINITE float param hashes to the frozen digest (allow_nan=False no-op)."""
+    """A FINITE float param hashes to the frozen pre-change digest."""
     digest = combo_digest(
         0b1010110,
         "NIFTY",
         "5m",
         "bull",
         {"sl_paisa": 80, "tp_paisa": 50, "prior_n": 3, "proximity": 0.25},
+        data_snapshot_hash="snap-aaaa",
+        indicator_version="ind-v1",
+        code_commit_sha="c0ffee01",
     )
     assert digest.hex() == _GOLDEN_FINITE_FLOAT
 
 
 def test_combo_digest_none_params_byte_stable() -> None:
-    """The ``params=None`` combo hashes to the frozen digest (unchanged)."""
-    digest = combo_digest(7, "BANKNIFTY", "1m", "bear", None)
+    """The ``params=None`` combo hashes to the frozen pre-change digest."""
+    digest = combo_digest(
+        7,
+        "BANKNIFTY",
+        "1m",
+        "bear",
+        None,
+        data_snapshot_hash="snap-aaaa",
+        indicator_version="ind-v1",
+        code_commit_sha="c0ffee01",
+    )
     assert digest.hex() == _GOLDEN_NONE
