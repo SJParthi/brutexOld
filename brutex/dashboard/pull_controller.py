@@ -102,11 +102,14 @@ from brutex.adapters.groww.vendor_floor import (
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     GROWW_COVERAGE_MARKET,
+    PullStep,
     PullVerdict,
+    StepOrderMonitor,
     SyntheticSpotAdapter,
     UntilCleanRound,
     classify_pull,
     mark_synthetic,
+    partition_spot_steps,
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
@@ -1170,6 +1173,30 @@ pull_health.PullHealthMonitor.observe` was fed ONLY at pull / instrument BOUNDAR
     return _on_window
 
 
+def make_step_write_observer(
+    inner: Callable[[], None],
+    monitor: StepOrderMonitor,
+    step: PullStep,
+) -> Callable[[], None]:
+    """Wrap a per-window callback so each processed window is step-attributed.
+
+    DEC-PULL-SIX-STEP-ORDER-001 — the spot arm of the observe-only ordering
+    oracle: the per-window settle callback (which in async-pipeline mode fires
+    from the CONSUMER tail) is composed per step group, closing over its group's
+    :class:`~brutex.adapters.ingest_common.PullStep`. A group-1 tail write
+    landing after ``begin_step(group 2)`` is the exact late-write signal —
+    ``monitor.observe_write`` WARNs ``pull.step.late_write`` + counts, never
+    raises, never blocks (the #907/#919 detect-and-warn pattern). *inner* (the
+    existing window observer chain) runs FIRST, byte-unchanged.
+    """
+
+    def _on_window() -> None:
+        inner()
+        monitor.observe_write(step)
+
+    return _on_window
+
+
 def _build_pull_health_monitor(
     controller: RateController | None,
 ) -> PullHealthMonitor | None:
@@ -1393,8 +1420,25 @@ def pull_all_spot(
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
     on_ledger_sync: OnLedgerSync | None = None,
     floor_store: VendorFloorMetaStore | None = None,
+    step_monitor: StepOrderMonitor | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
+
+    **Six-step pull order, steps 1-2 (DEC-PULL-SIX-STEP-ORDER-001):** the
+    instrument list is ALWAYS partitioned into ordered (INDICES-SPOT,
+    STOCKS-SPOT) groups via the COMMON
+    :func:`~brutex.adapters.ingest_common.partition_spot_steps` — every index
+    spot window is fetched before any stock spot window (empty groups skipped;
+    a homogeneous list is ONE group, byte-identical to the ungrouped pull).
+    The partition lives INSIDE this function — never at the caller — because
+    ``use_live_rate = adapter_factory is None and not dry_run`` means a
+    sequencer-level two-call split would have to inject an ``adapter_factory``
+    and silently DISABLE the live rate runtime. One adapter/pool/ledger/journal
+    build spans both groups; each group's until-clean loop settles (its
+    outstanding read is group-scoped via ``progress_counts(symbols=…)``) before
+    the next group's first vendor call; a global stop (dead token / spent quota
+    / mass-empty halt) in group k halts the remaining groups with
+    ``pull.step.halted``.
 
     The one-click "⤓ Pull ALL indices / stocks spot" button core: one
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
@@ -1477,6 +1521,12 @@ def pull_all_spot(
         full-range planning byte-identical and learns un-persisted (this pull's
         mass-settle still applies; the CLI ``brutex fetch`` path stays unwired —
         an explicit follow-up, mirroring DEC-PULL-HEALTH-WIRING-001's envelope).
+    step_monitor
+        Optional :class:`~brutex.adapters.ingest_common.StepOrderMonitor`
+        (DEC-PULL-SIX-STEP-ORDER-001). ``None`` (every production caller)
+        builds a fresh observe-only monitor — ordering violations are logged +
+        counted, never raised; tests inject ``raise_on_violation=True`` as the
+        hard ordering oracle.
 
     Returns
     -------
@@ -1743,13 +1793,25 @@ def pull_all_spot(
         # Per-phase FIRST-pass reports keyed by interval — the per-symbol rollup reads
         # each interval's 1-day/1-minute outcome from its own phase's report. Both
         # phases run over EVERY requested instrument (DEC-SPOT-INTERVAL-DECOUPLE-001 —
-        # the minute phase is no longer filtered by 1-day coverage).
+        # the minute phase is no longer filtered by 1-day coverage). Under the
+        # six-step order (DEC-PULL-SIX-STEP-ORDER-001) each phase now appends one
+        # report PER (interval-phase × step group); the rollup below needed ZERO
+        # change — ``merged_pairs.update`` dict-unions the disjoint symbol sets and
+        # ``windows_skipped`` sums correctly over disjoint groups (fold-parity pinned).
         phase_reports: list[GrowwIngestReport] = []
+        # Six-step pull order, steps 1-2 (DEC-PULL-SIX-STEP-ORDER-001): ALWAYS-ON
+        # ordered partition — indices spot before stock spot, empty groups omitted.
+        # Computed ONCE; PLANNING stays one pass over ALL instruments (ledger rows,
+        # zero vendor calls) — only EXECUTION order is the law's subject.
+        spot_groups = partition_spot_steps(instruments)
+        _step_monitor = step_monitor if step_monitor is not None else StepOrderMonitor()
 
         def _run_phase(
             phase_intervals: tuple[str, ...],
             phase_instruments: Sequence[Instrument],
             phase_windows: SpotWindows | None,
+            *,
+            step: PullStep,
         ) -> None:
             """Run ONE phase (1-day or 1-minute) over the SHARED ledger; fold its outcome.
 
@@ -1764,10 +1826,24 @@ def pull_all_spot(
             Aggregates into the ``final_*`` outer state: ``still_failed`` SUMS across
             phases; ``auth_aborted`` / ``quota_exhausted`` are ANY phase's; the FIRST
             pass of each phase is appended to ``phase_reports`` for the rollup.
+
+            *step* (DEC-PULL-SIX-STEP-ORDER-001): the group's
+            :class:`~brutex.adapters.ingest_common.PullStep` — composes the
+            per-window observer with the step monitor's late-write observe and
+            scopes the until-clean outstanding read to the GROUP's own symbols
+            (``progress_counts(symbols=…)``) so the indices group exits
+            ``stop_clean`` honestly instead of burning a vendor-call-free
+            ``stop_no_progress`` round against the stock group's PLANNED rows.
             """
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
             nonlocal final_mass_empty_cause
             passes: list[SpotIngestWithRetry] = []
+            # Group-scoped until-clean + step-attributed writes
+            # (DEC-PULL-SIX-STEP-ORDER-001): the outstanding read below folds ONLY
+            # this group's symbols; the per-window observer also attributes each
+            # processed window to this group's step (late writes WARN + count).
+            group_symbols = frozenset(inst.symbol_name for inst in phase_instruments)
+            phase_observer = make_step_write_observer(window_observer, _step_monitor, step)
             # Synthesized quarantine rows for a TERMINAL mid-pass auth halt
             # (DEC-GROWW-AUTH-HALT-001): the spine now RAISES a dead-credential
             # auth error before returning its report, so the aborted pass never
@@ -1798,7 +1874,7 @@ def pull_all_spot(
                     ledger=ledger,
                     run_parallel=run_parallel,
                     auto_retry=do_retry,
-                    on_window=window_observer,
+                    on_window=phase_observer,
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
@@ -1838,7 +1914,15 @@ def pull_all_spot(
                         res = _one_pass(True)
                         outstanding = settled = streak = None
                         if ledger is not None:
-                            prog = ledger.progress_counts()
+                            # GROUP-scoped outstanding (DEC-PULL-SIX-STEP-ORDER-001):
+                            # fold ONLY this step group's symbols, so the indices
+                            # group exits ``stop_clean`` instead of reading the stock
+                            # group's still-PLANNED rows as its own residual (the
+                            # ledger-wide-pollution trap). The streak total stays
+                            # ledger-wide — only THIS pass's own symbols advance
+                            # streaks mid-loop, so cross-group contributions are
+                            # constant and cancel in the progress comparison.
+                            prog = ledger.progress_counts(symbols=group_symbols)
                             outstanding = prog.total - prog.settled
                             settled = prog.settled
                             # Summed empty_streak — the secondary progress signal (an
@@ -1995,6 +2079,71 @@ def pull_all_spot(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=auth_failures)
             )
 
+        def _run_grouped(
+            phase_intervals: tuple[str, ...],
+            phase_windows: SpotWindows | None,
+        ) -> None:
+            """Run ONE phase over the ordered step groups (DEC-PULL-SIX-STEP-ORDER-001).
+
+            The COMMON group loop BOTH phase call sites (the dormant 1-day phase
+            + the 1-minute phase) funnel through: each non-empty step group runs
+            ``_run_phase`` to settlement (its until-clean loop drains) before the
+            next group's first vendor call — step-major by construction on the
+            producer side. A global stop latched by an earlier group (dead token
+            / spent quota / mass-empty halt) halts the remaining groups LOUDLY
+            (``pull.step.halted``) — the same `final_*` global-stop state the
+            phase-level minute guard reads.
+            """
+            for step, group in spot_groups:
+                if (
+                    final_auth_aborted
+                    or final_quota_exhausted
+                    or final_mass_empty_cause is not None
+                ):
+                    reason = (
+                        "auth_expired"
+                        if final_auth_aborted
+                        else "quota_exhausted"
+                        if final_quota_exhausted
+                        else "mass_empty_halt"
+                    )
+                    _LOG.warning(
+                        "pull.step.halted",
+                        step=step.label,
+                        ordinal=int(step),
+                        reason=reason,
+                        pull_id=pid,
+                    )
+                    break
+                _step_monitor.begin_step(step)
+                _LOG.info(
+                    "pull.step.started",
+                    step=step.label,
+                    ordinal=int(step),
+                    symbols=len(group),
+                    pull_id=pid,
+                )
+                before_failed = final_still_failed
+                _run_phase(phase_intervals, group, phase_windows, step=step)
+                group_report = phase_reports[-1]
+                group_failed = final_still_failed - before_failed
+                _LOG.info(
+                    "pull.step.settled",
+                    step=step.label,
+                    ordinal=int(step),
+                    clean=(
+                        group_failed == 0
+                        and not final_auth_aborted
+                        and not final_quota_exhausted
+                        and final_mass_empty_cause is None
+                    ),
+                    bars=group_report.bars_appended,
+                    windows=group_report.windows,
+                    still_failed=group_failed,
+                    skipped=group_report.skipped_windows,
+                    pull_id=pid,
+                )
+
         # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
         # captured at the minute phase's reconcile below — the SAME already-loaded
         # spans + the just-reconciled ledger rows, a pre-pull-CONSISTENT pair —
@@ -2007,8 +2156,10 @@ def pull_all_spot(
         fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (over EVERY symbol; full range) ──
+            # DEC-PULL-SIX-STEP-ORDER-001: the phase runs through the ordered
+            # step-group loop (indices group first, then stocks).
             if daily_requested:
-                _run_phase((_PHASE1_DAILY,), instruments, None)
+                _run_grouped((_PHASE1_DAILY,), None)
             # ── Phase 2 — 1-minute over EVERY symbol, full range (DECOUPLED) ──
             # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851): the 1-minute pull is
             # FULLY DECOUPLED from the 1-day coverage — it pulls its full ``[start,
@@ -2097,7 +2248,9 @@ def pull_all_spot(
                     # ``max(GROWW_HISTORY_FLOOR, learned floor)`` — the SAME
                     # ``_floor_windows`` the plan above tiled, so planned keys ==
                     # fetched keys; ``None`` (no learned floors) is byte-identical.
-                    _run_phase(minute_intervals, instruments, _floor_windows)
+                    # DEC-PULL-SIX-STEP-ORDER-001: ordered step groups (indices
+                    # spot before stock spot) through the ONE ingest seam.
+                    _run_grouped(minute_intervals, _floor_windows)
             # Fetch phases done — arm the post-drain L2 lake heal in the finally.
             fetch_phases_ok = True
         finally:
@@ -2842,6 +2995,7 @@ __all__ = [
     "SessionRateController",
     "SymbolPullResult",
     "TimeframeResult",
+    "make_step_write_observer",
     "make_window_observer",
     "parse_symbol_list",
     "pull_all_spot",
