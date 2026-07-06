@@ -58,7 +58,22 @@ multi-destination-month reassignment (options + bars twin) + overlap-across-
 months pinned, truncation mutants killed. NITs: symlinked series dirs
 skipped LOUDLY (heal primitives would otherwise mutate outside the lake
 root); ONE `is_foreign_timestamp` predicate (4 copies killed, §11 COMMON);
-new options events carry `series=repr(…)` (#907). HONEST: no production
+new options events carry `series=repr(…)` (#907). ROUND 2 (refuter-confirmed
+MAJOR): that scan-time symlink skip ALONE was BYPASSABLE — a symlinked
+`options/` ROOT (its series dirs are real, the per-series probe never fired)
+and a scan→heal TOCTOU dir swap were BOTH reproduced writing outside the
+lake from the default AUTO-ON sweep; containment is now ENFORCED at the
+writer MUTATION boundary (`OptionParquetWriter._assert_options_containment`
+inside both heal-side entries, resolved-path check at heal time, the
+`options` component deliberately NOT symlink-resolved; refusal = isolated
+`OptionWriterError`, batch continues, outside bytes untouched; a symlinked
+lake ROOT still passes — pinned) + the options ROOT symlink is skipped
+loudly at scan; 6 regressions all verified failing pre-fix; round-2 NITs:
+the "zero reads out of scope" L2 claim + the "healer's own dup pass
+quarantines" comment + the `_merge_partition` "byte-for-byte" docstring
+reworded honestly, `is_foreign_timestamp` added to `__all__`, the
+option-foreign month split now the O(rows) dict-group (bars twin's shape).
+HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
 deterministically (canonical/path-ordered-first wins, originals in
@@ -383,8 +398,10 @@ hostile-review pass._
   `months=` bounds the options tree BY FILENAME; census OPTIONS row + `brutex lake audit-unique` + `/universe` chip
   carry REAL foreign/overlap numbers (drift stays `-`, honestly N/A). Wiring honesty: L1 reconcile-piggyback heal is
   STRUCTURALLY N/A for `options/` (the reconcile walks the CATALOG; the options tree is uncatalogued by design); L2
-  `heal_after_pull(include_options=True)` wired at the F&O post-pull seam ONLY (bounded, months-scoped, zero reads
-  out of scope; no current production pull WRITES `options/` — opportunistic census of a legacy table); L3 startup
+  `heal_after_pull(include_options=True)` wired at the F&O post-pull seam ONLY (bounded, months-scoped by FILENAME —
+  a CLEAN out-of-scope file is never read; HONEST round-2 NIT: a FLAGGED in-scope file still costs targeted
+  canonical-sibling reads + heal writes in its foreign rows' HOME months, possibly outside the span; no current
+  production pull WRITES `options/` — opportunistic census of a legacy table); L3 startup
   sweep already scanned `include_options=True` so the new findings ride automatically (sentinel gate G9-pinned);
   recall stays `None` for options findings (NOTHING derives from `options/`; bars recall machinery reused as-is in
   mixed batches — no new recall invented). STRICTLY row-removing/row-reassigning — never value-editing.
@@ -411,10 +428,30 @@ hostile-review pass._
   dirs are SKIPPED loudly (`lake.invariant.symlink_skipped` — the heal primitives unlink/rmdir/create INSIDE a
   series dir, so a followed symlink would mutate files OUTSIDE the lake root); the foreign-routing predicate is
   ONE `is_foreign_timestamp` (§11 COMMON, 4 inline copies killed); the new options events carry `series=repr(…)`
-  (the #907 raw-name convention). Remaining
+  (the #907 raw-name convention). HOSTILE-REVIEW FOLDS (round 2, refuter-confirmed; all 6 regressions verified
+  failing pre-fix): (R2-1·MAJOR) the round-1 scan-time symlink skip was the ONLY control and was BYPASSABLE — both
+  vectors empirically reproduced mutating files OUTSIDE the lake root from the default AUTO-ON sweep: (V1) a
+  symlinked `options/` ROOT (`is_dir()` follows it; the series dirs inside are REAL so the per-series probe never
+  fired) and (V2) a scan→heal TOCTOU (the probe is scan-time only; the heal re-derives dest + re-reads/unlinks src
+  with no re-check), with NO containment check at the writer mutation boundary. FIXED with two rails: containment
+  ENFORCED at the mutation boundary — NEW `OptionParquetWriter._assert_options_containment(dest)` under the locks
+  inside BOTH heal-side entries (`heal_partition` before any read/unlink/rewrite; `merge_partition_frame` via
+  `_merge_frame_locked(containment=True)`) refusing with the quarantinable `OptionWriterError` unless
+  `dest.resolve().parent` sits under `lake_root.resolve()/options` (the `options` component deliberately NOT
+  symlink-resolved — resolving it would re-anchor the containment root to the attacker's target; a lake ROOT reached
+  via a symlink still PASSES, pinned no-false-positive; refusal = isolated counted error, batch continues, an
+  errored L3 batch skips the sentinel so the next boot re-attempts) — PLUS the options-ROOT symlink is skipped
+  loudly at scan (same `lake.invariant.symlink_skipped` event). The production `write()` path stays deliberately
+  unguarded (`_safe_segment` already rejects traversal; a deliberately-symlinked options tree keeps a working pull —
+  the HEALER refuses instead). HONEST: closes the demonstrated scan→heal window; a sub-lock race against the atomic
+  rename inside ONE call would need dirfd-relative I/O — out of scope, NOT claimed. (R2-2·NITs) the L2
+  "zero-reads-out-of-scope" overclaim + the untrue "healer's own dup pass quarantines" comment + the
+  `_merge_partition` "byte-for-byte" docstring all reworded honestly; `is_foreign_timestamp` added to
+  `lake_invariants.__all__`; the option-foreign month split rewritten O(months × rows) → O(rows) dict-group (the
+  bars twin's shape). Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (437/146) + `option_parquet_writer.py`
-  (147/26) + `lake_heal.py` (588/162) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (439/148) + `option_parquet_writer.py`
+  (155/30) + `lake_heal.py` (589/164) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
