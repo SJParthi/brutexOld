@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from brutex import __version__
+from brutex.config.hardware_envelope import apply_polars_thread_bound
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
@@ -6633,6 +6634,18 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command is None or args.command == "version":
         return cmd_version()
+    # DEC-THREAD-BUDGET-BOUNDS-001 — bound the polars global thread pool ONCE
+    # per process, at the ONE entrypoint every BruteX process (CLI fetch AND
+    # the in-process uvicorn dashboard) enters, BEFORE the first lazy `import
+    # polars` any dispatch below can trigger (verified: importing brutex.cli
+    # pulls in neither polars nor duckdb; the polars-free `version` fast path
+    # above stays log-free — its byte-exact stdout contract is test-pinned).
+    # Runs AFTER bootstrap_env so a persisted BRUTEX_POLARS_THREADS /
+    # POLARS_MAX_THREADS in ~/.brutex/.env is honoured. Safe by construction:
+    # an operator-preset POLARS_MAX_THREADS is respected, and an
+    # already-imported polars logs one loud too-late warning per process
+    # instead of pretending a bound applied.
+    apply_polars_thread_bound()
     if args.command == "status":
         return cmd_status(run_id=args.run_id)
     if args.command == "audit":

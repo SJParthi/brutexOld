@@ -1,14 +1,16 @@
-"""Unit tests for the COMMON CPU hardware-envelope module (DEC-HARDWARE-ENVELOPE-001).
+"""Unit tests for the COMMON hardware-envelope module.
 
-100% line + branch of :mod:`brutex.config.hardware_envelope` — every detection
-cascade (macOS / Linux / fallback), every probe failure mode, and every CPU
-sizing helper, all via dependency injection so the branches are deterministic
-on a Linux CI box that is neither an M4 Pro nor able to run ``sysctl``.
+100% line + branch of :mod:`brutex.config.hardware_envelope` (together with
+the sibling ``tests/unit/test_hardware_envelope.py``, which pins the ported
+DEC-RAM-BUDGETS-001 RAM surface verbatim) — every detection cascade
+(macOS / Linux / fallback), every probe failure mode, every CPU sizing
+helper, and the polars/DuckDB thread bounds (DEC-THREAD-BUDGET-BOUNDS-001),
+all via dependency injection so the branches are deterministic on a Linux CI
+box that is neither an M4 Pro nor able to run ``sysctl``.
 
-RAM detection + RAM-scaled budgets are OWNED by the sibling
-:mod:`brutex.hardware_envelope` (DEC-RAM-BUDGETS-001, MIGRATION.md #1360) and
-are tested in ``tests/unit/test_hardware_envelope.py`` — the delegation pin
-below guards the one-source-of-truth split.
+Since DEC-HW-ENVELOPE-CONSOLIDATE-001 this module IS the one hardware-envelope
+module — the consolidation pin below supersedes the interim two-module
+RAM-delegation pin of the #1167 conflict resolution.
 """
 
 from __future__ import annotations
@@ -25,37 +27,49 @@ if TYPE_CHECKING:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Delegation pin — RAM budgets live in brutex.hardware_envelope, NOT here
+# Consolidation pin — ONE hardware-envelope module, the #1360 RAM law hosted
+# verbatim (DEC-HW-ENVELOPE-CONSOLIDATE-001; supersedes the interim
+# two-module RAM-delegation pin of the #1167 conflict resolution)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestRamDelegationPin:
-    def test_config_module_defines_no_ram_surface(self) -> None:
-        """The contradictory RAM half must never come back (one source of truth).
+class TestConsolidationPin:
+    def test_config_module_hosts_the_authoritative_ram_surface(self) -> None:
+        """The #1360 RAM API lives HERE now (one source of truth).
 
-        An earlier draft duplicated a ``memory_budget_bytes`` here with
-        DIFFERENT semantics (available-RAM-preferring, floor-clamped,
-        silent-ignore fraction override) from the authoritative
-        :func:`brutex.hardware_envelope.memory_budget_bytes` (total-RAM,
-        floor-only-on-undetected, fail-LOUD override). This pin fails if the
-        duplicate surface reappears.
+        The contradictory ENVELOPE-mode ``memory_budget_bytes`` duplicate
+        (available-RAM-preferring, floor-clamped, silent-ignore fraction
+        override) stays DEAD — its surface must not reappear — while the
+        authoritative DEC-RAM-BUDGETS-001 derivation (total-RAM,
+        floor-only-on-undetected, fail-LOUD override) is hosted verbatim
+        (pinned in tests/unit/test_hardware_envelope.py).
         """
-        for name in (
-            "memory_budget_bytes",
+        assert callable(hw.memory_budget_bytes)
+        assert callable(hw.detect_total_ram_bytes)
+        assert callable(hw.reset_hardware_envelope_cache)
+        assert hw.UNDETECTED_RAM == 0
+        for dead in (
             "_resolve_fraction",
             "MEM_FRACTION_ENV",
             "DEFAULT_MEMORY_FLOOR_BYTES",
             "_read_meminfo",
         ):
-            assert not hasattr(hw, name), f"RAM surface leaked back into config leaf: {name}"
+            assert not hasattr(hw, dead), f"dead envelope-mode RAM surface reappeared: {dead}"
 
-    def test_authoritative_ram_module_is_importable(self) -> None:
-        from brutex.hardware_envelope import detect_total_ram_bytes, memory_budget_bytes
+    def test_old_sibling_module_is_gone(self) -> None:
+        # Filesystem pin (not find_spec — an editable-install meta-path finder
+        # can resolve against a SIBLING checkout): the package directory of
+        # the imported module must not carry the old sibling file.
+        from pathlib import Path
 
-        assert callable(memory_budget_bytes)
-        assert callable(detect_total_ram_bytes)
+        package_dir = Path(hw.__file__).resolve().parent.parent
+        assert not (package_dir / "hardware_envelope.py").exists(), (
+            "brutex/hardware_envelope.py must stay deleted — "
+            "brutex.config.hardware_envelope is the ONE module "
+            "(DEC-HW-ENVELOPE-CONSOLIDATE-001)"
+        )
 
-    def test_envelope_has_no_ram_fields(self) -> None:
+    def test_envelope_dataclass_stays_cpu_only(self) -> None:
         env = hw.envelope_from({"logical_cores": 2})
         assert not hasattr(env, "total_ram_bytes")
         assert not hasattr(env, "available_ram_bytes")
@@ -368,3 +382,206 @@ class TestLibraryThreadBudget:
     def test_uses_cached_envelope(self) -> None:
         hw.reset_envelope_cache()
         assert hw.library_thread_budget({}, 2) >= 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# polars / DuckDB thread bounds (DEC-THREAD-BUDGET-BOUNDS-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPoolDivisor:
+    def test_none_uses_default(self) -> None:
+        assert hw._pool_divisor(None) == hw.DEFAULT_EXPECTED_LIBRARY_POOLS
+
+    def test_below_one_uses_default(self) -> None:
+        assert hw._pool_divisor(0) == hw.DEFAULT_EXPECTED_LIBRARY_POOLS
+
+    def test_explicit_wins(self) -> None:
+        assert hw._pool_divisor(4) == 4
+
+
+class TestPolarsThreadBudget:
+    def test_default_is_full_physical_width(self) -> None:
+        # The hostile-review MAJOR: the default deliberately keeps polars at
+        # FULL physical width (divisor 1) — the #1401 prebuild's worker
+        # threads share the ONE global pool, and dividing it would waste half
+        # the box in the phase that matters most (the operator's USE
+        # EVERYTHING goal). Contention is handled by the per-connection
+        # DuckDB caps + the movers PrebuildGate.
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.polars_thread_budget({}, envelope=env) == 14
+
+    def test_explicit_expected_workers(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.polars_thread_budget({}, expected_workers=7, envelope=env) == 2
+
+    def test_expected_workers_below_one_uses_full_width(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.polars_thread_budget({}, expected_workers=0, envelope=env) == 14
+
+    def test_kill_switch_env_wins(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.polars_thread_budget({"BRUTEX_POLARS_THREADS": "5"}, envelope=env) == 5
+
+    def test_invalid_kill_switch_ignored(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.polars_thread_budget({"BRUTEX_POLARS_THREADS": "zero"}, envelope=env) == 14
+
+    def test_floors_at_one(self) -> None:
+        env = hw.envelope_from({"physical_cores": 1})
+        assert hw.polars_thread_budget({}, envelope=env) == 1
+
+
+class TestApplyPolarsThreadBound:
+    def test_sets_env_var_before_polars_import(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        environ: dict[str, str] = {}
+        got = hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
+        assert got == 14  # full physical width — the prebuild-throughput default.
+        assert environ["POLARS_MAX_THREADS"] == "14"
+
+    def test_operator_preset_respected_never_overwritten(self) -> None:
+        environ = {"POLARS_MAX_THREADS": "3"}
+        got = hw.apply_polars_thread_bound(environ, loaded_modules={})
+        assert got is None
+        assert environ["POLARS_MAX_THREADS"] == "3"
+
+    def test_blank_preset_is_unset(self) -> None:
+        env = hw.envelope_from({"physical_cores": 4})
+        environ = {"POLARS_MAX_THREADS": "  "}
+        got = hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
+        assert got == 4
+        assert environ["POLARS_MAX_THREADS"] == "4"
+
+    def test_polars_already_imported_is_honest_noop(self) -> None:
+        # Setting the env var after polars imported would be silently ignored
+        # by polars — the honest behaviour is NOT to set it (loud warning).
+        env = hw.envelope_from({"physical_cores": 14})
+        environ: dict[str, str] = {}
+        got = hw.apply_polars_thread_bound(
+            environ, envelope=env, loaded_modules={"polars": object()}
+        )
+        assert got is None
+        assert "POLARS_MAX_THREADS" not in environ
+
+    def test_kill_switch_env_flows_through(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        environ = {"BRUTEX_POLARS_THREADS": "4"}
+        got = hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
+        assert got == 4
+        assert environ["POLARS_MAX_THREADS"] == "4"
+
+    def test_default_environ_is_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        env = hw.envelope_from({"physical_cores": 2})
+        monkeypatch.delenv("POLARS_MAX_THREADS", raising=False)
+        monkeypatch.delenv("BRUTEX_POLARS_THREADS", raising=False)
+        got = hw.apply_polars_thread_bound(envelope=env, loaded_modules={})
+        try:
+            assert got == 2  # physical_cores of the injected envelope — full width.
+            assert os.environ["POLARS_MAX_THREADS"] == "2"
+        finally:
+            # monkeypatch restores the pre-test absence at teardown too; this
+            # keeps the assertion failure path clean.
+            os.environ.pop("POLARS_MAX_THREADS", None)
+
+    def test_default_loaded_modules_is_sys_modules(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys as _sys
+
+        env = hw.envelope_from({"physical_cores": 2})
+        monkeypatch.setitem(_sys.modules, "polars", object())
+        environ: dict[str, str] = {}
+        assert hw.apply_polars_thread_bound(environ, envelope=env) is None
+        assert "POLARS_MAX_THREADS" not in environ
+
+
+class TestDuckdbThreadBudget:
+    def test_derived_splits_physical_across_pools(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.duckdb_thread_budget({}, envelope=env) == 7
+
+    def test_kill_switch_env_wins(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.duckdb_thread_budget({"BRUTEX_DUCKDB_THREADS": "2"}, envelope=env) == 2
+
+    def test_explicit_expected_workers(self) -> None:
+        env = hw.envelope_from({"physical_cores": 12})
+        assert hw.duckdb_thread_budget({}, expected_workers=3, envelope=env) == 4
+
+
+class _RecordingConn:
+    """A duck-typed connection recording every ``execute`` call."""
+
+    def __init__(self) -> None:
+        self.sql: list[str] = []
+
+    def execute(self, sql: str) -> object:
+        self.sql.append(sql)
+        return None
+
+
+class TestApplyDuckdbThreadBound:
+    def test_derived_budget_applied(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        conn = _RecordingConn()
+        got = hw.apply_duckdb_thread_bound(conn, {}, envelope=env)
+        assert got == 7
+        assert conn.sql == ["SET threads TO 7"]
+
+    def test_explicit_threads_win(self) -> None:
+        conn = _RecordingConn()
+        got = hw.apply_duckdb_thread_bound(conn, {}, threads=3)
+        assert got == 3
+        assert conn.sql == ["SET threads TO 3"]
+
+    @pytest.mark.parametrize("threads", [0, -2])
+    def test_explicit_below_one_fails_loud(self, threads: int) -> None:
+        conn = _RecordingConn()
+        with pytest.raises(ValueError, match="threads must be >= 1"):
+            hw.apply_duckdb_thread_bound(conn, {}, threads=threads)
+        assert conn.sql == []
+
+    def test_real_duckdb_connection_setting_takes_effect(self) -> None:
+        duckdb = pytest.importorskip("duckdb")
+        env = hw.envelope_from({"physical_cores": 14})
+        with duckdb.connect() as conn:
+            got = hw.apply_duckdb_thread_bound(conn, {}, envelope=env)
+            row = conn.execute("SELECT current_setting('threads')").fetchone()
+            assert row is not None
+            assert int(row[0]) == got == 7
+
+
+class TestPolarsBoundLogOnce:
+    def test_too_late_warns_once_per_process(self) -> None:
+        from structlog.testing import capture_logs
+
+        hw.reset_hardware_envelope_cache()  # clears the log-once registry
+        try:
+            env = hw.envelope_from({"physical_cores": 4})
+            with capture_logs() as logs:
+                for _ in range(3):
+                    hw.apply_polars_thread_bound(
+                        {}, envelope=env, loaded_modules={"polars": object()}
+                    )
+            events = [log for log in logs if log["event"] == "hardware.polars_bound.too_late"]
+            assert len(events) == 1
+        finally:
+            hw.reset_hardware_envelope_cache()
+
+    def test_applied_and_preset_log_once_each(self) -> None:
+        from structlog.testing import capture_logs
+
+        hw.reset_hardware_envelope_cache()
+        try:
+            env = hw.envelope_from({"physical_cores": 4})
+            with capture_logs() as logs:
+                environ: dict[str, str] = {}
+                hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
+                # A second call now hits the preset branch (the var is set).
+                hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
+                hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
+            applied = [log for log in logs if log["event"] == "hardware.polars_bound.applied"]
+            preset = [log for log in logs if log["event"] == "hardware.polars_bound.preset"]
+            assert len(applied) == 1
+            assert len(preset) == 1
+        finally:
+            hw.reset_hardware_envelope_cache()
