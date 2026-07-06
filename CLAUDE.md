@@ -18,7 +18,37 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
+_Last updated: 2026-07-06 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1521–#1523 — the ADR-0012 NIFTY-futures sweep LAUNCH
+capstone (PR-5): the futures track is addressed by ONE frozen series alias **`NSE-NIFTY-FUT`**
+(symbol_id 4 in the append-only `_SYMBOL_ID_TABLE`; the two pre-launch shapes
+`NIFTY-FUT-YYYY-MM-DD` + `NSE-NIFTY-<DDMmmYY>-FUT` are RETIRED with a did-you-mean refusal —
+supersedes the #1178 dual-acceptance envelope, satisfies ADR-0016 §6 + the #1138 [C16]
+reservation in one PR). NEW `brutex/data/futures_series.py` resolves the alias from the VENDOR
+lake dirs (scan + `parse_fno_symbol`, never `strftime`) into disjoint IST-date ownership windows
+(`(E_{k-1}, E_k]` — expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=`
+law); interior holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp +
+WARN, the calendar is an OBSERVE-ONLY cross-check (drift WARNed with evidence, 2027+ coverage
+abstains — never load-bearing). NEW `brutex/feed/series_load.py` is the ONE alias-aware
+sweep-slice loader every sweep mouth now uses (spot path = the old inline reconcile+ReplayFeed
+block moved verbatim; the alias is stitched per contract with the exact
+`astimezone(IST).date()` ownership cut stage1a keys on). Stage-1A B2 CLOSED
+(DEC-STAGE1A-ROLL-RESET-001): a `roll_schedule` of owning-expiry day-ordinals keys the VWAP
+session per contract and a key change triggers a TOTAL hard reset of EVERY stateful member
+(VWAP, MarketStructureState, EMA20/200, prior-history, day extremes, pivots/daily-history/
+anchors — D11: no level ever crosses the roll basis gap; post-roll state == fresh-builder state,
+proven bit-for-bit); a bar beyond the schedule raises (never a silent constant-key fallback);
+`apply_1day_mask` honestly clears ToD 44-47 + VWAP 52-53 on volume-bearing futures `1day` grids
+(D12; spot deliberately NOT flipped — named follow-up). `roll_schedule` conditionally enters
+`canonical_trade_params` under a hard instrument⟺schedule `__post_init__` invariant (presence ⟺
+the alias, both directions — the #1062 bug class contained; spot run_ids byte-identical, the
+unmodified golden suite is the proof); recount compares recorded-vs-re-derived schedules with
+evidence. ENGINE surface now EXACTLY {NIFTY/BANKNIFTY/SENSEX spot} ∪ {NSE/FNO/NSE-NIFTY-FUT};
+all else REFERENCE_ONLY; no vocab/rate/lake-schema change. Honest: resolution is O(FNO dirs)
+once per launch, NOT O(1); D6 map, D14's DSR effective-N half (only MIN_TRADES=30 gates at
+launch), the #1013 D8-stamping consumption, futures→options translation (PR-6), the spot 1day
+mask audit and cascade manifest schedule-carriage are NAMED follow-ups).
+Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
 MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
 adversarial audit's confirmed defects fixed as ONE change set: (a) price
 POSITIVITY is enforced at the ENGINE READ BOUNDARY
@@ -428,7 +458,17 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
+- **Active branch:** `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
+  DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1521–#1523** — the ADR-0012
+  NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
+  did-you-mean refusal), the vendor-truth roll resolver (`brutex/data/futures_series.py` — interior holes refuse
+  naming months, head/tail clamp+WARN, calendar observe-only), the ONE alias-aware sweep-slice loader
+  (`brutex/feed/series_load.py` — exact IST-date ownership cut, spot path byte-identical), the Stage-1A B2 closure
+  (roll-aware `session_key` + TOTAL per-contract hard reset + the D12 `apply_1day_mask`), and `roll_schedule` in
+  `canonical_trade_params` under the instrument⟺schedule invariant. ENGINE surface = 3 spot indices +
+  NSE/FNO/NSE-NIFTY-FUT; spot byte-identical (unmodified goldens green); mypy `--strict` clean, pyright at the
+  pre-change baseline, ruff/ruff-format clean).
+  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
   DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
   the ENGINE READ BOUNDARY (`arrow_table_to_bars`, partition-naming corrupt-bar errors) — NOT the general bar
   constructor, which stays permissive for the Greeks BAD_INPUT / executor-guard / trade-sim-fallback classifiers; the NEW COMMON
@@ -1608,7 +1648,20 @@ hostile-review pass._
    `rust/trading-core/src/indicators/market_structure.rs`, a swing confirmed only
    k bars later, proven P-06-clean by a dedicated `LookAheadBarrier` test) — so
    ALL 60 conditions are now `implemented=true` (`IMPLEMENTED_MASK = (1<<60)-1`)
-   and the data-independent indicator vocabulary is COMPLETE.**
+   and the data-independent indicator vocabulary is COMPLETE.** **PR-5
+   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 / DEC-FUTURES-ADDRESSING-PIN-001 /
+   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1521–#1523) LAUNCHED the futures
+   sweep: the track is addressed by the ONE pinned series alias
+   `NSE-NIFTY-FUT` (DEC-FUTURES-ADDRESSING-PIN-001 — supersedes the
+   pre-launch dual-acceptance envelope; the retired `NIFTY-FUT-YYYY-MM-DD` /
+   `NSE-NIFTY-<DDMmmYY>-FUT` shapes get a did-you-mean refusal), roll-resolved
+   at launch by `brutex/data/futures_series.py` into the per-contract
+   `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` lake partitions (vendor-parsed
+   expiries govern ownership; expiry day belongs to the EXPIRING contract) and
+   stitched by `brutex/feed/series_load.py` with a hard per-contract Stage-1A
+   reset at every roll (D11 — no level ever crosses the basis gap). The
+   engine sweep surface is EXACTLY {the 3 spot index triples} ∪
+   {NSE/FNO/NSE-NIFTY-FUT}.**
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
@@ -2021,6 +2074,7 @@ bruteX/
 | F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set; **212** single stocks verified in the operator instrument master (lake scope) | `groww/constants.py:103-104`; `groww/instruments.py:174` |
 | NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:124-136`; `groww/adapter.py:162-174` |
+| NIFTY-futures ENGINE series alias | **`NSE-NIFTY-FUT`** (symbol_id 4) — the ONE pinned ADR-0012 futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolved at launch by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the engine hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |

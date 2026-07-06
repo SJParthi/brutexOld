@@ -1222,6 +1222,15 @@ jobs:
           else
             echo "(brutex.feed.resampler test file not present yet — gate inactive)"
           fi
+          # DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001: the ONE alias-aware sweep-slice
+          # loader — spot verbatim (byte-identical moved block), futures alias
+          # roll-stitched with the exact IST-date ownership cut. 100%
+          # line+branch standalone.
+          if compgen -G "tests/unit/test_feed_series_load.py" > /dev/null; then
+            pytest --cov=brutex.feed.series_load --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_series_load.py
+          else
+            echo "(brutex.feed.series_load test file not present yet — gate inactive)"
+          fi
           # 20c · brutex.strategies.library.donchian_breakout (44 stmts,
           #       10 branches; same test file as 19l/19m/19n). Closes
           #       98.25→100% by deleting the unused `_bar_close_decimal`
@@ -1529,6 +1538,15 @@ jobs:
             pytest --cov=brutex.data.fno_candle_lake --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_candle_lake.py
           else
             echo "(brutex.data.fno_candle_lake test file not present yet — gate inactive)"
+          fi
+          # DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001: the ADR-0012 NIFTY-futures series
+          # resolver — vendor-dir-parsed ownership windows + roll schedule +
+          # interior-hole refusal + observe-only calendar cross-check. 100%
+          # line+branch standalone.
+          if compgen -G "tests/unit/test_futures_series.py" > /dev/null; then
+            pytest --cov=brutex.data.futures_series --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_futures_series.py
+          else
+            echo "(brutex.data.futures_series test file not present yet — gate inactive)"
           fi
           # DEC-FNO-MONEYNESS-001: the shared option moneyness (ITM/ATM/OTM) + ATM±N
           # engine — pure, stdlib+Decimal only, the ONE source consumed by the movers
