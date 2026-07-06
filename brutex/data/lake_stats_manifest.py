@@ -1,0 +1,1290 @@
+"""Per-file lake STATS manifest — write-time partition statistics (DEC-LAKE-STATS-MANIFEST-001).
+
+The PER-FILE stats/paging EXTENSION of the shipped dataset-discovery manifest
+(DEC-LAKE-MANIFEST-O1-001, :mod:`brutex.data.lake_manifest`). It claims the
+MIGRATION.md #867/#1025 named future work ("true O(page) needs a write-time
+lake manifest"): the ``/db`` candle pagers' remaining O(files) Parquet-footer
+scans (the per-dataset ``COUNT(*)`` + the whole-glob page ``ORDER BY``) can be
+answered from per-file DISTINCT-identity-key row counts + timestamp bounds
+maintained AT WRITE TIME — one small JSON shard per dataset, revalidated
+against the live directory on EVERY consult.
+
+Like the Bloom prefilter, this is a **results-safe accelerator**: it is NEVER
+part of run identity (the blake3 formula), NEVER in partition bytes, NEVER in
+``data_snapshot_hash``. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX).
+
+Storage
+-------
+One self-contained JSON per dataset, atomically replaced whole::
+
+    <lake_root>/.manifest/stats/<hh>/<sha256(kind|key)>.json     (mode 0o600)
+
+``hh`` is the first two hex chars of the digest (a fanout dir); the sha256
+filename mirrors ``.locks/`` so ``&``, spaces, and #911-drift directory names
+need no escaping. ``.manifest/`` is a dot-dir sibling of ``bars/`` +
+``options/`` holding no ``*.parquet``, so every lake scanner is provably blind
+to it. An EMPTY dataset has NO shard (the last row's removal unlinks it).
+
+Shard schema (:data:`STATS_MANIFEST_VERSION` = 1)
+-------------------------------------------------
+``{"version", "kind", "key", "identity_key", "row_count", "min_ts", "max_ts",
+"files": [{"rel", "rows", "min_ts", "max_ts", "mtime_ns", "size",
+"raw_hash"}], "updated_utc"}`` where:
+
+* ``key`` is recorded VERBATIM from the on-disk dir (a #911 drift dir like
+  ``NSE-M&M`` is its own shard) and ECHOED + compared at load — the
+  hash-collision / mis-file guard.
+* ``rows`` is the per-file DISTINCT-identity-key count — ``("timestamp",)``
+  bars, ``("side", "timestamp")`` options (the test-pinned twins of
+  ``lake_invariants.UNIQUE_KEY_BARS`` / ``UNIQUE_KEY_OPTIONS``) — NEVER
+  physical rows.
+* ``files`` is sorted ascending by ``rel`` (the filename order the lake's
+  keep-FIRST QUALIFY dedup depends on) and ``row_count == Σ files[].rows`` is
+  checked at load.
+* ``updated_utc`` is observability ONLY — never validated, never identity.
+
+Anti-illusion law (Golden Rule #1)
+----------------------------------
+:func:`load_valid_dataset_stats` serves the manifest ONLY when ALL of the
+following hold, re-checked on every consult (O(D) in the ONE dataset's month
+files — metadata syscalls only, independent of total lake depth):
+
+1. parse + version + key echo + well-formed rows + sorted + sum invariant;
+2. FILE-SET EQUALITY — one fixed-depth scandir of the dataset dir
+   (``*.parquet`` only) yields exactly the shard's ``rel`` set;
+3. PER-FILE STAT EQUALITY — a fresh ``os.stat`` ``mtime_ns`` + ``size``
+   equals the stamped token for EVERY listed file;
+4. MONTH-BOUNDS SANITY — each file's stamped ``[min_ts, max_ts]`` lies inside
+   the UTC month its ``rel`` path names (the prefix-sum exactness /
+   anti-G-RACE-1 guard: a foreign-month-poisoned partition self-disables the
+   manifest until lake_heal rewrites it).
+
+ANY failure ⇒ the manifest is treated ABSENT for the request (the caller runs
+the byte-identical legacy live scan) + ONE ``lake.stats_manifest.fallback``
+structlog event naming the failed clause. The reader NEVER serves a number it
+could not revalidate against the live directory THIS request.
+
+**Honest residual (Golden Rule #10):** an out-of-band overwrite preserving
+BOTH ``mtime_ns`` and ``size`` exactly is stat-undetectable — the same
+documented envelope every stat token in the tree carries (#1149); impossible
+via the production ``mkstemp`` + ``os.replace`` path (new inode). ``raw_hash``
+is stored for forensics and deliberately NOT re-hashed per request (O(bytes)
+would defeat the point).
+
+Write side (best-effort · incremental · lazily accreted)
+--------------------------------------------------------
+Every writer hook (:func:`record_partition_stats` /
+:func:`remove_partition_stats` / :func:`remove_dataset_stats`) is BEST-EFFORT
+— it logs, best-effort unlinks the shard, and returns; it NEVER raises into
+the pull (the caught set is exactly ``(OSError, PartitionLockTimeout,
+ValueError)``; a :class:`~brutex.data.errors.LakeWriteHalt` raised by
+``partition_write_lock``'s ``.locks/`` creation on a genuinely full disk is
+deliberately NOT swallowed). Each upsert is INCREMENTAL: ONE file-row upsert +
+an in-memory aggregate refold — never a dataset rescan.
+
+LAZY ACCRETION (the anti-storm law): a hook first does ONE O(1) ``os.stat``
+existence probe of the shard — if NO shard exists it returns immediately.
+Shards are seeded ONLY by the read side (:func:`seed_dataset_stats`, the
+write-behind rebuild after a clean legacy scan), so the prebuild's ~10⁵–10⁶
+derived-TF partition writes cost one failed ``stat`` each — no shard-IO/inode
+storm — and never-viewed datasets stay ~zero-cost.
+
+Locking: shards serialise on the COMMON
+:func:`~brutex.data.partition_lock.partition_write_lock` keyed on the SHARD
+path, with the dedicated short :data:`STATS_LOCK_TIMEOUT_S` bound (env
+:data:`STATS_LOCK_TIMEOUT_ENV`, fail-loud validated). Lock ORDER is the
+sanctioned acyclic direction — data-partition lock → shard lock; no path ever
+takes a partition lock while holding a shard lock. Readers take NO lock
+(``os.replace`` atomicity: a read sees a complete old or new shard).
+
+Kill switch: env :data:`STATS_MANIFEST_ENV` = ``off`` ⇒ every writer hook AND
+every reader consult no-ops ⇒ byte-identical legacy behaviour. Default ON.
+
+Leaf discipline (PR #1177 ``py/cyclic-import``): imports are stdlib +
+:mod:`brutex.data.atomic_io` + :mod:`brutex.data.partition_lock` +
+:mod:`brutex.data.lake_manifest` ONLY — no duckdb/polars/dashboard. The
+month-grammar rel-path parsing (``<yyyy>/<mm>.parquet`` bars,
+``<YYYY>-<MM>.parquet`` options) is implemented locally and TEST-PINNED
+against ``partition.py`` / ``option_parquet_writer.py`` (the
+``ledger_file_path`` precedent) rather than imported.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Final
+
+import structlog
+
+from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.errors import PartitionLockTimeout
+from brutex.data.lake_manifest import manifest_dir
+from brutex.data.partition_lock import partition_write_lock
+
+_LOG = structlog.get_logger("brutex.data.lake_stats_manifest")
+
+#: On-disk shard format version. A reader seeing any OTHER version treats the
+#: shard as invalid (legacy-scan fallback + read-side reseed) — never a guess.
+STATS_MANIFEST_VERSION: Final[int] = 1
+
+#: The stats shards' home under ``.manifest/`` — a sibling of the
+#: DEC-LAKE-MANIFEST-O1-001 dataset-discovery files, which stay byte-untouched.
+STATS_SUBDIRNAME: Final[str] = "stats"
+
+#: Dataset kind: the spot/F&O candle tree (``bars/<exch>/<seg>/<sym>/<tf>/…``).
+KIND_BARS: Final[str] = "bars"
+
+#: Dataset kind: the expired-options tree (``options/<series>/…``).
+KIND_OPTIONS: Final[str] = "options"
+
+#: The coordinate fields each kind's ``key`` mapping must carry (as strings).
+STATS_KEY_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
+    KIND_BARS: ("exchange", "segment", "symbol", "interval"),
+    KIND_OPTIONS: ("series",),
+}
+
+#: Per-kind DISTINCT-identity-key columns the ``rows`` counts are defined over.
+#: Test-pinned twins of ``lake_invariants.UNIQUE_KEY_BARS`` /
+#: ``UNIQUE_KEY_OPTIONS`` — deliberately NOT imported (``lake_invariants``
+#: pulls polars/duckdb; this module is a leaf).
+STATS_IDENTITY_KEYS: Final[Mapping[str, tuple[str, ...]]] = {
+    KIND_BARS: ("timestamp",),
+    KIND_OPTIONS: ("side", "timestamp"),
+}
+
+#: Default bounded-acquire deadline for the SHARD flock (seconds). Deliberately
+#: SHORT: the shard upsert runs inside the writer's already-held data-partition
+#: lock section, and the deadline-ordering law (75 s partition acquire +
+#: :data:`STATS_LOCK_TIMEOUT_S` here) must stay strictly inside the 90 s
+#: ``GROWW_WRITE_DEADLINE_S`` margin (DEC-WRITE-DEADLINE-LOCK-ORDER-001).
+STATS_LOCK_TIMEOUT_S: Final[float] = 5.0
+
+#: Environment override for the shard-lock deadline — FAIL-LOUD validated by
+#: :func:`resolve_stats_lock_timeout_seconds` (blank / non-numeric / ``nan`` /
+#: ``inf`` / non-positive raise :class:`ValueError`), unlike the silently
+#: defaulting partition-lock env: a misconfigured stats knob must be seen, not
+#: absorbed.
+STATS_LOCK_TIMEOUT_ENV: Final[str] = "BRUTEX_STATS_LOCK_TIMEOUT_S"
+
+#: Kill-switch environment variable. Set to :data:`STATS_MANIFEST_OFF`
+#: (case-insensitive, whitespace-stripped) to disable the whole feature —
+#: every writer hook AND every reader consult no-ops (byte-identical legacy
+#: behaviour). Any other value (including unset) keeps it ON.
+STATS_MANIFEST_ENV: Final[str] = "BRUTEX_LAKE_STATS_MANIFEST"
+
+#: The one value of :data:`STATS_MANIFEST_ENV` that disables the manifest.
+STATS_MANIFEST_OFF: Final[str] = "off"
+
+#: Test-pinned twin of ``brutex.data.partition.BAR_DIR_NAME`` (leaf module —
+#: deliberately not imported; ``tests/unit/test_lake_stats_manifest.py`` pins
+#: the two names equal so they can never drift).
+_BARS_TREE_DIRNAME: Final[str] = "bars"
+
+#: Test-pinned twin of ``brutex.data.option_parquet_writer._OPTIONS_SUBDIR``.
+_OPTIONS_TREE_DIRNAME: Final[str] = "options"
+
+#: Bars month grammar: ``<yyyy>/<mm>.parquet`` (nested year dir — the
+#: ``build_partition_path`` tail). Month range is checked numerically.
+_BARS_REL_RE: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})/(\d{2})\.parquet\Z")
+
+#: Options month grammar: ``<YYYY>-<MM>.parquet`` (flat series dir — the
+#: ``OptionParquetWriter`` partition filename).
+_OPTIONS_REL_RE: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})-(\d{2})\.parquet\Z")
+
+#: The write-side best-effort catch set: a shard failure logs + unlinks +
+#: returns, NEVER raising into the pull. ``json.JSONDecodeError`` is a
+#: ``ValueError`` subclass. :class:`~brutex.data.errors.LakeWriteHalt` is
+#: deliberately ABSENT — a genuinely full disk at ``.locks/`` creation must
+#: still halt the pull (the ``partition_write_lock`` contract).
+_BEST_EFFORT_ERRORS: Final[tuple[type[BaseException], ...]] = (
+    OSError,
+    PartitionLockTimeout,
+    ValueError,
+)
+
+_MONTHS_PER_YEAR: Final[int] = 12
+
+
+@dataclass(frozen=True, slots=True)
+class StatsFileRow:
+    """One month-partition file's stamped statistics inside a dataset shard.
+
+    Attributes
+    ----------
+    rel
+        The file's path relative to the dataset dir — ``"2026/07.parquet"``
+        (bars) or ``"2026-07.parquet"`` (options).
+    rows
+        DISTINCT-identity-key row count of the file (``(timestamp,)`` bars /
+        ``(side, timestamp)`` options) — NEVER physical rows.
+    min_ts, max_ts
+        The file's whole-partition timestamp bounds (timezone-aware UTC).
+    mtime_ns, size
+        The content stat token, captured by the writer immediately after its
+        ``os.replace`` while still holding the data-partition lock.
+        Equality-compared at read time, never ordered (clock-skew immune).
+    raw_hash
+        The partition's sha256 hex digest when the writer computes one (the
+        bars tree), ``None`` on the options tree — forensics only, never
+        re-hashed per request.
+    """
+
+    rel: str
+    rows: int
+    min_ts: datetime
+    max_ts: datetime
+    mtime_ns: int
+    size: int
+    raw_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetStats:
+    """A whole dataset's validated stats shard (one JSON file, schema v1).
+
+    Attributes
+    ----------
+    kind
+        :data:`KIND_BARS` or :data:`KIND_OPTIONS`.
+    key
+        The dataset's coordinate mapping, recorded VERBATIM from the on-disk
+        directory names (:data:`STATS_KEY_FIELDS` names the fields per kind).
+    identity_key
+        The DISTINCT-count columns the ``rows`` figures are defined over —
+        self-description for evolution (:data:`STATS_IDENTITY_KEYS`).
+    row_count
+        ``Σ files[].rows`` — the dataset's total distinct-key count.
+    min_ts, max_ts
+        Fold of the per-file bounds (timezone-aware UTC).
+    files
+        The per-file rows, sorted ascending by ``rel``.
+    updated_utc
+        Observability-only write stamp (ISO-8601) — never validated, never
+        identity.
+    """
+
+    kind: str
+    key: Mapping[str, str]
+    identity_key: tuple[str, ...]
+    row_count: int
+    min_ts: datetime
+    max_ts: datetime
+    files: tuple[StatsFileRow, ...]
+    updated_utc: str
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Knobs
+# ────────────────────────────────────────────────────────────────────────
+
+
+def stats_manifest_enabled() -> bool:
+    """Whether the stats manifest is enabled — the kill switch check. O(1).
+
+    Returns ``False`` iff :data:`STATS_MANIFEST_ENV` is set to
+    :data:`STATS_MANIFEST_OFF` (case-insensitive, whitespace-stripped).
+    Disabled means every writer hook AND every reader consult no-ops, so
+    behaviour is byte-identical to the pre-manifest legacy paths.
+    """
+    raw = os.environ.get(STATS_MANIFEST_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() != STATS_MANIFEST_OFF
+
+
+def resolve_stats_lock_timeout_seconds() -> float:
+    """Resolve the shard-flock deadline: env override, else :data:`STATS_LOCK_TIMEOUT_S`.
+
+    FAIL-LOUD (the DEC-RAM-BUDGETS-001 env precedent, deliberately STRICTER
+    than the silently-defaulting ``resolve_partition_lock_timeout_seconds``):
+    a SET-but-invalid :data:`STATS_LOCK_TIMEOUT_ENV` — blank, non-numeric,
+    ``nan`` / ``inf``, or non-positive — raises :class:`ValueError` instead of
+    quietly falling back, so a misconfigured knob is seen. The write hooks
+    catch ``ValueError`` in their best-effort envelope (logged, never raised
+    into the pull). O(1).
+
+    Raises
+    ------
+    ValueError
+        If the env var is set to a blank / non-numeric / non-finite /
+        non-positive value.
+    """
+    raw = os.environ.get(STATS_LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return STATS_LOCK_TIMEOUT_S
+    text = raw.strip()
+    if not text:
+        raise ValueError(
+            f"{STATS_LOCK_TIMEOUT_ENV} is set but blank — "
+            "set a positive number of seconds or unset it"
+        )
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise ValueError(f"{STATS_LOCK_TIMEOUT_ENV}={raw!r} is not a number") from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"{STATS_LOCK_TIMEOUT_ENV}={raw!r} must be a finite positive number of seconds"
+        )
+    return value
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Paths + month grammar
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _canonical_key(kind: str, key: Mapping[str, str]) -> dict[str, str]:
+    """Validate + project *key* to exactly the fields *kind* requires.
+
+    Raises :class:`ValueError` on an unknown kind or a missing / non-string /
+    empty field (a programming error at the call site — the best-effort hooks
+    catch it, the readers document it).
+    """
+    fields = STATS_KEY_FIELDS.get(kind)
+    if fields is None:
+        raise ValueError(f"unknown stats-manifest kind {kind!r}")
+    canonical: dict[str, str] = {}
+    for field in fields:
+        value = key.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"stats-manifest key field {field!r} must be a non-empty string, got {value!r}"
+            )
+        canonical[field] = value
+    return canonical
+
+
+def stats_dir(lake_root: Path) -> Path:
+    """Return ``<lake_root>/.manifest/stats`` (never created here). O(1)."""
+    return manifest_dir(lake_root) / STATS_SUBDIRNAME
+
+
+def stats_shard_path(lake_root: Path, kind: str, key: Mapping[str, str]) -> Path:
+    """Return the dataset's shard path — ``stats/<hh>/<sha256>.json``. O(1).
+
+    The digest is ``sha256`` of the canonical JSON ``[kind, key]`` form
+    (injective — no delimiter-stuffing collisions); ``hh`` is its first two
+    hex chars (a fanout dir). Because the filename is a digest, drifted
+    dataset dir names (``&``, spaces, ``NSE-M&M``) need no escaping — the
+    ``.locks/`` precedent. Never created here.
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* or a malformed *key* (missing / empty field).
+    """
+    canonical = _canonical_key(kind, key)
+    token = json.dumps([kind, canonical], sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return stats_dir(lake_root) / digest[:2] / f"{digest}.json"
+
+
+def dataset_dir(lake_root: Path, kind: str, key: Mapping[str, str]) -> Path:
+    """Return the dataset's on-disk directory for *kind* + *key*. O(1).
+
+    ``bars`` → ``<lake_root>/bars/<exchange>/<segment>/<symbol>/<interval>``;
+    ``options`` → ``<lake_root>/options/<series>``. The dir names are the
+    key's VERBATIM values (drift dirs stay their own dataset). Never created
+    here.
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* or a malformed *key*.
+    """
+    canonical = _canonical_key(kind, key)
+    if kind == KIND_BARS:
+        return (
+            lake_root
+            / _BARS_TREE_DIRNAME
+            / canonical["exchange"]
+            / canonical["segment"]
+            / canonical["symbol"]
+            / canonical["interval"]
+        )
+    return lake_root / _OPTIONS_TREE_DIRNAME / canonical["series"]
+
+
+def parse_rel_month(kind: str, rel: str) -> tuple[int, int] | None:
+    """Parse *rel* under *kind*'s month grammar → ``(year, month)`` or ``None``.
+
+    Bars: ``<yyyy>/<mm>.parquet`` (zero-padded, nested year dir); options:
+    ``<YYYY>-<MM>.parquet`` (flat). Anything else — wrong grammar, month
+    outside 1–12, year ``0000`` — returns ``None`` (fail-closed: the caller
+    treats the row as invalid). Test-pinned against
+    ``partition.build_partition_path`` / the option writer's partition
+    filename so the local grammar can never drift from the owning modules.
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* (a programming error, not bad data).
+    """
+    if kind == KIND_BARS:
+        match = _BARS_REL_RE.match(rel)
+    elif kind == KIND_OPTIONS:
+        match = _OPTIONS_REL_RE.match(rel)
+    else:
+        raise ValueError(f"unknown stats-manifest kind {kind!r}")
+    if match is None:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2))
+    if year < 1 or not (1 <= month <= _MONTHS_PER_YEAR):
+        return None
+    return (year, month)
+
+
+def rel_month_bounds(kind: str, rel: str) -> tuple[datetime, datetime] | None:
+    """The UTC half-open month window ``[start, next_start)`` *rel* names.
+
+    Returns ``None`` when *rel* fails :func:`parse_rel_month` (fail-closed).
+    Used by the month-bounds sanity clause: every stamped bar bound must lie
+    inside its file's own UTC month — the prefix-sum exactness guard.
+    """
+    parsed = parse_rel_month(kind, rel)
+    if parsed is None:
+        return None
+    year, month = parsed
+    start = datetime(year, month, 1, tzinfo=UTC)
+    if month == _MONTHS_PER_YEAR:
+        nxt = datetime(year + 1, 1, 1, tzinfo=UTC)
+    else:
+        nxt = datetime(year, month + 1, 1, tzinfo=UTC)
+    return (start, nxt)
+
+
+def dest_rel(kind: str, dest: Path) -> str:
+    """Derive the shard ``rel`` from a partition *dest* path. O(1).
+
+    Bars take the last TWO components (``<yyyy>/<mm>.parquet``), options the
+    last ONE (``<YYYY>-<MM>.parquet``).
+
+    Raises
+    ------
+    ValueError
+        If the derived rel does not match *kind*'s month grammar (or *kind*
+        is unknown) — the best-effort hooks catch it.
+    """
+    rel = f"{dest.parent.name}/{dest.name}" if kind == KIND_BARS else dest.name
+    if parse_rel_month(kind, rel) is None:
+        raise ValueError(f"dest {dest!r} does not match the {kind!r} month grammar")
+    return rel
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Stat tokens
+# ────────────────────────────────────────────────────────────────────────
+
+
+def stat_token(stat: os.stat_result) -> str:
+    """Render the content token ``"<st_mtime_ns>:<st_size>"`` from *stat*. O(1).
+
+    Equality-compared, never ordered — clock-skew / backwards-mtime immune.
+    """
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def file_token_matches(path: Path, row: StatsFileRow) -> bool:
+    """Whether *path*'s CURRENT stat equals *row*'s stamped token. O(1).
+
+    A fresh ``os.stat`` compared for ``mtime_ns`` + ``size`` equality; any
+    :class:`OSError` (including a vanished file) is ``False`` — fail-closed.
+    Used per-file by clause 3 of the read-time validation and by the
+    read side's post-query TOCTOU re-stat.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return False
+    return stat.st_mtime_ns == row.mtime_ns and stat.st_size == row.size
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Row / shard construction
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _require_int(value: object, *, field: str, minimum: int) -> int:
+    """Coerce-check an int field (bool rejected — JSON ``true`` is not a count)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an int, got {value!r}")
+    if value < minimum:
+        raise ValueError(f"{field} must be >= {minimum}, got {value}")
+    return value
+
+
+def _require_ts(value: object, *, field: str) -> datetime:
+    """Coerce-check a timestamp field to a timezone-aware UTC datetime.
+
+    Accepts an aware :class:`~datetime.datetime` or an ISO-8601 string with an
+    explicit offset; a naive datetime / naive string / anything else raises
+    :class:`ValueError` (an ambiguous bound could mis-place a month check).
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"{field} must be an ISO-8601 timestamp, got {value!r}") from exc
+    else:
+        raise ValueError(f"{field} must be a timestamp, got {value!r}")
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must be timezone-aware, got naive {value!r}")
+    return parsed.astimezone(UTC)
+
+
+def _normalized_row(row: StatsFileRow) -> StatsFileRow:
+    """Validate *row*'s values and return a UTC-normalized copy.
+
+    Raises :class:`ValueError` on any malformation: empty rel, ``rows < 1``,
+    naive / inverted bounds, negative stat fields, or an empty-string
+    ``raw_hash``. The ONE row validator shared by the factory and the shard
+    parser (CLAUDE.md §11 COMMON).
+    """
+    if not isinstance(row.rel, str) or not row.rel:
+        raise ValueError(f"rel must be a non-empty string, got {row.rel!r}")
+    rows = _require_int(row.rows, field="rows", minimum=1)
+    min_ts = _require_ts(row.min_ts, field="min_ts")
+    max_ts = _require_ts(row.max_ts, field="max_ts")
+    if min_ts > max_ts:
+        raise ValueError(f"file {row.rel!r} has min_ts > max_ts")
+    mtime_ns = _require_int(row.mtime_ns, field="mtime_ns", minimum=0)
+    size = _require_int(row.size, field="size", minimum=0)
+    if row.raw_hash is not None and (not isinstance(row.raw_hash, str) or not row.raw_hash):
+        raise ValueError(f"raw_hash must be a non-empty string or None, got {row.raw_hash!r}")
+    return StatsFileRow(
+        rel=row.rel,
+        rows=rows,
+        min_ts=min_ts,
+        max_ts=max_ts,
+        mtime_ns=mtime_ns,
+        size=size,
+        raw_hash=row.raw_hash,
+    )
+
+
+def build_dataset_stats(
+    *,
+    kind: str,
+    key: Mapping[str, str],
+    files: Iterable[StatsFileRow],
+    updated_utc: str | None = None,
+) -> DatasetStats:
+    """Build a validated :class:`DatasetStats` from per-file rows — the ONE factory.
+
+    Sorts *files* ascending by ``rel`` (the keep-FIRST filename order),
+    normalizes every timestamp to UTC, enforces the month grammar AND the
+    month-bounds sanity per row (so a writer can never persist a
+    foreign-month-poisoned shard — it fails here, the shard is unlinked, and
+    the reader falls back), and computes the ``row_count`` / ``min_ts`` /
+    ``max_ts`` aggregates. O(files · log files).
+
+    Parameters
+    ----------
+    kind, key
+        Dataset coordinates (validated via :data:`STATS_KEY_FIELDS`).
+    files
+        The per-file rows; must be non-empty (an empty dataset has NO shard).
+    updated_utc
+        Observability stamp; defaults to now (UTC ISO-8601).
+
+    Raises
+    ------
+    ValueError
+        On any malformation: unknown kind, bad key, empty / duplicate-rel
+        files, grammar-violating rel, bounds outside the rel's UTC month, or
+        a malformed row value.
+    """
+    canonical = _canonical_key(kind, key)
+    rows = sorted((_normalized_row(row) for row in files), key=lambda r: r.rel)
+    if not rows:
+        raise ValueError("files must be non-empty — an empty dataset has NO shard")
+    rels = [row.rel for row in rows]
+    if len(set(rels)) != len(rels):
+        raise ValueError(f"duplicate rel in files: {rels!r}")
+    for row in rows:
+        bounds = rel_month_bounds(kind, row.rel)
+        if bounds is None:
+            raise ValueError(f"rel {row.rel!r} does not match the {kind!r} month grammar")
+        start, nxt = bounds
+        if row.min_ts < start or row.max_ts >= nxt:
+            raise ValueError(f"file {row.rel!r} bounds lie outside its UTC month")
+    return DatasetStats(
+        kind=kind,
+        key=canonical,
+        identity_key=STATS_IDENTITY_KEYS[kind],
+        row_count=sum(row.rows for row in rows),
+        min_ts=min(row.min_ts for row in rows),
+        max_ts=max(row.max_ts for row in rows),
+        files=tuple(rows),
+        updated_utc=(updated_utc if updated_utc is not None else datetime.now(tz=UTC).isoformat()),
+    )
+
+
+def render_shard(stats: DatasetStats) -> str:
+    """Serialize *stats* to its canonical shard JSON (sorted keys, compact).
+
+    Deterministic byte-for-byte for identical inputs — the golden schema-freeze
+    pin (``tests/golden/test_lake_stats_manifest_golden.py``) compares this
+    literal.
+    """
+    payload = {
+        "version": STATS_MANIFEST_VERSION,
+        "kind": stats.kind,
+        "key": dict(stats.key),
+        "identity_key": list(stats.identity_key),
+        "row_count": stats.row_count,
+        "min_ts": stats.min_ts.isoformat(),
+        "max_ts": stats.max_ts.isoformat(),
+        "files": [
+            {
+                "rel": row.rel,
+                "rows": row.rows,
+                "min_ts": row.min_ts.isoformat(),
+                "max_ts": row.max_ts.isoformat(),
+                "mtime_ns": row.mtime_ns,
+                "size": row.size,
+                "raw_hash": row.raw_hash,
+            }
+            for row in stats.files
+        ],
+        "updated_utc": stats.updated_utc,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _row_from_json(obj: object) -> StatsFileRow:
+    """Parse one shard file-row object → :class:`StatsFileRow`, fail-closed.
+
+    Raises :class:`ValueError` on any shape/type/value malformation (mapped to
+    the ``row_malformed`` clause by the shard parser).
+    """
+    if not isinstance(obj, dict):
+        raise ValueError(f"file row must be an object, got {obj!r}")
+    rel = obj.get("rel")
+    if not isinstance(rel, str) or not rel:
+        raise ValueError(f"rel must be a non-empty string, got {rel!r}")
+    raw_hash = obj.get("raw_hash")
+    if raw_hash is not None and not isinstance(raw_hash, str):
+        raise ValueError(f"raw_hash must be a string or null, got {raw_hash!r}")
+    return _normalized_row(
+        StatsFileRow(
+            rel=rel,
+            rows=_require_int(obj.get("rows"), field="rows", minimum=1),
+            min_ts=_require_ts(obj.get("min_ts"), field="min_ts"),
+            max_ts=_require_ts(obj.get("max_ts"), field="max_ts"),
+            mtime_ns=_require_int(obj.get("mtime_ns"), field="mtime_ns", minimum=0),
+            size=_require_int(obj.get("size"), field="size", minimum=0),
+            raw_hash=raw_hash,
+        )
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Structural load (validation clause 1)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _load_shard_with_clause(
+    lake_root: Path, *, kind: str, key: Mapping[str, str]
+) -> tuple[DatasetStats | None, str | None]:
+    """Read + structurally validate the shard → ``(stats, None)`` or ``(None, clause)``.
+
+    Clause 1 of the read-time validation: parse + version + kind/key echo +
+    identity-key echo + well-formed rows + sorted files + sum invariant +
+    aggregate-bounds consistency. Takes NO lock (``os.replace`` atomicity —
+    a read sees a complete old or new shard). Raises :class:`ValueError` only
+    for a malformed *kind*/*key* argument (a programming error, not bad data).
+    """
+    canonical = _canonical_key(kind, key)
+    shard_path = stats_shard_path(lake_root, kind, key)
+    try:
+        text = shard_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "absent"
+    except OSError:
+        return None, "shard_read"
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None, "parse"
+    if not isinstance(obj, dict):
+        return None, "parse"
+    version = obj.get("version")
+    if isinstance(version, bool) or version != STATS_MANIFEST_VERSION:
+        return None, "version"
+    if obj.get("kind") != kind:
+        return None, "kind"
+    if obj.get("key") != canonical:
+        return None, "key_echo"
+    if obj.get("identity_key") != list(STATS_IDENTITY_KEYS[kind]):
+        return None, "identity_key"
+    files_raw = obj.get("files")
+    if not isinstance(files_raw, list):
+        return None, "row_malformed"
+    if not files_raw:
+        return None, "files_empty"
+    rows: list[StatsFileRow] = []
+    for entry in files_raw:
+        try:
+            rows.append(_row_from_json(entry))
+        except ValueError:
+            return None, "row_malformed"
+    rels = [row.rel for row in rows]
+    if rels != sorted(rels) or len(set(rels)) != len(rels):
+        return None, "files_unsorted"
+    try:
+        row_count = _require_int(obj.get("row_count"), field="row_count", minimum=1)
+    except ValueError:
+        return None, "sum_invariant"
+    if row_count != sum(row.rows for row in rows):
+        return None, "sum_invariant"
+    try:
+        min_ts = _require_ts(obj.get("min_ts"), field="min_ts")
+        max_ts = _require_ts(obj.get("max_ts"), field="max_ts")
+    except ValueError:
+        return None, "aggregate_bounds"
+    if min_ts != min(row.min_ts for row in rows) or max_ts != max(row.max_ts for row in rows):
+        return None, "aggregate_bounds"
+    updated_utc = obj.get("updated_utc")
+    stats = DatasetStats(
+        kind=kind,
+        key=canonical,
+        identity_key=STATS_IDENTITY_KEYS[kind],
+        row_count=row_count,
+        min_ts=min_ts,
+        max_ts=max_ts,
+        files=tuple(rows),
+        updated_utc=updated_utc if isinstance(updated_utc, str) else "",
+    )
+    return stats, None
+
+
+def load_shard_stats(lake_root: Path, *, kind: str, key: Mapping[str, str]) -> DatasetStats | None:
+    """Read + structurally validate the dataset's shard (clause 1 ONLY).
+
+    Parse + version + kind/key echo + identity-key echo + well-formed rows +
+    sorted files + sum invariant. Does NOT check the live directory — use
+    :func:`load_valid_dataset_stats` for the full anti-illusion validation.
+    Returns ``None`` on any structural failure (or when the kill switch is
+    off). Takes no lock.
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* or malformed *key* (programming error).
+    """
+    if not stats_manifest_enabled():
+        return None
+    stats, _clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
+    return stats
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Read-time revalidation (clauses 2–4) — the anti-illusion gate
+# ────────────────────────────────────────────────────────────────────────
+
+
+def scan_dataset_rels(lake_root: Path, kind: str, key: Mapping[str, str]) -> set[str]:
+    """One fixed-depth scandir of the dataset dir → its ``*.parquet`` rel set.
+
+    Bars scan exactly depth 2 (``<year-dir>/<file>.parquet``), options exactly
+    depth 1 — the same depths the legacy globs read, so a stray file at any
+    other depth is invisible to BOTH paths (equivalence preserved). A missing
+    dataset dir is the empty set; any other :class:`OSError` propagates
+    (the validation caller fails closed to the legacy scan). O(D).
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* or malformed *key*.
+    OSError
+        On a scandir failure other than a missing dataset dir.
+    """
+    root = dataset_dir(lake_root, kind, key)
+    rels: set[str] = set()
+    if kind == KIND_BARS:
+        try:
+            entries = list(os.scandir(root))
+        except FileNotFoundError:
+            return rels
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            with os.scandir(entry.path) as inner:
+                for leaf in inner:
+                    if leaf.is_file() and leaf.name.endswith(".parquet"):
+                        rels.add(f"{entry.name}/{leaf.name}")
+        return rels
+    try:
+        entries = list(os.scandir(root))
+    except FileNotFoundError:
+        return rels
+    for entry in entries:
+        if entry.is_file() and entry.name.endswith(".parquet"):
+            rels.add(entry.name)
+    return rels
+
+
+def _log_fallback(kind: str, key: Mapping[str, str], clause: str, **extra: object) -> None:
+    """Emit the ONE ``lake.stats_manifest.fallback`` event naming the clause."""
+    _LOG.info("lake.stats_manifest.fallback", kind=kind, key=dict(key), clause=clause, **extra)
+
+
+def load_valid_dataset_stats(
+    lake_root: Path, *, kind: str, key: Mapping[str, str]
+) -> DatasetStats | None:
+    """Serve the dataset's stats ONLY after FULL per-request revalidation.
+
+    The anti-illusion gate (module docstring): clause 1 structural (parse +
+    version + key echo + rows well-formed + sorted + sum invariant), clause 2
+    FILE-SET EQUALITY (fixed-depth scandir), clause 3 PER-FILE STAT EQUALITY
+    (``mtime_ns`` + ``size`` vs the stamped token), clause 4 MONTH-BOUNDS
+    SANITY (stamped bounds inside the rel's UTC month). ANY failure returns
+    ``None`` after ONE ``lake.stats_manifest.fallback`` log naming the failed
+    clause — the caller runs the byte-identical legacy live scan (+ best-effort
+    reseed). Kill switch off returns ``None`` silently (no consult happened).
+
+    Cost: O(D) metadata syscalls + O(D) JSON-row parse, D = the ONE dataset's
+    month files — independent of total lake depth. NOT a literal O(1).
+    Readers take NO lock.
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* or malformed *key* (programming error at the
+        call site, never a data condition).
+    """
+    if not stats_manifest_enabled():
+        return None
+    canonical = _canonical_key(kind, key)
+    stats, clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
+    if stats is None:
+        # ``clause`` is always set when ``stats`` is None (the parser returns
+        # exactly one of the two) — assert the contract for the type checker.
+        _log_fallback(kind, canonical, clause if clause is not None else "unknown")
+        return None
+    root = dataset_dir(lake_root, kind, key)
+    try:
+        on_disk = scan_dataset_rels(lake_root, kind, key)
+    except OSError as exc:
+        _log_fallback(kind, canonical, "file_set", error_type=type(exc).__name__, error=str(exc))
+        return None
+    stamped = {row.rel for row in stats.files}
+    if on_disk != stamped:
+        _log_fallback(
+            kind,
+            canonical,
+            "file_set",
+            extra=sorted(on_disk - stamped),
+            missing=sorted(stamped - on_disk),
+        )
+        return None
+    for row in stats.files:
+        if not file_token_matches(root / row.rel, row):
+            _log_fallback(kind, canonical, "stat_token", rel=row.rel)
+            return None
+    for row in stats.files:
+        bounds = rel_month_bounds(kind, row.rel)
+        if bounds is None:
+            _log_fallback(kind, canonical, "month_bounds", rel=row.rel)
+            return None
+        start, nxt = bounds
+        if row.min_ts < start or row.max_ts >= nxt:
+            _log_fallback(kind, canonical, "month_bounds", rel=row.rel)
+            return None
+    return stats
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Write-side hooks (best-effort · incremental · lazy accretion)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _unlink_shard(shard_path: Path) -> None:
+    """Remove the shard best-effort — a failure logs, never raises."""
+    try:
+        shard_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _LOG.warning(
+            "lake.stats_manifest.unlink_failed",
+            shard=str(shard_path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
+def _write_shard(shard_path: Path, stats: DatasetStats) -> None:
+    """Atomically replace the shard (0o600) via the COMMON guard-free core.
+
+    ``atomic_write_simple`` — NOT ``atomic_write_via`` — because a shard
+    ENOSPC must never escalate to a pull-wide
+    :class:`~brutex.data.errors.LakeWriteHalt` (the accelerator is never a
+    correctness surface; the ``lake_manifest`` precedent).
+    """
+    body = render_shard(stats)
+    atomic_write_simple(shard_path, lambda tmp: tmp.write_text(body, encoding="utf-8"), chmod=0o600)
+
+
+def _shard_exists(shard_path: Path) -> bool:
+    """The lazy-accretion existence probe — ONE ``os.stat``, fail-closed False."""
+    try:
+        os.stat(shard_path)
+    except OSError:
+        return False
+    return True
+
+
+def record_partition_stats(
+    lake_root: Path,
+    *,
+    kind: str,
+    key: Mapping[str, str],
+    dest: Path,
+    rows: int,
+    min_ts: datetime,
+    max_ts: datetime,
+    raw_hash: str | None,
+    stat: os.stat_result,
+) -> bool:
+    """Upsert ONE file row after a partition write — best-effort, incremental.
+
+    Called by the lake writers INSIDE their already-held data-partition lock,
+    immediately after the durable ``os.replace`` (*stat* must be the fresh
+    ``os.stat(dest)`` taken while that lock is still held, so the token is the
+    durable file's). LAZY ACCRETION: when NO shard exists this is ONE failed
+    ``os.stat`` and an immediate ``False`` — shards are seeded only by the
+    read side (:func:`seed_dataset_stats`), which is what caps the prebuild's
+    ~10⁵–10⁶ writes to one probe each.
+
+    When the shard exists: take the shard flock
+    (:func:`resolve_stats_lock_timeout_seconds`-bounded), re-read + parse
+    (corrupt / old-version ⇒ unlink, NEVER merge into garbage), upsert the one
+    row keyed by ``rel``, refold the aggregates in memory, and atomically
+    rewrite. Any best-effort failure (``OSError`` / lock timeout /
+    ``ValueError``) logs ``lake.stats_manifest.record_failed``, unlinks the
+    shard (the reader falls back + reseeds), and returns ``False`` — it NEVER
+    raises into the pull. A
+    :class:`~brutex.data.errors.LakeWriteHalt` from the ``.locks/`` creation
+    on a genuinely full disk deliberately PROPAGATES.
+
+    Parameters
+    ----------
+    lake_root, kind, key
+        Dataset coordinates.
+    dest
+        The partition file just written (its ``rel`` is derived per *kind*).
+    rows
+        The file's DISTINCT-identity-key count (``WriteResult.row_count`` /
+        the option writer's post-``unique`` ``combined.height``) — never
+        physical rows.
+    min_ts, max_ts
+        The write's whole-partition timestamp bounds (timezone-aware).
+    raw_hash
+        The partition's sha256 hex (bars) or ``None`` (options).
+    stat
+        The post-replace ``os.stat(dest)`` result (the content token source).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the shard was updated.
+    """
+    if not stats_manifest_enabled():
+        return False
+    try:
+        shard_path = stats_shard_path(lake_root, kind, key)
+    except ValueError as exc:
+        _LOG.warning(
+            "lake.stats_manifest.record_failed",
+            kind=kind,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    if not _shard_exists(shard_path):
+        return False
+    try:
+        rel = dest_rel(kind, dest)
+        new_row = StatsFileRow(
+            rel=rel,
+            rows=rows,
+            min_ts=min_ts,
+            max_ts=max_ts,
+            mtime_ns=stat.st_mtime_ns,
+            size=stat.st_size,
+            raw_hash=raw_hash,
+        )
+        timeout = resolve_stats_lock_timeout_seconds()
+        with partition_write_lock(lake_root, shard_path, timeout_seconds=timeout):
+            stats, clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
+            if stats is None:
+                if clause == "absent":
+                    # Unlinked between the probe and the lock — stay lazy.
+                    return False
+                _LOG.warning(
+                    "lake.stats_manifest.corrupt_unlinked",
+                    kind=kind,
+                    clause=clause,
+                    shard=str(shard_path),
+                )
+                _unlink_shard(shard_path)
+                return False
+            merged = [row for row in stats.files if row.rel != rel]
+            merged.append(new_row)
+            rebuilt = build_dataset_stats(kind=kind, key=key, files=merged)
+            _write_shard(shard_path, rebuilt)
+    except _BEST_EFFORT_ERRORS as exc:
+        _LOG.warning(
+            "lake.stats_manifest.record_failed",
+            kind=kind,
+            key=dict(key),
+            dest=str(dest),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        _unlink_shard(shard_path)
+        return False
+    _LOG.debug("lake.stats_manifest.recorded", kind=kind, rel=rel, rows=rows)
+    return True
+
+
+def remove_partition_stats(
+    lake_root: Path, *, kind: str, key: Mapping[str, str], dest: Path
+) -> bool:
+    """Remove ONE file's row after its quarantine-move — best-effort.
+
+    The heal-side twin of :func:`record_partition_stats`: called beside the
+    existing ``invalidate_manifest`` when a heal MOVES a partition file out of
+    the dataset. Lazy probe first (absent shard ⇒ no-op ``False``); under the
+    shard flock the file's row is deleted and the aggregates re-summed; the
+    LAST row's removal unlinks the whole shard (an empty dataset has no
+    shard). A rel with no stored row is an idempotent no-op ``True``. Failures
+    log ``lake.stats_manifest.remove_failed`` + unlink + return ``False`` —
+    never raise into the pull (:class:`~brutex.data.errors.LakeWriteHalt`
+    from ``.locks/`` creation still propagates).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the shard reflects the removal (including the no-op and
+        unlinked-last-row cases).
+    """
+    if not stats_manifest_enabled():
+        return False
+    try:
+        shard_path = stats_shard_path(lake_root, kind, key)
+    except ValueError as exc:
+        _LOG.warning(
+            "lake.stats_manifest.remove_failed",
+            kind=kind,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    if not _shard_exists(shard_path):
+        return False
+    try:
+        rel = dest_rel(kind, dest)
+        timeout = resolve_stats_lock_timeout_seconds()
+        with partition_write_lock(lake_root, shard_path, timeout_seconds=timeout):
+            stats, clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
+            if stats is None:
+                if clause == "absent":
+                    return False
+                _LOG.warning(
+                    "lake.stats_manifest.corrupt_unlinked",
+                    kind=kind,
+                    clause=clause,
+                    shard=str(shard_path),
+                )
+                _unlink_shard(shard_path)
+                return False
+            remaining = [row for row in stats.files if row.rel != rel]
+            if len(remaining) == len(stats.files):
+                _LOG.debug("lake.stats_manifest.remove_noop", kind=kind, rel=rel)
+                return True
+            if not remaining:
+                _unlink_shard(shard_path)
+                _LOG.debug("lake.stats_manifest.removed_last_row", kind=kind, rel=rel)
+                return True
+            rebuilt = build_dataset_stats(kind=kind, key=key, files=remaining)
+            _write_shard(shard_path, rebuilt)
+    except _BEST_EFFORT_ERRORS as exc:
+        _LOG.warning(
+            "lake.stats_manifest.remove_failed",
+            kind=kind,
+            key=dict(key),
+            dest=str(dest),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        _unlink_shard(shard_path)
+        return False
+    _LOG.debug("lake.stats_manifest.row_removed", kind=kind, rel=rel)
+    return True
+
+
+def remove_dataset_stats(lake_root: Path, *, kind: str, key: Mapping[str, str]) -> None:
+    """Unlink the dataset's WHOLE shard — the heal / TF-rebuild chokepoint hook.
+
+    Called beside ``invalidate_manifest`` wherever a whole dataset's files are
+    quarantined / deleted-and-rebuilt (``lake_heal._quarantine_move``).
+    Prefers the shard flock; if the lock cannot be taken the unlink still
+    proceeds (a racing upsert then re-creates a shard whose stat tokens the
+    reader revalidates — never a wrong number, only a re-seed). Idempotent,
+    O(1), never raises (a
+    :class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation
+    still propagates — a genuinely full disk halts the pull).
+    """
+    if not stats_manifest_enabled():
+        return
+    try:
+        shard_path = stats_shard_path(lake_root, kind, key)
+    except ValueError as exc:
+        _LOG.warning(
+            "lake.stats_manifest.remove_dataset_failed",
+            kind=kind,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return
+    if not _shard_exists(shard_path):
+        return
+    try:
+        timeout = resolve_stats_lock_timeout_seconds()
+        with partition_write_lock(lake_root, shard_path, timeout_seconds=timeout):
+            _unlink_shard(shard_path)
+    except _BEST_EFFORT_ERRORS as exc:
+        _LOG.warning(
+            "lake.stats_manifest.remove_dataset_lock_failed",
+            kind=kind,
+            key=dict(key),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        _unlink_shard(shard_path)
+        return
+    _LOG.debug("lake.stats_manifest.dataset_removed", kind=kind, key=dict(key))
+
+
+def seed_dataset_stats(
+    lake_root: Path, *, kind: str, key: Mapping[str, str], files: Iterable[StatsFileRow]
+) -> bool:
+    """Write-behind a WHOLE rebuilt shard from a clean legacy scan — the ONLY seeder.
+
+    The read side calls this after a fallback whose live scan ran CLEAN,
+    passing per-file rows whose stat tokens it captured BEFORE its grouped
+    query and re-checked AFTER (any movement drops the rebuild — that
+    discipline lives with the caller, which owns the DuckDB connection). The
+    rows are validated through the ONE factory (:func:`build_dataset_stats`)
+    — a month-bounds-violating row REJECTS the whole seed
+    (``lake.stats_manifest.seed_rejected``), so known-unservable garbage is
+    never persisted. EMPTY *files* unlinks any existing shard and returns
+    ``False`` (an empty dataset has no shard).
+
+    The final shard is written under the shard flock and loses gracefully to a
+    concurrent writer upsert; a seed FAILURE (lock timeout / ``OSError``)
+    deliberately does NOT unlink an existing shard — the seed is a read-side
+    write-behind and must never clobber a writer's fresher upsert (the
+    reader's per-request validation governs whatever survives). Never raises
+    (:class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation
+    still propagates).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the rebuilt shard was written.
+    """
+    if not stats_manifest_enabled():
+        return False
+    try:
+        shard_path = stats_shard_path(lake_root, kind, key)
+    except ValueError as exc:
+        _LOG.warning(
+            "lake.stats_manifest.seed_failed",
+            kind=kind,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    rows = list(files)
+    if not rows:
+        _LOG.warning("lake.stats_manifest.seed_rejected", kind=kind, reason="empty_files")
+        _unlink_shard(shard_path)
+        return False
+    try:
+        stats = build_dataset_stats(kind=kind, key=key, files=rows)
+    except ValueError as exc:
+        _LOG.warning("lake.stats_manifest.seed_rejected", kind=kind, key=dict(key), reason=str(exc))
+        return False
+    try:
+        timeout = resolve_stats_lock_timeout_seconds()
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+        with partition_write_lock(lake_root, shard_path, timeout_seconds=timeout):
+            _write_shard(shard_path, stats)
+    except _BEST_EFFORT_ERRORS as exc:
+        _LOG.warning(
+            "lake.stats_manifest.seed_failed",
+            kind=kind,
+            key=dict(key),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    _LOG.info(
+        "lake.stats_manifest.seeded",
+        kind=kind,
+        key=dict(key),
+        files=len(stats.files),
+        row_count=stats.row_count,
+    )
+    return True
+
+
+__all__ = [
+    "KIND_BARS",
+    "KIND_OPTIONS",
+    "STATS_IDENTITY_KEYS",
+    "STATS_KEY_FIELDS",
+    "STATS_LOCK_TIMEOUT_ENV",
+    "STATS_LOCK_TIMEOUT_S",
+    "STATS_MANIFEST_ENV",
+    "STATS_MANIFEST_OFF",
+    "STATS_MANIFEST_VERSION",
+    "STATS_SUBDIRNAME",
+    "DatasetStats",
+    "StatsFileRow",
+    "build_dataset_stats",
+    "dataset_dir",
+    "dest_rel",
+    "file_token_matches",
+    "load_shard_stats",
+    "load_valid_dataset_stats",
+    "parse_rel_month",
+    "record_partition_stats",
+    "rel_month_bounds",
+    "remove_dataset_stats",
+    "remove_partition_stats",
+    "render_shard",
+    "resolve_stats_lock_timeout_seconds",
+    "scan_dataset_rels",
+    "seed_dataset_stats",
+    "stat_token",
+    "stats_dir",
+    "stats_manifest_enabled",
+    "stats_shard_path",
+]
