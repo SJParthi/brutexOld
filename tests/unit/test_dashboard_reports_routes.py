@@ -499,3 +499,39 @@ def test_zip_no_lake_root_is_valid_empty_workbook() -> None:
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         # The empty-selection fallback: a single header-only workbook member.
         assert zf.namelist()
+
+
+def test_symbols_route_docstring_states_pruned_cold_miss_honestly() -> None:
+    """DEC-O1-CLAIMS-HONESTY-001 round-2 review fold: honest cold-miss wording.
+
+    The route docstring must NOT describe the CURRENT discovery in present
+    tense as the pre-1b unfiltered "full ``bars/`` tree walk, ~66k dirs"
+    (part 1b prunes the FNO contract tree at walk DESCENT + bounds the walk
+    to the one interval the basis reads, and a manifest-served lake pays an
+    O(manifest-rows) read — never a walk). The 361,596 ms / ~66k-dir forensic
+    figures stay, but explicitly qualified as the PRE-fix UNFILTERED
+    measurement, and the memo paragraph must bound the PRUNED cold-miss walk,
+    not "the measured" (unfiltered) one. Golden Rules #1/#10 — the stale
+    cost-characterization class this repo reconciles.
+    """
+    from fastapi.routing import APIRoute
+
+    app = build_app(DashboardState(), instrument_store=None)
+    doc = next(
+        route.endpoint.__doc__
+        for route in app.routes
+        if isinstance(route, APIRoute) and route.path == "/api/v1/reports/preopen/symbols"
+    )
+    assert doc is not None
+    # The forensic figures survive, qualified as the pre-fix unfiltered walk.
+    assert "361,596 ms" in doc
+    assert "PRE-DEC-O1-CLAIMS-HONESTY-001" in doc
+    assert "UNFILTERED" in doc
+    # The current cold-miss cost is stated explicitly: FNO-pruned +
+    # interval-bounded walk, or an O(manifest-rows) manifest read.
+    assert "exclude_segments={FNO}" in doc
+    assert "O(manifest-rows)" in doc
+    # The memo paragraph bounds the PRUNED walk — the stale conflation of the
+    # unfiltered forensic walk with the memoised compute is gone.
+    assert "pruned cold-miss walk is" in doc
+    assert "the measured mid-pull walk" not in doc

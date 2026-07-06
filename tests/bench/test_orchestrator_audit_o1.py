@@ -6,8 +6,15 @@ Enforces the O(1) decree (CLAUDE.md §2 r5 / §12, Golden Rule #8) for
 best-effort ``os.fsync`` (DEC-AUDIT-FSYNC-DURABILITY-001) — which must be
 latency-independent of how many lines the chain already holds. The writer keeps
 the running ``prev_hash``/``seq`` in memory and never re-reads/re-hashes the
-chain on append; the fsync is a per-append CONSTANT, so it cannot mask an O(n)
-regression, only add jitter (absorbed by the per-base sample mean).
+chain on append. HONEST detection envelope (Golden Rule #10): the per-append
+fsync is an additive CONSTANT shared by BOTH bases, and an additive constant
+COMPRESSES the timing ratio — it dampens sensitivity, it does not merely add
+jitter. The ratio gate therefore reliably catches the heavyweight regression
+class it names (a re-READ/re-HASH of the on-disk chain, ~microseconds per
+prior line → hundreds of ms at the 100k base, ratio ≫ ceiling), NOT an
+arbitrarily cheap O(n) term hiding below ~(ceiling−1)× the fsync constant
+(with a real-disk ~1-3 ms fsync dominating the 1k base, the 5× shared-CI
+ceiling implies a detection floor of roughly tens of ns per prior line).
 
 Mirrors ``tests/bench/test_engine_sweep_audit_o1.py`` (the BLAKE3 sweep twin)
 with ONE honest prefill delta: this writer fsyncs EVERY append, so a 100k-line
@@ -144,3 +151,23 @@ class TestAppendIsO1:
             f"the ceiling — the append may have regressed from O(1) to an O(n) "
             f"re-hash/re-read of the chain. t_1k={t_small:.0f}ns, t_100k={t_large:.0f}ns."
         )
+
+
+class TestDocstringHonesty:
+    def test_detection_envelope_not_overclaimed(self) -> None:
+        """DEC-O1-CLAIMS-HONESTY-001 round-2 review fold: honest envelope prose.
+
+        The module docstring must NOT claim the constant per-append fsync
+        'cannot mask an O(n) regression': an additive constant present in BOTH
+        bases COMPRESSES the timing ratio (t_large + C)/(t_small + C) — which
+        IS masking for a sufficiently cheap O(n) term — so the honest claim is
+        that the gate reliably catches the heavyweight re-read/re-hash class,
+        not an arbitrary O(n) regression (Golden Rule #10, the exact
+        absolute-sensitivity overstatement this decision removes from prose).
+        """
+        doc = __doc__
+        assert doc is not None
+        assert "cannot mask" not in doc
+        assert "COMPRESSES the timing ratio" in doc
+        assert "re-READ/re-HASH" in doc
+        assert "NOT an" in doc and "arbitrarily cheap O(n) term" in doc
