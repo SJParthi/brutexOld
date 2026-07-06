@@ -10,7 +10,9 @@ timestamps, (b) rows whose UTC ``(year, month)`` differs from the file's (which
 provably subsumes cross-file overlap — one file per UTC month per series), and,
 per ``bars/<exch>/<seg>/`` directory, (c) #911 legacy-key drift; plus, per
 ``options/<series>/`` month file, (d) intra-file duplicate ``(side, timestamp)``
-keys. Findings are frozen value dataclasses consumed by the healer
+keys and (e) foreign-month rows (UTC routing, overlap subsumed —
+DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, closing the #1175 named follow-up).
+Findings are frozen value dataclasses consumed by the healer
 (``brutex.data.lake_heal``) and the census surfaces.
 
 **Month invariant (recon-B §1e):** a bar's canonical month file is
@@ -88,6 +90,9 @@ _ENGINE_LABEL: Final[str] = "NIFTY/BANKNIFTY/SENSEX"
 
 #: Cap on offender names in :attr:`LakeCensus.engine_detail`.
 _ENGINE_DETAIL_CAP: Final[int] = 5
+
+#: December — the highest valid month in an options-tree ``YYYY-MM`` stem.
+_MAX_MONTH: Final[int] = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,12 +180,37 @@ class OptionIntraFileDup:
     unique_keys: int
 
 
+@dataclass(frozen=True, slots=True)
+class OptionForeignMonthRows:
+    """Rows in ONE ``options/<series>/`` file whose UTC month != the file's own ``YYYY-MM``.
+
+    Subsumes cross-file overlap exactly as :class:`ForeignMonthRows` does for
+    ``bars/``: ``OptionParquetWriter.write`` routes every bar by
+    ``partition_for_timestamp`` (one file per UTC month per series,
+    ``option_parquet_writer.py`` write → ``_merge_partition``), so any
+    same-``(side, timestamp)`` key in two files is by construction a foreign
+    row in one of them. ``overlap_rows`` = the foreign KEYS also present in
+    their canonical month sibling (canonical wins on heal); ``None`` = the
+    sibling was unreadable (honest abstain).
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001.
+    """
+
+    path: Path
+    series: str
+    year: int  # the file's own stem month = the home month
+    month: int
+    foreign_rows: int  # ROW count (dup copies counted individually — mirrors bars)
+    overlap_rows: int | None
+
+
 #: Union of every finding kind one scan can emit. Importable by name
 #: (``from brutex.data.lake_invariants import LakeFinding``) but intentionally
 #: NOT listed in ``__all__``: it is a PEP 695 ``type`` statement, which some
 #: static analysers (CodeQL) do not yet model as an ``__all__`` binding, and
 #: type aliases are idiomatically not part of the ``import *`` surface anyway.
-type LakeFinding = IntraFileDup | ForeignMonthRows | LegacyKeyDrift | OptionIntraFileDup
+type LakeFinding = (
+    IntraFileDup | ForeignMonthRows | LegacyKeyDrift | OptionIntraFileDup | OptionForeignMonthRows
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,53 +233,64 @@ class LakeScanReport:
     engine_files: int = 0
 
 
-def _utc_aware(ts: datetime) -> datetime:
+def utc_aware(ts: datetime) -> datetime:
     """Stamp a (defensive) tz-naive timestamp UTC so month routing never raises.
 
     Lake bars are stored ``timestamp[us, tz=UTC]``; a hand-planted naive column
     is routed as-if-UTC (deterministic) instead of crashing the whole scan.
+
+    PUBLIC (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): shared by the scanner AND the
+    healer's option-foreign routing (``lake_heal._heal_option_foreign``) —
+    :func:`~brutex.data.partition.partition_for_timestamp` raises
+    :class:`~brutex.data.errors.PartitionError` on a naive timestamp
+    (``partition.py`` rejects naive by documented stance), and
+    ``PartitionError`` is NOT in the healer's per-finding isolation set
+    (``lake_heal._PER_FINDING_HEAL_ERRORS`` — it is a ``DataLakeError``, not a
+    ``WriterError``), so an unguarded routing call on a hand-planted naive
+    stored column would crash the WHOLE heal batch, not one finding. A
+    duplicated private copy in ``lake_heal`` would violate §11 COMMON.
     """
     if ts.tzinfo is None:
         return ts.replace(tzinfo=UTC)
     return ts
 
 
-def _count_foreign_rows(coords: PartitionCoords, timestamps: pl.Series) -> int:
-    """Count ROWS whose UTC month differs from the file's month (O(1) fast path).
+def _count_foreign_rows(home: tuple[int, int], timestamps: pl.Series) -> int:
+    """Count ROWS whose UTC month differs from the *home* month (O(1) fast path).
 
     Months are contiguous time intervals, so when the column's min AND max both
-    route to the file's own ``(year, month)`` every row between them does too —
-    a clean file never pays the O(rows) Python loop. A null timestamp (only
-    plantable by hand) abstains: it carries no month to route.
+    route to *home* every row between them does too — a clean file never pays
+    the O(rows) Python loop. A null timestamp (only plantable by hand)
+    abstains: it carries no month to route. Shared by the bars AND options
+    classifiers (the ONLY coordinate fields either ever used are the
+    ``(year, month)`` pair — DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
     """
-    home = (coords.year, coords.month)
     first = timestamps.min()
     last = timestamps.max()
     if (
         isinstance(first, datetime)
         and isinstance(last, datetime)
-        and partition_for_timestamp(_utc_aware(first)) == home
-        and partition_for_timestamp(_utc_aware(last)) == home
+        and partition_for_timestamp(utc_aware(first)) == home
+        and partition_for_timestamp(utc_aware(last)) == home
     ):
         return 0
     return sum(
         1
         for ts in timestamps.to_list()
-        if isinstance(ts, datetime) and partition_for_timestamp(_utc_aware(ts)) != home
+        if isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
     )
 
 
-def _foreign_timestamps(coords: PartitionCoords, timestamps: pl.Series) -> set[datetime]:
-    """The UNIQUE (UTC-normalised) timestamps routed outside the file's month.
+def _foreign_timestamps(home: tuple[int, int], timestamps: pl.Series) -> set[datetime]:
+    """The UNIQUE (UTC-normalised) timestamps routed outside the *home* month.
 
     Anomaly-only cost: called solely for files :func:`classify_bar_keys` already
     flagged foreign, to drive the targeted canonical-sibling overlap read.
     """
-    home = (coords.year, coords.month)
     return {
-        _utc_aware(ts)
+        utc_aware(ts)
         for ts in timestamps.to_list()
-        if isinstance(ts, datetime) and partition_for_timestamp(_utc_aware(ts)) != home
+        if isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
     }
 
 
@@ -292,7 +333,7 @@ def classify_bar_keys(
             unique_keys=unique,
         )
     foreign: ForeignMonthRows | None = None
-    foreign_rows = _count_foreign_rows(coords, timestamps)
+    foreign_rows = _count_foreign_rows((coords.year, coords.month), timestamps)
     if foreign_rows:
         foreign = ForeignMonthRows(
             path=Path(coords.relpath()),
@@ -392,7 +433,8 @@ def log_lake_finding(finding: LakeFinding) -> None:
     overlap_rows``), ``lake.invariant.legacy_key_drift`` (``drifted, canonical,
     exchange, segment, files`` — drifted/canonical via ``repr()``, the #907
     convention), ``lake.invariant.option_intra_file_dup`` (``partition,
-    physical_rows, unique_keys``).
+    physical_rows, unique_keys``), ``lake.invariant.option_foreign_month_rows``
+    (``partition, foreign_rows, overlap_rows``).
     """
     if isinstance(finding, IntraFileDup):
         _LOG.warning(
@@ -416,6 +458,13 @@ def log_lake_finding(finding: LakeFinding) -> None:
             exchange=finding.exchange,
             segment=finding.segment,
             files=finding.files,
+        )
+    elif isinstance(finding, OptionForeignMonthRows):
+        _LOG.warning(
+            "lake.invariant.option_foreign_month_rows",
+            partition=f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}",
+            foreign_rows=finding.foreign_rows,
+            overlap_rows=finding.overlap_rows,
         )
     else:
         _LOG.warning(
@@ -528,8 +577,167 @@ def _canonical_timestamps(
         return None
     _pause(per_file_pause)
     return {
-        _utc_aware(ts) for ts in frame.get_column("timestamp").to_list() if isinstance(ts, datetime)
+        utc_aware(ts) for ts in frame.get_column("timestamp").to_list() if isinstance(ts, datetime)
     }
+
+
+# ── options-tree classification (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) ──────────
+
+
+def _option_file_month(path: Path) -> tuple[int, int] | None:
+    """The ``(year, month)`` an ``options/<series>/<YYYY>-<MM>.parquet`` name addresses.
+
+    ``None`` for an unparsable stem (non-numeric / missing separator / month
+    outside 1..12) — such a file keeps today's dup-only treatment and honestly
+    abstains from foreign classification (no home month to route against).
+    """
+    stem, sep, month_text = path.stem.rpartition("-")
+    if not sep or not stem.isdigit() or not month_text.isdigit():
+        return None
+    month = int(month_text)
+    if not 1 <= month <= _MAX_MONTH:
+        return None
+    return int(stem), month
+
+
+def _option_foreign_keys(
+    home: tuple[int, int], frame: pl.DataFrame
+) -> set[tuple[str | None, datetime]]:
+    """The UNIQUE raw ``(side, timestamp)`` keys routed outside the file's month.
+
+    Anomaly-only cost (called only for already-flagged files). Routing is
+    TIMESTAMP-ONLY (the one shared law): a null timestamp abstains (no month
+    to route — the bars null-abstain); ``side`` is key payload, carried RAW
+    (even a hand-planted null side rides verbatim) so the scanner's foreign
+    count and the healer's movable set can never diverge (liveness).
+    Timestamps are ``utc_aware``-ROUTED but stored RAW in the key (removal
+    matching is exact stored-value membership).
+    """
+    sides = frame.get_column("side").to_list()
+    stamps = frame.get_column("timestamp").to_list()
+    return {
+        (side, ts)
+        for side, ts in zip(sides, stamps, strict=True)
+        if isinstance(ts, datetime) and partition_for_timestamp(utc_aware(ts)) != home
+    }
+
+
+def _canonical_option_keys(
+    series_dir: Path, year: int, month: int, per_file_pause: Callable[[], None] | None
+) -> set[tuple[str | None, datetime]] | None:
+    """The canonical sibling ``<series>/<YYYY>-<MM>.parquet``'s raw (side, ts) key set.
+
+    ``set()`` for a missing sibling (pure misplacement); ``None`` for an
+    unreadable one (honest abstain + one ``lake.invariant.scan_skip`` WARNING
+    + ``_pause``). Reads via the ONE :func:`_read_key_columns` seam (the
+    spy-count tests keep working). Simpler than the bars twin
+    :func:`_canonical_timestamps`: the sibling lives in the SAME directory —
+    no ``build_partition_path``, no ``PartitionError`` arm.
+    """
+    canonical = series_dir / f"{year:04d}-{month:02d}.parquet"
+    if not canonical.exists():
+        return set()
+    try:
+        frame = _read_key_columns(canonical, UNIQUE_KEY_OPTIONS)
+    except parquet_read_skip_errors() as exc:
+        _LOG.warning("lake.invariant.scan_skip", path=str(canonical), error=str(exc))
+        _pause(per_file_pause)
+        return None
+    _pause(per_file_pause)
+    sides = frame.get_column("side").to_list()
+    stamps = frame.get_column("timestamp").to_list()
+    return set(zip(sides, stamps, strict=True))
+
+
+def _classify_option_overlap(
+    series_dir: Path,
+    foreign_keys: set[tuple[str | None, datetime]],
+    per_file_pause: Callable[[], None] | None,
+    canonical_cache: dict[tuple[int, int], set[tuple[str | None, datetime]] | None],
+) -> int | None:
+    """Split one file's foreign keys into the overlap-with-canonical count.
+
+    Groups keys by ``partition_for_timestamp(utc_aware(ts))``; ONE targeted
+    2-key-column read per affected canonical month per SERIES (memoised in
+    *canonical_cache*); any ``None`` cache entry leaves the finding honestly
+    unclassified (``None``). Mirror of :func:`_classify_overlap` (bars).
+    Overlap membership compares RAW keys — canonical keys are read raw too,
+    so naive/aware columns compare like-for-like within one series.
+    """
+    overlap = 0
+    unresolved = False
+    grouped: dict[tuple[int, int], set[tuple[str | None, datetime]]] = {}
+    for side, ts in foreign_keys:
+        grouped.setdefault(partition_for_timestamp(utc_aware(ts)), set()).add((side, ts))
+    for year, month in sorted(grouped):
+        if (year, month) not in canonical_cache:
+            canonical_cache[(year, month)] = _canonical_option_keys(
+                series_dir, year, month, per_file_pause
+            )
+        stored = canonical_cache[(year, month)]
+        if stored is None:
+            unresolved = True
+            continue
+        overlap += len(grouped[(year, month)] & stored)
+    return None if unresolved else overlap
+
+
+def classify_option_keys(
+    path: Path, series: str, home: tuple[int, int] | None, frame: pl.DataFrame
+) -> tuple[OptionIntraFileDup | None, OptionForeignMonthRows | None]:
+    """PURE classification of one already-read ``(side, timestamp)`` key frame.
+
+    The options twin of :func:`classify_bar_keys` — dup = physical rows above
+    the unique ``(side, timestamp)`` count (the option writer's own merge
+    key); foreign = rows whose UTC month != *home* via the SHARED
+    :func:`_count_foreign_rows` (``home=None`` ⇒ dup-only honest abstain — an
+    unparsable filename has no month to route against); ``overlap_rows=None``
+    here (the pure core never reads siblings). An empty frame →
+    ``(None, None)``. Findings carry the CONCRETE *path* (the scanner passes
+    it — no relpath substitution needed for the options tree).
+
+    Parameters
+    ----------
+    path
+        The concrete ``options/<series>/<YYYY>-<MM>.parquet`` file.
+    series
+        The series directory name.
+    home
+        The file's own ``(year, month)``, or ``None`` for an unparsable stem.
+    frame
+        The file's ``(side, timestamp)`` key frame (already read).
+
+    Returns
+    -------
+    tuple[OptionIntraFileDup | None, OptionForeignMonthRows | None]
+        The optional dup + foreign findings; ``(None, None)`` for a clean or
+        empty frame.
+    """
+    physical = int(frame.height)
+    if physical == 0:
+        return None, None
+    dup: OptionIntraFileDup | None = None
+    unique = int(frame.unique(subset=list(UNIQUE_KEY_OPTIONS)).height)
+    if physical > unique:
+        dup = OptionIntraFileDup(
+            path=path,
+            series=series,
+            physical_rows=physical,
+            unique_keys=unique,
+        )
+    foreign: OptionForeignMonthRows | None = None
+    if home is not None:
+        foreign_rows = _count_foreign_rows(home, frame.get_column("timestamp"))
+        if foreign_rows:
+            foreign = OptionForeignMonthRows(
+                path=path,
+                series=series,
+                year=home[0],
+                month=home[1],
+                foreign_rows=foreign_rows,
+                overlap_rows=None,
+            )
+    return dup, foreign
 
 
 def scan_lake_invariants(
@@ -541,6 +749,7 @@ def scan_lake_invariants(
     interval: str | None = None,
     months: Collection[tuple[int, int]] | None = None,
     include_options: bool = True,
+    include_bars: bool = True,
     canonical_keys: Collection[str] | None = None,
     per_file_pause: Callable[[], None] | None = None,
 ) -> LakeScanReport:
@@ -567,9 +776,20 @@ def scan_lake_invariants(
     months
         Optional ``(year, month)`` scope; an out-of-scope bar file is skipped
         BEFORE reading (the L2 bound; counted in neither ``files_scanned`` nor
-        ``files_skipped``). Applies to the ``bars/`` tree only.
+        ``files_skipped``). Applies to the ``bars/`` tree AND — by filename,
+        an O(1) parse with no read — the ``options/`` tree; an options file
+        whose name does not parse to a month is skipped under a months scope
+        (it cannot be proven in scope; the unbounded L3 sweep still scans it).
     include_options
-        Scan the ``options/`` tree for ``(side, timestamp)`` dups.
+        Scan the ``options/`` tree for ``(side, timestamp)`` dups +
+        foreign-month rows (overlap subsumed —
+        DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
+    include_bars
+        Scan the ``bars/`` tree (+ the legacy-key drift fold). ``False``
+        exists for the bounded L2 options-only census
+        (``lake_heal.heal_after_pull(include_options=True)``) — the bars
+        counters (``files_scanned`` / ``files_skipped`` / ``series_scanned``
+        / ``files_by_segment`` / ``engine_files``) all stay 0.
     canonical_keys
         Extra canonical key universe for :func:`detect_legacy_drift`.
     per_file_pause
@@ -587,79 +807,84 @@ def scan_lake_invariants(
     files_scanned = 0
     files_skipped = 0
     engine_files = 0
-    files_by_segment: dict[str, int] = {}
-    symbol_dirs: dict[tuple[str, str], set[str]] = {}
-    per_series: dict[tuple[str, str, str, str], list[tuple[PartitionCoords, Path]]] = {}
-    for path in _bar_files(
-        lake_root, exchange=exchange, segment=segment, symbol=symbol, interval=interval
-    ):
-        try:
-            parsed = parse_partition_path(path, lake_root=lake_root)
-        except PartitionError:
-            files_skipped += 1
-            continue
-        coords = PartitionCoords(
-            exchange=cast(str, parsed["exchange"]),
-            segment=cast(str, parsed["segment"]),
-            symbol=cast(str, parsed["symbol"]),
-            interval=cast(str, parsed["interval"]),
-            year=cast(int, parsed["year"]),
-            month=cast(int, parsed["month"]),
-        )
-        symbol_dirs.setdefault((coords.exchange, coords.segment), set()).add(coords.symbol)
-        if month_scope is not None and (coords.year, coords.month) not in month_scope:
-            continue  # the L2 scope bound — never read
-        per_series.setdefault(coords.series, []).append((coords, path))
-
     series_scanned = 0
-    for series_key in sorted(per_series):
-        entries = sorted(per_series[series_key], key=lambda cp: (cp[0].year, cp[0].month))
-        scanned_in_series = 0
-        pending_overlap: list[tuple[int, PartitionCoords, set[datetime]]] = []
-        canonical_cache: dict[tuple[int, int], set[datetime] | None] = {}
-        for coords, path in entries:
+    files_by_segment: dict[str, int] = {}
+    if include_bars:
+        symbol_dirs: dict[tuple[str, str], set[str]] = {}
+        per_series: dict[tuple[str, str, str, str], list[tuple[PartitionCoords, Path]]] = {}
+        for path in _bar_files(
+            lake_root, exchange=exchange, segment=segment, symbol=symbol, interval=interval
+        ):
             try:
-                frame = _read_key_columns(path, UNIQUE_KEY_BARS)
-            except parquet_read_skip_errors() as exc:
-                _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
+                parsed = parse_partition_path(path, lake_root=lake_root)
+            except PartitionError:
                 files_skipped += 1
-                _pause(per_file_pause)
                 continue
-            _pause(per_file_pause)
-            files_scanned += 1
-            scanned_in_series += 1
-            files_by_segment[coords.segment] = files_by_segment.get(coords.segment, 0) + 1
-            if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
-                engine_files += 1
-            timestamps = frame.get_column("timestamp")
-            dup, foreign = classify_bar_keys(coords, timestamps)
-            if dup is not None:
-                dup = replace(dup, path=path)
-                log_lake_finding(dup)
-                findings.append(dup)
-            if foreign is not None:
-                foreign = replace(foreign, path=path)
-                pending_overlap.append(
-                    (len(findings), coords, _foreign_timestamps(coords, timestamps))
-                )
-                findings.append(foreign)
-        if scanned_in_series:
-            series_scanned += 1
-        for idx, coords, foreign_ts in pending_overlap:
-            overlap = _classify_overlap(
-                lake_root, coords, foreign_ts, per_file_pause, canonical_cache
+            coords = PartitionCoords(
+                exchange=cast(str, parsed["exchange"]),
+                segment=cast(str, parsed["segment"]),
+                symbol=cast(str, parsed["symbol"]),
+                interval=cast(str, parsed["interval"]),
+                year=cast(int, parsed["year"]),
+                month=cast(int, parsed["month"]),
             )
-            updated = replace(cast(ForeignMonthRows, findings[idx]), overlap_rows=overlap)
-            log_lake_finding(updated)
-            findings[idx] = updated
+            symbol_dirs.setdefault((coords.exchange, coords.segment), set()).add(coords.symbol)
+            if month_scope is not None and (coords.year, coords.month) not in month_scope:
+                continue  # the L2 scope bound — never read
+            per_series.setdefault(coords.series, []).append((coords, path))
 
-    for drift in detect_legacy_drift(
-        {key: sorted(names) for key, names in symbol_dirs.items()},
-        lake_root=lake_root,
-        canonical_keys=canonical_keys,
-    ):
-        log_lake_finding(drift)
-        findings.append(drift)
+        for series_key in sorted(per_series):
+            entries = sorted(per_series[series_key], key=lambda cp: (cp[0].year, cp[0].month))
+            scanned_in_series = 0
+            pending_overlap: list[tuple[int, PartitionCoords, set[datetime]]] = []
+            canonical_cache: dict[tuple[int, int], set[datetime] | None] = {}
+            for coords, path in entries:
+                try:
+                    frame = _read_key_columns(path, UNIQUE_KEY_BARS)
+                except parquet_read_skip_errors() as exc:
+                    _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
+                    files_skipped += 1
+                    _pause(per_file_pause)
+                    continue
+                _pause(per_file_pause)
+                files_scanned += 1
+                scanned_in_series += 1
+                files_by_segment[coords.segment] = files_by_segment.get(coords.segment, 0) + 1
+                if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
+                    engine_files += 1
+                timestamps = frame.get_column("timestamp")
+                dup, foreign = classify_bar_keys(coords, timestamps)
+                if dup is not None:
+                    dup = replace(dup, path=path)
+                    log_lake_finding(dup)
+                    findings.append(dup)
+                if foreign is not None:
+                    foreign = replace(foreign, path=path)
+                    pending_overlap.append(
+                        (
+                            len(findings),
+                            coords,
+                            _foreign_timestamps((coords.year, coords.month), timestamps),
+                        )
+                    )
+                    findings.append(foreign)
+            if scanned_in_series:
+                series_scanned += 1
+            for idx, coords, foreign_ts in pending_overlap:
+                overlap = _classify_overlap(
+                    lake_root, coords, foreign_ts, per_file_pause, canonical_cache
+                )
+                updated = replace(cast(ForeignMonthRows, findings[idx]), overlap_rows=overlap)
+                log_lake_finding(updated)
+                findings[idx] = updated
+
+        for drift in detect_legacy_drift(
+            {key: sorted(names) for key, names in symbol_dirs.items()},
+            lake_root=lake_root,
+            canonical_keys=canonical_keys,
+        ):
+            log_lake_finding(drift)
+            findings.append(drift)
 
     option_files_scanned = 0
     option_files_skipped = 0
@@ -669,7 +894,14 @@ def scan_lake_invariants(
             # Any dir containing *.parquet is scanned — no regex gate, an
             # unrecognized series dir is still checked (Golden Rule #1).
             for series_dir in sorted(p for p in options_root.iterdir() if p.is_dir()):
+                option_canonical_cache: dict[
+                    tuple[int, int], set[tuple[str | None, datetime]] | None
+                ] = {}
+                pending_option_overlap: list[tuple[int, set[tuple[str | None, datetime]]]] = []
                 for path in sorted(series_dir.glob("*.parquet")):
+                    home = _option_file_month(path)
+                    if month_scope is not None and (home is None or home not in month_scope):
+                        continue  # the L2 scope bound — never read (bars precedent)
                     try:
                         frame = _read_key_columns(path, UNIQUE_KEY_OPTIONS)
                     except parquet_read_skip_errors() as exc:
@@ -679,17 +911,26 @@ def scan_lake_invariants(
                         continue
                     _pause(per_file_pause)
                     option_files_scanned += 1
-                    physical = frame.height
-                    unique = frame.unique(subset=list(UNIQUE_KEY_OPTIONS)).height
-                    if physical > unique:
-                        finding = OptionIntraFileDup(
-                            path=path,
-                            series=series_dir.name,
-                            physical_rows=physical,
-                            unique_keys=unique,
+                    option_dup, option_foreign = classify_option_keys(
+                        path, series_dir.name, home, frame
+                    )
+                    if option_dup is not None:
+                        log_lake_finding(option_dup)
+                        findings.append(option_dup)
+                    if option_foreign is not None:
+                        keys = _option_foreign_keys(
+                            (option_foreign.year, option_foreign.month), frame
                         )
-                        log_lake_finding(finding)
-                        findings.append(finding)
+                        pending_option_overlap.append((len(findings), keys))
+                        findings.append(option_foreign)
+                for idx, keys in pending_option_overlap:
+                    found = cast(OptionForeignMonthRows, findings[idx])
+                    overlap = _classify_option_overlap(
+                        series_dir, keys, per_file_pause, option_canonical_cache
+                    )
+                    updated_option = replace(found, overlap_rows=overlap)
+                    log_lake_finding(updated_option)
+                    findings[idx] = updated_option
 
     report = LakeScanReport(
         findings=tuple(findings),
@@ -739,8 +980,13 @@ class LakeCensus:
 
 
 def _engine_relevant(finding: LakeFinding) -> bool:
-    """True when *finding* touches an :data:`ENGINE_INDEX_COORDS` series."""
-    if isinstance(finding, OptionIntraFileDup):
+    """True when *finding* touches an :data:`ENGINE_INDEX_COORDS` series.
+
+    BOTH options-tree finding kinds return ``False`` here — the fall-through
+    reads ``finding.coords``, which neither carries (the totality pin,
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
+    """
+    if isinstance(finding, OptionIntraFileDup | OptionForeignMonthRows):
         return False
     if isinstance(finding, LegacyKeyDrift):
         return (finding.exchange, finding.segment, finding.canonical_symbol) in (
@@ -761,6 +1007,8 @@ def _engine_offender(finding: LakeFinding) -> str:
         return f"dup {finding.coords.relpath()}"
     if isinstance(finding, ForeignMonthRows):
         return f"foreign {finding.coords.relpath()}"
+    if isinstance(finding, OptionForeignMonthRows):
+        return f"option-foreign {OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"
     return f"option-dup {OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"
 
 
@@ -770,8 +1018,10 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
     ``clean`` counts files with ZERO findings; a file carrying both a dup and a
     foreign finding is one poisoned file. Drift is a DIR-level count (the
     drifted dir's own files are also scanned + counted in ``files``). The
-    ``OPTIONS`` row covers dups only — foreign/overlap classification for the
-    options tree is a named follow-up (honest scope, DEC-LAKE-HEAL-001).
+    ``OPTIONS`` row now carries REAL dup + foreign + overlap counts
+    (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 closed the #1175 named follow-up);
+    ``drift_dirs`` stays 0 for it — honestly N/A, no legacy-key-drift concept
+    exists for vendor-coordinate-derived series dirs.
     """
     seg_files = dict(report.files_by_segment)
     dup_paths: dict[str, set[str]] = {}
@@ -782,7 +1032,11 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
     for finding in report.findings:
         if _engine_relevant(finding):
             engine_findings.append(finding)
-        if isinstance(finding, OptionIntraFileDup):
+        if isinstance(finding, OptionForeignMonthRows):
+            foreign_paths.setdefault(OPTIONS_SEGMENT, set()).add(str(finding.path))
+            if (finding.overlap_rows or 0) > 0:
+                overlap_paths.setdefault(OPTIONS_SEGMENT, set()).add(str(finding.path))
+        elif isinstance(finding, OptionIntraFileDup):
             dup_paths.setdefault(OPTIONS_SEGMENT, set()).add(str(finding.path))
         elif isinstance(finding, LegacyKeyDrift):
             drift_dirs[finding.segment] = drift_dirs.get(finding.segment, 0) + 1
@@ -809,15 +1063,16 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
             )
         )
     option_dups = dup_paths.get(OPTIONS_SEGMENT, set())
+    option_foreigns = foreign_paths.get(OPTIONS_SEGMENT, set())
     rows.append(
         SegmentCensus(
             segment=OPTIONS_SEGMENT,
             files=report.option_files_scanned,
-            clean=report.option_files_scanned - len(option_dups),
+            clean=report.option_files_scanned - len(option_dups | option_foreigns),
             dup_files=len(option_dups),
-            foreign_files=0,
-            overlap_files=0,
-            drift_dirs=0,
+            foreign_files=len(option_foreigns),
+            overlap_files=len(overlap_paths.get(OPTIONS_SEGMENT, set())),
+            drift_dirs=0,  # honestly N/A — no legacy-key-drift concept for series dirs
         )
     )
     if engine_findings:
@@ -906,13 +1161,16 @@ __all__ = [
     "LakeCensus",
     "LakeScanReport",
     "LegacyKeyDrift",
+    "OptionForeignMonthRows",
     "OptionIntraFileDup",
     "PartitionCoords",
     "SegmentCensus",
     "build_lake_census",
     "census_to_dict",
     "classify_bar_keys",
+    "classify_option_keys",
     "detect_legacy_drift",
     "log_lake_finding",
     "scan_lake_invariants",
+    "utc_aware",
 ]

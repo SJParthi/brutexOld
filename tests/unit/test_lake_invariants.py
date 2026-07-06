@@ -37,13 +37,16 @@ from brutex.data.lake_invariants import (
     IntraFileDup,
     LakeScanReport,
     LegacyKeyDrift,
+    OptionForeignMonthRows,
     OptionIntraFileDup,
     PartitionCoords,
     build_lake_census,
     census_to_dict,
     classify_bar_keys,
+    classify_option_keys,
     detect_legacy_drift,
     scan_lake_invariants,
+    utc_aware,
 )
 from brutex.data.models import CandleBar, OptionBar
 from brutex.data.option_parquet_writer import (
@@ -138,7 +141,7 @@ def _plant_raw(dest: Path, timestamps: Sequence[datetime | None], *, price: floa
     pq.write_table(table, dest)
 
 
-def _plant_option_raw(dest: Path, rows: Sequence[tuple[str, datetime]]) -> None:
+def _plant_option_raw(dest: Path, rows: Sequence[tuple[str | None, datetime | None]]) -> None:
     """Write a RAW options-tree file with only the two scanner key columns."""
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -151,6 +154,18 @@ def _plant_option_raw(dest: Path, rows: Sequence[tuple[str, datetime]]) -> None:
         }
     )
     pq.write_table(table, dest)
+
+
+def _option_key_frame(rows: Sequence[tuple[str | None, datetime | None]]) -> pl.DataFrame:
+    """A 2-column ``(side, timestamp)`` key frame for the pure classifier."""
+    return pl.DataFrame(
+        {
+            "side": pl.Series("side", [side for side, _ in rows], dtype=pl.Utf8),
+            "timestamp": pl.Series(
+                "timestamp", [ts for _, ts in rows], dtype=pl.Datetime("us", "UTC")
+            ),
+        }
+    )
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
@@ -593,6 +608,318 @@ class TestOptionsTree:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Options tree — the pure (side, timestamp) classifier
+# (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+_OPT_PATH = Path("options/SERIES/2024-06.parquet")
+
+
+class TestUtcAware:
+    def test_naive_is_stamped_utc(self) -> None:
+        naive = datetime(2024, 6, 3, 4, 1)
+        assert utc_aware(naive) == datetime(2024, 6, 3, 4, 1, tzinfo=UTC)
+
+    def test_aware_is_untouched(self) -> None:
+        aware = _ts(1)
+        assert utc_aware(aware) is aware
+
+
+class TestOptionFileMonth:
+    @pytest.mark.parametrize(
+        ("stem", "expected"),
+        [
+            ("2024-06", (2024, 6)),
+            ("2024-12", (2024, 12)),
+            ("garbage", None),
+            ("2024", None),
+            ("2024-13", None),
+            ("2024-00", None),
+            ("2024-06-x", None),
+            ("-06", None),
+        ],
+    )
+    def test_stem_parse_matrix(self, stem: str, expected: tuple[int, int] | None) -> None:
+        assert li._option_file_month(Path(f"options/S/{stem}.parquet")) == expected
+
+
+class TestClassifyOptionKeys:
+    def test_empty_frame_is_clean(self) -> None:
+        dup, foreign = classify_option_keys(_OPT_PATH, "SERIES", (2024, 6), _option_key_frame([]))
+        assert (dup, foreign) == (None, None)
+
+    def test_clean_frame_is_clean(self) -> None:
+        frame = _option_key_frame([("CE", _ts(1)), ("CE", _ts(2))])
+        assert classify_option_keys(_OPT_PATH, "SERIES", (2024, 6), frame) == (None, None)
+
+    def test_dup_counted_exactly(self) -> None:
+        frame = _option_key_frame([("CE", _ts(1)), ("CE", _ts(1)), ("PE", _ts(2))])
+        dup, foreign = classify_option_keys(_OPT_PATH, "SERIES", (2024, 6), frame)
+        assert foreign is None
+        assert dup == OptionIntraFileDup(
+            path=_OPT_PATH, series="SERIES", physical_rows=3, unique_keys=2
+        )
+
+    def test_cross_side_same_timestamp_is_not_a_dup(self) -> None:
+        frame = _option_key_frame([("CE", _ts(1)), ("PE", _ts(1))])
+        assert classify_option_keys(_OPT_PATH, "SERIES", (2024, 6), frame) == (None, None)
+
+    def test_foreign_counted_with_home_month(self) -> None:
+        frame = _option_key_frame([("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))])
+        dup, foreign = classify_option_keys(_OPT_PATH, "SERIES", (2024, 6), frame)
+        assert dup is None
+        assert foreign == OptionForeignMonthRows(
+            path=_OPT_PATH,
+            series="SERIES",
+            year=2024,
+            month=6,
+            foreign_rows=1,
+            overlap_rows=None,  # the pure core never reads siblings
+        )
+
+    def test_home_none_abstains_from_foreign(self) -> None:
+        # An unparsable filename has no month to route against — dup-only.
+        frame = _option_key_frame([("CE", _ts(1)), ("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))])
+        dup, foreign = classify_option_keys(_OPT_PATH, "SERIES", None, frame)
+        assert dup is not None and dup.physical_rows == 3 and dup.unique_keys == 2
+        assert foreign is None
+
+    def test_null_timestamp_abstains_from_foreign(self) -> None:
+        # NULL keys are still duplicate keys but carry no month to route.
+        frame = _option_key_frame([("CE", None), ("CE", None)])
+        dup, foreign = classify_option_keys(_OPT_PATH, "SERIES", (2024, 6), frame)
+        assert dup is not None and dup.physical_rows == 2 and dup.unique_keys == 1
+        assert foreign is None
+
+    def test_foreign_rows_counts_dup_copies_individually(self) -> None:
+        # Two physical copies of ONE foreign key = 2 foreign ROWS (mirrors bars).
+        july = _ts(1, month=7, day=1)
+        frame = _option_key_frame([("CE", _ts(0)), ("CE", july), ("CE", july)])
+        _dup, foreign = classify_option_keys(_OPT_PATH, "SERIES", (2024, 6), frame)
+        assert foreign is not None
+        assert foreign.foreign_rows == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Options tree — foreign-month scan + overlap classification
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _opt_dest(lake: Path, name: str, *, series: str = "SERIES") -> Path:
+    return lake / "options" / series / f"{name}.parquet"
+
+
+class TestOptionForeignScan:
+    def test_foreign_detected_pure_misplacement(self, tmp_path: Path) -> None:
+        # A June key planted in the JULY file; no June file exists at all.
+        dest = _opt_dest(tmp_path, "2024-07")
+        _plant_option_raw(dest, [("CE", _ts(1)), ("CE", _ts(2, month=7, day=1))])
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert len(report.findings) == 1
+        finding = report.findings[0]
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.path == dest
+        assert finding.series == "SERIES"
+        assert finding.year == 2024
+        assert finding.month == 7
+        assert finding.foreign_rows == 1
+        assert finding.overlap_rows == 0  # missing sibling = pure misplacement
+        warns = _events(logs, "lake.invariant.option_foreign_month_rows")
+        assert len(warns) == 1
+        assert warns[0]["log_level"] == "warning"
+        assert warns[0]["partition"] == "options/SERIES/2024-07.parquet"
+        assert warns[0]["foreign_rows"] == 1
+        assert warns[0]["overlap_rows"] == 0
+
+    def test_overlap_classified_against_canonical_sibling(self, tmp_path: Path) -> None:
+        # The SAME (CE, June-ts) key lives in BOTH the June and July files.
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1)), ("PE", _ts(2))])
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("CE", _ts(3, month=7, day=1))]
+        )
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].foreign_rows == 1
+        assert foreigns[0].overlap_rows == 1
+
+    def test_cross_side_same_timestamp_not_overlap_matched(self, tmp_path: Path) -> None:
+        # Canonical June holds (PE, ts1); the July file carries (CE, ts1) —
+        # the key includes SIDE, so this is NOT an overlap.
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("PE", _ts(1))])
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("PE", _ts(3, month=7, day=1))]
+        )
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].overlap_rows == 0
+
+    def test_unreadable_canonical_sibling_abstains(self, tmp_path: Path) -> None:
+        june = _opt_dest(tmp_path, "2024-06")
+        june.parent.mkdir(parents=True, exist_ok=True)
+        june.write_bytes(b"not a parquet file at all")
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("CE", _ts(3, month=7, day=1))]
+        )
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.option_files_skipped == 1  # the garbage June file itself
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].overlap_rows is None  # honest abstain
+        # Skipped once as a scanned file + once as the canonical targeted read.
+        assert len(_events(logs, "lake.invariant.scan_skip")) == 2
+
+    def test_canonical_read_cached_per_series(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # July AND August both carry the same June foreign key — the canonical
+        # June sibling is read ONCE (per-series cache), not once per finding.
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1))])
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))]
+        )
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-08"), [("CE", _ts(1)), ("PE", _ts(2, month=8, day=1))]
+        )
+        calls: list[Path] = []
+        real = li._read_key_columns
+
+        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
+            calls.append(path)
+            return real(path, columns)
+
+        monkeypatch.setattr(li, "_read_key_columns", spy)
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert [f.overlap_rows for f in foreigns] == [1, 1]
+        # 3 in-scope scans + exactly ONE targeted canonical re-read of June.
+        assert len(calls) == 4
+        assert calls.count(_opt_dest(tmp_path, "2024-06")) == 2  # scanned + canonical
+
+    def test_clean_option_file_pays_no_extra_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The min/max fast path: a clean file costs exactly ONE key read.
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1)), ("PE", _ts(2))])
+        _plant_option_raw(_opt_dest(tmp_path, "2024-07"), [("CE", _ts(3, month=7, day=1))])
+        calls: list[Path] = []
+        real = li._read_key_columns
+
+        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
+            calls.append(path)
+            return real(path, columns)
+
+        monkeypatch.setattr(li, "_read_key_columns", spy)
+        report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()
+        assert report.option_files_scanned == 2
+        assert len(calls) == 2  # ONE read per file, ZERO canonical reads
+
+    def test_option_utc_not_ist_month_boundary(self, tmp_path: Path) -> None:
+        # 2024-06-30 20:30 UTC = 2024-07-01 02:00 IST: the bar is HOME in the
+        # June file under UTC routing (the writer's own router) — never flagged.
+        straddle = datetime(2024, 6, 30, 20, 30, tzinfo=UTC)
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", straddle)])
+        report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()
+
+    def test_months_scope_skips_out_of_scope_before_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1))])
+        _plant_option_raw(_opt_dest(tmp_path, "2024-07"), [("CE", _ts(2, month=7, day=1))])
+        # An unparsable-name file cannot be proven in scope — skipped too.
+        _plant_option_raw(_opt_dest(tmp_path, "junk"), [("CE", _ts(3)), ("CE", _ts(3))])
+        calls: list[Path] = []
+        real = li._read_key_columns
+
+        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
+            calls.append(path)
+            return real(path, columns)
+
+        monkeypatch.setattr(li, "_read_key_columns", spy)
+        report = scan_lake_invariants(tmp_path, months={(2024, 6)}, include_bars=False)
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 0
+        assert calls == [_opt_dest(tmp_path, "2024-06")]
+        assert report.findings == ()
+
+    def test_no_scope_unparsable_name_still_dup_scanned(self, tmp_path: Path) -> None:
+        # Today's behaviour pinned: without a months scope an unparsable-name
+        # file is still dup-scanned (home=None → foreign abstains).
+        _plant_option_raw(
+            _opt_dest(tmp_path, "junk"),
+            [("CE", _ts(1)), ("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))],
+        )
+        report = scan_lake_invariants(tmp_path)
+        assert len(report.findings) == 1
+        finding = report.findings[0]
+        assert isinstance(finding, OptionIntraFileDup)
+        assert finding.physical_rows == 3
+        assert finding.unique_keys == 2
+
+    def test_null_side_foreign_key_counted_and_keyed(self, tmp_path: Path) -> None:
+        # A hand-planted NULL side with a foreign ts: counted foreign (routing
+        # is timestamp-only) AND carried raw in the key set — the scanner's
+        # count and the healer's movable set can never diverge (liveness).
+        july = _ts(1, month=7, day=1)
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(0)), (None, july)])
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].foreign_rows == 1
+        keys = li._option_foreign_keys(
+            (2024, 6), li._read_key_columns(_opt_dest(tmp_path, "2024-06"), ("side", "timestamp"))
+        )
+        assert keys == {(None, july)}
+
+    def test_null_timestamp_abstains_from_key_set(self, tmp_path: Path) -> None:
+        # A null ts has no month to route — never in the foreign key set.
+        frame = _option_key_frame([("CE", None), ("PE", _ts(1, month=7, day=1))])
+        keys = li._option_foreign_keys((2024, 6), frame)
+        assert keys == {("PE", _ts(1, month=7, day=1))}
+
+
+class TestScanIncludeBars:
+    def test_include_bars_false_scans_only_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bars dup poison + a drift pair + an option dup: with include_bars
+        # False only the OPTION finding is emitted; bars counters stay 0.
+        _plant_raw(_dest(tmp_path), [_ts(1), _ts(1)])
+        _write_bars(tmp_path, [_bar(_ts(2))], segment="CASH", symbol="M&M")
+        _write_bars(tmp_path, [_bar(_ts(3))], segment="CASH", symbol="NSE-M&M")
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(4)), ("CE", _ts(4))])
+        calls: list[Path] = []
+        real = li._read_key_columns
+
+        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
+            calls.append(path)
+            return real(path, columns)
+
+        monkeypatch.setattr(li, "_read_key_columns", spy)
+        report = scan_lake_invariants(tmp_path, include_bars=False)
+        assert [type(f).__name__ for f in report.findings] == ["OptionIntraFileDup"]
+        assert report.files_scanned == 0
+        assert report.files_skipped == 0
+        assert report.series_scanned == 0
+        assert report.files_by_segment == ()
+        assert report.engine_files == 0
+        assert report.option_files_scanned == 1
+        assert calls == [_opt_dest(tmp_path, "2024-06")]  # zero bars reads
+
+    def test_include_bars_default_true_unchanged(self, tmp_path: Path) -> None:
+        _plant_raw(_dest(tmp_path), [_ts(1), _ts(1)])
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_scanned == 1
+        assert len(report.findings) == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Legacy-key drift
 # ────────────────────────────────────────────────────────────────────────
 
@@ -748,6 +1075,45 @@ class TestCensus:
         assert options.clean == 1
         assert census.engine_clean is True  # options never touch the engine verdict
 
+    def test_census_option_foreign_overlap_union_math(self, tmp_path: Path) -> None:
+        # One file with dup AND overlapping-foreign keys is ONE poisoned file
+        # (union math — the bars law, now real for OPTIONS); a second series'
+        # PURE misplacement is foreign but NOT overlap; a clean file stays clean.
+        _plant_option_raw(
+            tmp_path / "options" / "A" / "2024-06.parquet", [("CE", _ts(1)), ("PE", _ts(2))]
+        )
+        _plant_option_raw(
+            tmp_path / "options" / "A" / "2024-07.parquet",
+            [("CE", _ts(1)), ("CE", _ts(1)), ("PE", _ts(3, month=7, day=1))],
+        )
+        _plant_option_raw(
+            tmp_path / "options" / "B" / "2024-07.parquet",
+            [("CE", _ts(4)), ("PE", _ts(5, month=7, day=1))],
+        )
+        census = build_lake_census(scan_lake_invariants(tmp_path))
+        by_segment = {row.segment: row for row in census.segments}
+        options = by_segment["OPTIONS"]
+        assert options.files == 3
+        assert options.dup_files == 1
+        assert options.foreign_files == 2
+        assert options.overlap_files == 1  # only A's July key overlaps canonical June
+        assert options.clean == 1  # A June; the dup+foreign A July file counted ONCE
+        assert options.drift_dirs == 0  # honestly N/A for series dirs
+        assert census.engine_clean is True
+
+    def test_engine_relevant_option_foreign_is_false(self, tmp_path: Path) -> None:
+        # The G5 totality pin: without the widened isinstance branch the
+        # fall-through reads `.coords` and raises AttributeError.
+        finding = OptionForeignMonthRows(
+            path=tmp_path / "options" / "S" / "2024-07.parquet",
+            series="S",
+            year=2024,
+            month=7,
+            foreign_rows=1,
+            overlap_rows=0,
+        )
+        assert li._engine_relevant(finding) is False
+
     def test_census_engine_drift_and_offender_cap(self, tmp_path: Path) -> None:
         # 6 poisoned NIFTY months + a drifted NSE-NIFTY dir: the detail names at
         # most 5 offenders then "(+N more)"; the drift token uses repr arrows.
@@ -781,6 +1147,15 @@ class TestCensus:
         # An options finding is never engine-relevant, but the token is total.
         assert li._engine_offender(option) == "option-dup options/S/2024-06.parquet"
         assert li._engine_relevant(option) is False
+        option_foreign = OptionForeignMonthRows(
+            path=tmp_path / "options" / "S" / "2024-07.parquet",
+            series="S",
+            year=2024,
+            month=7,
+            foreign_rows=1,
+            overlap_rows=None,
+        )
+        assert li._engine_offender(option_foreign) == ("option-foreign options/S/2024-07.parquet")
 
     def test_engine_coords_constant(self) -> None:
         assert ENGINE_INDEX_COORDS == (
