@@ -305,8 +305,15 @@ class RegistryStore:
         DEC-STORE-WRITE-DEADLINE-001: after a write-deadline breach the zombie write
         still holds the DuckDB connection's internal mutex, so a read would block on
         it unboundedly. Reads therefore fail FAST + LOUD with the terminal
-        :class:`RegistryError` every read-side caller already catches and degrades
-        on; the check self-heals the moment the zombie completes (the guard's
+        :class:`RegistryError`. Caller honesty (Golden Rule #10): the dashboard
+        read-side callers (``movers_options.load_registry_expiries``,
+        ``registry_strikes``) catch it and DEGRADE gracefully; the pull-path
+        callers deliberately do NOT — the metadata-pull SEED reads fail the job
+        fast + loud at pull start (intended fail-fast, MIGRATION.md #1493), and
+        the composite's phase-(b) re-read is gated UPSTREAM on
+        ``MetadataPullReport.store_write_deferrals`` (phase (b) is skipped with an
+        honest note, so a phase-(a) wedge never reaches this raise as a whole-job
+        crash). The check self-heals the moment the zombie completes (the guard's
         token-matched latch clears). One boolean check on the healthy path.
         """
         if self._write_guard.wedged:

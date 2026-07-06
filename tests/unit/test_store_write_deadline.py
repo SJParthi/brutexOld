@@ -7,7 +7,10 @@ with a 30 s safety, released in ``finally``): the healthy byte-identical path, t
 breach (deadline fires near 0.2 s, transient raise, one WARN), the wedge latch
 (instant ``latched=True`` fail-fast, fn never invoked, zero new threads, no guard
 log), the token-matched self-recovery (one INFO, store resumes), the defensive
-token-mismatch arm, un-retyped fn errors (incl. a REAL ``TimeoutError``), the
+token-mismatch arm, the thread-spawn-failure no-stuck-latch regression (a
+``Thread.start`` RuntimeError leaves NO zombie — the orphaned token must be
+cleared, never a permanent false wedge), un-retyped fn errors (incl. a REAL
+``TimeoutError``), the
 env-tunable resolver, and the transient error class (message / attrs / pickle /
 never-a-``LakeWriteHalt``). 100% line+branch on
 ``brutex/data/store_write_deadline.py``.
@@ -151,6 +154,38 @@ class TestWedgeLatch:
         finally:
             hung.gate.set()
         _wait_until(lambda: not guard.wedged)
+
+
+class TestSpawnFailureNeverSticksTheLatch:
+    def test_thread_spawn_failure_clears_the_token_and_the_store_is_not_bricked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILS-BEFORE regression: a ``Thread.start()`` RuntimeError inside
+        ``run_with_deadline`` (thread exhaustion — realistic under the very zombie
+        storm this guard targets) used to leave ``_active`` set FOREVER with NO
+        zombie in existence to self-clear it: every later write instantly
+        ``latched=True``, every read the terminal wedged error — a false 'wedged
+        volume' diagnosis bricking the store for the process lifetime. The
+        BaseException arm now clears the orphaned token (token-identity-safe)."""
+        guard = StoreWriteDeadlineGuard(store_label="registry")
+        calls = 0
+
+        def _spawn_fails(*_a: object, **_k: object) -> object:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(swd, "run_with_deadline", _spawn_fails)
+        with capture_logs() as logs, pytest.raises(RuntimeError, match="can't start new thread"):
+            guard.run(lambda: "never-runs", op="upsert_expiries", deadline_seconds=0.2)
+        assert calls == 1  # the failure came from the guard's own run_with_deadline call
+        assert guard.wedged is False  # NO false wedge — the orphaned token was cleared
+        assert logs == []  # not a breach: no deadline WARN, no recovery INFO
+        # The store is NOT bricked: with the primitive healthy again, the very
+        # next guarded write runs normally (no latched fail-fast).
+        monkeypatch.undo()
+        assert guard.run(lambda: "ok", op="upsert_expiries", deadline_seconds=5.0) == "ok"
+        assert guard.wedged is False
 
 
 class TestSelfRecovery:

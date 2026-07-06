@@ -243,4 +243,25 @@ class StoreWriteDeadlineGuard:
                 deadline_seconds=seconds,
             )
             raise StoreWriteDeadlineExceeded(seconds, self._store_label, op) from exc
+        except BaseException:
+            # NOT a breach: ``run_with_deadline`` failed OUTSIDE the deadline
+            # machinery — most plausibly ``Thread.start()`` raising
+            # ``RuntimeError("can't start new thread")`` under thread exhaustion
+            # (realistic in EXACTLY the storm this guard targets: a persistently
+            # wedged volume accumulates abandoned zombie daemons), or an
+            # interrupted deadline wait. On a spawn failure ``_attempt`` NEVER
+            # ran, so NO zombie exists to self-clear the token — without this
+            # clear the latch would stick for the PROCESS LIFETIME (every write
+            # instantly ``latched=True``, every read the terminal wedged error,
+            # ``close()`` skipping the raw close — a false "wedged volume"
+            # diagnosis with no recovery but a restart). The token IDENTITY
+            # check makes this a no-op on the fn-raised-error path (the daemon's
+            # ``finally`` already cleared it) and can never clobber a newer
+            # run's token; on a mid-wait interrupt with a genuine in-flight
+            # zombie, clearing costs at most one full deadline wait on the next
+            # write (bounded — the zombie's own finally is then a benign no-op),
+            # never corruption, never a stuck latch.
+            if self._active is token:
+                self._active = None
+            raise
         return result
