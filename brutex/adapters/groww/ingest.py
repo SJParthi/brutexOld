@@ -62,6 +62,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from time import sleep as _time_sleep
 
 import structlog
@@ -69,18 +70,21 @@ import structlog
 from brutex.adapters.empty_circuit_breaker import EmptySettleBreaker
 from brutex.adapters.error_storm_breaker import (
     ErrorStormBreaker,
+    observe_authorisation_failure,
     observe_window_failure,
     observe_window_success,
 )
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.client import client_self_paces
 from brutex.adapters.groww.errors import (
+    GrowwAuthorisationError,
     GrowwError,
     is_rate_limit,
     is_retryable,
     steps_timeout_ladder,
 )
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline, FetchTail, RawFetchResult
+from brutex.adapters.groww.vendor_floor import VendorFloorLearner, observe_boundary_floor
 from brutex.adapters.groww.write_deadline import append_with_deadline
 from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
@@ -99,6 +103,7 @@ from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.partial_window_detect import SUSPECTED_PARTIAL, observe_partial_window
 from brutex.data.session import (
     ALL_FILTERED,
@@ -108,6 +113,7 @@ from brutex.data.session import (
 )
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.write_breaker import WriteHealthBreaker, partition_health_key
 from brutex.models import Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
@@ -222,6 +228,20 @@ class IngestReport:
     for the dashboard's "incomplete windows" view).
     """
 
+    vendor_dup_rows_dropped: int = 0
+    """WITHIN-BATCH duplicate vendor rows the writer collapsed across this run's
+    windows (DEC-VENDOR-CONFLICT-SURFACE-001 — the sum of every window's
+    :attr:`~brutex.data.sink.SinkAppendResult.vendor_dup_rows_dropped`). Zero on a
+    clean / skipped pull; previously this count died in the
+    ``lake.vendor_duplicate_rows`` log line."""
+
+    max_close_delta: Decimal | None = None
+    """The MAX absolute keep-first close delta across this run's conflicts —
+    exact Decimal rupees (prices are Decimal, never float; CLAUDE.md §6).
+    ``None`` when no window recorded a conflict (honestly distinct from a real
+    ``Decimal("0")`` delta). MAX-folds across windows/passes via
+    :func:`~brutex.data.parquet_writer.fold_max_close_delta`."""
+
 
 @dataclass(frozen=True, slots=True)
 class _WindowOutcome:
@@ -243,6 +263,12 @@ class _WindowOutcome:
     window: tuple[date, date] | None = None
     #: The retryable error's class name for the per-window WARNING. ``None`` unless transient.
     error_type: str | None = None
+    #: Within-batch duplicate vendor rows the writer collapsed on this window's
+    #: append (DEC-VENDOR-CONFLICT-SURFACE-001; sum-folds across windows).
+    vendor_dup_rows_dropped: int = 0
+    #: MAX absolute keep-first close delta on this window's append (exact
+    #: Decimal; ``None`` = no conflict; max-folds across windows).
+    max_close_delta: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +330,8 @@ def ingest_spot(
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -390,6 +418,17 @@ def ingest_spot(
         dry-run / synthetic / unit-test caller) observes nothing; ONLY the
         real-vendor production sites arm it (the ``detect_completeness_gaps``
         gating pattern).
+    floor_learner
+        Optional per-pull :class:`~brutex.adapters.groww.vendor_floor.VendorFloorLearner`
+        (DEC-VENDOR-FLOOR-LAZY-PROBE-001), shared by every window worker. When a
+        window STARTING AT the configured history floor settles CONFIRMED
+        clean-empty, the learner runs ONE bounded, breaker-gated depth probe per
+        symbol per pull and — on a clean verdict — persists the learned vendor
+        floor + mass-settles the wholly pre-floor windows ``SKIPPED``
+        (reversible via ``brutex reopen-skipped``). ``None`` (the default —
+        dry-run / synthetic / unit-test callers) never probes; ONLY the
+        real-vendor production sites arm it (the ``storm_breaker`` gating
+        pattern). Best-effort: a learner failure can never crash the pull.
 
     Returns
     -------
@@ -471,21 +510,26 @@ def ingest_spot(
                 observed_holidays=observed_holidays,
                 empty_breaker=empty_breaker,
                 storm_breaker=storm_breaker,
+                write_breaker=write_breaker,
+                floor_learner=floor_learner,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
 
     def _drain_pass(
         pending: list[tuple[date, date]],
-    ) -> tuple[int, int, int, int, list[tuple[date, date]]]:
+    ) -> tuple[int, int, int, int, int, Decimal | None, list[tuple[date, date]]]:
         """Run ONE fan-out pass over *pending*; sum outcomes + collect failed windows.
 
         A captured terminal GrowwError is re-raised here so the outer quarantine
         behaves exactly as it would with a sequential spine; any other captured
         exception (a real bug) is re-raised too — never swallowed. Returns
-        ``(bars_appended, transient, skipped, conflicts, transient_windows)``.
+        ``(bars_appended, transient, skipped, conflicts, vendor_dup_rows_dropped,
+        max_close_delta, transient_windows)`` — the two vendor-behaviour counters
+        (DEC-VENDOR-CONFLICT-SURFACE-001) sum/max-fold exactly like conflicts.
         """
-        b = t = s = c = 0
+        b = t = s = c = dup = 0
+        delta: Decimal | None = None
         failed: list[tuple[date, date]] = []
         for outcome in runner(_fetch_window, pending):
             # Per-window live-sync ping (DEC-SPOT-WINDOW-PROGRESS-001): the window's ledger
@@ -503,6 +547,8 @@ def ingest_spot(
                 t += result.transient
                 s += result.skipped
                 c += result.conflicts
+                dup += result.vendor_dup_rows_dropped
+                delta = fold_max_close_delta(delta, result.max_close_delta)
                 if result.transient and result.window is not None:
                     failed.append(result.window)
                 continue
@@ -510,7 +556,7 @@ def ingest_spot(
             if exc is None:  # pragma: no cover — a failed outcome always carries exc
                 continue
             raise exc
-        return b, t, s, c, failed
+        return b, t, s, c, dup, delta, failed
 
     # First pass over ALL windows, then bounded in-run auto-retry of ONLY the
     # transiently-failed windows. Counts that accumulate across passes
@@ -518,15 +564,20 @@ def ingest_spot(
     # pass's still-failing count, so ``transient_failures == still_failed_windows``.
     # Worklists are sorted before each pass so the report is deterministic
     # regardless of worker-completion order (Rule #4).
-    bars_appended = skipped = conflicts = transient = 0
+    bars_appended = skipped = conflicts = transient = vendor_dup_rows_dropped = 0
+    max_close_delta: Decimal | None = None
     ever_retried: set[tuple[date, date]] = set()
     pending = windows
     pass_idx = 0
     while True:
-        pass_bars, transient, pass_skipped, pass_conflicts, failed = _drain_pass(pending)
+        pass_bars, transient, pass_skipped, pass_conflicts, pass_dup, pass_delta, failed = (
+            _drain_pass(pending)
+        )
         bars_appended += pass_bars
         skipped += pass_skipped
         conflicts += pass_conflicts
+        vendor_dup_rows_dropped += pass_dup
+        max_close_delta = fold_max_close_delta(max_close_delta, pass_delta)
         failed_sorted = sorted(set(failed))
         if not failed_sorted or pass_idx >= max_retry_passes:
             break
@@ -561,6 +612,8 @@ def ingest_spot(
         conflicts=conflicts,
         retried_windows=len(ever_retried),
         still_failed_windows=transient,
+        vendor_dup_rows_dropped=vendor_dup_rows_dropped,
+        max_close_delta=max_close_delta,
     )
 
 
@@ -605,6 +658,8 @@ def _ingest_one_window(
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -646,6 +701,7 @@ def _ingest_one_window(
         old_cutoff=old_cutoff,
         empty_breaker=empty_breaker,
         storm_breaker=storm_breaker,
+        floor_learner=floor_learner,
     )
     if raw is None:
         # Producer-resolved (skip / transient / terminal-raised): never touches the tail.
@@ -662,6 +718,7 @@ def _ingest_one_window(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            write_breaker=write_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED outcome immediately and re-paces + fetches the next
@@ -687,6 +744,7 @@ def _ingest_one_window(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            write_breaker=write_breaker,
         )
         if result_outcome.transient:
             # A tail-side PartitionLockTimeout DEFERRED this window (a wedged peer held the
@@ -700,6 +758,8 @@ def _ingest_one_window(
             bars_appended=result_outcome.bars_appended,
             conflicts=result_outcome.conflicts,
             series_key=series_key,
+            vendor_dup_rows_dropped=result_outcome.vendor_dup_rows_dropped,
+            max_close_delta=result_outcome.max_close_delta,
         )
 
     def _rehydrate(bars: Sequence[CandleBar]) -> None:
@@ -751,6 +811,7 @@ def _fetch_window_raw(
     old_cutoff: date | None,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
+    floor_learner: VendorFloorLearner | None = None,
 ) -> tuple[_WindowOutcome, _RawWindow | None]:
     """The PRODUCER half — pace + fetch + EMPTY-retry + controller feedback. STAYS on the fetch thread.
 
@@ -883,6 +944,19 @@ def _fetch_window_raw(
             # A TERMINAL (non-retryable) Groww error — including auth, which has no
             # fail-fast latch here (the documented divergence): it simply propagates to
             # the outer run_groww_spot_ingest quarantine, never swallowed.
+            # AUTHORISATION-storm observation (DEC-GROWW-AUTHZ-QUARANTINE-001): the
+            # terminal authorisation rejection is fed to the per-pull breaker's
+            # authorisation arm BEFORE the quarantine raise (previously ONLY the
+            # retryable branch above observed anything, so the terminal path was
+            # invisible to the breaker). Below the distinct-symbol threshold this is
+            # a no-op and the per-symbol quarantine raise follows; at/after the
+            # threshold it RAISES GrowwAuthorisationStormError — the fleet-wide
+            # account-suspension global stop. None (dry-run / synthetic / tests)
+            # observes nothing.
+            if isinstance(exc, GrowwAuthorisationError):
+                observe_authorisation_failure(
+                    storm_breaker, symbol=instrument.symbol_name, window_key=key, exc=exc
+                )
             raise
         if raw_bars:
             break  # bars on this attempt — the (possibly glitched) empty is recovered
@@ -938,6 +1012,22 @@ def _fetch_window_raw(
     # record time (``allow_settle``), so a settle computed here but recorded after a trip is
     # still suppressed (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001).
     confirmed_empty_after_retry = (not raw_bars) and fetch_count >= CONFIRMED_EMPTY_MIN_FETCHES
+    # Lazy vendor-depth-floor learning (DEC-VENDOR-FLOOR-LAZY-PROBE-001): a window
+    # STARTING AT the configured history floor that just settled CONFIRMED clean-empty
+    # is the honest "vendor depth may be shallower than the floor" signal — feed it to
+    # the per-pull learner (producer-side, riding the SAME paced adapter). The learner
+    # itself enforces the floor-boundary check, the mass-empty-breaker gate (probe
+    # NOTHING + cement NOTHING under a suspected soft-throttle) and the ONE-probe-per-
+    # symbol-per-pull single-flight; None (dry-run / synthetic / tests) observes
+    # nothing; best-effort — a learner failure never crashes the pull.
+    if confirmed_empty_after_retry:
+        observe_boundary_floor(
+            floor_learner,
+            instrument=instrument,
+            window_start=window_start,
+            ledger=ledger,
+            empty_breaker=empty_breaker,
+        )
     is_old = old_cutoff is not None and window_end < old_cutoff
     settle_empty = confirmed_empty_after_retry and is_old
     return (
@@ -965,6 +1055,7 @@ def _process_window_tail(
     detect_completeness_gaps: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    write_breaker: WriteHealthBreaker | None = None,
 ) -> _WindowOutcome:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -982,6 +1073,11 @@ def _process_window_tail(
     Any other sink error (a :class:`~brutex.data.errors.LakeWriteHalt` disk-full) propagates —
     in async mode the pipeline captures it into its pool-wide stop, re-raised on the next
     submit / drain so the pull halts through ``_GLOBAL_STOP_ERRORS``.
+
+    A wired *write_breaker* (DEC-WRITE-HEALTH-BREAKER-001) observes each defer per
+    partition; once enough DISTINCT partitions are wedged it raises
+    ``LakeWriteHalt("volume_wedged")`` — riding the SAME global-stop + Telegram paths —
+    instead of burning the whole pull deferring window after window on a dead volume.
     """
     instrument = raw.instrument
     interval = raw.interval
@@ -1056,6 +1152,15 @@ def _process_window_tail(
         session_bars=len(bars),
         **series_fields,
     )
+    # The per-partition write-health key (DEC-WRITE-HEALTH-BREAKER-001) — series + the
+    # window-start month, from what this tail already has (no extra lookup).
+    health_key = partition_health_key(
+        exchange=instrument.exch_id.value,
+        segment=instrument.segment.value,
+        symbol=instrument.symbol_name,
+        interval=interval,
+        month=window_start.strftime("%Y-%m"),
+    )
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
@@ -1099,7 +1204,16 @@ def _process_window_tail(
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
             )
+        # Cross-window write-health accounting (DEC-WRITE-HEALTH-BREAKER-001): AFTER the
+        # ledger row is durably FAILED (so the deferred window is never lost even if the
+        # breaker trips here), observe the defer; a volume-wedged trip raises
+        # LakeWriteHalt("volume_wedged") which propagates as a global stop.
+        if write_breaker is not None:
+            write_breaker.observe_defer(health_key)
         return _WindowOutcome(transient=1, window=window, error_type=type(exc).__name__)
+    if write_breaker is not None:
+        # A durable write landed on this partition — reset its consecutive-defer streak.
+        write_breaker.observe_success(health_key)
     _LOG.debug(
         "ingest.window",
         pull_id=pull_id,
@@ -1262,7 +1376,12 @@ def _process_window_tail(
         )
     if on_success is not None:
         on_success()
-    return _WindowOutcome(bars_appended=result.bars_appended, conflicts=window_conflicts)
+    return _WindowOutcome(
+        bars_appended=result.bars_appended,
+        conflicts=window_conflicts,
+        vendor_dup_rows_dropped=result.vendor_dup_rows_dropped,
+        max_close_delta=result.max_close_delta,
+    )
 
 
 __all__ = [

@@ -14,9 +14,12 @@ from brutex.dashboard.pull_rate_view import (
     CEILING_PER_MIN_LIMIT,
     CEILING_RPS_LIMIT,
     FLOW_DONE,
+    FLOW_FAILING,
     FLOW_FLOWING,
     FLOW_IDLE,
+    FLOW_LOCAL,
     FLOW_STALLED,
+    LOCAL_PHASES,
     STALE_AFTER_S,
     STALL_RPS_FLOOR,
     PullRateView,
@@ -798,3 +801,383 @@ def test_merged_bridge_default_keeps_tick_freshness_fallback() -> None:
         bridge_seconds_since_update=1.0,
     )
     assert view.flow_state == FLOW_STALLED  # unchanged pre-gate bridge behaviour
+
+
+# ---------------------------------------------------------------------------
+# DEC-PIPELINE-PHASE-UI-HONESTY-001 — the amber FLOW_LOCAL verdict.
+# The pipeline's prebuild + movers-warm stages are LOCAL processing (ZERO vendor
+# calls by design — DEC-PIPELINE-AUTOPREBUILD-001), so the vendor-rate heuristics
+# (measured completed-rate at/below the floor · zero admissions · a stale tick)
+# read a perfectly healthy local stage as a red "stalled". FLOW_LOCAL keys
+# STRICTLY on ``pull_active is True ∧ phase ∈ LOCAL_PHASES`` — never on meter
+# absence / zero admissions — so every DEC-RATE-WIDGET-FNO-HONEST-001 stall pin
+# stays green unmodified.
+# ---------------------------------------------------------------------------
+
+
+def test_local_phases_are_exactly_the_zero_vendor_call_stages() -> None:
+    """LOCAL_PHASES = {prebuild, movers} — the two post-fetch local pipeline stages."""
+    assert frozenset({"prebuild", "movers"}) == LOCAL_PHASES
+
+
+def test_prebuild_phase_reads_local_amber_not_stalled() -> None:
+    """Regression (fails before the fix): a healthy prebuild used to read red.
+
+    During the prebuild the sampler keeps ticking with a ~0 completed rate, so the
+    pre-fix verdict (``meter_present=True ∧ effective_rps <= floor``) was STALLED —
+    a dishonest red alarm on a healthy local stage. With the phase threaded it now
+    reads the amber ``local``.
+    """
+    before = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+    )
+    assert before.flow_state == FLOW_STALLED  # the pre-fix (phase-blind) verdict
+    after = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="prebuild",
+    )
+    assert after.flow_state == FLOW_LOCAL
+    assert after.stalled is False
+    assert after.active is False  # zero vendor traffic — live numbers zeroed
+    assert after.req_per_sec_achieved == 0.0
+    assert after.req_per_min == 0
+
+
+def test_movers_warm_phase_reads_local_amber_not_stalled() -> None:
+    """The movers-warm stage is the second LOCAL phase — same amber verdict."""
+    view = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0, recent_minute=0),  # type: ignore[arg-type]
+        meter_present=False,
+        pull_active=True,
+        phase="movers",
+    )
+    assert view.flow_state == FLOW_LOCAL
+    assert view.stalled is False
+
+
+def test_local_verdict_carries_flow_detail_naming_the_phase() -> None:
+    """flow_detail = "local processing — <phase> (no vendor calls)" for the widget."""
+    view = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="prebuild",
+    )
+    assert view.flow_detail == "local processing — prebuild (no vendor calls)"
+    data = view.to_dict()
+    assert data["flow_detail"] == "local processing — prebuild (no vendor calls)"
+    assert data["flow_state"] == FLOW_LOCAL
+
+
+def test_flow_detail_is_empty_for_every_non_local_state() -> None:
+    """flow_detail is an ADDITIVE field — empty everywhere but FLOW_LOCAL."""
+    flowing = build_pull_rate_view(**_live_kwargs(), pull_active=True)  # type: ignore[arg-type]
+    stalled = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+    )
+    done = build_pull_rate_view(**_live_kwargs(), pull_active=False)  # type: ignore[arg-type]
+    idle = build_pull_rate_view(
+        **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 60.0),  # type: ignore[arg-type]
+    )
+    for view in (flowing, stalled, done, idle):
+        assert view.flow_detail == ""
+        assert view.to_dict()["flow_detail"] == ""
+
+
+def test_zero_admission_historical_phase_still_reads_stalled() -> None:
+    """THE MANDATED PIN: FLOW_LOCAL keys on the PHASE, never on zero admissions.
+
+    A zero-admission HISTORICAL (fetch) phase must STILL read STALLED — the
+    DEC-RATE-WIDGET-FNO-HONEST-001 fake-alive guard is untouched: ``historical``
+    is a VENDOR-fetch phase, so a dead pull there is a real stall, not local work.
+    """
+    view = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0, recent_minute=0),  # type: ignore[arg-type]
+        meter_present=False,
+        pull_active=True,
+        phase="historical",
+    )
+    assert view.flow_state == FLOW_STALLED
+    assert view.stalled is True
+    # And the spot/metadata fetch phases behave identically (never local).
+    for fetch_phase in ("spot", "metadata"):
+        fetch_view = build_pull_rate_view(
+            **_live_kwargs(effective_rps=0.0, recent_minute=0),  # type: ignore[arg-type]
+            meter_present=False,
+            pull_active=True,
+            phase=fetch_phase,
+        )
+        assert fetch_view.flow_state == FLOW_STALLED
+
+
+def test_healthy_fetch_phase_with_phase_label_keeps_measured_verdict() -> None:
+    """A flowing spot phase with its label threaded stays the measured FLOWING."""
+    view = build_pull_rate_view(
+        **_live_kwargs(),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="spot",
+    )
+    assert view.flow_state == FLOW_FLOWING
+    assert view.req_per_sec_achieved == 6.4  # the _live_kwargs measured rate
+
+
+def test_local_requires_pull_active_true() -> None:
+    """The amber verdict needs the AUTHORITATIVE active signal — never fabricated.
+
+    ``pull_active=False`` (pull finished) outranks a lingering local phase label
+    (→ done); ``pull_active=None`` (the CLI bridge — which never has a pipeline
+    phase anyway) keeps the byte-identical legacy tick-freshness verdict.
+    """
+    finished = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=False,
+        phase="prebuild",
+    )
+    assert finished.flow_state == FLOW_DONE
+    no_signal = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=None,
+        phase="prebuild",
+    )
+    assert no_signal.flow_state == FLOW_STALLED  # legacy phase-blind verdict
+
+
+def test_local_with_stale_tick_still_reads_local_not_stalled() -> None:
+    """A between-tick gap during a local stage can never read red either.
+
+    The local check runs BEFORE the tick-freshness stall (an active pull whose
+    ticks paused mid-prebuild is doing local work, not a vendor stall).
+    """
+    view = build_pull_rate_view(
+        **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 5.0),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="prebuild",
+    )
+    assert view.flow_state == FLOW_LOCAL
+    assert view.stalled is False
+
+
+def test_empty_or_unknown_phase_never_reads_local() -> None:
+    """phase="" (cleared) / an unknown label / None → the pre-phase verdicts."""
+    for phase in ("", "unknown-future-phase", None):
+        view = build_pull_rate_view(
+            **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+            pull_active=True,
+            phase=phase,
+        )
+        assert view.flow_state == FLOW_STALLED
+
+
+def test_merged_panel_phase_threads_through_to_local() -> None:
+    """build_pull_rate_view_merged threads panel_phase into the panel projection."""
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=1.0,
+        panel_pull_active=True,
+        panel_phase="prebuild",
+    )
+    assert view.flow_state == FLOW_LOCAL
+    assert view.flow_detail == "local processing — prebuild (no vendor calls)"
+
+
+def test_merged_bridge_never_receives_a_phase() -> None:
+    """A fresher CLI bridge keeps its byte-identical verdict — local is panel-only.
+
+    The bridge is a separate ``brutex fetch`` process with NO pipeline phase, so
+    even with the panel side sitting in a local phase the bridge projection can
+    never read amber.
+    """
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=500.0,
+        panel_pull_active=True,
+        panel_phase="prebuild",
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=3,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+    )
+    assert view.flow_state == FLOW_STALLED  # the bridge's unchanged legacy verdict
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# failed_rps → the distinct FAILING verdict (DEC-PULL-TELEMETRY-TRIAD-001 —
+# closing the #1022 flagged follow-up: "issued-but-all-failing needs the
+# meter's failed rate"). Meter-fed path only; the default is byte-identical.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_failed_rps_default_is_byte_identical() -> None:
+    """PARITY PIN (Session-B contract): omitting ``failed_rps`` and passing the 0.0
+    default produce the SAME view — and the verdict matrix is unchanged at 0.0."""
+    kwargs: dict[str, float | int] = {
+        "effective_rps": 0.0,
+        "current_rps": 8.0,
+        "recent_minute": 240,
+        "recent_429_count": 0,
+        "last_update_monotonic": 100.0,
+        "now_monotonic": 101.0,
+    }
+    omitted = build_pull_rate_view(**kwargs)  # type: ignore[arg-type]
+    explicit = build_pull_rate_view(failed_rps=0.0, **kwargs)  # type: ignore[arg-type]
+    assert omitted == explicit
+    assert omitted.flow_state == FLOW_STALLED  # the pre-decision verdict, unchanged
+    assert omitted.req_per_sec_failed == 0.0
+
+
+def test_issuing_but_all_failing_reads_failing_with_evidence() -> None:
+    """Meter-fed + completed-rate at/below the floor + failures burning → the DISTINCT
+    ``failing`` verdict (stalled stays True for red-light consumers) with the measured
+    failed-calls rate carried as evidence."""
+    view = build_pull_rate_view(
+        effective_rps=0.0,  # nothing completing…
+        current_rps=8.0,
+        recent_minute=240,  # …while calls ARE being issued…
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=True,
+        failed_rps=2.5,  # …and the meter MEASURES them failing
+    )
+    assert view.flow_state == FLOW_FAILING
+    assert view.stalled is True  # failing IS a degraded/red state
+    assert view.active is True
+    assert view.req_per_sec_achieved == 0.0
+    assert view.req_per_sec_failed == 2.5
+
+
+def test_flowing_with_some_failures_stays_flowing() -> None:
+    """A healthy completed-rate above the floor stays FLOWING even with failures —
+    ``failing`` is reserved for the all-failing (at/below-floor) case."""
+    view = build_pull_rate_view(
+        effective_rps=5.0,
+        current_rps=8.0,
+        recent_minute=300,
+        recent_429_count=1,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        failed_rps=1.0,
+    )
+    assert view.flow_state == FLOW_FLOWING
+    assert view.stalled is False
+    assert view.req_per_sec_failed == 1.0
+
+
+def test_meter_absent_never_fabricates_failing() -> None:
+    """meter_present=False ⇒ no measured failure rate exists — the verdict keeps the
+    admission fallback and the carried failed rate is an honest 0.0 (never fabricated),
+    even if a stray nonzero ``failed_rps`` is passed."""
+    view = build_pull_rate_view(
+        effective_rps=0.0,
+        current_rps=8.0,
+        recent_minute=240,  # admissions happening → the fallback reads flowing
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        meter_present=False,
+        failed_rps=3.0,  # must be IGNORED — there is no meter to have measured it
+    )
+    assert view.flow_state == FLOW_FLOWING  # the pre-decision meter-less fallback verdict
+    assert view.req_per_sec_failed == 0.0
+
+
+def test_quiet_views_zero_the_failed_rate() -> None:
+    """Idle / done / stale views zero ``req_per_sec_failed`` like every live number."""
+    idle = build_pull_rate_view(
+        effective_rps=4.0,
+        current_rps=8.0,
+        recent_minute=200,
+        recent_429_count=0,
+        last_update_monotonic=0.0,
+        now_monotonic=STALE_AFTER_S + 100.0,
+        failed_rps=9.9,
+    )
+    assert idle.flow_state == FLOW_IDLE
+    assert idle.req_per_sec_failed == 0.0
+    done = build_pull_rate_view(
+        effective_rps=4.0,
+        current_rps=8.0,
+        recent_minute=200,
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        failed_rps=9.9,
+        pull_active=False,
+    )
+    assert done.flow_state == FLOW_DONE
+    assert done.req_per_sec_failed == 0.0
+
+
+def test_to_dict_carries_req_per_sec_failed() -> None:
+    """The JSON payload exposes the additive ``req_per_sec_failed`` key for the widget."""
+    view = build_pull_rate_view(
+        effective_rps=0.0,
+        current_rps=8.0,
+        recent_minute=100,
+        recent_429_count=0,
+        last_update_monotonic=100.0,
+        now_monotonic=101.0,
+        failed_rps=1.7,
+    )
+    data = view.to_dict()
+    assert data["req_per_sec_failed"] == 1.7
+    assert data["flow_state"] == FLOW_FAILING
+
+
+def test_merged_threads_panel_failed_rps() -> None:
+    """The merged builder threads ``panel_failed_rps`` into the panel-side projection
+    (default 0.0 — byte-identical) and defaults an absent bridge field to 0.0."""
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=120,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=1.0,
+        panel_failed_rps=2.0,
+    )
+    assert view.flow_state == FLOW_FAILING
+    assert view.req_per_sec_failed == 2.0
+
+
+def test_merged_bridge_failed_rps_threaded_and_none_defaults_zero() -> None:
+    """A fresher bridge wins with ITS failed rate; a ``None`` (older bridge file)
+    projects an honest 0.0 → the plain stalled verdict, never a fabricated failing."""
+    fresher_bridge = build_pull_rate_view_merged(
+        panel_effective_rps=5.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=300,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=50.0,
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=100,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+        bridge_failed_rps=4.0,
+    )
+    assert fresher_bridge.flow_state == FLOW_FAILING
+    assert fresher_bridge.req_per_sec_failed == 4.0
+    legacy_bridge = build_pull_rate_view_merged(
+        panel_effective_rps=5.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=300,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=50.0,
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=100,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+        bridge_failed_rps=None,
+    )
+    assert legacy_bridge.flow_state == FLOW_STALLED  # no failure measurement → plain stalled
+    assert legacy_bridge.req_per_sec_failed == 0.0

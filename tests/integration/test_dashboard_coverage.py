@@ -239,7 +239,13 @@ class TestSpotCoverageApi:
         resp = client.get("/api/v1/coverage/spot")
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
+        assert body == {
+            "headline": {"datasets": 0, "total_bars": 0},
+            "rows": [],
+            # Freshness honesty fields (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
+            "duty_degraded": False,
+            "snapshot_age_s": 0.0,
+        }
 
     def test_spot_reports_written_datasets(self, store: InstrumentStore, tmp_path: Path) -> None:
         # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
@@ -331,7 +337,13 @@ class TestSpotCoverageApi:
         fake = SimpleNamespace(path=None)
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
         body = client.get("/api/v1/coverage/spot").json()
-        assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
+        assert body == {
+            "headline": {"datasets": 0, "total_bars": 0},
+            "rows": [],
+            # Freshness honesty fields (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
+            "duty_degraded": False,
+            "snapshot_age_s": 0.0,
+        }
 
 
 def _index_inst(symbol: str) -> Instrument:
@@ -830,6 +842,55 @@ class TestCoverageHelpers:
             assert "outline: 2px solid var(--blue)" in html
 
 
+class TestCoverageFreshnessStamps:
+    """The duty_degraded + snapshot_age_s honesty fields (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001)."""
+
+    def test_coverage_and_scoreboard_payloads_carry_freshness_fields(self, store: Any) -> None:
+        # All three SummaryCache-riding payloads ship the fields on a normal
+        # (fresh) read: honest False / a non-negative age.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        for url in (
+            "/api/v1/coverage/spot",
+            "/api/v1/coverage/options",
+            "/api/v1/completeness/scoreboard",
+        ):
+            body = client.get(url).json()
+            assert body["duty_degraded"] is False, url
+            assert isinstance(body["snapshot_age_s"], int | float), url
+            assert body["snapshot_age_s"] >= 0.0, url
+
+    def test_duty_degraded_visible_when_stale_served_under_pull(self, store: Any) -> None:
+        """REGRESSION companion (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001): a
+        pull-time stale serve is VISIBLE in the payload — duty_degraded flips
+        True while the pull holds the entry back, and back to False the moment
+        the staleness is no longer pull-held (never a silent stale number)."""
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        pull_on = {"v": True}
+        # A wide injected base floor (300 s) makes the two same-second requests
+        # deterministic on any CI machine (no real-clock race with the 2 s floor).
+        cache = SummaryCache(ttl_floor_s=300.0)
+        client = TestClient(
+            build_app(
+                DashboardState(),
+                instrument_store=store,
+                summary_cache=cache,
+                pull_active_probe=lambda: pull_on["v"],
+            )
+        )
+        first = client.get("/api/v1/coverage/spot").json()
+        assert first["duty_degraded"] is False  # cold compute — fresh by definition
+        cache.mark_dirty()  # a pull write landed → the entry is dirty
+        second = client.get("/api/v1/coverage/spot").json()
+        assert second["duty_degraded"] is True  # stale served while the pull runs
+        assert second["snapshot_age_s"] >= 0.0
+        # The pull ends: the same throttled read is now a plain non-pull
+        # throttle — the flag honestly drops back to False.
+        pull_on["v"] = False
+        third = client.get("/api/v1/coverage/spot").json()
+        assert third["duty_degraded"] is False
+
+
 class TestCompletenessScoreboard:
     """GET /api/v1/completeness/scoreboard{,.csv} + /completeness page
     (DEC-COMPLETENESS-SCOREBOARD-001 / DEC-COMPLETENESS-PAGE-001)."""
@@ -840,7 +901,7 @@ class TestCompletenessScoreboard:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         body = client.get("/api/v1/completeness/scoreboard").json()
         # The well-shaped payload: spot + options each with a per-category table + drill-down.
-        assert set(body) == {"spot", "options"}
+        assert set(body) == {"spot", "options", "duty_degraded", "snapshot_age_s"}
         for cat in ("index", "equity", "reference"):
             assert cat in body["spot"]["by_category"]
             assert cat in body["options"]["by_category"]
@@ -881,7 +942,7 @@ class TestCompletenessScoreboard:
         # The expensive lake scan ran EXACTLY ONCE across all three loads (shared cache).
         assert calls["n"] == 1
         # Correctness preserved — the cached scan serves a consistent, well-shaped board.
-        assert set(first.json()) == {"spot", "options"}
+        assert set(first.json()) == {"spot", "options", "duty_degraded", "snapshot_age_s"}
         assert first.json() == second.json()
 
     def test_csv_scoreboard_is_attachment_with_sections(self, store: InstrumentStore) -> None:
@@ -918,7 +979,7 @@ class TestCompletenessScoreboard:
         fake = SimpleNamespace(path=None)
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
         body = client.get("/api/v1/completeness/scoreboard").json()
-        assert set(body) == {"spot", "options"}
+        assert set(body) == {"spot", "options", "duty_degraded", "snapshot_age_s"}
         assert body["spot"]["per_symbol"] == [] and body["options"]["per_underlying"] == []
         csv_resp = client.get("/api/v1/completeness/scoreboard.csv")
         assert csv_resp.status_code == 200
