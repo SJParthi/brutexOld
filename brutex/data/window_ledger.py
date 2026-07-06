@@ -1131,6 +1131,7 @@ class WindowLedger:
         *,
         markets: Collection[str] | None = None,
         intervals: Collection[str] | None = None,
+        symbols: Collection[str] | None = None,
     ) -> LedgerProgress:
         """Return a live O(N) :class:`LedgerProgress` snapshot — thread-safe, idempotent.
 
@@ -1154,6 +1155,16 @@ class WindowLedger:
         pollute its denominator. ``None`` (the default) folds everything —
         byte-identical to the unfiltered snapshot. Still one bounded O(N) sweep
         (the filter is a per-record membership test, no extra pass).
+
+        *symbols* (DEC-PULL-SIX-STEP-ORDER-001): optional SYMBOL scope filter,
+        congruent with *markets* / *intervals* — a record is folded only when
+        its ``security_id`` (the engine ``symbol_name``) is a member. The
+        six-step spot pull runs its until-clean loop PER GROUP (indices, then
+        stocks) over the ONE shared ledger, so each group's outstanding read
+        must fold ONLY its own symbols — otherwise the indices group would
+        burn a vendor-call-free ``stop_no_progress`` round against the stock
+        group's still-PLANNED rows instead of exiting ``stop_clean`` honestly.
+        ``None`` (the default) folds everything — byte-identical to today.
         """
         with self._lock:
             records = list(self._by_window.values())
@@ -1165,6 +1176,8 @@ class WindowLedger:
             if markets is not None and record.market not in markets:
                 continue
             if intervals is not None and record.interval not in intervals:
+                continue
+            if symbols is not None and record.security_id not in symbols:
                 continue
             total += 1
             bars += record.bars
