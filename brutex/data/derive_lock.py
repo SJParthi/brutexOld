@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Final
 
@@ -85,6 +86,19 @@ DERIVE_LOCK_FILENAME: Final[str] = "derive.lock"
 #: ``partition_lock._LOCK_SUBDIR`` / ``pull_singleflight._LOCK_SUBDIR`` (the
 #: value is part of the on-disk lake layout contract, restated per module).
 _LOCK_SUBDIR: Final[str] = ".locks"
+
+# Process-local REENTRANCY registry (DEC-HARDWARE-ENVELOPE-001 fold): the
+# parallel prebuild holds the derive lock ONCE around its whole thread-pool run
+# while every worker's ``materialize_lake_timeframes`` re-enters it per symbol.
+# ``fcntl.flock`` is per OPEN FILE DESCRIPTION, so without this registry two
+# threads of ONE process would serialise on the exclusive flock — turning the
+# thread-pool fan-out back into a sequential run (the bench gate catches it).
+# Cross-PROCESS semantics are untouched: only the FIRST holder in this process
+# takes (and finally releases) the real flock; nested holders ride it. The
+# nested scope MUST sit inside the outer holder's ``with`` block (true by
+# construction — the pool is joined before the orchestrator exits).
+_REENTRANT_MUTEX: Final[threading.Lock] = threading.Lock()
+_HELD_DEPTHS: Final[dict[str, int]] = {}
 
 
 def derive_lock_path(lake_root: Path) -> Path:
@@ -154,6 +168,21 @@ def derive_write_lock(
         resolve_partition_lock_timeout_seconds() if timeout_seconds is None else timeout_seconds
     )
     lock_path = derive_lock_path(lake_root)
+    key = str(lock_path)
+    with _REENTRANT_MUTEX:
+        nested = _HELD_DEPTHS.get(key, 0) > 0
+        if nested:
+            _HELD_DEPTHS[key] += 1
+    if nested:
+        # This PROCESS already holds the exclusive flock (the parallel
+        # prebuild's whole-run hold) — ride it, never a second flock that
+        # would self-serialise the thread pool.
+        try:
+            yield
+        finally:
+            with _REENTRANT_MUTEX:
+                _HELD_DEPTHS[key] -= 1
+        return
     with lake_write_guard():
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         # 0o600 — owner-only: a private coordination sidecar, never
@@ -161,7 +190,15 @@ def derive_write_lock(
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         _acquire_bounded(fd, timeout_seconds=deadline)
-        yield
+        with _REENTRANT_MUTEX:
+            _HELD_DEPTHS[key] = _HELD_DEPTHS.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            with _REENTRANT_MUTEX:
+                _HELD_DEPTHS[key] -= 1
+                if _HELD_DEPTHS[key] <= 0:
+                    del _HELD_DEPTHS[key]
     finally:
         # Closing the fd releases the advisory lock (flock is tied to the open
         # file description) on every exit — success or error.
