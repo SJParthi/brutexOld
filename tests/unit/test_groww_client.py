@@ -15,6 +15,7 @@ from brutex.adapters.groww.errors import (
     GrowwTokenStillStaleError,
 )
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 
 # Fakes named like the SDK exceptions so from_groww_exception maps them.
@@ -1128,7 +1129,7 @@ def test_historical_candles_epoch_bound_unchanged_by_normalize() -> None:
 # ════════════════════════════════════════════════════════════════════════
 
 
-def _failed_calls(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _failed_calls(logs: list[EventDict]) -> list[EventDict]:
     """The captured ``groww.call`` events whose outcome is ``failed``."""
     return [e for e in logs if e["event"] == "groww.call" and e.get("outcome") == "failed"]
 
