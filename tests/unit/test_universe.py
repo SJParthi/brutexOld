@@ -961,11 +961,58 @@ class TestIsEngineSweepSymbol:
     def test_spot_indexes_allowed(self, symbol: str) -> None:
         assert is_engine_sweep_symbol(symbol) is True
 
-    def test_series_key_futures_shape_allowed(self) -> None:
-        assert is_engine_sweep_symbol("NIFTY-FUT-2026-07-30") is True
+    def test_series_alias_allowed(self) -> None:
+        # The ONE pinned ADR-0012 addressing shape
+        # (DEC-FUTURES-ADDRESSING-PIN-001 — supersedes the #1178
+        # dual-acceptance envelope both flipped tests below carried).
+        assert is_engine_sweep_symbol("NSE-NIFTY-FUT") is True
 
-    def test_lake_contract_futures_shape_allowed(self) -> None:
-        assert is_engine_sweep_symbol("NSE-NIFTY-30Jul26-FUT") is True
+    def test_series_key_retired_shape_refused_with_hint(self) -> None:
+        # FLIPPED by DEC-FUTURES-ADDRESSING-PIN-001 (was: allowed): the
+        # pre-launch series_key form is refused with a did-you-mean hint
+        # naming the pinned alias.
+        assert is_engine_sweep_symbol("NIFTY-FUT-2026-07-30") is False
+        verdict = classify_engine_sweep_target(
+            exchange="NSE", segment="FNO", symbol="NIFTY-FUT-2026-07-30"
+        )
+        assert verdict.allowed is False
+        assert verdict.tier == "refused"
+        assert "RETIRED" in verdict.reason
+        assert "'NSE-NIFTY-FUT'" in verdict.reason
+        assert "did you mean that?" in verdict.reason
+
+    def test_lake_contract_retired_shape_refused_with_hint(self) -> None:
+        # FLIPPED by DEC-FUTURES-ADDRESSING-PIN-001 (was: allowed): a
+        # per-contract groww_symbol is a lake dir, never the engine address.
+        assert is_engine_sweep_symbol("NSE-NIFTY-30Jul26-FUT") is False
+        verdict = classify_engine_sweep_target(
+            exchange="NSE", segment="FNO", symbol="NSE-NIFTY-30Jul26-FUT"
+        )
+        assert verdict.allowed is False
+        assert verdict.tier == "refused"
+        assert "RETIRED" in verdict.reason
+        assert "'NSE-NIFTY-FUT'" in verdict.reason
+        assert "did you mean that?" in verdict.reason
+
+    def test_alias_never_parses_as_a_contract_symbol(self) -> None:
+        # Grammar collision-proofing: parse_fno_symbol can never absorb the
+        # alias (3 hyphen tokens < the 4-token future minimum), so no vendor
+        # contract symbol can ever collide with it.
+        from brutex.data.fno_symbol import parse_fno_symbol
+
+        assert parse_fno_symbol("NSE-NIFTY-FUT") is None
+
+    def test_alias_import_identity_with_the_resolver(self) -> None:
+        # brutex.data.futures_series consumes THIS module's constant — no
+        # second literal exists to drift (DEC-FUTURES-ADDRESSING-PIN-001).
+        import brutex.universe as universe_module
+        from brutex.data import futures_series
+
+        assert (
+            futures_series.NIFTY_FUTURES_SERIES_SYMBOL
+            is universe_module.NIFTY_FUTURES_SERIES_SYMBOL
+        )
+        assert futures_series.is_futures_series_symbol(universe_module.NIFTY_FUTURES_SERIES_SYMBOL)
 
     def test_series_key_regex_drift_pin_against_real_futures_contract(self) -> None:
         # Drift-pin (no universe→futures_roll import — that module pulls the
@@ -1000,6 +1047,10 @@ class TestIsEngineSweepSymbol:
             "NSE-NIFTY-30Jul26-24000-CE",  # an option is never engine scope
             "NSE-NIFTY-30Jul26-24000-PE",
             "nifty",  # lake keys are case-exact
+            "NSE-NIFTY-FUT ",  # trailing space — never a fuzzy alias match
+            "nse-nifty-fut",  # the alias is case-exact too
+            "NSE-BANKNIFTY-FUT",  # alias-SHAPED but the wrong underlying
+            "BSE-NIFTY-FUT",  # alias-shaped but the wrong exchange
             "",
         ],
     )
@@ -1020,20 +1071,43 @@ class TestClassifyEngineSweepTarget:
         assert verdict.tier == "spot_index"
         assert "CLAUDE.md §2 Rule 3" in verdict.reason
 
-    @pytest.mark.parametrize("symbol", ["NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"])
-    def test_nifty_futures_shapes_allowed_under_nse_fno(self, symbol: str) -> None:
-        verdict = classify_engine_sweep_target(exchange="NSE", segment="FNO", symbol=symbol)
+    def test_series_alias_allowed_under_nse_fno(self) -> None:
+        # The retired shapes moved to the hint-refusal tests below —
+        # DEC-FUTURES-ADDRESSING-PIN-001 pins ONE admitted futures address.
+        verdict = classify_engine_sweep_target(
+            exchange="NSE", segment="FNO", symbol="NSE-NIFTY-FUT"
+        )
         assert verdict.allowed is True
         assert verdict.tier == "nifty_future"
         assert "ADR-0012" in verdict.reason
+        assert "DEC-FUTURES-ADDRESSING-PIN-001" in verdict.reason
 
-    def test_nifty_futures_shape_under_wrong_coordinates_refused(self) -> None:
+    @pytest.mark.parametrize(
+        ("exchange", "segment"),
+        [("NSE", "INDEX"), ("BSE", "FNO"), ("BSE", "INDEX")],
+    )
+    def test_series_alias_under_wrong_coordinates_refused(
+        self, exchange: str, segment: str
+    ) -> None:
         verdict = classify_engine_sweep_target(
-            exchange="NSE", segment="INDEX", symbol="NIFTY-FUT-2026-07-30"
+            exchange=exchange, segment=segment, symbol="NSE-NIFTY-FUT"
         )
         assert verdict.allowed is False
         assert verdict.tier == "refused"
         assert "NSE/FNO" in verdict.reason
+
+    @pytest.mark.parametrize("symbol", ["NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"])
+    def test_retired_futures_shapes_refused_with_hint(self, symbol: str) -> None:
+        # Hint-never-admit: BOTH retired pre-launch shapes point the operator
+        # at the ONE pinned alias, on any coordinates.
+        for exchange, segment in [("NSE", "FNO"), ("NSE", "INDEX")]:
+            verdict = classify_engine_sweep_target(
+                exchange=exchange, segment=segment, symbol=symbol
+            )
+            assert verdict.allowed is False
+            assert verdict.tier == "refused"
+            assert "RETIRED" in verdict.reason
+            assert "'NSE-NIFTY-FUT'" in verdict.reason
 
     def test_spot_symbol_under_wrong_exchange_refused_with_expected_coords(self) -> None:
         verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="SENSEX")
@@ -1055,14 +1129,28 @@ class TestClassifyEngineSweepTarget:
         verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="RELIANCE")
         assert verdict.allowed is False
         assert "outside the brute-force engine scope" in verdict.reason
+        # The generic fall-through names the pinned alias alongside the 3
+        # spot indexes (DEC-FUTURES-ADDRESSING-PIN-001 message reword).
+        assert "'NSE-NIFTY-FUT'" in verdict.reason
 
     @pytest.mark.parametrize(
         "symbol",
-        ["BANKNIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-24000-CE"],
+        [
+            "BANKNIFTY-FUT-2026-07-30",
+            "NSE-NIFTY-30Jul26-24000-CE",
+            "NSE-BANKNIFTY-30Jul26-FUT",  # wrong underlying — NO retired hint
+            "BSE-NIFTY-30Jul26-FUT",  # wrong embedded exchange — NO hint
+            "NSE-BANKNIFTY-FUT",  # alias-shaped, wrong underlying — NO hint
+            "BSE-NIFTY-FUT",  # alias-shaped, wrong exchange — NO hint
+        ],
     )
     def test_non_nifty_future_and_options_refused_even_under_nse_fno(self, symbol: str) -> None:
+        # Deny-by-default teeth: only the exact NIFTY retired shapes earn the
+        # did-you-mean hint — every neighbour keeps the generic refusal.
         verdict = classify_engine_sweep_target(exchange="NSE", segment="FNO", symbol=symbol)
         assert verdict.allowed is False
+        assert verdict.tier == "refused"
+        assert "RETIRED" not in verdict.reason
 
     @pytest.mark.parametrize("symbol", ["nifty", "indiavix"])
     def test_lower_cased_known_symbol_gets_a_did_you_mean_hint(self, symbol: str) -> None:
