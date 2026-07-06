@@ -176,6 +176,26 @@ class TestWorkersResolver:
     def test_pool_workers_formula(self, cpu: int, expected: int) -> None:
         assert greeks_pool_workers(cpu) == expected
 
+    @pytest.mark.parametrize("cpu", [None, 0, 1, 2, 3, 4, 8, 10, 12, 14, 16, 20, 64, 100])
+    def test_pool_workers_byte_equivalent_to_common_delegation(self, cpu: int | None) -> None:
+        """DEC-HW-ENVELOPE-CONSOLIDATE-001 — the delegation to the COMMON
+        cpu_pool_workers is byte-unchanged vs the closed form
+        ``max(1, min((cpu or 1) - 2, 8))`` across the cpu-count spectrum
+        (the auto_sweep_workers identity: ``min(max(1, n - 2), 8) ==
+        max(1, min(n - 2, 8))`` for cap >= 1)."""
+        from brutex.config.hardware_envelope import cpu_pool_workers, envelope_from
+
+        n = cpu if cpu is not None else 1
+        closed_form = max(1, min(n - 2, 8))
+        delegated = cpu_pool_workers(
+            {},
+            reserve=2,
+            cap=8,
+            prefer_performance=False,
+            envelope=envelope_from({"logical_cores": max(1, n)}),
+        )
+        assert greeks_pool_workers(cpu) == closed_form == delegated
+
     def test_unset_env_resolves_auto(self) -> None:
         assert resolve_greeks_workers({}, cpu_count_fn=lambda: 6) == 4
 

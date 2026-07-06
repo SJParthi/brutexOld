@@ -116,7 +116,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.hardware_envelope import memory_budget_bytes
+from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:
@@ -208,7 +208,7 @@ MAX_BLOOM_BYTES_ENV: Final[str] = "BRUTEX_MAX_BLOOM_BYTES"
 def resolve_max_bloom_bytes(environ: Mapping[str, str] | None = None) -> int:
     """Resolve the Bloom bit-array ceiling (DEC-RAM-BUDGETS-001).
 
-    Delegates to the COMMON :func:`brutex.hardware_envelope.memory_budget_bytes`:
+    Delegates to the COMMON :func:`brutex.config.hardware_envelope.memory_budget_bytes`:
     a set, non-blank ``BRUTEX_MAX_BLOOM_BYTES`` is the validated explicit
     override (a non-integer / non-positive value raises ``ValueError``);
     otherwise the ceiling is ``detected total RAM`` ×
