@@ -7,7 +7,12 @@ envelope. These pins keep its safety properties from silently rotting:
 
 * **Trigger discipline** — cron + dispatch + a paths-filtered push smoke
   on ``main`` ONLY; NEVER a ``pull_request`` trigger (a scheduled
-  observability contract must never gate PRs or join ci-ok).
+  observability contract must never gate PRs or join ci-ok); the doctor
+  JOB and the doctor/assert STEPS are unconditional and the whole step
+  ``if:`` surface is equality-pinned — a job-level (or doctor+assert
+  paired) never-true ``if:`` SKIPS the work while the run reports
+  SUCCESS, hollowing the cron with no red anywhere (empirically verified
+  to survive every other pin).
 * **Envelope honesty** — the workflow ASSERTS the 5 operator-envelope
   checks stay SKIP-with-reason and BOTH wheel-freshness handshakes stay
   PASS (never fake-green, never quietly hollow); the check-set contract
@@ -36,7 +41,13 @@ envelope. These pins keep its safety properties from silently rotting:
   the closer (the exact-title find is the other half of the dedupe key
   — a one-sided title edit would break close-on-green forever); red
   days fold into ONE open issue via ``createComment`` and a green day
-  closes it; BOTH issue-lifecycle steps AND the Telegram step are
+  closes it; the dedupe query's ``state: 'open'`` arm is pinned textually
+  AND functionally (a verified-surviving ``state: 'all'`` mutation would
+  match the CLOSED prior-episode issue via the stable title, muting the
+  channel); an EMPTY report (``tee`` pre-creates the file, so a
+  timeout-kill mid-doctor leaves it existing but empty) reads as
+  'doctor output unavailable' in both the filer and the step summary,
+  never an empty code fence; BOTH issue-lifecycle steps AND the Telegram step are
   ref-gated to ``refs/heads/main`` (the issue is repo-global state
   while concurrency serializes only per-ref, and a red branch
   ``workflow_dispatch`` — the natural debug move while main is red —
@@ -99,6 +110,18 @@ RED_ALERT_GUARD = (
 
 # The stable dedupe-key title, byte-identical in the filer AND the closer.
 ISSUE_TITLE = "doctor-daily: brutex doctor is RED"
+
+# The EXACT step-`if:` classification (step name -> guard). Mirrors the
+# RED_ALERT_GUARD equality-pin pattern: any future conditional anywhere in
+# the job must red this map and be reclassified consciously. Steps absent
+# from this map — crucially the doctor + assert steps — must carry NO `if:`.
+EXPECTED_STEP_IF = {
+    "Publish run summary (envelope-honest)": "always()",
+    "Upload doctor report": "always()",
+    "Telegram alert on red (best-effort — NEVER fails the job)": RED_ALERT_GUARD,
+    "File or update the single doctor-daily tracking issue": RED_ALERT_GUARD,
+    "Close the tracking issue on recovery": ("success() && github.ref == 'refs/heads/main'"),
+}
 
 EXPECTED_STATUSES = {
     "audit_chain": "SKIP",
@@ -255,6 +278,33 @@ def test_job_timeout_bounded() -> None:
     assert 15 <= timeout <= 60
 
 
+def test_job_unconditional_and_step_if_set_pinned_exactly() -> None:
+    """No job-level ``if:``; the set of steps carrying ``if:`` is EXACT.
+
+    Empirically verified before this pin: inserting a job-level
+    ``if: github.event_name != 'schedule'`` (or any never-true guard,
+    e.g. ``if: false``) survived every other test — a SKIPPED job reports
+    the workflow run as SUCCESS, so the daily 07:30 IST doctor silently
+    never runs, NO red appears in the Actions tab, the red-path guards
+    never fire, and the tracking-issue channel stays mute — functionally
+    identical to deleting ``schedule:`` (which IS pinned) yet invisible
+    to every other pin. The paired variant (the same ``if:`` on the
+    doctor + assert steps) is worse: the job completes GREEN,
+    ``success()`` is true, and the closer would actively CLOSE a genuine
+    open 'critical' alarm every day. With 'alert if missed' an honest
+    NON-goal (MIGRATION #1521), nothing else detects this class, so the
+    whole ``if:`` surface is equality-pinned.
+    """
+    data = _load()
+    assert "if" not in _job(data), "the doctor job must be unconditional"
+    if_map = {str(step.get("name")): str(step["if"]) for step in _steps(data) if "if" in step}
+    assert if_map == EXPECTED_STEP_IF, (
+        "the step `if:` set drifted from the pinned classification — any new "
+        "conditional (especially on the doctor/assert steps, which must stay "
+        "unconditional) must be reclassified here consciously"
+    )
+
+
 def test_doctor_step_has_own_timeout() -> None:
     """The doctor step is step-bounded, bash, and pipefail-guarded.
 
@@ -400,6 +450,22 @@ def test_assert_step_reds_an_added_unclassified_check(tmp_path: Path) -> None:
     assert _run_assert_step(tmp_path, statuses) == 1
 
 
+def test_summary_step_treats_empty_report_as_unavailable() -> None:
+    """The step summary embeds the report only when NON-empty (``-s``).
+
+    The bash twin of the filer's empty-report guard: ``tee`` pre-creates
+    doctor-report.txt, so ``-f`` is true even after a timeout-kill
+    mid-doctor and the summary would render an empty code fence instead
+    of the honest unavailable line.
+    """
+    summary = next(s for s in _steps(_load()) if "GITHUB_STEP_SUMMARY" in str(s.get("run", "")))
+    run = summary["run"]
+    assert isinstance(run, str)
+    assert "[ -s doctor-report.txt ]" in run, "summary must test NON-empty, not mere existence"
+    assert "[ -f doctor-report.txt ]" not in run
+    assert "doctor output unavailable" in run
+
+
 def test_alert_steps_fire_on_cancelled() -> None:
     """Every alert step's guard includes cancelled().
 
@@ -473,6 +539,17 @@ def test_issue_title_stable_and_lifecycle_wired() -> None:
     # new 'critical' issue every red day and never auto-close any of them).
     assert raw.count("labels: 'bug,doctor',") == 2, (
         "filer + closer must both query with the labels: 'bug,doctor' filter"
+    )
+    # The dedupe query's THIRD arm: state must be 'open' in BOTH steps. An
+    # empirically-verified surviving mutation flipped it to state: 'all' —
+    # because the title is deliberately STABLE across episodes, a later red
+    # day would then find the CLOSED prior-episode issue by exact title and
+    # post 'Still red' comments onto a closed issue instead of opening a
+    # fresh 'critical' alarm (episode semantics broken, primary channel
+    # muted), and the closer would comment/re-close it on every green day.
+    assert raw.count("state: 'open',") == 2, (
+        "filer + closer must both query with state: 'open' — 'all' would "
+        "match the CLOSED prior-episode issue via the stable title"
     )
     assert "labels: ['bug', 'doctor', 'critical']," in raw, (
         "the created issue's labels must be a superset of the query filter"
@@ -618,6 +695,22 @@ def _calls(result: dict[str, Any], name: str) -> list[dict[str, Any]]:
     return [c["args"] for c in result["calls"] if c["name"] == name]
 
 
+def _assert_open_dedupe_query(result: dict[str, Any]) -> None:
+    """Every recorded listForRepo call carries the full 3-arm dedupe query.
+
+    The functional twin of the ``state: 'open',`` textual pin: the stub
+    returns the fixture issues regardless of args, so without inspecting
+    the RECORDED query args a ``state: 'all'`` mutation (empirically
+    verified to survive) would keep every lifecycle test green while
+    matching CLOSED prior-episode issues via the stable title.
+    """
+    queries = _calls(result, "listForRepo")
+    assert queries, "the lifecycle script must query for the tracking issue"
+    for args in queries:
+        assert args["state"] == "open", "the dedupe query must filter to OPEN issues only"
+        assert args["labels"] == "bug,doctor"
+
+
 # An open same-labelled issue with a DIFFERENT title: the dedupe/close key is
 # the exact stable title, so this distractor must never be commented/closed.
 _DISTRACTOR_ISSUE = {"number": 7, "title": "doctor-daily: some other thread"}
@@ -635,6 +728,7 @@ def test_filer_creates_the_pinned_issue_when_none_open(tmp_path: Path) -> None:
     """
     (tmp_path / "doctor-report.txt").write_text("FIXTURE TABLE\n", encoding="utf-8")
     result = _run_lifecycle_script(tmp_path, _filer_script(), [_DISTRACTOR_ISSUE])
+    _assert_open_dedupe_query(result)
     creates = _calls(result, "create")
     assert len(creates) == 1, "the first red day must file exactly one issue"
     assert creates[0]["title"] == ISSUE_TITLE
@@ -646,11 +740,37 @@ def test_filer_creates_the_pinned_issue_when_none_open(tmp_path: Path) -> None:
 
 
 @requires_node
+def test_filer_treats_empty_or_missing_report_as_unavailable(tmp_path: Path) -> None:
+    """A timeout-kill mid-doctor leaves an EMPTY report — never an empty fence.
+
+    ``tee`` CREATES doctor-report.txt at pipeline start while the doctor
+    prints its whole report in ONE write at process end, so the
+    DEC-MUTATION-ALERT-CANCELLED-001 timeout-kill/cancel class leaves the
+    file EXISTING but EMPTY; a fallback keyed only on a readFileSync
+    THROW embeds a bare empty code fence in the 'critical' issue instead
+    of the honest unavailable note. Both the empty-file AND the no-file
+    case must carry the fallback text.
+    """
+    (tmp_path / "doctor-report.txt").write_text("   \n", encoding="utf-8")
+    empty_file = _run_lifecycle_script(tmp_path, _filer_script(), [_DISTRACTOR_ISSUE])
+    (tmp_path / "doctor-report.txt").unlink()
+    missing_file = _run_lifecycle_script(tmp_path, _filer_script(), [_DISTRACTOR_ISSUE])
+    for result in (empty_file, missing_file):
+        creates = _calls(result, "create")
+        assert len(creates) == 1
+        assert "doctor output unavailable" in creates[0]["body"], (
+            "an empty/missing report must read as unavailable, never an empty fence"
+        )
+        assert result["warnings"] == []
+
+
+@requires_node
 def test_filer_folds_a_repeat_red_into_the_open_issue(tmp_path: Path) -> None:
     """Repeat red day: one createComment on the open issue, NO duplicate."""
     result = _run_lifecycle_script(
         tmp_path, _filer_script(), [_DISTRACTOR_ISSUE, _OPEN_TRACKING_ISSUE]
     )
+    _assert_open_dedupe_query(result)
     comments = _calls(result, "createComment")
     assert len(comments) == 1, "a repeat red must fold into the ONE open issue"
     assert comments[0]["issue_number"] == 42, "the comment must land on the exact-title match"
@@ -672,6 +792,7 @@ def test_closer_comments_and_closes_the_open_issue(tmp_path: Path) -> None:
     result = _run_lifecycle_script(
         tmp_path, _closer_script(), [_DISTRACTOR_ISSUE, _OPEN_TRACKING_ISSUE]
     )
+    _assert_open_dedupe_query(result)
     comments = _calls(result, "createComment")
     assert len(comments) == 1
     assert comments[0]["issue_number"] == 42
@@ -687,6 +808,7 @@ def test_closer_comments_and_closes_the_open_issue(tmp_path: Path) -> None:
 def test_closer_is_a_noop_when_no_tracking_issue_open(tmp_path: Path) -> None:
     """Green with no open alarm: list only — never comment/close/create."""
     result = _run_lifecycle_script(tmp_path, _closer_script(), [_DISTRACTOR_ISSUE])
+    _assert_open_dedupe_query(result)
     assert _calls(result, "createComment") == []
     assert _calls(result, "update") == []
     assert _calls(result, "create") == []

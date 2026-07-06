@@ -215,12 +215,18 @@ jobs:
             echo "are contract-asserted to stay SKIP — never fake-green. Production-"
             echo "envelope doctor: \`verify-m4pro.yml\` (daily 12:00 UTC, M4 Pro, real lake)."
             echo ""
-            if [ -f doctor-report.txt ]; then
+            # -s (non-empty), NOT -f: `tee` creates doctor-report.txt at
+            # pipeline start while the doctor prints its whole report once
+            # at process end, so a timeout-kill/cancel mid-doctor (the
+            # DEC-MUTATION-ALERT-CANCELLED-001 class) leaves the file
+            # EXISTING but EMPTY — an empty code fence would masquerade as
+            # doctor output.
+            if [ -s doctor-report.txt ]; then
               echo '```'
               cat doctor-report.txt
               echo '```'
             else
-              echo "_doctor never ran — see the failed setup step in this run._"
+              echo "_doctor output unavailable — setup/bootstrap failure or a timeout-kill before any output; see the run log._"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -316,7 +322,12 @@ jobs:
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             let table = '(doctor output unavailable — the failure was in setup/bootstrap or a timeout-kill; see the run log)';
             try {
-              table = require('fs').readFileSync('doctor-report.txt', 'utf8').slice(0, 6000);
+              // `tee` creates the report at pipeline start while the doctor
+              // prints everything once at process end, so a timeout-kill
+              // mid-doctor leaves the file EXISTING but EMPTY — treat a
+              // whitespace-only report as unavailable, never an empty fence.
+              const raw = require('fs').readFileSync('doctor-report.txt', 'utf8');
+              if (raw.trim()) { table = raw.slice(0, 6000); }
             } catch (e) { /* no report file exists */ }
             const line = `Red on \`${context.sha}\` (${context.eventName}) — [run](${runUrl}).\n\n\`\`\`\n${table}\n\`\`\``;
             try {
