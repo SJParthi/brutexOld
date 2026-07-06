@@ -1,0 +1,206 @@
+"""Real long-soak DRIVER — the wall-clock runner behind the pure drift detector.
+
+DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1512). This is the ONE code path
+that a 30-second nightly regression AND a multi-hour self-hosted soak both take
+(SCALABLE — the only difference is the wall-clock budget). It drives the two hot
+paths a real pull exercises — the INGEST audit-chain append
+(:class:`brutex.orchestrator.audit.AuditWriter`) and the SWEEP combo-dedup key
+(:func:`brutex.engine.sweep_cache.combo_digest`) — binned into time windows, and
+feeds each window's RSS / fd / per-op latency into the pure
+:class:`brutex.observability.soak_drift.SoakDriftMonitor`. The drift LOGIC lives
+in that COMMON module (unit-tested to 100% line+branch on synthetic series); THIS
+file is the honest wall-clock exerciser.
+
+The failure signal is AUTOMATIC (CLAUDE.md §11, never eyeball-only): a per-window
+RSS-ceiling / fd-growth / p99-latency-drift breach (a) fires the monitor's
+best-effort ``on_breach`` alert IN REAL TIME (production wires
+:meth:`brutex.notifications.sweep_alerts.SweepAlerter.soak_drift`), and (b) is
+asserted absent at the end of the run, so a leak fails CI, never a chart read.
+
+## Two entry points, ONE driver (honest tier split)
+
+* :func:`test_soak_short` — ``@pytest.mark.stress``, a FIXED short budget, so it
+  runs in the normal nightly ``pytest tests/stress -m stress`` on the ubuntu box.
+  Parametrised over a couple of tiny durations so the real driver is genuinely
+  exercised (no long-only path is dishonestly ``pragma``'d) and the window
+  binning is proven at more than one point.
+* :func:`test_soak_sustained` — ``@pytest.mark.soak``, honours the full
+  ``STRESS_DURATION_S`` (hours), selected ONLY on the self-hosted
+  ``soak-selfhosted.yml`` tier via ``-m 'stress or soak'``. Wires the
+  previously-dead ``STRESS_DURATION_S`` knob (it existed in
+  ``tests/stress/__init__.py`` but NO test read it) with a live ``windows >= 1``
+  assertion.
+
+Neither test is coverage-measured — ``[tool.coverage.run] source = ["brutex"]``
+excludes ``tests/`` — so no wall-clock path rides a coverage obligation and the
+drift LOGIC's 100% line+branch claim stands only on the pure module.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from time import perf_counter
+
+import pytest
+from brutex.engine.sweep_cache import combo_digest
+from brutex.observability.metrics import MetricRegistry
+from brutex.observability.process_probe import read_fd_count, read_rss_kib
+from brutex.observability.sla import SLAEvent
+from brutex.observability.soak_drift import SoakDriftMonitor
+from brutex.orchestrator.audit import AuditWriter, verify_chain
+
+# NOTE: NO module-level ``pytestmark = pytest.mark.stress`` here — that would tag
+# the long ``test_soak_sustained`` with ``stress`` too, so the ubuntu nightly's
+# ``-m stress`` would run the full-budget soak. The two entry points carry
+# DISTINCT markers instead: ``test_soak_short`` is ``@stress`` (nightly),
+# ``test_soak_sustained`` is ``@soak`` (self-hosted only). The self-hosted tier
+# selects both via ``-m 'stress or soak'``.
+
+#: Time slice per drift window (seconds). Each window collects per-op latencies,
+#: then samples RSS/fd once at its boundary and evaluates the drift rules.
+_WINDOW_SECONDS: float = 0.15
+
+#: Ops per inner batch before the window-elapsed clock is re-checked (keeps the
+#: perf_counter poll off the per-op hot loop).
+_OPS_PER_BATCH: int = 200
+
+#: The self-hosted sustained default when ``STRESS_DURATION_S`` is unset — a few
+#: seconds, so a plain ``-m soak`` dev run is quick; the workflow overrides it.
+_DEFAULT_SUSTAINED_S: float = 2.0
+
+#: Fixed reproducibility stand-ins for the combo-dedup key (NOT real BLAKE3 run
+#: identities — the sweep hot path shape is what the soak exercises, Golden
+#: Rule #1). 64-hex like the memory-growth harness's run-id stand-ins.
+_SNAP_HASH: str = "0" * 64
+_INDICATOR_VERSION: str = "v-soak"
+_CODE_COMMIT_SHA: str = "f" * 40
+
+
+@dataclass(frozen=True, slots=True)
+class _SoakResult:
+    """The driver's outcome — window count, appended entries, and any drift edges."""
+
+    windows: int
+    appended: int
+    breaches: tuple[str, ...]
+
+
+def _run_soak(*, duration_s: float, monitor: SoakDriftMonitor, audit_path: Path) -> _SoakResult:
+    """Drive the ingest + sweep hot loop for *duration_s*, feeding each window to *monitor*.
+
+    Runs at least ONE window (the outer loop body always executes once), so even
+    a sub-window duration yields a real observation. Returns the window count,
+    the appended-entry count (for the chain-integrity check), and every rule that
+    edged into BREACH.
+    """
+    breaches: list[str] = []
+    appended = 0
+    windows = 0
+    with AuditWriter.open(audit_path) as log:
+        deadline = perf_counter() + duration_s
+        while True:
+            window_start = perf_counter()
+            latencies: list[float] = []
+            while perf_counter() - window_start < _WINDOW_SECONDS:
+                for _ in range(_OPS_PER_BATCH):
+                    t0 = perf_counter()
+                    # INGEST hot path — one hash-chained append.
+                    log.append(
+                        action="SOAK_BURST",
+                        subject=f"event:{appended % 1024:08d}",
+                        payload={"seq": appended, "bucket": appended % 64},
+                    )
+                    appended += 1
+                    # SWEEP hot path — one combo-dedup digest.
+                    combo_digest(
+                        mask=(1 << (appended % 60)),
+                        instrument=("NIFTY", "BANKNIFTY", "SENSEX")[appended % 3],
+                        tf=("1m", "5m", "15m")[appended % 3],
+                        direction="bull" if appended % 2 == 0 else "bear",
+                        data_snapshot_hash=_SNAP_HASH,
+                        indicator_version=_INDICATOR_VERSION,
+                        code_commit_sha=_CODE_COMMIT_SHA,
+                    )
+                    latencies.append(perf_counter() - t0)
+            # Window boundary — sample the whole-process probes ONCE and evaluate
+            # the drift rules. Kept OUT of the per-op latency region so the
+            # sampling never pollutes the measured latencies.
+            events = monitor.observe_window(
+                rss_kib=read_rss_kib(),
+                fd_count=read_fd_count(),
+                latency_samples=latencies,
+            )
+            windows += 1
+            breaches.extend(e.rule_name for e in events if e.new_state.value == "breach")
+            if perf_counter() >= deadline:
+                break
+    return _SoakResult(windows=windows, appended=appended, breaches=tuple(breaches))
+
+
+def _drive(tmp_path: Path, duration_s: float) -> _SoakResult:
+    """Build a monitor over a fresh registry and run the soak for *duration_s*."""
+    registry = MetricRegistry()
+    recorded: list[str] = []
+
+    def _on_breach(event: SLAEvent) -> None:
+        recorded.append(event.rule_name)
+
+    def _on_recovery(_event: SLAEvent) -> None:
+        return None
+
+    monitor = SoakDriftMonitor(
+        registry=registry,
+        on_breach=_on_breach,
+        on_recovery=_on_recovery,
+    )
+    result = _run_soak(
+        duration_s=duration_s,
+        monitor=monitor,
+        audit_path=tmp_path / "soak_audit.jsonl",
+    )
+    # The real-time alert edge and the returned events must agree (both are the
+    # automatic drift signal).
+    assert list(result.breaches) == recorded
+    return result
+
+
+def _assert_healthy(result: _SoakResult, audit_path: Path) -> None:
+    """Assert the run produced windows, leaked nothing, and kept the chain intact."""
+    assert result.windows >= 1, "the soak must produce at least one drift window"
+    assert result.breaches == (), (
+        f"soak drift breach(es) detected: {result.breaches} — a memory/fd/latency "
+        f"regression over {result.windows} windows (DEC-SOAK-REAL-TIER-001)"
+    )
+    verified = verify_chain(audit_path)
+    assert verified == result.appended, (
+        f"audit chain verified {verified} entries, expected {result.appended} — "
+        f"chain drift / entry loss under sustained load"
+    )
+
+
+@pytest.mark.stress
+@pytest.mark.parametrize("duration_s", [0.4, 0.8])
+def test_soak_short(tmp_path: Path, duration_s: float) -> None:
+    """The real soak driver, run briefly — the honest nightly regression tier.
+
+    Fixed short budget (never reads ``STRESS_DURATION_S``), so the ubuntu
+    ``-m stress`` nightly runs it in seconds while still exercising the SAME
+    driver + drift detector the multi-hour tier uses.
+    """
+    result = _drive(tmp_path, duration_s)
+    _assert_healthy(result, tmp_path / "soak_audit.jsonl")
+
+
+@pytest.mark.soak
+def test_soak_sustained(tmp_path: Path) -> None:
+    """The full-budget soak — honours ``STRESS_DURATION_S`` (hours on the tier).
+
+    Selected ONLY by ``-m 'stress or soak'`` on the self-hosted
+    ``soak-selfhosted.yml`` job; a plain dev run defaults to a couple of seconds.
+    This is the live wiring of the previously-dead ``STRESS_DURATION_S`` knob.
+    """
+    duration_s = float(os.environ.get("STRESS_DURATION_S", str(_DEFAULT_SUSTAINED_S)))
+    result = _drive(tmp_path, duration_s)
+    _assert_healthy(result, tmp_path / "soak_audit.jsonl")
