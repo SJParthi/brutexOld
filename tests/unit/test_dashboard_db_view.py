@@ -599,11 +599,21 @@ class TestOptionWindowDecode:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # C3: the 4 s page poll must not re-pay the full Parquet load — the read
-        # is cached on the file's mtime and ANY flush invalidates it.
+        # is cached on the ledger stamp and ANY flush invalidates it (past the
+        # DEC-LEDGER-DELTA-O-PAGE-001 adaptive floor — the injected clock steps
+        # over it so the fresh-parse-per-stamp law stays pinned).
         import os
 
+        from brutex.dashboard import db_view as db_view_module
         from brutex.data import window_ledger_store as store_module
         from brutex.data.window_ledger_store import ledger_path
+
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
 
         ledger = WindowLedger()
         ledger.record(
@@ -625,9 +635,10 @@ class TestOptionWindowDecode:
         assert first["windows"] == second["windows"]
         assert calls["n"] <= 1  # the second poll was served from the cache
 
-        # Any flush bumps the mtime → the cache MUST refresh.
+        # Any flush bumps the mtime → the cache MUST refresh (past the floor).
         path = ledger_path(tmp_path)
         os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         loaded_before = calls["n"]
         build_window_payload(tmp_path)
         assert calls["n"] == loaded_before + 1
@@ -714,13 +725,21 @@ class TestSpotWindowRollup:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The grouping is O(rows) at universe scale — it must run once per
-        # ledger flush, not once per 4 s poll (hostile C7).
+        # ledger flush, not once per 4 s poll (hostile C7). The injected clock
+        # steps past the DEC-LEDGER-DELTA-O-PAGE-001 adaptive floor so the
+        # flush → exactly-one-regroup law stays pinned.
         import os
 
         from brutex.dashboard import db_view as db_view_module
         from brutex.dashboard.db_view import spot_window_rollup
         from brutex.data.window_ledger_store import ledger_path
 
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
         ledger = WindowLedger()
         ledger.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
@@ -743,6 +762,7 @@ class TestSpotWindowRollup:
 
         path = ledger_path(tmp_path)
         os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         before = calls["n"]
         spot_window_rollup(tmp_path)
         assert calls["n"] == before + 1  # mtime bump re-groups exactly once
@@ -1767,7 +1787,20 @@ class TestLedgerDeltaAwareness:
         assert payload["source"] == "ledger"
         assert [w["symbol"] for w in payload["windows"]] == ["NIFTY"]
 
-    def test_records_cache_refreshes_on_a_delta_append(self, tmp_path: Path) -> None:
+    def test_records_cache_refreshes_on_a_delta_append(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The injected clock steps past the DEC-LEDGER-DELTA-O-PAGE-001 adaptive
+        # floor so the delta-append → fresh-parse law stays pinned (a read
+        # WITHIN the floor serves the prior fold stale — bounded + logged).
+        from brutex.dashboard import db_view as db_view_module
+
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
         base = WindowLedger()
         base.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
@@ -1775,14 +1808,24 @@ class TestLedgerDeltaAwareness:
         save_window_ledger(base, tmp_path)
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {"NIFTY"}
         self._append_delta(tmp_path, "SENSEX")  # base mtime UNTOUCHED
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {
             "NIFTY",
             "SENSEX",
         }
 
-    def test_spot_window_rollup_sees_mid_pull_deltas(self, tmp_path: Path) -> None:
+    def test_spot_window_rollup_sees_mid_pull_deltas(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import db_view as db_view_module
         from brutex.dashboard.db_view import spot_window_rollup
 
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
         base = WindowLedger()
         base.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
@@ -1790,6 +1833,7 @@ class TestLedgerDeltaAwareness:
         save_window_ledger(base, tmp_path)
         assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
         self._append_delta(tmp_path, "BANKNIFTY")  # base mtime UNTOUCHED
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         assert spot_window_rollup(tmp_path) == {
             ("NIFTY", "1minute"): (1, 0, 0),
             ("BANKNIFTY", "1minute"): (1, 0, 0),

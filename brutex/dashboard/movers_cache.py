@@ -83,6 +83,8 @@ from typing import Final, TypeVar
 
 import structlog
 
+from brutex.dashboard.summary_cache import effective_adaptive_floor
+
 _LOG = structlog.get_logger(__name__)
 
 __all__ = [
@@ -387,9 +389,12 @@ class MoversSnapshotCache:
                 return entry.value  # type: ignore[return-value]
         if entry is not None and self._adaptive_floor and not force_fresh and self._pull_active():
             age = self._clock() - entry.computed_at
-            effective_floor = min(
-                max(self._adaptive_base_floor_s, entry.compute_duration),
-                self._adaptive_floor_cap_s,
+            # Delegates to the ONE extracted #920 formula (byte-equal arithmetic
+            # — DEC-LEDGER-DELTA-O-PAGE-001, CLAUDE.md §11 COMMON).
+            effective_floor = effective_adaptive_floor(
+                entry.compute_duration,
+                base_s=self._adaptive_base_floor_s,
+                cap_s=self._adaptive_floor_cap_s,
             )
             if age < effective_floor:
                 _LOG.info(

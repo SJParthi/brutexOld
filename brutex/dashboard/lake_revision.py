@@ -86,6 +86,22 @@ ABSENT_TOKEN: Final[str] = "absent"  # noqa: S105  # nosec B105 — a freshness 
 _SWEEPS_DIRNAME: Final[str] = "sweeps"
 
 
+def revision_generation(token: str) -> int:
+    """Map a content token onto a ``MoversSnapshotCache`` generation int — one digest bridge.
+
+    DEC-LEDGER-DELTA-O-PAGE-001: the reused
+    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` keys freshness on
+    an ``int`` *generation*, while the lake content signals are opaque string
+    tokens (a ledger stamp token, a revision composite). This bridge digests the
+    token to the first 8 bytes of its SHA-256 — a 64-bit int, so ANY token
+    change moves the generation. HONEST envelope (Golden Rule #10): two distinct
+    tokens collide with probability ~2\\ :sup:`-64`; a collision would serve ONE
+    stale entry for that colliding pair and self-heals on the next token move —
+    documented, not hidden. Pure, O(len(token)).
+    """
+    return int.from_bytes(hashlib.sha256(token.encode("utf-8")).digest()[:8], "big")
+
+
 def _stat_token(target: Path, *, event: str) -> str | None:
     """One path's ``"<mtime_ns>:<size>"`` stat token — the shared O(1) probe core.
 
@@ -237,4 +253,4 @@ def lake_revision(lake_root: Path) -> str | None:
     return f"{ledger}|{sweeps}"
 
 
-__all__ = ["ABSENT_TOKEN", "lake_revision", "sweeps_revision"]
+__all__ = ["ABSENT_TOKEN", "lake_revision", "revision_generation", "sweeps_revision"]
