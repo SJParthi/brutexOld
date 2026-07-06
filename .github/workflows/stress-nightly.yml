@@ -144,7 +144,22 @@ jobs:
           STRESS_EVENTS: ${{ github.event.inputs.stress_events || '5000' }}
         run: |
           max=200000
-          if [ "$STRESS_EVENTS" -gt "$max" ] 2>/dev/null; then
+          # STRICT numeric validation BEFORE the comparison. `[ -gt ]` cannot
+          # parse an underscore-grouped integer (the documented canonical soak
+          # value `10_000_000`), so the old `2>/dev/null`-suppressed comparison
+          # silently fell through to "passed" and let a 10M run launch on the
+          # tier that cannot finish it. Strip underscores (Python's int() accepts
+          # them, so the test would too), then REFUSE any non-numeric input
+          # outright rather than error-suppressing it (DEC-SOAK-REAL-TIER-001).
+          ev=${STRESS_EVENTS//_/}
+          case "$ev" in
+            ''|*[!0-9]*)
+              echo "::error::STRESS_EVENTS='$STRESS_EVENTS' is not a non-negative integer." >&2
+              echo "::error::Provide a plain integer event count (max $max); larger soaks: use soak-selfhosted.yml." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$ev" -gt "$max" ]; then
             echo "::error::STRESS_EVENTS=$STRESS_EVENTS exceeds the ubuntu-tier ceiling ($max)." >&2
             echo "::error::This job's 60-min timeout cannot complete a soak-scale run." >&2
             echo "::error::Run a real multi-hour soak via .github/workflows/soak-selfhosted.yml (soak_minutes input)." >&2

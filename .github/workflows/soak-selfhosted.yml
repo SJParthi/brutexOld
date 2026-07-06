@@ -13,9 +13,14 @@
 # (the `soak` marker) for the full `STRESS_DURATION_S`, feeding each time window
 # to the pure `brutex.observability.soak_drift.SoakDriftMonitor` (RSS ceiling /
 # fd growth / p99 latency drift). The failure signal is AUTOMATIC (CLAUDE.md §11):
-# the in-process monitor fires a CRITICAL `SweepAlerter.soak_drift` Telegram alert
-# the INSTANT a rule edges into breach (trigger-independent), AND a breach fails
-# the pytest run so the "open issue on failure" step files a tracked issue.
+# the driver WIRES the monitor's on_breach to `SweepAlerter.soak_drift`, so the
+# INSTANT any rule edges into breach a CRITICAL Telegram alert fires in real time
+# (trigger-independent; a silent no-op when Telegram is disabled). The end-of-run
+# HARD gate is the DETERMINISTIC oracles — an RSS-ceiling / fd-growth / audit-chain
+# breach fails the pytest run so the "open issue on failure" step files a tracked
+# issue. `soak.p99_drift` is ALERT-ONLY (a sub-second window's p99 is
+# fsync/GC/scheduler-jitter-bound, so asserting on it false-fails ~15% of runs) —
+# it fires the real-time alert but never red-fails CI (DEC-SOAK-REAL-TIER-001).
 #
 # RUNNER + TRIGGER PRECEDENT (verify-m4pro.yml / bench-m4pro.yml)
 # --------------------------------------------------------------
@@ -176,6 +181,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Real soak failed on ${context.sha} (drift breach or timeout). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). A drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time.`,
+              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time (a timeout-kill did not); soak.p99_drift is alert-only and never opens this issue.`,
               labels: ['bug', 'soak', 'critical'],
             });

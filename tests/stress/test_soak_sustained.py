@@ -11,11 +11,25 @@ feeds each window's RSS / fd / per-op latency into the pure
 in that COMMON module (unit-tested to 100% line+branch on synthetic series); THIS
 file is the honest wall-clock exerciser.
 
-The failure signal is AUTOMATIC (CLAUDE.md §11, never eyeball-only): a per-window
-RSS-ceiling / fd-growth / p99-latency-drift breach (a) fires the monitor's
-best-effort ``on_breach`` alert IN REAL TIME (production wires
-:meth:`brutex.notifications.sweep_alerts.SweepAlerter.soak_drift`), and (b) is
-asserted absent at the end of the run, so a leak fails CI, never a chart read.
+The failure signal is AUTOMATIC (CLAUDE.md §11, never eyeball-only). Every
+per-window RSS-ceiling / fd-growth / p99-latency-drift breach (a) fires the
+monitor's best-effort ``on_breach`` alert IN REAL TIME — the driver WIRES it to
+:meth:`brutex.notifications.sweep_alerts.SweepAlerter.soak_drift` (mirroring
+DEC-PULL-HEALTH-WIRING-001, which bound the originally-dormant pull-health
+monitor), a CRITICAL, trigger-independent push that fires the INSTANT a rule
+edges into breach and is a silent no-op when Telegram is disabled (CI/dev), so it
+never sends spuriously nor blocks the run.
+
+The **hard CI gate** (b) is the DETERMINISTIC oracles only — the RSS ceiling, the
+fd-growth count, and the audit-chain integrity are asserted at end-of-run so a
+leak fails CI. ``soak.p99_drift`` is deliberately **alert-only, NOT a hard gate**:
+a sub-second window's p99 is dominated by transient fsync/GC/scheduler spikes
+(the ingest ``audit.append`` fsyncs per record), so comparing a later window's
+p99 to a single warm first-window baseline at ratio 2.0 fires on NOISE, not
+drift — reproduced as a ~15% false-fail rate on an idle box (ratios up to 8–9×).
+It still fires its real-time ``soak_drift`` alert (the operator sees a genuine
+sustained p99 climb over hours), but it never red-fails the pytest gate, so the
+nightly cron cannot cry-wolf and open false CRITICAL issues (DEC-SOAK-REAL-TIER-001).
 
 ## Two entry points, ONE driver (honest tier split)
 
@@ -45,10 +59,11 @@ from time import perf_counter
 
 import pytest
 from brutex.engine.sweep_cache import combo_digest
+from brutex.notifications.sweep_alerts import SweepAlerter
 from brutex.observability.metrics import MetricRegistry
 from brutex.observability.process_probe import read_fd_count, read_rss_kib
 from brutex.observability.sla import SLAEvent
-from brutex.observability.soak_drift import SoakDriftMonitor
+from brutex.observability.soak_drift import RULE_P99_DRIFT, SoakDriftMonitor
 from brutex.orchestrator.audit import AuditWriter, verify_chain
 
 # NOTE: NO module-level ``pytestmark = pytest.mark.stress`` here — that would tag
@@ -143,9 +158,22 @@ def _drive(tmp_path: Path, duration_s: float) -> _SoakResult:
     """Build a monitor over a fresh registry and run the soak for *duration_s*."""
     registry = MetricRegistry()
     recorded: list[str] = []
+    # Real production wiring of the advertised real-time drift alert
+    # (DEC-PULL-HEALTH-WIRING-001 precedent): the default resolver returns the
+    # process notifier singleton, which is disabled in CI/dev, so
+    # ``soak_drift`` is a silent no-op there and only genuinely sends on a
+    # Telegram-configured self-hosted soak — never a spurious push.
+    alerter = SweepAlerter()
 
     def _on_breach(event: SLAEvent) -> None:
         recorded.append(event.rule_name)
+        # Best-effort CRITICAL push the INSTANT a rule edges into breach.
+        alerter.soak_drift(
+            rule=event.rule_name,
+            observed=event.observed_value,
+            threshold=event.threshold,
+            detail="soak drift breach — check RSS / fd / p99 latency over the run",
+        )
 
     def _on_recovery(_event: SLAEvent) -> None:
         return None
@@ -167,10 +195,19 @@ def _drive(tmp_path: Path, duration_s: float) -> _SoakResult:
 
 
 def _assert_healthy(result: _SoakResult, audit_path: Path) -> None:
-    """Assert the run produced windows, leaked nothing, and kept the chain intact."""
+    """Assert the run produced windows, leaked nothing, and kept the chain intact.
+
+    Only the DETERMINISTIC drift oracles hard-gate CI: the RSS ceiling and the
+    fd-growth count (plus the audit-chain integrity below). ``soak.p99_drift`` is
+    alert-only — a sub-second window's p99 is fsync/GC/scheduler-jitter-bound, so
+    asserting on it false-fails the nightly cron (~15% locally) and spams CRITICAL
+    issues for a non-regression (DEC-SOAK-REAL-TIER-001); it still fires its
+    real-time ``soak_drift`` alert but is filtered out of the hard gate here.
+    """
     assert result.windows >= 1, "the soak must produce at least one drift window"
-    assert result.breaches == (), (
-        f"soak drift breach(es) detected: {result.breaches} — a memory/fd/latency "
+    hard_breaches = tuple(rule for rule in result.breaches if rule != RULE_P99_DRIFT)
+    assert hard_breaches == (), (
+        f"soak drift breach(es) detected: {hard_breaches} — a memory/fd "
         f"regression over {result.windows} windows (DEC-SOAK-REAL-TIER-001)"
     )
     verified = verify_chain(audit_path)
