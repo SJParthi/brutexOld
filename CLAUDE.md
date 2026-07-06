@@ -18,7 +18,25 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
+_Last updated: 2026-07-06 (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1492 —
+the `GET /api/v1/pull/rate` CLI-bridge file read moved OFF the uvicorn event loop: a NEW
+`brutex/dashboard/rate_bridge_cache.py` `RateBridgeCache` memoises the decoded bridge
+snapshot behind a 2 s TTL + an `mtime_ns:size:ino` stat content token (NEW public
+`lake_revision.rate_bridge_revision` over the shared `_stat_token` core, `include_ino`
+opt-in — every pre-existing token byte-unchanged), refreshes post-TTL under the COMMON
+`run_with_deadline` freeze guard (0.5 s; stat AND read inside the guard) with a
+NON-BLOCKING single-flight (followers serve last-known immediately; at most ONE abandoned
+daemon per outage, late-return self-heal), and is called via `run_in_threadpool` through a
+`build_app(rate_bridge_cache=)` injection seam. TWO ADDITIVE payload keys stamped in ONE
+place: `bridge_source` ∈ {live, cached, unverified, unwired} + `bridge_probe_age_s` — no
+stale illusion (the cache stores the SNAPSHOT, never the view; ages recompute per request
+from its own `wall_time`, TTL 2 s < STALE_AFTER_S 12 s test-pinned). Every pre-existing
+payload key byte-identical; teeth verified (the same wedged read blocked the pre-change
+route 8.02 s, bounded < 2 s fixed). HONEST: liveness/latency only, no throughput claim;
+the wedged daemon cannot be killed (#999 stance); the CLI WRITE-side publish hang is a
+named follow-up. READ-side dashboard only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+`rate_bridge_cache.py` + `lake_revision.py` 100% line+branch).
+Earlier: 2026-07-06 (DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
 MIGRATION.md #1490–#1491 — the hardware-envelope CONSOLIDATION + thread-bounding pack:
 (1) the TWO hardware-envelope modules (#1360's `brutex/hardware_envelope.py` + #1401's
 `brutex/config/hardware_envelope.py`) are consolidated into ONE at
@@ -350,7 +368,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-thread-bounds` (**DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
+- **Active branch:** `claude/vibrant-knuth-itozu6` (**DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1492** —
+  the `GET /api/v1/pull/rate` CLI-bridge file read (`<lake_root>/.rate/pull_rate.json`, previously a synchronous
+  `Path.read_bytes()` executed ON the uvicorn event loop on EVERY ~3 s site-wide widget poll — a slow/stalled external
+  lake volume froze the WHOLE dashboard) is moved off the loop behind a NEW `brutex/dashboard/rate_bridge_cache.py`
+  `RateBridgeCache`: a 2 s-TTL + `mtime_ns:size:ino` content-token memo (NEW public `lake_revision.rate_bridge_revision`
+  over the shared `_stat_token` core, `include_ino` opt-in — default tokens byte-unchanged) whose post-TTL refresh
+  (stat + conditional read, BOTH inside the guard) runs under the COMMON `run_with_deadline` freeze guard (0.5 s) with a
+  NON-BLOCKING single-flight (followers serve last-known immediately; `_inflight` cleared only by the refresh daemon's
+  finally → EXACTLY ONE abandoned daemon per outage, late-return self-heal), called via `run_in_threadpool` (the app.py
+  offload doctrine) through a `build_app(rate_bridge_cache=)` injection seam; TWO ADDITIVE honest-freshness payload keys
+  stamped in ONE place (`stamp_bridge_freshness`): `bridge_source` ∈ {live, cached, unverified, unwired} +
+  `bridge_probe_age_s` — NO stale illusion (the cache stores the SNAPSHOT, never the view: ages recompute per request
+  from its own `wall_time`, so the 12 s `STALE_AFTER_S` verdict machinery is unfooled; TTL 2 s < 12 s test-pinned); env
+  kill switches `BRUTEX_RATE_BRIDGE_TTL_S` / `BRUTEX_RATE_BRIDGE_READ_DEADLINE_S` (fail-loud parse). Every
+  pre-existing payload key byte-identical (frozen 17-key set ∪ the 2 additive keys, pinned; direct-uncached-computation
+  parity pinned); teeth: the same wedged read blocked the PRE-change route 8.02 s and is bounded < 2 s fixed. HONEST:
+  a liveness/latency fix, NO throughput claim; steady-state O(1) zero-syscall + one threadpool hop, post-TTL one stat,
+  miss one ~300-byte read; the wedged daemon cannot be killed (the #999 stance — free loop + bounded latency +
+  at-most-one zombie); the CLI WRITE-side bridge-publish hang is a named follow-up, NOT fixed. READ-side dashboard
+  only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX); `rate_bridge_cache.py` + `lake_revision.py` 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/pyright at the pre-change baseline).
+  Earlier: `claude/hw-thread-bounds` (**DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
   MIGRATION.md #1490–#1491** — ONE hardware-envelope module at `brutex/config/hardware_envelope.py` (the #1360 sibling
   `brutex/hardware_envelope.py` DELETED, consumers repointed, the #1360 RAM-budget contract ported verbatim, the
   interim #1167-resolution RAM-delegation pin superseded, `greeks_pool_workers` delegated to the COMMON
