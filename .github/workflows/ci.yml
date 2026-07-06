@@ -1847,8 +1847,15 @@ jobs:
           # `intervals` walk filter) is covered by
           # tests/unit/test_completeness_fno_skip.py, which MUST also join
           # this gate (without it the module reads 99.74% — lines 935/1241).
+          # DEC-LEDGER-DELTA-O-PAGE-001: the SQL-side ledger delta fold + the
+          # shared stamped ledger read cache (the _LEDGER_READ_CACHE seam, the
+          # _ledger_scan_source base-absent branch, the phase_progress
+          # second-failure `records` fallback, the base-absent probe skip) are
+          # covered by tests/unit/test_dashboard_db_view_ledger_delta_fold.py
+          # + tests/unit/test_dashboard_db_view_ledger_read_cache.py, which
+          # MUST join this gate (without them the module reads 99.34%).
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
