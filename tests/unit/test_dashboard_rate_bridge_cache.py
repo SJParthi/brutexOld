@@ -11,6 +11,11 @@
   abandoned daemon per outage, late adoption self-heals, threads leak-free);
 * non-blocking single-flight followers + an N-thread barrier race;
 * once-per-outage degraded WARN + recovered INFO;
+* the GUARD-SPAWN-FAILURE arm (hostile-review MAJOR fold): a guard raising
+  other than ``DeadlineExceeded`` (``Thread.start()`` under thread exhaustion)
+  never raises out of ``get()``, releases the single-flight flag (no permanent
+  ``unverified`` wedge — the next poll re-spawns), WARNs once per outage, and
+  ``KeyboardInterrupt`` propagates with the flag released;
 * the fail-loud env overrides, the TTL < ``STALE_AFTER_S`` invariant pin, the
   additive-only :func:`stamp_bridge_freshness`, and the late-binding reader seam.
 
@@ -112,6 +117,28 @@ class _Reader:
 def _inline_guard(fn: Callable[[], None], _seconds: float) -> None:
     """Thread-free guard seam: run the refresh synchronously on the caller."""
     fn()
+
+
+class _ScriptedGuard:
+    """Guard driven by a per-call script: ``None`` runs inline, an exception raises.
+
+    Models ``run_with_deadline``'s one non-DeadlineExceeded raise path —
+    ``threading.Thread(...).start()`` failing under thread/memory exhaustion —
+    where the refresh daemon NEVER runs, so ``_refresh``'s ``finally`` can
+    never clear ``_inflight``. The last script step repeats (the
+    :class:`_Probe` / :class:`_Reader` convention).
+    """
+
+    def __init__(self, script: list[BaseException | None]) -> None:
+        self.script = script
+        self.calls = 0
+
+    def __call__(self, fn: Callable[[], None], _seconds: float) -> None:
+        self.calls += 1
+        step = self.script[min(self.calls - 1, len(self.script) - 1)]
+        if step is not None:
+            raise step
+        fn()
 
 
 class TestEnvResolvers:
@@ -496,6 +523,108 @@ class TestRefreshFailure:
         # Recovered probe returns the SAME token → revalidate without re-reading.
         assert cache.get(_LAKE).source == BRIDGE_SOURCE_LIVE
         assert reader.calls == 1
+
+
+class TestGuardSpawnFailure:
+    """A guard raising OTHER than ``DeadlineExceeded`` (hostile-review MAJOR fold).
+
+    The production guard's one such path is ``threading.Thread(...).start()``
+    raising ``RuntimeError("can't start new thread")`` under thread/memory
+    exhaustion — the refresh daemon never runs, so before the fix the owner
+    RAISED out of ``get()`` (a 500 on the poll route) AND ``_inflight`` leaked
+    permanently (the cache served ``unverified`` forever, zero retries, until
+    process restart). These pins prove: no raise, honest ``unverified`` serve,
+    ONE ``refresh_spawn_failed`` WARN per outage, the flag released, and the
+    NEXT poll re-spawning the refresh (self-heal at poll cadence).
+    """
+
+    def test_raising_guard_never_raises_and_serves_unverified_cold(self) -> None:
+        """Cold cache + failing guard: get() returns (never raises), labelled, WARN once."""
+        guard = _ScriptedGuard([RuntimeError("can't start new thread")])
+        cache = RateBridgeCache(
+            ttl_s=2.0,
+            read_deadline_s=0.5,
+            clock=_Clock(),
+            probe=_Probe(["t1"]),
+            reader=_Reader([_snap()]),
+            guard=guard,
+        )
+        with capture_logs() as logs:
+            result = cache.get(_LAKE)  # the pre-fix defect: this raised → route 500
+        assert result.source == BRIDGE_SOURCE_UNVERIFIED
+        assert result.snapshot is None  # cold memo — honest None, panel-only downstream
+        assert result.probe_age_s is None  # no refresh has EVER completed
+        events = [entry["event"] for entry in logs]
+        assert events.count("rate_bridge_cache.refresh_spawn_failed") == 1
+        assert cache._inflight is False  # the owner released the flag — no wedge
+
+    def test_next_poll_after_spawn_failure_respawns_and_recovers(self) -> None:
+        """The permanent-wedge regression: the NEXT post-TTL get() retries and goes live."""
+        clock = _Clock()
+        guard = _ScriptedGuard([RuntimeError("can't start new thread"), None])
+        reader = _Reader([_snap()])
+        cache = RateBridgeCache(
+            ttl_s=2.0,
+            read_deadline_s=0.5,
+            clock=clock,
+            probe=_Probe(["t1"]),
+            reader=reader,
+            guard=guard,
+        )
+        with capture_logs() as logs:
+            assert cache.get(_LAKE).source == BRIDGE_SOURCE_UNVERIFIED  # spawn fails
+            clock.advance(3.0)  # past TTL; the guard is healthy again
+            recovered = cache.get(_LAKE)
+        assert guard.calls == 2  # the refresh WAS re-spawned (pre-fix: stuck at 1 forever)
+        assert recovered.source == BRIDGE_SOURCE_LIVE
+        assert recovered.snapshot == _snap()
+        assert reader.calls == 1
+        events = [entry["event"] for entry in logs]
+        assert events.count("rate_bridge_cache.refresh_spawn_failed") == 1
+        assert events.count("rate_bridge_cache.read_recovered") == 1  # latch flips out
+
+    def test_spawn_failure_with_prior_memo_serves_it_aging_and_warns_once(self) -> None:
+        """Warm memo + REPEATED spawn failures: memo served with honest growing age, ONE WARN."""
+        clock = _Clock()
+        guard = _ScriptedGuard([None, RuntimeError("can't start new thread")])
+        cache = RateBridgeCache(
+            ttl_s=2.0,
+            read_deadline_s=0.5,
+            clock=clock,
+            probe=_Probe(["t1"]),
+            reader=_Reader([_snap()]),
+            guard=guard,
+        )
+        assert cache.get(_LAKE).source == BRIDGE_SOURCE_LIVE  # memo built while healthy
+        clock.advance(3.0)
+        with capture_logs() as logs:
+            degraded = cache.get(_LAKE)  # spawn failure #1 — WARN (flip in)
+            clock.advance(2.0)
+            again = cache.get(_LAKE)  # spawn failure #2 — latched, NO second WARN
+        assert degraded.source == BRIDGE_SOURCE_UNVERIFIED
+        assert degraded.snapshot == _snap()  # last-known memo kept, never dropped
+        assert degraded.probe_age_s == 3.0  # honest age since the last COMPLETED refresh
+        assert again.source == BRIDGE_SOURCE_UNVERIFIED
+        assert again.probe_age_s == 5.0  # keeps growing — never a stale illusion
+        events = [entry["event"] for entry in logs]
+        assert events.count("rate_bridge_cache.refresh_spawn_failed") == 1
+
+    def test_keyboard_interrupt_propagates_but_releases_the_flag(self) -> None:
+        """``KeyboardInterrupt`` is NEVER swallowed — yet the single-flight flag is released."""
+        guard = _ScriptedGuard([KeyboardInterrupt(), None])
+        cache = RateBridgeCache(
+            ttl_s=2.0,
+            read_deadline_s=0.5,
+            clock=_Clock(),
+            probe=_Probe(["t1"]),
+            reader=_Reader([_snap()]),
+            guard=guard,
+        )
+        with pytest.raises(KeyboardInterrupt):
+            cache.get(_LAKE)
+        assert cache._inflight is False  # released with the raise — no leak
+        # ... so the very next poll can refresh normally (no wedge).
+        assert cache.get(_LAKE).source == BRIDGE_SOURCE_LIVE
 
 
 class TestLateBindingReader:

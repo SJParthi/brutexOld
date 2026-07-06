@@ -29,9 +29,13 @@ This module is the fix — ONE small cache composing EXISTING repo primitives
   :data:`RATE_BRIDGE_READ_DEADLINE_S` (0.5 s).
 * **Non-blocking single-flight** — while a refresh is in flight every other
   caller returns the last-known memo IMMEDIATELY (never a timeout-less wait);
-  ``_inflight`` is cleared ONLY by the refresh daemon itself, so a wedged disk
-  leaves EXACTLY ONE abandoned daemon per outage (not one per TTL), and its
-  eventual late return self-heals the cache (last-write-wins adoption).
+  once the daemon RUNS, ``_inflight`` is cleared ONLY by that daemon itself,
+  so a wedged disk leaves EXACTLY ONE abandoned daemon per outage (not one per
+  TTL), and its eventual late return self-heals the cache (last-write-wins
+  adoption). A guard that fails BEFORE its daemon could run (``Thread.start()``
+  under thread/memory exhaustion) is caught by the OWNER, which releases the
+  flag itself and serves ``unverified`` — a spawn failure can never wedge the
+  single-flight nor raise out of :meth:`RateBridgeCache.get`.
 
 No stale illusion, by construction (Golden Rule #1)
 ---------------------------------------------------
@@ -53,6 +57,14 @@ Honest envelope (Golden Rule #10)
   plus EVERY response bounded (owner ≤ ~deadline once per outage, followers
   O(1)-immediate) plus at most ONE abandoned daemon per outage, never zombie
   reaping (the DEC-FETCH-HUNG-WRITE-DEADLINE-001 stance).
+* The route-level "every response bounded" holds GIVEN an available AnyIO
+  worker token: the route reaches this cache via ``run_in_threadpool``, whose
+  DEFAULT 40-token limiter is shared by EVERY offloaded dashboard read, and
+  the sibling lake offloads (summary / movers / db_view) carry NO deadline
+  guard — a pool-wide wedge (every token stuck on an undeadlined sibling read
+  of the same stalled volume) would queue this route's offload behind them.
+  The bounds above are guarantees OF THIS CACHE; pool-wide wedge protection
+  is OUT OF SCOPE here — a named follow-up.
 * O-complexity per path, honestly: TTL hit — O(1) pure in-memory, ZERO
   syscalls; post-TTL revalidate — O(1) + ONE ``os.stat`` on the guard's daemon;
   content-change miss — one stat + one ~300-byte read + JSON decode (constant
@@ -314,9 +326,11 @@ class RateBridgeCache:
         self._token: str | None = None
         # Monotonic instant of the last COMPLETED refresh attempt (None = never).
         self._probed_at: float | None = None
-        # True while a refresh daemon is running; cleared ONLY by that daemon's
-        # finally — so a deadline-exceeded owner leaves it SET and abandoned
-        # daemons are bounded to EXACTLY ONE per outage.
+        # True while a refresh is running; cleared by the daemon's finally on
+        # every path where the daemon RAN (so a deadline-exceeded owner leaves
+        # it SET and abandoned daemons are bounded to EXACTLY ONE per outage)
+        # — or by the OWNER when the guard raised BEFORE the daemon could run
+        # (thread exhaustion), so a spawn failure can never wedge the cache.
         self._inflight = False
         # Once-per-outage log latch (WARN on the flip in, INFO on the flip out).
         self._degraded = False
@@ -328,6 +342,11 @@ class RateBridgeCache:
         answer while a refresh is in flight (the non-blocking single-flight);
         or an OWNER refresh bounded by the deadline guard (≤ ``read_deadline_s``
         even on a wedged disk, after which the memo is served ``unverified``).
+        A guard that FAILS to spawn its refresh daemon (``Thread.start()``
+        under thread/memory exhaustion) degrades to the SAME labelled
+        ``unverified`` serve with the single-flight flag released — never a
+        raise, never a wedge; only ``KeyboardInterrupt`` / ``SystemExit``
+        propagate (with the flag released first).
 
         Parameters
         ----------
@@ -379,6 +398,48 @@ class RateBridgeCache:
                 )
             probe_age = None if probed_at is None else max(0.0, now - probed_at)
             return BridgeReadResult(snapshot, BRIDGE_SOURCE_UNVERIFIED, probe_age)
+        except Exception as exc:  # pylint: disable=broad-except — the poll route must never 500
+            # The guard failed BEFORE its refresh daemon could run — with the
+            # production ``run_with_deadline`` the only non-DeadlineExceeded
+            # raise is ``threading.Thread(...).start()`` failing under
+            # thread/memory exhaustion (``_refresh`` itself swallows every
+            # Exception), so NO daemon exists to clear ``_inflight``: release
+            # it HERE, or the cache would latch ``unverified`` forever with
+            # zero retries and the raise would 500 the poll route
+            # (hostile-review MAJOR). With an INJECTED guard whose daemon DID
+            # run, this re-clear is at worst an early release (one duplicate
+            # refresh, last-write-wins commit) — never a wedge, never a stale
+            # illusion. Serve last-known, labelled; the next post-TTL poll
+            # retries the refresh (self-healing at poll cadence).
+            with self._lock:
+                self._inflight = False
+                first_flip = not self._degraded
+                self._degraded = True
+                snapshot = self._snapshot
+                probed_at = self._probed_at
+                now = self._clock()
+            if first_flip:
+                _LOG.warning(
+                    "rate_bridge_cache.refresh_spawn_failed",
+                    lake_root=str(lake_root),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    detail=(
+                        "the deadline guard failed before the refresh daemon "
+                        "could run (thread/memory exhaustion) — serving the "
+                        "last-known snapshot as 'unverified'; the next poll "
+                        "retries the refresh"
+                    ),
+                )
+            probe_age = None if probed_at is None else max(0.0, now - probed_at)
+            return BridgeReadResult(snapshot, BRIDGE_SOURCE_UNVERIFIED, probe_age)
+        except BaseException:
+            # KeyboardInterrupt / SystemExit: NEVER swallowed — but the
+            # single-flight flag must not leak with them either (no daemon ran
+            # to clear it; see the Exception arm above).
+            with self._lock:
+                self._inflight = False
+            raise
         with self._lock:
             recovered = self._degraded
             self._degraded = False
@@ -400,7 +461,9 @@ class RateBridgeCache:
         INJECTED probe/reader (the production ones never raise by contract) is
         caught + WARNed, the memo kept, and ``_probed_at`` STILL advanced so a
         persistent fast failure retries at TTL cadence, never per poll. The
-        ``finally`` clears ``_inflight`` — ONLY here, never on the owner.
+        ``finally`` clears ``_inflight`` on EVERY path where this daemon ran;
+        the owner releases it only when the guard raised before this daemon
+        could run (see :meth:`get`).
         """
         try:
             token = self._probe(lake_root)

@@ -16,7 +16,10 @@ spy (one read across polls within the TTL); BYTE-COMPAT (the payload key set is 
 frozen pre-change set plus exactly the two additive freshness keys, and the fresh-bridge
 values match a DIRECT un-cached ``build_pull_rate_view_merged`` computation); staleness
 honesty under the memo (a stale/frozen snapshot ages from its own ``wall_time`` — never
-a fabricated "flowing"); deleted-file / permission-denied / unwired degrades.
+a fabricated "flowing"); deleted-file / permission-denied / unwired degrades; and the
+GUARD-SPAWN-FAILURE fold (a guard raising other than ``DeadlineExceeded`` — thread
+exhaustion — answers 200 + ``unverified`` and the NEXT poll recovers: never a 500,
+never a permanent wedge).
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -337,6 +341,47 @@ class TestSlowReadLatencyBound:
                 assert len(reads) == 1  # recovery revalidated by token — no re-read
         finally:
             release.set()
+
+
+class TestGuardSpawnFailureNever500s:
+    """Hostile-review MAJOR fold: a guard that cannot spawn its daemon must not 500 or wedge.
+
+    The production guard's one non-``DeadlineExceeded`` raise path is
+    ``threading.Thread(...).start()`` failing under thread/memory exhaustion.
+    Pre-fix that raise propagated through ``run_in_threadpool`` (a 500 on the
+    poll route) AND permanently latched the cache's single-flight flag (every
+    later poll served ``unverified`` with zero refreshes until restart).
+    """
+
+    def test_raising_guard_route_stays_200_and_recovers_next_poll(self, tmp_path: Path) -> None:
+        """The failing poll answers 200 + ``unverified``; the next poll goes live."""
+        _publish_now(tmp_path, effective_rps=4.8, current_rps=5.0)
+
+        calls = {"n": 0}
+
+        def flaky_guard(fn: Callable[[], None], _seconds: float) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("can't start new thread")
+            fn()  # inline refresh — the real probe + reader run on the caller
+
+        cache = RateBridgeCache(ttl_s=0.0, read_deadline_s=0.5, guard=flaky_guard)
+        with _client(DashboardState(), _FakeStore(tmp_path), rate_bridge_cache=cache) as c:
+            resp = c.get("/api/v1/pull/rate")
+            assert resp.status_code == 200  # pre-fix: a 500 through run_in_threadpool
+            body = resp.json()
+            assert body["bridge_source"] == "unverified"
+            assert body["bridge_probe_age_s"] is None  # cold — nothing ever completed
+            assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS
+            # The flag was released: the NEXT poll re-spawns the refresh and
+            # surfaces the fresh CLI bridge (pre-fix: 'unverified' forever).
+            resp2 = c.get("/api/v1/pull/rate")
+            assert resp2.status_code == 200
+            body2 = resp2.json()
+            assert body2["bridge_source"] == "live"
+            assert body2["req_per_sec_achieved"] == 4.8
+            assert body2["flow_state"] == "flowing"
+        assert calls["n"] == 2  # exactly one failed spawn + one successful retry
 
 
 class TestCacheHitSpy:

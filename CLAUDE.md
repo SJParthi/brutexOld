@@ -26,15 +26,21 @@ snapshot behind a 2 s TTL + an `mtime_ns:size:ino` stat content token (NEW publi
 opt-in — every pre-existing token byte-unchanged), refreshes post-TTL under the COMMON
 `run_with_deadline` freeze guard (0.5 s; stat AND read inside the guard) with a
 NON-BLOCKING single-flight (followers serve last-known immediately; at most ONE abandoned
-daemon per outage, late-return self-heal), and is called via `run_in_threadpool` through a
+daemon per outage, late-return self-heal; a guard SPAWN failure — `Thread.start()` under
+thread exhaustion — is caught by the owner: flag released, ONE `refresh_spawn_failed` WARN
+per outage, served `unverified`, next poll retries — never a route 500 nor a permanent
+wedge, the hostile-review MAJOR fold; KeyboardInterrupt/SystemExit propagate with the flag
+released), and is called via `run_in_threadpool` through a
 `build_app(rate_bridge_cache=)` injection seam. TWO ADDITIVE payload keys stamped in ONE
 place: `bridge_source` ∈ {live, cached, unverified, unwired} + `bridge_probe_age_s` — no
 stale illusion (the cache stores the SNAPSHOT, never the view; ages recompute per request
 from its own `wall_time`, TTL 2 s < STALE_AFTER_S 12 s test-pinned). Every pre-existing
 payload key byte-identical; teeth verified (the same wedged read blocked the pre-change
 route 8.02 s, bounded < 2 s fixed). HONEST: liveness/latency only, no throughput claim;
-the wedged daemon cannot be killed (#999 stance); the CLI WRITE-side publish hang is a
-named follow-up. READ-side dashboard only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+the wedged daemon cannot be killed (#999 stance); the route-level bound holds GIVEN a free
+AnyIO worker token (the DEFAULT 40-token `run_in_threadpool` limiter is shared with the
+sibling UNdeadlined lake offloads — pool-wide wedge protection is a named follow-up); the
+CLI WRITE-side publish hang is a named follow-up. READ-side dashboard only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
 `rate_bridge_cache.py` + `lake_revision.py` 100% line+branch).
 Earlier: 2026-07-06 (DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
 MIGRATION.md #1490–#1491 — the hardware-envelope CONSOLIDATION + thread-bounding pack:
