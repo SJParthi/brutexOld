@@ -1531,6 +1531,15 @@ jobs:
           else
             echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
           fi
+          # DEC-STORED-DATA-VALIDATION-001: the frame-level stored-OHLC price-sanity
+          # checks (positivity + ordering) consumed by the prebuild 1-minute read
+          # boundary + the lake invariant scanner. Pure polars expressions,
+          # standalone-gateable at 100% line+branch.
+          if compgen -G "tests/unit/test_data_price_sanity.py" > /dev/null; then
+            pytest --cov=brutex.data.price_sanity --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_price_sanity.py
+          else
+            echo "(brutex.data.price_sanity test file not present yet — gate inactive)"
+          fi
           # DEC-FNO-CANDLE-LAKE-001: the canonical F&O contract-symbol parser + the
           # F&O candle logical-table descriptor/schema_meta registration — pure,
           # stdlib-only, standalone-gateable at 100% line+branch.

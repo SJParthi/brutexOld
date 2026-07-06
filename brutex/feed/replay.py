@@ -250,7 +250,10 @@ class ReplayFeed:
             start=self._start,
             end=self._end,
         )
-        return arrow_table_to_bars(table)
+        return arrow_table_to_bars(
+            table,
+            source=f"{self._exchange}/{self._segment}/{symbol}/{self._interval}",
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -258,7 +261,7 @@ class ReplayFeed:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def arrow_table_to_bars(table: pa.Table) -> list[CandleBar]:
+def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[CandleBar]:
     """Materialise a ``pyarrow.Table`` of canonical bars into ``list[CandleBar]``.
 
     The table must have the canonical 7-column schema emitted by
@@ -271,6 +274,36 @@ def arrow_table_to_bars(table: pa.Table) -> list[CandleBar]:
     CLAUDE.md §11 COMMON, ``DEC-MOVERS-DASHBOARD-PAGE-001``): this is the single
     source of truth for the Arrow → :class:`CandleBar` conversion, reused by the
     lake-reading screener paths — no copy-paste of the conversion.
+
+    Validation (DEC-STORED-DATA-VALIDATION-001): this is the ENGINE READ
+    BOUNDARY (``ReplayFeed._load_bars`` → ``Catalog.get_bars`` → Stage-1A /
+    run identity), so it — NOT the general-purpose :class:`CandleBar`
+    constructor — enforces price POSITIVITY (every OHLC price ``> 0``) on top
+    of the constructor's ordering / ``volume >= 0`` invariants. A corrupt
+    stored bar (e.g. a legacy pre-#912 partition holding an internally-ordered
+    NEGATIVE bar the round-2 audit reproduced as a day_low of −1000) can never
+    silently enter the engine: a non-positive price OR an ordering violation
+    raises a LOUD :class:`ValueError` naming *source* (the partition
+    coordinates, when the caller knows them) plus the offending bar's
+    timestamp — the graceful per-symbol error surface the ingest/prebuild
+    quarantines already handle. Positivity is checked HERE rather than in the
+    constructor because the bar container is legitimately used to hold a
+    non-positive price for downstream corrupt-input classification (the Greeks
+    ``BAD_INPUT`` path, the executor ``require_tradeable_price`` guard, the
+    Rust trade-sim out-of-envelope fallback) — see
+    :func:`brutex.data.models._validate_price_bar`. Cost stays O(1)/bar: four
+    fixed comparisons per row plus the constructor's own; the ``try``/``except``
+    wrapper is zero-cost on the non-raising path (CPython 3.11+ exception tables).
+
+    Parameters
+    ----------
+    table
+        The canonical 7-column bar table.
+    source
+        Optional human-readable origin (e.g.
+        ``"NSE/INDEX/NSE-NIFTY/1minute"``) woven into the corrupt-bar error
+        so the operator can locate the poisoned partition. ``None`` keeps
+        the bare per-bar message.
     """
     if table.num_rows == 0:
         return []
@@ -283,20 +316,42 @@ def arrow_table_to_bars(table: pa.Table) -> list[CandleBar]:
     volumes: list[int] = table.column("volume").to_pylist()
     open_interests: list[int | None] = table.column("open_interest").to_pylist()
 
-    return [
-        CandleBar(
-            timestamp=ts,
-            open=Decimal(str(o)),
-            high=Decimal(str(h)),
-            low=Decimal(str(lo)),
-            close=Decimal(str(c)),
-            volume=int(v),
-            open_interest=int(oi) if oi is not None else None,
-        )
-        for ts, o, h, lo, c, v, oi in zip(
-            timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
-        )
-    ]
+    bars: list[CandleBar] = []
+    for ts, o, h, lo, c, v, oi in zip(
+        timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
+    ):
+        origin = f" in {source}" if source is not None else ""
+        # Engine-boundary POSITIVITY (DEC-STORED-DATA-VALIDATION-001): checked
+        # BEFORE construction so an internally-ORDERED all-negative bar (which
+        # the ordering-only constructor would accept) is refused with the real
+        # defect named, never laundered into Stage-1A / run identity.
+        for price_name, price in (("open", o), ("high", h), ("low", lo), ("close", c)):
+            if price <= 0:
+                raise ValueError(
+                    f"corrupt stored bar{origin} at timestamp {ts!r}: "
+                    f"{price_name}={price} is a non-positive price (a traded Indian "
+                    f"price is never <= 0) — refusing to serve corrupt data to the "
+                    f"engine (DEC-STORED-DATA-VALIDATION-001)"
+                )
+        try:
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(o)),
+                    high=Decimal(str(h)),
+                    low=Decimal(str(lo)),
+                    close=Decimal(str(c)),
+                    volume=int(v),
+                    open_interest=int(oi) if oi is not None else None,
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"corrupt stored bar{origin} at timestamp {ts!r}: {exc} — "
+                f"refusing to serve corrupt data to the engine "
+                f"(DEC-STORED-DATA-VALIDATION-001)"
+            ) from exc
+    return bars
 
 
 __all__ = [

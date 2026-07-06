@@ -60,11 +60,15 @@ def _build_lake(lake: Path) -> list[GreeksEnrichTarget]:
     from brutex.data.sink import ParquetBarSink
 
     def bar(ts: datetime, close: str, *, oi: int | None) -> CandleBar:
+        # Tick-floored low (DEC-STORED-DATA-VALIDATION-001): `close - 2` on the
+        # 1.05 at-expiry premium fabricated a NEGATIVE low the price-positivity
+        # gate now refuses; low is not a Greeks input, so the parallel-vs-
+        # sequential byte-identity oracle is unaffected.
         return CandleBar(
             timestamp=ts,
             open=Decimal(close),
             high=Decimal(close) + 2,
-            low=Decimal(close) - 2,
+            low=max(Decimal(close) - 2, Decimal("0.05")),
             close=Decimal(close),
             volume=7,
             open_interest=oi,
