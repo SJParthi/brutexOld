@@ -1,0 +1,181 @@
+# soak-selfhosted.yml — The REAL multi-hour soak on the self-hosted M4-Pro runner.
+#
+# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1512)
+# ------------------------------------------------------
+# The nightly `stress-nightly.yml` runs on GitHub-hosted `ubuntu-24.04` with a
+# FIXED 60-minute job timeout — which STRUCTURALLY forbids a real multi-hour
+# soak from ever completing (a 10M-event dispatch linearly extrapolates to
+# ~16.7 h and self-kills at 60 min, ~1/17th done; see the honest #208 rewrite).
+# This workflow is the tier where a genuine hours-long soak actually RUNS: on
+# the operator's registered self-hosted Apple M4-Pro (CLAUDE.md §8), with a job
+# timeout DERIVED from the requested duration so it can never outrun its own
+# clock. It drives `tests/stress/test_soak_sustained.py::test_soak_sustained`
+# (the `soak` marker) for the full `STRESS_DURATION_S`, feeding each time window
+# to the pure `brutex.observability.soak_drift.SoakDriftMonitor` (RSS ceiling /
+# fd growth / p99 latency drift). The failure signal is AUTOMATIC (CLAUDE.md §11):
+# the in-process monitor fires a CRITICAL `SweepAlerter.soak_drift` Telegram alert
+# the INSTANT a rule edges into breach (trigger-independent), AND a breach fails
+# the pytest run so the "open issue on failure" step files a tracked issue.
+#
+# RUNNER + TRIGGER PRECEDENT (verify-m4pro.yml / bench-m4pro.yml)
+# --------------------------------------------------------------
+# `runs-on: [self-hosted, macos, m4pro]`, NO `pull_request` trigger — a runner
+# that is offline (the Mac asleep) would otherwise hang a PR's mergeable state.
+# It runs on a weekly cron + manual dispatch, where a perpetually-queued run is
+# harmless. A queue-age watchdog for an unregistered runner is a named follow-up
+# in ADR-0017 (NOT built here).
+#
+# HONEST ENVELOPE (Golden Rule #10)
+# ---------------------------------
+# This is NOT a claim that a 24h run happens in PR CI. The PR/ubuntu tiers verify
+# the drift LOGIC (100% line+branch on synthetic series) + a FEW-SECOND real
+# driver run; only THIS scheduled self-hosted job runs the multi-hour wall-clock,
+# and only for the `soak_minutes` you dispatch. The default weekly cron soaks for
+# 6 h (`soak_minutes` default 360). ru_maxrss on macOS is a PEAK not a slope, so
+# the RSS rule is an absolute ceiling backstop, not a growth gate (see
+# process_probe.py).
+
+name: Real soak (self-hosted M4-Pro)
+
+on:
+  schedule:
+    # Weekly Sunday 02:00 UTC = 07:30 IST — the PRIMARY real soak run.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      soak_minutes:
+        description: "Soak wall-clock minutes (job timeout is this + 30)"
+        required: false
+        default: "360"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Cargo network resilience (CI-only flake hardening) — see ci.yml. Pure
+  # download-retry; changes nothing about what is built or run.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  soak:
+    name: Real multi-hour soak (drift-gated)
+    # Gated to the registered self-hosted M4-Pro. If no runner with this label
+    # set is online the job sits "queued" indefinitely — harmless (no PR to
+    # block). Same precedent as verify-m4pro.yml / bench-m4pro.yml.
+    runs-on: [self-hosted, macos, m4pro]
+    # SELF-KILL FIX (DEC-SOAK-REAL-TIER-001): the job timeout is DERIVED from the
+    # requested duration (+30 min for install/teardown), NOT a fixed 60. A
+    # scheduled run reads the '360' default → 390. This is the structural fix for
+    # the #208 trap where a soak could never fit its own fixed-60 timeout.
+    timeout-minutes: ${{ fromJSON(github.event.inputs.soak_minutes || '360') + 30 }}
+
+    env:
+      PYTHONHASHSEED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Show runner identity (real hardware proof)
+        run: |
+          echo "Runner: $(uname -a)"
+          echo "Soak minutes: ${{ github.event.inputs.soak_minutes || '360' }}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install deps
+        run: pip install -e ".[dev,data]"
+
+      - name: Install Rust toolchain (for fno_math wheel)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install fno_math Rust extension
+        # Belt-and-suspenders crates.io flake guard (reused from stress-nightly.yml).
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # The engine stress tests import trading_core; mirror the main CI + the
+        # stress-nightly install so the `soak` selection collects.
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Run soak (drift-gated)
+        # G2 belt-and-suspenders: the SAME derived bound is ALSO applied as a
+        # per-step timeout, so even if the job-level expression silently
+        # no-op'd the run still cannot outrun `soak_minutes + 30`.
+        timeout-minutes: ${{ fromJSON(github.event.inputs.soak_minutes || '360') + 30 }}
+        env:
+          # DYNAMIC duration knob: minutes → seconds for STRESS_DURATION_S, which
+          # test_soak_sustained honours. `-m 'stress or soak'` selects the short
+          # nightly driver AND the full sustained soak.
+          STRESS_DURATION_S: ${{ fromJSON(github.event.inputs.soak_minutes || '360') * 60 }}
+        run: |
+          echo "Soaking for STRESS_DURATION_S=$STRESS_DURATION_S seconds"
+          pytest tests/stress -m 'stress or soak' --tb=short
+
+      - name: Upload soak drift artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-drift-logs
+          path: |
+            /tmp/pytest-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Open issue on failure
+        # A soak failure (a drift breach OR a timeout-kill) must never be
+        # eyeball-only (CLAUDE.md §11 AUTOMATED). Unlike stress-nightly's
+        # schedule-only gate, this fires on BOTH schedule AND a manual dispatch,
+        # so a manually-launched soak's failure is also tracked. Dedup-by-title
+        # (COMMON, reused from safety.yml / stress-nightly.yml).
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = `soak-selfhosted: failure on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,soak',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `Real soak failed on ${context.sha} (drift breach or timeout). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). A drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time.`,
+              labels: ['bug', 'soak', 'critical'],
+            });
