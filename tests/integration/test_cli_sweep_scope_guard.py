@@ -127,8 +127,15 @@ class TestRefusalCarriesTheCorpActionRationale:
     def test_in_scope_symbol_proceeds_to_no_bars_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # NIFTY passes the gate; the empty lake then yields the EXISTING
-        # honest no-bars user error (the extension changed nothing in scope).
+        # NIFTY passes the gate; the EXISTING bar-less lake (dir + empty
+        # catalog at sweep's default <lake>/catalog.duckdb, so the read
+        # guards of DEC-CLI-USER-ERROR-HYGIENE-001 pass) then yields the
+        # EXISTING honest no-bars user error (the extension changed nothing
+        # in scope).
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        with Catalog.open(lake / "catalog.duckdb"):
+            pass
         rc = main(_sweep_argv("NIFTY", tmp_path))
         assert rc == EXIT_USER_ERROR
         err = capsys.readouterr().err
@@ -260,8 +267,11 @@ class TestSweepVerifyRecountGate:
     ) -> None:
         # --allow-out-of-scope lets the legacy out-of-scope recount through
         # the scope gate LOUDLY (override WARNING + the hazard structlog
-        # event); the empty lake then hits the existing no-bars error INSIDE
-        # the recount tier — proving the launch got past the gate.
+        # event); the EXISTING bar-less lake dir (so the recount's
+        # DEC-CLI-USER-ERROR-HYGIENE-001 lake guard passes) then hits the
+        # existing no-bars error INSIDE the recount tier — proving the
+        # launch got past the gate.
+        (tmp_path / "lake").mkdir()
         with capture_logs() as logs:
             rc = main(_sweep_verify_argv("INDIAVIX", tmp_path, recount=True, override=True))
         captured = capsys.readouterr()
@@ -290,8 +300,11 @@ class TestSweepVerifyRecountGate:
     def test_recount_in_scope_proceeds_past_the_gate(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # NIFTY passes the gate; the empty lake then hits the EXISTING honest
-        # "no bars for any" user error INSIDE the recount tier.
+        # NIFTY passes the gate; the EXISTING bar-less lake dir (so the
+        # recount's DEC-CLI-USER-ERROR-HYGIENE-001 lake guard passes) then
+        # hits the EXISTING honest "no bars for any" user error INSIDE the
+        # recount tier.
+        (tmp_path / "lake").mkdir()
         rc = main(_sweep_verify_argv("NIFTY", tmp_path, recount=True, override=False))
         assert rc == EXIT_USER_ERROR
         err = capsys.readouterr().err
