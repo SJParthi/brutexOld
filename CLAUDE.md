@@ -374,7 +374,7 @@ hostile-review pass._
   mixed batches — no new recall invented). STRICTLY row-removing/row-reassigning — never value-editing. Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (426/142) + `option_parquet_writer.py`
-  (141/24) + `lake_heal.py` (595/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  (141/24) + `lake_heal.py` (588/162) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
