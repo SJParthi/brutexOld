@@ -63,6 +63,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.data import lake_stats_manifest as lsm
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar, OptionBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
 from brutex.data.parquet_writer import ParquetWriter
@@ -962,8 +963,12 @@ class TestSeedAborts:
             assert self._seed(rigged, tmp_path) is False
         assert _seed_skip_reasons(logs) == ["no_bounds"]
 
-    def test_empty_parquet_file_aborts_file_set(self, conn: Any, tmp_path: Path) -> None:
-        """A ZERO-row month file yields no group → seen != rels → abort."""
+    def test_empty_parquet_file_aborts_with_distinct_reason(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """A ZERO-row month file yields no group → the DISTINCT ``empty_file``
+        abort reason (the file is still present + unmoved — a PERMANENT
+        out-of-band condition, never a transient set change)."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -973,6 +978,54 @@ class TestSeedAborts:
         pq.write_table(empty, base / "2024" / "02.parquet")
         with capture_logs() as logs:
             assert self._seed(conn, tmp_path) is False
+        assert _seed_skip_reasons(logs) == ["empty_file"]
+
+    def test_missing_group_row_with_moved_file_is_file_set_changed(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """A rel with no group row whose token MOVED mid-scan stays the
+        transient ``file_set_changed`` reason — never mislabelled permanent."""
+        _write_months(tmp_path, ((2024, 1), (2024, 2)))
+        base = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, _COORDS)
+        jan = (
+            str(base / "2024" / "01.parquet"),
+            20,
+            datetime(2024, 1, 5, 4, 0, tzinfo=UTC),
+            datetime(2024, 1, 8, 4, 19, tzinfo=UTC),
+        )
+        # The canned grouped result DROPS February's row while the rig touches
+        # the February file during the scan: missing + moved ⇒ transient.
+        rig = _MutatingConn(
+            _CannedConn(rows=[jan]),
+            trigger=lambda sql, p: "GROUP BY filename" in sql,
+            side_effect=lambda: _touch(base / "2024" / "02.parquet"),
+        )
+        with capture_logs() as logs:
+            assert self._seed(rig, tmp_path) is False
+        assert rig.fired
+        assert _seed_skip_reasons(logs) == ["file_set_changed"]
+
+    def test_missing_group_row_with_vanished_file_is_file_set_changed(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """A rel with no group row whose file VANISHED mid-scan (the re-stat
+        raises) is likewise the transient ``file_set_changed`` reason."""
+        _write_months(tmp_path, ((2024, 1), (2024, 2)))
+        base = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, _COORDS)
+        jan = (
+            str(base / "2024" / "01.parquet"),
+            20,
+            datetime(2024, 1, 5, 4, 0, tzinfo=UTC),
+            datetime(2024, 1, 8, 4, 19, tzinfo=UTC),
+        )
+        rig = _MutatingConn(
+            _CannedConn(rows=[jan]),
+            trigger=lambda sql, p: "GROUP BY filename" in sql,
+            side_effect=(base / "2024" / "02.parquet").unlink,
+        )
+        with capture_logs() as logs:
+            assert self._seed(rig, tmp_path) is False
+        assert rig.fired
         assert _seed_skip_reasons(logs) == ["file_set_changed"]
 
     def test_file_deleted_during_scan_aborts_post_stat(self, conn: Any, tmp_path: Path) -> None:
@@ -1010,6 +1063,143 @@ class TestSeedAborts:
         assert stats.row_count == 40
         assert [row.rel for row in stats.files] == ["2024/01.parquet", "2024/02.parquet"]
         assert all(row.raw_hash is None for row in stats.files)
+
+    def test_lake_write_halt_is_caught_on_the_read_thread(
+        self, conn: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A disk-full LakeWriteHalt during the write-behind seed must NOT
+        escape into the /db READ request (the routes catch only ValueError —
+        an uncaught halt 500s a read-only paging click). The seed is skipped
+        with the halt's reason; the payload is the legacy answer. The WRITE
+        hooks' LakeWriteHalt propagation stays pinned separately
+        (tests/unit/test_lake_stats_manifest.py)."""
+
+        def _halt(*args: Any, **kwargs: Any) -> bool:
+            raise LakeWriteHalt("disk_full")
+
+        monkeypatch.setattr(db_view, "seed_dataset_stats", _halt)
+        _write_months(tmp_path, ((2024, 1),))
+        legacy = _q(conn, tmp_path, use=False)
+        with capture_logs() as logs:
+            served = _q(conn, tmp_path, use=True)  # must not raise
+        assert served == legacy
+        assert "disk_full" in _seed_skip_reasons(logs)
+        assert not _shard_path(tmp_path).exists()
+
+
+# ── seed-attempt latch: a rejected seed runs at most once per generation ────────────
+
+
+def _grouped_seed_scans(rec: _RecordingConn) -> int:
+    """Count the seed's ``GROUP BY filename`` full-dataset scans in a trace."""
+    return sum(1 for sql, _src in rec.sources if "GROUP BY filename" in sql)
+
+
+def _plant_foreign_month_copy(root: Path) -> None:
+    """Copy January's partition to a March rel — the G-RACE-1 poison class.
+
+    The seed measures the copy's REAL January bounds, which violate the
+    ``2024/03.parquet`` rel month, so ``seed_dataset_stats`` REJECTS every
+    seed attempt until ``lake_heal`` rewrites the partition.
+    """
+    dataset = lsm.dataset_dir(root, lsm.KIND_BARS, _COORDS)
+    src = dataset / "2024" / "01.parquet"
+    (src.parent / "03.parquet").write_bytes(src.read_bytes())
+
+
+class TestSeedAttemptLatch:
+    """A FAILED seed attempt is latched per (dataset, generation) — the doomed
+    O(dataset-rows) grouped scan never repays on every paging click."""
+
+    def test_rejected_seed_runs_at_most_once_per_generation(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        _write_months(tmp_path, ((2024, 1), (2024, 2)))
+        _plant_foreign_month_copy(tmp_path)
+        cache = MoversSnapshotCache()
+        legacy = _q(conn, tmp_path, use=False)
+        rec_first = _RecordingConn(conn)
+        with capture_logs() as first_logs:
+            first = _q(rec_first, tmp_path, use=True, count_cache=cache, generation=7)
+        assert first == legacy
+        assert _grouped_seed_scans(rec_first) == 1, "the first click pays the seed scan once"
+        assert any(e["event"] == "lake.stats_manifest.seed_rejected" for e in first_logs)
+        # Repeat clicks at the SAME generation: the latch skips the doomed
+        # scan — the legacy page/count still serve the honest numbers.
+        for offset in (0, 4, 9):
+            rec = _RecordingConn(conn)
+            with capture_logs() as logs:
+                again = _q(rec, tmp_path, use=True, count_cache=cache, generation=7, offset=offset)
+            assert again == _q(conn, tmp_path, use=False, offset=offset)
+            assert _grouped_seed_scans(rec) == 0, "a latched dataset must never rescan"
+            assert not any(e["event"] == "lake.stats_manifest.seed_rejected" for e in logs), (
+                "the rejection WARNING must not repeat per click"
+            )
+            assert "attempt_blocked" in _seed_skip_reasons(logs)
+
+    def test_generation_bump_reattempts_the_seed(self, conn: Any, tmp_path: Path) -> None:
+        """A pull/heal bumps the generation — the blocked dataset re-attempts
+        (a healed partition would now seed; the poison here still rejects)."""
+        _write_months(tmp_path, ((2024, 1),))
+        _plant_foreign_month_copy(tmp_path)
+        cache = MoversSnapshotCache()
+        rec_a = _RecordingConn(conn)
+        _q(rec_a, tmp_path, use=True, count_cache=cache, generation=1)
+        rec_b = _RecordingConn(conn)
+        _q(rec_b, tmp_path, use=True, count_cache=cache, generation=1)
+        rec_c = _RecordingConn(conn)
+        _q(rec_c, tmp_path, use=True, count_cache=cache, generation=2)
+        assert _grouped_seed_scans(rec_a) == 1
+        assert _grouped_seed_scans(rec_b) == 0
+        assert _grouped_seed_scans(rec_c) == 1, "a generation bump re-enables the seed"
+
+    def test_successful_seed_never_blocks_the_reseed_contract(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """An out-of-band invalidation WITHIN one generation still reseeds —
+        only a FAILED attempt latches (the fallback→reseed healing contract)."""
+        _write_months(tmp_path, ((2024, 1), (2024, 2)))
+        cache = MoversSnapshotCache()
+        _q(conn, tmp_path, use=True, count_cache=cache, generation=5)  # clean seed
+        assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=_COORDS)
+        _touch(lsm.dataset_dir(tmp_path, lsm.KIND_BARS, _COORDS) / "2024" / "01.parquet")
+        with capture_logs() as logs:
+            _q(conn, tmp_path, use=True, count_cache=cache, generation=5)
+        assert "stat_token" in _fallback_clauses(logs)
+        assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=_COORDS), (
+            "the same-generation reseed must have healed the shard"
+        )
+
+    def test_count_cache_none_attempts_every_click(self, conn: Any, tmp_path: Path) -> None:
+        """The pure default has no latch state — behaviour-identical to before."""
+        _write_months(tmp_path, ((2024, 1),))
+        _plant_foreign_month_copy(tmp_path)
+        for _ in range(2):
+            rec = _RecordingConn(conn)
+            _q(rec, tmp_path, use=True)
+            assert _grouped_seed_scans(rec) == 1
+
+    def test_options_rejected_seed_latches_too(self, conn: Any, tmp_path: Path) -> None:
+        """The options pager rides the SAME latch helper."""
+        _write_option_months(tmp_path)
+        series_dir = tmp_path / "options" / _OPT_SERIES
+        src = series_dir / "2024-03.parquet"
+        (series_dir / "2024-05.parquet").write_bytes(src.read_bytes())  # foreign-month copy
+        cache = MoversSnapshotCache()
+        rec_a = _RecordingConn(conn)
+        _qopt(rec_a, tmp_path, use=True, count_cache=cache, generation=3)
+        rec_b = _RecordingConn(conn)
+        _qopt(rec_b, tmp_path, use=True, count_cache=cache, generation=3)
+        assert _grouped_seed_scans(rec_a) == 1
+        assert _grouped_seed_scans(rec_b) == 0
+
+    def test_seed_key_is_disjoint_per_kind_and_coords(self) -> None:
+        spot = db_view._stats_seed_key(lsm.KIND_BARS, _COORDS)
+        other = db_view._stats_seed_key(lsm.KIND_BARS, {**_COORDS, "interval": "1day"})
+        opt = db_view._stats_seed_key(lsm.KIND_OPTIONS, {"series": _OPT_SERIES})
+        assert spot.startswith("statseed|bars|")
+        assert opt.startswith("statseed|options|")
+        assert len({spot, other, opt}) == 3
 
 
 # ── whitebox: the small helpers, branch by branch ───────────────────────────────────
@@ -1269,3 +1459,7 @@ class TestProvenanceEvent:
         reads = [e for e in logs if e["event"] == "db.stats_manifest.read"]
         assert [e["page_source"] for e in reads] == ["live_scan", "manifest"]
         assert [e["validated"] for e in reads] == [False, True]
+        # Emitted at INFO (production logging defaults to INFO): an operator
+        # must be able to POSITIVELY confirm the manifest path is being taken
+        # — a DEBUG-only event made the healthy path invisible in production.
+        assert [e["log_level"] for e in reads] == ["info", "info"]

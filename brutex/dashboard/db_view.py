@@ -62,6 +62,7 @@ from brutex.adapters.groww.constants import (
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
@@ -89,6 +90,7 @@ from brutex.data.lake_stats_manifest import (
     parse_rel_month,
     scan_dataset_rels,
     seed_dataset_stats,
+    stat_token,
     stats_manifest_enabled,
 )
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
@@ -1911,6 +1913,10 @@ _STATS_FALLBACK_EVENT: Final[str] = "lake.stats_manifest.fallback"
 
 #: Per-request provenance event (the #1145 stored-first honesty pattern):
 #: names whether the page was manifest-served or ran the legacy live scan.
+#: Emitted at INFO — production logging defaults to INFO, and an operator must
+#: be able to POSITIVELY confirm the O(page-files) path is being taken (a
+#: DEBUG-only event made a healthy manifest-served page invisible while only
+#: fallbacks surfaced — the silent-degradation gap in reverse).
 _STATS_READ_EVENT: Final[str] = "db.stats_manifest.read"
 
 #: Read-side seed skipped/aborted event (best-effort — never an error).
@@ -2342,9 +2348,15 @@ def _seed_stats_manifest(
     non-month file, unreadable file, empty file, or unexpected result shape
     aborts the seed (logged ``db.stats_manifest.seed_skipped``; the dataset
     simply stays legacy-served — never a wrong shard). Never raises into the
-    request; the seeded rows carry ``raw_hash=None`` (forensics-only field —
-    hashing every partition would defeat the point; the next writer upsert
-    restamps its file's hash).
+    request — INCLUDING a :class:`~brutex.data.errors.LakeWriteHalt` from the
+    shard-lock ``.locks/`` creation on a full disk: this runs on the /db READ
+    request thread, where there is no pull to halt and the viewer's pinned
+    contract is "never a 500", so the halt is caught here, logged
+    (``db.stats_manifest.seed_skipped`` with the halt's reason), and the seed
+    is simply skipped (the WRITE hooks' LakeWriteHalt propagation is
+    untouched — a full disk still halts the pull). The seeded rows carry
+    ``raw_hash=None`` (forensics-only field — hashing every partition would
+    defeat the point; the next writer upsert restamps its file's hash).
 
     Returns
     -------
@@ -2417,12 +2429,28 @@ def _seed_stats_manifest(
             )
         )
     if seen != set(rels):
+        # A rel with NO group row either held ZERO identity rows (an
+        # out-of-band 0-row parquet — the production writers never render an
+        # empty partition) or vanished/moved mid-scan. Distinguish them by
+        # re-statting the missing rels against the pre-scan tokens: all
+        # present + unmoved ⇒ the PERMANENT ``empty_file`` condition (the
+        # dataset stays legacy-served until the file is removed), anything
+        # moved ⇒ the transient ``file_set_changed``.
+        missing = sorted(set(rels) - seen)
+
+        def _rel_unmoved(rel: str) -> bool:
+            try:
+                return stat_token(os.stat(base / rel)) == stat_token(pre[rel])
+            except OSError:
+                return False
+
+        unmoved = all(_rel_unmoved(rel) for rel in missing)
         _LOG.info(
             _STATS_SEED_SKIPPED_EVENT,
             kind=kind,
             key=key,
-            reason="file_set_changed",
-            missing=sorted(set(rels) - seen),
+            reason="empty_file" if unmoved else "file_set_changed",
+            missing=missing,
         )
         return False
     for rel in rels:
@@ -2441,7 +2469,86 @@ def _seed_stats_manifest(
         if post.st_mtime_ns != pre[rel].st_mtime_ns or post.st_size != pre[rel].st_size:
             _LOG.info(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="file_moved", rel=rel)
             return False
-    return seed_dataset_stats(lake_root, kind=kind, key=key, files=rows)
+    try:
+        return seed_dataset_stats(lake_root, kind=kind, key=key, files=rows)
+    except LakeWriteHalt as exc:
+        # ``seed_dataset_stats`` deliberately lets a LakeWriteHalt from the
+        # shard-lock ``.locks/`` creation PROPAGATE (correct for the WRITE
+        # hooks — a full disk must halt the pull). This caller runs on the
+        # /db READ request thread where there is NO pull to halt and the
+        # routes catch only ValueError, so an uncaught halt would 500 a
+        # read-only paging click (pre-manifest, /db reads performed zero lake
+        # writes — this class could never surface). Skip the write-behind
+        # seed instead: the dataset simply stays legacy-served.
+        _LOG.warning(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason=exc.reason)
+        return False
+
+
+def _stats_seed_key(kind: str, key: Mapping[str, str]) -> str:
+    """Build the per-dataset cache key for the seed-attempt latch. O(1).
+
+    Keyed on the dataset coordinates ONLY — never bounds / paging (the seed is
+    bounds-invariant, so one latch covers every click on the dataset); the
+    ``statseed|`` prefix keeps it disjoint from the count / span /
+    star-projection keys sharing the SAME injected cache.
+    """
+    token = "|".join(key[name] for name in sorted(key))
+    return f"statseed|{kind}|{token}"
+
+
+def _seed_stats_once(
+    conn: Any,
+    lake_root: Path,
+    *,
+    kind: str,
+    key: dict[str, str],
+    base: Path,
+    identity: tuple[str, ...],
+    count_cache: CandleCountCache | None,
+    generation: int,
+) -> bool:
+    """Run the write-behind seed behind a FAILED-attempt latch per generation.
+
+    The raw seed (:func:`_seed_stats_manifest`) pays one full O(dataset-rows)
+    grouped scan. For a dataset whose seed is REJECTED every time — a
+    foreign-month-poisoned partition awaiting ``lake_heal`` (the G-RACE-1
+    class), an out-of-band 0-row parquet, a corrupt file — an unlatched caller
+    would repay that doomed scan on EVERY paging click: a permanent ~2×
+    per-click regression on exactly the datasets the manifest honestly
+    disables itself for, contradicting the "pays today's price ONCE" law. So
+    the production path (injected *count_cache*) memoises a small MUTABLE
+    latch per ``(dataset, generation)``: the FIRST failed attempt flips it and
+    every later click within the generation skips the seed outright (one
+    ``db.stats_manifest.seed_skipped`` ``reason="attempt_blocked"`` DEBUG
+    event — the rejection itself was already logged loudly by that first
+    attempt). A SUCCESSFUL seed never blocks, so an out-of-band invalidation
+    within the SAME generation still falls back and reseeds (the
+    fallback→reseed healing contract, integration-pinned); the generation
+    bump after any pull/heal re-enables a blocked dataset (a healed partition
+    is re-attempted naturally). Best-effort envelope: an LRU eviction of the
+    latch merely re-attempts once — never a wrong number, only a scan.
+    ``count_cache=None`` (the pure default) attempts every time —
+    behaviour-identical to before (the purity contract; the production /db
+    routes always inject the cache).
+    """
+
+    def _attempt() -> bool:
+        return _seed_stats_manifest(
+            conn, lake_root, kind=kind, key=key, base=base, identity=identity
+        )
+
+    if count_cache is None:
+        return _attempt()
+    latch: dict[str, bool] = count_cache.get_or_compute(
+        _stats_seed_key(kind, key), generation=generation, compute=lambda: {"blocked": False}
+    )
+    if latch.get("blocked"):
+        _LOG.debug(_STATS_SEED_SKIPPED_EVENT, kind=kind, key=key, reason="attempt_blocked")
+        return False
+    seeded = _attempt()
+    if not seeded:
+        latch["blocked"] = True
+    return seeded
 
 
 class CandleCountCache(Protocol):
@@ -2807,7 +2914,7 @@ def query_candles(
             # computed and the generation bump remains its invalidation).
             total = _legacy_count_total()
     if stats_ctx is not None:
-        _LOG.debug(
+        _LOG.info(
             _STATS_READ_EVENT,
             kind=KIND_BARS,
             symbol=symbol,
@@ -2916,14 +3023,19 @@ def query_candles(
         # Read-side write-behind seed (the ONLY seeding mechanism, lazy
         # accretion): the shard was absent/invalid and the legacy scan just
         # answered this request — rebuild it best-effort so the NEXT click is
-        # manifest-served. Never raises; any anomaly aborts the seed.
-        _seed_stats_manifest(
+        # manifest-served. Never raises; any anomaly aborts the seed, and a
+        # FAILED attempt is latched per (dataset, generation) so a
+        # permanently-unseedable dataset never repays the grouped scan on
+        # every click (see _seed_stats_once).
+        _seed_stats_once(
             conn,
             lake_root,
             kind=KIND_BARS,
             key={"exchange": exchange, "segment": segment, "symbol": symbol, "interval": interval},
             base=base,
             identity=("timestamp",),
+            count_cache=count_cache,
+            generation=generation,
         )
     applied_range = resolve_applied_range(
         is_fno=is_fno,
@@ -4030,7 +4142,7 @@ def query_option_candles(
             # degraded page (see query_candles).
             total = _legacy_count_total()
     if stats_ctx is not None:
-        _LOG.debug(
+        _LOG.info(
             _STATS_READ_EVENT,
             kind=KIND_OPTIONS,
             series=series,
@@ -4083,14 +4195,17 @@ def query_option_candles(
     else:
         stored_start_ist, stored_end_ist = (None, None)
     if stats_ctx is not None and stats_ctx.should_seed:
-        # Read-side write-behind seed — the options twin (see query_candles).
-        _seed_stats_manifest(
+        # Read-side write-behind seed — the options twin (see query_candles);
+        # same failed-attempt latch per (dataset, generation).
+        _seed_stats_once(
             conn,
             lake_root,
             kind=KIND_OPTIONS,
             key={"series": series},
             base=base,
             identity=("side", "timestamp"),
+            count_cache=count_cache,
+            generation=generation,
         )
     return {
         "series": series,

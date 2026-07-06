@@ -172,7 +172,15 @@ STATS_LOCK_TIMEOUT_S: Final[float] = 5.0
 #: :func:`resolve_stats_lock_timeout_seconds` (blank / non-numeric / ``nan`` /
 #: ``inf`` / non-positive raise :class:`ValueError`), unlike the silently
 #: defaulting partition-lock env: a misconfigured stats knob must be seen, not
-#: absorbed.
+#: absorbed. DEADLINE-ORDERING CAUTION: the override is NOT clamped against the
+#: 90 s ``GROWW_WRITE_DEADLINE_S`` write deadline (importing the adapter
+#: constant here would break this module's leaf discipline) — the pinned
+#: ordering law (:data:`STATS_LOCK_TIMEOUT_S` + the 75 s partition acquire
+#: strictly inside 90 s) holds for the DEFAULTS only, so a large override
+#: (e.g. ``120``) plus a wedged shard flock can push a viewed dataset's write
+#: past the deadline into the fail-safe ``WriteDeadlineExceeded`` defer loop
+#: (window deferred + re-pulled, never corruption). Keep any override well
+#: under ``90 − 75 = 15`` seconds.
 STATS_LOCK_TIMEOUT_ENV: Final[str] = "BRUTEX_STATS_LOCK_TIMEOUT_S"
 
 #: Kill-switch environment variable. Set to :data:`STATS_MANIFEST_OFF`
@@ -212,6 +220,15 @@ _BEST_EFFORT_ERRORS: Final[tuple[type[BaseException], ...]] = (
 )
 
 _MONTHS_PER_YEAR: Final[int] = 12
+
+#: Cap on the per-rel enumerations a ``file_set`` fallback event carries. The
+#: event fires on EVERY consult while a dataset stays drifted, so an uncapped
+#: stray list (thousands of hand-copied files — exactly the #911-drift class
+#: this clause catches) would inflate every structured log line to ~100 KB+
+#: (a log-volume exhaustion vector). Mirrors the repo's capped-enumeration
+#: precedent (option_ingest caps at 20 names; the pipeline headline at 10);
+#: the TRUE totals always ride the ``extra_count`` / ``missing_count`` ints.
+_FALLBACK_REL_LOG_CAP: Final[int] = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +328,19 @@ def resolve_stats_lock_timeout_seconds() -> float:
     quietly falling back, so a misconfigured knob is seen. The write hooks
     catch ``ValueError`` in their best-effort envelope (logged, never raised
     into the pull). O(1).
+
+    DEADLINE ORDERING (documented, deliberately NOT clamped): the shard flock
+    is acquired INSIDE the writer's partition-lock section, which itself runs
+    under the 90 s ``GROWW_WRITE_DEADLINE_S`` wall-clock guard — the pinned
+    ordering law (default :data:`STATS_LOCK_TIMEOUT_S` 5 s + the 75 s
+    partition acquire < 90 s) covers the DEFAULTS only. Clamping the override
+    against the write deadline would require importing the Groww adapter
+    constant, breaking this module's leaf discipline, so an oversized override
+    (e.g. 120 s) is accepted and instead documented: combined with a wedged
+    shard flock it turns a viewed dataset's write into the FAIL-SAFE
+    ``WriteDeadlineExceeded`` defer loop (window deferred + re-pulled — never
+    corruption; the same property the pre-existing partition-lock env carries).
+    Keep any override well under the ``90 − 75 = 15`` second margin.
 
     Raises
     ------
@@ -718,7 +748,14 @@ def _load_shard_with_clause(
         return None, "shard_read"
     try:
         obj = json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
+        # RecursionError: a shard replaced out-of-band with deeply-nested JSON
+        # (e.g. 100k nested arrays) blows the C scanner's recursion limit —
+        # a RuntimeError subclass, OUTSIDE both this handler's old
+        # ``JSONDecodeError`` and the hooks' ``_BEST_EFFORT_ERRORS``
+        # ``ValueError`` net, so without this it would raise into the pull /
+        # 500 the read route. The clause-1 parser exists precisely to fail
+        # CLOSED on arbitrary shard bytes; this input class is no different.
         return None, "parse"
     if not isinstance(obj, dict):
         return None, "parse"
@@ -887,12 +924,20 @@ def load_valid_dataset_stats(
         return None
     stamped = {row.rel for row in stats.files}
     if on_disk != stamped:
+        # Capped enumerations (log-volume exhaustion guard): this event fires
+        # on EVERY consult while the dataset stays drifted, so the rel lists
+        # are bounded at _FALLBACK_REL_LOG_CAP entries; the honest TRUE totals
+        # ride the *_count integers.
+        extra_rels = sorted(on_disk - stamped)
+        missing_rels = sorted(stamped - on_disk)
         _log_fallback(
             kind,
             canonical,
             "file_set",
-            extra=sorted(on_disk - stamped),
-            missing=sorted(stamped - on_disk),
+            extra=extra_rels[:_FALLBACK_REL_LOG_CAP],
+            extra_count=len(extra_rels),
+            missing=missing_rels[:_FALLBACK_REL_LOG_CAP],
+            missing_count=len(missing_rels),
         )
         return None
     for row in stats.files:
@@ -1200,13 +1245,19 @@ def seed_dataset_stats(
     never persisted. EMPTY *files* unlinks any existing shard and returns
     ``False`` (an empty dataset has no shard).
 
-    The final shard is written under the shard flock and loses gracefully to a
-    concurrent writer upsert; a seed FAILURE (lock timeout / ``OSError``)
-    deliberately does NOT unlink an existing shard — the seed is a read-side
-    write-behind and must never clobber a writer's fresher upsert (the
-    reader's per-request validation governs whatever survives). Never raises
-    (:class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation
-    still propagates).
+    The final shard is written under the shard flock, LAST-WRITER-WINS: a
+    concurrent writer upsert that completed BEFORE the seed acquired the flock
+    is overwritten by the seed's (older) snapshot — honestly a clobber, not a
+    graceful loss. That stale state is FAIL-CLOSED, never wrong-numbered: the
+    overwritten upsert's file is either absent from the seeded snapshot
+    (file-set inequality) or carries a moved stat token, so the NEXT read's
+    per-request validation detects it, falls back to the live scan, and
+    reseeds — converging in one extra O(files) cycle. A seed FAILURE (lock
+    timeout / ``OSError``) deliberately does NOT unlink an existing shard —
+    the reader's per-request validation governs whatever survives. Never
+    raises (:class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/``
+    creation still propagates — the read-side caller in ``db_view`` catches
+    it, so a full disk never 500s a ``/db`` read).
 
     Returns
     -------

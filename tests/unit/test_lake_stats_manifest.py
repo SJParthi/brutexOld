@@ -286,7 +286,14 @@ class TestMonthGrammar:
         assert lsm.STATS_IDENTITY_KEYS[lsm.KIND_OPTIONS] == UNIQUE_KEY_OPTIONS
 
     def test_deadline_ordering_pin(self) -> None:
-        """Shard flock + partition acquire stay strictly inside the write deadline."""
+        """Shard flock + partition acquire stay strictly inside the write deadline.
+
+        DEFAULTS ONLY: ``resolve_stats_lock_timeout_seconds`` accepts any
+        finite positive env override (a clamp would need the Groww adapter
+        constant — a leaf-discipline break), so the interaction is DOCUMENTED
+        in the resolver's docstring instead; the doc-pin below keeps that
+        caution from silently drifting away.
+        """
         from brutex.adapters.groww.constants import GROWW_WRITE_DEADLINE_S
         from brutex.data.partition_lock import DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS
 
@@ -294,6 +301,11 @@ class TestMonthGrammar:
             lsm.STATS_LOCK_TIMEOUT_S + DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS
             < GROWW_WRITE_DEADLINE_S
         )
+        # Doc-pin: the resolver must keep naming the write-deadline interaction
+        # its env override is NOT clamped against.
+        doc = lsm.resolve_stats_lock_timeout_seconds.__doc__ or ""
+        assert "GROWW_WRITE_DEADLINE_S" in doc
+        assert "NOT clamped" in doc
 
     def test_dest_rel_options(self) -> None:
         dest = Path("/lake/options/SERIES/2026-07.parquet")
@@ -656,6 +668,20 @@ class TestStructuralClauses:
         stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
         assert stats is None and clause == "parse"
 
+    def test_deep_nested_json_is_parse_clause_not_a_crash(self, tmp_path: Path) -> None:
+        """A shard replaced with deeply-nested JSON raises ``RecursionError``
+        out of ``json.loads`` (a RuntimeError subclass — OUTSIDE the old
+        ``JSONDecodeError`` catch AND the hooks' ValueError net); the parser
+        must fail CLOSED to the ``parse`` clause, never propagate."""
+        shard = _seed_bars(tmp_path)
+        depth = 100_000
+        shard.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is None and clause == "parse"
+        with capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        assert _fallback_clauses(logs) == ["parse"]
+
     def test_old_version(self, tmp_path: Path) -> None:
         _seed_bars(tmp_path)
 
@@ -897,6 +923,26 @@ class TestLoadValidDatasetStats:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         assert _fallback_clauses(logs) == ["file_set"]
 
+    def test_file_set_fallback_rel_lists_are_capped(self, tmp_path: Path) -> None:
+        """The per-consult ``file_set`` event bounds its rel enumerations at
+        ``_FALLBACK_REL_LOG_CAP`` (a drifted dataset with thousands of strays
+        must never inflate every log line to ~100 KB — log-volume exhaustion);
+        the TRUE totals ride the ``extra_count`` / ``missing_count`` ints."""
+        _seed_bars(tmp_path)
+        ddir = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY)
+        n_strays = lsm._FALLBACK_REL_LOG_CAP + 5
+        for i in range(n_strays):
+            (ddir / f"stray{i:04d}.parquet").write_bytes(b"x")
+        with capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        events = [e for e in logs if e["event"] == "lake.stats_manifest.fallback"]
+        assert len(events) == 1 and events[0]["clause"] == "file_set"
+        assert len(events[0]["extra"]) == lsm._FALLBACK_REL_LOG_CAP
+        assert events[0]["extra_count"] == n_strays
+        assert events[0]["missing"] == []
+        assert events[0]["missing_count"] == 0
+        assert events[0]["extra"] == sorted(f"stray{i:04d}.parquet" for i in range(n_strays))[:20]
+
     def test_out_of_band_delete_falls_back(self, tmp_path: Path) -> None:
         _seed_bars(tmp_path)
         (lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY) / "2026" / "07.parquet").unlink()
@@ -1107,6 +1153,19 @@ class TestRecordPartitionStats:
     def test_corrupt_shard_unlinked_never_merged(self, tmp_path: Path) -> None:
         shard = _seed_bars(tmp_path)
         shard.write_text("{corrupt", encoding="utf-8")
+        dest = self._dest(tmp_path)
+        with capture_logs() as logs:
+            assert self._record(tmp_path, dest) is False
+        assert not shard.exists()
+        assert any(e["event"] == "lake.stats_manifest.corrupt_unlinked" for e in logs)
+
+    def test_deep_nested_shard_unlinked_never_raises_into_the_pull(self, tmp_path: Path) -> None:
+        """The RecursionError input class inside the WRITER hook: the module's
+        'NEVER raises into the pull' contract must hold — the shard is
+        treated corrupt (unlink), never merged, never a raw crash."""
+        shard = _seed_bars(tmp_path)
+        depth = 100_000
+        shard.write_text("[" * depth + "]" * depth, encoding="utf-8")
         dest = self._dest(tmp_path)
         with capture_logs() as logs:
             assert self._record(tmp_path, dest) is False
@@ -1427,6 +1486,44 @@ class TestSeedDatasetStats:
         assert any(e["event"] == "lake.stats_manifest.seeded" for e in logs)
         stats = lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
         assert stats is not None and stats.row_count == 42
+
+    def test_seed_overwrites_fresher_shard_last_writer_wins_then_converges(
+        self, tmp_path: Path
+    ) -> None:
+        """The documented LAST-WRITER-WINS clobber (docstring honesty pin): a
+        writer upsert completed BEFORE the seed flock is OVERWRITTEN by the
+        seed's older snapshot — and the very next validated read detects the
+        stale shard (file-set inequality against the on-disk truth) and falls
+        back, so the clobber is fail-closed, never a wrong number."""
+        shard = _seed_bars(tmp_path)  # months 6+7
+        stale_rows = [
+            _row_for(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 6),
+            _row_for(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 7),
+        ]
+        # A concurrent writer lands month 8 + upserts it into the shard.
+        dest = _write_partition(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 8)
+        assert lsm.record_partition_stats(
+            tmp_path,
+            kind=lsm.KIND_BARS,
+            key=BARS_KEY,
+            dest=dest,
+            rows=5,
+            min_ts=_ts(2026, 8, 1),
+            max_ts=_ts(2026, 8, 2),
+            raw_hash=None,
+            stat=os.stat(dest),
+        )
+        # The (stale) seed now acquires the flock and clobbers the upsert.
+        assert lsm.seed_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, files=stale_rows)
+        obj = json.loads(shard.read_text(encoding="utf-8"))
+        assert [row["rel"] for row in obj["files"]] == ["2026/06.parquet", "2026/07.parquet"], (
+            "the seed is last-writer-wins — the upserted month-8 row is clobbered"
+        )
+        # Fail-closed convergence: the stale shard can never be SERVED — the
+        # on-disk month-8 file fails file-set equality on the next consult.
+        with capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        assert _fallback_clauses(logs) == ["file_set"]
 
     def test_write_failure_keeps_existing_shard(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

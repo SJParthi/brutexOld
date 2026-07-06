@@ -41,7 +41,12 @@ probe per write; seeding is read-side only), keyed on the NEW explicit
 switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ byte-identical legacy behavior.
 HONEST: a hit is O(page-files) Parquet work + an O(D) per-consult
 revalidation stat sweep (D = the ONE dataset's month files) — NOT literal
-O(1); the first view per dataset pays today's O(files) once (the seed); a
+O(1); the first view per dataset pays today's O(files) once (the seed), and
+a permanently-REJECTED seed (un-healed poison / 0-row parquet) is LATCHED
+per (dataset, generation) so the doomed scan never repays per click (review
+round 1 — which also caught the read-thread `LakeWriteHalt` 500, the
+RecursionError shard-parse escape, the uncapped fallback rel lists, the
+DEBUG-invisible provenance [now INFO], and the red option-writer CI gate); a
 same-`(mtime_ns,size)` in-place overwrite stays the documented stat-token
 residual. Results-safe — never in run identity / partition bytes /
 `data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
@@ -370,14 +375,26 @@ hostile-review pass._
   behavior change: both pagers' ORDER BY gains the physical `filename, file_row_number` tiebreaker so an options
   CE+PE same-minute tie has ONE total order on the pruned AND the full path. HONEST (Golden Rule #10): a hit is
   O(page-files) Parquet work + an O(D) per-consult revalidation stat sweep (D = the dataset's month files, ~80) —
-  NOT literal O(1); the FIRST view per dataset/invalidation pays today's O(files) scan once; a viewed dataset's
-  write pays one bounded shard flock + small fsync'd JSON rewrite (gated A/B pins the median overhead under the
-  12 ms merge-budget floor; unviewed = one stat, pinned); a same-`(mtime_ns,size)` in-place overwrite is the
-  documented stat-token residual; the new module's mutation score rides the weekly Mutation workflow (not verified
-  in-session). Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
+  NOT literal O(1) (only the repeat TOTAL/span lookup is O(1) via the generation cache — a repeat PAGE click
+  re-pays the O(D) revalidation + O(page-files) read); the FIRST view per dataset/invalidation pays today's
+  O(files) scan once, and a permanently-REJECTED seed (un-healed poison / an out-of-band 0-row parquet — the
+  distinct `empty_file` reason) is LATCHED per (dataset, generation) so the doomed grouped scan never repays per
+  click; a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (gated A/B pins the
+  median overhead under the 12 ms merge-budget floor; unviewed = one stat, pinned); a same-`(mtime_ns,size)`
+  in-place overwrite is the documented stat-token residual; the new module's mutation score rides the weekly
+  Mutation workflow (not verified in-session). REVIEW ROUND 1 (refuter panel — every CONFIRMED finding fixed with
+  a fails-before regression): the option-writer CI 100% gate joined its new suite (was RED at 94.74%); the
+  read-side seed catches `LakeWriteHalt` (a disk-full seed can never 500 a /db read; write-hook propagation
+  untouched); deep-nested-JSON shards fail closed to the `parse` clause (RecursionError caught); the `file_set`
+  fallback rel lists are capped at 20 + true counts; provenance `db.stats_manifest.read` raised DEBUG→INFO;
+  `seed_dataset_stats` documented honestly as LAST-WRITER-WINS (clobber detected + reseeded next read, pinned);
+  the `BRUTEX_STATS_LOCK_TIMEOUT_S` × 90 s write-deadline interaction documented + doc-pinned (not clamped — leaf
+  discipline); the spec §10 hypothesis paging-equivalence + Σ-pages==total + concurrent-writer thread-fuzz
+  properties landed (multi-process soak / crash-loop stress / CLI cross-process leg stay named follow-ups).
+  Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
   Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  `lake_stats_manifest.py` (431/136) + `parquet_writer.py` (400/112) + `option_parquet_writer.py` (130/22) +
-  `lake_heal.py` (563/154) + `db_view.py` (1236/424) ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
+  `lake_heal.py` + `db_view.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
   clean, pyright 0 errors in every touched/new file).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

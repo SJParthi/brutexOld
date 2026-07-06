@@ -1666,7 +1666,10 @@ jobs:
             echo "(brutex.strategies.runner test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_option_parquet_writer.py" > /dev/null; then
-            pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py
+            # DEC-LAKE-STATS-MANIFEST-001: the _record_option_stats hook is
+            # covered by tests/unit/test_option_writer_stats_manifest.py, which
+            # MUST run alongside the base suite for the 100% gate to hold.
+            pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py tests/unit/test_option_writer_stats_manifest.py
           else
             echo "(brutex.data.option_parquet_writer test file not present yet — gate inactive)"
           fi
