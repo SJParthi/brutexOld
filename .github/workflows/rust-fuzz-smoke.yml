@@ -1,0 +1,121 @@
+# BruteX — Rust fuzz smoke (bounded libFuzzer tier)
+#
+# Security-audit fuzz workstream, 2026-07-06. Builds EVERY cargo-fuzz target in
+# both harness crates (rust/trading-core/fuzz + rust/fno-math/fuzz) and runs
+# each for a short, bounded window. Purpose:
+#
+# 1. The fuzz harnesses can never silently rot again: the trading-core
+#    fuzz_evaluator target sat UN-COMPILABLE after the u64→u128 vocabulary
+#    widening (DEC-VOCAB-U128-CODEGEN-001) + the IndicatorSnapshot growth,
+#    because no workflow built the fuzz crates. The BUILD step here is the
+#    drift gate.
+# 2. A cheap crash/panic net on the hot kernels (evaluator, pivots/fib,
+#    BOS/CHoCH state machine, StrategySpec JSON/hex parsing, metadata,
+#    Black-76 Greeks) — a found crash/panic FAILS the job.
+#
+# HONEST TIER (Golden Rule #10): ~30 s per target is a SMOKE, not a coverage
+# campaign — it regression-tests the harnesses + seeds and catches shallow
+# panics; it does not claim deep state-space exploration. New-coverage plateaus
+# are NON-blocking by design (no -runs floor); only a crash/panic/timeout/OOM
+# is red.
+
+name: Rust fuzz smoke
+
+on:
+  pull_request:
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-fuzz-smoke.yml"
+  schedule:
+    - cron: "30 5 * * 1" # Monday 05:30 UTC — weekly drift net even without PRs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-fuzz-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned nightly (cargo-fuzz needs nightly for -Z sanitizer flags). Same
+  # pin discipline as safety.yml; bump deliberately, never `nightly` floating.
+  NIGHTLY: "nightly-2026-03-15"
+  # Bounded smoke: per-target wall clock (seconds) + libFuzzer memory cap.
+  FUZZ_SECONDS: "30"
+  FUZZ_RSS_MB: "2048"
+
+jobs:
+  fuzz-smoke:
+    name: cargo-fuzz smoke (${{ matrix.crate }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: trading-core
+            path: rust/trading-core
+          - crate: fno-math
+            path: rust/fno-math
+    defaults:
+      run:
+        working-directory: ${{ matrix.path }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly Rust (sanitizer support)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: rust-src
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ matrix.path }}/fuzz -> target
+          key: fuzz-smoke-${{ matrix.crate }}
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # The drift gate: a fuzz target that no longer matches the parent
+      # crate's API fails HERE (this exact rot shipped once — see
+      # rust/trading-core/fuzz/README.md).
+      - name: Build all fuzz targets
+        run: cargo +${{ env.NIGHTLY }} fuzz build
+
+      - name: Run each target (bounded smoke)
+        run: |
+          set -euo pipefail
+          targets="$(cargo +${{ env.NIGHTLY }} fuzz list)"
+          echo "targets: ${targets}"
+          for t in ${targets}; do
+            echo "::group::fuzz ${t} (${FUZZ_SECONDS}s)"
+            # Seed the live corpus from the checked-in regression seeds, if any
+            # (fuzz/corpus/ is gitignored cargo-fuzz scratch; fuzz/seeds/ is
+            # the tracked regression set — e.g. the two fuzz_greeks finds).
+            mkdir -p "fuzz/corpus/${t}"
+            if [ -d "fuzz/seeds/${t}" ]; then
+              cp "fuzz/seeds/${t}"/* "fuzz/corpus/${t}/" || true
+            fi
+            # A crash/panic/sanitizer report/timeout/OOM exits non-zero → red.
+            cargo +${{ env.NIGHTLY }} fuzz run "${t}" -- \
+              -max_total_time="${FUZZ_SECONDS}" \
+              -timeout=10 \
+              -rss_limit_mb="${FUZZ_RSS_MB}" \
+              -print_final_stats=1
+            echo "::endgroup::"
+          done
+
+      - name: Upload crash artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.crate }}
+          path: ${{ matrix.path }}/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

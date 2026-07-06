@@ -1,0 +1,143 @@
+name: sbom
+
+# =============================================================================
+# BruteX — SBOM generation + PR dependency review (supply-chain audit
+# Workstream 5, 2026-07-06; see docs/security/SUPPLY_CHAIN_POSTURE.md).
+#
+# Regenerates the CycloneDX SBOMs (Python environment + both Rust crates)
+# and uploads them as a CI artifact. Deliberately NON-BLOCKING:
+#   - none of these jobs feed the `CI OK (aggregate gate)` required check;
+#   - on pull_request events every job runs with continue-on-error so a
+#     scanner hiccup can never flip `mergeable_state` to failing-`unstable`
+#     and wedge auto-merge (DEC-AUTOMERGE-CLEAN-STRICT-001 tolerates
+#     pending-only `unstable`, not failing).
+# Promotion of `dependency-review` into the required gate is remediation
+# item R-7 in docs/security/SUPPLY_CHAIN_POSTURE.md.
+#
+# Actions are tag-pinned to match the repo-wide convention; migrating the
+# whole repo to SHA pins is remediation item R-1 (one PR, all workflows).
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "rust/**/Cargo.toml"
+      - "rust/**/Cargo.lock"
+      - ".github/workflows/sbom.yml"
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "rust/**/Cargo.toml"
+      - "rust/**/Cargo.lock"
+      - ".github/workflows/sbom.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom-python:
+    name: SBOM — Python environment (CycloneDX)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Advisory on PRs: never block auto-merge on an SBOM hiccup.
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install brutex with all runtime extras + cyclonedx-bom
+        run: |
+          python -m pip install --upgrade pip
+          # No lockfile exists (DEC-P0-012 "always latest"), so this SBOM
+          # describes today's resolution of the pyproject ranges — honest
+          # caveat recorded in docs/security/SUPPLY_CHAIN_POSTURE.md §1.
+          pip install -e ".[data,ui,optimize,groww,token-broker,dev]"
+          pip install cyclonedx-bom
+
+      - name: Generate CycloneDX SBOM (environment)
+        run: |
+          mkdir -p sbom-out
+          cyclonedx-py environment \
+            --pyproject pyproject.toml \
+            --sv 1.6 --of JSON --output-reproducible \
+            -o sbom-out/sbom-python.cdx.json \
+            "$(which python)"
+          python -c "import json; d=json.load(open('sbom-out/sbom-python.cdx.json')); print('components:', len(d.get('components', [])))"
+
+      - name: Upload Python SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-python-cyclonedx
+          path: sbom-out/sbom-python.cdx.json
+          retention-days: 90
+
+  sbom-rust:
+    name: SBOM — Rust crates (CycloneDX)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (incl. installed cargo-cyclonedx)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+          workspaces: |
+            rust/trading-core
+            rust/fno-math
+
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+
+      - name: Generate CycloneDX SBOMs (both crates, all targets/features)
+        run: |
+          mkdir -p sbom-out
+          # --describe crate + -a --target all: full non-dev dependency
+          # closure of the shipped artifact (dev-deps are license-swept
+          # separately in docs/security/license-inventory.md).
+          (cd rust/trading-core && cargo cyclonedx -q --format json \
+            --spec-version 1.5 --describe crate --all-features --target all -a)
+          (cd rust/fno-math && cargo cyclonedx -q --format json \
+            --spec-version 1.5 --describe crate --all-features --target all -a)
+          mv rust/trading-core/trading-core.cdx.json sbom-out/sbom-rust-trading-core.cdx.json
+          mv rust/fno-math/fno-math.cdx.json sbom-out/sbom-rust-fno-math.cdx.json
+
+      - name: Upload Rust SBOM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-rust-cyclonedx
+          path: sbom-out/sbom-rust-*.cdx.json
+          retention-days: 90
+
+  dependency-review:
+    name: PR dependency review (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Advisory until promoted into the required gate (remediation R-7):
+    # a red here is visible on the PR but never blocks auto-merge.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Dependency review (new vulnerable / disallowed-license deps)
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          # Mirror the copyleft policy verified clean in
+          # docs/security/license-inventory.md: flag strong copyleft.
+          deny-licenses: GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later, AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later
+          comment-summary-in-pr: on-failure
