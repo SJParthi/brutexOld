@@ -411,8 +411,9 @@ class TestConcurrentMissIsIdempotent:
         results: dict[str, str] = {}
 
         def _compute() -> str:
-            # Both threads may compute (no cross-thread wait by design); the scan
-            # is a deterministic function of the coordinate, so the value matches.
+            # Under DEC-SCAN-SINGLE-FLIGHT-001 exactly ONE thread computes and
+            # the other serves the stored result — either way the value matches
+            # (the scan is a deterministic function of the coordinate).
             release.wait(timeout=5)
             return "value"
 
@@ -426,4 +427,164 @@ class TestConcurrentMissIsIdempotent:
         for t in threads:
             t.join(timeout=5)
         assert results == {"t1": "value", "t2": "value"}
-        assert cache.size() == 1  # last store wins → exactly one resident entry
+        assert cache.size() == 1  # exactly one resident entry
+
+
+class TestSingleFlight:
+    """Per-key single-flight (DEC-SCAN-SINGLE-FLIGHT-001).
+
+    The 2026-07-05 restart log measured TEN concurrent cold ``/movers``
+    coordinates EACH paying the full O(files) discovery walk (~29.7 min per
+    call). Concurrent misses of one key must now share exactly ONE compute.
+    """
+
+    def test_same_key_concurrent_misses_compute_once(self) -> None:
+        cache = MoversSnapshotCache()
+        compute_started = threading.Event()
+        release = threading.Event()
+        calls = {"n": 0}
+
+        def _slow_compute() -> str:
+            calls["n"] += 1
+            compute_started.set()
+            assert release.wait(timeout=10)
+            return "candidates"
+
+        results: list[str] = []
+
+        def _worker() -> None:
+            results.append(cache.get_or_compute("k", generation=0, compute=_slow_compute))
+
+        lead = threading.Thread(target=_worker)
+        lead.start()
+        assert compute_started.wait(timeout=10)  # the leader is registered + scanning
+        waiters = [threading.Thread(target=_worker) for _ in range(9)]
+        for t in waiters:
+            t.start()
+        release.set()
+        lead.join(timeout=10)
+        for t in waiters:
+            t.join(timeout=10)
+        assert not lead.is_alive() and not any(t.is_alive() for t in waiters)
+        assert calls["n"] == 1  # ONE scan — never ten
+        assert results == ["candidates"] * 10
+
+    def test_different_keys_still_compute_in_parallel(self) -> None:
+        """Single-flight is PER KEY — two coordinates never serialise each other."""
+        cache = MoversSnapshotCache()
+        both_running = threading.Barrier(2, timeout=10)
+
+        def _compute_a() -> str:
+            both_running.wait()  # deadlocks unless B's compute runs CONCURRENTLY
+            return "a"
+
+        def _compute_b() -> str:
+            both_running.wait()
+            return "b"
+
+        results: dict[str, str] = {}
+        ta = threading.Thread(
+            target=lambda: results.__setitem__(
+                "a", cache.get_or_compute("ka", generation=0, compute=_compute_a)
+            )
+        )
+        tb = threading.Thread(
+            target=lambda: results.__setitem__(
+                "b", cache.get_or_compute("kb", generation=0, compute=_compute_b)
+            )
+        )
+        ta.start()
+        tb.start()
+        ta.join(timeout=10)
+        tb.join(timeout=10)
+        assert results == {"a": "a", "b": "b"}
+
+    def test_waiter_takes_over_after_compute_exception(self) -> None:
+        """A raised in-flight compute wakes the waiter, which computes fresh."""
+        cache = MoversSnapshotCache()
+        compute_started = threading.Event()
+        release = threading.Event()
+
+        class _Boom(RuntimeError):
+            pass
+
+        def _failing() -> str:
+            compute_started.set()
+            assert release.wait(timeout=10)
+            raise _Boom
+
+        errors: list[BaseException] = []
+        results: list[str] = []
+
+        def _leader() -> None:
+            try:
+                cache.get_or_compute("k", generation=0, compute=_failing)
+            except _Boom as exc:
+                errors.append(exc)
+
+        def _waiter() -> None:
+            results.append(cache.get_or_compute("k", generation=0, compute=lambda: "recovered"))
+
+        lead = threading.Thread(target=_leader)
+        lead.start()
+        assert compute_started.wait(timeout=10)
+        wait_thread = threading.Thread(target=_waiter)
+        wait_thread.start()
+        release.set()
+        lead.join(timeout=10)
+        wait_thread.join(timeout=10)
+        assert not lead.is_alive() and not wait_thread.is_alive()
+        assert len(errors) == 1  # the exception propagated untouched (nothing cached)
+        assert results == ["recovered"]  # the waiter took over
+
+    def test_newer_generation_waiter_recomputes(self) -> None:
+        """A waiter at a NEWER generation never serves the in-flight stale value."""
+        cache = MoversSnapshotCache()
+        compute_started = threading.Event()
+        release = threading.Event()
+
+        def _old_gen_compute() -> str:
+            compute_started.set()
+            assert release.wait(timeout=10)
+            return "old"
+
+        results: dict[str, str] = {}
+
+        def _leader() -> None:
+            results["old"] = cache.get_or_compute("k", generation=0, compute=_old_gen_compute)
+
+        def _new_gen_reader() -> None:
+            results["new"] = cache.get_or_compute("k", generation=1, compute=lambda: "fresh")
+
+        lead = threading.Thread(target=_leader)
+        lead.start()
+        assert compute_started.wait(timeout=10)
+        reader = threading.Thread(target=_new_gen_reader)
+        reader.start()
+        release.set()
+        lead.join(timeout=10)
+        reader.join(timeout=10)
+        assert results == {"old": "old", "new": "fresh"}  # never a stale cross-serve
+        # The newest store wins the resident slot for the key.
+        assert cache.get_or_compute("k", generation=1, compute=lambda: "unused") == "fresh"
+
+    def test_reentrant_miss_computes_without_deadlock(self) -> None:
+        """A compute that RE-ENTERS the same key on the same thread never hangs."""
+        cache = MoversSnapshotCache()
+        inner_value: list[str] = []
+
+        def _outer() -> str:
+            inner_value.append(cache.get_or_compute("k", generation=0, compute=lambda: "inner"))
+            return "outer"
+
+        done: list[str] = []
+
+        def _run() -> None:
+            done.append(cache.get_or_compute("k", generation=0, compute=_outer))
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive()  # no self-deadlock
+        assert inner_value == ["inner"]
+        assert done == ["outer"]
