@@ -264,13 +264,18 @@ class MoversSnapshotCache:
     :class:`~brutex.dashboard.summary_cache.SummaryCache`) so a slow lake scan
     never blocks a concurrent hit or eviction. A ``compute`` that raises
     propagates cleanly — nothing is stored — so a malformed request (e.g. a bad
-    ``HH:MM`` time) never poisons the cache. The cache does NOT serialise two
-    concurrent cold *misses* of the same key: each computes independently and the
-    last store wins (the candidate set is a deterministic function of the
-    coordinate + generation, so the duplicate scan is idempotent — Golden Rule
-    #7). For a click-driven page that window is rare and the scan is bounded; the
-    simplicity is deliberately preferred to a cross-thread wait (Golden Rule #10
-    — the duplicate-scan cost is stated, not hidden).
+    ``HH:MM`` time) never poisons the cache. Two concurrent cold *misses* of the
+    SAME key are now SINGLE-FLIGHT (DEC-SCAN-SINGLE-FLIGHT-001): exactly one
+    thread runs ``compute`` while the others wait on a per-key event and then
+    serve the stored result — the pre-fix "each computes independently" design
+    let ten concurrent cold ``/movers`` coordinates each pay the full O(files)
+    discovery walk on the 2026-07-05 post-restart lake (~29.7 min each,
+    measured). A waiter whose *generation* is NEWER than the in-flight compute
+    re-checks after the wake and recomputes at its own generation (never a
+    stale serve — Golden Rule #1); a ``compute`` that RAISES wakes the waiters
+    so exactly one takes over; a RE-ENTRANT miss (the in-flight ``compute``
+    itself re-entering the same key on the same thread) recomputes instead of
+    self-deadlocking. Misses of DIFFERENT keys still compute in parallel.
     """
 
     def __init__(
@@ -293,6 +298,11 @@ class MoversSnapshotCache:
         self._clock = clock
         self._lock = threading.Lock()
         self._entries: OrderedDict[str, _Entry] = OrderedDict()
+        #: Per-key in-flight guard (DEC-SCAN-SINGLE-FLIGHT-001): ``key →
+        #: (event, owner thread ident)``. Concurrent cold misses of one key
+        #: wait on the event instead of each paying the lake scan; the owner
+        #: ident lets a re-entrant miss recompute instead of self-deadlock.
+        self._inflight: dict[str, tuple[threading.Event, int]] = {}
 
     def _pull_active(self) -> bool:
         """``True`` iff the wired probe reports a pull genuinely running — O(1).
@@ -363,15 +373,18 @@ class MoversSnapshotCache:
         -------
         The cached or freshly-computed candidate set.
         """
+        my_ident = threading.get_ident()
+        # Fast path + pull-time adaptive-floor stale-serve, checked ONCE before
+        # joining the single-flight loop (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001):
+        # a clean hit returns immediately; otherwise, while a pull is active in
+        # this process, a still-fresh-enough stale entry is served instead of
+        # recomputing (or waiting on an in-flight scan). The `_pull_active`
+        # probe runs OUTSIDE the lock (it takes the pull job's own lock).
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None and entry.generation == generation:
                 self._entries.move_to_end(key)  # mark most-recently-used.
                 return entry.value  # type: ignore[return-value]
-        # Opt-in pull-time adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001).
-        # The probe runs OUTSIDE the lock (it takes the pull job's own lock);
-        # `entry` is the snapshot read under the lock above — a concurrent
-        # replacement only means we serve an equally-valid value for this key.
         if entry is not None and self._adaptive_floor and not force_fresh and self._pull_active():
             age = self._clock() - entry.computed_at
             effective_floor = min(
@@ -392,8 +405,40 @@ class MoversSnapshotCache:
                     if key in self._entries:
                         self._entries.move_to_end(key)  # keep the served key MRU.
                 return entry.value  # type: ignore[return-value]
+        # Single-flight (DEC-SCAN-SINGLE-FLIGHT-001): exactly one thread pays a
+        # cold miss for a key; the rest wait on a per-key event, then re-plan.
+        while True:
+            with self._lock:
+                entry = self._entries.get(key)
+                if entry is not None and entry.generation == generation:
+                    self._entries.move_to_end(key)  # mark most-recently-used.
+                    return entry.value  # type: ignore[return-value]
+                inflight = self._inflight.get(key)
+                if inflight is None:
+                    event = threading.Event()
+                    self._inflight[key] = (event, my_ident)
+                    break  # this thread computes.
+                wait_event, owner = inflight
+                if owner == my_ident:
+                    # Re-entrant miss (the in-flight compute re-entered the same
+                    # key on this thread): waiting would self-deadlock — compute
+                    # WITHOUT re-registering; the completion pop below releases
+                    # the OUTER registration only after a value is stored.
+                    event = wait_event
+                    break
+            # SINGLE-FLIGHT wait: another thread is paying the scan for this
+            # exact key — wait (no lock held), then loop: a stored
+            # same-generation entry serves as a hit; a raised / stale-generation
+            # compute makes THIS thread the next computer.
+            wait_event.wait()
         started_at = self._clock()
-        value = compute()
+        try:
+            value = compute()
+        except BaseException:
+            with self._lock:
+                self._inflight.pop(key, None)
+            event.set()  # wake waiters so exactly one takes over.
+            raise
         finished_at = self._clock()
         with self._lock:
             self._entries[key] = _Entry(
@@ -408,4 +453,8 @@ class MoversSnapshotCache:
             self._entries.move_to_end(key)
             while len(self._entries) > self._capacity:
                 self._entries.popitem(last=False)  # evict the LRU entry.
+            # Store BEFORE waking waiters (same lock block) so a woken waiter
+            # always finds the fresh entry — never a duplicate scan.
+            self._inflight.pop(key, None)
+        event.set()
         return value

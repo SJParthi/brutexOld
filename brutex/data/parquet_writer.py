@@ -105,6 +105,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import WriterError, parquet_read_skip_errors
+from brutex.data.lake_manifest import invalidate_manifest, record_dataset
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, CandleBar, CatalogEntry, FnoGreeksBar
 from brutex.data.partition import (
     build_partition_path,
@@ -691,6 +692,7 @@ class ParquetWriter:
         # the serialisation semantics are byte-unchanged — only the timing
         # bookkeeping is added.
         lock_acquire_start = time.perf_counter()
+        dataset_created = False
         with contextlib.ExitStack() as stack:
             stack.enter_context(_PARTITION_LOCKS.acquire(dest))
             stack.enter_context(partition_write_lock(self._lake_root, dest))
@@ -713,6 +715,16 @@ class ParquetWriter:
                 # rewritten, so the duplicate persisted. The dedup applies the
                 # SAME per-merge_mode collision rule `_merge_write` uses, so a
                 # fresh write + a re-pull of the same batch stay bit-idempotent.
+                # NEW-dataset probe (DEC-LAKE-MANIFEST-O1-001): a dataset is
+                # CREATED by this write iff its interval dir holds zero
+                # ``*.parquet`` BEFORE the file lands (the ``.parquet.tmp``
+                # temp never matches the glob). Probed only on the FRESH
+                # branch — a new month of an EXISTING dataset short-circuits
+                # on its first stored file, and the hot existing-partition
+                # merge path never runs this at all (zero manifest cost per
+                # bar append). ``dest.parent.parent`` is the interval dir
+                # (``…/<interval>/<yyyy>/<mm>.parquet``).
+                dataset_created = not any(dest.parent.parent.rglob("*.parquet"))
                 fresh_bars, batch_conflicts = self._dedup_batch(sorted_bars, merge_mode=merge_mode)
                 # P9 tripwire (DEC-LAKE-WRITE-UNIQUE-001): post-dedup the batch MUST be
                 # strictly increasing; a violation is a loud WriterError, never a
@@ -746,6 +758,20 @@ class ParquetWriter:
             partition_rows=result.row_count,
             partition=str(dest),
         )
+        if dataset_created:
+            # Write-time manifest upsert (DEC-LAKE-MANIFEST-O1-001): this write
+            # CREATED the (exchange, segment, symbol, interval) dataset, so the
+            # durable manifest gains its row — O(1) per NEW dataset, best-effort
+            # (record_dataset never raises into the pull), taken AFTER the
+            # partition locks are released (lock order: partition → manifest,
+            # never the reverse — no cross-lock deadlock).
+            record_dataset(
+                self._lake_root,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+            )
         if duplicates_in_batch:
             # ONE aggregated WARNING per write when the vendor sent physically
             # duplicate rows (DEC-LAKE-WRITE-UNIQUE-001) — the batch was collapsed
@@ -1155,6 +1181,10 @@ class ParquetWriter:
             dest.unlink()
             with contextlib.suppress(OSError):
                 dest.parent.rmdir()  # prune the now-empty <yyyy>/ dir
+            # A file REMOVAL can empty a dataset, so the durable dataset
+            # manifest may now over-list — invalidate it (best-effort, O(1));
+            # the next discovery walks + rebuilds (DEC-LAKE-MANIFEST-O1-001).
+            invalidate_manifest(self._lake_root)
             return PartitionHealResult(
                 path=dest,
                 changed=True,
