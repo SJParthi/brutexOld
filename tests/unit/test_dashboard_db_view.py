@@ -35,6 +35,7 @@ from brutex.dashboard.db_view import (
     WINDOW_PHASES,
     _build_window_payload_duckdb,
     _json_safe,
+    _window_counts_since,
     _window_counts_total,
     _window_severity_order_sql,
     build_phase_progress,
@@ -42,6 +43,7 @@ from brutex.dashboard.db_view import (
     clamp_limit,
     clamp_offset,
     fno_current_phase_from_counts,
+    last_pull_start_utc,
     phase_progress_payload,
     phase_window_progress,
     sample_rows,
@@ -1492,6 +1494,203 @@ def test_fetch_windows_template_renders_status_label() -> None:
     assert "esc(label)" in template  # escaped, never raw interpolation
     assert "label && label !== v" in template  # replace-not-double-print guard
     assert "r.empty_streak" in template  # the legacy fallback widget is kept
+
+
+# ── per-run vs lifetime window counts (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001) ──
+# Session-B item 6: the /coverage/windows counts were LIFETIME-only ("88 empty" shown
+# when only 24 happened tonight). A memoised per-run GROUP BY filtered on
+# last_attempt_at >= the current pull's journal `started` instant adds the honest
+# "N this run" figure — OMITTED entirely when no journal/pull-start exists.
+
+_RUN_OLD = datetime(2026, 6, 8, 10, 0, tzinfo=UTC)
+_RUN_NEW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+_RUN_SINCE = "2026-06-08T11:00:00+00:00"
+
+
+def _save_two_pull_ledger(tmp_path: Path) -> None:
+    """A ledger whose rows straddle the pull-start instant ``_RUN_SINCE``.
+
+    OLD pull (10:00 UTC): a NIFTY EMPTY. NEW pull (12:00 UTC): a BANKNIFTY EMPTY +
+    an INFY SUCCESS. Plus a PLANNED SENSEX row (NULL ``last_attempt_at`` — never
+    attempted, must NEVER enter the per-run figure).
+    """
+    ledger = WindowLedger()
+    ledger.record(_window_key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_RUN_OLD)
+    ledger.record(
+        _window_key("BANKNIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_RUN_NEW
+    )
+    ledger.record(_window_key("INFY"), raw_bars=5, error_type=None, bars_appended=5, now=_RUN_NEW)
+    ledger.plan(_window_key("SENSEX"), now=_RUN_NEW)
+    save_window_ledger(ledger, tmp_path)
+
+
+class TestWindowCountsSincePullStart:
+    """The per-run counts helper + its payload threading and memoisation."""
+
+    def test_counts_since_filters_to_rows_attempted_on_or_after_since(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import ledger_path
+
+        _save_two_pull_ledger(tmp_path)
+        counts, total = _window_counts_since(
+            duckdb.connect(), ledger_path(tmp_path).as_posix(), _RUN_SINCE
+        )
+        # Only the NEW pull's two attempted rows: the OLD EMPTY is before the start,
+        # the PLANNED row has a NULL last_attempt_at (attempted statuses only).
+        assert counts["spot"] == {"EMPTY": 1, "SUCCESS": 1}
+        assert total == 2
+
+    def test_counts_since_boundary_is_inclusive(self, tmp_path: Path) -> None:
+        """A row stamped EXACTLY at the pull start counts (>= — the pull's own first
+        window, recorded the same instant, is this run's work)."""
+        from brutex.data.window_ledger_store import ledger_path
+
+        _save_two_pull_ledger(tmp_path)
+        counts, total = _window_counts_since(
+            duckdb.connect(), ledger_path(tmp_path).as_posix(), _RUN_NEW.isoformat()
+        )
+        assert total == 2  # both 12:00 rows; the 10:00 row is out
+        assert counts["spot"] == {"EMPTY": 1, "SUCCESS": 1}
+
+    def test_counts_since_empty_when_start_after_every_attempt(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import ledger_path
+
+        _save_two_pull_ledger(tmp_path)
+        counts, total = _window_counts_since(
+            duckdb.connect(),
+            ledger_path(tmp_path).as_posix(),
+            "2026-06-08T13:00:00+00:00",
+        )
+        assert total == 0
+        assert counts == {"spot": {}, "options": {}, "futures": {}}
+
+    def test_payload_with_since_adds_per_run_keys_uncached(self, tmp_path: Path) -> None:
+        _save_two_pull_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect(), since=_RUN_SINCE)
+        assert payload["counts_since_pull_start"]["spot"] == {"EMPTY": 1, "SUCCESS": 1}
+        assert payload["pull_start_utc"] == _RUN_SINCE
+        # The lifetime counts are UNCHANGED alongside (both figures shown honestly).
+        assert payload["counts"]["spot"] == {"EMPTY": 2, "SUCCESS": 1, "PLANNED": 1}
+
+    def test_payload_without_since_is_byte_identical_no_new_keys(self, tmp_path: Path) -> None:
+        """PARITY PIN (Session-B contract): ``since=None`` (every pre-change caller +
+        the no-journal lake) adds ZERO keys — the payload equals the pre-change
+        shape exactly; the per-run figure is OMITTED, never a fabricated 0."""
+        _save_two_pull_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        assert "counts_since_pull_start" not in payload
+        assert "pull_start_utc" not in payload
+        assert set(payload) == {
+            "source",
+            "count",
+            "counts",
+            "empty_threshold",
+            "matched",
+            "returned",
+            "capped",
+            "windows",
+        }
+
+    def test_payload_since_memoised_and_keyed_by_pull_start(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REUSES the generation-stamped memo (no new cache class): a repeat poll at
+        the same (generation, mtime, pull-start) computes ONCE; a NEW pull start
+        re-keys (never served the prior run's per-run figures)."""
+        _save_two_pull_ledger(tmp_path)
+        conn = duckdb.connect()
+        cache = MoversSnapshotCache()
+        calls = {"n": 0}
+        original = _window_counts_since
+
+        def _counting(c: object, glob: str, since: str) -> tuple[dict[str, dict[str, int]], int]:
+            calls["n"] += 1
+            return original(c, glob, since)
+
+        monkeypatch.setattr("brutex.dashboard.db_view._window_counts_since", _counting)
+        a = build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, generation=1, since=_RUN_SINCE
+        )
+        b = build_window_payload(
+            tmp_path, conn=conn, count_cache=cache, generation=1, since=_RUN_SINCE
+        )
+        assert a["counts_since_pull_start"] == b["counts_since_pull_start"]
+        assert calls["n"] == 1  # memoised — the repeat poll is an O(1) hit
+        later = build_window_payload(
+            tmp_path,
+            conn=conn,
+            count_cache=cache,
+            generation=1,
+            since="2026-06-08T13:00:00+00:00",
+        )
+        assert calls["n"] == 2  # a new pull start re-keys → recompute
+        assert later["counts_since_pull_start"] == {"spot": {}, "options": {}, "futures": {}}
+
+    def test_payload_cached_without_since_never_queries_per_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _save_two_pull_ledger(tmp_path)
+
+        def _boom(*_a: object, **_k: object) -> tuple[dict[str, dict[str, int]], int]:
+            raise AssertionError("per-run counts must not be queried without a pull start")
+
+        monkeypatch.setattr("brutex.dashboard.db_view._window_counts_since", _boom)
+        payload = build_window_payload(
+            tmp_path, conn=duckdb.connect(), count_cache=MoversSnapshotCache(), generation=1
+        )
+        assert "counts_since_pull_start" not in payload
+
+    def test_legacy_no_conn_path_omits_per_run_even_with_since(self, tmp_path: Path) -> None:
+        """The pyarrow fallback cannot answer the per-run figure — honest omission."""
+        _save_two_pull_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, conn=None, since=_RUN_SINCE)
+        assert payload["source"] == "ledger"
+        assert "counts_since_pull_start" not in payload
+        assert "pull_start_utc" not in payload
+
+
+class TestLastPullStartUtc:
+    """The journal-derived pull-start anchor — honest ``None`` when unknowable."""
+
+    def test_none_when_no_journal_exists(self, tmp_path: Path) -> None:
+        assert last_pull_start_utc(tmp_path) is None
+
+    def test_returns_latest_real_started_wall_utc(self, tmp_path: Path) -> None:
+        from brutex.observability.pull_journal import (
+            record_pull_finish,
+            record_pull_heartbeat,
+            record_pull_start,
+        )
+
+        record_pull_start(tmp_path, pull_id="p1", dry_run=False, now_utc=_RUN_OLD, monotonic_s=1.0)
+        record_pull_finish(tmp_path, pull_id="p1", verdict="clean", now_utc=_RUN_OLD)
+        record_pull_start(tmp_path, pull_id="p2", dry_run=False, now_utc=_RUN_NEW, monotonic_s=2.0)
+        record_pull_heartbeat(tmp_path, pull_id="p2", now_utc=_RUN_NEW)
+        assert last_pull_start_utc(tmp_path) == _RUN_NEW.isoformat()
+
+    def test_dry_run_starts_are_skipped(self, tmp_path: Path) -> None:
+        """A dry-run writes no ledger rows — anchoring on it would zero the per-run
+        figure right after a real pull, so the LAST REAL start wins."""
+        from brutex.observability.pull_journal import record_pull_start
+
+        record_pull_start(tmp_path, pull_id="real", dry_run=False, now_utc=_RUN_OLD)
+        record_pull_start(tmp_path, pull_id="dry", dry_run=True, now_utc=_RUN_NEW)
+        assert last_pull_start_utc(tmp_path) == _RUN_OLD.isoformat()
+
+    def test_none_when_only_dry_run_starts_exist(self, tmp_path: Path) -> None:
+        from brutex.observability.pull_journal import record_pull_start
+
+        record_pull_start(tmp_path, pull_id="dry", dry_run=True, now_utc=_RUN_NEW)
+        assert last_pull_start_utc(tmp_path) is None
+
+    def test_garbled_trailing_line_is_tolerated(self, tmp_path: Path) -> None:
+        """The tolerant journal reader skips a crash-truncated line (the exact crash
+        the journal exists to survive) — the prior real start still anchors."""
+        from brutex.observability.pull_journal import journal_path, record_pull_start
+
+        record_pull_start(tmp_path, pull_id="p1", dry_run=False, now_utc=_RUN_OLD)
+        with journal_path(tmp_path).open("a", encoding="utf-8") as handle:
+            handle.write('{"event": "started", "pull_id"')  # power-loss mid-append
+        assert last_pull_start_utc(tmp_path) == _RUN_OLD.isoformat()
 
 
 class TestLedgerDeltaAwareness:
