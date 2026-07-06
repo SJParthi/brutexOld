@@ -381,6 +381,12 @@ class RateLimitPanel:
     #: and bases the stall verdict on the controller's admission signal. Defaults ``True`` (the
     #: pre-decision meter-fed contract; an idle panel never reports a fabricated completed-rate).
     meter_present: bool = True
+    #: The transport meter's MEASURED rolling failed-calls rate (the ``CallMeter`` snapshot's
+    #: ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001): failed attempts per second over the
+    #: meter's trailing window. Feeds the ``/api/v1/pull/rate`` view's distinct "failing"
+    #: verdict for an issuing-but-all-failing pull (the #1022 flagged follow-up). ``0.0``
+    #: when idle / no meter / no failures (the byte-identical default).
+    failed_rps: float = 0.0
 
     def to_json_dict(self) -> dict[str, Any]:
         """Return a JSON-safe panel mapping, DROPPING the monotonic freshness baseline.
@@ -664,6 +670,7 @@ class DashboardState:
         rps_1s: int = 0,
         rps_1s_max: int = 0,
         meter_present: bool = True,
+        failed_rps: float = 0.0,
     ) -> None:
         """Update the MEASURED throughput half of the rate panel from a ``CallMeter`` snapshot.
 
@@ -681,6 +688,12 @@ class DashboardState:
         completed-rate). The ``/api/v1/pull/rate`` view reads it to keep "achieved" an honest 0
         + use the controller's admission signal for the stall verdict during the meter-less
         phases, instead of fabricating a completed-rate.
+
+        ``failed_rps`` (DEC-PULL-TELEMETRY-TRIAD-001) is the meter snapshot's MEASURED
+        rolling failed-calls rate — the evidence the ``/api/v1/pull/rate`` view needs to
+        read an issuing-but-all-failing pull as the distinct "failing" verdict (the #1022
+        flagged follow-up). Default ``0.0`` (an older meter snapshot / the admission-only
+        sampler) keeps the panel byte-identical.
         """
         with self._lock:
             self.rate_limit.effective_rps = effective_rps
@@ -688,6 +701,7 @@ class DashboardState:
             self.rate_limit.rps_1s = rps_1s
             self.rate_limit.rps_1s_max = rps_1s_max
             self.rate_limit.meter_present = meter_present
+            self.rate_limit.failed_rps = failed_rps
             # The measured-throughput half of a live tick is just as much pull activity as
             # the controller half — stamp the freshness baseline here too so the monitor
             # reads "active" even on a tick where only the meter moved (DEC-LIVE-RATE-MONITOR-001).
@@ -877,6 +891,9 @@ def make_rate_observer(
             # pushes ``meter_present=False`` (no measured completed-rate this phase); a REAL spot
             # CallMeter snapshot carries no such key → defaults ``True`` (the meter-fed contract).
             meter_present=bool(meter.get("meter_present", True)),
+            # The meter's MEASURED rolling failed-calls rate (DEC-PULL-TELEMETRY-TRIAD-001);
+            # absent on an older snapshot / the admission-only sampler sentinel → an honest 0.0.
+            failed_rps=float(meter.get("failed_rps", 0.0)),
         )
 
     return _observe
@@ -1606,6 +1623,7 @@ def build_app(
             panel_recent_600s = panel.recent_600s
             panel_recent_3600s = panel.recent_3600s
             panel_meter_present = panel.meter_present
+            panel_failed_rps = panel.failed_rps
             panel_last_update = panel.last_update_monotonic
         if math.isinf(panel_last_update):
             panel_age = math.inf
@@ -1651,6 +1669,9 @@ def build_app(
             panel_recent_600s=panel_recent_600s,
             panel_recent_3600s=panel_recent_3600s,
             panel_meter_present=panel_meter_present,
+            # DEC-PULL-TELEMETRY-TRIAD-001: the meter's MEASURED failed-calls rate, so an
+            # issuing-but-all-failing meter-fed pull reads the distinct "failing" verdict.
+            panel_failed_rps=panel_failed_rps,
             # DEC-RATE-STALL-PULL-GATE-001: the AUTHORITATIVE pull-run signal — the
             # in-process panel is only ever fed by THIS app's pulls, so its stall
             # verdict is gated on the job actually running: a just-completed pull
