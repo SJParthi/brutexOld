@@ -513,8 +513,27 @@ class TestAutoGrowCapacity:
         assert "--sweep-cache-bloom-capacity" in msg  # named as NOT the remedy.
         assert SWEEP_CACHE_BLOOM_CAPACITY_ENV in msg
 
-    def test_looser_fpr_shrinks_the_same_persisted_under_the_wall(self) -> None:
-        """The advertised remedy WORKS: the wall-busting count fits at a looser FPR."""
+    def test_looser_fpr_shrinks_the_same_persisted_under_the_wall(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The advertised remedy WORKS: the wall-busting count fits at a looser FPR.
+
+        The wall is PINNED to the 16 GiB ``MAX_BLOOM_BYTES_FLOOR`` for this
+        arithmetic: since DEC-RAM-BUDGETS-001 the live ``MAX_BLOOM_BYTES`` is
+        RAM-derived (total RAM × 1/3, ``brutex/orchestrator/bloom.py``), so on
+        a 16 GB CI runner it resolves ~5.6 GB — BELOW the ~5.99 GB this
+        5-billion-digest @ 1e-2 case needs. The remedy claim under test is the
+        FPR-loosening math relative to a FIXED wall, not the machine's RAM, so
+        the pin keeps the case machine-independent (``_auto_grow_capacity``
+        reads the ceiling via its function-level ``from brutex.orchestrator
+        .bloom import MAX_BLOOM_BYTES``, so patching the bloom module attribute
+        is authoritative here).
+        """
+        from brutex.orchestrator import bloom as bloom_mod
+
+        monkeypatch.setattr(
+            bloom_mod, "MAX_BLOOM_BYTES", bloom_mod.MAX_BLOOM_BYTES_FLOOR, raising=True
+        )
         grown = _auto_grow_capacity(1000, _OVER_WALL_PERSISTED, 1e-2)
         assert grown == _OVER_WALL_PERSISTED
 
