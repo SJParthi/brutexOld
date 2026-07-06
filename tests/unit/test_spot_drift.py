@@ -193,11 +193,12 @@ class TestScanSpotSymbolDirs:
         assert len(errors) == 1
         assert errors[0]["path"].endswith("bars")
 
-    @pytest.mark.parametrize("failing_dir_name", ["bars", "CASH"])
+    @pytest.mark.parametrize("failing_dir_name", ["bars", "NSE", "CASH", "M&M"])
     def test_memory_error_at_is_dir_reraises_raw(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_dir_name: str
     ) -> None:
-        """``_safe_is_dir`` keeps the honest-OOM convention at BOTH stat sites."""
+        """``_safe_is_dir`` keeps the honest-OOM convention at ALL FOUR stat
+        sites — the two head probes AND the two per-child probes."""
         lake = _mk_lake(tmp_path, {"NSE/CASH": ["M&M"]})
         real_is_dir = Path.is_dir
 
@@ -209,6 +210,57 @@ class TestScanSpotSymbolDirs:
         monkeypatch.setattr(Path, "is_dir", _oom)
         with pytest.raises(MemoryError):
             scan_spot_symbol_dirs(lake)
+
+    def test_exchange_child_stat_error_skips_that_child_keeps_other_exchanges(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The round-2 MINOR: a stat ``EACCES`` on ONE exchange child must not
+        empty the WHOLE scan — pre-fix the raw ``child.is_dir()`` in the
+        bars-level comprehension propagated into the bars-level ``except`` and
+        returned ``{}`` (wiping the READABLE exchanges' evidence) with a WARN
+        misleadingly naming ``<lake>/bars``. Now the broken child is skipped
+        with an accurate per-child WARN and NSE still contributes."""
+        lake = _mk_lake(tmp_path, {"NSE/CASH": ["GOOD"], "BSE/CASH": ["ALSO-GOOD"]})
+        real_is_dir = Path.is_dir
+
+        def _flaky(self: Path) -> bool:
+            if self.name == "BSE":
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _flaky)
+        with capture_logs() as logs:
+            result = scan_spot_symbol_dirs(lake)
+        assert result == {"NSE": ("GOOD",)}
+        errors = [e for e in logs if e["event"] == "spot_drift.scan_error"]
+        assert len(errors) == 1
+        assert errors[0]["error_type"] == "PermissionError"
+        assert errors[0]["path"].endswith("BSE")  # the offender, NOT bars/
+
+    def test_segment_child_stat_error_skips_that_child_keeps_siblings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The round-2 MINOR's segment-level twin: a stat error on ONE symbol
+        child skips just that child — its readable siblings (both before AND
+        after it in iteration order) survive, with the WARN naming the child.
+        Pre-fix the generator aborted mid-``set.update`` keeping only an
+        iterdir-order-dependent prefix."""
+        lake = _mk_lake(tmp_path, {"NSE/CASH": ["AAA", "MID", "ZZZ"]})
+        real_is_dir = Path.is_dir
+
+        def _flaky(self: Path) -> bool:
+            if self.name == "MID":
+                raise OSError(5, "Input/output error", str(self))
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _flaky)
+        with capture_logs() as logs:
+            result = scan_spot_symbol_dirs(lake)
+        assert result == {"NSE": ("AAA", "ZZZ")}
+        errors = [e for e in logs if e["event"] == "spot_drift.scan_error"]
+        assert len(errors) == 1
+        assert errors[0]["error_type"] == "OSError"
+        assert errors[0]["path"].endswith("MID")
 
 
 class TestPrefixStrippedFold:

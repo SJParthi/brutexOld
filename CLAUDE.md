@@ -369,7 +369,7 @@ hostile-review pass._
   untouched); genuine abbreviations stay alias-map territory; the `/db` moneyness twin is the NAMED follow-up
   DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — until it lands a drifted stock lake shows recovered Greeks but a `/db`
   moneyness UNKNOWN (honest split-brain). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no
-  scope/vocab/rate change; `lake_keys.py` (75/44) + `spot_drift.py` (128/42, NEW) + `greeks_enrich.py` (539/130) ALL
+  scope/vocab/rate change; `lake_keys.py` (75/44) + `spot_drift.py` (143/42, NEW) + `greeks_enrich.py` (539/130) ALL
   100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

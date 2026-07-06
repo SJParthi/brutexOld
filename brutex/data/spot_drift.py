@@ -25,13 +25,15 @@ offered as an ordered tuple (master-exact first, then lexicographic — the
 fragment carries data.
 
 Fail-soft by design: the loader returns ``None`` on a missing / unreadable
-master (the ladder stays byte-identical → the honest ``NO_SPOT``), a
-per-``(exchange, segment)`` scan error skips THAT subtree (partial evidence,
-never a raise — STAT probes included: pathlib's ``is_dir``/``exists`` swallow
-only ``ENOENT``-class errnos and RE-RAISE ``EACCES``/``EPERM``/``EIO``, so
-every probe goes through :func:`_safe_is_dir` / the loader's guarded
-``exists``), and a raw ``MemoryError`` ALWAYS re-raises (the honest-OOM
-convention). No blanket ``except Exception`` — a genuinely unexpected defect
+master (the ladder stays byte-identical → the honest ``NO_SPOT``), a scan
+error skips the SMALLEST subtree it can prove broken — a
+per-``(exchange, segment)`` ``iterdir`` error skips THAT segment, a per-CHILD
+stat error skips just THAT child (readable siblings and sibling exchanges keep
+contributing) — PARTIAL evidence, never a raise (STAT probes included:
+pathlib's ``is_dir``/``exists`` swallow only ``ENOENT``-class errnos and
+RE-RAISE ``EACCES``/``EPERM``/``EIO``, so every probe goes through
+:func:`_safe_is_dir` / the loader's guarded ``exists``), and a raw
+``MemoryError`` ALWAYS re-raises (the honest-OOM convention). No blanket ``except Exception`` — a genuinely unexpected defect
 propagates to the #1188 ``fno.greeks_enrich.error`` fence (loud ``ok=False``,
 the pull still never fails).
 """
@@ -77,9 +79,11 @@ def _safe_is_dir(path: Path) -> bool:
     ``EPERM``/``EIO`` — in-envelope on the §8 external SSD), so an unguarded
     probe would abort the WHOLE scan and, through it, the entire Greeks pass
     (the fix-round MAJOR). Any such error degrades to ONE
-    ``spot_drift.scan_error`` WARNING + ``False`` — the subtree is skipped,
-    PARTIAL evidence, never a raise. ``MemoryError`` re-raises raw (the
-    honest-OOM convention).
+    ``spot_drift.scan_error`` WARNING + ``False`` — the probed PATH is skipped
+    (a head probe skips its subtree; a per-child probe inside an enumeration
+    skips just that child, so readable siblings keep contributing — the
+    round-2 MINOR), PARTIAL evidence, never a raise. ``MemoryError``
+    re-raises raw (the honest-OOM convention).
     """
     try:
         return path.is_dir()
@@ -116,21 +120,25 @@ def scan_spot_symbol_dirs(lake_root: Path) -> dict[str, tuple[str, ...]]:
     imports ``brutex/dashboard``) and NOT ``lake_invariants._bar_files``
     (private; O(files) — this needs O(dirs)).
 
-    A per-``(exchange, segment)`` ``OSError`` — from the ``iterdir`` OR its
-    ``is_dir`` stat probe (:func:`_safe_is_dir`; pathlib re-raises
-    non-``ENOENT``-class stat errnos) — logs ONE ``spot_drift.scan_error``
-    WARNING and skips THAT subtree — PARTIAL evidence, never a raise (safe:
-    multi-dir entries are offered not refused, so a partial scan can only
-    shorten an offered tuple; the probe still decides). A missing ``bars/``
-    (a fresh lake) is an empty scan, not an error; an UNREADABLE ``bars/``
-    (stat or ``iterdir`` error) is an empty scan with one WARN.
-    ``MemoryError`` re-raises raw.
+    A scan ``OSError`` skips the SMALLEST subtree it can prove broken — every
+    stat probe (head dirs AND enumerated children) goes through
+    :func:`_safe_is_dir` (pathlib re-raises non-``ENOENT``-class stat errnos),
+    so a per-CHILD stat error logs ONE ``spot_drift.scan_error`` WARNING
+    naming THAT child and skips just it (readable siblings, the segment's
+    other children and the OTHER exchanges keep contributing — the round-2
+    MINOR: an unguarded exchange-child stat previously emptied the WHOLE
+    scan); a per-``(exchange, segment)`` ``iterdir`` error WARNs and skips
+    THAT segment — PARTIAL evidence, never a raise (safe: multi-dir entries
+    are offered not refused, so a partial scan can only shorten an offered
+    tuple; the probe still decides). A missing ``bars/`` (a fresh lake) is an
+    empty scan, not an error; an UNREADABLE ``bars/`` (stat or ``iterdir``
+    error) is an empty scan with one WARN. ``MemoryError`` re-raises raw.
     """
     bars = lake_root / "bars"
     if not _safe_is_dir(bars):
         return {}
     try:
-        exchange_dirs = sorted(child for child in bars.iterdir() if child.is_dir())
+        exchange_dirs = sorted(child for child in bars.iterdir() if _safe_is_dir(child))
     except MemoryError:
         raise
     except OSError as exc:
@@ -149,7 +157,7 @@ def scan_spot_symbol_dirs(lake_root: Path) -> dict[str, tuple[str, ...]]:
             if not _safe_is_dir(seg_dir):
                 continue
             try:
-                names.update(child.name for child in seg_dir.iterdir() if child.is_dir())
+                names.update(child.name for child in seg_dir.iterdir() if _safe_is_dir(child))
             except MemoryError:
                 raise
             except OSError as exc:
