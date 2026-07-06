@@ -111,3 +111,73 @@ def test_stage1a_per_bar_cost_is_flat() -> None:
         f"to super-linear. per_bar_small={per_bar_small * 1e9:.1f}ns, "
         f"per_bar_big={per_bar_big * 1e9:.1f}ns."
     )
+
+
+# ────── ADR-0012 roll_schedule arm (DEC-STAGE1A-ROLL-RESET-001) ──────
+
+
+def _roll_schedule_for(bars: list[CandleBar]) -> tuple[int, ...]:
+    """~Monthly owning-expiry ordinals spanning *bars* (every 20 IST days + tail).
+
+    Mirrors the production shape: the cursor advances at most ``len(schedule)``
+    times TOTAL across the whole stream (O(1) amortised per bar), and each key
+    change pays one per-contract hard reset — both must leave the per-bar cost
+    flat.
+    """
+    first = bars[0].timestamp.date().toordinal()
+    last = bars[-1].timestamp.date().toordinal()
+    schedule = list(range(first + 20, last, 20))
+    schedule.append(last)  # covering tail entry — no cursor exhaustion
+    return tuple(schedule)
+
+
+def _per_bar_seconds_with_schedule(bars: list[CandleBar], schedule: tuple[int, ...]) -> float:
+    """Best-of-N minimum mean per-bar ``build`` latency under a roll schedule."""
+    n = len(bars)
+    best = float("inf")
+    for _ in range(_REPEATS):
+        t0 = time.perf_counter()
+        Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
+        best = min(best, (time.perf_counter() - t0) / n)
+    return best
+
+
+@pytest.mark.slow
+@pytest.mark.bench
+def test_stage1a_per_bar_cost_is_flat_with_roll_schedule() -> None:
+    """The roll cursor + per-contract resets keep the per-bar cost flat.
+
+    Same two-tier probe as the spot gate, with a ~monthly ``roll_schedule``
+    spanning each stream (the big tier crosses ~13 roll boundaries, the small
+    ~1) — a cursor that rescans the schedule per bar, or a reset that grows
+    with history, blows the ratio.
+    """
+    small = _make_bars(_N_SMALL)
+    big = _make_bars(_N_BIG)
+    small_schedule = _roll_schedule_for(small)
+    big_schedule = _roll_schedule_for(big)
+
+    # Warm caches / allocator on each size before timing.
+    Stage1AMatrixBuilder(roll_schedule=small_schedule).build(small)
+    Stage1AMatrixBuilder(roll_schedule=big_schedule).build(big)
+
+    per_bar_small = _per_bar_seconds_with_schedule(small, small_schedule)
+    per_bar_big = _per_bar_seconds_with_schedule(big, big_schedule)
+    ratio = per_bar_big / max(per_bar_small, 1e-12)
+
+    ceiling = ratio_ceiling(5.0)
+    print(
+        f"\nStage-1A roll-schedule per-bar O(1) bench (DEC-STAGE1A-ROLL-RESET-001) "
+        f"— best of {_REPEATS} runs:\n"
+        f"  N_small = {_N_SMALL:,} bars, {len(small_schedule)} schedule entries "
+        f"| {per_bar_small * 1e9:.1f} ns/bar\n"
+        f"  N_big   = {_N_BIG:,} bars, {len(big_schedule)} schedule entries "
+        f"| {per_bar_big * 1e9:.1f} ns/bar\n"
+        f"  ratio   = {ratio:.2f}× (ceiling {ceiling}×)\n"
+    )
+    assert ratio < ceiling, (
+        f"Stage-1A roll-schedule per-bar cost ratio {ratio:.2f}× exceeds the "
+        f"{ceiling}× CI ceiling — the roll cursor / per-contract reset may have "
+        f"regressed to super-linear. per_bar_small={per_bar_small * 1e9:.1f}ns, "
+        f"per_bar_big={per_bar_big * 1e9:.1f}ns."
+    )

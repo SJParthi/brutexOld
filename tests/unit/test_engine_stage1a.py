@@ -18,16 +18,20 @@ conversions this module owns.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+import trading_core
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.stage1a import (
+    _DEFAULT_SESSION_KEY,  # pyright: ignore[reportPrivateUsage]
     ANCHOR_DEPENDENT_MASK,
     Stage1AMatrixBuilder,
     _ema_to_paisa,
     _price_to_paisa,
+    apply_1day_mask_for,
     build_bar_bits,
 )
 from brutex.vocabulary import bits as B
@@ -325,3 +329,342 @@ def test_timestamp_ist_is_converted_not_assumed() -> None:
     # Should not raise; IST date is 2024-01-02.
     builder.push(bar)
     assert bar.timestamp.astimezone(IST).date().isoformat() == "2024-01-02"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# ADR-0012 roll_schedule (B2, DEC-STAGE1A-ROLL-RESET-001) + the D12
+# apply_1day_mask flag (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The NIFTY-futures track feeds the builder a strictly increasing tuple of
+# owning-expiry day-ordinals; per bar the session key becomes the first entry
+# ``>=`` the bar's IST day ordinal (the ``resolve_near_month`` ``>=`` law over
+# the vendor schedule) and a key CHANGE triggers the TOTAL per-contract hard
+# reset. The spot path (``roll_schedule=None``) must stay byte-identical.
+
+#: The real NIFTY Jun/Jul-2025 monthly expiries (vendor-token dates).
+_EXPIRY_JUN = date(2025, 6, 26)
+_EXPIRY_JUL = date(2025, 7, 31)
+_ROLL_SCHEDULE = (_EXPIRY_JUN.toordinal(), _EXPIRY_JUL.toordinal())
+
+
+def _fut_bar(day: date, minute: int, open_: str, high: str, low: str, close: str) -> CandleBar:
+    """A volume-bearing 1-minute futures bar at 09:16 IST + *minute* on *day*."""
+    ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=IST) + timedelta(minutes=minute)
+    return _bar(ts.astimezone(UTC), open_, high, low, close, volume=100)
+
+
+def _seg_day(day: date, base: int, n: int = 6) -> list[CandleBar]:
+    """*n* drifting volume-bearing bars on *day* around integer-rupee *base*."""
+    out: list[CandleBar] = []
+    for m in range(n):
+        o = base + m
+        c = o + 1
+        out.append(_fut_bar(day, m, str(o), str(c + 1), str(o - 1), str(c)))
+    return out
+
+
+def _two_contract_stream() -> tuple[list[CandleBar], list[CandleBar]]:
+    """(segment A bars, segment B bars) across the Jun-2025 roll with a basis gap.
+
+    Segment A (owned by the 26Jun25 contract): 24-26 Jun around ₹100;
+    segment B (owned by the 31Jul25 contract): 27+30 Jun around ₹140 —
+    the ~40-pt basis gap D11 forbids comparing levels across.
+    """
+    seg_a = (
+        _seg_day(date(2025, 6, 24), 100)
+        + _seg_day(date(2025, 6, 25), 102)
+        + _seg_day(date(2025, 6, 26), 104)
+    )
+    seg_b = _seg_day(date(2025, 6, 27), 140) + _seg_day(date(2025, 6, 30), 142)
+    return seg_a, seg_b
+
+
+# ── Schedule validation (fail-fast input contract) ──
+
+
+def test_roll_schedule_empty_tuple_rejected() -> None:
+    with pytest.raises(ValueError, match="roll_schedule must be non-empty"):
+        Stage1AMatrixBuilder(roll_schedule=())
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [(5, 5), (5, 3), (-1, 5)],
+    ids=["duplicate", "decreasing", "negative"],
+)
+def test_roll_schedule_invalid_shape_rejected(schedule: tuple[int, ...]) -> None:
+    with pytest.raises(ValueError, match="strictly increasing"):
+        Stage1AMatrixBuilder(roll_schedule=schedule)
+
+
+def test_roll_schedule_invalid_shape_rejected_via_wrapper() -> None:
+    # The functional wrapper forwards the kw-only param → same fail-fast.
+    with pytest.raises(ValueError, match="strictly increasing"):
+        build_bar_bits([], roll_schedule=(3, 2))
+
+
+def test_negative_session_key_is_an_ffi_overflow() -> None:
+    """The u64-boundary pin motivating the non-negative schedule validation.
+
+    ``VwapState.update``'s ``session_key`` is a Rust ``u64`` — a negative
+    Python int raises ``OverflowError`` AT the FFI, so the builder's ctor
+    validation (negative ordinals rejected) is what keeps that error
+    unreachable from the production path.
+    """
+    state = trading_core.VwapState()
+    with pytest.raises(OverflowError):
+        state.update(10_000, 100, False, -1, date(2025, 6, 24).toordinal(), 9 * 3600)
+
+
+# ── Cursor exhaustion (F10 — loader/schedule desync is LOUD) ──
+
+
+def test_cursor_exhaustion_raises_value_error() -> None:
+    seg_a, seg_b = _two_contract_stream()
+    # Schedule ends at the Jun expiry; segment B bars (27+30 Jun) are BEYOND it.
+    builder = Stage1AMatrixBuilder(roll_schedule=(_EXPIRY_JUN.toordinal(),))
+    for bar in seg_a:
+        builder.push(bar)
+    with pytest.raises(ValueError, match="beyond the last roll_schedule expiry"):
+        builder.push(seg_b[0])
+
+
+def test_cursor_exhaustion_message_names_the_desync() -> None:
+    builder = Stage1AMatrixBuilder(roll_schedule=(_EXPIRY_JUN.toordinal(),))
+    with pytest.raises(ValueError, match="loader/schedule desync"):
+        builder.push(_fut_bar(date(2025, 6, 27), 0, "140", "142", "139", "141"))
+
+
+# ── Key derivation: the >= law + the loader-cut/cursor agreement pin ──
+
+
+def test_expiry_day_bar_keyed_to_the_expiring_contract() -> None:
+    """The ``>=`` boundary law: the expiry-day bar keys to the EXPIRING ordinal."""
+    builder = Stage1AMatrixBuilder(roll_schedule=_ROLL_SCHEDULE)
+    builder.push(_fut_bar(_EXPIRY_JUN, 0, "104", "106", "103", "105"))
+    key = builder._current_session_key  # pyright: ignore[reportPrivateUsage]
+    assert key == _EXPIRY_JUN.toordinal()
+    # The next trading day rolls to the NEXT contract's ordinal.
+    builder.push(_fut_bar(date(2025, 6, 27), 0, "140", "142", "139", "141"))
+    key = builder._current_session_key  # pyright: ignore[reportPrivateUsage]
+    assert key == _EXPIRY_JUL.toordinal()
+
+
+def test_loader_cut_and_cursor_agree_per_bar() -> None:
+    """The loader's IST-date ownership cut == the cursor's key, bar for bar.
+
+    Both derive from the ONE ``roll_schedule`` (owning expiry = first schedule
+    entry ``>=`` the bar's IST day ordinal) — computed test-side from the
+    date-cut law and asserted against the cursor after every push, over a
+    crafted boundary stream (pre-expiry / expiry-day / post-roll bars).
+    """
+    seg_a, seg_b = _two_contract_stream()
+    builder = Stage1AMatrixBuilder(roll_schedule=_ROLL_SCHEDULE)
+    for bar in seg_a + seg_b:
+        day_ordinal = bar.timestamp.astimezone(IST).date().toordinal()
+        expected = min(e for e in _ROLL_SCHEDULE if e >= day_ordinal)
+        builder.push(bar)
+        key = builder._current_session_key  # pyright: ignore[reportPrivateUsage]
+        assert key == expected
+
+
+def test_spot_path_feeds_exactly_the_default_session_key() -> None:
+    """SPOT session-key drift pin: no schedule ⇒ every VWAP feed gets the constant.
+
+    A recording wrapper around the real ``VwapState`` proves the schedule-absent
+    path feeds EXACTLY ``_DEFAULT_SESSION_KEY`` (== 0) on every bar — the
+    byte-identity precondition every spot golden rides on — and that the
+    futures cursor state stays untouched (``_current_session_key`` remains
+    ``None``).
+    """
+
+    class _KeyRecordingVwap:
+        def __init__(self) -> None:
+            self._inner = trading_core.VwapState()
+            self.keys: list[int] = []
+
+        def update(
+            self,
+            typical_paisa: int,
+            volume: int,
+            pre_open: bool,
+            session_key: int,
+            session_day: int,
+            tod_seconds: int,
+        ) -> int | None:
+            self.keys.append(session_key)
+            result = self._inner.update(
+                typical_paisa, volume, pre_open, session_key, session_day, tod_seconds
+            )
+            return result  # noqa: RET504 — keep the FFI return explicit
+
+    seg_a, seg_b = _two_contract_stream()
+    builder = Stage1AMatrixBuilder()
+    spy = _KeyRecordingVwap()
+    builder._vwap = spy  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    for bar in seg_a + seg_b:
+        builder.push(bar)
+    assert spy.keys == [_DEFAULT_SESSION_KEY] * (len(seg_a) + len(seg_b))
+    assert _DEFAULT_SESSION_KEY == 0
+    assert builder._current_session_key is None  # pyright: ignore[reportPrivateUsage]
+
+
+# ── The TOTAL hard reset (D11) ──
+
+
+def test_fresh_builder_oracle_post_roll_suffix() -> None:
+    """Post-roll suffix of a stitched run == a standalone fresh-builder run.
+
+    THE testable oracle of DEC-STAGE1A-ROLL-RESET-001: `_roll_to_new_contract`
+    restores the exact fresh-builder state, so the stitched build's segment-B
+    masks are bit-identical to a fresh builder fed segment B alone.
+    """
+    seg_a, seg_b = _two_contract_stream()
+    stitched = build_bar_bits(seg_a + seg_b, roll_schedule=_ROLL_SCHEDULE)
+    assert stitched[len(seg_a) :] == build_bar_bits(seg_b)
+    # And the pre-roll prefix is untouched by the schedule machinery.
+    assert stitched[: len(seg_a)] == build_bar_bits(seg_a)
+
+
+def test_first_post_roll_day_clears_anchor_dependent_bits() -> None:
+    """The first post-roll day is anchor-cold — `_NON_ANCHOR_MASK` fires again.
+
+    Segment A completed two prior days, so WITHOUT the reset the 27-Jun bars
+    would carry warm prev-day anchors (across a ~40-pt basis gap — the exact
+    D11 violation); the hard reset makes the new contract's first day behave
+    like day 1 of a fresh stream.
+    """
+    seg_a, seg_b = _two_contract_stream()
+    stitched = build_bar_bits(seg_a + seg_b, roll_schedule=_ROLL_SCHEDULE)
+    first_post_roll_day = [
+        m
+        for bar, m in zip(seg_a + seg_b, stitched, strict=True)
+        if bar.timestamp.astimezone(IST).date() == date(2025, 6, 27)
+    ]
+    assert first_post_roll_day  # non-vacuous
+    assert all((m & ANCHOR_DEPENDENT_MASK) == 0 for m in first_post_roll_day)
+    # Teeth: the continuous (no-schedule) build DOES set anchor bits there —
+    # proving the clear above comes from the roll reset, not the fixture.
+    continuous = build_bar_bits(seg_a + seg_b)
+    continuous_post_roll = [
+        m
+        for bar, m in zip(seg_a + seg_b, continuous, strict=True)
+        if bar.timestamp.astimezone(IST).date() == date(2025, 6, 27)
+    ]
+    assert any((m & ANCHOR_DEPENDENT_MASK) != 0 for m in continuous_post_roll)
+
+
+def test_market_structure_hard_resets_on_roll() -> None:
+    """A swing confirmed on the OLD contract can never trigger BOS/CHoCH on the new.
+
+    Segment A confirms a swing high then sets a DOWN trend (bars 0-9 of the
+    B1 fire-test script); segment B's first bars close far ABOVE that swing —
+    with CARRIED state a CHoCH-bull fires immediately (proven by the
+    continuous-build teeth arm), while the hard reset leaves the fresh
+    ``MarketStructureState`` ring unfilled (k=2 ⇒ no signal before 2k+1 bars),
+    so NO market-structure bit can fire on the first 4 post-roll bars.
+    """
+    script_a: tuple[tuple[int, int, int], ...] = (
+        (100, 90, 95),
+        (95, 85, 90),
+        (88, 70, 75),  # swing-low 70 candidate
+        (90, 80, 85),
+        (92, 82, 88),  # confirms swing-low 70
+        (85, 60, 65),  # close 65 < 70 → BOS_BEAR, trend DOWN
+        (95, 85, 90),
+        (110, 100, 105),  # swing-high 110 candidate
+        (98, 88, 92),
+        (96, 86, 90),  # confirms swing-high 110 (trend still DOWN)
+    )
+    day_a = date(2025, 6, 26)
+    seg_a = [
+        _fut_bar(day_a, m, str(min(h, max(l, c))), str(h), str(l), str(c))
+        for m, (h, l, c) in enumerate(script_a)
+    ]
+    # Post-roll bars close ABOVE the old swing high (110) — basis-gapped.
+    day_b = date(2025, 6, 27)
+    seg_b = [
+        _fut_bar(day_b, m, str(150 + m), str(152 + m), str(149 + m), str(151 + m)) for m in range(4)
+    ]
+    structure_mask = (
+        (1 << B.BIT_BOS_BULLISH)
+        | (1 << B.BIT_BOS_BEARISH)
+        | (1 << B.BIT_CHOCH_BULLISH)
+        | (1 << B.BIT_CHOCH_BEARISH)
+    )
+    stitched = build_bar_bits(seg_a + seg_b, roll_schedule=_ROLL_SCHEDULE)
+    pre_roll = stitched[: len(seg_a)]
+    post_roll = stitched[len(seg_a) :]
+    assert any(m & structure_mask for m in pre_roll)  # the script genuinely fired
+    assert all((m & structure_mask) == 0 for m in post_roll)
+    # Teeth: WITHOUT the reset the carried DOWN-trend + swing 110 make the
+    # first post-roll close (151 > 110) a CHoCH-bull — the exact phantom D11
+    # forbids. Proves the reset (not the fixture) produced the silence above.
+    continuous = build_bar_bits(seg_a + seg_b)
+    assert continuous[len(seg_a)] & (1 << B.BIT_CHOCH_BULLISH)
+
+
+# ── Spot byte-identity (P2) + constant-key invariance ──
+
+
+def test_none_schedule_is_byte_identical_to_default() -> None:
+    seg_a, seg_b = _two_contract_stream()
+    bars = seg_a + seg_b
+    assert build_bar_bits(bars) == build_bar_bits(bars, roll_schedule=None)
+
+
+def test_constant_key_single_contract_is_output_invariant() -> None:
+    """A schedule that makes the key ONE constant is output-invariant.
+
+    On a warm-volume SINGLE-contract stream, a one-entry schedule (every bar
+    keys to the same owning-expiry ordinal) must be bit-identical to the
+    default constant-key build — kills threading mutants that misroute the
+    key without changing its constancy.
+    """
+    seg_a, _ = _two_contract_stream()
+    last_ordinal = seg_a[-1].timestamp.astimezone(IST).date().toordinal()
+    assert build_bar_bits(seg_a) == build_bar_bits(seg_a, roll_schedule=(last_ordinal,))
+
+
+# ── apply_1day_mask (D12) ──
+
+
+def test_apply_1day_mask_clears_exactly_the_pinned_bit_set() -> None:
+    """The flag ANDs the FINAL mask with ``APPLIES_TO_1DAY_MASK`` — nothing else.
+
+    The exact cleared bit set (ToD 44-47 + VWAP 52-53) is pinned by
+    ``tests/unit/test_vocabulary.py::test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits``
+    (the ONE bit-set source of truth — reused, not re-invented); here we pin
+    that the builder applies EXACTLY that mask per bar, non-vacuously.
+    """
+    seg_a, seg_b = _two_contract_stream()
+    bars = seg_a + seg_b
+    unmasked = build_bar_bits(bars)
+    masked = build_bar_bits(bars, apply_1day_mask=True)
+    assert masked == [m & B.APPLIES_TO_1DAY_MASK for m in unmasked]
+    # Non-vacuous: the volume-bearing stream genuinely fired at least one of
+    # the six intraday-only bits (52/53 fire from bar 0 — VWAP seeds itself).
+    cleared = [m & ~B.APPLIES_TO_1DAY_MASK for m in unmasked]
+    assert any(cleared)
+    # Every cleared bit is inside the vocabulary's own pinned intraday-only set.
+    intraday_only = B.IMPLEMENTED_MASK & ~B.APPLIES_TO_1DAY_MASK
+    assert all((c & ~intraday_only) == 0 for c in cleared)
+
+
+def test_apply_1day_mask_composes_with_roll_schedule() -> None:
+    seg_a, seg_b = _two_contract_stream()
+    bars = seg_a + seg_b
+    stitched = build_bar_bits(bars, roll_schedule=_ROLL_SCHEDULE)
+    masked = build_bar_bits(bars, roll_schedule=_ROLL_SCHEDULE, apply_1day_mask=True)
+    assert masked == [m & B.APPLIES_TO_1DAY_MASK for m in stitched]
+
+
+def test_apply_1day_mask_for_is_the_one_d12_predicate() -> None:
+    """True iff (the futures alias, "1day") — spot deliberately NOT flipped."""
+    assert apply_1day_mask_for("NSE-NIFTY-FUT", "1day") is True
+    assert apply_1day_mask_for("NSE-NIFTY-FUT", "1minute") is False
+    assert apply_1day_mask_for("NSE-NIFTY-FUT", "5minute") is False
+    assert apply_1day_mask_for("NIFTY", "1day") is False  # named follow-up
+    assert apply_1day_mask_for("BANKNIFTY", "1day") is False
+    assert apply_1day_mask_for("NSE-NIFTY-30Jul26-FUT", "1day") is False
