@@ -50,6 +50,9 @@ from brutex.dashboard import historical_pull as hp
 from brutex.dashboard import pull_controller as pc
 from brutex.data.registry_store import RegistryStore
 
+from tests.fakes.lake_poison import poison_partition as _poison_partition
+from tests.fakes.lake_poison import stored_timestamps as _stored_timestamps
+
 _NOW = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
 _RUN_ID = "heal-seam-test"
 _FETCHED = datetime(2026, 1, 1, tzinfo=UTC)
@@ -124,27 +127,6 @@ def tmp_lake(tmp_path: Path) -> Path:
     return root
 
 
-def _poison_partition(dest: Path, rows: Sequence[tuple[datetime, float, int]]) -> None:
-    """Write a RAW pyarrow partition with VERBATIM duplicate timestamps."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    prices = [price for _, price, _ in rows]
-    table = pa.table(
-        {
-            "timestamp": pa.array([ts for ts, _, _ in rows], type=pa.timestamp("us", tz="UTC")),
-            "open": pa.array(prices, type=pa.float64()),
-            "high": pa.array(prices, type=pa.float64()),
-            "low": pa.array(prices, type=pa.float64()),
-            "close": pa.array(prices, type=pa.float64()),
-            "volume": pa.array([vol for _, _, vol in rows], type=pa.int64()),
-            "open_interest": pa.array([None] * len(rows), type=pa.int64()),
-        }
-    )
-    pq.write_table(table, dest)
-
-
 def _fno_ts(minute: int) -> datetime:
     """A UTC instant inside the January-2024 partition (Wed 3 Jan, IST session)."""
     return datetime(2024, 1, 3, 4, minute, tzinfo=UTC)
@@ -169,12 +151,6 @@ def _poisoned_fno_dest(lake: Path) -> Path:
         ],
     )
     return dest
-
-
-def _stored_timestamps(dest: Path) -> list[datetime]:
-    import polars as pl
-
-    return list(pl.read_parquet(dest, columns=["timestamp"])["timestamp"])
 
 
 def _pull(registry: RegistryStore, tmp_lake: Path, *, dry_run: bool = False) -> object:
