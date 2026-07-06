@@ -249,6 +249,72 @@ class TestSpotStoredReadEquality:
         assert len(cands.snapshots) == 1
         assert (cands.stored_reads, cands.resampled_reads) == (1, 0)
 
+    def test_spot_stored_read_falls_back_while_derive_lock_held(self, tmp_path: Path) -> None:
+        """DEC-ENGINE-MISC-PACK-001: a mid-flight cross-process derive is never read.
+
+        While a writer holds the exclusive ``<lake>/.locks/derive.lock`` (an
+        flock — a second fd in this process contends exactly like a second
+        process), the stored-first branch probes ``derive_in_progress`` and
+        HONESTLY bypasses the possibly-half-refreshed stored partition: the
+        on-the-fly 1-minute resample serves BYTE-IDENTICAL candidates (the
+        pinned equality reference) counted under ``resampled_reads``; once the
+        lock is released, the stored path resumes.
+        """
+        from brutex.data.derive_lock import derive_write_lock
+
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        _materialize_spot(tmp_path, "NIFTY")
+        stored = compute_spot_candidates(
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
+        )
+        assert (stored.stored_reads, stored.resampled_reads) == (1, 0)
+        with derive_write_lock(tmp_path):
+            gated = compute_spot_candidates(
+                lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
+            )
+        # Byte-equal ranking off the resample reference — only provenance flips.
+        assert gated.snapshots == stored.snapshots
+        assert gated.skipped == stored.skipped
+        assert (gated.stored_reads, gated.resampled_reads) == (0, 1)
+        # Lock released → the stored partition serves again.
+        released = compute_spot_candidates(
+            lake_root=tmp_path, interval="5minute", date=_DAY.isoformat(), time="09:19"
+        )
+        assert (released.stored_reads, released.resampled_reads) == (1, 0)
+
+    def test_materialize_holds_derive_lock_while_writing(self, tmp_path: Path) -> None:
+        """The WRITER side: `materialize_lake_timeframes` holds the EX lock.
+
+        Pinned by observing ``derive_in_progress`` from INSIDE the injected
+        write path (the reader probe contends on a separate fd, so this is the
+        cross-process observation), and released after the call returns.
+        """
+        from brutex.data.derive_lock import derive_in_progress
+        from brutex.data.timeframe_materialize import materialize_lake_timeframes
+
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        observed: list[bool] = []
+        real_write = ParquetWriter.write
+
+        def _spy_write(self: ParquetWriter, **kwargs: object) -> object:
+            observed.append(derive_in_progress(tmp_path))
+            return real_write(self, **kwargs)  # type: ignore[arg-type]
+
+        ParquetWriter.write = _spy_write  # type: ignore[method-assign, assignment]
+        try:
+            materialize_lake_timeframes(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                kind=PrebuildKind.SPOT,
+                tfs=("5m",),
+            )
+        finally:
+            ParquetWriter.write = real_write  # type: ignore[method-assign]
+        assert observed and all(observed), "every lake write must run under the EX derive lock"
+        assert derive_in_progress(tmp_path) is False  # released after the call.
+
     def test_spot_1minute_interval_serves_from_stored_base(self, tmp_path: Path) -> None:
         # interval=1minute: the stored partition IS the fetched base — the
         # stored path serves it (no resample) with identical bars.

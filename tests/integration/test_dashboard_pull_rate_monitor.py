@@ -626,3 +626,49 @@ class TestLocalPhaseAmber:
         # flow_detail reaches the expanded state text (textContent — no HTML sink).
         assert "data.flow_detail" in js
         assert "eStateEl.textContent = detail" in js
+
+
+class TestFailingVerdictEndToEnd:
+    """DEC-PULL-TELEMETRY-TRIAD-001 — the meter's measured ``failed_rps`` reaches the
+    ``/api/v1/pull/rate`` verdict end to end: an issuing-but-ALL-FAILING pull reads the
+    distinct red "failing", closing the #1022 flagged follow-up."""
+
+    def test_issuing_but_all_failing_reads_failing(self) -> None:
+        state = DashboardState()
+        # A REAL failing meter snapshot shape: nothing completing, failures burning.
+        make_rate_observer(state)(
+            {"current_rps": 8.0, "recent_hits": 0, "recent_minute": 240, "ceiling_per_min": 500},
+            {"effective_rps": 0.0, "latency_ms_p95": 0.0, "failed_rps": 2.5},
+        )
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
+            resp = c.get("/api/v1/pull/rate")
+        body = resp.json()
+        assert body["flow_state"] == "failing"
+        assert body["stalled"] is True  # red-light consumers unchanged
+        assert body["req_per_sec_failed"] == 2.5
+        assert body["req_per_sec_achieved"] == 0.0
+
+    def test_no_failures_keeps_the_plain_stalled_verdict(self) -> None:
+        """PARITY: the pre-decision stalled verdict is unchanged when failed_rps is 0."""
+        state = DashboardState()
+        make_rate_observer(state)(
+            {"current_rps": 8.0, "recent_hits": 50, "recent_minute": 2, "ceiling_per_min": 500},
+            {"effective_rps": 0.0, "latency_ms_p95": 9999.0},
+        )
+        with _client(state, pull_active=True) as c:  # type: ignore[attr-defined]
+            resp = c.get("/api/v1/pull/rate")
+        body = resp.json()
+        assert body["flow_state"] == "stalled"
+        assert body["req_per_sec_failed"] == 0.0
+
+    def test_widget_renders_failing_as_the_red_stalled_styling(self) -> None:
+        """The widget script maps the "failing" state onto the red stalled class (an
+        unknown state would silently fall back to the dark idle styling — hiding red)."""
+        js = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "static"
+            / "bx-rate-monitor.js"
+        ).read_text(encoding="utf-8")
+        assert 'state === "stalled" || state === "failing"' in js

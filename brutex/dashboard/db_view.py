@@ -3139,7 +3139,12 @@ def query_option_candles(
     per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /
     *end* are inclusive ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC
     calendar date. Returns an empty page (never raises) when the series has no
-    Parquet files yet.
+    Parquet files yet. All three reads (total / page / stored-life span) route
+    through the COMMON resilient probe-and-skip helpers
+    (:func:`_execute_parquet_resilient` / :func:`_execute_candle_page_resilient`
+    — DEC-ENGINE-MISC-PACK-002, the options twin of DEC-DB-CORRUPT-SKIP-001), so
+    one corrupt Parquet file degrades to the readable subset instead of 500ing
+    the whole tab.
 
     Parameters
     ----------
@@ -3193,7 +3198,6 @@ def query_option_candles(
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     base = lake_root / OPTIONS_DIR_NAME / series
-    glob = base.as_posix() + "/*.parquet"
     # Empty / not-yet-pulled series → return an empty page instead of letting
     # read_parquet raise "No files found" (mirrors query_candles).
     if not (base.is_dir() and any(base.glob("*.parquet"))):
@@ -3220,9 +3224,16 @@ def query_option_candles(
 
     # The glob is built from the validated series segment (no free user text),
     # so interpolating it is safe; the source is given to read_parquet as a
-    # bound parameter and every date/page value is parameter-bound.
+    # bound parameter and every date/page value is parameter-bound. Every read
+    # below routes through the resilient probe-and-skip helpers
+    # (DEC-ENGINE-MISC-PACK-002, the options twin of DEC-DB-CORRUPT-SKIP-001): a
+    # single corrupt / version-incompatible Parquet file in the series no longer
+    # 500s the WHOLE expired-options tab on every paging click — it is logged
+    # (``db.parquet_skip``), omitted, and the page degrades to its readable
+    # subset (never a fabricated bar).
     source = "read_parquet(?, union_by_name=true)"
     order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
+    skip_source = f"option-candle:{series}"
     # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): the expired-options
     # rolling identity is the COMPOSITE ``(side, timestamp)`` — the SAME key the
     # writer itself dedups on (option_parquet_writer). The page collapses
@@ -3232,12 +3243,21 @@ def query_option_candles(
     qualify_sql = dedup_qualify_sql(("side", "timestamp"))
 
     def _count_total() -> int:
-        """Run the O(files) deduped-total footer-scan over the whole series glob."""
-        total_row = conn.execute(
+        """Run the O(files) deduped-total footer-scan over the whole series glob.
+
+        Routed through the COMMON :func:`_execute_parquet_resilient` (the series
+        dir is FLAT, so its recursive ``**/*.parquet`` glob reads the identical
+        file set as the flat glob): a corrupt file is skipped + counted out of
+        the total, never a 500 (DEC-ENGINE-MISC-PACK-002).
+        """
+        rows = _execute_parquet_resilient(
+            conn,
+            base,
             f"SELECT {distinct_count_sql(('side', 'timestamp'))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-            [glob, *where_params],
-        ).fetchone()
-        return int(total_row[0]) if total_row else 0
+            list(where_params),
+            source=skip_source,
+        )
+        return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
     # The page total is paging-invariant, so memoise it per (series, start, end)
     # behind the injected generation-stamped cache (DEC-LAKE-READ-O1-AUDIT-001) —
@@ -3252,15 +3272,16 @@ def query_option_candles(
             compute=_count_total,
         )
     page_select = DEDUP_STAR_SELECT_SQL if select == "*" else select
-    cursor = conn.execute(
+    out_columns, raw_rows = _execute_candle_page_resilient(
+        conn,
+        base,
         f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
-        [glob, *where_params, safe_limit, safe_offset],
+        [*where_params, safe_limit, safe_offset],
+        source=skip_source,
     )
-    description = cursor.description or []
-    out_columns = [str(col[0]) for col in description]
     # Options roll a 1-minute table, so the bar always renders full HH:MM:SS (no
     # date-only collapse); options carry no spot derived %-columns.
-    rows = _render_candle_rows(cursor.fetchall(), out_columns, "1minute")
+    rows = _render_candle_rows(raw_rows, out_columns, "1minute")
 
     def _stored_span() -> tuple[str | None, str | None]:
         """The series' full-stored-life IST-date span (DEC-DB-UX-PACK-001 Feature 2).
@@ -3269,18 +3290,23 @@ def query_option_candles(
         blank (an explicit range needs no scan) and memoised per series behind the
         injected generation-stamped cache (``option_candle_span_key`` — the
         hostile-review MAJOR: the span is paging-invariant, so a prev/next click
-        must be an O(1) hit, never a re-scan). Reached only AFTER the page's own
-        reads above have already scanned the SAME glob, so the files are readable
-        here; a readable-but-empty series yields ``(None, None)`` (``_iso_date_or_none``
-        maps each ``NULL`` through). Genuine corruption surfaces on the page read
-        above exactly as before — this adds no new failure path (the expired-options
-        reader is intentionally non-resilient, unlike the F&O candle path).
+        must be an O(1) hit, never a re-scan). Rides the COMMON
+        :func:`_execute_parquet_resilient` probe-and-skip path exactly like the
+        F&O span reader (``_fno_stored_ist_span_resilient``) — a corrupt file is
+        skipped, an all-unreadable / readable-but-empty series yields
+        ``(None, None)`` (``_iso_date_or_none`` maps each ``NULL`` through), never
+        a 500, never a fabricated span (DEC-ENGINE-MISC-PACK-002).
         """
-        row = conn.execute(
+        rows = _execute_parquet_resilient(
+            conn,
+            base,
             f"SELECT MIN({_IST_DATE_EXPR}), MAX({_IST_DATE_EXPR}) FROM {source}",  # noqa: S608  # nosec B608 - constant expr over read_parquet(?) with a bound path
-            [glob],
-        ).fetchone()
-        return (_iso_date_or_none(row[0]), _iso_date_or_none(row[1]))
+            [],
+            source=skip_source,
+        )
+        if not rows:
+            return (None, None)
+        return (_iso_date_or_none(rows[0][0]), _iso_date_or_none(rows[0][1]))
 
     if start is None or end is None:
         if count_cache is None:

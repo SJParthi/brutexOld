@@ -12,6 +12,8 @@ DEC-COVERAGE-DRIVER-001).
 Covered branches (measured ``--cov`` miss list before this file):
 
 * ``open()`` ``ImportError`` when ``duckdb`` is absent (77-78)
+* ``open()`` ``require_exists=True`` missing-path refusal (112-115,
+  DEC-CLI-USER-ERROR-HYGIENE-001 — the READ-ONLY caller guard)
 * the :pyattr:`Catalog.path` property getter (94)
 * the ``upsert`` ``BEGIN → … → ROLLBACK → raise`` rollback path (145-147)
 * the ``list_partitions`` closed-catalog guard (209)
@@ -105,6 +107,32 @@ class TestOpenWithoutDuckDB:
         monkeypatch.setitem(sys.modules, "duckdb", None)
         with pytest.raises(CatalogError, match="duckdb"):
             Catalog.open(tmp_path / "catalog.duckdb")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Catalog.open — require_exists guard (DEC-CLI-USER-ERROR-HYGIENE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestOpenRequireExists:
+    """The READ-ONLY caller guard: never conjure a fresh catalog from a typo."""
+
+    def test_missing_path_refused_when_require_exists(self, tmp_path: Path) -> None:
+        """``require_exists=True`` on an absent path raises instead of creating."""
+        missing = tmp_path / "nope" / "catalog.duckdb"
+        with pytest.raises(CatalogError, match="catalog not found"):
+            Catalog.open(missing, require_exists=True)
+        # The guard must refuse WITHOUT side effects — no file, no parent dir.
+        assert not missing.exists()
+        assert not missing.parent.exists()
+
+    def test_existing_path_opens_when_require_exists(self, tmp_path: Path) -> None:
+        """``require_exists=True`` on a real catalog opens it normally."""
+        db_path = tmp_path / "catalog.duckdb"
+        with Catalog.open(db_path) as cat:  # create first (default behaviour)
+            cat.upsert(_entry())
+        with Catalog.open(db_path, require_exists=True) as reopened:
+            assert reopened.count() == 1
 
 
 # ────────────────────────────────────────────────────────────────────────
