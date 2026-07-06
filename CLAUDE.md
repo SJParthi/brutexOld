@@ -18,7 +18,39 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+_Last updated: 2026-07-06 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
+#1482 — the automatic lake healer is COMPLETED for the
+`options/<series>/<YYYY>-<MM>.parquet` expired-options table: foreign-month-row
++ overlapping-partition detection+heal on the SAME proven quarantine →
+writer-locked-rewrite → hash-chained-audit → one-alert-per-batch machinery,
+closing the DEC-LAKE-HEAL-001 #1175 named follow-up. Scanner: NEW
+`OptionForeignMonthRows` + pure `classify_option_keys` (UTC month routing —
+timestamp-only law, side is key payload; overlap via ONE memoised canonical-
+sibling read; clean file pays ZERO extra reads; `months=` scope now bounds the
+options tree BY FILENAME; NEW `include_bars=False` for the bounded L2 census;
+census OPTIONS row gains REAL foreign/overlap counts, drift stays honestly
+N/A). Writer: `OptionParquetWriter.heal_partition(remove_keys=…)` — RAW
+stored-value keyed removal (naive-column immune, keyed never positional) +
+wholly-removed quarantine-MOVE; NEW `read_partition_frame` +
+`merge_partition_frame` over the ONE `_merge_frame_locked` union core (golden
+byte-parity pinned). Healer: NEW `_heal_option_foreign` — copy-forward FIRST
+(keep-first union home; canonical wins, drifted overlap copies removed never
+restated), remove SECOND; 5-class heal order drift → foreign → dup →
+option-foreign → option-dup; crash-convergent, observe/mass-rail/halt/audit/
+alert/sentinel machinery reused with option files in the mass-rail
+denominator; NO catalog/raw_hash/recall for options (uncatalogued; NOTHING
+derives from `options/`). Wiring: L1 reconcile-piggyback is STRUCTURALLY N/A
+for options (catalog-walk only — documented); L2 `heal_after_pull` gains
+`include_options` (default False) wired True at the F&O post-pull seam ONLY;
+L3 startup sweep rides automatically (zero change). HONEST: no production
+pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
+L3 + census are the always-on cover); cross-file value drift resolved
+deterministically (canonical/path-ordered-first wins, originals in
+quarantine); rows move VERBATIM, never validated. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; `lake_invariants.py`/`option_parquet_writer.py`/
+`lake_heal.py` ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict`
++ pyright at the pre-change baseline).
+Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -317,7 +349,34 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+- **Active branch:** `claude/cool-cerf-tq8c27` (**DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md #1482** — the
+  automatic lake healer COMPLETED for the `options/<series>/<YYYY>-<MM>.parquet` expired-options table
+  (`OptionParquetWriter`, dedup key `(side, timestamp)`): FOREIGN-MONTH-ROW + OVERLAPPING-PARTITION detection+heal on
+  the SAME proven machinery — quarantine-COPY of original bytes BEFORE any rewrite → rewrite THROUGH the writer's
+  normal locked path (`heal_partition(remove_keys=…)`, RAW stored-value keyed removal — naive-column immune, KEYED
+  never positional; in-process + cross-process partition locks reused; `lake_write_guard` so ENOSPC/OOM →
+  `LakeWriteHalt`) → hash-chained audit JSONL (`AUDIT_HEAL_REASSIGN`, `tree="options"`) → ONE Telegram alert per
+  batch. Keep-first everywhere: a foreign `(side,ts)` key already present in its canonical month file is REMOVED
+  (canonical wins, drifted values never restated — preserved in quarantine); an absent key is REASSIGNED home through
+  `merge_partition_frame` (keep-first at the destination); copy-forward FIRST, remove SECOND (crash-convergent,
+  twin-lake pinned). 5-class heal order drift → foreign → dup → option-foreign → option-dup; observe short-circuit,
+  mass-heal rail (option files in the scanned-file DENOMINATOR), `LakeWriteHalt` re-raise, per-finding isolation all
+  inherited. Scanner: `OptionForeignMonthRows` + pure `classify_option_keys` (timestamp-only routing law — side is
+  key PAYLOAD so a null side rides verbatim and the scanner count can never diverge from the healable set; null ts
+  abstains); overlap via ONE memoised per-series canonical-sibling read; clean option file pays ZERO extra reads;
+  `months=` bounds the options tree BY FILENAME; census OPTIONS row + `brutex lake audit-unique` + `/universe` chip
+  carry REAL foreign/overlap numbers (drift stays `-`, honestly N/A). Wiring honesty: L1 reconcile-piggyback heal is
+  STRUCTURALLY N/A for `options/` (the reconcile walks the CATALOG; the options tree is uncatalogued by design); L2
+  `heal_after_pull(include_options=True)` wired at the F&O post-pull seam ONLY (bounded, months-scoped, zero reads
+  out of scope; no current production pull WRITES `options/` — opportunistic census of a legacy table); L3 startup
+  sweep already scanned `include_options=True` so the new findings ride automatically (sentinel gate G9-pinned);
+  recall stays `None` for options findings (NOTHING derives from `options/`; bars recall machinery reused as-is in
+  mixed batches — no new recall invented). STRICTLY row-removing/row-reassigning — never value-editing. Remaining
+  #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (426/142) + `option_parquet_writer.py`
+  (141/24) + `lake_heal.py` (595/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  pre-change baseline).
+  Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
@@ -423,7 +482,9 @@ hostile-review pass._
   audit-unique` (exit 0/1/2), a bounded doctor check, a `/universe` chip — each answering
   whether the ENGINE's index data (NIFTY/BANKNIFTY/SENSEX) carries dupes. HONEST: scan is
   O(files) NOT O(1) (bench-pinned); options tree = census + `(side,ts)` dup heal only
-  (foreign/overlap heal a named follow-up); STRICTLY row-removing/row-reassigning, never
+  (foreign/overlap heal a named follow-up) [CLOSED by DEC-LAKE-HEAL-OPTIONS-FOREIGN-001,
+  MIGRATION.md #1482 — the options tree now gets foreign-month + overlap detection/heal
+  too]; STRICTLY row-removing/row-reassigning, never
   value-editing; the CLI `brutex fetch` path has no L2 seam (covered by L1/L3/census, a named
   follow-up). All new modules + every touched module 100% line+branch; the #1067 pin suites
   pass unmodified. ENGINE UNCHANGED, F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
