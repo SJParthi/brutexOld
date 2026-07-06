@@ -1660,6 +1660,85 @@ def test_query_option_candles_paging_clamps(store: InstrumentStore, tmp_path: Pa
     assert out["offset"] == 0
 
 
+def _write_second_option_month(lake_root: Path) -> Path:
+    """Add an April-2024 bar so the series carries a SECOND month file.
+
+    Returns the ``2024-04.parquet`` path (the file the corrupt-skip tests
+    overwrite with garbage).
+    """
+    OptionParquetWriter(lake_root=lake_root).write(
+        partition_key=_OPT_PK,
+        coordinate=_OPT_COORD,
+        bars=[_obar(datetime(2024, 4, 1, 4, 0, tzinfo=UTC), "CE", "110.00")],
+    )
+    return lake_root / "options" / _OPT_SERIES / "2024-04.parquet"
+
+
+def test_query_option_candles_skips_one_corrupt_file_total_page_and_span(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    """REGRESSION (DEC-ENGINE-MISC-PACK-002): one corrupt file no longer 500s the tab.
+
+    One readable month (March, 4 rows) + ONE corrupt ``*.parquet`` (April) in
+    the SAME series dir. All three reads — the deduped TOTAL, the page, and the
+    default-range stored-life SPAN — now ride the COMMON resilient
+    probe-and-skip helpers: the bad file is logged + omitted, the readable
+    month serves the page, and the call does NOT raise (it 500ed the whole
+    expired-options tab before this fix).
+    """
+    _write_options(tmp_path)
+    april = _write_second_option_month(tmp_path)
+    april.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs() as logs:
+        out = query_option_candles(store.connection, tmp_path, series=_OPT_SERIES, limit=50)
+    # Only the readable March rows survive — the corrupt April file is OMITTED,
+    # never a fabricated bar, never an exception.
+    assert out["total"] == 4
+    assert len(out["rows"]) == 4
+    # The default-range span (Feature 2 chip) is served from the readable file.
+    assert out["applied_range"] == {"start": "2024-03-01", "end": "2024-03-02"}
+    skips = [e for e in logs if e["event"] == "db.parquet_skip"]
+    assert skips, "expected db.parquet_skip for the corrupt April file"
+    assert all(s["path"].endswith(april.name) for s in skips)
+    assert {s["source"] for s in skips} == {f"option-candle:{_OPT_SERIES}"}
+    assert not [e for e in logs if e["event"] == "db.parquet_unreadable"]
+
+
+def test_query_option_candles_all_corrupt_degrades_to_empty_page_not_500(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    """Every file unreadable → an honest EMPTY page + span, never an exception."""
+    _write_options(tmp_path)
+    series_dir = tmp_path / "options" / _OPT_SERIES
+    for path in series_dir.glob("*.parquet"):
+        path.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs() as logs:
+        out = query_option_candles(store.connection, tmp_path, series=_OPT_SERIES, limit=50)
+    assert out["total"] == 0
+    assert out["rows"] == []
+    # The stored-life span degrades to the honest no-data (None, None) chip.
+    assert out["applied_range"] == {"start": None, "end": None}
+    assert [e for e in logs if e["event"] == "db.parquet_unreadable"]
+
+
+def test_query_option_candles_clean_series_happy_path_unchanged(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    """Byte-identity pin: a CLEAN series pages identically through the helpers.
+
+    The resilient helpers bind a RECURSIVE ``**/*.parquet`` glob where the old
+    raw reads bound the flat ``/*.parquet`` — the series dir is FLAT (the
+    writer lays ``<YYYY>-<MM>.parquet`` directly under it), so the file set,
+    the total, the rows, and the span are identical (Golden Rule #7).
+    """
+    _write_options(tmp_path)
+    _write_second_option_month(tmp_path)
+    out = query_option_candles(store.connection, tmp_path, series=_OPT_SERIES, limit=50)
+    assert out["total"] == 5
+    assert len(out["rows"]) == 5
+    assert out["applied_range"] == {"start": "2024-03-01", "end": "2024-04-01"}
+
+
 def test_query_option_candles_date_bound_is_utc_not_session_tz(
     store: InstrumentStore, tmp_path: Path
 ) -> None:

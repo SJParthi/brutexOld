@@ -117,11 +117,104 @@ def test_gate_thread_safety_smoke() -> None:
     assert snap.blocking is False  # every begin was paired with a release.
 
 
+# ── started_at / gated_for_s stamps (DEC-MOVERS-GATE-PREBUILD-SCOPE-001) ──
+
+
+class _TickClock:
+    """A manually-advanced clock for deterministic duration tests."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_gate_idle_has_no_start_stamps() -> None:
+    snap = PrebuildGate().snapshot()
+    assert snap.started_at is None
+    assert snap.started_at_epoch is None
+    assert snap.gated_for_s is None
+
+
+def test_gate_begin_stamps_epoch_and_monotonic_duration() -> None:
+    # started_at_epoch = the injected WALL clock (epoch — renderable
+    # client-side; the ISO `started_at` twin is derived from the SAME instant);
+    # gated_for_s = the injected MONOTONIC delta (immune to wall-clock jumps).
+    mono = _TickClock(start=100.0)
+    wall = _TickClock(start=1_750_000_000.0)
+    gate = PrebuildGate(clock=mono, wall_clock=wall)
+    gate.begin()
+    mono.now += 34.5
+    snap = gate.snapshot()
+    assert snap.blocking is True
+    assert snap.started_at_epoch == 1_750_000_000.0
+    assert snap.started_at == "2025-06-15T15:06:40+00:00"  # the SAME instant, ISO UTC
+    assert snap.gated_for_s == 34.5
+
+
+def test_gate_release_clears_start_stamps() -> None:
+    mono = _TickClock()
+    gate = PrebuildGate(clock=mono, wall_clock=_TickClock(start=5.0))
+    gate.begin()
+    gate.release(True)
+    snap = gate.snapshot()
+    assert snap.started_at is None
+    assert snap.started_at_epoch is None
+    assert snap.gated_for_s is None
+
+
+def test_gate_release_without_begin_keeps_stamps_none() -> None:
+    # The narrowed scope (DEC-MOVERS-GATE-PREBUILD-SCOPE-001) makes the
+    # release-without-begin path the NORMAL one for every pipeline that stops
+    # before its prebuild — it must stay a safe no-op with no stamps.
+    gate = PrebuildGate(clock=_TickClock(), wall_clock=_TickClock())
+    gate.release(False)
+    snap = gate.snapshot()
+    assert snap.started_at is None
+    assert snap.started_at_epoch is None
+    assert snap.gated_for_s is None
+    assert snap.blocking is False
+
+
+def test_gate_double_begin_restamps_to_newest() -> None:
+    mono = _TickClock(start=10.0)
+    wall = _TickClock(start=1000.0)
+    gate = PrebuildGate(clock=mono, wall_clock=wall)
+    gate.begin()
+    mono.now, wall.now = 50.0, 1040.0
+    gate.begin()  # defensive double begin re-stamps to the newer start.
+    mono.now = 51.0
+    snap = gate.snapshot()
+    assert snap.started_at_epoch == 1040.0
+    assert snap.gated_for_s == 1.0
+
+
+def test_gate_duration_clamped_nonnegative_on_clock_skew() -> None:
+    # A (test-injected) backwards monotonic clock never yields a negative duration.
+    mono = _TickClock(start=100.0)
+    gate = PrebuildGate(clock=mono, wall_clock=_TickClock())
+    gate.begin()
+    mono.now = 99.0
+    snap = gate.snapshot()
+    assert snap.gated_for_s == 0.0
+
+
 # ── gated_movers_payload ──────────────────────────────────────────────────
 
 
 def _blocking_snapshot() -> GateSnapshot:
-    return GateSnapshot(state=STATE_BLOCKING, runs=3, last_ok=None)
+    # Deliberately PHASE-LESS (the defensive shape): the dynamic-phase echo is
+    # pinned by the phase-carrying tests below (DEC-PREBUILD-GATE-HONEST-NOTE-001
+    # reconciled the static `phase: "prebuild"` of the original
+    # DEC-MOVERS-GATE-PREBUILD-SCOPE-001 payload into the dynamic snapshot echo).
+    return GateSnapshot(
+        state=STATE_BLOCKING,
+        runs=3,
+        last_ok=None,
+        started_at_epoch=1_750_000_000.0,
+        gated_for_s=12.25,
+    )
 
 
 def test_gated_payload_shape_is_honest_and_empty() -> None:
@@ -134,6 +227,12 @@ def test_gated_payload_shape_is_honest_and_empty() -> None:
         top_n=100,
     )
     assert payload["gated"] is True
+    # The narrowed-scope honesty fields (DEC-MOVERS-GATE-PREBUILD-SCOPE-001):
+    # the gate's start/duration stamps ride the payload; the phase echo is
+    # DYNAMIC (snapshot-fed — None here, the phase-less defensive shape).
+    assert payload["phase"] is None
+    assert payload["started_at_epoch"] == 1_750_000_000.0
+    assert payload["gated_for_s"] == 12.25
     assert payload["interval"] == "5minute"
     assert payload["date"] == "2024-06-13"
     assert payload["time"] == "09:20"
@@ -214,6 +313,11 @@ def test_movers_template_renders_gated_note_and_auto_recovers() -> None:
     assert "j.gated" in template
     # The dynamic server note is set via textContent ONLY (XSS guard).
     assert 'textContent = j.note || "pull pipeline running' in template
+    # Narrowed-scope honesty (DEC-MOVERS-GATE-PREBUILD-SCOPE-001): the shell
+    # names the phase + shows the gate duration, via textContent only.
+    assert 'j.phase||"prebuild"' in template
+    assert "j.gated_for_s" in template
+    assert 'gated (${j.phase||"prebuild"}${gatedFor})`' in template
     # Auto-recovery: a retry timer re-polls until the gate lifts…
     assert "gateTimer = setTimeout(load, GATE_RETRY_MS)" in template
     # …and every non-gated load clears it.

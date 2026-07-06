@@ -17,10 +17,9 @@ from brutex.data import (
     BarSink,
     CandleBar,
     CatalogEntry,
-    NullBarSink,
-    ParquetBarSink,
 )
 from brutex.data.parquet_writer import WriteResult
+from brutex.data.sink import NullBarSink, ParquetBarSink
 
 # ────────────────────────────────────────────────────────────────────────
 # Fake writer + catalog (no polars, no duckdb)
