@@ -64,35 +64,195 @@ _OVER_WALL_PERSISTED = 5_000_000_000
 
 _MIB = 1024 * 1024
 
+#: The suite's fixed reproducibility hashes — the three STRUCTURAL keyword-only
+#: parameters of :func:`combo_digest` (DEC-COMBO-DIGEST-REPRO-HASHES-001,
+#: CLAUDE.md §2 Golden Rule #4 run-identity formula).
+_SNAP = "snap-aaaa"
+_IND = "ind-v1"
+_SHA = "c0ffee01"
+
+#: Keyword bundle for the ``SweepCache.seen`` / ``.record`` convenience calls.
+_REPRO_KW: dict[str, str] = {
+    "data_snapshot_hash": _SNAP,
+    "indicator_version": _IND,
+    "code_commit_sha": _SHA,
+}
+
+
+def _digest(
+    mask: int,
+    instrument: str,
+    tf: str,
+    direction: str,
+    params: dict[str, Any] | None = None,
+) -> bytes:
+    """``combo_digest`` bound to the suite's fixed reproducibility hashes."""
+    return combo_digest(
+        mask,
+        instrument,
+        tf,
+        direction,
+        params,
+        data_snapshot_hash=_SNAP,
+        indicator_version=_IND,
+        code_commit_sha=_SHA,
+    )
+
+
 #: Frozen golden digests — any change to the canonicalisation breaks these.
-_GOLDEN = "305dd064f60094a485abdccd5fa608bfbc193bf3f3093bda803101186d04317d"
-_GOLDEN_EMPTY = "50fb119cfc925983014cbac4e1f0a2dd7d73798009ccbd632743d66e39cda8b7"
+#: CAPTURED FROM THE PRE-CHANGE (main) combo_digest under the LEGACY convention
+#: (the three hashes injected INSIDE ``canonical_params`` by the caller), so
+#: they double as the dedup-store byte-identity contract of
+#: DEC-COMBO-DIGEST-REPRO-HASHES-001: the structural-kwargs API must reproduce
+#: them EXACTLY (existing Bloom/LMDB stores are not invalidated).
+_GOLDEN = "f940a93bdb390e459fc2b2877f8e874281ac738fcece153fe411240f143aa362"
+_GOLDEN_EMPTY = "3f542e4994a63e5c99cf1b447a0f070fcffcb98e58c8441b79384f4b79be6737"
+
+#: PRE-CHANGE capture of a full PRODUCTION-shaped ``_tuple_cache_params``-style
+#: payload (every supervisor identity leg) under the legacy in-params
+#: convention — the strongest byte-identity pin (the exact layout the live
+#: Bloom/LMDB dedup stores were keyed with).
+_GOLDEN_PRODUCTION_SHAPE = "d65aa979b0c2cfe6e3f0c7356f3be058953cc190bf5f4a12ee28dacdd5efdd20"
 
 
 # ── combo_digest ────────────────────────────────────────────────────────────
 
 
 def test_golden_digest_with_params() -> None:
-    assert combo_digest(7, "NIFTY", "5m", "bull", {"sl": 100}).hex() == _GOLDEN
+    assert _digest(7, "NIFTY", "5m", "bull", {"sl": 100}).hex() == _GOLDEN
 
 
 def test_golden_digest_default_params_none() -> None:
-    assert combo_digest(0, "BANKNIFTY", "1m", "bear").hex() == _GOLDEN_EMPTY
+    assert _digest(0, "BANKNIFTY", "1m", "bear").hex() == _GOLDEN_EMPTY
 
 
 def test_digest_is_32_bytes() -> None:
-    assert len(combo_digest(1, "NIFTY", "5m", "bull")) == 32
+    assert len(_digest(1, "NIFTY", "5m", "bull")) == 32
 
 
 def test_digest_param_order_independent() -> None:
-    a = combo_digest(1, "NIFTY", "5m", "bull", {"sl": 1, "tp": 2})
-    b = combo_digest(1, "NIFTY", "5m", "bull", {"tp": 2, "sl": 1})
+    a = _digest(1, "NIFTY", "5m", "bull", {"sl": 1, "tp": 2})
+    b = _digest(1, "NIFTY", "5m", "bull", {"tp": 2, "sl": 1})
     assert a == b
 
 
 def test_digest_non_serialisable_params_raises() -> None:
     with pytest.raises(SweepCacheError, match="not JSON-serialisable"):
-        combo_digest(1, "NIFTY", "5m", "bull", {"bad": object()})
+        _digest(1, "NIFTY", "5m", "bull", {"bad": object()})
+
+
+# ── combo_digest structural reproducibility hashes ───────────────────────────
+# DEC-COMBO-DIGEST-REPRO-HASHES-001: Golden Rule #4's three run-identity hashes
+# are REQUIRED keyword-only parameters — a caller can no longer forget them and
+# silently alias dedup entries across data snapshots (the stale-skip bug).
+
+
+class TestReproHashesStructural:
+    def test_byte_identical_to_legacy_in_params_convention(self) -> None:
+        """The structural API reproduces the PRE-change digests EXACTLY.
+
+        The three hex constants were captured by running the PRE-change (main)
+        ``combo_digest`` with the hashes injected inside ``canonical_params``
+        (the legacy supervisor convention). Byte-identity means existing
+        Bloom/LMDB dedup stores and run identities are NOT invalidated.
+        """
+        assert _digest(7, "NIFTY", "5m", "bull", {"sl": 100}).hex() == _GOLDEN
+        assert _digest(0, "BANKNIFTY", "1m", "bear").hex() == _GOLDEN_EMPTY
+        production_params: dict[str, Any] = {
+            "k": 2,
+            "condition_bits": [0, 5, 9],
+            "tf_minutes": 5,
+            "sl_paisa": 8000,
+            "tp_paisa": 5000,
+            "proximity_bps": [10, 15, 20],
+            "fib_anchor": "daily",
+            "prior_n": 3,
+            "start_equity_paisa": 10_000_000_00,
+            "mode": "signal_only",
+            "top_k": 50,
+            "min_hits": 30,
+            "max_combos": None,
+        }
+        digest = combo_digest(
+            3,
+            "NIFTY",
+            "5minute",
+            "bull",
+            production_params,
+            data_snapshot_hash="snap-prod-1",
+            indicator_version="ind-prod-1",
+            code_commit_sha="sha-prod-1",
+        )
+        assert digest.hex() == _GOLDEN_PRODUCTION_SHAPE
+
+    def test_each_hash_moves_the_digest(self) -> None:
+        """Changing ANY one reproducibility hash changes the digest.
+
+        The structural fix's teeth: a combo evaluated on OLD data can never be
+        skipped on NEW data (different ``data_snapshot_hash`` → different dedup
+        key), and an indicator / code change likewise re-keys.
+        """
+        base = _digest(7, "NIFTY", "5m", "bull", {"sl": 100})
+        changed_snap = combo_digest(
+            7,
+            "NIFTY",
+            "5m",
+            "bull",
+            {"sl": 100},
+            data_snapshot_hash="snap-CHANGED",
+            indicator_version=_IND,
+            code_commit_sha=_SHA,
+        )
+        changed_ind = combo_digest(
+            7,
+            "NIFTY",
+            "5m",
+            "bull",
+            {"sl": 100},
+            data_snapshot_hash=_SNAP,
+            indicator_version="ind-CHANGED",
+            code_commit_sha=_SHA,
+        )
+        changed_sha = combo_digest(
+            7,
+            "NIFTY",
+            "5m",
+            "bull",
+            {"sl": 100},
+            data_snapshot_hash=_SNAP,
+            indicator_version=_IND,
+            code_commit_sha="sha-CHANGED",
+        )
+        assert base not in {changed_snap, changed_ind, changed_sha}
+        assert len({changed_snap, changed_ind, changed_sha}) == 3
+
+    def test_omitting_the_hashes_is_a_typeerror(self) -> None:
+        """A caller omitting the hashes fails LOUDLY — never a silent alias.
+
+        ``cast(Any, …)`` bypasses the static signature so the RUNTIME contract
+        is what is pinned here; the static contract (mypy/pyright refusing the
+        call) is enforced by the required keyword-only parameters themselves.
+        """
+        with pytest.raises(TypeError, match="data_snapshot_hash"):
+            cast("Any", combo_digest)(1, "NIFTY", "5m", "bull")
+
+    def test_omitting_the_hashes_on_seen_and_record_is_a_typeerror(
+        self, tmp_path: Path
+    ) -> None:
+        with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
+            with pytest.raises(TypeError, match="data_snapshot_hash"):
+                cast("Any", cache.seen)(7, "NIFTY", "5m", "bull")
+            with pytest.raises(TypeError, match="data_snapshot_hash"):
+                cast("Any", cache.record)(7, "NIFTY", "5m", "bull")
+
+    @pytest.mark.parametrize(
+        "reserved", ["data_snapshot_hash", "indicator_version", "code_commit_sha"]
+    )
+    def test_reserved_key_inside_params_raises(self, reserved: str) -> None:
+        """The structural kwargs are the ONE channel — an in-``params`` copy is
+        refused loudly (two channels could silently disagree)."""
+        with pytest.raises(SweepCacheError, match="RESERVED reproducibility"):
+            _digest(1, "NIFTY", "5m", "bull", {reserved: "sneaky", "sl": 1})
 
 
 # ── combo_digest non-finite-float guard (DEC-ENGINE-DEDUP-NAN-CANON-001) ─────
@@ -107,22 +267,22 @@ def test_digest_nan_param_raises() -> None:
     silently accept a non-finite float the identity key would refuse.
     """
     with pytest.raises(SweepCacheError, match="non-finite float"):
-        combo_digest(1, "NIFTY", "5m", "bull", {"x": float("nan")})
+        _digest(1, "NIFTY", "5m", "bull", {"x": float("nan")})
 
 
 def test_digest_inf_param_raises() -> None:
     with pytest.raises(SweepCacheError, match="non-finite float"):
-        combo_digest(1, "NIFTY", "5m", "bull", {"x": float("inf")})
+        _digest(1, "NIFTY", "5m", "bull", {"x": float("inf")})
 
 
 def test_digest_negative_inf_param_raises() -> None:
     with pytest.raises(SweepCacheError, match="non-finite float"):
-        combo_digest(1, "NIFTY", "5m", "bull", {"x": float("-inf")})
+        _digest(1, "NIFTY", "5m", "bull", {"x": float("-inf")})
 
 
 def test_digest_finite_float_param_still_succeeds() -> None:
     """A FINITE float param is unaffected by the guard — a 64-hex digest."""
-    digest = combo_digest(1, "NIFTY", "5m", "bull", {"x": 1.5, "y": -0.0})
+    digest = _digest(1, "NIFTY", "5m", "bull", {"x": 1.5, "y": -0.0})
     assert len(digest) == 32
     assert len(digest.hex()) == 64
 
@@ -132,10 +292,10 @@ def test_digest_finite_float_param_still_succeeds() -> None:
 
 def test_open_creates_and_dedups(tmp_path: Path) -> None:
     with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
-        assert cache.seen(7, "NIFTY", "5m", "bull", {"sl": 100}) is False
-        assert cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}) is True
-        assert cache.seen(7, "NIFTY", "5m", "bull", {"sl": 100}) is True
-        assert cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}) is False  # idempotent
+        assert cache.seen(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is False
+        assert cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is True
+        assert cache.seen(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is True
+        assert cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is False  # idempotent
 
 
 def test_close_is_idempotent(tmp_path: Path) -> None:
@@ -146,7 +306,7 @@ def test_close_is_idempotent(tmp_path: Path) -> None:
 
 def test_use_after_close_raises(tmp_path: Path) -> None:
     cache = SweepCache.open(tmp_path / "c", bloom_capacity=1000)
-    d = combo_digest(1, "NIFTY", "5m", "bull")
+    d = _digest(1, "NIFTY", "5m", "bull")
     cache.close()
     with pytest.raises(SweepCacheError, match="closed SweepCache"):
         cache.seen_digest(d)
@@ -159,7 +319,7 @@ def test_use_after_close_raises(tmp_path: Path) -> None:
 
 def test_seen_digest_bloom_negative_fast_path(tmp_path: Path) -> None:
     with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
-        d = combo_digest(42, "NIFTY", "5m", "bull")
+        d = _digest(42, "NIFTY", "5m", "bull")
         assert cache.seen_digest(d) is False
         snap = cache.snapshot()
         assert snap["checks"] == 1
@@ -169,7 +329,7 @@ def test_seen_digest_bloom_negative_fast_path(tmp_path: Path) -> None:
 
 def test_seen_digest_bloom_positive_lmdb_hit(tmp_path: Path) -> None:
     with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
-        d = combo_digest(7, "NIFTY", "5m", "bull")
+        d = _digest(7, "NIFTY", "5m", "bull")
         cache.record_digest(d)
         assert cache.seen_digest(d) is True
         assert cache.snapshot()["hits"] == 1
@@ -179,7 +339,7 @@ def test_seen_digest_bloom_positive_lmdb_miss(tmp_path: Path) -> None:
     # Force the rare "Bloom says maybe, LMDB says no" path by seeding the Bloom
     # directly without recording to the exact store.
     with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
-        d = combo_digest(99, "NIFTY", "5m", "bull")
+        d = _digest(99, "NIFTY", "5m", "bull")
         cache._bloom.add(d)
         assert cache.seen_digest(d) is False
         snap = cache.snapshot()
@@ -192,7 +352,7 @@ def test_seen_digest_bloom_positive_lmdb_miss(tmp_path: Path) -> None:
 
 def test_record_digest_new_then_idempotent(tmp_path: Path) -> None:
     with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
-        d = combo_digest(3, "NIFTY", "5m", "bull")
+        d = _digest(3, "NIFTY", "5m", "bull")
         assert cache.record_digest(d) is True
         assert cache.record_digest(d) is False
         snap = cache.snapshot()
@@ -231,21 +391,21 @@ def test_property_recorded_combos_always_seen(
     d = tmp_path_factory.mktemp("kc")
     with SweepCache.open(d / "c", bloom_capacity=100_000) as cache:
         for mask, instrument, tf, direction in combos:
-            cache.record(mask, instrument, tf, direction)
+            cache.record(mask, instrument, tf, direction, **_REPRO_KW)
         # No false negatives — every recorded combo must be reported seen.
         for mask, instrument, tf, direction in combos:
-            assert cache.seen(mask, instrument, tf, direction) is True
+            assert cache.seen(mask, instrument, tf, direction, **_REPRO_KW) is True
 
 
 def test_reopen_reloads_persisted_membership(tmp_path: Path) -> None:
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as cache:
-        cache.record(7, "NIFTY", "5m", "bull", {"sl": 100})
+        cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW)
     # A fresh process re-opens: the in-RAM Bloom is repopulated from the persisted
     # LMDB exact store on open(), so the combo is reported as already evaluated
     # WITHOUT any manual Bloom seed (the resume-dedup guarantee, Golden Rule #7).
     with SweepCache.open(root, bloom_capacity=1000) as cache2:
-        d = combo_digest(7, "NIFTY", "5m", "bull", {"sl": 100})
+        d = _digest(7, "NIFTY", "5m", "bull", {"sl": 100})
         assert cache2.seen_digest(d) is True
 
 
@@ -271,18 +431,18 @@ def test_resume_dedups_all_previously_recorded_without_manual_seed(
     combos = [(mask, "NIFTY", "5m", "bull", {"sl": mask * 10}) for mask in range(1, 51)]
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask, inst, tf, direction, params in combos:
-            assert first.record(mask, inst, tf, direction, params) is True
+            assert first.record(mask, inst, tf, direction, params, **_REPRO_KW) is True
 
     # Fresh instance, same path → resume.
     with SweepCache.open(root, bloom_capacity=1000) as resumed:
         for mask, inst, tf, direction, params in combos:
-            assert resumed.seen(mask, inst, tf, direction, params) is True
+            assert resumed.seen(mask, inst, tf, direction, params, **_REPRO_KW) is True
         # None hit the Bloom-negative fast path — the Bloom was repopulated.
         snap = resumed.snapshot()
         assert snap["bloom_negatives"] == 0
         assert snap["hits"] == len(combos)
         # A genuinely-new combo is still correctly reported unseen (Bloom-negative).
-        assert resumed.seen(999, "NIFTY", "5m", "bull") is False
+        assert resumed.seen(999, "NIFTY", "5m", "bull", **_REPRO_KW) is False
 
 
 def test_cold_open_repopulate_is_noop(tmp_path: Path) -> None:
@@ -303,11 +463,11 @@ def test_resume_persisted_over_capacity_auto_grows_within_wall(tmp_path: Path) -
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask in range(5):
-            first.record(mask, "NIFTY", "5m", "bull")
+            first.record(mask, "NIFTY", "5m", "bull", **_REPRO_KW)
     with capture_logs() as logs, SweepCache.open(root, bloom_capacity=3) as resumed:
         assert resumed._bloom.capacity == 5
         for mask in range(5):
-            assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+            assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
     grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
     assert len(grows) == 1
     assert grows[0]["persisted"] == 5
@@ -321,7 +481,7 @@ def test_resume_within_capacity_never_grows_and_never_logs(tmp_path: Path) -> No
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask in range(5):
-            first.record(mask, "NIFTY", "5m", "bull")
+            first.record(mask, "NIFTY", "5m", "bull", **_REPRO_KW)
     with capture_logs() as logs, SweepCache.open(root, bloom_capacity=1000) as resumed:
         assert resumed._bloom.capacity == 1000
     assert not [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
@@ -365,7 +525,7 @@ def test_concurrent_record_admits_digest_exactly_once(tmp_path: Path) -> None:
     threads both pass ``digest not in self._exact`` and both ``bloom.add`` →
     ``bloom_insertions``/``records`` inflate above 1.
     """
-    d = combo_digest(7, "NIFTY", "5m", "bull", {"sl": 100})
+    d = _digest(7, "NIFTY", "5m", "bull", {"sl": 100})
     n_threads = 8
     with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
         start = threading.Barrier(n_threads)
@@ -545,7 +705,7 @@ class TestCapacityRefusalRemedy:
     def _seed(root: Path, count: int) -> None:
         with SweepCache.open(root, bloom_capacity=1000) as cache:
             for mask in range(count):
-                assert cache.record(mask, "NIFTY", "5m", "bull") is True
+                assert cache.record(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
 
     def test_wall_refusal_closes_env_and_reopen_admits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -568,7 +728,7 @@ class TestCapacityRefusalRemedy:
                 SweepCache.open(root, bloom_capacity=3)
         with SweepCache.open(root, bloom_capacity=1000) as resumed:
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
 
     def test_bloom_config_error_after_exact_open_leaks_no_env(self, tmp_path: Path) -> None:
         """A BloomFilter CONFIG error (fpr out of range) also closes the env.
@@ -586,7 +746,7 @@ class TestCapacityRefusalRemedy:
             SweepCache.open(root, bloom_capacity=1000, bloom_fpr=0.9)
         with SweepCache.open(root, bloom_capacity=1000) as resumed:
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
 
     def test_env_knob_small_capacity_self_heals_by_auto_grow(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -597,7 +757,7 @@ class TestCapacityRefusalRemedy:
         monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "3")
         with capture_logs() as logs, SweepCache.open(root) as resumed:
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
         assert [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
 
     def test_explicit_knob_still_pre_sizes_without_grow(self, tmp_path: Path) -> None:
@@ -607,7 +767,7 @@ class TestCapacityRefusalRemedy:
         with capture_logs() as logs, SweepCache.open(root, bloom_capacity=10) as resumed:
             assert resumed._bloom.capacity == 10
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
         assert not [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
 
 
@@ -656,7 +816,7 @@ class TestRecordDigestExactFirst:
             real_exact = cache._exact
             stub = _MapFullOnceExact()
             monkeypatch.setattr(cache, "_exact", stub)
-            d = combo_digest(7, "NIFTY", "5m", "bull", {"sl": 100})
+            d = _digest(7, "NIFTY", "5m", "bull", {"sl": 100})
             with pytest.raises(LmdbMapFullError, match="synthetic map full"):
                 cache.record_digest(d)
             # The fault propagated with the Bloom UNTOUCHED — no phantom entry.
@@ -721,7 +881,7 @@ class TestRecordDigestExactFirst:
         """
         successes = 0
         for n in range(4096):
-            digest = combo_digest(n, "NIFTY", "5m", "bull", {"fresh": True})
+            digest = _digest(n, "NIFTY", "5m", "bull", {"fresh": True})
             try:
                 cache.record_digest(digest)
             except LmdbMapFullError as exc:

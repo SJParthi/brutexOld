@@ -55,7 +55,19 @@ _PARAMS = {"sl_paisa": 80, "tp_paisa": 50, "prior_n": 3, "proximity": 0.25}
 
 
 def _digest(seed: int) -> bytes:
-    return combo_digest(seed % (1 << 52), "NIFTY", "5m", "bull", _PARAMS)
+    return combo_digest(
+        seed % (1 << 52),
+        "NIFTY",
+        "5m",
+        "bull",
+        _PARAMS,
+        # The three STRUCTURAL reproducibility hashes
+        # (DEC-COMBO-DIGEST-REPRO-HASHES-001) — fixed here; the perf/memory
+        # envelope is what these suites measure, not the identity.
+        data_snapshot_hash="snap-aaaa",
+        indicator_version="ind-v1",
+        code_commit_sha="c0ffee01",
+    )
 
 
 def test_combo_digest_bounded_memory_and_deterministic_under_sustained_load() -> None:
@@ -113,4 +125,13 @@ def test_non_finite_float_always_raises_under_sustained_load() -> None:
         bad = non_finite[i % len(non_finite)]
         assert not math.isfinite(bad)
         with pytest.raises(SweepCacheError, match="non-finite float"):
-            combo_digest(i, "NIFTY", "5m", "bull", {"x": bad})
+            combo_digest(
+                i,
+                "NIFTY",
+                "5m",
+                "bull",
+                {"x": bad},
+                data_snapshot_hash="snap-aaaa",
+                indicator_version="ind-v1",
+                code_commit_sha="c0ffee01",
+            )

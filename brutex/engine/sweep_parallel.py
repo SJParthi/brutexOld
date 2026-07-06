@@ -968,6 +968,9 @@ class ParallelGridDriver:
             tuple_.tf.label,
             direction_label(tuple_.direction),
             tuple_cache_params(tuple_, self._grid),
+            data_snapshot_hash=self._grid.data_snapshot_hash,
+            indicator_version=self._grid.indicator_version,
+            code_commit_sha=self._grid.code_commit_sha,
         ):
             return _skip_outcome(index, tuple_, "cache")
         bars = self._bars_for(tuple_.instrument, tuple_.tf.label)
@@ -1110,6 +1113,9 @@ class ParallelGridDriver:
             outcome.tuple_.tf.label,
             direction_label(outcome.tuple_.direction),
             tuple_cache_params(outcome.tuple_, self._grid),
+            data_snapshot_hash=self._grid.data_snapshot_hash,
+            indicator_version=self._grid.indicator_version,
+            code_commit_sha=self._grid.code_commit_sha,
         )
         if not acc.had_failure:
             self._guards.checkpoint.record(index)
