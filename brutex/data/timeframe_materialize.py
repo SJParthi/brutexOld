@@ -51,6 +51,8 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.derive_lock import derive_write_lock
+
 # Re-export: `frame_to_candle_bars` LIVES in `spot_daily_resample` — the
 # import-graph LEAF of the pair (this module already imports its daily-derive
 # seam) — so the shared batched converter (DEC-PREBUILD-GIL-VECTORIZE-001) is
@@ -167,9 +169,14 @@ class PrebuildKind(Enum):
         FUTURES (option bars are OI-carrying F&O bars) since
         DEC-PIPELINE-AUTOPREBUILD-001, which SUPERSEDES the earlier on-demand
         design (DEC-PREBUILD-SELECT-001's explicit no-op). Honest storage
-        envelope (Golden Rule #10): once all 19 intraday + the ``1day``
-        partitions exist, the options lake costs **~2-3× its 1-minute
-        footprint** — an operator-accepted cost of the decree.
+        envelope (Golden Rule #10, DEC-LAKE-FOOTPRINT-MEASURED-001): the
+        fully-materialised cost is a MEASURED multiple of the 1-minute
+        footprint — the observed multiplier is persisted to ``schema_meta``
+        (``lake_footprint.*``) after every prebuild run, with a conservative
+        **6.5×** fallback before the first observation. The retired "~2-3×"
+        estimate IGNORED the 17-column Greeks-enriched option 1-minute rewrite
+        (:mod:`brutex.data.greeks_enrich`), which alone pushes the realistic
+        all-in cost toward ~5-6× — operator-accepted either way.
     """
 
     SPOT = "spot"
@@ -428,8 +435,11 @@ def materialize_lake_timeframes(
       (SPOT → OI-dropping spot resampler; FUTURES/OPTIONS → OI-aware F&O
       resampler — option materialisation enabled by
       DEC-PIPELINE-AUTOPREBUILD-001, which supersedes the on-demand-only
-      design; honest cost: a fully-materialised options lake is **~2-3× its
-      1-minute footprint**, operator-accepted);
+      design; honest cost per DEC-LAKE-FOOTPRINT-MEASURED-001: a MEASURED
+      multiple of the 1-minute footprint — observed multiplier persisted to
+      ``schema_meta``, conservative 6.5× fallback; the retired "~2-3×" guess
+      ignored the Greeks-enriched 17-column 1-minute rewrite — operator-
+      accepted);
     * reads the 1-minute base ONCE, with the OI column for FUTURES + OPTIONS
       (``with_open_interest=kind is not PrebuildKind.SPOT``), so a spot
       partition's output is byte-identical to before;
@@ -504,6 +514,17 @@ def materialize_lake_timeframes(
     derived fan-out (measured: 205,609 INFO lines ≈ ~26 min to roll the
     10 MiB × 5 rotation, pull 2026-07-04/05).
 
+    **Cross-process derive signal (DEC-ENGINE-MISC-PACK-001):** the WHOLE
+    per-symbol materialise runs under the exclusive
+    :func:`~brutex.data.derive_lock.derive_write_lock` (the fixed
+    ``<lake_root>/.locks/derive.lock`` flock), so a concurrent reader in a
+    SEPARATE process — the ``/movers`` stored-first read probing
+    :func:`~brutex.data.derive_lock.derive_in_progress` — can never observe a
+    half-refreshed TF set as its stored source. Held PER CALL (one symbol) and
+    released between symbols, so a multi-symbol prebuild never starves readers
+    for its whole duration; lock ORDER is derive → per-partition flock (writer
+    only), never the reverse — no cycle.
+
     **Daily-open substitution observe (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001,
     SPOT + ``include_daily=True`` only):** after the daily derive, the SAME
     in-memory 1-minute frame is scanned (zero extra I/O) for complete sessions
@@ -533,165 +554,166 @@ def materialize_lake_timeframes(
     must always rebuild what it just quarantined) never skips and never
     stamps.
     """
-    from datetime import UTC, datetime
+    with derive_write_lock(lake_root):
+        from datetime import UTC, datetime
 
-    from brutex.calendars.nse import daily_derive_cutoff
-    from brutex.data.derive_stamp import (
-        DeriveStamp,
-        derive_stamp_path,
-        incremental_prebuild_enabled,
-        load_derive_stamp,
-        save_derive_stamp,
-        should_skip_derive,
-        source_1m_token,
-    )
-
-    if months is not None and include_daily:
-        raise ValueError(
-            "months= cannot be combined with include_daily=True — the midnight-IST "
-            "derived 1day straddles UTC months (use the daily recall path's "
-            "±1-day-padded window read instead; DEC-TF-REBUILD-MONTH-BOUND-001)"
-        )
-    requested = tuple(dict.fromkeys(tfs))
-    # Resolve the daily forming-session cutoff up-front — the skip rule must
-    # see the SAME value the derive would use (resolved unconditionally so the
-    # daily branch below needs no Optional narrowing; a non-daily run simply
-    # never uses it and its stamp records daily_before=None).
-    # DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001: the production default is the
-    # session-close-aware cutoff — a post-close (or non-trading-day) run
-    # includes the run day's completed session; a mid-session run excludes it.
-    before: date = daily_before if daily_before is not None else daily_derive_cutoff(_now_ist())
-    before_iso = before.isoformat() if include_daily else None
-
-    # A months-bounded (partial) derive never skips and never stamps
-    # (DEC-TF-REBUILD-MONTH-BOUND-001 × DEC-PREBUILD-INCREMENTAL-001).
-    if months is not None:
-        inc = False
-    else:
-        inc = incremental_prebuild_enabled() if incremental is None else incremental
-    token: str | None = None
-    stamp_file = derive_stamp_path(lake_root, exchange, segment, symbol)
-    if inc:
-        # Token BEFORE the read (conservative: a write landing between the
-        # token and the read makes the NEXT run re-derive, never a stale skip).
-        token = source_1m_token(lake_root, exchange, segment, symbol)
-        if (
-            token is not None
-            and should_skip_derive(
-                load_derive_stamp(stamp_file),
-                token=token,
-                tfs=requested,
-                include_daily=include_daily,
-                daily_before=before_iso,
-            )
-            and _derived_dirs_present(
-                lake_root, exchange, segment, symbol, requested, include_daily
-            )
-        ):
-            _LOG.info(
-                "prebuild.derive.unchanged_skip",
-                exchange=exchange,
-                segment=segment,
-                symbol=symbol,
-                include_daily=include_daily,
-            )
-            return MaterializeResult(written={}, skipped=(), unchanged=True)
-
-    read_1m = make_lake_read_1m(
-        lake_root=lake_root,
-        exchange=exchange,
-        segment=segment,
-        symbol=symbol,
-        with_open_interest=kind is not PrebuildKind.SPOT,
-        months=months,
-    )
-    write_tf = make_lake_write_tf(
-        lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-    )
-    resampler = intraday_resampler_for(kind)
-
-    def _stamp(last_1m_ist_date: str | None) -> None:
-        """Record the successful full derive (best-effort — never raises)."""
-        if not inc or token is None:
-            return
-        save_derive_stamp(
-            stamp_file,
-            DeriveStamp(
-                token=token,
-                tfs=tuple(sorted(set(requested))),
-                include_daily=include_daily,
-                daily_before=before_iso,
-                last_1m_ist_date=last_1m_ist_date,
-                written_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            ),
+        from brutex.calendars.nse import daily_derive_cutoff
+        from brutex.data.derive_stamp import (
+            DeriveStamp,
+            derive_stamp_path,
+            incremental_prebuild_enabled,
+            load_derive_stamp,
+            save_derive_stamp,
+            should_skip_derive,
+            source_1m_token,
         )
 
-    def _log_write_summary(result: MaterializeResult) -> None:
-        """ONE aggregate INFO per materialised SYMBOL (DEC-PREBUILD-LOG-FLOOD-001).
+        if months is not None and include_daily:
+            raise ValueError(
+                "months= cannot be combined with include_daily=True — the midnight-IST "
+                "derived 1day straddles UTC months (use the daily recall path's "
+                "±1-day-padded window read instead; DEC-TF-REBUILD-MONTH-BOUND-001)"
+            )
+        requested = tuple(dict.fromkeys(tfs))
+        # Resolve the daily forming-session cutoff up-front — the skip rule must
+        # see the SAME value the derive would use (resolved unconditionally so the
+        # daily branch below needs no Optional narrowing; a non-daily run simply
+        # never uses it and its stamp records daily_before=None).
+        # DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001: the production default is the
+        # session-close-aware cutoff — a post-close (or non-trading-day) run
+        # includes the run day's completed session; a mid-session run excludes it.
+        before: date = daily_before if daily_before is not None else daily_derive_cutoff(_now_ist())
+        before_iso = before.isoformat() if include_daily else None
 
-        The per-partition ``lake.partition.write`` telemetry is DEBUG on this
-        derived path (see ``make_lake_write_tf``), so the prebuild's audit
-        record survives log rotation in O(symbols) not O(partitions): one line
-        per symbol carrying the timeframe count + total derived bars — the
-        aggregate form of the per-partition fields the forensics rely on.
-        """
-        _LOG.info(
-            "lake.derived.write_summary",
+        # A months-bounded (partial) derive never skips and never stamps
+        # (DEC-TF-REBUILD-MONTH-BOUND-001 × DEC-PREBUILD-INCREMENTAL-001).
+        if months is not None:
+            inc = False
+        else:
+            inc = incremental_prebuild_enabled() if incremental is None else incremental
+        token: str | None = None
+        stamp_file = derive_stamp_path(lake_root, exchange, segment, symbol)
+        if inc:
+            # Token BEFORE the read (conservative: a write landing between the
+            # token and the read makes the NEXT run re-derive, never a stale skip).
+            token = source_1m_token(lake_root, exchange, segment, symbol)
+            if (
+                token is not None
+                and should_skip_derive(
+                    load_derive_stamp(stamp_file),
+                    token=token,
+                    tfs=requested,
+                    include_daily=include_daily,
+                    daily_before=before_iso,
+                )
+                and _derived_dirs_present(
+                    lake_root, exchange, segment, symbol, requested, include_daily
+                )
+            ):
+                _LOG.info(
+                    "prebuild.derive.unchanged_skip",
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    include_daily=include_daily,
+                )
+                return MaterializeResult(written={}, skipped=(), unchanged=True)
+
+        read_1m = make_lake_read_1m(
+            lake_root=lake_root,
             exchange=exchange,
             segment=segment,
             symbol=symbol,
-            timeframes_written=len(result.written),
-            total_bars=result.total_bars,
-            skipped=len(result.skipped),
-            include_daily=include_daily,
+            with_open_interest=kind is not PrebuildKind.SPOT,
+            months=months,
+        )
+        write_tf = make_lake_write_tf(
+            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+        )
+        resampler = intraday_resampler_for(kind)
+
+        def _stamp(last_1m_ist_date: str | None) -> None:
+            """Record the successful full derive (best-effort — never raises)."""
+            if not inc or token is None:
+                return
+            save_derive_stamp(
+                stamp_file,
+                DeriveStamp(
+                    token=token,
+                    tfs=tuple(sorted(set(requested))),
+                    include_daily=include_daily,
+                    daily_before=before_iso,
+                    last_1m_ist_date=last_1m_ist_date,
+                    written_at=datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+
+        def _log_write_summary(result: MaterializeResult) -> None:
+            """ONE aggregate INFO per materialised SYMBOL (DEC-PREBUILD-LOG-FLOOD-001).
+
+            The per-partition ``lake.partition.write`` telemetry is DEBUG on this
+            derived path (see ``make_lake_write_tf``), so the prebuild's audit
+            record survives log rotation in O(symbols) not O(partitions): one line
+            per symbol carrying the timeframe count + total derived bars — the
+            aggregate form of the per-partition fields the forensics rely on.
+            """
+            _LOG.info(
+                "lake.derived.write_summary",
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                timeframes_written=len(result.written),
+                total_bars=result.total_bars,
+                skipped=len(result.skipped),
+                include_daily=include_daily,
+            )
+
+        if not include_daily:
+            result = materialize_timeframes(
+                tfs=requested, read_1m=read_1m, write_tf=write_tf, resampler=resampler
+            )
+            _stamp(last_1m_ist_date=None)
+            _log_write_summary(result)
+            return result
+
+        from brutex.data.spot_daily_resample import (
+            fill_daily_from_minute,
+            make_lake_write_1day,
+            observe_daily_open_substitutions,
         )
 
-    if not include_daily:
-        result = materialize_timeframes(
-            tfs=requested, read_1m=read_1m, write_tf=write_tf, resampler=resampler
+        # Read the 1-minute base ONCE and share the frame between the intraday
+        # derivation and the daily derivation (halves the partition I/O).
+        df_1m = read_1m()
+        intraday = materialize_timeframes(
+            tfs=requested, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
         )
-        _stamp(last_1m_ist_date=None)
+        daily = fill_daily_from_minute(
+            read_1m=lambda: df_1m,
+            write_1day=make_lake_write_1day(
+                lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+            ),
+            before=before,
+            resample_fn=daily_resample_fn_for(kind),
+        )
+        # OBSERVE-ONLY daily-open substitution scan (DEC-CALENDAR-EXPECTED-BARS-
+        # DAILY-OPEN-001) — SPOT only, AFTER the fill so a fill exception short-circuits
+        # identically to before; read-only over the frame already in memory, so
+        # the written bars are byte-unchanged (golden-pinned). Guarded inside:
+        # a scan error logs + returns 0, never failing the prebuild.
+        opens_substituted = 0
+        if kind is PrebuildKind.SPOT:
+            opens_substituted = observe_daily_open_substitutions(
+                df_1m, before=before, symbol=symbol, dense=dense_symbol
+            )
+        _stamp(last_1m_ist_date=_last_ist_date(df_1m))
+        result = MaterializeResult(
+            written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
+            skipped=intraday.skipped,
+            opens_substituted=opens_substituted,
+        )
         _log_write_summary(result)
         return result
-
-    from brutex.data.spot_daily_resample import (
-        fill_daily_from_minute,
-        make_lake_write_1day,
-        observe_daily_open_substitutions,
-    )
-
-    # Read the 1-minute base ONCE and share the frame between the intraday
-    # derivation and the daily derivation (halves the partition I/O).
-    df_1m = read_1m()
-    intraday = materialize_timeframes(
-        tfs=requested, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
-    )
-    daily = fill_daily_from_minute(
-        read_1m=lambda: df_1m,
-        write_1day=make_lake_write_1day(
-            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
-        ),
-        before=before,
-        resample_fn=daily_resample_fn_for(kind),
-    )
-    # OBSERVE-ONLY daily-open substitution scan (DEC-CALENDAR-EXPECTED-BARS-
-    # DAILY-OPEN-001) — SPOT only, AFTER the fill so a fill exception short-circuits
-    # identically to before; read-only over the frame already in memory, so
-    # the written bars are byte-unchanged (golden-pinned). Guarded inside:
-    # a scan error logs + returns 0, never failing the prebuild.
-    opens_substituted = 0
-    if kind is PrebuildKind.SPOT:
-        opens_substituted = observe_daily_open_substitutions(
-            df_1m, before=before, symbol=symbol, dense=dense_symbol
-        )
-    _stamp(last_1m_ist_date=_last_ist_date(df_1m))
-    result = MaterializeResult(
-        written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
-        skipped=intraday.skipped,
-        opens_substituted=opens_substituted,
-    )
-    _log_write_summary(result)
-    return result
 
 
 def _last_ist_date(df_1m: pl.DataFrame) -> str | None:

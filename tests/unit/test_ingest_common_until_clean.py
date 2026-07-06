@@ -25,6 +25,7 @@ from brutex.adapters.ingest_common import (
     decide_until_clean,
     run_until_clean,
 )
+from structlog.typing import EventDict
 
 
 def _scripted_runner(
@@ -570,3 +571,97 @@ def test_run_until_clean_outstanding_runs_to_budget_when_not_stuck_opted_in() ->
     out = run_until_clean(runner, max_rounds=2, sleep=sleep, stop_when_stuck=False)
     assert out.verdict == "stop_budget"
     assert len(calls) == 2
+
+
+# ── until_clean.round / until_clean.done observability (DEC-PULL-TELEMETRY-TRIAD-001) ──
+
+
+def _until_clean_events(logs: list[EventDict], event: str) -> list[EventDict]:
+    """The captured structlog events named *event*."""
+    return [e for e in logs if e["event"] == event]
+
+
+def test_round_events_emitted_per_round_with_terminal_done() -> None:
+    """A 3-round drive (2 progressing + a clean finish) logs one ``until_clean.round``
+    per round (round index, outstanding, made_progress, verdict) + ONE terminal
+    ``until_clean.done`` (rounds, final outstanding, verdict)."""
+    from structlog.testing import capture_logs
+
+    sleep, _seen = _no_sleep()
+    runner, calls = _scripted_runner(
+        [
+            UntilCleanRound(still_failed_windows=111, auth_aborted=False),
+            UntilCleanRound(still_failed_windows=40, auth_aborted=False),
+            UntilCleanRound(still_failed_windows=0, auth_aborted=False),
+        ]
+    )
+    with capture_logs() as logs:
+        out = run_until_clean(runner, max_rounds=5, sleep=sleep)
+    rounds = _until_clean_events(logs, "until_clean.round")
+    assert [e["round"] for e in rounds] == [1, 2, 3]
+    assert [e["outstanding"] for e in rounds] == [111, 40, 0]
+    # The default path never opts into stuck detection → made_progress stays True.
+    assert [e["made_progress"] for e in rounds] == [True, True, True]
+    assert [e["verdict"] for e in rounds] == ["continue", "continue", "stop_clean"]
+    done = _until_clean_events(logs, "until_clean.done")
+    assert done == [
+        {
+            "event": "until_clean.done",
+            "log_level": "info",
+            "rounds": 3,
+            "outstanding": 0,
+            "verdict": "stop_clean",
+        }
+    ]
+    # PARITY PIN (Session-B contract): the returned outcome is byte-identical to the
+    # pre-logging controller for the same scripted rounds — logging is the only delta.
+    assert out.verdict == "stop_clean"
+    assert out.rounds_run == 3
+    assert len(calls) == 3
+
+
+def test_round_event_outstanding_prefers_the_ledger_count() -> None:
+    """A round carrying ``outstanding_windows`` logs THAT (the genuinely-outstanding
+    ledger count), not the legacy still-failed count; made_progress reflects the
+    stuck detection when opted in."""
+    from structlog.testing import capture_logs
+
+    sleep, _seen = _no_sleep()
+    runner, _calls = _scripted_runner(
+        [
+            _outstanding_round(outstanding=5, settled=1, streak=0, failed=2),
+            _outstanding_round(outstanding=5, settled=1, streak=0, failed=2),  # flat → stuck
+        ]
+    )
+    with capture_logs() as logs:
+        out = run_until_clean(runner, max_rounds=50, sleep=sleep, stop_when_stuck=True)
+    rounds = _until_clean_events(logs, "until_clean.round")
+    assert [e["outstanding"] for e in rounds] == [5, 5]  # the ledger count, not failed=2
+    assert [e["made_progress"] for e in rounds] == [True, False]
+    assert rounds[-1]["verdict"] == "stop_no_progress"
+    done = _until_clean_events(logs, "until_clean.done")
+    assert len(done) == 1
+    assert done[0]["rounds"] == 2
+    assert done[0]["outstanding"] == 5
+    assert done[0]["verdict"] == "stop_no_progress"
+    assert out.verdict == "stop_no_progress"  # parity: verdict unchanged
+
+
+def test_disabled_budget_still_emits_a_terminal_done() -> None:
+    """``max_rounds <= 0`` runs ZERO rounds yet still terminally observes itself:
+    one ``until_clean.done`` with rounds=0, outstanding=None (nothing measured)."""
+    from structlog.testing import capture_logs
+
+    sleep, _seen = _no_sleep()
+    runner, calls = _scripted_runner([])
+    with capture_logs() as logs:
+        out = run_until_clean(runner, max_rounds=0, sleep=sleep)
+    assert not _until_clean_events(logs, "until_clean.round")  # no round ran → no round log
+    done = _until_clean_events(logs, "until_clean.done")
+    assert len(done) == 1
+    assert done[0]["rounds"] == 0
+    assert done[0]["outstanding"] is None
+    assert done[0]["verdict"] == "stop_budget"
+    # Parity: the disabled-budget outcome is byte-identical (no rounds, spent budget).
+    assert out == UntilCleanOutcome(verdict="stop_budget", rounds_run=0, rounds=())
+    assert calls == []

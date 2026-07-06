@@ -32,6 +32,7 @@ from brutex.dashboard.pipeline_prebuild import (
     run_pipeline_prebuild_guarded,
 )
 from brutex.data.fs_probe import AllocationProbe
+from brutex.data.lake_footprint import DiskGuardDecision
 from brutex.data.timeframe_materialize import MaterializeResult, PrebuildKind
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from structlog.testing import capture_logs
@@ -565,6 +566,105 @@ def test_guarded_prebuild_threads_lake_root(
     )
     assert probed == [tmp_path / "lake"]
     assert outcome.fs_note == "coarse (fake)"
+
+
+# ── the pre-run disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001) ────────────────
+
+
+def _decision(*, blocked: bool) -> DiskGuardDecision:
+    return DiskGuardDecision(
+        blocked=blocked,
+        free_bytes=1024,
+        estimated_need_bytes=4096,
+        source_1m_bytes=512,
+        derived_bytes=128,
+        multiplier=Decimal("6.5"),
+        multiplier_source="fallback",
+        margin=Decimal("0.10"),
+    )
+
+
+class TestDiskGuard:
+    def test_blocked_guard_skips_the_whole_prebuild(self) -> None:
+        """TRIP: a blocked verdict skips BEFORE any materialise — never a half-write."""
+        mat = _FakeMaterializer()
+        decision = _decision(blocked=True)
+        with capture_logs() as logs:
+            outcome = run_pipeline_prebuild(
+                instruments=[_spot("NSE-NIFTY")],
+                cascade=_cascade(),
+                materialize=mat,
+                disk_guard=lambda: decision,
+            )
+        assert outcome == PrebuildOutcome(
+            symbols_built=0,
+            total_bars=0,
+            failed=(),
+            failed_count=0,
+            ok=False,
+            disk_guard_blocked=True,
+            disk_guard_detail=decision.detail,
+        )
+        assert mat.targets == []  # nothing materialised
+        warned = [e for e in logs if e["event"] == "pipeline.prebuild.disk_guard"]
+        assert len(warned) == 1
+        assert warned[0]["estimated_need_bytes"] == 4096
+        assert warned[0]["free_bytes"] == 1024
+        assert warned[0]["multiplier"] == "6.5"
+        assert warned[0]["multiplier_source"] == "fallback"
+
+    def test_clear_guard_runs_normally(self) -> None:
+        mat = _FakeMaterializer()
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=mat,
+            disk_guard=lambda: _decision(blocked=False),
+        )
+        assert outcome.ok is True
+        assert outcome.disk_guard_blocked is False
+        assert outcome.disk_guard_detail is None
+        assert len(mat.targets) == 4
+
+    def test_none_verdict_runs_normally(self) -> None:
+        """SKIP/no-verdict: a disabled guard (env off / no store) never blocks."""
+        mat = _FakeMaterializer()
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=mat,
+            disk_guard=lambda: None,
+        )
+        assert outcome.ok is True
+        assert len(mat.targets) == 4
+
+    def test_raising_guard_fails_open_and_logs(self) -> None:
+        """OVERRIDE-by-failure: a guard bug is logged and the data stage proceeds."""
+
+        def _boom() -> DiskGuardDecision | None:
+            raise RuntimeError("guard bug")
+
+        mat = _FakeMaterializer()
+        with capture_logs() as logs:
+            outcome = run_pipeline_prebuild(
+                instruments=[_spot("NSE-NIFTY")],
+                cascade=_cascade(),
+                materialize=mat,
+                disk_guard=_boom,
+            )
+        assert outcome.ok is True
+        assert len(mat.targets) == 4
+        assert any(e["event"] == "pipeline.prebuild.disk_guard_error" for e in logs)
+
+    def test_guarded_wrapper_threads_disk_guard(self) -> None:
+        outcome = run_pipeline_prebuild_guarded(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade_or_error=_cascade,
+            materialize=_FakeMaterializer(),
+            disk_guard=lambda: _decision(blocked=True),
+        )
+        assert outcome.disk_guard_blocked is True
+        assert outcome.ok is False
 
 
 # ── incremental unchanged-skip counting (DEC-PREBUILD-INCREMENTAL-001) ──────

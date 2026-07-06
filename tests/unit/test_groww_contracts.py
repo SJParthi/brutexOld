@@ -23,6 +23,7 @@ from brutex.adapters.groww.contracts import (
     resolve_expiries,
     underlying_symbol_forms,
 )
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.protocol import DerivativeContract
 
 _EXPIRY = date(2025, 1, 2)
@@ -402,3 +403,66 @@ class TestEmptyRetryEverywhere:
         )
         assert out == []
         assert len(sdk.contract_calls) == 3
+
+
+class TestSymbolFormPreferenceRecording:
+    """DEC-SYMBOL-FORM-PREFERENCE-001 — the non-empty form is RECORDED and reordered.
+
+    Drives the ``record_winner`` call sites inside ``resolve_expiries`` /
+    ``resolve_contracts`` (`_fetch_form_recording`) with a REAL
+    :class:`SymbolFormPreference`: the ``%26`` form wins on the first call (the plain
+    form is clean-empty), the winner is recorded, and the NEXT call tries the learned
+    winner FIRST — one SDK call, no wasted plain-form fetch.
+    """
+
+    def test_resolve_expiries_records_winner_and_reorders_next_call(self) -> None:
+        def _expiries(kw: Mapping[str, object]) -> Mapping[str, object]:
+            if "%26" in str(kw["underlying_symbol"]):
+                return {"expiries": [_EXPIRY.isoformat()]}
+            return {"expiries": []}
+
+        sdk = _FakeSDK(expiries=_expiries)
+        pref = SymbolFormPreference()
+        first = resolve_expiries(
+            _client(sdk), exchange="NSE", underlying_symbol="M&M", form_preference=pref
+        )
+        assert first == [_EXPIRY]
+        # Plain tried first (canonical order), the encoded form won → RECORDED.
+        assert [c["underlying_symbol"] for c in sdk.expiry_calls] == ["M&M", "M%26M"]
+        assert pref.order("M&M", underlying_symbol_forms("M&M")) == ("M%26M", "M&M")
+        # Next call: the learned winner goes FIRST — exactly ONE further SDK call.
+        second = resolve_expiries(
+            _client(sdk), exchange="NSE", underlying_symbol="M&M", form_preference=pref
+        )
+        assert second == [_EXPIRY]
+        assert [c["underlying_symbol"] for c in sdk.expiry_calls] == ["M&M", "M%26M", "M%26M"]
+
+    def test_resolve_contracts_records_winner_and_reorders_next_call(self) -> None:
+        def _contracts(kw: Mapping[str, object]) -> Mapping[str, object]:
+            if "%26" in str(kw["underlying_symbol"]):
+                return {"contracts": ["NSE-M&M-02Jan25-2400-CE"]}
+            return {"contracts": []}
+
+        sdk = _FakeSDK(contracts=_contracts)
+        pref = SymbolFormPreference()
+        first = resolve_contracts(
+            _client(sdk),
+            exchange="NSE",
+            underlying_symbol="M&M",
+            expiry=_EXPIRY,
+            form_preference=pref,
+        )
+        assert [c.symbol for c in first] == ["NSE-M&M-02Jan25-2400-CE"]
+        # The vendor's canonical symbol parses against the ORIGINAL `&` underlying.
+        assert first[0].underlying_symbol == "M&M"
+        assert [c["underlying_symbol"] for c in sdk.contract_calls] == ["M&M", "M%26M"]
+        assert pref.order("M&M", underlying_symbol_forms("M&M")) == ("M%26M", "M&M")
+        second = resolve_contracts(
+            _client(sdk),
+            exchange="NSE",
+            underlying_symbol="M&M",
+            expiry=_EXPIRY,
+            form_preference=pref,
+        )
+        assert [c.symbol for c in second] == ["NSE-M&M-02Jan25-2400-CE"]
+        assert [c["underlying_symbol"] for c in sdk.contract_calls] == ["M&M", "M%26M", "M%26M"]

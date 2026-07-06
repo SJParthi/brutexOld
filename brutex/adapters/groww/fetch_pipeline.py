@@ -108,12 +108,14 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
 
 from brutex.adapters.groww.fetch_spill import FetchSpillArea, SpilledWindow
 from brutex.data.errors import LakeWriteHalt
+from brutex.data.parquet_writer import fold_max_close_delta
 
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
@@ -344,6 +346,15 @@ class SeriesTotals:
         Total bars the consumer durably appended for this series.
     conflicts
         Total keep-first vendor re-statements detected for this series.
+    vendor_dup_rows_dropped
+        Total WITHIN-BATCH duplicate vendor rows the writer collapsed for this
+        series (DEC-VENDOR-CONFLICT-SURFACE-001 — sum-fold across the series'
+        windows, exactly like ``conflicts``).
+    max_close_delta
+        The MAX absolute keep-first close delta observed across this series'
+        windows (exact Decimal rupees; ``None`` = no conflict anywhere —
+        max-fold via
+        :func:`~brutex.data.parquet_writer.fold_max_close_delta`).
     transient
         The series' LAST-FOLD tail-transient state — ``1`` iff the most recently processed
         window of this series was deferred by a ``PartitionLockTimeout``, ``0`` once a later
@@ -360,6 +371,8 @@ class SeriesTotals:
     bars_appended: int = 0
     conflicts: int = 0
     transient: int = 0
+    vendor_dup_rows_dropped: int = 0
+    max_close_delta: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,6 +546,12 @@ class FetchPipeline:
         self._processed = 0
         self._bars_appended = 0
         self._conflicts = 0
+        # Vendor-behaviour honesty counters (DEC-VENDOR-CONFLICT-SURFACE-001):
+        # the pull-level sum of within-batch vendor duplicate rows dropped +
+        # the pull-level MAX keep-first close delta, folded alongside the
+        # bars/conflicts totals so the drain log + post-drain reconcile see them.
+        self._vendor_dup_rows_dropped = 0
+        self._max_close_delta: Decimal | None = None
         # Tail-side transient defers (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 MAJOR-2 fix): a
         # ``PartitionLockTimeout`` raised INSIDE a consumer's tail (a wedged peer held the
         # cross-process partition lock past the deadline) is folded here so the deferred window
@@ -591,14 +610,23 @@ class FetchPipeline:
         return self._workers
 
     def fold_totals(
-        self, *, bars_appended: int, conflicts: int, series_key: tuple[str, str] | None = None
+        self,
+        *,
+        bars_appended: int,
+        conflicts: int,
+        series_key: tuple[str, str] | None = None,
+        vendor_dup_rows_dropped: int = 0,
+        max_close_delta: Decimal | None = None,
     ) -> None:
         """Thread-safe fold of ONE processed window's bars/conflicts into the pull totals.
 
         Called by ``_process_window_tail`` (on a consumer thread) after a durable append, so
         the pull-level observability totals reflect every deferred window AND — when
         *series_key* (``(symbol, interval)``) is given — the per-series totals the controller
-        reconciles after drain (the completion-count fix). O(1) under the totals lock.
+        reconciles after drain (the completion-count fix). The two vendor-behaviour counters
+        (DEC-VENDOR-CONFLICT-SURFACE-001) fold alongside: duplicates SUM, the close delta
+        MAX-folds (``None`` identity — the defaults keep every legacy caller byte-identical).
+        O(1) under the totals lock.
 
         When an ``on_bars`` hook is wired (DEC-PULL-PROGRESS-HONESTY-001) it is invoked
         HERE with this window's *bars_appended* delta — once per folded window, so a
@@ -612,12 +640,19 @@ class FetchPipeline:
             self._processed += 1
             self._bars_appended += bars_appended
             self._conflicts += conflicts
+            self._vendor_dup_rows_dropped += vendor_dup_rows_dropped
+            self._max_close_delta = fold_max_close_delta(self._max_close_delta, max_close_delta)
             if series_key is not None:
                 # A durable success CLEARS the series' last-fold transient flag (this window
                 # resolved) — LAST-WRITE-WINS, so an early-round transient that later succeeds
                 # is no longer reported still-failing (DEC-FNO-ASYNC-PIPELINE-WIRE-001 MAJOR-1).
                 self._accumulate_series(
-                    series_key, bars_appended=bars_appended, conflicts=conflicts, transient=0
+                    series_key,
+                    bars_appended=bars_appended,
+                    conflicts=conflicts,
+                    transient=0,
+                    vendor_dup_rows_dropped=vendor_dup_rows_dropped,
+                    max_close_delta=max_close_delta,
                 )
             if self._on_bars is not None:
                 try:
@@ -652,11 +687,15 @@ class FetchPipeline:
         bars_appended: int = 0,
         conflicts: int = 0,
         transient: int = 0,
+        vendor_dup_rows_dropped: int = 0,
+        max_close_delta: Decimal | None = None,
     ) -> None:
         """Fold one window's outcome into the per-series totals (caller holds ``_totals_lock``).
 
-        ``bars_appended`` / ``conflicts`` ACCUMULATE across the series' windows (and across
-        until-clean rounds — the keep-first sink makes a re-pull append only new bars). The
+        ``bars_appended`` / ``conflicts`` / ``vendor_dup_rows_dropped`` ACCUMULATE across the
+        series' windows (and across until-clean rounds — the keep-first sink makes a re-pull
+        append only new bars); ``max_close_delta`` MAX-folds (exact Decimal, ``None`` identity —
+        DEC-VENDOR-CONFLICT-SURFACE-001). The
         ``transient`` flag is LAST-WRITE-WINS, NOT cumulative: it is OVERWRITTEN to the caller's
         value (``1`` from a tail-transient fold, ``0`` from a durable-success fold) so the stored
         value reflects the series' MOST RECENT outcome — matching the synchronous spine's
@@ -669,6 +708,8 @@ class FetchPipeline:
             bars_appended=prior.bars_appended + bars_appended,
             conflicts=prior.conflicts + conflicts,
             transient=transient,
+            vendor_dup_rows_dropped=prior.vendor_dup_rows_dropped + vendor_dup_rows_dropped,
+            max_close_delta=fold_max_close_delta(prior.max_close_delta, max_close_delta),
         )
 
     @property
@@ -682,6 +723,17 @@ class FetchPipeline:
         """Tail-side transient defers folded so far — the async ``still_failed_windows`` (safe)."""
         with self._totals_lock:
             return self._tail_transients
+
+    @property
+    def vendor_surface_totals(self) -> tuple[int, Decimal | None]:
+        """The pull-level ``(vendor_dup_rows_dropped, max_close_delta)`` so far (thread-safe).
+
+        DEC-VENDOR-CONFLICT-SURFACE-001 — the two honest vendor-behaviour
+        counters the drain log + tests read; the per-series reconcile reads the
+        SAME numbers off :meth:`per_series_totals`.
+        """
+        with self._totals_lock:
+            return (self._vendor_dup_rows_dropped, self._max_close_delta)
 
     def per_series_totals(self) -> dict[tuple[str, str], SeriesTotals]:
         """A snapshot copy of the per-``(symbol, interval)`` consumer totals (thread-safe).
@@ -1179,12 +1231,15 @@ class FetchPipeline:
         self._watchdog_stop.set()
         self._watchdog.join(timeout=self._drain_join_timeout_seconds)
         processed, bars_appended, conflicts = self.totals
+        dup_rows, max_delta = self.vendor_surface_totals
         _LOG.info(
             "fetch_pipeline.drained",
             processed_windows=processed,
             bars_appended=bars_appended,
             conflicts=conflicts,
             tail_transients=self.tail_transients,
+            vendor_dup_rows_dropped=dup_rows,
+            max_close_delta=None if max_delta is None else str(max_delta),
         )
         # Best-effort sweep any straggler spill files (a window dropped fail-fast on a halt, or a
         # consumer killed mid-tail). Each processed window already discarded its own spill in
