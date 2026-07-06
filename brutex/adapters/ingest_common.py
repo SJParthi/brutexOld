@@ -47,6 +47,8 @@ serve both vendors.
 
 from __future__ import annotations
 
+import enum
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -65,7 +67,7 @@ from brutex.adapters.protocol import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.window_ledger import CONFIRMED_EMPTY_MIN_FETCHES
-from brutex.models import Exchange, Instrument
+from brutex.models import BruteXError, Exchange, Instrument
 
 if TYPE_CHECKING:
     from brutex.data.parquet_writer import BarConflict
@@ -1699,6 +1701,163 @@ def fetch_until_nonempty[T](
     return result
 
 
+# --------------------------------------------------------------------------- #
+# The six-step pull-order vocabulary (DEC-PULL-SIX-STEP-ORDER-001).
+#
+# Operator hard law (2026-07-06): whenever a Groww fetch pull runs — any
+# selection — it executes INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES →
+# STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS, skipping empty groups.
+# This leaf owns the ONE COMMON vocabulary (CLAUDE.md §11 COMMON) consumed by
+# BOTH execution chokepoints: the spot spine's group loop (steps 1-2, wired in
+# ``pull_controller.pull_all_spot``) and the F&O bucket sort (steps 3-6, wired
+# in ``historical_pull``). Everything here is pure / observe-only — ordering
+# POLICY (the strict post-step gate) lives in the sequencer, not here.
+# --------------------------------------------------------------------------- #
+
+
+@enum.unique
+class PullStep(enum.IntEnum):
+    """The operator's strict pull order (DEC-PULL-SIX-STEP-ORDER-001). value IS the rank."""
+
+    INDICES_SPOT = 1
+    STOCKS_SPOT = 2
+    INDICES_FUTURES = 3
+    STOCKS_FUTURES = 4
+    INDICES_OPTIONS = 5
+    STOCKS_OPTIONS = 6
+
+    @property
+    def label(self) -> str:
+        """The lowercase-hyphenated step name used in every ``pull.step.*`` event."""
+        return _PULL_STEP_LABELS[self]
+
+
+#: The ONE label table — event field values for ``pull.step.started`` /
+#: ``pull.step.settled`` / ``pull.step.halted`` and the ordering diagnostics.
+_PULL_STEP_LABELS: Final[dict[PullStep, str]] = {
+    PullStep.INDICES_SPOT: "indices-spot",
+    PullStep.STOCKS_SPOT: "stocks-spot",
+    PullStep.INDICES_FUTURES: "indices-futures",
+    PullStep.STOCKS_FUTURES: "stocks-futures",
+    PullStep.INDICES_OPTIONS: "indices-options",
+    PullStep.STOCKS_OPTIONS: "stocks-options",
+}
+
+#: One ordered spot step group — the step plus its instruments, input order kept.
+type SpotStepGroup = tuple[PullStep, tuple[Instrument, ...]]
+
+
+def partition_spot_steps(instruments: Sequence[Instrument]) -> tuple[SpotStepGroup, ...]:
+    """Ordered non-empty (INDICES_SPOT, STOCKS_SPOT) groups; empty groups OMITTED.
+
+    Total classification via :attr:`~brutex.models.Instrument.is_index`
+    (``IDX`` ⇒ indices; everything else ⇒ stocks). Stable (input order preserved
+    within a group); every instrument lands in EXACTLY one group (the
+    property-test invariant). Pure, O(n). India VIX (IDX, reference-only) rides
+    INDICES_SPOT; an NTM+F&O dual-class EQ name rides STOCKS and STAYS tradable;
+    reference-only filtering is untouched (it happens before this partition).
+    """
+    indices: list[Instrument] = []
+    stocks: list[Instrument] = []
+    for inst in instruments:
+        if inst.is_index:
+            indices.append(inst)
+        else:
+            stocks.append(inst)
+    groups: list[SpotStepGroup] = []
+    if indices:
+        groups.append((PullStep.INDICES_SPOT, tuple(indices)))
+    if stocks:
+        groups.append((PullStep.STOCKS_SPOT, tuple(stocks)))
+    return tuple(groups)
+
+
+class StepOrderError(BruteXError):
+    """A pull-step rank regression under ``StepOrderMonitor(raise_on_violation=True)``.
+
+    Raised ONLY by the test oracle — the production monitor logs + counts and
+    never raises (the #907/#919 detect-and-warn pattern).
+    """
+
+
+class StepOrderMonitor:
+    """Observe-only ordering oracle for the six-step pull law.
+
+    Thread-safe (one lock), O(1) per call. :meth:`begin_step` — a rank
+    regression logs ERROR ``pull.step.order_violation`` (or raises
+    :class:`StepOrderError` when ``raise_on_violation=True`` — the TEST
+    oracle). :meth:`observe_write` — a write observed for a step BELOW the
+    current one logs WARN ``pull.step.late_write`` + increments
+    :attr:`late_writes` (production observe-only; never raises, never blocks —
+    the #907/#919 detect-and-warn pattern; the expected source is an
+    async-pipeline consumer tail draining a prior step's queued write).
+    """
+
+    def __init__(self, *, raise_on_violation: bool = False) -> None:
+        self._lock = threading.Lock()
+        self._raise_on_violation = raise_on_violation
+        self._current: PullStep | None = None
+        self._late_writes = 0
+
+    @property
+    def current_step(self) -> PullStep | None:
+        """The highest step begun so far (``None`` before the first step)."""
+        with self._lock:
+            return self._current
+
+    @property
+    def late_writes(self) -> int:
+        """Count of writes observed for a step below the current one."""
+        with self._lock:
+            return self._late_writes
+
+    def begin_step(self, step: PullStep) -> None:
+        """Mark *step* as started; a rank regression is a loud ordering violation.
+
+        Re-beginning the CURRENT step is a no-op (an until-clean retry round);
+        the monitor's cursor only ever advances (a regression never rewinds it,
+        so later writes for the lower step stay observable as late writes).
+        """
+        regressed_from: PullStep | None = None
+        with self._lock:
+            current = self._current
+            if current is not None and step < current:
+                regressed_from = current
+            else:
+                self._current = step
+        if regressed_from is not None:
+            if self._raise_on_violation:
+                raise StepOrderError(
+                    f"pull step order violation: began {step.label} (rank {int(step)}) "
+                    f"after {regressed_from.label} (rank {int(regressed_from)})"
+                )
+            _LOG.error(
+                "pull.step.order_violation",
+                step=step.label,
+                current_step=regressed_from.label,
+            )
+
+    def observe_write(self, step: PullStep, *, symbol: str | None = None) -> None:
+        """Observe one settle/write for *step*; a below-current write is a counted WARN.
+
+        Never raises, never blocks — pure detect-and-warn, even under
+        ``raise_on_violation=True`` (only :meth:`begin_step` is the hard oracle).
+        """
+        late_behind: PullStep | None = None
+        with self._lock:
+            current = self._current
+            if current is not None and step < current:
+                late_behind = current
+                self._late_writes += 1
+        if late_behind is not None:
+            _LOG.warning(
+                "pull.step.late_write",
+                step=step.label,
+                current_step=late_behind.label,
+                symbol=symbol,
+            )
+
+
 __all__ = [
     "AUTO_RESUME_MAX_ROUNDS",
     "CONFIRMED_EMPTY_MIN_FETCHES",
@@ -1713,10 +1872,14 @@ __all__ = [
     "SYNTHETIC_DRY_RUN_LABEL",
     "DateWindow",
     "LoopVerdict",
+    "PullStep",
     "PullVerdict",
     "PullVerdictKind",
     "RetryOutcome",
     "RetryRound",
+    "SpotStepGroup",
+    "StepOrderError",
+    "StepOrderMonitor",
     "SyntheticSpotAdapter",
     "UntilCleanOutcome",
     "UntilCleanRound",
@@ -1731,6 +1894,7 @@ __all__ = [
     "label_synthetic",
     "mark_synthetic",
     "now_ist",
+    "partition_spot_steps",
     "plan_windows",
     "retry_failed_windows",
     "run_until_clean",
