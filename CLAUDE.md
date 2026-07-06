@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1521 —
+_Last updated: 2026-07-06 (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522 —
 the `GET /api/v1/pull/rate` CLI-bridge file read moved OFF the uvicorn event loop: a NEW
 `brutex/dashboard/rate_bridge_cache.py` `RateBridgeCache` memoises the decoded bridge
 snapshot behind a 2 s TTL + an `mtime_ns:size:ino` stat content token (NEW public
@@ -452,7 +452,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/vibrant-knuth-itozu6` (**DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1521** —
+- **Active branch:** `claude/vibrant-knuth-itozu6` (**DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522** —
   the `GET /api/v1/pull/rate` CLI-bridge file read (`<lake_root>/.rate/pull_rate.json`, previously a synchronous
   `Path.read_bytes()` executed ON the uvicorn event loop on EVERY ~3 s site-wide widget poll — a slow/stalled external
   lake volume froze the WHOLE dashboard) is moved off the loop behind a NEW `brutex/dashboard/rate_bridge_cache.py`
