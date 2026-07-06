@@ -66,21 +66,27 @@ The drift detector reuses the EXISTING rails (`SLADetector` hysteresis,
 `pull_health.py`. RSS + fd are read through ONE COMMON cross-platform probe
 (`process_probe.py`). The p99 uses the ONE COMMON `metrics.compute.percentile`.
 
-The failure signal is AUTOMATIC. Every per-window RSS-ceiling / fd-growth /
-p99-drift breach (a) fires a CRITICAL `SweepAlerter.soak_drift` Telegram alert in
+The failure signal is AUTOMATIC. Every per-window MONOTONE RSS-ceiling / fd-growth
+breach (a) fires a CRITICAL `SweepAlerter.soak_drift` Telegram alert in
 real time — the driver's `on_breach` is WIRED to it (DEC-PULL-HEALTH-WIRING-001
 precedent, which bound the originally-dormant pull-health monitor), a
-trigger-independent push that is a silent no-op when Telegram is disabled. The
+trigger-independent push that is a silent no-op when Telegram is disabled.
+`soak.p99_drift` is OBSERVE-ONLY — it fires NEITHER this push NOR the hard gate
+(see below). The
 end-of-run HARD gate (b) is the DETERMINISTIC oracles ONLY — the RSS ceiling, the
 fd-growth count, and the audit-chain integrity are asserted absent so a leak
-fails CI, never a chart read. `soak.p99_drift` is deliberately **alert-only, NOT a
-hard CI gate**: a sub-second window's p99 is dominated by transient
-fsync/GC/scheduler spikes (`audit.append` fsyncs per record), so comparing a
-later window's p99 to a single warm first-window baseline at ratio 2.0 fires on
-NOISE, not drift (reproduced as a ~15% false-fail rate on an idle box, ratios up
-to 8–9×). It still fires its real-time alert so a genuine multi-hour p99 climb is
-signalled, but it never red-fails the pytest gate — so the nightly cron cannot
-cry-wolf and open false CRITICAL issues (Golden Rule #10).
+fails CI, never a chart read. `soak.p99_drift` is deliberately **observe-only — neither a real-time
+Telegram push NOR a hard CI gate**: a sub-second window's p99 is dominated by
+transient fsync/GC/scheduler spikes (`audit.append` fsyncs per record), so
+comparing a later window's p99 to a single warm first-window baseline at ratio
+2.0 fires on NOISE, not drift (reproduced as a ~15% false-fail rate on an idle
+box, ratios up to 8–9×), and the detector re-fires a fresh OK→BREACH edge per
+up-crossing so pushing each would storm the operator on non-regression noise. It
+is visible ONLY via the monitor's structlog breach warning + the
+`brutex_soak_p99_ratio` /metrics gauge, so the nightly cron cannot cry-wolf and
+open false CRITICAL issues (Golden Rule #10). HONEST GAP: a genuine multi-hour
+p99 climb is therefore NOT auto-alerted — a smoothed/sustained-p99 push rule is a
+named follow-up.
 
 ## 3. Consequences
 
@@ -91,7 +97,8 @@ cry-wolf and open false CRITICAL issues (Golden Rule #10).
   a duration-derived timeout.
 * Whole-process RSS + fd are now HARD-gated automatically (deterministic); the
   drift LOGIC is 100%-covered on synthetic series. p99-latency-drift is
-  alert-gated (real-time Telegram) but not a hard CI gate — see Honest limits.
+  OBSERVE-ONLY (structlog + the `brutex_soak_p99_ratio` gauge) — neither a
+  real-time Telegram push NOR a hard CI gate — see Honest limits.
 * The #208 "REACHABLE" over-claim is corrected in place (Golden Rule #10).
 
 **Operational dependency (accepted)**
@@ -110,10 +117,15 @@ cry-wolf and open false CRITICAL issues (Golden Rule #10).
 * On macOS the RSS fallback reads `ru_maxrss` (a process-lifetime PEAK), so the
   RSS rule is an absolute CEILING backstop, not a growth slope. The fd-growth
   rule is the hard-gated slope signal; `soak.p99_drift` is the drift signal but
-  is ALERT-ONLY (Telegram), never a hard CI gate — a sub-second window's p99 is
-  fsync/GC/scheduler-jitter-bound and asserting on it false-fails ~15% of runs
-  (reproduced), so a hard gate on it would train the operator to ignore soak
-  alerts (the opposite of §11). It is filtered out of the end-of-run assertion.
+  is OBSERVE-ONLY — visible via structlog + the `brutex_soak_p99_ratio` gauge,
+  and fires NEITHER a real-time Telegram push NOR a hard CI gate — a sub-second
+  window's p99 is fsync/GC/scheduler-jitter-bound and asserting on it false-fails
+  ~15% of runs (reproduced), so a hard gate on it would train the operator to
+  ignore soak alerts (the opposite of §11), and pushing each oscillating
+  up-crossing would storm the operator on non-regression noise. It is filtered
+  out of BOTH the end-of-run assertion and the real-time push. HONEST GAP (Golden
+  Rule #10): a genuine multi-hour p99 climb is therefore NOT auto-alerted — a
+  smoothed/sustained-p99 push rule is a named follow-up.
 
 **Named follow-ups (NOT built here)**
 

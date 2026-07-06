@@ -14,13 +14,16 @@
 # to the pure `brutex.observability.soak_drift.SoakDriftMonitor` (RSS ceiling /
 # fd growth / p99 latency drift). The failure signal is AUTOMATIC (CLAUDE.md §11):
 # the driver WIRES the monitor's on_breach to `SweepAlerter.soak_drift`, so the
-# INSTANT any rule edges into breach a CRITICAL Telegram alert fires in real time
-# (trigger-independent; a silent no-op when Telegram is disabled). The end-of-run
-# HARD gate is the DETERMINISTIC oracles — an RSS-ceiling / fd-growth / audit-chain
-# breach fails the pytest run so the "open issue on failure" step files a tracked
-# issue. `soak.p99_drift` is ALERT-ONLY (a sub-second window's p99 is
-# fsync/GC/scheduler-jitter-bound, so asserting on it false-fails ~15% of runs) —
-# it fires the real-time alert but never red-fails CI (DEC-SOAK-REAL-TIER-001).
+# INSTANT a MONOTONE RSS-ceiling / fd-growth rule edges into breach a CRITICAL
+# Telegram alert fires in real time (trigger-independent; a silent no-op when
+# Telegram is disabled). The end-of-run HARD gate is the DETERMINISTIC oracles —
+# an RSS-ceiling / fd-growth / audit-chain breach fails the pytest run so the
+# "open issue on failure" step files a tracked issue. `soak.p99_drift` is
+# OBSERVE-ONLY (a sub-second window's p99 is fsync/GC/scheduler-jitter-bound, so
+# asserting on it false-fails ~15% of runs and pushing each oscillating
+# up-crossing would storm the operator) — it fires NEITHER the real-time alert
+# NOR the CI gate, visible only via structlog + the brutex_soak_p99_ratio gauge
+# (DEC-SOAK-REAL-TIER-001).
 #
 # RUNNER + TRIGGER PRECEDENT (verify-m4pro.yml / bench-m4pro.yml)
 # --------------------------------------------------------------
@@ -181,6 +184,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time (a timeout-kill did not); soak.p99_drift is alert-only and never opens this issue.`,
+              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any MONOTONE RSS/fd drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time (a timeout-kill did not); soak.p99_drift is observe-only (structlog + the brutex_soak_p99_ratio gauge) — it fires no Telegram alert and never opens this issue.`,
               labels: ['bug', 'soak', 'critical'],
             });
