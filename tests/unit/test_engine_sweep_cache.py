@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from brutex.data.lmdb_membership import (
@@ -47,12 +48,19 @@ from brutex.engine.sweep_cache import (
     SweepCache,
     SweepCacheCapacityError,
     SweepCacheError,
+    _auto_grow_capacity,
     combo_digest,
     resolve_sweep_cache_bloom_capacity,
     resolve_sweep_cache_map_mb,
 )
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
+
+#: A persisted count whose Bloom bit array at the default 1e-7 FPR sizes over
+#: the 16 GiB ``MAX_BLOOM_BYTES`` wall (~4.19 bytes/item ⇒ ~21 GB) — used to
+#: drive the wall arm as PURE MATH, never a real 16 GiB allocation.
+_OVER_WALL_PERSISTED = 5_000_000_000
 
 _MIB = 1024 * 1024
 
@@ -283,20 +291,61 @@ def test_cold_open_repopulate_is_noop(tmp_path: Path) -> None:
         assert cache.snapshot()["bloom_insertions"] == 0
 
 
-def test_resume_bloom_capacity_exceeded_fails_closed(tmp_path: Path) -> None:
-    """A resume whose persisted count exceeds the Bloom capacity FAILS_CLOSED.
+def test_resume_persisted_over_capacity_auto_grows_within_wall(tmp_path: Path) -> None:
+    """STEP-1 auto-grow (DEC-ENGINE-MISC-PACK-001): a within-wall >capacity resume OPENS.
 
-    Re-opening with a SMALLER ``bloom_capacity`` than the persisted digest count
-    would overflow the Bloom's FAIL_CLOSED gate mid-rebuild — instead
-    :meth:`open` raises :class:`SweepCacheCapacityError` up front so the operator
-    re-opens with a larger capacity (Golden Rule #5, no silent FPR drift).
+    Regression flip of the old unconditional FAIL_CLOSED: persisted=5 against a
+    configured capacity of 3 now auto-grows to ``max(5, ceil(3 × 1.25)=4) = 5``,
+    every persisted digest reads Bloom-positive (the resume-dedup guarantee),
+    and EXACTLY ONE loud ``sweep_cache.bloom_auto_grow`` event names the
+    deviation from the operator knob.
     """
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask in range(5):
             first.record(mask, "NIFTY", "5m", "bull")
+    with capture_logs() as logs, SweepCache.open(root, bloom_capacity=3) as resumed:
+        assert resumed._bloom.capacity == 5
+        for mask in range(5):
+            assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+    grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
+    assert len(grows) == 1
+    assert grows[0]["persisted"] == 5
+    assert grows[0]["configured_capacity"] == 3
+    assert grows[0]["grown_capacity"] == 5
+    assert grows[0]["m_bytes"] > 0
+
+
+def test_resume_within_capacity_never_grows_and_never_logs(tmp_path: Path) -> None:
+    """A ``persisted <= capacity`` resume is byte-identical: no grow, no log."""
+    root = tmp_path / "c"
+    with SweepCache.open(root, bloom_capacity=1000) as first:
+        for mask in range(5):
+            first.record(mask, "NIFTY", "5m", "bull")
+    with capture_logs() as logs, SweepCache.open(root, bloom_capacity=1000) as resumed:
+        assert resumed._bloom.capacity == 1000
+    assert not [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
+
+
+def test_rebuild_guard_stays_as_defence_in_depth() -> None:
+    """The `_rebuild_bloom_from_exact` >capacity guard is KEPT (invariant check).
+
+    Unreachable from :meth:`SweepCache.open` now that the capacity is pre-sized
+    (``_auto_grow_capacity`` returns ``>= persisted``), but a DIRECT caller that
+    under-sizes still FAILS_CLOSED before any partial rebuild.
+    """
+
+    class _FakeExact:
+        def __len__(self) -> int:
+            return 5
+
+        def iter_keys(self) -> list[bytes]:  # pragma: no cover — never reached
+            return []
+
     with pytest.raises(SweepCacheCapacityError, match="persisted exact-store"):
-        SweepCache.open(root, bloom_capacity=3)
+        SweepCache._rebuild_bloom_from_exact(
+            cast(Any, object()), cast(Any, _FakeExact()), bloom_capacity=3
+        )
 
 
 # ── concurrency: atomic check-then-act (DEC-SWEEP-CACHE-RESUME-DEDUP-001) ─────
@@ -421,8 +470,76 @@ class TestOpenKnobThreading:
             SweepCache.open(tmp_path / "c")
 
 
+class TestAutoGrowCapacity:
+    """The STEP-1 pure grow decision (`_auto_grow_capacity`, DEC-ENGINE-MISC-PACK-001)."""
+
+    def test_within_capacity_is_identity(self) -> None:
+        """``persisted <= capacity`` returns the configured knob unchanged."""
+        with capture_logs() as logs:
+            assert _auto_grow_capacity(1000, 0, 1e-7) == 1000
+            assert _auto_grow_capacity(1000, 1000, 1e-7) == 1000
+        assert not logs  # no grow, no log — byte-identical behaviour.
+
+    def test_grow_takes_max_of_persisted_and_ratio(self) -> None:
+        """``grown = max(persisted, ceil(capacity × 1.25))`` — both arms.
+
+        The ``max`` is the correctness clamp: a bare ``ceil(cap × 1.25)`` at
+        ``persisted=500, cap=100`` would return 125 < 500 and overflow the
+        FAIL_CLOSED Bloom gate mid-rebuild.
+        """
+        assert _auto_grow_capacity(100, 101, 1e-7) == 125  # ratio arm wins.
+        assert _auto_grow_capacity(100, 500, 1e-7) == 500  # persisted arm wins.
+
+    def test_grow_emits_one_loud_event(self) -> None:
+        with capture_logs() as logs:
+            _auto_grow_capacity(100, 500, 1e-7)
+        grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
+        assert len(grows) == 1
+        assert grows[0]["grown_capacity"] == 500
+
+    def test_above_wall_fails_closed_naming_the_sharded_follow_up(self) -> None:
+        """The 16 GiB wall arm stays FAIL_CLOSED — pure math, no allocation.
+
+        The message must name the HONEST above-the-wall remedies (a
+        ``bloom_capacity`` raise cannot help there): loosening ``bloom_fpr``
+        and the sharded / mmap'd Bloom follow-up.
+        """
+        with pytest.raises(SweepCacheCapacityError) as excinfo:
+            _auto_grow_capacity(1000, _OVER_WALL_PERSISTED, 1e-7)
+        msg = str(excinfo.value)
+        assert "MAX_BLOOM_BYTES" in msg
+        assert "bloom_fpr" in msg
+        assert "sharded" in msg
+        assert "--sweep-cache-bloom-capacity" in msg  # named as NOT the remedy.
+        assert SWEEP_CACHE_BLOOM_CAPACITY_ENV in msg
+
+    def test_looser_fpr_shrinks_the_same_persisted_under_the_wall(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The advertised remedy WORKS: the wall-busting count fits at a looser FPR.
+
+        The wall is PINNED to the 16 GiB ``MAX_BLOOM_BYTES_FLOOR`` for this
+        arithmetic: since DEC-RAM-BUDGETS-001 the live ``MAX_BLOOM_BYTES`` is
+        RAM-derived (total RAM × 1/3, ``brutex/orchestrator/bloom.py``), so on
+        a 16 GB CI runner it resolves ~5.6 GB — BELOW the ~5.99 GB this
+        5-billion-digest @ 1e-2 case needs. The remedy claim under test is the
+        FPR-loosening math relative to a FIXED wall, not the machine's RAM, so
+        the pin keeps the case machine-independent (``_auto_grow_capacity``
+        reads the ceiling via its function-level ``from brutex.orchestrator
+        .bloom import MAX_BLOOM_BYTES``, so patching the bloom module attribute
+        is authoritative here).
+        """
+        from brutex.orchestrator import bloom as bloom_mod
+
+        monkeypatch.setattr(
+            bloom_mod, "MAX_BLOOM_BYTES", bloom_mod.MAX_BLOOM_BYTES_FLOOR, raising=True
+        )
+        grown = _auto_grow_capacity(1000, _OVER_WALL_PERSISTED, 1e-2)
+        assert grown == _OVER_WALL_PERSISTED
+
+
 class TestCapacityRefusalRemedy:
-    """The >capacity resume refusal is ACTIONABLE and the remedy works."""
+    """The wall refusal is ACTIONABLE, leak-free, and the knob still pre-sizes."""
 
     @staticmethod
     def _seed(root: Path, count: int) -> None:
@@ -430,43 +547,68 @@ class TestCapacityRefusalRemedy:
             for mask in range(count):
                 assert cache.record(mask, "NIFTY", "5m", "bull") is True
 
-    def test_refusal_message_names_both_knobs(self, tmp_path: Path) -> None:
-        root = tmp_path / "c"
-        self._seed(root, 5)
-        with pytest.raises(SweepCacheCapacityError) as excinfo:
-            SweepCache.open(root, bloom_capacity=3)
-        msg = str(excinfo.value)
-        assert "--sweep-cache-bloom-capacity" in msg
-        assert SWEEP_CACHE_BLOOM_CAPACITY_ENV in msg
+    def test_wall_refusal_closes_env_and_reopen_admits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An over-the-wall resume refuses LOUDLY and leaks no LMDB env.
 
-    def test_larger_explicit_knob_admits_refused_resume(self, tmp_path: Path) -> None:
-        """The advertised remedy WORKS: refused at 3, admitted at 10.
-
-        Also pins the refusal-path cleanup: the refused ``open`` closes its
-        LMDB env before raising, so the immediate re-open of the SAME path
-        is safe (no second live env on one LMDB directory in-process).
+        The wall arm is driven through the REAL ``open`` path by reporting a
+        wall-busting persisted count from the exact store (a genuine 5-billion
+        seed / 16 GiB Bloom is not constructible in a test — Golden Rule #10);
+        the refused open must close its env so the immediate re-open of the
+        SAME path (with the true count restored) is safe and dedups.
         """
         root = tmp_path / "c"
         self._seed(root, 5)
-        with pytest.raises(SweepCacheCapacityError, match="re-open with a larger"):
-            SweepCache.open(root, bloom_capacity=3)
-        with SweepCache.open(root, bloom_capacity=10) as resumed:
+        with monkeypatch.context() as patched:
+            patched.setattr(
+                LmdbMembership, "__len__", lambda self: _OVER_WALL_PERSISTED, raising=True
+            )
+            with pytest.raises(SweepCacheCapacityError, match="sharded"):
+                SweepCache.open(root, bloom_capacity=3)
+        with SweepCache.open(root, bloom_capacity=1000) as resumed:
             for mask in range(5):
                 assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
 
-    def test_larger_env_knob_admits_refused_resume(
+    def test_bloom_config_error_after_exact_open_leaks_no_env(self, tmp_path: Path) -> None:
+        """A BloomFilter CONFIG error (fpr out of range) also closes the env.
+
+        Regression for the open() restructure: the Bloom is now built AFTER the
+        exact store opens, so ANY construction fault must ride the same
+        close-before-raise cleanup (the broadened except), proven by the
+        immediate re-open of the SAME path succeeding.
+        """
+        root = tmp_path / "c"
+        self._seed(root, 5)
+        from brutex.orchestrator.bloom import BloomConfigError
+
+        with pytest.raises(BloomConfigError):
+            SweepCache.open(root, bloom_capacity=1000, bloom_fpr=0.9)
+        with SweepCache.open(root, bloom_capacity=1000) as resumed:
+            for mask in range(5):
+                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+
+    def test_env_knob_small_capacity_self_heals_by_auto_grow(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The env-var spelling of the remedy is equivalent to the flag."""
+        """The env spelling of the knob also rides the auto-grow (no refusal)."""
         root = tmp_path / "c"
         self._seed(root, 5)
         monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "3")
-        with pytest.raises(SweepCacheCapacityError, match="persisted exact-store"):
-            SweepCache.open(root)
-        monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "10")
-        with SweepCache.open(root) as resumed:
+        with capture_logs() as logs, SweepCache.open(root) as resumed:
             for mask in range(5):
                 assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+        assert [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
+
+    def test_explicit_knob_still_pre_sizes_without_grow(self, tmp_path: Path) -> None:
+        """A big-enough explicit knob keeps the no-grow path (knob unchanged)."""
+        root = tmp_path / "c"
+        self._seed(root, 5)
+        with capture_logs() as logs, SweepCache.open(root, bloom_capacity=10) as resumed:
+            assert resumed._bloom.capacity == 10
+            for mask in range(5):
+                assert resumed.seen(mask, "NIFTY", "5m", "bull") is True
+        assert not [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
 
 
 # ── record_digest exact-first durability ordering (R2-SL-F4-F5) ──────────────

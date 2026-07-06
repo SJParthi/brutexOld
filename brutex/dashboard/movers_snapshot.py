@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_stored_read import read_stored_day_frame
+from brutex.data.derive_lock import derive_in_progress
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -735,8 +736,25 @@ def _read_intraday_bars(
     COMMON :func:`filter_to_ist_minute`); a MID-bucket as-of always takes the
     1-minute resample fallback, the only source that can aggregate the partial
     forming bucket honestly (never a leak of minutes past the as-of instant).
+
+    **Cross-process derive probe (DEC-ENGINE-MISC-PACK-001):** before touching
+    the stored partition the read probes
+    :func:`~brutex.data.derive_lock.derive_in_progress` — a non-blocking O(1)
+    shared-flock check of the fixed ``<lake_root>/.locks/derive.lock`` the
+    materialiser holds exclusively per symbol. While a SEPARATE-process derive
+    (a CLI-launched pipeline prebuild) is mid-rewrite of the TF set, the stored
+    partition may be half-refreshed, so the read takes the on-the-fly 1-minute
+    resample instead — the byte-equality REFERENCE path, honestly counted under
+    the existing ``resampled_reads`` provenance (no new payload field). The
+    in-process pipeline case is already gated by the process-local
+    ``PrebuildGate``; this closes the cross-PROCESS half — the probe is a
+    point-in-time signal, refreshed on every poll.
     """
-    if not prefer_resample and _stored_serves_cutoff(minutes, cutoff_min):
+    if (
+        not prefer_resample
+        and _stored_serves_cutoff(minutes, cutoff_min)
+        and not derive_in_progress(lake_root)
+    ):
         stored = read_stored_day_frame(
             lake_root,
             exchange=exchange,
