@@ -217,8 +217,11 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     UnsupportedTradeOutcomeError
         If ``trade.trade_outcome`` is not ``"NORMAL_CLOSE"`` (MAJOR-1).
     UnverifiedCostRegimeError
-        If ``entry_dt_ist.date()`` < 2024-10-01: the ETC regime for the
-        date is an UNVERIFIED refusal window — the whole trade cost is
+        If ``entry_dt_ist.date()`` lands on an ETC refusal window
+        (currently every pre-2024-10-01 date; the authoritative spans are
+        DERIVED from the regime tables via ``etc_unverified_windows``,
+        never this prose): the ETC regime for the date is UNVERIFIED —
+        the whole trade cost is
         refused, no component fabricated (DEC-ETC-REGIME-HISTORY-001;
         raised out of Step 6's ``exchange_charge_bps_x100``). The options
         executor prechecks-and-rejects such trades BEFORE calling here,
@@ -271,7 +274,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
 
     # ── Step 6: exchange transaction charge (both sides on premium) ─────
     # Date-regime-selected like STT (COMMON rate_for_date mechanism). Only
-    # the current post-2024-10-01 rates are VERIFIED; a pre-boundary date
+    # the dated VERIFIED regimes are encoded; a date on an UNVERIFIED window
     # lands on an explicit refusal row and RAISES UnverifiedCostRegimeError
     # here (DEC-ETC-REGIME-HISTORY-001) — the options executor prechecks
     # and rejects such trades before reaching this point, so this raise is

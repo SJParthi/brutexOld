@@ -621,9 +621,11 @@ def ipft_bps_x100(instrument: str) -> int:
 def unverified_windows(regimes: RegimeTable) -> tuple[tuple[date, date | None], ...]:
     """Derive the ``[start, next_start-or-None)`` spans of the refusal rows.
 
-    The refusal windows are derived from the table DATA so no doc / CLI
-    footer / log line ever hardcodes a date copy that could drift
-    (DEC-ETC-REGIME-HISTORY-001).
+    The refusal windows are derived from the table DATA so no CLI footer
+    or log line ever hardcodes a date copy that could drift; prose docs
+    (docstrings, COSTS_VERIFIED.md §20) may STATE the current boundary
+    for the reader and are reconciled when a verified pre-boundary row
+    lands (DEC-ETC-REGIME-HISTORY-001).
 
     Parameters
     ----------

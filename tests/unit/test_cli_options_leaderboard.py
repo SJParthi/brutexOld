@@ -106,6 +106,31 @@ def test_footer_open_fallback_when_all_windows_open_ended(
     assert "UNVERIFIED pre-open ETC" in out.splitlines()[-1]
 
 
+def test_footer_boundary_is_latest_end_across_differing_exchanges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two exchanges with DIFFERING dated refusal-window ends render the
+    LATER end — the honest boundary is the last date on which ANY exchange
+    is still unverified. Kills the ``max(ends)`` → ``min(ends)`` mutant the
+    shipped tables cannot distinguish (both real ends are 2024-10-01); the
+    shape becomes reachable the day one exchange's window closes earlier
+    (MIGRATION.md #1521 follow-up (ii) per-window circular closure)."""
+    import brutex.costs.constants as costs_constants
+
+    monkeypatch.setattr(
+        costs_constants,
+        "etc_unverified_windows",
+        lambda: {
+            "NSE": ((date.min, date(2024, 10, 1)),),
+            "BSE": ((date.min, date(2023, 11, 1)),),
+        },
+    )
+    results = (_result(rule_name="atm", net_pnl_paisa=8_000, n_rejected_cost_regime_unverified=1),)
+    footer = _render_options_leaderboard(_FakeRow(), results).splitlines()[-1]
+    assert "UNVERIFIED pre-2024-10-01 ETC" in footer
+    assert "2023-11-01" not in footer
+
+
 def test_missing_count_field_fails_loud() -> None:
     """The footer sum uses DIRECT attribute access — a result object without
     ``n_rejected_cost_regime_unverified`` (e.g. after a future field rename)
