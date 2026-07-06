@@ -268,10 +268,18 @@ class SummaryCache:
         #: Per-kind honest served-stale-under-pull flag (feeds
         #: :meth:`entry_meta` / :meth:`stamp_freshness`).
         self._duty_degraded: dict[str, bool] = {}
-        #: Per-kind in-flight recompute guard so two concurrent dirty reads of
-        #: the same kind don't both pay the O(files) scan (the second waits for
-        #: the first's result via the post-recompute re-check).
-        self._refreshing: set[str] = set()
+        #: Per-kind in-flight recompute guard: ``kind → (event, owner thread
+        #: ident)``. A WARM concurrent dirty read serves the stale entry (as
+        #: before); a COLD concurrent read now WAITS on the event instead of
+        #: duplicating the scan (DEC-SCAN-SINGLE-FLIGHT-001 — the operator's
+        #: restart log measured SIX concurrent 58-68 min lake-uniqueness census
+        #: scans, one per cold poll, because the pre-fix cold path deliberately
+        #: fell through to a "transient double-scan"). The owner thread ident
+        #: preserves the one legal fall-through: a RE-ENTRANT read from inside
+        #: the in-flight recompute itself (same thread) must recompute rather
+        #: than self-deadlock waiting on its own event (the
+        #: DEC-COMPLETENESS-O1-LATENCY-001 cold-reentrancy case, still pinned).
+        self._refreshing: dict[str, tuple[threading.Event, int]] = {}
 
     def set_pull_active_probe(self, probe: Callable[[], bool | None] | None) -> None:
         """LATE-BIND the in-process pull probe (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
@@ -420,44 +428,68 @@ class SummaryCache:
         SummaryPayload
             The cached or freshly-computed summary for *kind*.
         """
-        # Probe OUTSIDE the lock (a hung stat must never block mark_dirty —
-        # DEC-SURFACE-TRIAL-001), then reconcile + plan under it: the
-        # SPOT/OPTIONS summaries themselves (not only the generation-KEYED
-        # sibling caches) see a CLI-process ledger checkpoint as dirty. The
-        # pull probe is ALSO hoisted outside the lock (it takes the pull job's
-        # own lock — never nested under this cache's,
-        # DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
-        token = self._probe_token()
-        pull_active = self._probe_pull_active()
-        with self._lock:
-            self._reconcile_revision_locked(token)
-            decision = self._plan(kind, pull_active=pull_active)
-        if decision is None:
-            # Hit or stale-but-throttled: a payload is available without a scan.
-            return self._entries[kind].payload
-        gen_at_start = decision
-        started_at = self._clock()
-        try:
-            payload = recompute()
-        finally:
+        while True:
+            # Probe OUTSIDE the lock (a hung stat must never block mark_dirty —
+            # DEC-SURFACE-TRIAL-001), then reconcile + plan under it: the
+            # SPOT/OPTIONS summaries themselves (not only the generation-KEYED
+            # sibling caches) see a CLI-process ledger checkpoint as dirty. The
+            # pull probe is ALSO hoisted outside the lock (it takes the pull
+            # job's own lock — never nested under this cache's,
+            # DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
+            token = self._probe_token()
+            pull_active = self._probe_pull_active()
             with self._lock:
-                self._refreshing.discard(kind)
-        finished_at = self._clock()
-        with self._lock:
-            self._entries[kind] = _Entry(
-                payload=payload,
-                generation=gen_at_start,
-                computed_at=finished_at,
-                # The measured cost of THIS scan drives the adaptive floor for the
-                # next one. A non-monotonic clock could make the delta negative, but the
-                # `max(base_floor, duration)` in `_plan` neutralizes that (a negative can
-                # never drive the floor below the base) — so no clamp is needed here.
-                compute_duration=finished_at - started_at,
-            )
-            # A fresh recompute is by definition NOT duty-degraded (the honest
-            # flag tracks the LAST served read of this kind).
-            self._duty_degraded[kind] = False
-        return payload
+                self._reconcile_revision_locked(token)
+                decision = self._plan(kind, pull_active=pull_active)
+            if decision is None:
+                # Hit or stale-but-throttled: a payload is available without a scan.
+                return self._entries[kind].payload
+            if isinstance(decision, threading.Event):
+                # COLD single-flight (DEC-SCAN-SINGLE-FLIGHT-001): another
+                # thread is already paying the first-ever scan of this kind —
+                # wait for it (no lock held), then re-plan: the stored entry
+                # serves as a hit/throttled read; if the scan RAISED instead,
+                # exactly one woken waiter re-registers and becomes the new
+                # computer. Unbounded wait is deliberate + honest: pre-fix,
+                # every cold poller duplicated the wedged scan and hung anyway
+                # — now at most ONE scan is in flight to wedge.
+                decision.wait()
+                continue
+            gen_at_start = decision
+            started_at = self._clock()
+            try:
+                payload = recompute()
+            except BaseException:
+                with self._lock:
+                    aborted = self._refreshing.pop(kind, None)
+                if aborted is not None:
+                    aborted[0].set()  # wake waiters so one can take over
+                raise
+            finished_at = self._clock()
+            with self._lock:
+                self._entries[kind] = _Entry(
+                    payload=payload,
+                    generation=gen_at_start,
+                    computed_at=finished_at,
+                    # The measured cost of THIS scan drives the adaptive floor for the
+                    # next one. A non-monotonic clock could make the delta negative, but the
+                    # `max(base_floor, duration)` in `_plan` neutralizes that (a negative can
+                    # never drive the floor below the base) — so no clamp is needed here.
+                    compute_duration=finished_at - started_at,
+                )
+                # A fresh recompute is by definition NOT duty-degraded (the honest
+                # flag tracks the LAST served read of this kind).
+                self._duty_degraded[kind] = False
+                # Entry stored BEFORE the event is set (same lock block), so a
+                # woken waiter always finds a servable payload — never a second
+                # scan. A RE-ENTRANT recompute (see `_plan`) is not registered,
+                # so this pop may release the OUTER registration early — safe:
+                # the inner entry was just stored, and the outer's own
+                # completion pops nothing (`None` → no double-set concern).
+                done = self._refreshing.pop(kind, None)
+            if done is not None:
+                done[0].set()
+            return payload
 
     def entry_meta(self, kind: str) -> SummaryEntryMeta | None:
         """Return *kind*'s freshness snapshot, or ``None`` when never computed — O(1).
@@ -499,14 +531,17 @@ class SummaryCache:
         payload["snapshot_age_s"] = round(meta.age_s, 3) if meta is not None and degraded else 0.0
         return payload
 
-    def _plan(self, kind: str, *, pull_active: bool = False) -> int | None:
+    def _plan(self, kind: str, *, pull_active: bool = False) -> int | threading.Event | None:
         """Decide whether *kind* needs a recompute — caller holds the lock.
 
-        Returns the generation to stamp a fresh entry with when a recompute is
-        needed (and marks the kind in-flight), or ``None`` when the cached entry
-        should be served as-is (hit, throttled, or already being refreshed by a
-        concurrent reader). *pull_active* is the pull probe's verdict, taken by
-        the caller OUTSIDE the lock (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
+        Returns the generation to stamp a fresh entry with when THIS reader
+        should recompute (registering the kind in-flight, except on the
+        re-entrant escape), a :class:`threading.Event` when a COLD read should
+        WAIT for another thread's in-flight first scan
+        (DEC-SCAN-SINGLE-FLIGHT-001), or ``None`` when the cached entry should
+        be served as-is (hit, throttled, or warm-in-flight). *pull_active* is
+        the pull probe's verdict, taken by the caller OUTSIDE the lock
+        (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
         """
         entry = self._entries.get(kind)
         if entry is not None and entry.generation == self._generation:
@@ -514,18 +549,27 @@ class SummaryCache:
             # this generation, so the honest flag reads not-degraded.
             self._duty_degraded[kind] = False
             return None
-        if entry is not None and kind in self._refreshing:
-            # Another reader is already paying the scan AND a prior entry exists
-            # to serve: return it instead of double-scanning (the warm in-flight
-            # fast path). On a COLD cache (entry is None) we deliberately fall
-            # THROUGH so this reader recomputes too — a transient double-scan on
-            # first concurrent access is correct and idempotent, far better than
-            # the `self._entries[kind]` KeyError → 500 that returning ``None``
-            # here would cause when no entry has ever been written
-            # (DEC-COMPLETENESS-O1-LATENCY-001 hostile-review MAJOR: this PR is
-            # the first to SHARE the SPOT entry across two concurrently-polled
-            # routes, widening the cold-start exposure of the latent race).
-            return None
+        inflight = self._refreshing.get(kind)
+        if inflight is not None:
+            if entry is not None:
+                # Warm in-flight: another reader is already paying the scan AND
+                # a prior entry exists to serve — serve it, no double-scan.
+                return None
+            event, owner = inflight
+            if owner == threading.get_ident():
+                # COLD RE-ENTRANT read — the in-flight recompute itself
+                # re-entered ``get_or_refresh`` for the same kind on the SAME
+                # thread (the DEC-COMPLETENESS-O1-LATENCY-001 cold-start case).
+                # Waiting on our own event would self-deadlock, so recompute
+                # WITHOUT re-registering: the inner scan stores an entry (and
+                # releases the outer registration on completion), never a
+                # `self._entries[kind]` KeyError → 500, never a hang.
+                return self._generation
+            # COLD cross-thread read: exactly ONE scan may be in flight
+            # (DEC-SCAN-SINGLE-FLIGHT-001 — pre-fix, every cold concurrent
+            # poller duplicated the whole-lake census; the 2026-07-05 restart
+            # log measured SIX concurrent 58-68 min duplicate scans). Wait.
+            return event
         if entry is not None:
             # ADAPTIVE floor (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001): throttle for at
             # least as long as the LAST scan took (capped), so an expensive full-lake
@@ -560,7 +604,7 @@ class SummaryCache:
                 # -visible duty_degraded flag; False for a plain non-pull throttle).
                 self._duty_degraded[kind] = pull_active
                 return None
-        self._refreshing.add(kind)
+        self._refreshing[kind] = (threading.Event(), threading.get_ident())
         return self._generation
 
 
