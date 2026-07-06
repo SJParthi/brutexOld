@@ -552,6 +552,20 @@ def build_plan(base: str) -> Plan:
     )
 
 
+def _print_report_stderr(stderr: str) -> None:
+    """Print a non-empty ``coverage report`` stderr (the swallowed-error fix).
+
+    Parameters
+    ----------
+    stderr:
+        The captured stderr of a ``coverage report`` invocation; blank / whitespace
+        prints nothing.
+    """
+    text = stderr.strip()
+    if text:
+        print(f"  coverage report stderr: {text}")
+
+
 def _run_coverage(module: str, tests: Sequence[str]) -> bool:
     """Run pytest --cov for *module* over *tests*; return True if 100%.
 
@@ -561,7 +575,10 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
     2.x. The per-file 100% assertion is ``--fail-under=100`` on the
     filtered report; a file the tests never imported is reported as
     not-measured and also fails (the exact 0%-masking this gate exists to
-    prevent).
+    prevent). The not-measured probe retries ONCE with its stderr surfaced —
+    the out-of-process report has been observed to intermittently miss a
+    just-written ``.coverage`` data file (a read race on heavily-threaded
+    suites), and a silently-swallowed stderr made that flake undiagnosable.
 
     Parameters
     ----------
@@ -592,14 +609,24 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
         print(f"  FAIL: pytest errored for {module} (exit {proc.returncode})")
         return False
     include = f"*/{module}"
+    measured_cmd = [sys.executable, "-m", "coverage", "report", f"--include={include}"]
     measured = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
-        [sys.executable, "-m", "coverage", "report", f"--include={include}"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+        measured_cmd, cwd=ROOT, capture_output=True, text=True, check=False
     )
     if module not in measured.stdout:
+        # Diagnosability + ONE defensive retry (DEC-PULL-BEAT-PERRUN-001 review fold,
+        # round 3 MINOR): the out-of-process report has been observed to
+        # intermittently see no data for a module right after pytest-cov wrote
+        # ``.coverage`` (the flaky victims were the heavily-threaded suites), and its
+        # captured stderr was never printed — so the real error was invisible and the
+        # gate could red/green nondeterministically on a genuinely-100% module.
+        _print_report_stderr(measured.stderr)
+        print(f"  WARN: {module} absent from the coverage report — retrying the report once")
+        measured = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
+            measured_cmd, cwd=ROOT, capture_output=True, text=True, check=False
+        )
+    if module not in measured.stdout:
+        _print_report_stderr(measured.stderr)
         print(f"  FAIL: {module} was not measured by its tests — gate failed")
         return False
     report = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell

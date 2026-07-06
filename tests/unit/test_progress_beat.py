@@ -378,6 +378,28 @@ class TestDropWarnEpochThrottle:
         emit_progress_beat()  # warn #2 (re-armed; registry still non-empty)
         assert len(_drop_warns(warn_capture)) == 2
 
+    def test_noop_unregister_leaves_the_epoch_and_the_throttle_untouched(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        """The docstring-claimed invariant, PINNED (review fold, round 3 — a mutant
+        bumping the epoch on the no-op return survived the suite): after the WARN
+        fired, a no-op unregister (identity mismatch AND missing channel) must NOT
+        close the epoch, so the next unroutable emit stays SUPPRESSED."""
+        beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="abc123def456")
+        emit_progress_beat()  # unroutable (unscoped, no legacy registrant) → warn #1
+        assert len(_drop_warns(warn_capture)) == 1
+        # Identity mismatch: the channel holds `beat`, not this wrong closure — no-op.
+        unregister_progress_beat(pull_id="abc123def456", beat=lambda: None)
+        # Missing channel — also a no-op.
+        unregister_progress_beat(pull_id="000000000000")
+        emit_progress_beat()  # SAME epoch → still suppressed
+        assert len(_drop_warns(warn_capture)) == 1
+        assert beats == []  # the registered channel survived both no-ops … untouched
+        with pull_id_scope("abc123def456"):
+            emit_progress_beat()  # … and still routable
+        assert beats == [1]
+
 
 class TestResetSeam:
     """``reset_progress_beats`` — THE sanctioned cross-test isolation seam."""

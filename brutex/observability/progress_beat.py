@@ -249,7 +249,9 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
             logger.warning(
                 "progress_beat.foreign_beat_dropped — a beat from channel %s matched no "
                 "registered run (%d registered channel(s), %d drop(s) this epoch); the "
-                "emitting thread is missing the capture-then-rebind pull_id binding. "
+                "emitting thread carries no / a foreign run id — either a missing "
+                "capture-then-rebind pull_id binding, or an emitter that genuinely "
+                "belongs to no run (e.g. a heal/maintenance write during a live pull). "
                 "Dropped (never routed into a foreign run — anti-masking); worst case is "
                 "a loud false stalled-SUSPECT, never a masked true stall.",
                 repr(channel),

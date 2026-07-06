@@ -578,7 +578,14 @@ class BackgroundPullJob:
 
     @property
     def pull_id(self) -> str:
-        """The CURRENT run's correlation id (``""`` before the first start) — O(1)."""
+        """The LAST STARTED run's correlation id (``""`` before the first start) — O(1).
+
+        NOT cleared when the run finishes: the id is deliberately RETAINED alongside
+        :attr:`_watchdog` as the finished run's identity token (the ``_on_hung`` /
+        superseded-run gates + :meth:`_beat`'s ambient gate key on it), so between runs
+        this reports the finished run's id with :attr:`running` ``False`` — honest
+        envelope (review fold, round 3), never "the current run" while none is live.
+        """
         with self._lock:
             return self._pull_id
 
@@ -1040,7 +1047,7 @@ class BackgroundPullJob:
         self._beat()
 
     def _beat(self) -> None:
-        """Beat the CURRENT run's stall watchdog iff the emitting thread belongs to it — O(1).
+        """Beat the CURRENT run's stall watchdog iff the emitting thread belongs to it.
 
         DEC-PULL-BEAT-PERRUN-001 fix round (the direct-hook anti-masking gate): the
         direct heartbeats (:meth:`_on_progress` / :meth:`sync_from_ledger` /
@@ -1054,23 +1061,44 @@ class BackgroundPullJob:
         pre-gate behaviour preserved) or match the CURRENT run's id; a non-empty
         mismatch is DROPPED + WARNed once per run (``pull_job.foreign_beat_dropped``) —
         a stale run's thread can never refresh a newer run's heartbeat and mask a real
-        stall. The gate reads ``(watchdog, pull_id)`` atomically under :attr:`_lock` and
-        beats OUTSIDE it (the job-lock → watchdog-lock order would otherwise invert the
-        timer thread's watchdog-lock → job-lock edge). Also appends the THROTTLED
-        durable pull-journal heartbeat (DEC-PULL-TELEMETRY-TRIAD-001) — only while a run
-        is active (a stale beat between runs, when :attr:`_watchdog` is ``None``,
-        journals nothing).
+        stall. The gate reads ``(watchdog, pull_id, running)`` atomically under
+        :attr:`_lock` and beats OUTSIDE it (the job-lock → watchdog-lock order would
+        otherwise invert the timer thread's watchdog-lock → job-lock edge). Also appends
+        the THROTTLED durable pull-journal heartbeat (DEC-PULL-TELEMETRY-TRIAD-001) —
+        only while the run is LIVE (:attr:`_running`): the finished run's identity
+        token (:attr:`_watchdog` + :attr:`_pull_id`) is deliberately RETAINED after
+        the ``finally`` (the ``_on_hung`` / superseded-run identity gates need it), so
+        a stale thread still bound to the FINISHED run's id passes the ambient gate
+        between runs and inertly beats the already-STOPPED watchdog — but journals
+        NOTHING, so a durable heartbeat record can never land AFTER the run's finish
+        record (review fold, round 3). Cost honesty (Golden Rule #10): the ambient
+        read is one contextvars-context copy + scan
+        (:func:`~brutex.observability.correlation.current_pull_id` — O(bound
+        contextvars), ≤ ~3 keys), skipped entirely by the UNLOCKED
+        no-watchdog fast exit below (before the FIRST ``start()`` a beat costs one
+        attribute read — the pre-gate short-circuit, restored).
         """
+        # Unlocked fast exit: before the FIRST start() there is no watchdog — skip the
+        # contextvars scan + the job-lock acquire entirely. The unlocked read is the
+        # same benign race the pre-gate code carried: a beat straddling start() is
+        # already tolerated (register()/start() seed the watchdog's heartbeat).
+        watchdog = self._watchdog
+        if watchdog is None:
+            return
         ambient = current_pull_id()
         with self._lock:
+            # Re-read under the lock: the unlocked read above can lose the race with
+            # a refused start()'s identity rollback (the singleflight-refused branch
+            # nulls the token) — nothing to beat then.
             watchdog = self._watchdog
+            if watchdog is None:
+                return
             run_pull_id = self._pull_id
-            foreign = watchdog is not None and bool(ambient) and ambient != run_pull_id
+            running = self._running
+            foreign = bool(ambient) and ambient != run_pull_id
             warn = foreign and not self._foreign_beat_warned
             if warn:
                 self._foreign_beat_warned = True
-        if watchdog is None:
-            return
         if foreign:
             if warn:
                 _LOG.warning(
@@ -1086,6 +1114,12 @@ class BackgroundPullJob:
                 )
             return
         watchdog.beat()
+        if not running:
+            # Between runs (finished-run identity token retained — see the docstring):
+            # the beat above hit an already-STOPPED watchdog (inert), but a durable
+            # journal heartbeat would land AFTER the run's finish record — skip it
+            # (review fold, round 3: the between-runs forensic-journal noise).
+            return
         # ``ambient`` is either the run's own id or "" (the legacy skip) — pass it so
         # the journal never pays a second contextvars scan (fix round NIT).
         self._maybe_journal_heartbeat(pull_id=ambient)

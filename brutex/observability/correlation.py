@@ -72,7 +72,11 @@ def current_pull_id() -> str:
     :func:`pull_id_scope`). Returns the empty string when called outside any
     scope, so a spine function logs a benign ``pull_id=""`` rather than raising
     when exercised in isolation (e.g. a direct unit test that does not open a
-    scope). O(1).
+    scope). O(bound contextvars) — ``structlog.contextvars.get_contextvars``
+    copies the thread's contextvars context and scans EVERY bound var into a
+    fresh dict per call (≤ ~3 keys on this repo's threads), no I/O — NOT a
+    literal O(1) (Golden Rule #10; matches :func:`emit_progress_beat`'s stated
+    cost, whose per-beat channel resolution this function is).
     """
     return str(structlog.contextvars.get_contextvars().get(PULL_ID_KEY, ""))
 

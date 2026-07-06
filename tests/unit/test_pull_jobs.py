@@ -927,12 +927,38 @@ def test_run_finally_skips_clearing_running_when_superseded() -> None:
     assert job._running is True  # pyright: ignore[reportPrivateUsage]  # NOT cleared (superseded)
 
 
-def test_beat_is_a_noop_when_no_watchdog_wired() -> None:
-    """``_beat`` short-circuits (the ``self._watchdog is not None`` ->exit branch) when
-    no watchdog is wired — e.g. before any ``start`` built one."""
+def test_beat_is_a_noop_when_no_watchdog_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_beat`` short-circuits at the UNLOCKED ``self._watchdog is None`` fast exit
+    before any ``start`` built a watchdog — paying NO contextvars scan and NO job-lock
+    acquire (the restored pre-gate short-circuit, review fold round 3): a raising
+    ``current_pull_id`` stand-in proves the scan is never reached."""
     job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
     assert job._watchdog is None  # pyright: ignore[reportPrivateUsage]
-    job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the None guard
+
+    def _must_not_scan() -> str:
+        raise AssertionError("the no-watchdog fast exit must skip the contextvars scan")
+
+    monkeypatch.setattr(pull_jobs, "current_pull_id", _must_not_scan)
+    job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the fast exit
+
+
+def test_beat_lost_race_with_identity_rollback_is_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The in-lock ``watchdog is None`` re-check: the unlocked fast exit saw a watchdog,
+    but a refused ``start()``'s identity rollback nulled the token before the locked
+    snapshot — simulated deterministically by nulling it inside the contextvars scan.
+    The beat is a silent no-op, never an ``AttributeError`` on ``None``."""
+    job = _job()
+    assert job.start(lambda _h: None, total=1) is True  # leaves the retained token
+    assert job._watchdog is not None  # pyright: ignore[reportPrivateUsage]
+
+    def _null_token_and_return_empty() -> str:
+        job._watchdog = None  # pyright: ignore[reportPrivateUsage] — the rollback landing mid-_beat
+        return ""
+
+    monkeypatch.setattr(pull_jobs, "current_pull_id", _null_token_and_return_empty)
+    job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — locked None snapshot
 
 
 def test_set_phase_passthrough_reaches_the_snapshot() -> None:
@@ -1284,7 +1310,9 @@ class TestJournalHeartbeat:
         assert run.interrupted is True  # start + heartbeat, no finish (died-mid-run shape)
 
     def test_stale_beat_between_runs_journals_nothing(self, tmp_path: object) -> None:
-        """A beat with NO active run (``_watchdog is None``) never journals."""
+        """A beat BEFORE the first start (the only shape where ``_watchdog is None``)
+        exits at the unlocked fast path and never journals. The between-RUNS shape —
+        the identity token retained after a finished run — is pinned separately below."""
         from pathlib import Path
 
         from brutex.observability.correlation import pull_id_scope
@@ -1295,6 +1323,37 @@ class TestJournalHeartbeat:
         with pull_id_scope("abc123def456"):
             job._beat()  # pyright: ignore[reportPrivateUsage] — whitebox: no run active
         assert read_journal(root) == []
+
+    def test_finished_run_bound_stale_beat_journals_nothing_between_runs(
+        self, tmp_path: object
+    ) -> None:
+        """REGRESSION (review fold, round 3): the finished run's identity token
+        (``_watchdog`` + ``_pull_id``) is deliberately RETAINED after ``_run``'s
+        ``finally``, so a drain-abandoned thread still bound to the FINISHED run's id
+        passes ``_beat``'s ambient gate between runs — it must inertly beat only the
+        already-STOPPED watchdog and journal NOTHING (a durable heartbeat landing
+        AFTER the run's finish record is forensic noise, not liveness)."""
+        from pathlib import Path
+
+        from brutex.observability.correlation import pull_id_scope
+        from brutex.observability.pull_journal import EVENT_HEARTBEAT, read_journal
+
+        root = Path(str(tmp_path))
+        # ONE scripted clock value — consumed by the in-run beat; a between-runs
+        # journal attempt would pop the exhausted script and fail LOUDLY.
+        job = self._job(root, self._manual_clock([0.0]), 100.0)
+
+        def work(on_progress: ProgressHook) -> None:
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=0 → journals
+
+        assert job.start(work, total=1, pull_id="abc123def456") is True
+        assert job.running is False  # finished — yet the identity token is retained:
+        assert job._watchdog is not None  # pyright: ignore[reportPrivateUsage]
+        assert job.pull_id == "abc123def456"
+        with pull_id_scope("abc123def456"):  # the zombie still bound to the FINISHED id
+            job._beat()  # pyright: ignore[reportPrivateUsage] — gate passes, running=False
+        beats = [e for e in read_journal(root) if e.event == EVENT_HEARTBEAT]
+        assert len(beats) == 1  # ONLY the in-run heartbeat — nothing after the finish
 
 
 # ── the on_finally completion hook (DEC-PULL-INTENT-RESUME-001) ───────────────

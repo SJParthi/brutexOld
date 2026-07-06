@@ -575,16 +575,56 @@ class TestRunCoverage:
         self._patch_runs(gate, monkeypatch, [_completed(returncode=1)])
         assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
 
-    def test_not_measured_fails(self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._patch_runs(
+    def test_not_measured_fails(
+        self,
+        gate: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Twice-absent module fails, and the captured stderr is SURFACED (the
+        swallowed-error diagnosability fix) — one probe with stderr text, the retry
+        without (both print branches of ``_print_report_stderr``)."""
+        calls = self._patch_runs(
             gate,
             monkeypatch,
             [
                 _completed(returncode=0),
-                _completed(returncode=0, stdout="some other file only"),  # path absent
+                _completed(
+                    returncode=0, stdout="some other file only", stderr="No data to report."
+                ),
+                _completed(returncode=0, stdout="still absent"),  # retry — path absent again
             ],
         )
         assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
+        assert len(calls) == 3  # pytest + report + ONE retry, never more
+        out = capsys.readouterr().out
+        assert "coverage report stderr: No data to report." in out
+        assert "retrying the report once" in out
+        assert "was not measured by its tests — gate failed" in out
+
+    def test_not_measured_then_retry_recovers(
+        self,
+        gate: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The observed data-file read race: the first report misses the module, the
+        ONE retry sees it — the gate passes instead of red/greening nondeterministically."""
+        calls = self._patch_runs(
+            gate,
+            monkeypatch,
+            [
+                _completed(returncode=0),  # pytest
+                _completed(returncode=0, stdout="some other file only"),  # flaked probe
+                _completed(returncode=0, stdout="brutex/x.py 10 0 100%"),  # retry sees it
+                _completed(returncode=0),  # report --fail-under=100
+            ],
+        )
+        assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is True
+        assert len(calls) == 4
+        out = capsys.readouterr().out
+        assert "retrying the report once" in out
+        assert "gate failed" not in out
 
     def test_below_100_fails(self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_runs(
