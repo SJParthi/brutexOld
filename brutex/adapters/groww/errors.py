@@ -139,6 +139,97 @@ class GrowwCredentialDeadError(GrowwAuthError):
     """
 
 
+class GrowwAuthorisationError(GrowwError):
+    """A vendor AUTHORISATION rejection — TERMINAL, quarantined PER SYMBOL, never a halt.
+
+    Maps the SDK's ``GrowwAPIAuthorisationException`` CLASS (the scope is that SDK
+    exception class, matched by name — the SDK reference documents no literal HTTP
+    status for it, so no ``403`` is assumed anywhere; Golden Rule #1,
+    ``docs/groww/api-reference/05-exceptions.md``). The shape it names is "the
+    presented token IS authenticated but this account is not ENTITLED to this
+    resource" — e.g. one entitlement-restricted instrument — which is a
+    PER-INSTRUMENT verdict, not a dead credential.
+
+    Deliberately **NOT a :class:`GrowwAuthError` subclass**
+    (DEC-GROWW-AUTHZ-QUARANTINE-001): the auth-family machinery must never see it —
+    (a) the client's bounded token re-mint branch (``client._call``'s
+    ``isinstance(err, GrowwAuthError)``) must not burn ``max_reauths`` re-minting a
+    token that is already VALID (re-minting cannot grant an entitlement), and
+    (b) the pull-wide terminal-auth HALT (:func:`is_terminal_auth_failure` → both
+    ingest spines' ``_GLOBAL_STOP_ERRORS`` / ``fetch_pipeline._is_pool_isolatable``
+    / ``pull_jobs`` / the CLI halt wrap) must not stop a ~750-symbol pull because
+    ONE instrument is entitlement-restricted. As a plain terminal
+    :class:`GrowwError` it rides the EXISTING per-symbol/per-contract quarantine
+    (DEC-GROWW-QUARANTINE-BRUTEX-001) — the window stays re-pullable, the pull
+    continues. The FLEET-WIDE shape (a real account suspension hits every symbol)
+    is restored by the error-storm breaker's authorisation arm, which escalates to
+    :class:`GrowwAuthorisationStormError` at ≥ the distinct-symbol threshold.
+    """
+
+
+#: Cap on the symbols named in the authorisation-storm halt message (counts stay exact).
+_MAX_NAMED_AUTHZ_SYMBOLS = 10
+
+
+class GrowwAuthorisationStormError(GrowwAuthError):
+    """ESCALATED fleet-wide authorisation storm — TERMINAL + a pull-wide global stop.
+
+    Raised by the error-storm breaker
+    (:class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`,
+    DEC-GROWW-AUTHZ-QUARANTINE-001), NEVER by the client/auth layer itself: when
+    authorisation errors (:class:`GrowwAuthorisationError`) have been observed on
+    ``>=`` :data:`~brutex.adapters.groww.constants.GROWW_AUTHZ_STORM_MIN_SYMBOLS`
+    DISTINCT symbols with ZERO transport successes since the storm began, the
+    "one restricted instrument" explanation is exhausted and the honest verdict is
+    an ACCOUNT-level suspension / entitlement revocation — every remaining symbol
+    would fail identically, so the storm arm RESTORES the pre-quarantine pull-wide
+    HALT semantics for exactly this fleet shape. Being a TERMINAL
+    :class:`GrowwAuthError` subclass it (a) is already a member of both ingest
+    spines' ``_GLOBAL_STOP_ERRORS`` (``GrowwAuthError`` is listed) and (b)
+    satisfies the :func:`is_terminal_auth_failure` carve-out at every halt chokepoint
+    (both drain checks, ``fetch_pipeline._is_pool_isolatable``,
+    ``pull_jobs.is_pull_halt``, the CLI wrap) with ZERO per-site changes — the
+    exact :class:`GrowwCredentialDeadError` precedent. Because it is raised by the
+    breaker on the ingest worker (never from inside ``GrowwClient._call``), the
+    client's bounded reauth branch is never re-entered by it. The threshold is an
+    operator-tunable HEURISTIC
+    (:data:`~brutex.adapters.groww.constants.GROWW_AUTHZ_STORM_MIN_SYMBOLS`),
+    not a vendor fact.
+
+    Carries the storm's counts so the halt surface can NAME them (the
+    :class:`~brutex.adapters.error_storm_breaker.VendorDownError` shape). Also
+    constructible like any plain exception
+    (``GrowwAuthorisationStormError("msg")``) with the counts defaulting to 0 —
+    the generic construct-from-a-bare-message contract the drift-pin tests use.
+    The base ``__init__`` runs exactly ONCE on every path.
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        distinct_symbols: int = 0,
+        symbols: tuple[str, ...] = (),
+    ) -> None:
+        self.distinct_symbols = distinct_symbols
+        self.symbols = symbols
+        if not args:
+            named = ", ".join(symbols[:_MAX_NAMED_AUTHZ_SYMBOLS])
+            more = len(symbols) - _MAX_NAMED_AUTHZ_SYMBOLS
+            suffix = f" (+{more} more)" if more > 0 else ""
+            args = (
+                "AUTHORISATION STORM — account-level suspension suspected: vendor "
+                f"authorisation rejections on {distinct_symbols} distinct symbols "
+                f"({named}{suffix}) with ZERO transport successes. The vendor is UP and "
+                "the token IS authenticated — the ACCOUNT's entitlements are the "
+                "problem, so every remaining symbol would fail identically. The pull "
+                "HALTED gracefully — check the Groww account status / API entitlements, "
+                "then re-run: the durable window ledger + idempotent sink re-pull "
+                "exactly the missing windows (nothing lost, nothing faked).",
+            )
+        # The ONE base-class init call for every construction path.
+        super().__init__(*args)
+
+
 class GrowwNotFoundError(GrowwError):
     """Unknown instrument / endpoint (terminal)."""
 
@@ -225,7 +316,12 @@ class GrowwFeedError(GrowwError):
 #: (string) so the SDK need not be importable (the optional-extra resilience).
 _SDK_NAME_TO_ERROR: dict[str, type[GrowwError]] = {
     "GrowwAPIAuthenticationException": GrowwAuthError,
-    "GrowwAPIAuthorisationException": GrowwAuthError,
+    # An AUTHORISATION rejection is a PER-INSTRUMENT entitlement verdict, NOT a dead
+    # credential: it maps to the terminal-but-quarantinable GrowwAuthorisationError
+    # (NOT the GrowwAuthError family) so one restricted instrument can never
+    # global-stop a ~750-symbol pull (DEC-GROWW-AUTHZ-QUARANTINE-001; the fleet-wide
+    # account-suspension shape is restored by the breaker's authorisation storm arm).
+    "GrowwAPIAuthorisationException": GrowwAuthorisationError,
     "GrowwAPIBadRequestException": GrowwBadRequestError,
     "GrowwAPINotFoundException": GrowwNotFoundError,
     "GrowwAPIRateLimitException": GrowwRateLimitError,
@@ -487,7 +583,10 @@ def is_retryable(exc: GrowwError) -> bool:
     reauth re-pulls later instead of dying).
     Terminal: bad-request, not-found, a NON-throttled / non-still-stale auth failure
     (needs re-auth — incl. the escalated :class:`GrowwCredentialDeadError`, which is
-    additionally a pull-wide global stop, DEC-VENDOR-DOWN-BREAKER-001), feed (out of
+    additionally a pull-wide global stop, DEC-VENDOR-DOWN-BREAKER-001), an
+    AUTHORISATION rejection (:class:`GrowwAuthorisationError` — per-symbol
+    quarantine; its fleet escalation :class:`GrowwAuthorisationStormError` is a
+    terminal auth-family global stop, DEC-GROWW-AUTHZ-QUARANTINE-001), feed (out of
     scope), and any bare :class:`GrowwError`.
     """
     return isinstance(
@@ -555,6 +654,8 @@ def steps_timeout_ladder(exc: GrowwError) -> bool:
 
 __all__ = [
     "GrowwAuthError",
+    "GrowwAuthorisationError",
+    "GrowwAuthorisationStormError",
     "GrowwBadRequestError",
     "GrowwCredentialDeadError",
     "GrowwEmptyResponseError",

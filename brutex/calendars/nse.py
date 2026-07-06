@@ -778,6 +778,46 @@ def get_session_checked(d: date, *, exchange: str | None = None) -> TradingSessi
     )
 
 
+def daily_derive_cutoff(now_ist: datetime) -> date:
+    """The session-close-aware forming-session cutoff for the derived ``1day``.
+
+    DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 — the ONE COMMON resolver of the
+    ``before`` date the daily derive drops sessions at (``ist_date >= before``
+    in :func:`brutex.data.spot_daily_resample.resample_1m_to_daily`). It
+    supersedes the whole-day-granular "``before`` = today IST" default (the
+    DEC-DOCTOR-KIT-HONESTY-001 fix-4 clause "the code cannot cheaply prove the
+    session closed" — it now CAN, from the calendar):
+
+    * **today has NO session** (weekend / holiday) → ``today + 1 day``: there
+      is no forming session to protect, so yesterday's (and any stored)
+      completed sessions all derive.
+    * **today's session is provably OVER** (``now_ist.time()`` strictly after
+      :attr:`TradingSession.close_time_ist` — :func:`get_session` already
+      resolves the per-date close for regular days,
+      :data:`SPECIAL_WEEKEND_TRADING_SESSIONS` Budget weekends AND the
+      :data:`MUHURAT_SESSIONS` evening hours) → ``today + 1 day``: a post-close
+      prebuild writes the run day's own daily bar instead of deferring it to
+      the next pipeline run.
+    * **still forming / pre-close** (incl. exactly AT the close instant —
+      strict ``>``, conservative; a boundary tightening is a named follow-up)
+      → ``today``: the no-look-ahead exclusion is unchanged.
+
+    HONEST envelope (Golden Rule #10): clock-based proof, not data-grounded —
+    a ``df_1m``-last-bar-vs-close variant is the named follow-up. Uses the
+    unguarded :func:`get_session`, which FABRICATES a regular session for an
+    out-of-coverage weekday (an unknown future holiday): both mis-verdicts are
+    harmless here — pre-"close" keeps ``today`` (nothing to derive on a
+    holiday), post-"close" includes a bar-less date (derives nothing) — so the
+    boot-safe unguarded variant is deliberate. Pure O(1); *now_ist* must be
+    the current IST wall-clock instant.
+    """
+    today = now_ist.date()
+    session = get_session(today)
+    if session is None or now_ist.time() > session.close_time_ist:
+        return today + timedelta(days=1)
+    return today
+
+
 def trading_days_between(start: date, end: date, *, exchange: str | None = None) -> list[date]:
     """List of trading days in [start, end] inclusive.
 

@@ -263,6 +263,23 @@ class GrowwClient:
                 )
             except Exception as exc:  # broad: any SDK error → neutral GrowwError
                 err = from_groww_exception(exc)
+                # Failed-attempt observability (DEC-PULL-TELEMETRY-TRIAD-001): exactly ONE
+                # ``groww.call`` outcome=failed line per FAILED attempt — EVERY raise path out
+                # of the timed call lands here first (the terminal raise, the 429/timeout
+                # retry ``continue``s, AND the reauth branch — including a re-mint that itself
+                # raises out of ``refresher.reauth`` below), so a burned-call burst (the 06:00
+                # token-reset blip) is READ from /logs, never back-inferred. The elapsed is
+                # computed HERE from ``started`` because the shared ``elapsed_ms`` local is
+                # deliberately left ``0.0`` on the failure path — the meter's
+                # ``stop(elapsed_ms=0.0, completed=False)`` bracket stays byte-identical.
+                _LOG.info(
+                    "groww.call",
+                    method=label,
+                    attempt=attempt,
+                    elapsed_ms=round((self.clock() - started) * 1000.0, 1),
+                    outcome="failed",
+                    error_type=type(err).__name__,
+                )
                 if isinstance(err, GrowwRateLimitError):
                     self.on_rate_limit()  # decrement the shared bucket on EVERY 429
                 # AUTH-error auto-RE-MINT (DEC-GROWW-TOKEN-REAUTH-001): on the 06:00 IST
@@ -346,6 +363,7 @@ class GrowwClient:
                     method=label,
                     attempt=attempt,
                     elapsed_ms=elapsed_ms,
+                    outcome="success",
                 )
                 return result
             finally:
@@ -429,7 +447,7 @@ class GrowwClient:
         """Return a copy of this client with its ``pace`` hook rebound (O(1), immutable).
 
         The :class:`GrowwClientProtocol` seam the ingest spine uses
-        (:func:`~brutex.adapters.groww.run_ingest._with_paced_client`) to wire the shared
+        (:func:`~brutex.adapters.groww.run_ingest.with_paced_client`) to wire the shared
         rate bucket into the client's internal fast-retry AFTER the adapter is built —
         replacing the prior raw :func:`dataclasses.replace`, so the SAME call also re-fans
         the pace into every leaf of a multi-connection :class:`~brutex.adapters.groww.pool.\

@@ -9,10 +9,11 @@
  * right of the page (the COLLAPSED default — same small footprint as before, so it does
  * NOT reflow or cover any page content):
  *
- *   - a STALL light: green = flowing, red = stalled, amber = local (an ACTIVE pull in a
- *     zero-vendor-call LOCAL pipeline stage — the timeframe prebuild / movers warm,
- *     DEC-PIPELINE-PHASE-UI-HONESTY-001 — never a red "stalled" off the correctly-
- *     flatlined fetch rate), dark = idle (no pull running);
+ *   - a STALL light: green = flowing, red = stalled OR failing (issuing but every call
+ *     fails — the meter's measured failed_rps, DEC-PULL-TELEMETRY-TRIAD-001), amber =
+ *     local (an ACTIVE pull in a zero-vendor-call LOCAL pipeline stage — the timeframe
+ *     prebuild / movers warm, DEC-PIPELINE-PHASE-UI-HONESTY-001 — never a red "stalled"
+ *     off the correctly-flatlined fetch rate), dark = idle (no pull running);
  *   - req/sec  (achieved / allowed, with the 8 r/s ceiling);
  *   - req/min  (rolling-60s issue count, with the 500/min cap);
  *   - req/10min (MEASURED rolling-600s issue count — the new metric);
@@ -55,6 +56,14 @@
  * window fills, never inflated). The 8/sec + 500/min are the configured limits the
  * backend returns.
  *
+ * ETA row (DEC-PULL-PROGRESS-HONESTY-001): the pill ALSO polls the O(1)
+ * GET /api/v1/universe/pull-progress snapshot and shows a linear "ETA ~Xh Ym" row
+ * while a pull is RUNNING and the backend reports a non-null eta_seconds. The row is
+ * HIDDEN whenever the ETA is null — idle/settled, no measured rate yet, or an
+ * open-ended (growing-denominator) phase such as the F&O historical fill, where a
+ * linear ETA would be an illusion (the backend, not this widget, owns that verdict).
+ * Rendered via textContent only (the CodeQL XSS guard).
+ *
  * The whole widget is best-effort: a fetch error / malformed payload leaves the last
  * render in place (or an honest "—") and never throws into the page. READ-ONLY — it
  * changes no pacing decision and is purely observational.
@@ -63,6 +72,7 @@
   "use strict";
 
   var ENDPOINT = "/api/v1/pull/rate";
+  var PROGRESS_ENDPOINT = "/api/v1/universe/pull-progress";
   var POLL_MS = 3000;
   var WIDGET_ID = "bxRateMonitor";
   var OVERLAY_ID = "bxRateMonitorOverlay";
@@ -230,11 +240,47 @@
         pillRow("req/min", "bxrmMin", "bxrmMinLim"),
         pillRow("req/10min", "bxrmTenMin", null),
         pillRow("req/hour", "bxrmHour", null),
+        etaRow,
       ]
     );
     w.addEventListener("click", openOverlay);
     document.body.appendChild(w);
     return w;
+  }
+
+  // ETA row (DEC-PULL-PROGRESS-HONESTY-001): built like every other pill row but
+  // HIDDEN by default — it appears only while the backend reports a non-null
+  // eta_seconds for a RUNNING pull (never for an open-ended phase, where the
+  // backend already returns null). textContent-only updates via renderEta().
+  var etaRow = pillRow("ETA", "bxrmEta", null);
+  etaRow.id = "bxrmEtaRow";
+  etaRow.style.display = "none";
+
+  // "ETA ~Xh Ym" formatter (or "~Ym" under an hour) — mirrors universe.html's
+  // fmtEta so both surfaces read identically.
+  function fmtEtaSeconds(sec) {
+    if (typeof sec !== "number" || !isFinite(sec) || sec < 0) {
+      return "";
+    }
+    var t = Math.round(sec);
+    var h = Math.floor(t / 3600);
+    var m = Math.round((t - h * 3600) / 60);
+    return h > 0 ? "~" + h + "h " + m + "m" : "~" + m + "m";
+  }
+
+  function renderEta(progress) {
+    var row = document.getElementById("bxrmEtaRow");
+    if (!row) {
+      return;
+    }
+    var text =
+      progress && progress.running === true ? fmtEtaSeconds(progress.eta_seconds) : "";
+    if (text) {
+      setText("bxrmEta", text);
+      row.style.display = "";
+    } else {
+      row.style.display = "none";
+    }
   }
 
   // One expanded-grid metric: a "gk" label + a big "gv" value + a small "gc" evidence count.
@@ -337,12 +383,21 @@
     }
     // "idle" and "done" (pull just finished — DEC-RATE-STALL-PULL-GATE-001) both take
     // the dark idle styling; "local" (an active pull in a zero-vendor-call LOCAL stage —
-    // DEC-PIPELINE-PHASE-UI-HONESTY-001) takes the AMBER styling; the state TEXT still
+    // DEC-PIPELINE-PHASE-UI-HONESTY-001) takes the AMBER styling; "failing"
+    // (issuing-but-all-failing, the meter's measured failed_rps —
+    // DEC-PULL-TELEMETRY-TRIAD-001) takes the RED stalled styling; the state TEXT still
     // shows the honest backend word.
     el.classList.remove("flowing", "stalled", "local", "idle");
-    el.classList.add(
-      state === "flowing" || state === "stalled" || state === "local" ? state : "idle"
-    );
+    // NOTE: the first branch's "stalled" makes the second's re-check redundant —
+    // both spellings are integration-PINNED verbatim (the #1119 local-amber pin and
+    // the telemetry-triad failing pin), so the redundancy is deliberate.
+    var cls = "idle";
+    if (state === "flowing" || state === "stalled" || state === "local") {
+      cls = state;
+    } else if (state === "stalled" || state === "failing") {
+      cls = "stalled";
+    }
+    el.classList.add(cls);
   }
 
   function setText(id, value) {
@@ -425,6 +480,18 @@
       })
       .catch(function () {
         /* best-effort — leave the last render in place on a transient error. */
+      });
+    // ETA (DEC-PULL-PROGRESS-HONESTY-001): best-effort second read of the O(1)
+    // pull-progress snapshot; the row hides itself on any error / null ETA.
+    fetch(PROGRESS_ENDPOINT, { headers: { Accept: "application/json" } })
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .then(function (progress) {
+        renderEta(progress);
+      })
+      .catch(function () {
+        /* best-effort — keep the last ETA render on a transient error. */
       });
   }
 

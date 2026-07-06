@@ -45,24 +45,33 @@ distributed lock across hosts (an ``flock`` is local to one machine / one filesy
 and NOT a queue (the second pull is REFUSED, not deferred). ``fcntl.flock`` is POSIX
 (Linux + macOS — the Track-1 hardware envelope); Windows is out of scope.
 
-**RESIDUAL — keyed by lake root, NOT by the Groww account (DEC-PULL-HARDENING-FOLLOWUP-001,
-MIGRATION.md #996).** The lock file lives UNDER ``lake_root`` (see
-:func:`pull_singleflight_lock_path`), so this gate serialises pulls that share ONE lake
-root. The *intent* is the ACCOUNT request rate (Golden Rule #6), but the *key* is the
-lake root — so it does NOT cover the case where the SAME Groww account is pulled into
-TWO distinct ``BRUTEX_LAKE_ROOT`` s at once: those two pulls take DIFFERENT lock files,
-BOTH acquire, and the account still sees the SUM of both rates (~16 r/s at the 8 r/s
-ceiling). Keying the lock on the credentials / feed-token instead of the lake root would
-need the live ``GrowwAPI`` token threaded into BOTH build sites + a system-wide
-cross-user lock dir (``/tmp``-style) with its own permission trade-offs — a larger
-change, flagged as a FOLLOW-UP and deliberately NOT done here. **Operators running ONE
-account into TWO lake roots must not start both pulls at once — this guard will NOT stop
-them.** (See ``docs/runbooks/data-fetch-runday.md`` §6a for the operator note.)
+**RESIDUAL — the lake-root key alone does NOT cover two lake roots; the ACCOUNT-keyed
+second lock now does (single host).** The lake-root lock file lives UNDER ``lake_root``
+(see :func:`pull_singleflight_lock_path`), so on its own it serialises only pulls that
+share ONE lake root — the SAME Groww account pulled into TWO distinct
+``BRUTEX_LAKE_ROOT`` s took DIFFERENT lock files, BOTH acquired, and the account still
+saw the SUM of both rates (~16 r/s at the 8 r/s ceiling; the residual flagged by
+DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996). That residual is now CLOSED for the
+single-host case by :func:`account_pull_singleflight_lock`
+(DEC-ACCOUNT-KEY-SINGLEFLIGHT-001, MIGRATION.md #1285): a SECOND flock keyed by a
+Groww ``api_key`` fingerprint under ``~/.brutex/locks/pull_account<pbkdf2[:16]>.flock``
+(a PBKDF2-HMAC-SHA256 derivation with a fixed app salt — deliberately expensive so the
+filename never invites offline guessing of the credential it fingerprints), taken FIRST
+(before the lake-root lock) at both production pull sites. HONEST envelope:
+the key is the AWS-resolved ``api_key`` (DEC-AWS-ONLY-CREDS-001 — the retired env-var
+path is NEVER read); the lock dir is PER-USER (``Path.home()``), so two OS users pulling
+one account, or two HOSTS, are still NOT covered (a system-wide ``/tmp``-style dir has
+its own permission trade-offs; a cross-host distributed lock is out of scope for an
+``flock``) — both stay NAMED follow-ups, as does keying on the vendor feed-token instead
+of the ``api_key``. A credentials-less run (dry-run / no AWS) SKIPS the account lock
+gracefully — it makes no vendor calls, so there is no account rate to protect. (See
+``docs/runbooks/data-fetch-runday.md`` §6a for the operator note.)
 """
 
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -73,8 +82,12 @@ from brutex.data.atomic_io import lake_write_guard
 from brutex.models import BruteXError
 
 __all__ = [
+    "ACCOUNT_LOCK_FILE_PREFIX",
     "PULL_SINGLEFLIGHT_LOCK_NAME",
     "PullAlreadyRunningError",
+    "account_pull_singleflight_lock",
+    "account_singleflight_lock_path",
+    "default_account_lock_dir",
     "pull_singleflight_lock",
     "pull_singleflight_lock_path",
 ]
@@ -87,6 +100,30 @@ _LOCK_SUBDIR: Final[str] = ".locks"
 #: The single, stable filename for the account-wide pull single-flight lock. ONE name
 #: (not per-partition) so EVERY pull against this lake root contends on the same file.
 PULL_SINGLEFLIGHT_LOCK_NAME: Final[str] = "pull_singleflight.lock"
+
+#: Filename prefix for the ACCOUNT-keyed single-flight lock (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001).
+#: The full name is ``pull_account<pbkdf2_hmac_sha256(api_key)[:16]>.flock`` — a truncated
+#: hex KDF fingerprint ONLY, never the api_key itself (no secret in a path or a log line).
+ACCOUNT_LOCK_FILE_PREFIX: Final[str] = "pull_account"
+
+#: Hex chars of the PBKDF2 fingerprint kept in the account lock filename. 16 hex
+#: chars = 64 bits — collision-safe for the handful of accounts one host ever runs,
+#: short enough for a readable filename.
+_ACCOUNT_DIGEST_LEN: Final[int] = 16
+
+#: Fixed application salt for the account-lock PBKDF2 derivation. The fingerprint must
+#: be DETERMINISTIC per api_key (two processes must independently derive the SAME lock
+#: filename — that is the whole point), so a random per-call salt is impossible; a
+#: fixed app-scoped salt still domain-separates the fingerprint from any other use of
+#: the key.
+_ACCOUNT_LOCK_KDF_SALT: Final[bytes] = b"brutex-pull-account-lock"
+
+#: PBKDF2 iteration count for the account-lock fingerprint. High enough that the
+#: filename cannot be used as a cheap offline-guessing oracle for the api_key
+#: (CodeQL py/weak-sensitive-data-hashing — a bare sha256 of credential material is
+#: guessable at GPU speed); low enough that the one derivation per pull start costs
+#: ~100 ms on commodity hardware — negligible against a multi-hour pull.
+_ACCOUNT_LOCK_KDF_ITERATIONS: Final[int] = 200_000
 
 
 class PullAlreadyRunningError(BruteXError):
@@ -162,7 +199,95 @@ def pull_singleflight_lock(lake_root: Path) -> Generator[None, None, None]:
         (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996) — a raw ``OSError`` would
         otherwise escape the dashboard ``start()`` path uncaught.
     """
-    lock_path = pull_singleflight_lock_path(lake_root)
+    with _flock_singleflight(pull_singleflight_lock_path(lake_root)):
+        yield
+
+
+def default_account_lock_dir() -> Path:
+    """Return the default PER-USER directory for the account-keyed lock files.
+
+    ``~/.brutex/locks`` — deliberately OUTSIDE any lake root, so two pulls of the SAME
+    account into TWO distinct ``BRUTEX_LAKE_ROOT`` s still contend on ONE file
+    (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001). Per-user (``Path.home()``): two OS users are NOT
+    covered (documented honest envelope in the module docstring). O(1), pure path
+    computation — nothing is created here.
+    """
+    return Path.home() / ".brutex" / "locks"
+
+
+def account_singleflight_lock_path(api_key: str, *, lock_dir: Path | None = None) -> Path:
+    """Return the account-keyed single-flight lock path for *api_key*.
+
+    ``<lock_dir>/pull_account<pbkdf2(api_key)[:16]>.flock`` — the filename carries ONLY
+    a truncated hex PBKDF2-HMAC-SHA256 fingerprint of the api_key, NEVER the key itself,
+    so no secret ever lands in a path, an ``ls``, or a log line (the fingerprint is
+    stable per key and distinct across keys). PBKDF2 (``_ACCOUNT_LOCK_KDF_ITERATIONS``
+    iterations over the fixed ``_ACCOUNT_LOCK_KDF_SALT``) instead of a bare sha256 so
+    the visible filename is computationally expensive to brute-force back to the
+    credential (CodeQL py/weak-sensitive-data-hashing). HONEST cost: the derivation is
+    DELIBERATELY slow — ~100 ms once per pull start (never per fetch), negligible
+    against a multi-hour pull. *lock_dir* defaults to
+    :func:`default_account_lock_dir`; tests inject a tmp dir so CI never touches the
+    real home. O(1) calls per pull.
+    """
+    fingerprint = hashlib.pbkdf2_hmac(
+        "sha256",
+        api_key.encode("utf-8"),
+        _ACCOUNT_LOCK_KDF_SALT,
+        _ACCOUNT_LOCK_KDF_ITERATIONS,
+    )
+    digest = fingerprint.hex()[:_ACCOUNT_DIGEST_LEN]
+    base = default_account_lock_dir() if lock_dir is None else lock_dir
+    return base / f"{ACCOUNT_LOCK_FILE_PREFIX}{digest}.flock"
+
+
+@contextmanager
+def account_pull_singleflight_lock(
+    api_key: str, *, lock_dir: Path | None = None
+) -> Generator[None, None, None]:
+    """Hold the ACCOUNT-keyed single-flight lock for the ``with`` block.
+
+    DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 — the second flock closing the #996 residual for
+    the single-host case: keyed by the Groww ``api_key`` digest (NOT the lake root), it
+    lives under the per-user :func:`default_account_lock_dir`, so ONE account pulled
+    into TWO lake roots at once still contends on ONE file and the second pull is
+    REFUSED instead of silently doubling the account request rate (Golden Rule #6).
+    Taken FIRST — strictly BEFORE the lake-root :func:`pull_singleflight_lock` — at
+    every production site (one fixed lock ORDER everywhere, so two processes can never
+    deadlock-invert across the pair). Same mechanics as the lake-root lock: exclusive
+    non-blocking ``flock``, released by closing the fd on exit.
+
+    Parameters
+    ----------
+    api_key
+        The AWS-resolved Groww api_key (:func:`brutex.config.credentials.\
+resolve_groww_aws_credentials` — the SOLE credential source, DEC-AWS-ONLY-CREDS-001).
+        Only its PBKDF2 fingerprint is used; the key never reaches the filesystem or a
+        log.
+    lock_dir
+        Override of the lock directory (tests — never write the real ``$HOME`` in CI).
+
+    Raises
+    ------
+    PullAlreadyRunningError
+        If another process holds this ACCOUNT's lock (a pull is in flight for the same
+        account, possibly against a DIFFERENT lake root).
+    LakeWriteHalt
+        If creating the lock dir / file hits ENOSPC / OOM (the same
+        :func:`~brutex.data.atomic_io.lake_write_guard` contract as the lake-root lock).
+    """
+    with _flock_singleflight(account_singleflight_lock_path(api_key, lock_dir=lock_dir)):
+        yield
+
+
+@contextmanager
+def _flock_singleflight(lock_path: Path) -> Generator[None, None, None]:
+    """The ONE non-blocking exclusive-flock core both single-flight locks share (COMMON).
+
+    Creates the lock dir/file (guarded — ENOSPC/OOM → ``LakeWriteHalt``), takes
+    ``LOCK_EX | LOCK_NB`` (contention → :class:`PullAlreadyRunningError`), and releases
+    by closing the fd on every exit.
+    """
     # The lock-file creation runs inside ``lake_write_guard`` so a full disk at that step
     # becomes a ``LakeWriteHalt`` (the same contract the partition lock honours), never a
     # raw ``OSError`` that escapes the caller uncaught.
