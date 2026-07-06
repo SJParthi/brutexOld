@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta
 from brutex.adapters.groww.expiry_scope import (
     ScopePartition,
     expiry_in_scope,
+    log_expiry_scope_summary,
     log_out_of_scope_expiries,
     normalize_expiry_scope,
     partition_contracts_by_scope,
@@ -103,11 +104,18 @@ def test_partition_default_scope_keeps_everything_in_order() -> None:
         _row("SENSEX", date(2026, 6, 26)),
         _row("NIFTY", date(2026, 7, 30), side="PE"),
     ]
-    part = partition_contracts_by_scope(rows, scope_start=None, scope_end=None)
+    with capture_logs() as logs:
+        part = partition_contracts_by_scope(rows, scope_start=None, scope_end=None)
+        log_out_of_scope_expiries(part, scope_start=None, scope_end=None)
+        log_expiry_scope_summary(part, scope_start=None, scope_end=None)
     assert part.in_scope == tuple(rows)  # every row, input order preserved
     assert part.out_by_expiry == {}
     assert part.contracts_out_of_scope == 0
     assert part.expiries_out_of_scope == 0
+    # Default-path ZERO-log pin (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001 extends the
+    # #1146 parity): the (None, None) unscoped pull emits NO log at all — the summary
+    # included. Logging is the only delta the telemetry adds, and it adds none here.
+    assert logs == []
 
 
 def test_partition_groups_out_of_scope_by_underlying_and_expiry() -> None:
@@ -238,6 +246,82 @@ def test_log_emits_nothing_when_everything_in_scope() -> None:
     with capture_logs() as logs:
         log_out_of_scope_expiries(part, scope_start=None, scope_end=None)
     assert [e for e in logs if e["event"] == "fno.expiry_out_of_scope"] == []
+
+
+# ── log_expiry_scope_summary — ONE bounded-scope summary, silent by default ──
+# DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001 (Session-B observe-only telemetry).
+
+
+def test_expiries_in_scope_counts_distinct_underlying_expiry_groups() -> None:
+    """The in-scope twin of ``expiries_out_of_scope`` — distinct groups, not legs."""
+    near = date(2026, 6, 25)
+    rows = [
+        _row("NIFTY", near, n=1),  # group (NIFTY, near) — leg 1
+        _row("NIFTY", near, side="PE", n=2),  # group (NIFTY, near) — leg 2
+        _row("SENSEX", near, n=3),  # group (SENSEX, near)
+        _row("NIFTY", date(2026, 7, 30), n=4),  # group (NIFTY, July)
+    ]
+    part = partition_contracts_by_scope(rows, scope_start=None, scope_end=None)
+    assert len(part.in_scope) == 4
+    assert part.expiries_in_scope == 3  # 4 legs fold to 3 (underlying, expiry) groups
+
+
+def test_scope_summary_emits_once_with_both_sides_and_bounds() -> None:
+    """A bounded scope emits EXACTLY ONE summary naming both sides + the bounds."""
+    far = date(2026, 9, 29)
+    rows = [
+        _row("NIFTY", date(2026, 6, 25), n=1),  # in
+        _row("NIFTY", date(2026, 6, 25), side="PE", n=2),  # in — same group
+        _row("NIFTY", far, n=3),  # out
+        _row("SENSEX", far, n=4),  # out — second group
+    ]
+    part = partition_contracts_by_scope(
+        rows, scope_start=date(2026, 6, 1), scope_end=date(2026, 6, 30)
+    )
+    with capture_logs() as logs:
+        log_expiry_scope_summary(part, scope_start=date(2026, 6, 1), scope_end=date(2026, 6, 30))
+    (event,) = [e for e in logs if e["event"] == "fno.expiry_scope_summary"]
+    assert event["contracts_in_scope"] == 2
+    assert event["expiries_in_scope"] == 1
+    assert event["contracts_out_of_scope"] == 2
+    assert event["expiries_out_of_scope"] == 2
+    assert event["scope_start"] == "2026-06-01"
+    assert event["scope_end"] == "2026-06-30"
+
+
+def test_scope_summary_start_only_bound_emits_with_none_end() -> None:
+    """A start-only scope is BOUNDED — the summary fires with ``scope_end=None``."""
+    rows = [_row("NIFTY", date(2026, 6, 25))]
+    part = partition_contracts_by_scope(rows, scope_start=date(2026, 6, 1), scope_end=None)
+    with capture_logs() as logs:
+        log_expiry_scope_summary(part, scope_start=date(2026, 6, 1), scope_end=None)
+    (event,) = [e for e in logs if e["event"] == "fno.expiry_scope_summary"]
+    assert event["scope_start"] == "2026-06-01"
+    assert event["scope_end"] is None
+    assert event["contracts_in_scope"] == 1
+    assert event["contracts_out_of_scope"] == 0
+
+
+def test_scope_summary_end_only_bound_emits_with_none_start() -> None:
+    """An end-only scope is BOUNDED — the summary fires with ``scope_start=None``."""
+    rows = [_row("NIFTY", date(2026, 9, 29))]
+    part = partition_contracts_by_scope(rows, scope_start=None, scope_end=date(2026, 6, 30))
+    with capture_logs() as logs:
+        log_expiry_scope_summary(part, scope_start=None, scope_end=date(2026, 6, 30))
+    (event,) = [e for e in logs if e["event"] == "fno.expiry_scope_summary"]
+    assert event["scope_start"] is None
+    assert event["scope_end"] == "2026-06-30"
+    assert event["contracts_in_scope"] == 0
+    assert event["expiries_in_scope"] == 0
+    assert event["contracts_out_of_scope"] == 1
+
+
+def test_scope_summary_default_scope_emits_nothing() -> None:
+    """The (None, None) default pull emits ZERO summary lines — the #1146 parity pin."""
+    part = ScopePartition(in_scope=(_row("NIFTY", date(2026, 6, 25)),), out_by_expiry={})
+    with capture_logs() as logs:
+        log_expiry_scope_summary(part, scope_start=None, scope_end=None)
+    assert logs == []
 
 
 # ── normalize_expiry_scope — the live-edge law (DEC-EXPIRY-SCOPE-LIVE-EDGE-001) ──

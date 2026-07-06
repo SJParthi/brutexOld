@@ -4716,7 +4716,7 @@ def build_app(
         ledger read is mtime-cached so the 4 s page poll stops re-paying the
         full Parquet load at pre-planned-universe scale (~841k rows measured).
         """
-        from brutex.dashboard.db_view import build_window_payload
+        from brutex.dashboard.db_view import build_window_payload, last_pull_start_utc
 
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -4749,6 +4749,10 @@ def build_app(
                 conn=store.connection,
                 count_cache=_window_counts_cache,
                 generation=_summary_cache.generation,
+                # Per-run honesty (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the last
+                # REAL pull's journal `started` instant — None (no journal / dry-run
+                # only) OMITS the per-run figure entirely, never fabricates it.
+                since=last_pull_start_utc(lake),
             )
 
         return JSONResponse(await run_in_threadpool(_payload))
