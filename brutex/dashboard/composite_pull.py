@@ -199,6 +199,27 @@ def _registry_read_keys(instruments: Sequence[Instrument]) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def _underlying_kind_map(instruments: Sequence[Instrument]) -> dict[str, bool]:
+    """Map each tradable instrument's REGISTRY underlying key → ``is_index`` — pure.
+
+    DEC-PULL-SIX-STEP-ORDER-001 — the classification map that drives the strict F&O
+    steps 3-6 ordering inside :func:`~brutex.dashboard.historical_pull.pull_contract_candles`.
+    Keys go through the SAME ``primary_fno_underlying`` + alias resolution
+    :func:`_registry_read_keys` uses to READ the registry the metadata phase WROTE
+    under — so the map joins :class:`~brutex.data.registry_store.ContractRow.underlying`
+    exactly by construction (``NIFTYJR`` → ``NIFTYNXT50``, ``BAJAJ-AUTO`` →
+    ``BAJAJAUTO`` cannot misroute). First-wins on a key collision (two spot
+    spellings sharing one F&O primary), mirroring the read-key de-dup.
+    """
+    aliases = resolve_fno_index_aliases()
+    kinds: dict[str, bool] = {}
+    for inst in instruments:
+        key = primary_fno_underlying(inst.symbol_name, aliases=aliases)
+        if key not in kinds:
+            kinds[key] = inst.is_index
+    return kinds
+
+
 def _select_fresh_contracts(
     registry: RegistryStore, underlyings: Sequence[str]
 ) -> list[ContractRow]:
@@ -419,6 +440,9 @@ def pull_historical_for_underlyings(
         scope_end=scope_end,
         on_bars=on_bars,
         on_ledger_sync=on_ledger_sync,
+        # DEC-PULL-SIX-STEP-ORDER-001: the index/stock classification that drives the
+        # strict steps 3-6 bucket order — SAME resolved keys as the registry read above.
+        underlying_kinds=_underlying_kind_map(tradable),
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law

@@ -65,7 +65,7 @@ leaves it ``none``). A contract that quarantined or left a transient window is l
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -105,7 +105,9 @@ from brutex.adapters.groww.option_ingest import (
 from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
+    PullStep,
     PullVerdict,
+    StepOrderMonitor,
     UntilCleanRound,
     classify_pull,
     mark_synthetic,
@@ -161,15 +163,64 @@ _ONE_DAY: Final[timedelta] = timedelta(days=1)
 #: collide on the same expiry.
 _FUTURE_SIDE: Final[str] = "FUT"
 
-#: Deterministic pull ORDER over the per-market buckets: the FUTURES market is processed
-#: BEFORE the OPTIONS market (futures-first), with any unknown market sorted LAST. Without
-#: this the buckets were iterated in ``dict`` insertion order, which (options inserted
-#: first) pulled CE/PE before FUT. Pure ordering — the per-contract windows + the ingest
-#: driver are untouched (DEC-FNO-LOOKBACK-SPLIT-001).
-_MARKET_PULL_ORDER: Final[dict[str, int]] = {
-    GROWW_FUTURE_COVERAGE_MARKET: 0,
-    GROWW_OPTION_COVERAGE_MARKET: 1,
+#: One F&O ordering bucket: ``(ledger-market, is_index)``. The MARKET half names the
+#: ledger namespace (``_contract_market`` — KEPT verbatim, so every window row / skip
+#: decision / ``/coverage/windows`` bucket is byte-identical); the BOOL half is the
+#: ORDERING-only index/stock class (DEC-PULL-SIX-STEP-ORDER-001).
+_BucketKey = tuple[str, bool]
+
+#: The F&O steps 3-6 binding (DEC-PULL-SIX-STEP-ORDER-001 — REPLACES the 2-key
+#: ``_MARKET_PULL_ORDER`` futures-first sort of DEC-FNO-LOOKBACK-SPLIT-001): binds the
+#: ledger-market constants (owned here) to the COMMON :class:`PullStep` ranks (owned in
+#: ``ingest_common``) — the law lives in ONE place, the binding at the ONE chokepoint.
+#: INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS.
+_STEP_FOR_BUCKET: Final[dict[_BucketKey, PullStep]] = {
+    (GROWW_FUTURE_COVERAGE_MARKET, True): PullStep.INDICES_FUTURES,
+    (GROWW_FUTURE_COVERAGE_MARKET, False): PullStep.STOCKS_FUTURES,
+    (GROWW_OPTION_COVERAGE_MARKET, True): PullStep.INDICES_OPTIONS,
+    (GROWW_OPTION_COVERAGE_MARKET, False): PullStep.STOCKS_OPTIONS,
 }
+
+
+def _bucket_sort_key(bucket: _BucketKey) -> tuple[int, str, int]:
+    """Total, deterministic sort key over ordering buckets — the decreed 3→4→5→6.
+
+    A known bucket sorts by its :class:`PullStep` rank; an UNKNOWN market sorts
+    LAST (rank 99) with ``(market, index-first)`` string/flag tie-breaks so the
+    order stays total + deterministic for ANY input (the property-test invariant).
+    Pure, O(1).
+    """
+    market, is_index = bucket
+    step = _STEP_FOR_BUCKET.get(bucket)
+    return (int(step) if step is not None else 99, market, 0 if is_index else 1)
+
+
+def _contract_bucket(
+    row: ContractRow, underlying_kinds: Mapping[str, bool] | None
+) -> tuple[_BucketKey, bool]:
+    """Classify one contract row into its ordering bucket — pure, total, never raises.
+
+    Returns ``(bucket_key, resolved)``. The market half is ALWAYS
+    :func:`_contract_market` (the ledger namespace, byte-unchanged); the class
+    half joins *underlying_kinds* — keyed by the SAME
+    ``primary_fno_underlying``-resolved registry key the metadata phase wrote
+    :class:`~brutex.data.registry_store.ContractRow.underlying` under, so
+    NIFTYJR→NIFTYNXT50 / BAJAJ-AUTO join by construction. Fail-closed for ORDER,
+    never for DATA: an underlying absent from the map classifies STOCK-side (the
+    LATER bucket — an unknown can never jump ahead of a mandated index step) with
+    ``resolved=False`` so the caller counts + WARNs it; the row is still pulled.
+    ``underlying_kinds=None`` (a direct/legacy caller) classifies everything
+    stock-side with ``resolved=True`` (no per-row noise) — the order degrades to
+    exactly the legacy 2-bucket FUT-then-OPT law, byte-identical.
+    """
+    market = _contract_market(row)
+    if underlying_kinds is None:
+        return (market, False), True
+    kind = underlying_kinds.get(row.underlying)
+    if kind is None:
+        return (market, False), False
+    return (market, kind), True
+
 
 #: Factory: ``(lake_root) -> (client, sink)`` — injected in tests; the default picks the
 #: honest dry-run pair or the live ``(GrowwClient, ParquetBarSink)``. Re-uses the SAME
@@ -279,6 +330,13 @@ class HistoricalPullReport:
     """The Greeks driver's per-target quarantine tally (a per-contract
     read/solve/write error is quarantined INSIDE the driver — surfaced here,
     never conflated with a whole-pass failure)."""
+    class_unresolved: int = 0
+    """Contract legs whose index/stock ORDERING class could not be resolved from
+    the caller's ``underlying_kinds`` map (DEC-PULL-SIX-STEP-ORDER-001) — each
+    classified STOCK-side (fail-closed for ORDER, never for DATA: the leg is
+    still pulled, one ``fno.step_unclassified`` WARN per underlying) and named
+    in the note. 0 for a legacy ``underlying_kinds=None`` caller (the 2-bucket
+    order — nothing to resolve) and for a fully-resolved map."""
 
     @property
     def verdict(self) -> PullVerdict:
@@ -338,6 +396,7 @@ class HistoricalPullReport:
             "greeks_enrich_ok": self.greeks_enrich_ok,
             "greeks_enrich_error": self.greeks_enrich_error,
             "greeks_targets_errored": self.greeks_targets_errored,
+            "class_unresolved": self.class_unresolved,
             "verdict": self.verdict.to_dict(),
         }
 
@@ -558,9 +617,11 @@ def _clean_symbols(report: GrowwOptionIngestReport) -> frozenset[str]:
 
 @dataclass(frozen=True, slots=True)
 class _PassResult:
-    """One full ingest pass's aggregate counts + the contracts that landed CLEAN.
+    """One BUCKET ingest pass's aggregate counts + the contracts that landed CLEAN.
 
-    ``bars`` / ``windows`` SUM across rounds (round N re-appends only newly-fetched
+    Since DEC-PULL-SIX-STEP-ORDER-001 a pass covers ONE ``(ledger-market, is_index)``
+    ordering bucket (one step's round); the phase fold sums buckets. ``bars`` /
+    ``windows`` SUM across rounds (round N re-appends only newly-fetched
     windows — the keep-first sink + WindowLedger skip make double-counting impossible);
     ``failed_pairs`` / ``still_failed_windows`` / ``auth_aborted`` describe THIS pass's
     residual (the loop reports the LAST round's). ``clean_symbols`` is the set of contract
@@ -751,6 +812,7 @@ def _build_note(
     contracts_out_of_scope: int = 0,
     greeks_enrich_ok: bool | None = None,
     greeks_enrich_error: str | None = None,
+    class_unresolved: int = 0,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -789,10 +851,20 @@ def _build_note(
     a pull outcome instead of one log line. ``True`` (pass completed —
     per-target quarantines never flip it) and the ``None`` default (pass did
     not run: dry-run) render byte-identically to before.
+
+    *class_unresolved* (DEC-PULL-SIX-STEP-ORDER-001): a positive count appends
+    ", N contract(s) with unresolved index/stock class (ordered as stocks)" —
+    the honest fail-closed-for-ORDER clause (the legs were still pulled, just
+    ordered stock-side). The zero default renders byte-identically to before.
     """
     prefix = (
         "window ledger reload FAILED — running full re-verify pull (no skip); "
         if ledger_load_failed
+        else ""
+    )
+    class_suffix = (
+        f", {class_unresolved} contract(s) with unresolved index/stock class (ordered as stocks)"
+        if class_unresolved
         else ""
     )
     suffix = (
@@ -858,7 +930,7 @@ def _build_note(
             f"pulled {windows} windows across {contracts_completed}/{contracts_selected} "
             f"contract(s){skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
         )
-    return f"{prefix}{base}{suffix}{scope_suffix}{greeks_suffix}"
+    return f"{prefix}{base}{suffix}{scope_suffix}{class_suffix}{greeks_suffix}"
 
 
 def _mark_complete(
@@ -889,8 +961,9 @@ def _mark_complete(
 def _run_phase(
     *,
     interval: str,
-    by_market: dict[str, list[_RebuiltContract]],
+    by_bucket: dict[_BucketKey, list[_RebuiltContract]],
     selected_symbols: frozenset[str],
+    step_monitor: StepOrderMonitor,
     client: GrowwClientProtocol,
     sink: BarSink,
     lake_root: Path,
@@ -913,7 +986,7 @@ def _run_phase(
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
 ) -> _PhaseResult:
-    """Run ONE interval's full pull over *by_market* and fold its until-clean passes.
+    """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
 
     The single ingest call site (CLAUDE.md §11 COMMON) — BOTH phases funnel through here,
     differing only by *interval* and the optional per-contract *contract_windows* bounds.
@@ -921,6 +994,17 @@ def _run_phase(
     the one-shot path OR the bounded until-clean loop, and returns the folded
     :class:`_PhaseResult`. The barrier flag :attr:`_PhaseResult.clean` is True iff EVERY
     selected contract landed clean with no quarantine / still-failing / auth death.
+
+    **STEP-major (DEC-PULL-SIX-STEP-ORDER-001):** the ``(ledger-market, is_index)``
+    buckets run in the decreed 3→4→5→6 order (:func:`_bucket_sort_key`) and — under
+    ``until_clean=True`` — each bucket runs its OWN bounded until-clean loop, so each
+    step SETTLES (clean or bounded-terminal) before the next step's first vendor call
+    (retry rounds are scoped per step; a cross-step global retry pass no longer
+    exists — a documented, law-sanctioned change). A dead token in step k halts steps
+    k+1.. loudly (``pull.step.halted``); a tripped mass-empty breaker halts the WHOLE
+    phase (the existing handler, committed work kept) with the remaining steps
+    likewise announced. *step_monitor* attributes every per-pair settle to its step
+    (late writes WARN + count) and is the tests' hard ordering oracle.
     """
     ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
     # LOUD reload failure (DEC-WINDOW-LEDGER-RESCUE-001): the persisted ledger existed
@@ -952,7 +1036,10 @@ def _run_phase(
     census_rows: list[tuple[Any, ...]] = []
     if ledger is not None:
         spans = load_lake_spans(lake_root)
-        for reconcile_market, reconcile_bucket in by_market.items():
+        # Buckets REFINE (never cross) the market split, so the per-bucket
+        # reconcile with ``market=key[0]`` is byte-equivalent to the legacy
+        # per-market reconcile (DEC-PULL-SIX-STEP-ORDER-001).
+        for (reconcile_market, _is_index), reconcile_bucket in by_bucket.items():
             reconcile_fno_ledger_windows(
                 ledger,
                 spans,
@@ -991,7 +1078,7 @@ def _run_phase(
             ledger,
             lambda: None,
             on_ledger_sync,
-            markets=frozenset(by_market),
+            markets=frozenset(market for market, _is_index in by_bucket),
             intervals=(interval,),
         )
     # Raw-data integrity capture (DEC-RAW-DATA-INTEGRITY-001): bind the per-contract
@@ -1039,20 +1126,27 @@ def _run_phase(
         live_sync()
 
     passes: list[_PassResult] = []
+    # Per-BUCKET pass lists (DEC-PULL-SIX-STEP-ORDER-001): each step's own rounds, so the
+    # fold below can read a bucket's FIRST-round skips + LAST-round residual while the
+    # flat ``passes`` list keeps the whole-phase sums + the rounds_completed telemetry.
+    passes_by_bucket: dict[_BucketKey, list[_PassResult]] = {}
     # Merged per-pair reports + quarantined symbols across ALL rounds/buckets (last-round-wins),
     # kept ONLY for the async post-drain reconcile (DEC-FNO-ASYNC-PIPELINE-WIRE-001). The
     # synchronous path never reads them (the reconcile is a no-op when ``fetch_pipeline`` is None).
     merged_pairs: dict[tuple[str, str], IngestReport] = {}
     failure_symbols: set[str] = set()
 
-    def _one_pass() -> _PassResult:
-        """Run ONE full ingest pass over EVERY market bucket at *interval*; collect clean.
+    def _one_bucket_pass(bucket_key: _BucketKey, bucket: list[_RebuiltContract]) -> _PassResult:
+        """Run ONE ingest pass over ONE ordering bucket at *interval*; collect clean.
 
         Re-attempts the SHARED ledger's prior-round FAILED windows (the ledger skips the
-        done ones). Stops early on a dead auth token. The per-contract *contract_windows*
-        bounds the heavy sub-daily fetch to each contract's discovered listing→expiry span
-        (never the ``1day`` interval — the spine ignores the map for the daily coverage).
+        done ones). The per-contract *contract_windows* bounds the heavy sub-daily fetch
+        to each contract's discovered listing→expiry span. The bucket's per-pair progress
+        is composed with the step monitor's ``observe_write`` (late writes WARN + count,
+        never raise — DEC-PULL-SIX-STEP-ORDER-001).
         """
+        market, _is_index = bucket_key
+        step = _STEP_FOR_BUCKET[bucket_key]
         pass_bars = 0
         pass_windows = 0
         pass_failed_pairs = 0
@@ -1063,83 +1157,79 @@ def _run_phase(
         pass_max_delta: Decimal | None = None
         pass_auth = False
         clean: set[str] = set()
-        # FUTURES market BEFORE the OPTIONS market (futures-first), unknown markets LAST —
-        # a STABLE, deterministic order independent of dict insertion order.
-        for market, bucket in sorted(
-            by_market.items(),
-            key=lambda kv: (_MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
-        ):
-            try:
-                report: GrowwOptionIngestReport = run_groww_option_ingest(
-                    client,
-                    sink,
-                    contracts=[contract for _row, contract in bucket],
-                    intervals=(interval,),
-                    start=start,
-                    end=end,
-                    pace=pace,
-                    ledger=ledger,
-                    on_rate_limit=on_rate_limit,
-                    on_timeout=on_timeout,
-                    on_success=on_success,
-                    on_progress=_progress,
-                    market=market,
-                    contract_windows=contract_windows,
-                    empty_retry_by_symbol=empty_retry_by_symbol,
-                    run_parallel=run_parallel,
-                    capture_hook_factory=capture_hook_factory,
-                    write_pool=write_pool,
-                    fetch_pipeline=fetch_pipeline,
-                    observed_holidays=observed_holidays,
-                    breaker_health_probe=breaker_canary,
-                    storm_breaker=storm_breaker,
-                )
-            except GrowwAuthError as exc:
-                # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
-                # bucket (DEC-GROWW-AUTH-HALT-001 — the spine's ``_GLOBAL_STOP_ERRORS``
-                # raise). Map it to the SAME graceful auth-abort the pre-halt quarantine
-                # produced — the pass reports ``auth_aborted`` (the "auth token expired"
-                # verdict/note), remaining buckets are stopped (every one would fail
-                # identically), committed work + the ledger survive via the outer
-                # finally. Because the halt is CAUGHT here (it never escapes to the job
-                # layer's ``_is_pull_halt`` path), the CRITICAL Telegram pull-halt alert
-                # fires HERE (DEC-TELEGRAM-PULL-HALT-001 parity with the mass-empty
-                # handler below; best-effort by construction). A RETRYABLE auth-family
-                # shape (throttled mint / stale read-only re-read) re-raises unchanged.
-                if not is_terminal_auth_failure(exc):
-                    raise
-                emit_pull_halt_alert(exc)
-                pass_auth = True
-                _LOG.warning(
-                    "historical.pull.auth_halt",
-                    market=market,
-                    error_type=type(exc).__name__,
-                    rounds_completed=len(passes),
-                    note=(
-                        "terminal Groww auth failure — dead credential / re-mint budget "
-                        "exhausted; committed work kept; re-pull after re-auth"
-                    ),
-                )
-            else:
-                pass_bars += report.bars_appended
-                pass_windows += report.windows
-                pass_failed_pairs += report.failed_pairs
-                pass_still_failed += report.still_failed_windows
-                pass_skipped += report.skipped_windows
-                pass_conflicts += report.conflicts
-                pass_dup_rows += report.vendor_dup_rows_dropped
-                pass_max_delta = fold_max_close_delta(pass_max_delta, report.max_close_delta)
-                pass_auth = pass_auth or report.auth_aborted
-                clean |= _clean_symbols(report)
-                # Fold this bucket's per-pair reports + quarantines into the phase-wide merge so
-                # the async post-drain reconcile can override the deferred counts (no-op
-                # synchronously).
-                merged_pairs.update(report.pairs)
-                failure_symbols.update(f.symbol for f in report.failures)
-            if pass_auth:
-                # Dead token (a terminal halt above, or a RETRYABLE-auth quarantine
-                # derived by the report) — every remaining bucket fails identically.
-                break
+
+        def _step_progress(label: str, bars: int, failed: bool) -> None:
+            """The per-pair progress wrapper, step-attributed for the ordering monitor."""
+            _progress(label, bars, failed)
+            step_monitor.observe_write(step, symbol=label)
+
+        try:
+            report: GrowwOptionIngestReport = run_groww_option_ingest(
+                client,
+                sink,
+                contracts=[contract for _row, contract in bucket],
+                intervals=(interval,),
+                start=start,
+                end=end,
+                pace=pace,
+                ledger=ledger,
+                on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
+                on_success=on_success,
+                on_progress=_step_progress,
+                market=market,
+                contract_windows=contract_windows,
+                empty_retry_by_symbol=empty_retry_by_symbol,
+                run_parallel=run_parallel,
+                capture_hook_factory=capture_hook_factory,
+                write_pool=write_pool,
+                fetch_pipeline=fetch_pipeline,
+                observed_holidays=observed_holidays,
+                breaker_health_probe=breaker_canary,
+                storm_breaker=storm_breaker,
+            )
+        except GrowwAuthError as exc:
+            # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
+            # bucket (DEC-GROWW-AUTH-HALT-001 — the spine's ``_GLOBAL_STOP_ERRORS``
+            # raise). Map it to the SAME graceful auth-abort the pre-halt quarantine
+            # produced — the pass reports ``auth_aborted`` (the "auth token expired"
+            # verdict/note), remaining steps are halted by the step loop (every one
+            # would fail identically), committed work + the ledger survive via the
+            # outer finally. Because the halt is CAUGHT here (it never escapes to the
+            # job layer's ``_is_pull_halt`` path), the CRITICAL Telegram pull-halt
+            # alert fires HERE (DEC-TELEGRAM-PULL-HALT-001 parity with the mass-empty
+            # handler below; best-effort by construction). A RETRYABLE auth-family
+            # shape (throttled mint / stale read-only re-read) re-raises unchanged.
+            if not is_terminal_auth_failure(exc):
+                raise
+            emit_pull_halt_alert(exc)
+            pass_auth = True
+            _LOG.warning(
+                "historical.pull.auth_halt",
+                market=market,
+                error_type=type(exc).__name__,
+                rounds_completed=len(passes),
+                note=(
+                    "terminal Groww auth failure — dead credential / re-mint budget "
+                    "exhausted; committed work kept; re-pull after re-auth"
+                ),
+            )
+        else:
+            pass_bars += report.bars_appended
+            pass_windows += report.windows
+            pass_failed_pairs += report.failed_pairs
+            pass_still_failed += report.still_failed_windows
+            pass_skipped += report.skipped_windows
+            pass_conflicts += report.conflicts
+            pass_dup_rows += report.vendor_dup_rows_dropped
+            pass_max_delta = fold_max_close_delta(pass_max_delta, report.max_close_delta)
+            pass_auth = pass_auth or report.auth_aborted
+            clean |= _clean_symbols(report)
+            # Fold this bucket's per-pair reports + quarantines into the phase-wide merge so
+            # the async post-drain reconcile can override the deferred counts (no-op
+            # synchronously).
+            merged_pairs.update(report.pairs)
+            failure_symbols.update(f.symbol for f in report.failures)
         result = _PassResult(
             bars=pass_bars,
             windows=pass_windows,
@@ -1153,38 +1243,96 @@ def _run_phase(
             max_close_delta=pass_max_delta,
         )
         passes.append(result)
+        passes_by_bucket.setdefault(bucket_key, []).append(result)
         return result
 
+    def _bucket_round_runner(
+        bucket_key: _BucketKey, bucket: list[_RebuiltContract]
+    ) -> Callable[[], UntilCleanRound]:
+        """Bind one bucket's until-clean round runner (no loop-variable capture)."""
+
+        def _round() -> UntilCleanRound:
+            res = _one_bucket_pass(bucket_key, bucket)
+            # Groww derives auth_aborted from quarantined failures and carries no
+            # auth_cause string (the documented divergence — mirrors the spot/chain
+            # paths), so auth_cause stays at its None default.
+            return UntilCleanRound(
+                still_failed_windows=res.still_failed_windows,
+                auth_aborted=res.auth_aborted,
+            )
+
+        return _round
+
+    # Groww backtesting has NO daily quota (DEC-GROWW-NO-DAILY-QUOTA-001), so this
+    # brake is dormant; wired for parity with the spot/chain paths. Offline /
+    # dry-run pulls have no controller → no hook (never the limit).
+    quota_hook = (
+        session_rate.get().quota_exhausted if (session_rate is not None and not dry_run) else None
+    )
+    # STEP-major bucket order (DEC-PULL-SIX-STEP-ORDER-001): the decreed 3→4→5→6 via
+    # ``_bucket_sort_key`` — a STABLE, deterministic, total order independent of dict
+    # insertion order (supersedes the 2-key futures-first ``_MARKET_PULL_ORDER`` sort).
+    ordered_buckets = sorted(by_bucket.items(), key=lambda kv: _bucket_sort_key(kv[0]))
     mass_empty_cause: str | None = None
+    auth_latched = False
+    #: Buckets ENTERED so far — on a mid-bucket MassEmptySettleHalt the not-yet-started
+    #: remainder is exactly ``ordered_buckets[buckets_started:]`` (announced loudly).
+    buckets_started = 0
     try:
-        if until_clean:
-
-            def _round_runner() -> UntilCleanRound:
-                res = _one_pass()
-                # Groww derives auth_aborted from quarantined failures and carries no
-                # auth_cause string (the documented divergence — mirrors the spot/chain
-                # paths), so auth_cause stays at its None default.
-                return UntilCleanRound(
-                    still_failed_windows=res.still_failed_windows,
-                    auth_aborted=res.auth_aborted,
+        for bucket_key, bucket in ordered_buckets:
+            buckets_started += 1
+            step = _STEP_FOR_BUCKET[bucket_key]
+            if auth_latched:
+                # A dead token in an earlier step — every remaining step would fail
+                # identically against it; halt LOUDLY, never silently (per step).
+                _LOG.warning(
+                    "pull.step.halted",
+                    step=step.label,
+                    ordinal=int(step),
+                    reason="auth_expired",
                 )
-
-            # Groww backtesting has NO daily quota (DEC-GROWW-NO-DAILY-QUOTA-001), so this
-            # brake is dormant; wired for parity with the spot/chain paths. Offline /
-            # dry-run pulls have no controller → no hook (never the limit).
-            quota_hook = (
-                session_rate.get().quota_exhausted
-                if (session_rate is not None and not dry_run)
-                else None
+                continue
+            step_monitor.begin_step(step)
+            _LOG.info(
+                "pull.step.started",
+                step=step.label,
+                ordinal=int(step),
+                contracts=len(bucket),
             )
-            run_until_clean(
-                _round_runner,
-                max_rounds=until_clean_rounds,
-                quota_exhausted=quota_hook,
-                stop_when_stuck=True,
+            if until_clean:
+                # Each STEP settles — clean or bounded-terminal (clean/stuck/budget/
+                # quota stops) — before the next step's first vendor call: the
+                # until-clean rounds are scoped PER BUCKET (the round-major cross-step
+                # retry pass no longer exists — a law-sanctioned change).
+                run_until_clean(
+                    _bucket_round_runner(bucket_key, bucket),
+                    max_rounds=until_clean_rounds,
+                    quota_exhausted=quota_hook,
+                    stop_when_stuck=True,
+                )
+            else:
+                _one_bucket_pass(bucket_key, bucket)
+            bucket_passes = passes_by_bucket.get(bucket_key, ())
+            last_pass = bucket_passes[-1] if bucket_passes else None
+            step_failed = last_pass.still_failed_windows if last_pass is not None else 0
+            step_auth = last_pass is not None and last_pass.auth_aborted
+            _LOG.info(
+                "pull.step.settled",
+                step=step.label,
+                ordinal=int(step),
+                clean=(
+                    last_pass is not None
+                    and not step_auth
+                    and last_pass.failed_pairs == 0
+                    and step_failed == 0
+                ),
+                bars=sum(p.bars for p in bucket_passes),
+                windows=sum(p.windows for p in bucket_passes),
+                still_failed=step_failed,
+                skipped=bucket_passes[0].skipped_windows if bucket_passes else 0,
             )
-        else:
-            _one_pass()
+            if step_auth:
+                auth_latched = True
     except MassEmptySettleHalt as exc:
         # The mass-empty circuit breaker TRIPPED mid-phase (DEC-EMPTY-WINDOW-CIRCUIT-
         # BREAKER-001 minor M-5 — the F&O bulk route's polished halt, mirroring the
@@ -1210,6 +1358,16 @@ def _run_phase(
                 "committed work kept; un-settled windows stay retryable"
             ),
         )
+        # The steps the trip stopped from ever starting are announced LOUDLY, per
+        # step (DEC-PULL-SIX-STEP-ORDER-001) — never a silent disappearance.
+        for later_key, _later_bucket in ordered_buckets[buckets_started:]:
+            later_step = _STEP_FOR_BUCKET[later_key]
+            _LOG.warning(
+                "pull.step.halted",
+                step=later_step.label,
+                ordinal=int(later_step),
+                reason="mass_empty_halt",
+            )
     finally:
         # CRITICAL ORDER (DEC-FNO-ASYNC-PIPELINE-WIRE-001): drain the async fetch_pipeline
         # BEFORE persisting the ledger. In async mode each contract's tail — incl. the durable
@@ -1243,12 +1401,17 @@ def _run_phase(
     # counts ONCE, unthrottled (the last throttled tick may predate the final windows;
     # the spot spine does the same final push in pull_all_spot). Idempotent absolute fold.
     if ledger is not None and on_ledger_sync is not None:
-        final = ledger.progress_counts(markets=frozenset(by_market), intervals=(interval,))
+        final = ledger.progress_counts(
+            markets=frozenset(market for market, _is_index in by_bucket), intervals=(interval,)
+        )
         on_ledger_sync(final.resolved, final.total, final.bars, final.failed, final.current)
 
-    # bars/windows SUM across rounds (round N re-appends only newly-fetched windows — the
-    # keep-first sink + ledger skip make double-counting impossible); the residual reflects
-    # the LAST round. ``until_clean_rounds <= 0`` runs zero rounds → empty passes → all-zero.
+    # bars/windows SUM across all rounds of all buckets (round N re-appends only
+    # newly-fetched windows — the keep-first sink + ledger skip make double-counting
+    # impossible); the residual is each BUCKET's LAST-round residual, summed
+    # (DEC-PULL-SIX-STEP-ORDER-001 — the until-clean rounds are step-scoped, so
+    # "the last round" is a per-bucket notion now). ``until_clean_rounds <= 0``
+    # runs zero rounds → empty passes → all-zero.
     complete: frozenset[str] = (
         frozenset().union(*(p.clean_symbols for p in passes)) if passes else frozenset()
     )
@@ -1258,25 +1421,29 @@ def _run_phase(
     phase_max_delta: Decimal | None = None
     for p in passes:
         phase_max_delta = fold_max_close_delta(phase_max_delta, p.max_close_delta)
+    bucket_last = [bucket_passes[-1] for bucket_passes in passes_by_bucket.values()]
+    bucket_first = [bucket_passes[0] for bucket_passes in passes_by_bucket.values()]
     return _PhaseResult(
         bars=sum(p.bars for p in passes),
         windows=sum(p.windows for p in passes),
-        failed_pairs=passes[-1].failed_pairs if passes else 0,
+        failed_pairs=sum(p.failed_pairs for p in bucket_last),
         # HONEST UNDERCOUNT on a halt: ``passes`` holds only COMPLETED passes — the
         # pass a mid-flight MassEmptySettleHalt aborted never appended, so its
         # still-pending windows are NOT in this residual (the halt verdict already
         # demands triage + a re-pull; the ledger, not this count, is the retry
-        # authority).
-        still_failed_windows=passes[-1].still_failed_windows if passes else 0,
-        auth_aborted=passes[-1].auth_aborted if passes else False,
+        # authority). Likewise a step halted by an earlier dead token contributes
+        # nothing here (its windows were never attempted — the ledger re-pulls them).
+        still_failed_windows=sum(p.still_failed_windows for p in bucket_last),
+        auth_aborted=any(p.auth_aborted for p in bucket_last),
         complete=complete,
         # A halted phase is never the clean barrier, whatever landed before the trip.
         clean=barrier_clean and mass_empty_cause is None,
         merged_pairs=merged_pairs,
         failure_symbols=frozenset(failure_symbols),
-        # The FIRST pass's skips — the operator-meaningful "no vendor hit" count
-        # (later until-clean rounds re-skip the same settled windows by design).
-        skipped_windows=passes[0].skipped_windows if passes else 0,
+        # Each bucket's FIRST-round skips, summed — the operator-meaningful "no
+        # vendor hit" count (later until-clean rounds re-skip the same settled
+        # windows by design; summing every round would double-count).
+        skipped_windows=sum(p.skipped_windows for p in bucket_first),
         ledger_load_failed=ledger_load_failed,
         mass_empty_cause=mass_empty_cause,
         # Honest-verdict settle tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): every
@@ -1597,6 +1764,8 @@ def pull_contract_candles(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    underlying_kinds: Mapping[str, bool] | None = None,
+    step_monitor: StepOrderMonitor | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -1721,6 +1890,23 @@ def pull_contract_candles(
         planned per market bucket), so the dashboard marks the phase *open_ended* —
         this feeds real moving counts, it does NOT claim a final total. ``None``
         (default — CLI / tests) is byte-identical.
+    underlying_kinds
+        Optional ``{registry-underlying-key: is_index}`` classification map
+        (DEC-PULL-SIX-STEP-ORDER-001) — keyed by the SAME
+        ``primary_fno_underlying``-resolved key the metadata phase persisted
+        :class:`~brutex.data.registry_store.ContractRow.underlying` under (the
+        composite builds it via ``_underlying_kind_map``). Drives the strict
+        steps 3-6 ordering (INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS
+        → STOCKS-OPTIONS); an unresolved underlying classifies STOCK-side
+        (fail-closed for ORDER, never for DATA — still pulled, WARNed +
+        counted). ``None`` (a direct/legacy caller) degrades byte-identically
+        to the legacy 2-bucket FUT-then-OPT order.
+    step_monitor
+        Optional :class:`~brutex.adapters.ingest_common.StepOrderMonitor`
+        (DEC-PULL-SIX-STEP-ORDER-001). ``None`` (every production caller)
+        builds a fresh observe-only monitor — ordering violations are logged +
+        counted, never raised; tests inject ``raise_on_violation=True`` as the
+        hard ordering oracle.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -1817,11 +2003,30 @@ def pull_contract_candles(
     in_window = [(row, contract) for row, contract in rebuilt if contract.symbol in minute_windows]
     contracts_not_yet_in_window = len(rebuilt) - len(in_window)
     selected_symbols = frozenset(row.contract_symbol for row, _contract in in_window)
-    # Option + future legs ride DISTINCT ledger namespaces (DEC-GROWW-FUTURE-INGEST-001),
-    # so split the selection by market and ingest each bucket under its own market.
-    by_market: dict[str, list[_RebuiltContract]] = {}
+    # Option + future legs ride DISTINCT ledger namespaces (DEC-GROWW-FUTURE-INGEST-001 —
+    # `_contract_market` untouched, every ledger row byte-identical); the ORDERING key
+    # additionally splits each market by index/stock class (DEC-PULL-SIX-STEP-ORDER-001)
+    # so the buckets run in the decreed steps 3→4→5→6.
+    if underlying_kinds is None:
+        # A direct/legacy caller passed no classification map: everything classifies
+        # stock-side WITHOUT per-underlying noise — the order degrades to exactly the
+        # legacy 2-bucket FUT-then-OPT law, byte-identical; announced once per pull.
+        _LOG.info("fno.step_kinds_absent")
+    by_bucket: dict[_BucketKey, list[_RebuiltContract]] = {}
+    class_unresolved = 0
+    unresolved_warned: set[str] = set()
     for row, contract in in_window:
-        by_market.setdefault(_contract_market(row), []).append((row, contract))
+        bucket_key, resolved = _contract_bucket(row, underlying_kinds)
+        if not resolved:
+            # Fail-closed for ORDER, never for DATA: the leg is STILL pulled, just
+            # ordered stock-side (an unknown can never jump ahead of a mandated
+            # index step); ONE WARN per underlying + an honest report count.
+            class_unresolved += 1
+            if row.underlying not in unresolved_warned:
+                unresolved_warned.add(row.underlying)
+                _LOG.warning("fno.step_unclassified", underlying=row.underlying)
+        by_bucket.setdefault(bucket_key, []).append((row, contract))
+    _step_monitor = step_monitor if step_monitor is not None else StepOrderMonitor()
 
     # Per-contract EMPTY-retry budget (DEC-FETCH-PER-WINDOW-GUARANTEE-001): a confirmed-deep
     # far-OTM strike (outside ITS (underlying, expiry) chain's median ± band — keyed PER
@@ -1837,8 +2042,9 @@ def pull_contract_candles(
     try:
         minute = _run_phase(
             interval=_MINUTE_INTERVAL,
-            by_market=by_market,
+            by_bucket=by_bucket,
             selected_symbols=selected_symbols,
+            step_monitor=_step_monitor,
             client=client,
             sink=sink,
             lake_root=lake_root,
@@ -1966,6 +2172,7 @@ def pull_contract_candles(
         contracts_out_of_scope=scoped.contracts_out_of_scope,
         greeks_enrich_ok=greeks_outcome.ok,
         greeks_enrich_error=greeks_outcome.error,
+        class_unresolved=class_unresolved,
     )
     return HistoricalPullReport(
         dry_run=dry_run,
@@ -2004,6 +2211,8 @@ def pull_contract_candles(
         greeks_enrich_ok=greeks_outcome.ok,
         greeks_enrich_error=greeks_outcome.error,
         greeks_targets_errored=greeks_outcome.errored_targets,
+        # DEC-PULL-SIX-STEP-ORDER-001: the fail-closed-for-ORDER classification tally.
+        class_unresolved=class_unresolved,
     )
 
 
