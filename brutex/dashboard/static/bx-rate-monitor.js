@@ -64,8 +64,15 @@
  * linear ETA would be an illusion (the backend, not this widget, owns that verdict).
  * Rendered via textContent only (the CodeQL XSS guard).
  *
- * The whole widget is best-effort: a fetch error / malformed payload leaves the last
- * render in place (or an honest "—") and never throws into the page. READ-ONLY — it
+ * Self-recovering poll + client staleness (DEC-PULL-UI-STALENESS-001 — the 2026-07-06
+ * 38-minute frozen-tab incident fix): a fetch rejection, a non-ok HTTP status, a
+ * malformed payload or a hung fetch (10 s abort) is a COUNTED poll failure. The
+ * "updated Xs ago" readout — a ~1 s CLIENT-clock ticker measuring time since the last
+ * SUCCESSFUL poll — escalates amber past STALE_WARN_MS, then LOUD RED with explicit
+ * "STALE" wording past STALE_RED_MS, while the next poll is scheduled on capped
+ * exponential backoff (3 s doubling to a 30 s max). The widget NEVER stops polling;
+ * the next successful poll clears the stale marking and restores the normal cadence
+ * with no manual refresh. The widget never throws into the page. READ-ONLY — it
  * changes no pacing decision and is purely observational.
  */
 (function () {
@@ -74,6 +81,13 @@
   var ENDPOINT = "/api/v1/pull/rate";
   var PROGRESS_ENDPOINT = "/api/v1/universe/pull-progress";
   var POLL_MS = 3000;
+  // Client-side staleness + self-recovering backoff (DEC-PULL-UI-STALENESS-001).
+  var STALE_WARN_MS = 10000;   // amber: ~3 missed 3 s polls + 1 s margin
+  var STALE_RED_MS = 30000;    // red STALE: 10x POLL_MS; == BACKOFF_MAX_MS so "retrying" reads true
+  var BACKOFF_BASE_MS = 3000;  // failure backoff base (the ask's 3 s), doubling per consecutive failure
+  var BACKOFF_MAX_MS = 30000;  // backoff cap: recovery noticed <=30 s after the server returns
+  var FETCH_TIMEOUT_MS = 10000; // abort bound: a wedged fetch becomes a counted failure, the chain never hangs
+  var AGE_TICK_MS = 1000;      // the ~1 s client staleness ticker
   var WIDGET_ID = "bxRateMonitor";
   var OVERLAY_ID = "bxRateMonitorOverlay";
 
@@ -164,7 +178,13 @@
       "#" + OVERLAY_ID + " .bxrm-evidence{margin-top:20px;padding-top:16px;" +
       "border-top:1px solid var(--border-strong,#2B313F);font-size:12px;" +
       "color:var(--muted,#787B86);line-height:1.7;}" +
-      "#" + OVERLAY_ID + " .bxrm-evidence b{color:var(--text-bright,#FFF);}";
+      "#" + OVERLAY_ID + " .bxrm-evidence b{color:var(--text-bright,#FFF);}" +
+      // Client-side staleness readout (DEC-PULL-UI-STALENESS-001).
+      "#" + WIDGET_ID + " .bxrm-stale{color:var(--red,#FF5C5C);font-weight:800;}" +
+      "#" + WIDGET_ID + " .bxrm-stale-warn{color:var(--yellow,#FFB74D);font-weight:700;}" +
+      "#" + WIDGET_ID + ".bxrm-stale{border-color:var(--red,#FF5C5C);}" +
+      "#" + OVERLAY_ID + " .bxrm-stale{color:var(--red,#FF5C5C);}" +
+      "#" + OVERLAY_ID + " .bxrm-stale-warn{color:var(--yellow,#FFB74D);}";
     var style = document.createElement("style");
     style.id = "bxRateMonitorStyles";
     style.textContent = css;
@@ -241,6 +261,7 @@
         pillRow("req/10min", "bxrmTenMin", null),
         pillRow("req/hour", "bxrmHour", null),
         etaRow,
+        ageRow,
       ]
     );
     w.addEventListener("click", openOverlay);
@@ -255,6 +276,12 @@
   var etaRow = pillRow("ETA", "bxrmEta", null);
   etaRow.id = "bxrmEtaRow";
   etaRow.style.display = "none";
+
+  // "updated Xs ago" age row (DEC-PULL-UI-STALENESS-001) — VISIBLE by default: an
+  // idle page still shows honest feed freshness (/api/v1/pull/rate answers while
+  // idle), so the operator always sees how old the numbers on screen are.
+  var ageRow = pillRow("updated", "bxrmAge", null);
+  ageRow.id = "bxrmAgeRow";
 
   // "ETA ~Xh Ym" formatter (or "~Ym" under an hour) — mirrors universe.html's
   // fmtEta so both surfaces read identically.
@@ -281,6 +308,32 @@
     } else {
       row.style.display = "none";
     }
+  }
+
+  // "updated Xs ago" on the CLIENT clock since the last SUCCESSFUL poll
+  // (DEC-PULL-UI-STALENESS-001). The payload's server-side seconds_since_update is a
+  // different signal, shown additionally in the overlay — it never replaces this
+  // transport-level measurement. Amber past STALE_WARN_MS, LOUD RED with explicit
+  // STALE wording past STALE_RED_MS; the next successful poll clears it.
+  function renderAge() {
+    var pill = document.getElementById("bxrmAge");
+    var big = document.getElementById("bxrmEAge");
+    var w = document.getElementById(WIDGET_ID);
+    if (!pill && !big) { return; }
+    var ref = lastPollOkMs !== null ? lastPollOkMs : bootMs;
+    var text = "—";
+    var cls = "";
+    if (ref !== null) {
+      var age = nowMs() - ref;
+      var ageS = Math.max(0, Math.round(age / 1000));
+      var base = lastPollOkMs !== null ? ageS + "s ago" : "no data yet (" + ageS + "s)";
+      if (age >= STALE_RED_MS) { text = "STALE — " + base + " — retrying"; cls = "bxrm-stale"; }
+      else if (age >= STALE_WARN_MS) { text = base + " — retrying"; cls = "bxrm-stale-warn"; }
+      else { text = base; }
+    }
+    if (pill) { pill.textContent = text; pill.className = cls; }
+    if (big) { big.textContent = text; big.className = "gv" + (cls ? " " + cls : ""); }
+    if (w) { w.classList.toggle("bxrm-stale", cls === "bxrm-stale"); }
   }
 
   // One expanded-grid metric: a "gk" label + a big "gv" value + a small "gc" evidence count.
@@ -313,6 +366,7 @@
         .concat(gridMetric("req/min", "bxrmEMin", "bxrmEMinC"))
         .concat(gridMetric("req/10min", "bxrmETenMin", "bxrmETenMinC"))
         .concat(gridMetric("req/hour", "bxrmEHour", "bxrmEHourC"))
+        .concat(gridMetric("updated", "bxrmEAge", "bxrmEAgeC"))
     );
     var evidence = el("div", {
       id: "bxrmEvidence",
@@ -409,6 +463,42 @@
 
   var lastData = null;
 
+  // ── Self-recovering poll state (DEC-PULL-UI-STALENESS-001) ──
+  var pollFailures = 0;
+  var lastPollOkMs = null;  // CLIENT clock of the last SUCCESSFUL poll
+  var bootMs = null;        // widget-boot baseline: a never-succeeding page still ages honestly
+  var pollTimer = null;
+  var pollSeq = 0;          // re-entrancy token: a superseded response never renders or schedules
+
+  // Monotonic client clock: performance.now() is immune to NTP/wall-clock jumps.
+  function nowMs() {
+    return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+  }
+  // Exponential backoff, overflow-proof: exponent clamped BEFORE Math.pow
+  // (3000 * 2^4 = 48000 already exceeds the 30000 cap).
+  function backoffDelayMs(failures) {
+    var exp = Math.min(failures > 0 ? failures - 1 : 0, 4);
+    return Math.min(BACKOFF_BASE_MS * Math.pow(2, exp), BACKOFF_MAX_MS);
+  }
+  function schedulePoll(delayMs) {
+    if (pollTimer) { clearTimeout(pollTimer); }
+    pollTimer = setTimeout(poll, delayMs);
+  }
+  // Bounded JSON fetch: a non-ok status THROWS (a failed poll, never a silent skip),
+  // and a hung fetch is aborted after FETCH_TIMEOUT_MS so the self-scheduling poll
+  // chain can never wedge on a dead connection.
+  function fetchJson(url) {
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var killer = ctrl ? setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS) : null;
+    var opts = { headers: { Accept: "application/json" } };
+    if (ctrl) { opts.signal = ctrl.signal; }
+    return fetch(url, opts).then(function (r) {
+      if (killer) { clearTimeout(killer); }
+      if (!r.ok) { throw new Error("HTTP " + r.status); }  // non-ok is a FAILED poll
+      return r.json();
+    }).catch(function (err) { if (killer) { clearTimeout(killer); } throw err; });
+  }
+
   function render(data) {
     lastData = data;
     var state = data && typeof data.flow_state === "string" ? data.flow_state : "idle";
@@ -466,41 +556,58 @@
     setText("bxrmETenMinC", fmtCount(data.req_per_10min, "600s"));
     setText("bxrmEHour", fmtInt(data.req_per_hour_measured));
     setText("bxrmEHourC", fmtCount(data.req_per_hour_measured, "3600s"));
+    // Server-side age (pull_rate_view's seconds_since_update) shown ADDITIONALLY —
+    // it never replaces the client-clock measurement renderAge() owns; null means
+    // the panel never ticked (typeof null === "object" → the honest fallback).
+    setText(
+      "bxrmEAgeC",
+      typeof data.seconds_since_update === "number" && isFinite(data.seconds_since_update)
+        ? "server: " + Math.round(data.seconds_since_update) + "s since last tick"
+        : "server: never ticked"
+    );
   }
 
   function poll() {
-    fetch(ENDPOINT, { headers: { Accept: "application/json" } })
-      .then(function (r) {
-        return r.ok ? r.json() : null;
-      })
+    var seq = ++pollSeq;   // a superseded response never renders or schedules
+    fetchJson(ENDPOINT)
       .then(function (data) {
-        if (data) {
-          render(data);
-        }
+        if (seq !== pollSeq) { return; }
+        if (!data || typeof data !== "object") { throw new Error("malformed payload"); }
+        render(data);
+        pollFailures = 0;
+        lastPollOkMs = nowMs();   // the CLIENT staleness stamp
+        renderAge();              // stale marking clears on the very next success
+        schedulePoll(POLL_MS);
       })
       .catch(function () {
-        /* best-effort — leave the last render in place on a transient error. */
+        // Operator incident 2026-07-06: the old silent catch left the last render in
+        // place FOREVER. Every failure now feeds the staleness clock + backs off 3s->30s.
+        if (seq !== pollSeq) { return; }
+        pollFailures += 1;
+        renderAge();
+        schedulePoll(backoffDelayMs(pollFailures));
       });
-    // ETA (DEC-PULL-PROGRESS-HONESTY-001): best-effort second read of the O(1)
-    // pull-progress snapshot; the row hides itself on any error / null ETA.
-    fetch(PROGRESS_ENDPOINT, { headers: { Accept: "application/json" } })
-      .then(function (r) {
-        return r.ok ? r.json() : null;
-      })
-      .then(function (progress) {
-        renderEta(progress);
-      })
-      .catch(function () {
-        /* best-effort — keep the last ETA render on a transient error. */
-      });
+    // ETA (DEC-PULL-PROGRESS-HONESTY-001): best-effort second read riding the SAME
+    // tick (so it backs off with the main poll). On failure the ETA row HIDES
+    // (renderEta(null)) instead of freezing a stale figure; it never drives
+    // scheduling/staleness — the main endpoint owns the widget's numbers.
+    fetchJson(PROGRESS_ENDPOINT)
+      .then(function (progress) { renderEta(progress); })
+      .catch(function () { renderEta(null); });
   }
 
   function start() {
     injectStyles();
     buildWidget();
     buildOverlay();
-    poll();
-    setInterval(poll, POLL_MS);
+    bootMs = nowMs();
+    poll();   // self-schedules from here on (success -> POLL_MS, failure -> backoff)
+    setInterval(renderAge, AGE_TICK_MS);
+    document.addEventListener("visibilitychange", function () {
+      // A background-throttled tab re-syncs within one RTT of being foregrounded;
+      // the age is timestamp-derived so it is already correct the instant it renders.
+      if (!document.hidden) { schedulePoll(0); }
+    });
   }
 
   if (document.readyState === "loading") {
