@@ -983,7 +983,11 @@ def _trusted_host_patterns(allowed_hosts: Sequence[str] | None) -> list[str]:
     STRIPPED, and asserts that a pattern contains no ``*`` beyond a leading
     ``*.`` domain wildcard — so the operator-facing ``host:*`` (any-port)
     spelling is normalized to its bare host here, deduplicated
-    order-preserving, and empty entries are dropped.
+    order-preserving, and empty entries are dropped. The bracketed IPv6
+    spelling rides the SAME rule (``"[::1]:*"`` → ``"[::1]"`` — the suffix
+    strip is bracket-agnostic); the request-side bracket-aware port strip
+    lives in :class:`brutex.dashboard.trusted_host.BracketAwareTrustedHostMiddleware`
+    (DEC-ENGINE-MISC-PACK-002).
 
     Parameters
     ----------
@@ -1232,7 +1236,8 @@ def build_app(
             Response,
         )
         from fastapi.staticfiles import StaticFiles
-        from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+        from brutex.dashboard.trusted_host import BracketAwareTrustedHostMiddleware
     except ImportError as exc:
         raise RuntimeError(
             "FastAPI is not installed. Install with `pip install "
@@ -1284,7 +1289,14 @@ def build_app(
             return JSONResponse({"detail": reason}, status_code=403)
         return await call_next(request)
 
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_host_patterns(allowed_hosts))
+    # Bracket-aware Host guard (DEC-ENGINE-MISC-PACK-002): a pure-ASGI SUBCLASS of
+    # Starlette's TrustedHostMiddleware — NEVER an @app.middleware("http") shim,
+    # which would drop Host-guard coverage on the /ws websocket route — whose only
+    # delta is admitting an allowlisted BRACKETED IPv6 Host ([::1]) that the
+    # parent's naive split(":")[0] port-strip would mangle to "[".
+    app.add_middleware(
+        BracketAwareTrustedHostMiddleware, allowed_hosts=_trusted_host_patterns(allowed_hosts)
+    )
 
     @app.middleware("http")
     async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue
