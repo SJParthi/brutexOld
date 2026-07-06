@@ -13,20 +13,34 @@ envelope. These pins keep its safety properties from silently rotting:
   PASS (never fake-green, never quietly hollow); ``--live`` (the
   sandbox-blind Mac kit) never runs; ``BRUTEX_SKIP_WHEEL_FRESHNESS`` is
   never set (the wheel handshakes are the cron's substantive teeth).
+  The assert step's bash is FUNCTIONALLY executed here against fixture
+  reports (the DEC-CI-FORK-PR-HARDEN-001 executed-script precedent), so
+  hollowing mutations (``exit 1`` -> ``exit 0``, a ``true`` body) fail
+  loudly instead of surviving textual grep pins.
 * **Alerting** — every alert step fires on ``cancelled()`` too
   (DEC-MUTATION-ALERT-CANCELLED-001: a job killed by its own
   ``timeout-minutes`` reports CANCELLED, live-probed run 28748795864);
   the tracking issue title is STABLE (SHA-free) so red days fold into
-  ONE open issue via ``createComment`` and a green day closes it; the
-  Telegram step degrades gracefully when its secrets are unset and can
-  NEVER fail the job.
+  ONE open issue via ``createComment`` and a green day closes it; BOTH
+  issue-lifecycle steps are ref-gated to ``refs/heads/main`` (the issue
+  is repo-global state while concurrency serializes only per-ref — an
+  ungated branch ``workflow_dispatch`` could falsely close the live
+  alarm or race a duplicate same-titled issue); the Telegram step
+  degrades gracefully when its secrets are unset and can NEVER fail the
+  job.
+* **Token hygiene** — checkout sets ``persist-credentials: false``
+  (DEC-CI-FORK-PR-HARDEN-001 convention): the job's ``issues: write``
+  GITHUB_TOKEN must never land in ``.git/config`` under the third-party
+  pip/cargo build surface the later steps execute.
 
-Pure YAML-parse meta-tests — no network, no ``brutex`` import (zero
-coverage-gate impact: ``--cov=brutex`` measures the package only).
+YAML-parse meta-tests plus a subprocess-executed bash harness for the
+assert step — no network, no ``brutex`` import (zero coverage-gate
+impact: ``--cov=brutex`` measures the package only).
 """
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -131,19 +145,40 @@ def test_no_pull_request_trigger_and_scoped_push() -> None:
     triggers = _on(_load())
     assert "pull_request" not in triggers
     assert "pull_request_target" not in triggers
-    push = triggers.get("push")
-    if push is not None:
-        assert push["branches"] == ["main"]
-        assert set(push["paths"]) == {
-            ".github/workflows/doctor-daily.yml",
-            "brutex/doctor.py",
-        }
+    # The push smoke is a HARD part of the trigger contract (deleting it
+    # would defer a broken doctor-daily.yml / doctor.py merged to main to
+    # the next 02:00 UTC cron — up to ~24h of undetected red).
+    push = triggers["push"]
+    assert push["branches"] == ["main"]
+    assert set(push["paths"]) == {
+        ".github/workflows/doctor-daily.yml",
+        "brutex/doctor.py",
+    }
 
 
 def test_permissions_minimal() -> None:
     """contents: read + issues: write and nothing else."""
     permissions = _load()["permissions"]
     assert permissions == {"contents": "read", "issues": "write"}
+
+
+def test_checkout_never_persists_credentials() -> None:
+    """Checkout must set persist-credentials: false.
+
+    DEC-CI-FORK-PR-HARDEN-001 convention (pre-merge-gate.yml,
+    auto-merge.yml): the default ``persist-credentials: true`` writes the
+    job's ``issues: write`` GITHUB_TOKEN into ``.git/config``, where the
+    third-party build surface the later steps execute (PyPI build
+    backends, cargo build.rs/proc-macros) could read it and tamper with
+    the very alerting channel this workflow provides. Nothing here uses
+    git credentials after checkout, so the hardened form is free.
+    """
+    checkouts = [
+        s for s in _steps(_load()) if str(s.get("uses", "")).startswith("actions/checkout")
+    ]
+    assert checkouts, "the doctor job must have a checkout step"
+    for step in checkouts:
+        assert step.get("with", {}).get("persist-credentials") is False
 
 
 def test_concurrency_never_cancels_in_flight() -> None:
@@ -204,13 +239,84 @@ def test_both_wheels_installed() -> None:
 
 def test_envelope_honesty_contract_asserted() -> None:
     """All 7 check verdicts are pinned: 5 SKIP-with-reason + 2 PASS."""
-    steps = _steps(_load())
-    assert_step = next(s for s in steps if "assert_status" in str(s.get("run", "")))
-    run = assert_step["run"]
+    run = _assert_step_run()
     for name, want in EXPECTED_STATUSES.items():
         assert f"assert_status {name} {want}" in run, (
             f"envelope contract line for {name} -> {want} is missing"
         )
+
+
+# ---------------------------------------------------------------------------
+# Functional teeth for the assert step (DEC-CI-FORK-PR-HARDEN-001 precedent:
+# execute the REAL script, don't just grep for its invocation lines). A
+# hollowing mutation — `exit 1` -> `exit 0`, an appended `|| true`, a `true`
+# body — survives every textual pin but fails these subprocess runs.
+# ---------------------------------------------------------------------------
+
+# Mirrors DoctorReport.format()'s status -> glyph map (brutex/doctor.py).
+_STATUS_GLYPH = {"PASS": "✅", "FAIL": "❌", "SKIP": "⏸", "WARN": "⚠️"}
+
+
+def _assert_step_run() -> str:
+    """Return the envelope-honesty assert step's real run script."""
+    step = next(s for s in _steps(_load()) if "assert_status" in str(s.get("run", "")))
+    run = step["run"]
+    assert isinstance(run, str)
+    return run
+
+
+def _render_report(statuses: dict[str, str]) -> str:
+    """Render a fixture report in the exact DoctorReport.format() shape.
+
+    Line shape: ``<glyph> <name:20s> <status:5s> <detail>`` — awk $2 is
+    the check name and $3 the status, exactly what the workflow parses.
+    """
+    lines = ["brutex doctor — health check report", "=" * 40]
+    for name, status in statuses.items():
+        lines.append(f"{_STATUS_GLYPH[status]} {name:20s} {status:5s} fixture detail text")
+    lines.append("=" * 40)
+    lines.append("OVERALL: ✅ PASS")
+    return "\n".join(lines) + "\n"
+
+
+def _run_assert_step(tmp_path: Path, statuses: dict[str, str]) -> int:
+    """Execute the assert step's real bash against a fixture report."""
+    (tmp_path / "doctor-report.txt").write_text(_render_report(statuses), encoding="utf-8")
+    # Executes the repo's OWN workflow bash (nothing attacker-controlled).
+    proc = subprocess.run(
+        ["bash", "-c", _assert_step_run()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode
+
+
+def test_assert_step_greens_the_expected_hermetic_report(tmp_path: Path) -> None:
+    """The shipped assert bash exits 0 on the exact expected report."""
+    assert _run_assert_step(tmp_path, dict(EXPECTED_STATUSES)) == 0
+
+
+def test_assert_step_reds_a_fabricated_envelope_pass(tmp_path: Path) -> None:
+    """A PASS on an operator-envelope check in CI is a fabricated verdict."""
+    statuses = dict(EXPECTED_STATUSES)
+    statuses["audit_chain"] = "PASS"
+    assert _run_assert_step(tmp_path, statuses) == 1
+
+
+def test_assert_step_reds_a_warn_wheel_handshake(tmp_path: Path) -> None:
+    """A WARN wheel handshake means the run proved nothing -> red."""
+    statuses = dict(EXPECTED_STATUSES)
+    statuses["wheel_freshness_fno_math"] = "WARN"
+    assert _run_assert_step(tmp_path, statuses) == 1
+
+
+def test_assert_step_reds_a_missing_check_name(tmp_path: Path) -> None:
+    """A missing check name means the doctor check set changed -> red."""
+    statuses = dict(EXPECTED_STATUSES)
+    del statuses["wheel_freshness"]
+    assert _run_assert_step(tmp_path, statuses) == 1
 
 
 def test_alert_steps_fire_on_cancelled() -> None:
@@ -234,12 +340,40 @@ def test_issue_title_stable_and_lifecycle_wired() -> None:
             "a per-SHA title mints one issue per red day — title must be stable"
         )
     assert "createComment" in raw, "repeat reds must fold into one issue"
-    assert "'doctor'" in raw, "issue label 'doctor' is the dedupe key"
+    # Pin the dedupe QUERY end-to-end: both lifecycle steps must list with
+    # the SAME label filter, and the created issue must carry a superset of
+    # those labels so the query can find it (a drifted filter would mint a
+    # new 'critical' issue every red day and never auto-close any of them).
+    assert raw.count("labels: 'bug,doctor',") == 2, (
+        "filer + closer must both query with the labels: 'bug,doctor' filter"
+    )
+    assert "labels: ['bug', 'doctor', 'critical']," in raw, (
+        "the created issue's labels must be a superset of the query filter"
+    )
     assert "state: 'closed'" in raw, "a green day must close the tracking issue"
     close_step = next(
         s for s in _steps(_load()) if "state: 'closed'" in str(s.get("with", {}).get("script", ""))
     )
-    assert close_step["if"] == "success()"
+    assert close_step["if"] == "success() && github.ref == 'refs/heads/main'"
+
+
+def test_issue_lifecycle_is_main_ref_gated() -> None:
+    """Both issue-lifecycle steps only run on refs/heads/main.
+
+    The tracking issue is repo-global mutable state keyed by a STABLE
+    title, but the concurrency group serializes only per-ref. Ungated, a
+    GREEN branch ``workflow_dispatch`` (the natural debug move while main
+    is red) would falsely close the live main 'critical' alarm, and a RED
+    branch dispatch racing a red main run could pass the find-then-create
+    dedupe twice and mint two same-titled issues. The main-ref gate puts
+    every issue-touching run in the ONE main concurrency group.
+    """
+    issue_steps = [
+        s for s in _steps(_load()) if "listForRepo" in str(s.get("with", {}).get("script", ""))
+    ]
+    assert len(issue_steps) == 2, "expected exactly the filer + closer issue steps"
+    for step in issue_steps:
+        assert "github.ref == 'refs/heads/main'" in str(step["if"])
 
 
 def test_telegram_degrades_gracefully() -> None:

@@ -50,6 +50,9 @@ concurrency:
   # a CANCELLED conclusion can only mean job-timeout-kill or manual cancel
   # — both alert-worthy, which is exactly what `failure() || cancelled()`
   # below gives (a superseded QUEUED run never starts, so it never alerts).
+  # Per-ref group: a branch dispatch never blocks the main cron. The
+  # repo-global ISSUE lifecycle is additionally ref-gated to main below,
+  # so every issue-touching run serializes in the ONE main group.
   group: doctor-daily-${{ github.ref }}
   cancel-in-progress: false
 
@@ -71,7 +74,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
+        # DEC-CI-FORK-PR-HARDEN-001 convention (pre-merge-gate.yml /
+        # auto-merge.yml): never persist the job's issues:write GITHUB_TOKEN
+        # into .git/config — the later steps execute a broad third-party
+        # build surface (PyPI build backends via `pip install -e`, every
+        # cargo dependency's build.rs/proc-macro via the two wheel builds)
+        # and nothing here needs git credentials after checkout.
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -206,7 +217,9 @@ jobs:
         # gitleaks-allowlisted by name; docs/runbooks/telegram-setup.md).
         # Plain-text sendMessage (no parse_mode — MarkdownV2 escaping stays
         # an app-side concern). Every exit path is 0; the GitHub issue below
-        # is the guaranteed channel.
+        # is the PRIMARY channel — itself best-effort (its filer try/catch
+        # degrades an API/permission failure to a warning, retried on the
+        # next red run), never a guarantee (Golden Rule #10).
         if: failure() || cancelled()
         continue-on-error: true
         shell: bash
@@ -216,7 +229,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
-            echo "::notice::Telegram secrets unset — skipping Telegram alert (the GitHub issue is the guaranteed channel)"
+            echo "::notice::Telegram secrets unset — skipping Telegram alert (the GitHub issue is the primary channel)"
             exit 0
           fi
           text="doctor-daily RED: brutex doctor failed or was cancelled (e.g. timeout-killed) on ${GITHUB_SHA}. ${RUN_URL}"
@@ -225,7 +238,7 @@ jobs:
             --data-urlencode "chat_id=${TG_CHAT}" \
             --data-urlencode "text=${text}" \
             >/dev/null \
-            || echo "::warning::Telegram send failed (non-fatal — the GitHub issue is the guaranteed channel)"
+            || echo "::warning::Telegram send failed (non-fatal — the GitHub issue is the primary channel)"
 
       - name: File or update the single doctor-daily tracking issue
         # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
@@ -235,8 +248,17 @@ jobs:
         # mint one issue per day — the title here is STABLE (no sha), so all
         # red days fold into ONE open tracking issue via createComment.
         # try/catch so a denied issues:write degrades to a warning, never a
-        # masking second failure.
-        if: failure() || cancelled()
+        # masking second failure — which also means the issue is a PRIMARY
+        # (best-effort, per-red-run retried) channel, NOT a guaranteed one.
+        # REF-GATED to main: the tracking issue is repo-global state keyed
+        # by a STABLE title, but the concurrency group serializes only
+        # per-ref — an ungated branch workflow_dispatch red could race the
+        # find-then-create against a main red (two same-titled 'critical'
+        # issues) or pollute the main alarm with a branch SHA. Gating on
+        # main means every issue-touching run sits in the ONE
+        # doctor-daily-refs/heads/main group (cancel-in-progress: false),
+        # so the find-then-create is genuinely serialized.
+        if: (failure() || cancelled()) && github.ref == 'refs/heads/main'
         uses: actions/github-script@v9
         with:
           script: |
@@ -293,7 +315,11 @@ jobs:
         # Golden Rule #1: a recovered doctor must not leave a stale open
         # 'critical' alarm. Green closes with a recovery comment; the next
         # red opens a fresh thread (one issue per red EPISODE).
-        if: success()
+        # REF-GATED to main: a GREEN branch workflow_dispatch (the natural
+        # debug move while main is red) must never post a false
+        # 'Recovered: green on <feature-sha>' and close the live main
+        # alarm while main is still red.
+        if: success() && github.ref == 'refs/heads/main'
         uses: actions/github-script@v9
         with:
           script: |

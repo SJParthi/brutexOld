@@ -285,8 +285,11 @@ with the SAME values as the app env vars above:
 This is an **operator task and never required for green**: when the
 secrets are absent the workflow's Telegram step degrades gracefully to a
 skip notice (exit 0) and the GitHub tracking issue remains the
-guaranteed alert channel. The secret NAMES mirror the app env vars and
-are already allowlisted by name in `.gitleaks.toml`.
+**primary** alert channel — itself best-effort (a filer API/permission
+failure degrades to a run warning and is retried on the next red run;
+the only unconditional signal is the red run in the Actions tab). The
+secret NAMES mirror the app env vars and are already allowlisted by
+name in `.gitleaks.toml`.
 
 ---
 
