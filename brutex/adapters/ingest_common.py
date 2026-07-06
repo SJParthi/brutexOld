@@ -1789,8 +1789,18 @@ class StepOrderMonitor:
     oracle). :meth:`observe_write` — a write observed for a step BELOW the
     current one logs WARN ``pull.step.late_write`` + increments
     :attr:`late_writes` (production observe-only; never raises, never blocks —
-    the #907/#919 detect-and-warn pattern; the expected source is an
-    async-pipeline consumer tail draining a prior step's queued write).
+    the #907/#919 detect-and-warn pattern).
+
+    HONEST wiring envelope (Golden Rule #10): both production spines feed
+    :meth:`observe_write` from PRODUCER-side hooks (the spot per-window drain
+    callback; the F&O per-pair ``on_progress`` drain), so it observes the
+    synchronous inline write path and any sequencer wiring regression (a pass
+    still settling after a later ``begin_step``) — it CANNOT see an
+    async-pipeline consumer tail draining a prior step's queued write after
+    the boundary (those tails never touch the monitor; consumer-side
+    attribution needs a submit-time step stamp through ``FetchPipeline`` — a
+    named follow-up, NOT claimed). In the default async-pipeline mode
+    :attr:`late_writes` therefore stays 0 on a healthy pull.
     """
 
     def __init__(self, *, raise_on_violation: bool = False) -> None:
@@ -1837,11 +1847,37 @@ class StepOrderMonitor:
                 current_step=regressed_from.label,
             )
 
+    def begin_phase(self) -> None:
+        """Start a NEW ordered pass — rewind the step cursor to "no step yet".
+
+        DEC-PULL-SIX-STEP-ORDER-001 dual-interval envelope: the retained
+        defensive spot path that injects ``intervals=("1day", "1minute")``
+        runs the ordered steps 1→2 ONCE PER INTERVAL PHASE, so the minute
+        phase's ``begin_step(INDICES_SPOT)`` after the daily phase's
+        STOCKS_SPOT is a LEGAL phase restart, never a rank regression (which
+        previously logged a false ``pull.step.order_violation`` ERROR and
+        raised under the test oracle). Production resolves ``("1minute",)``
+        — one phase — so this is a no-op there (the cursor starts ``None``).
+
+        HONEST (Golden Rule #10): the six-step law is enforced WITHIN each
+        interval phase; the dual-interval maintenance path stays
+        interval-major by construction (daily stock fetches precede minute
+        index fetches) — a disclosed envelope, not silently blessed as
+        step-major. Rewinding also relaxes the cross-phase cursor, so a
+        caller sharing one monitor across surfaces keeps ordering guarantees
+        only WITHIN each phase-delimited sequence. :attr:`late_writes` is
+        NOT reset — the counter accumulates across phases.
+        """
+        with self._lock:
+            self._current = None
+
     def observe_write(self, step: PullStep, *, symbol: str | None = None) -> None:
         """Observe one settle/write for *step*; a below-current write is a counted WARN.
 
         Never raises, never blocks — pure detect-and-warn, even under
         ``raise_on_violation=True`` (only :meth:`begin_step` is the hard oracle).
+        Fed from PRODUCER-side hooks in both spines — see the class docstring's
+        honest wiring envelope (an async consumer tail is NOT observable here).
         """
         late_behind: PullStep | None = None
         with self._lock:

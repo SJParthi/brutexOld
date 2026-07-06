@@ -289,3 +289,114 @@ class TestStepOrderMonitor:
                 thread.join()
         assert monitor.late_writes == 8 * per_thread
         assert monitor.current_step is PullStep.STOCKS_OPTIONS
+
+
+class TestBeginPhase:
+    """``begin_phase`` — the legal phase-restart rewind (DEC-PULL-SIX-STEP-ORDER-001).
+
+    The dual-interval defensive spot path runs the ordered steps 1→2 once per
+    interval phase; without the rewind the minute phase's ``begin_step(1)``
+    after the daily phase's rank-2 cursor was a FALSE ``order_violation``.
+    """
+
+    def test_before_any_step_is_a_noop(self) -> None:
+        monitor = StepOrderMonitor()
+        monitor.begin_phase()
+        assert monitor.current_step is None
+
+    def test_rewinds_the_cursor_to_none(self) -> None:
+        monitor = StepOrderMonitor()
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        monitor.begin_phase()
+        assert monitor.current_step is None
+
+    def test_legal_phase_restart_does_not_violate(self) -> None:
+        """Steps 1→2, phase restart, steps 1→2 again — silent under the hard oracle."""
+        monitor = StepOrderMonitor(raise_on_violation=True)
+        monitor.begin_step(PullStep.INDICES_SPOT)
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        monitor.begin_phase()
+        with capture_logs() as logs:
+            monitor.begin_step(PullStep.INDICES_SPOT)  # must NOT raise
+            monitor.begin_step(PullStep.STOCKS_SPOT)
+        assert [e for e in logs if e["event"] == "pull.step.order_violation"] == []
+        assert monitor.current_step is PullStep.STOCKS_SPOT
+
+    def test_legal_phase_restart_logs_no_error_on_observe_only_monitor(self) -> None:
+        monitor = StepOrderMonitor()
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        monitor.begin_phase()
+        with capture_logs() as logs:
+            monitor.begin_step(PullStep.INDICES_SPOT)
+        assert [e for e in logs if e["event"] == "pull.step.order_violation"] == []
+
+    def test_genuine_regression_after_restart_still_raises(self) -> None:
+        """The rewind relaxes only the CROSS-phase cursor — within a phase the law holds."""
+        monitor = StepOrderMonitor(raise_on_violation=True)
+        monitor.begin_step(PullStep.INDICES_SPOT)
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        monitor.begin_phase()
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        with pytest.raises(StepOrderError, match="indices-spot .* after stocks-spot"):
+            monitor.begin_step(PullStep.INDICES_SPOT)
+
+    def test_genuine_regression_after_restart_logs_error(self) -> None:
+        monitor = StepOrderMonitor()
+        monitor.begin_phase()
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        with capture_logs() as logs:
+            monitor.begin_step(PullStep.INDICES_SPOT)
+        events = [e for e in logs if e["event"] == "pull.step.order_violation"]
+        assert len(events) == 1
+        assert events[0]["step"] == "indices-spot"
+        assert events[0]["current_step"] == "stocks-spot"
+
+    def test_late_writes_survive_the_rewind(self) -> None:
+        """``late_writes`` accumulates ACROSS phases — the rewind never resets it."""
+        monitor = StepOrderMonitor()
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        with capture_logs():
+            monitor.observe_write(PullStep.INDICES_SPOT)
+        assert monitor.late_writes == 1
+        monitor.begin_phase()
+        assert monitor.late_writes == 1
+
+    def test_observe_write_after_rewind_is_silent(self) -> None:
+        """A rewound (``None``) cursor observes any step silently — no late count."""
+        monitor = StepOrderMonitor()
+        monitor.begin_step(PullStep.STOCKS_SPOT)
+        monitor.begin_phase()
+        with capture_logs() as logs:
+            monitor.observe_write(PullStep.INDICES_SPOT)
+        assert [e for e in logs if e["event"] == "pull.step.late_write"] == []
+        assert monitor.late_writes == 0
+
+    def test_thread_safety_concurrent_restarts(self) -> None:
+        """8 threads interleaving begin_phase/begin_step/observe_write never corrupt.
+
+        The observe-only monitor under maximal churn: the final state is one of
+        the legal cursor values and the late-write counter is bounded by the
+        total observe calls (never negative, never over-counted past them).
+        """
+        monitor = StepOrderMonitor()
+        per_thread = 100
+        barrier = threading.Barrier(8)
+
+        def hammer(worker: int) -> None:
+            barrier.wait()
+            for _ in range(per_thread):
+                if worker % 2 == 0:
+                    monitor.begin_phase()
+                    monitor.begin_step(PullStep.INDICES_SPOT)
+                else:
+                    monitor.begin_step(PullStep.STOCKS_SPOT)
+                    monitor.observe_write(PullStep.INDICES_SPOT)
+
+        threads = [threading.Thread(target=hammer, args=(w,)) for w in range(8)]
+        with capture_logs():
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        assert monitor.current_step in {None, PullStep.INDICES_SPOT, PullStep.STOCKS_SPOT}
+        assert 0 <= monitor.late_writes <= 4 * per_thread

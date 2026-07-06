@@ -1310,8 +1310,8 @@ class WindowLedger:
                 ),
             )
 
-    def streak_total(self) -> int:
-        """Sum of ``empty_streak`` across every recorded window — **O(N)**, one lock, no sort.
+    def streak_total(self, *, symbols: Collection[str] | None = None) -> int:
+        """Sum of ``empty_streak`` across the recorded windows — **O(N)**, one lock, no sort.
 
         The secondary progress signal for the outstanding-windows until-clean loop
         (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001): an EMPTY window stepping toward its
@@ -1321,9 +1321,24 @@ class WindowLedger:
         sorted :meth:`records` snapshot (which would be O(N log N) + a second lock) —
         called once per OUTER round (≤ ``AUTO_RESUME_MAX_ROUNDS``), never on the
         per-bar hot path; the bound is O(N) per round, NOT an O(1)-total claim.
+
+        *symbols* (DEC-PULL-SIX-STEP-ORDER-001): optional SYMBOL scope filter,
+        congruent with :meth:`progress_counts`'s — a record folds only when its
+        ``security_id`` is a member. The six-step spot pull's group-scoped
+        until-clean loop must read ONLY its own group's streaks: the ledger is
+        shared and in the default async-pipeline mode a PRIOR group's consumer
+        tails can still drain while this group's loop runs — a foreign late
+        EMPTY tail bumps another group's streak (+1) and a foreign late SUCCESS
+        tail RESETS one to 0, so a ledger-wide fold is NOT constant across the
+        group's rounds (it could mask a genuine stall or falsely read one).
+        ``None`` (the default) folds everything — byte-identical to today.
         """
         with self._lock:
-            return sum(record.empty_streak for record in self._by_window.values())
+            return sum(
+                record.empty_streak
+                for record in self._by_window.values()
+                if symbols is None or record.security_id in symbols
+            )
 
     def to_rows(
         self,

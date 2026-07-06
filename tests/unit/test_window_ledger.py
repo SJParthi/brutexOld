@@ -1365,6 +1365,64 @@ class TestStreakTotal:
         ledger.record(k, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)  # SUCCESS
         assert ledger.streak_total() == 0
 
+    def test_symbols_filter_scopes_the_fold(self) -> None:
+        """`symbols=` folds ONLY the member security_ids (DEC-PULL-SIX-STEP-ORDER-001)."""
+        ledger = WindowLedger()
+        a = _key("NIFTY", "1minute")
+        b = _key("ADANIENT", "1minute")
+        # NIFTY EMPTY twice → streak 2; ADANIENT EMPTY once → streak 1.
+        ledger.record(a, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(a, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(b, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=frozenset({"NIFTY"})) == 2
+        assert ledger.streak_total(symbols=frozenset({"ADANIENT"})) == 1
+        assert ledger.streak_total(symbols=frozenset({"NIFTY", "ADANIENT"})) == 3
+
+    def test_none_is_byte_identical_to_unfiltered(self) -> None:
+        """``symbols=None`` (the default) folds everything — byte-identical to today."""
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(_key("TCS"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=None) == ledger.streak_total() == 2
+
+    def test_empty_collection_folds_nothing(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=frozenset()) == 0
+
+    def test_foreign_group_late_tail_never_perturbs_the_scoped_total(self) -> None:
+        """The group-scoped until-clean regression (DEC-PULL-SIX-STEP-ORDER-001).
+
+        In the default async-pipeline mode a PRIOR group's consumer tails can
+        still drain while the current group's until-clean loop runs: a foreign
+        late EMPTY tail bumps that group's streak (+1) and a foreign late
+        SUCCESS tail RESETS one to 0 — so the LEDGER-WIDE fold moved between
+        the current group's rounds (masking a stall / faking progress). The
+        GROUP-scoped fold must be INVARIANT under any foreign-record churn.
+        """
+        ledger = WindowLedger()
+        indices = frozenset({"NIFTY"})
+        nifty = _key("NIFTY", "1minute")
+        adani = _key("ADANIENT", "1minute")
+        # Current (indices) group: one EMPTY round so far → scoped streak 1.
+        ledger.record(nifty, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        # Foreign (stocks) group already carries a streak of 1.
+        ledger.record(adani, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        scoped_before = ledger.streak_total(symbols=indices)
+        wide_before = ledger.streak_total()
+        assert (scoped_before, wide_before) == (1, 2)
+        # Foreign late EMPTY tail drains → ADANIENT streak bumps to 2.
+        ledger.record(adani, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=indices) == scoped_before
+        assert ledger.streak_total() == wide_before + 1  # the wide fold DID move
+        # Foreign late SUCCESS tail drains → ADANIENT streak RESETS to 0.
+        ledger.record(adani, raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        assert ledger.streak_total(symbols=indices) == scoped_before
+        assert ledger.streak_total() == scoped_before  # wide collapsed with the reset
+        # The scoped fold still tracks the CURRENT group's own progress.
+        ledger.record(nifty, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=indices) == 2
+
 
 class TestSuppressSettle:
     """`record(suppress_settle=True)` — the UNTRUSTED empty (breaker tripped)."""

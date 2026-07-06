@@ -1181,13 +1181,23 @@ def make_step_write_observer(
     """Wrap a per-window callback so each processed window is step-attributed.
 
     DEC-PULL-SIX-STEP-ORDER-001 — the spot arm of the observe-only ordering
-    oracle: the per-window settle callback (which in async-pipeline mode fires
-    from the CONSUMER tail) is composed per step group, closing over its group's
-    :class:`~brutex.adapters.ingest_common.PullStep`. A group-1 tail write
-    landing after ``begin_step(group 2)`` is the exact late-write signal —
+    oracle: the per-window callback is composed per step group, closing over
+    its group's :class:`~brutex.adapters.ingest_common.PullStep`.
     ``monitor.observe_write`` WARNs ``pull.step.late_write`` + counts, never
     raises, never blocks (the #907/#919 detect-and-warn pattern). *inner* (the
     existing window observer chain) runs FIRST, byte-unchanged.
+
+    HONEST wiring envelope (Golden Rule #10): the wrapped ``on_window`` fires
+    on the PRODUCER side — the spine's fan-out drain loop invokes it when each
+    window's outcome is yielded, which in async-pipeline mode happens when the
+    DEFERRED outcome returns (the consumer tail's ``sink.append`` →
+    ``ledger.record`` never touches this callback). So this channel observes
+    the synchronous inline write path and any sequencer wiring regression (a
+    group's pass still running after a later ``begin_step``) — it structurally
+    CANNOT observe an async consumer tail draining past the step boundary
+    (consumer-side attribution needs a submit-time step stamp through
+    ``FetchPipeline`` — a named follow-up, NOT claimed). See the
+    :class:`~brutex.adapters.ingest_common.StepOrderMonitor` docstring.
     """
 
     def _on_window() -> None:
@@ -1918,10 +1928,15 @@ def pull_all_spot(
                             # fold ONLY this step group's symbols, so the indices
                             # group exits ``stop_clean`` instead of reading the stock
                             # group's still-PLANNED rows as its own residual (the
-                            # ledger-wide-pollution trap). The streak total stays
-                            # ledger-wide — only THIS pass's own symbols advance
-                            # streaks mid-loop, so cross-group contributions are
-                            # constant and cancel in the progress comparison.
+                            # ledger-wide-pollution trap). The streak total is
+                            # GROUP-scoped too: in the default async-pipeline mode a
+                            # PRIOR group's/phase's consumer tails can still drain
+                            # while this loop runs (the pipeline drains only in the
+                            # outer finally), and a foreign late EMPTY tail bumps
+                            # another group's streak (+1) while a foreign late
+                            # SUCCESS tail RESETS one to 0 — so a ledger-wide fold
+                            # is NOT constant across this group's rounds (it could
+                            # mask a genuine stall or falsely end the loop early).
                             prog = ledger.progress_counts(symbols=group_symbols)
                             outstanding = prog.total - prog.settled
                             settled = prog.settled
@@ -1929,7 +1944,7 @@ def pull_all_spot(
                             # EMPTY window stepping toward SKIPPED advances this before
                             # ``settled`` rises). A dedicated single-lock O(N) fold (no
                             # sort), once per OUTER round, NOT the per-bar hot path.
-                            streak = ledger.streak_total()
+                            streak = ledger.streak_total(symbols=group_symbols)
                         return UntilCleanRound(
                             still_failed_windows=res.report.still_failed_windows,
                             auth_aborted=res.report.auth_aborted,
@@ -2093,7 +2108,18 @@ def pull_all_spot(
             / spent quota / mass-empty halt) halts the remaining groups LOUDLY
             (``pull.step.halted``) — the same `final_*` global-stop state the
             phase-level minute guard reads.
+
+            Each grouped pass is ONE ordered 1→2 sequence, so the step cursor
+            is REWOUND first (``begin_phase``): the retained defensive
+            dual-interval path (``intervals=("1day", "1minute")``) runs this
+            loop once per interval phase, and the minute phase's
+            ``begin_step(INDICES_SPOT)`` after the daily phase's STOCKS_SPOT
+            is a LEGAL phase restart — without the rewind it logged a false
+            ``pull.step.order_violation`` ERROR (and raised under the test
+            oracle). A no-op on the single-phase production pull (the cursor
+            starts ``None``); the law stays enforced WITHIN each phase.
             """
+            _step_monitor.begin_phase()
             for step, group in spot_groups:
                 if (
                     final_auth_aborted

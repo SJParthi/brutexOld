@@ -454,6 +454,81 @@ class TestGroupScopedUntilClean:
         assert report.still_failed_windows > 0
 
 
+class TestDualIntervalPhaseRestart:
+    """(h) The dual-interval defensive path is a LEGAL phase restart (review round).
+
+    ``intervals=("1day", "1minute")`` runs the ordered 1→2 group loop once per
+    interval phase; ``_run_grouped`` rewinds the step cursor (``begin_phase``)
+    so the minute phase's ``begin_step(INDICES_SPOT)`` after the daily phase's
+    STOCKS_SPOT never reads as a rank regression. Before the rewind this pull
+    raised ``StepOrderError`` under the test oracle (and logged a false
+    ``pull.step.order_violation`` ERROR in production).
+    """
+
+    def test_dual_interval_pull_does_not_violate_under_the_hard_oracle(
+        self, tmp_path: Path
+    ) -> None:
+        monitor = StepOrderMonitor(raise_on_violation=True)
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_stock("ADANIENT"), _index("NIFTY")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_NOW,
+                from_date=_FROM,
+                to_date=_TO,
+                intervals=("1day", "1minute"),
+                step_monitor=monitor,  # raises on any rank regression
+            )
+        assert report.verdict.kind == "clean"
+        assert _events(logs, "pull.step.order_violation") == []
+        # Both phases ran the full ordered 1→2 sequence.
+        started = _events(logs, "pull.step.started")
+        assert [e["step"] for e in started] == [
+            "indices-spot",
+            "stocks-spot",
+            "indices-spot",
+            "stocks-spot",
+        ]
+        assert [e["ordinal"] for e in started] == [1, 2, 1, 2]
+        # The rewind never fabricates late writes on a healthy pull.
+        assert monitor.late_writes == 0
+
+    def test_single_phase_pull_unchanged_by_the_rewind(self, tmp_path: Path) -> None:
+        """Production (``("1minute",)`` — one phase): the rewind is a no-op."""
+        with capture_logs() as logs:
+            pull_all_spot(
+                [_stock("ADANIENT"), _index("NIFTY")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_NOW,
+                from_date=_FROM,
+                to_date=_TO,
+                step_monitor=StepOrderMonitor(raise_on_violation=True),
+            )
+        started = _events(logs, "pull.step.started")
+        assert [e["step"] for e in started] == ["indices-spot", "stocks-spot"]
+        assert _events(logs, "pull.step.order_violation") == []
+
+
+class TestGroupScopedStreakPin:
+    """(i) The until-clean STREAK read is GROUP-scoped, like the outstanding read.
+
+    A foreign group's late consumer tail (EMPTY bump / SUCCESS reset) makes the
+    ledger-wide ``streak_total()`` non-constant across the current group's
+    rounds — the behavioural invariance teeth live in
+    ``tests/unit/test_window_ledger.py`` (``TestStreakTotal``); this pin holds
+    the controller to the scoped read (the same source-pin pattern as (g)).
+    """
+
+    def test_round_runner_reads_group_scoped_streak_and_progress(self) -> None:
+        src = inspect.getsource(pull_controller.pull_all_spot)
+        assert "streak = ledger.streak_total(symbols=group_symbols)" in src
+        assert "prog = ledger.progress_counts(symbols=group_symbols)" in src
+        # The unscoped fold must NOT reappear in the round runner.
+        assert "ledger.streak_total()" not in src
+
+
 class TestUseLiveRateTrapPin:
     """(g) The partition lives INSIDE ``pull_all_spot`` — the ``use_live_rate`` trap."""
 

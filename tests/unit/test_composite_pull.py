@@ -499,6 +499,45 @@ def test_registry_read_keys_resolve_alias_normalize_and_dedup() -> None:
     assert cp._registry_read_keys(instruments) == ("NIFTYNXT50", "BAJAJAUTO", "NIFTY")
 
 
+def test_underlying_kind_map_first_wins_on_key_collision() -> None:
+    """Two spot spellings sharing one F&O primary keep the FIRST row's kind.
+
+    ``_underlying_kind_map`` mirrors the read-key first-wins de-dup
+    (DEC-PULL-SIX-STEP-ORDER-001): a later row landing on an already-mapped
+    primary key must NEVER overwrite the classification (order decides).
+    """
+
+    def _kinded(symbol: str, security_id: int, kind: InstrumentType) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=security_id,
+            symbol_name=symbol,
+            display_name=symbol,
+            instrument=kind,
+            segment=Segment.INDEX if kind == InstrumentType.IDX else Segment.CASH,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=0 if kind == InstrumentType.IDX else 500,
+            tick_size=Decimal("0") if kind == InstrumentType.IDX else Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+
+    # Hyphen-normalized stock first, then a contrived IDX row on the SAME
+    # primary key — the collision arm must keep the FIRST row's kind.
+    stock_first = [
+        _kinded("BAJAJ-AUTO", 1, InstrumentType.EQ),
+        _kinded("BAJAJAUTO", 2, InstrumentType.IDX),
+    ]
+    assert cp._underlying_kind_map(stock_first) == {"BAJAJAUTO": False}
+    # Order flipped → the index classification wins instead (order decides).
+    assert cp._underlying_kind_map(list(reversed(stock_first))) == {"BAJAJAUTO": True}
+
+
 def test_aliased_underlying_chain_visible_to_candle_phase(tmp_path: Path) -> None:
     """FAILS-BEFORE regression: an aliased index's fresh chain must reach phase (b).
 

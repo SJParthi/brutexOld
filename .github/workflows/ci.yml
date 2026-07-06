@@ -1603,8 +1603,11 @@ jobs:
           # backoff + the injected known-gap predicate (both the passed + default arms).
           # PR-J4a additionally relocated synthetic / synthetic_adapter / pull_verdict /
           # until_clean into this module; their moved test files join this gate.
+          # DEC-PULL-SIX-STEP-ORDER-001 added the six-step vocabulary (PullStep +
+          # partition_spot_steps + StepOrderMonitor incl. the begin_phase rewind);
+          # tests/unit/test_ingest_common_pull_step_vocab.py joins this gate.
           if compgen -G "tests/unit/test_ingest_common.py" > /dev/null; then
-            pytest --cov=brutex.adapters.ingest_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ingest_common.py tests/unit/test_ingest_common_auto_retry.py tests/unit/test_ingest_common_pull_verdict.py tests/unit/test_ingest_common_until_clean.py tests/unit/test_ingest_common_synthetic.py tests/unit/test_ingest_common_synthetic_adapter.py
+            pytest --cov=brutex.adapters.ingest_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ingest_common.py tests/unit/test_ingest_common_auto_retry.py tests/unit/test_ingest_common_pull_verdict.py tests/unit/test_ingest_common_until_clean.py tests/unit/test_ingest_common_synthetic.py tests/unit/test_ingest_common_synthetic_adapter.py tests/unit/test_ingest_common_pull_step_vocab.py
           else
             echo "(brutex.adapters.ingest_common test file not present yet — gate inactive)"
           fi
@@ -1693,8 +1696,13 @@ jobs:
           # _reconcile_pairs_with_pipeline) are covered by
           # tests/unit/test_dashboard_fetch_pipeline_wiring.py, which MUST likewise
           # join the per-module gate so its coverage of those lines registers.
+          # DEC-PULL-SIX-STEP-ORDER-001: the spot step-group loop (_run_grouped +
+          # begin_phase rewind + make_step_write_observer + the group-scoped
+          # until-clean reads) is covered by
+          # tests/unit/test_pull_controller_step_groups.py, which MUST likewise
+          # join the per-module gate so its coverage of those lines registers.
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py tests/unit/test_dashboard_write_batch_wiring.py tests/unit/test_dashboard_fetch_pipeline_wiring.py
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py tests/unit/test_dashboard_write_batch_wiring.py tests/unit/test_dashboard_fetch_pipeline_wiring.py tests/unit/test_pull_controller_step_groups.py
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
           fi
