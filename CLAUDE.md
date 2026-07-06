@@ -18,7 +18,38 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+_Last updated: 2026-07-06 (DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
+MIGRATION.md #1490–#1491 — the hardware-envelope CONSOLIDATION + thread-bounding pack:
+(1) the TWO hardware-envelope modules (#1360's `brutex/hardware_envelope.py` + #1401's
+`brutex/config/hardware_envelope.py`) are consolidated into ONE at
+`brutex/config/hardware_envelope.py` (Golden Rule #11 COMMON) — the #1360 RAM-derived
+budget API (`detect_total_ram_bytes` / `UNDETECTED_RAM` / the fail-loud no-floor-clamp
+`memory_budget_bytes` consumed by `sweep_mem_budget` + `bloom`) is ported VERBATIM, the
+old module DELETED, every consumer repointed, the interim two-module RAM-delegation pin
+of the #1167 conflict resolution SUPERSEDED (its stripped envelope-mode
+`memory_budget_bytes` duplicate stays DEAD — zero consumers), and the third sizing copy
+`greeks_enrich.greeks_pool_workers` now DELEGATES to the COMMON `cpu_pool_workers`
+byte-unchanged (the `auto_sweep_workers` identity, pinned across cpu counts).
+(2) the polars GLOBAL thread pool is bounded ONCE per process at the ONE entrypoint
+(`brutex.cli` dispatch, right after the byte-exact-stdout-pinned polars-free `version`
+fast path and before the first `import polars` any dispatch can trigger — CLI fetch AND
+the in-process uvicorn dashboard both enter there; outcomes log once per process) and
+every concurrent-reader DuckDB connection (`InstrumentStore.open` / `RegistryStore.open`
+/ `coverage_reconcile` / `movers_warm`) is bounded at creation (`SET threads TO
+<budget>`); budgets = `physical_cores // DEFAULT_EXPECTED_LIBRARY_POOLS(2)` — the
+divisor is the number of competing library POOLS, NOT the prebuild worker count
+(polars' pool is process-global and shared by worker threads — dividing by workers
+would serialise it, the #1401-documented hazard; DuckDB's pool IS per-connection, hence
+the per-connection bound); kill switches `BRUTEX_POLARS_THREADS` /
+`BRUTEX_DUCKDB_THREADS`; an operator-preset `POLARS_MAX_THREADS` is respected and an
+already-imported polars gets ONE loud too-late WARN per process, never a pretend-bound.
+Parallelism-only — results byte-identical; measured A/B on the small CI fixture
+~NEUTRAL (1.14×) as predicted — a CONTENTION fix whose win shows at production
+concurrency, NO M4-Pro speedup claimed (Golden Rule #10). The Groww fetch pool / rate
+ceiling / governor + the sweep + Greeks per-worker determinism pins +
+`data/catalog.py` are UNTOUCHED. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched
+modules 100% line+branch).
+Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -317,7 +348,14 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+- **Active branch:** `claude/hw-thread-bounds` (**DEC-HW-ENVELOPE-CONSOLIDATE-001 + DEC-THREAD-BUDGET-BOUNDS-001,
+  MIGRATION.md #1490–#1491** — ONE hardware-envelope module at `brutex/config/hardware_envelope.py` (the #1360 sibling
+  `brutex/hardware_envelope.py` DELETED, consumers repointed, the #1360 RAM-budget contract ported verbatim, the
+  interim #1167-resolution RAM-delegation pin superseded, `greeks_pool_workers` delegated to the COMMON
+  `cpu_pool_workers` byte-unchanged) + the polars global pool bounded once at the `brutex.cli` dispatch before the
+  first polars import and every concurrent-reader DuckDB connection bounded at creation, budgets from the envelope
+  (`physical_cores // 2` competing library pools), kill switches `BRUTEX_POLARS_THREADS`/`BRUTEX_DUCKDB_THREADS`;
+  parallelism-only, byte-identical results; ENGINE UNCHANGED). Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
@@ -1906,17 +1944,21 @@ bruteX/
 8 TB external SSD. Daily apps run concurrently (10 cores used by sweep,
 2 reserved).
 
-The CPU side of this envelope is now **auto-detected at RUNTIME**, never
-hardcoded — the COMMON CPU-only config leaf
-`brutex/config/hardware_envelope.py` (DEC-HARDWARE-ENVELOPE-001, MIGRATION.md
-#1401) probes cores (macOS `sysctl` P/E split, Linux `sched_getaffinity`
-cgroup/CI-aware, fallback `os.cpu_count()`) and sizes every CPU-bound stage
-off it (`cpu_pool_workers(reserve=2, prefer_performance=True)` → 8 on this
-machine). RAM detection + every RAM-scaled byte budget stay OWNED by the
-sibling `brutex/hardware_envelope.py` (DEC-RAM-BUDGETS-001, #1360) — one
-source of truth per axis. The engine sweep pool (`auto_sweep_workers`) and
-the pull pipeline's timeframe PREBUILD (parallelised across cores via a
-`ThreadPoolExecutor`, byte-identical lake output) both size off the CPU leaf;
+This envelope is now **auto-detected at RUNTIME**, never hardcoded — the ONE
+COMMON config leaf `brutex/config/hardware_envelope.py`
+(DEC-HARDWARE-ENVELOPE-001 #1401 + DEC-RAM-BUDGETS-001 #1360, consolidated by
+DEC-HW-ENVELOPE-CONSOLIDATE-001 #1490) probes cores (macOS `sysctl` P/E
+split, Linux `sched_getaffinity` cgroup/CI-aware, fallback `os.cpu_count()`)
+AND total physical RAM (sysconf-first, the honest `0` "unknown" sentinel) and
+sizes every CPU-bound stage off it (`cpu_pool_workers(reserve=2,
+prefer_performance=True)` → 8 on this machine; `memory_budget_bytes` for the
+RAM-scaled byte budgets). The engine sweep pool (`auto_sweep_workers`), the
+Greeks enrichment pool (`greeks_pool_workers`), and the pull pipeline's
+timeframe PREBUILD (parallelised across cores via a `ThreadPoolExecutor`,
+byte-identical lake output) all size off it; the polars global pool + every
+concurrent-reader DuckDB connection are bounded off it too
+(DEC-THREAD-BUDGET-BOUNDS-001 #1491, `physical_cores // 2` competing library
+pools, kill switches `BRUTEX_POLARS_THREADS`/`BRUTEX_DUCKDB_THREADS`).
 `BRUTEX_CPU_WORKERS` / `BRUTEX_PREBUILD_WORKERS` / `BRUTEX_SWEEP_WORKERS=1`
 override. The Groww FETCH pool + the per-second rate ceiling + the 500/min
 governor are a REAL vendor limit (a single TOTP token; §2 Rule 6) and are

@@ -58,6 +58,7 @@ from typing import Final
 import structlog
 
 from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
+from brutex.config.hardware_envelope import apply_duckdb_thread_bound
 from brutex.observability.progress_beat import emit_progress_beat
 
 __all__ = [
@@ -231,6 +232,9 @@ def latest_movers_date(lake_root: Path) -> str | None:
     # crashing (Golden Rule #1 / #10). NARROW: a code bug still propagates.
     try:
         with duckdb.connect() as conn:
+            # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
+            # thread pool (DuckDB defaults to ALL logical cores per connection).
+            apply_duckdb_thread_bound(conn)
             row = conn.execute(
                 "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "
                 "FROM read_parquet(?, union_by_name=true)",  # nosec B608 - bound glob-list parameter

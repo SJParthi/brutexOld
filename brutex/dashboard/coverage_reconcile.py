@@ -54,10 +54,14 @@ def load_lake_spans(
         import duckdb
     except ImportError:
         return []
+    from brutex.config.hardware_envelope import apply_duckdb_thread_bound
     from brutex.dashboard.db_view import summarize_spot_datasets
 
     conn = duckdb.connect()
     try:
+        # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
+        # thread pool (DuckDB defaults to ALL logical cores per connection).
+        apply_duckdb_thread_bound(conn)
         return summarize_spot_datasets(conn, lake_root, session_date_segments=session_date_segments)
     finally:
         conn.close()
