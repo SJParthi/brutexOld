@@ -97,11 +97,15 @@ class TestAppendIsO1:
                 )
             )
             # Last round's entry must be a well-formed chain link: a 64-char hex
-            # SHA-256 hash, and the seq must have advanced past the base.
-            # (`AuditWriter` has no public `.seq` — assert on the returned entry.)
+            # SHA-256 hash, and the seq must have reached the base (a prefill of
+            # n lines occupies seqs 0..n-1, so the FIRST production append
+            # returns seq == n exactly — `>=` holds for ONE benchmark invocation
+            # too, e.g. under `--benchmark-disable`; every extra round only
+            # increases it). (`AuditWriter` has no public `.seq` — assert on the
+            # returned entry.)
             assert len(entry.entry_hash) == 64
             assert all(c in "0123456789abcdef" for c in entry.entry_hash)
-            assert entry.seq > _SMALL
+            assert entry.seq >= _SMALL
 
     def test_append_throughput_smoke_large(self, benchmark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         """Throughput smoke at a 100k-line base.
@@ -118,11 +122,15 @@ class TestAppendIsO1:
                 )
             )
             # Last round's entry must be a well-formed chain link: a 64-char hex
-            # SHA-256 hash, and the seq must have advanced past the base.
-            # (`AuditWriter` has no public `.seq` — assert on the returned entry.)
+            # SHA-256 hash, and the seq must have reached the base (a prefill of
+            # n lines occupies seqs 0..n-1, so the FIRST production append
+            # returns seq == n exactly — `>=` holds for ONE benchmark invocation
+            # too, e.g. under `--benchmark-disable`; every extra round only
+            # increases it). (`AuditWriter` has no public `.seq` — assert on the
+            # returned entry.)
             assert len(entry.entry_hash) == 64
             assert all(c in "0123456789abcdef" for c in entry.entry_hash)
-            assert entry.seq > _LARGE
+            assert entry.seq >= _LARGE
 
     def test_append_ratio_is_o1(self, tmp_path: Path) -> None:
         """Appending one line costs the same at a 100k-line base as at a 1k base.

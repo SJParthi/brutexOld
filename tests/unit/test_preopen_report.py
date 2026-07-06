@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import io
 import zipfile
+from collections.abc import Collection
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import duckdb
 import pytest
-from brutex.dashboard import preopen_report
+from brutex.dashboard import db_view, preopen_report
 from brutex.dashboard.db_view import list_candle_datasets
 from brutex.dashboard.preopen_report import (
     _BASIS_INTERVAL,
@@ -219,10 +220,22 @@ def test_resolve_walk_is_filtered_at_source(
     ]
 
 
-def test_resolve_datasets_seam_byte_identical(tmp_path: Path) -> None:
+def test_resolve_datasets_seam_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The pre-walked ``datasets=`` seam (the warm's zero-extra-walk path) must
-    # produce a result byte-identical to the filtered-walk path — the in-loop
+    # produce a result byte-identical to the FILTERED-WALK path — the in-loop
     # screens are the semantic truth, the walk filters a pure optimization.
+    #
+    # DEC-O1-CLAIMS-HONESTY-001 round-4 review fold: the walked side is
+    # captured BEFORE any unfiltered discovery. On this ledger-less lake the
+    # stat token is the non-None ``absent`` sentinel, so an unfiltered
+    # ``list_candle_datasets`` FIRST would build a servable manifest and every
+    # later resolve would be manifest-served — silently pinning
+    # seam == manifest-projection instead of the named property. A counting
+    # wrapper around the REAL ``_walk_candle_datasets`` asserts each walked
+    # capture genuinely ran the preopen FILTERED walk (this assertion fails if
+    # the ordering ever regresses to manifest-served captures again).
     _write(
         tmp_path,
         "ONLYDAY",
@@ -236,12 +249,32 @@ def test_resolve_datasets_seam_byte_identical(tmp_path: Path) -> None:
         [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="1", close="2")],
     )
     _write_fno(tmp_path)
+    real_walk = db_view._walk_candle_datasets
+    walk_exclusions: list[frozenset[str]] = []
+
+    def _counting_walk(
+        lake_root: Path,
+        *,
+        exclude_segments: frozenset[str] = frozenset(),
+        intervals: Collection[str] | None = None,
+    ) -> list[dict[str, str]]:
+        walk_exclusions.append(exclude_segments)
+        return real_walk(lake_root, exclude_segments=exclude_segments, intervals=intervals)
+
+    monkeypatch.setattr(db_view, "_walk_candle_datasets", _counting_walk)
+    walked_by_basis = {
+        basis: resolve_report_datasets(tmp_path, basis=basis) for basis in REPORT_BASES
+    }
+    # Every walked-side capture ran the genuine filtered walk (one per basis,
+    # each carrying the preopen exclusions) — never a manifest-served read.
+    assert walk_exclusions == [REPORT_EXCLUDED_SEGMENTS] * len(REPORT_BASES)
     unfiltered = list_candle_datasets(tmp_path)
     for basis in REPORT_BASES:
-        walked = resolve_report_datasets(tmp_path, basis=basis)
-        assert walked == resolve_report_datasets(tmp_path, basis=basis, datasets=unfiltered)
-    assert resolve_report_datasets(tmp_path, basis="day") == [("NSE", "CASH", "ONLYDAY")]
-    assert resolve_report_datasets(tmp_path, basis="minute") == [("NSE", "CASH", "ONLYMIN")]
+        assert walked_by_basis[basis] == resolve_report_datasets(
+            tmp_path, basis=basis, datasets=unfiltered
+        )
+    assert walked_by_basis["day"] == [("NSE", "CASH", "ONLYDAY")]
+    assert walked_by_basis["minute"] == [("NSE", "CASH", "ONLYMIN")]
 
 
 def test_report_bases_pins_basis_interval() -> None:
