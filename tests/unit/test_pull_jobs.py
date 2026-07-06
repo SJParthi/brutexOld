@@ -1155,19 +1155,20 @@ class TestJournalHeartbeat:
         mid-interval one is throttled. Each record carries the BOUND pull_id."""
         from pathlib import Path
 
-        from brutex.observability.correlation import pull_id_scope
         from brutex.observability.pull_journal import EVENT_HEARTBEAT, read_journal
 
         root = Path(str(tmp_path))
         job = self._job(root, self._manual_clock([0.0, 50.0, 150.0]), 100.0)
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=0 → writes
-                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=50 → throttled
-                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=150 → writes
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=0 → writes
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=50 → throttled
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=150 → writes
 
-        assert job.start(work, total=3) is True
+        # The RUN id is the bound id (DEC-PULL-BEAT-PERRUN-001 fix round: a beat under a
+        # FOREIGN id is now dropped by the _beat ambient gate, so the test binds the id
+        # the sanctioned way — through start()).
+        assert job.start(work, total=3, pull_id="abc123def456") is True
         assert job.snapshot().state == STATE_DONE  # PARITY: the pull is unaffected
         beats = [e for e in read_journal(root) if e.event == EVENT_HEARTBEAT]
         assert len(beats) == 2
@@ -1215,7 +1216,6 @@ class TestJournalHeartbeat:
         """A ``None`` resolved lake root (dry-run / test) skips the write gracefully."""
         from pathlib import Path
 
-        from brutex.observability.correlation import pull_id_scope
         from brutex.observability.pull_journal import read_journal
 
         root = Path(str(tmp_path))
@@ -1228,10 +1228,9 @@ class TestJournalHeartbeat:
         )
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 10, False, False)
+            on_progress("NSE-NIFTY 1minute", 10, False, False)
 
-        assert job.start(work, total=1) is True
+        assert job.start(work, total=1, pull_id="abc123def456") is True
         assert job.snapshot().state == STATE_DONE
         assert read_journal(root) == []  # nothing written anywhere under tmp
 
@@ -1243,7 +1242,6 @@ class TestJournalHeartbeat:
         from pathlib import Path
 
         from brutex.observability import pull_journal
-        from brutex.observability.correlation import pull_id_scope
         from structlog.testing import capture_logs
 
         def _boom(*_a: object, **_kw: object) -> None:
@@ -1254,11 +1252,10 @@ class TestJournalHeartbeat:
         job = self._job(root, self._manual_clock([0.0]), 1.0)
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 42, False, False)
+            on_progress("NSE-NIFTY 1minute", 42, False, False)
 
         with capture_logs() as logs:
-            assert job.start(work, total=1) is True
+            assert job.start(work, total=1, pull_id="abc123def456") is True
         snap = job.snapshot()
         assert snap.state == STATE_DONE  # the pull is UNAFFECTED
         assert snap.bars == 42
@@ -1271,7 +1268,6 @@ class TestJournalHeartbeat:
         with the ``started`` record — the post-mortem 'the run was alive' evidence."""
         from pathlib import Path
 
-        from brutex.observability.correlation import pull_id_scope
         from brutex.observability.pull_journal import last_run, read_journal, record_pull_start
 
         root = Path(str(tmp_path))
@@ -1279,10 +1275,9 @@ class TestJournalHeartbeat:
         job = self._job(root, self._manual_clock([0.0]), 100.0)
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 10, False, False)
+            on_progress("NSE-NIFTY 1minute", 10, False, False)
 
-        assert job.start(work, total=1) is True
+        assert job.start(work, total=1, pull_id="abc123def456") is True
         run = last_run(read_journal(root))
         assert run is not None
         assert len(run.heartbeats) == 1

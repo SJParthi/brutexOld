@@ -214,6 +214,14 @@ class TestKeyedRouting:
         emit_progress_beat()
         assert _drop_warns(warn_capture) == []
 
+    def test_empty_registry_explicit_arg_emit_is_silent_noop(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        """An EXPLICIT ``pull_id`` arg on an empty registry bypasses the ambient fast
+        path (the arg is already resolved) and still no-ops silently in the lock."""
+        emit_progress_beat(pull_id="abc123def456")
+        assert _drop_warns(warn_capture) == []
+
     def test_raising_keyed_beat_is_swallowed(self) -> None:
         calls: list[int] = []
 
@@ -224,6 +232,117 @@ class TestKeyedRouting:
         register_progress_beat(_boom, pull_id="abc123def456")
         emit_progress_beat(pull_id="abc123def456")  # swallowed + logged, not raised
         assert calls == [1]
+
+
+class TestChannelCollision:
+    """A LIVE-channel overwrite by a DIFFERENT callback is a caller bug — WARNed loudly."""
+
+    def test_overwriting_a_different_callback_warns(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        _a_beats, a = _counting_beat()
+        _b_beats, b = _counting_beat()
+        register_progress_beat(a, pull_id="dupdupdup001")
+        register_progress_beat(b, pull_id="dupdupdup001")
+        collisions = [r for r in warn_capture.records if "channel_collision" in r.getMessage()]
+        assert len(collisions) == 1
+        assert "'dupdupdup001'" in collisions[0].getMessage()
+
+    def test_reregistering_the_same_callback_is_silent(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        _beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="abc123def456")
+        register_progress_beat(beat, pull_id="abc123def456")  # identical — no bug
+        assert not any("channel_collision" in r.getMessage() for r in warn_capture.records)
+
+    def test_distinct_channels_never_collide(self, warn_capture: pytest.LogCaptureFixture) -> None:
+        _a_beats, a = _counting_beat()
+        _b_beats, b = _counting_beat()
+        register_progress_beat(a, pull_id="aaaaaaaaaaaa")
+        register_progress_beat(b, pull_id="bbbbbbbbbbbb")
+        assert not any("channel_collision" in r.getMessage() for r in warn_capture.records)
+
+
+class TestIdentityGuardedUnregister:
+    """``unregister(beat=...)`` pops only when the channel still holds THAT closure."""
+
+    def test_matching_beat_pops_the_channel(self) -> None:
+        beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="abc123def456")
+        unregister_progress_beat(pull_id="abc123def456", beat=beat)
+        emit_progress_beat(pull_id="abc123def456")
+        assert beats == []
+        assert "abc123def456" not in pb._BEATS  # pyright: ignore[reportPrivateUsage]
+
+    def test_stale_beat_never_starves_a_duplicate_id_survivor(self) -> None:
+        """The duplicate-id survivor pin: a finished run's identity-guarded unregister
+        leaves the channel with the SURVIVOR's (re-keyed) callback still live."""
+        _old_beats, old = _counting_beat()
+        new_beats, new = _counting_beat()
+        register_progress_beat(old, pull_id="dupdupdup001")
+        register_progress_beat(new, pull_id="dupdupdup001")  # the survivor re-keys
+        unregister_progress_beat(pull_id="dupdupdup001", beat=old)  # stale — no-op
+        emit_progress_beat(pull_id="dupdupdup001")
+        assert new_beats == [1]  # the survivor still owns its channel
+
+    def test_beat_none_keeps_the_unconditional_pop(self) -> None:
+        _old_beats, old = _counting_beat()
+        new_beats, new = _counting_beat()
+        register_progress_beat(old, pull_id="dupdupdup001")
+        register_progress_beat(new, pull_id="dupdupdup001")
+        unregister_progress_beat(pull_id="dupdupdup001")  # back-compat: pops regardless
+        emit_progress_beat(pull_id="dupdupdup001")
+        assert new_beats == []
+
+
+class TestDropCounterSummary:
+    """The per-epoch drop tally: magnitude in the WARN + a debug flush on epoch close."""
+
+    def _summaries(self, caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if "drop_summary" in r.getMessage()]
+
+    def test_warn_carries_the_running_drop_count(
+        self, warn_capture: pytest.LogCaptureFixture
+    ) -> None:
+        _beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="abc123def456")
+        emit_progress_beat()  # the first drop fires the WARN with count 1
+        warns = _drop_warns(warn_capture)
+        assert len(warns) == 1
+        assert "1 drop(s) this epoch" in warns[0].getMessage()
+
+    def test_unregister_flushes_a_debug_summary_with_the_tally(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="brutex.observability.progress_beat")
+        _beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="abc123def456")
+        for _ in range(5):
+            emit_progress_beat()  # 5 unroutable drops, one epoch
+        unregister_progress_beat(pull_id="abc123def456")
+        summaries = self._summaries(caplog)
+        assert len(summaries) == 1
+        assert "5 beat(s) dropped" in summaries[0].getMessage()
+
+    def test_reset_flushes_the_tally_too(self, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger="brutex.observability.progress_beat")
+        _beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="abc123def456")
+        emit_progress_beat()
+        emit_progress_beat()
+        reset_progress_beats()
+        summaries = self._summaries(caplog)
+        assert len(summaries) == 1
+        assert "2 beat(s) dropped" in summaries[0].getMessage()
+
+    def test_no_drops_means_no_summary(self, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger="brutex.observability.progress_beat")
+        _beats, beat = _counting_beat()
+        register_progress_beat(beat, pull_id="abc123def456")
+        emit_progress_beat(pull_id="abc123def456")  # delivered, never dropped
+        unregister_progress_beat(pull_id="abc123def456")
+        assert self._summaries(caplog) == []
 
 
 class TestDropWarnEpochThrottle:
@@ -326,5 +445,8 @@ class TestHotPathFlatness:
         for i in range(256):
             register_progress_beat(beat, pull_id=f"chan{i:08x}")
         many = _time_emits(5000)
-        # Generous flatness bound — a linear scan over 257 channels would blow it.
-        assert many < one * 10 + 0.05
+        # Flatness bound with a NOISE-scale absolute floor only (fix round: the prior
+        # +0.05 s slack dwarfed the signal — an injected O(channels) linear scan over
+        # the 257-entry registry measured ~15.8x and still PASSED; at +0.005 s the
+        # scan arm fails while the real dict lookup keeps ~large headroom).
+        assert many < one * 10 + 0.005

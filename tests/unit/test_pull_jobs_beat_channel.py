@@ -425,11 +425,19 @@ class TestConcurrentRunChannels:
         assert built_a[0].beats == 1  # no crosstalk in either direction
         assert built_b[0].beats == 2
 
-    def test_duplicate_pull_id_is_per_channel_last_write_wins(self) -> None:
-        """Two live runs keyed on the SAME id: the newest registrant owns the channel;
-        after it finishes it pops the shared key, so the older run's beats are DROPPED
-        (its watchdog then stalls honestly on silence) — the failure direction is a
-        loud false stalled-SUSPECT, never a beat routed into a run it does not own."""
+    def test_duplicate_pull_id_is_per_channel_last_write_wins(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Two live runs keyed on the SAME id: the newest registrant owns the channel
+        AND the overwrite is WARNed as a caller bug (``progress_beat.channel_collision``
+        — fix round). HONEST residual: WHILE both are live, an emit addressed to the
+        shared key routes to the NEWER registrant (the channel key is the only identity
+        the seam has), so a duplicate live id is loudly flagged, not silently
+        discriminated. After the newer run finishes it pops the shared key
+        (identity-guarded), so the older run's beats are then DROPPED (its watchdog
+        stalls honestly on silence) — never a SILENT beat into a run that did not
+        register the channel."""
+        caplog.set_level(logging.WARNING, logger=_FOREIGN_LOGGER)
         empty_after_pop: list[bool] = []
         built_a, factory_a = _spy_factory()
         built_b, factory_b = _spy_factory()
@@ -455,3 +463,229 @@ class TestConcurrentRunChannels:
         assert built_b[0].beats == 1  # last write won while both were live
         assert built_a[0].beats == 0  # A never received a beat it did not own
         assert empty_after_pop == [True]  # the shared key is gone → honest silence
+        collisions = [
+            r
+            for r in caplog.records
+            if r.name == _FOREIGN_LOGGER and "channel_collision" in r.getMessage()
+        ]
+        assert len(collisions) == 1  # the duplicate LIVE id was loudly flagged
+
+
+class TestDirectHookGate:
+    """The FIX-ROUND direct-hook gate: `_beat` (behind `_on_progress` /
+    `sync_from_ledger` / `add_bars`) drops a beat whose ambient pull_id names a
+    DIFFERENT run — closing the zombie side-door the keyed seam channels never see
+    (a drain-abandoned fetch-pipeline consumer un-wedging after run A ended and
+    folding its backlog through app.py's ``on_bars=_pull_job.add_bars``)."""
+
+    def test_stale_run_thread_add_bars_cannot_beat_newer_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE zombie-consumer regression: run A's abandoned thread (still bound to
+        A's id by the consumer's own ``pull_id_scope``) drives ``job.add_bars``
+        while run B is live → B's watchdog gets NO beat (B alarms honestly at
+        769 s) and exactly ONE ``pull_job.foreign_beat_dropped`` WARN fires."""
+        clock, box = _make_clock()
+        job, built = _real_watchdog_job(clock)
+        alerts: list[BaseException] = []
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
+
+        a_ids: list[str] = []
+        assert job.start(lambda _h: a_ids.append(current_pull_id()), total=1) is True
+        a_id = a_ids[0]
+
+        stalled_mid_b: list[bool] = []
+        drop_events: list[dict[str, object]] = []
+
+        def work_b(_on_progress: ProgressHook) -> None:
+            box.advance(400.0)
+
+            def _zombie_folds() -> None:
+                with pull_id_scope(a_id):  # the abandoned consumer's bound run-A id
+                    job.add_bars(5)
+                    job.add_bars(7)  # a second fold — the WARN stays once per run
+
+            thread = threading.Thread(target=_zombie_folds)
+            with structlog.testing.capture_logs() as logs:
+                thread.start()
+                thread.join(timeout=10)
+            assert not thread.is_alive()
+            drop_events.extend(e for e in logs if e["event"] == "pull_job.foreign_beat_dropped")
+            box.advance(369.0)  # 769 s of run-B channel silence since the t=0 seed
+            wd_b = built[1]
+            assert len(wd_b.check_once()) == 1  # HUNG — the zombie folds were dropped
+            stalled_mid_b.append(job.snapshot().stalled)
+
+        assert job.start(work_b, total=1) is True
+        assert job.pull_id != a_id
+        assert stalled_mid_b == [True]
+        assert len(drop_events) == 1  # loud exactly once per run
+        assert drop_events[0]["ambient_pull_id"] == a_id
+        assert len(alerts) == 1
+
+    def test_empty_ambient_direct_beat_keeps_the_watchdog_alive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Control arm (back-compat): an UNSCOPED thread's direct hook still beats —
+        legacy callers / tests / unrebound hooks introduce no new false stall."""
+        clock, box = _make_clock()
+        job, built = _real_watchdog_job(clock)
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        checkpoints: list[int] = []
+
+        def work(_on_progress: ProgressHook) -> None:
+            box.advance(400.0)
+
+            def _legacy_fold() -> None:
+                job.add_bars(3)  # fresh thread — empty contextvar context, ambient ""
+
+            thread = threading.Thread(target=_legacy_fold)
+            thread.start()
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+            box.advance(369.0)  # t=769, but the empty-ambient beat landed at t=400
+            checkpoints.append(len(built[0].check_once()))
+
+        assert job.start(work, total=1) is True
+        assert checkpoints == [0]  # HEALTHY — the legacy direct beat counted
+
+    def test_own_run_direct_beat_beats_and_warn_rearms_next_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The run's OWN ambient id passes the gate; the once-per-run WARN throttle
+        re-arms on the next start (a stale fold in run C warns again)."""
+        clock, box = _make_clock()
+        job, built = _real_watchdog_job(clock)
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+
+        def work_b(_on_progress: ProgressHook) -> None:
+            box.advance(400.0)
+            job.add_bars(1)  # worker thread — ambient IS the run id (bound by _run)
+            box.advance(369.0)
+            assert len(built[0].check_once()) == 0  # own-run beat counted at t=400
+
+        assert job.start(work_b, total=1) is True
+        b_id = job.pull_id
+
+        def work_c(_on_progress: ProgressHook) -> None:
+            def _stale() -> None:
+                with pull_id_scope(b_id):
+                    job.add_bars(1)
+
+            thread = threading.Thread(target=_stale)
+            with structlog.testing.capture_logs() as logs:
+                thread.start()
+                thread.join(timeout=10)
+            assert not thread.is_alive()
+            assert [e["event"] for e in logs].count("pull_job.foreign_beat_dropped") == 1
+
+        assert job.start(work_c, total=1) is True  # the WARN re-armed for run C
+
+
+class TestStallEdgeRunId:
+    """The three stall-edge events stamp the race-free ``watchdog.run_id`` — a stale
+    edge can never carry a NEWER run's ``self._pull_id`` (fix-round MINOR)."""
+
+    def test_stalled_suspect_event_carries_run_id_not_clobbered_pull_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock, box = _make_clock()
+        job, built = _real_watchdog_job(clock)
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        events: list[dict[str, object]] = []
+
+        def work(_on_progress: ProgressHook) -> None:
+            run_id = job.pull_id
+            # Simulate the race window: a newer run publishes a different _pull_id
+            # between the identity-gated lock and the log line.
+            job._pull_id = "feedfacef00d"
+            box.advance(601.0)
+            with structlog.testing.capture_logs() as logs:
+                assert len(built[0].check_once()) == 1
+            events.extend(e for e in logs if e["event"] == "pull_stall.stalled_suspect")
+            assert events[0]["pull_id"] == run_id  # the OWN run's id, never the newer
+
+        assert job.start(work, total=1) is True
+        assert len(events) == 1
+
+    def test_stalled_recovered_event_carries_run_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clock, box = _make_clock()
+        job, built = _real_watchdog_job(clock)
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
+        events: list[dict[str, object]] = []
+
+        def work(_on_progress: ProgressHook) -> None:
+            run_id = job.pull_id
+            box.advance(601.0)
+            assert len(built[0].check_once()) == 1  # HUNG
+            job._pull_id = "feedfacef00d"  # the race-window clobber
+            built[0].beat()  # a heartbeat lands again
+            with structlog.testing.capture_logs() as logs:
+                built[0].check_once()  # the recovery edge
+            events.extend(e for e in logs if e["event"] == "pull_stall.stalled_recovered")
+            assert events[0]["pull_id"] == run_id
+
+        assert job.start(work, total=1) is True
+        assert len(events) == 1
+        assert job.snapshot().stalled is False
+
+    def test_wedged_event_carries_run_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.observability.watchdog import WorkerState
+
+        clock, _box = _make_clock()
+        job, built = _real_watchdog_job(clock)
+        alerts: list[BaseException] = []
+        monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
+        events: list[dict[str, object]] = []
+
+        def work(_on_progress: ProgressHook) -> None:
+            run_id = job.pull_id
+            job._pull_id = "feedfacef00d"  # the race-window clobber
+            evt = WorkerEvent(
+                worker_name="dashboard-pull",
+                new_state=WorkerState.HUNG,
+                last_beat_seconds_ago=3600.0,
+                timeout_seconds=600.0,
+            )
+            with structlog.testing.capture_logs() as logs:
+                job._on_wedged(evt, built[0])
+            events.extend(e for e in logs if e["event"] == "pull_stall.wedged")
+            assert events[0]["pull_id"] == run_id
+
+        assert job.start(work, total=1) is True
+        assert len(events) == 1
+        assert len(alerts) == 1
+
+
+class TestRefusedStartRollback:
+    """A singleflight-REFUSED start publishes NO phantom run identity (fix round)."""
+
+    def test_refused_start_leaves_no_phantom_pull_id(self, tmp_path: Path) -> None:
+        from brutex.adapters.groww.pull_singleflight import PullAlreadyRunningError
+
+        class _HeldGuard:
+            def __enter__(self) -> None:
+                raise PullAlreadyRunningError(tmp_path / "pull.flock")
+
+            def __exit__(self, *_exc: object) -> None:
+                return None
+
+        _built, factory = _spy_factory()
+        job = BackgroundPullJob(
+            progress=PullProgress(),
+            spawn=lambda fn: fn(),
+            watchdog_factory=factory,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _HeldGuard(),
+            account_key_resolver=lambda: None,
+        )
+        assert job.start(lambda _h: None, total=1, pull_id="abc123def456") is False
+        assert job.pull_id == ""  # the refused run never existed — no phantom id
+        assert job.running is False
+        # A later start is unaffected by the rollback.
+        job2 = BackgroundPullJob(
+            progress=PullProgress(),
+            spawn=lambda fn: fn(),
+            watchdog_factory=_spy_factory()[1],
+        )
+        assert job2.start(lambda _h: None, total=1) is True

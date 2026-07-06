@@ -43,7 +43,7 @@ from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S, PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
-from brutex.observability.correlation import new_pull_id, pull_id_scope
+from brutex.observability.correlation import current_pull_id, new_pull_id, pull_id_scope
 from brutex.observability.progress_beat import (
     register_progress_beat,
     unregister_progress_beat,
@@ -430,6 +430,11 @@ class BackgroundPullJob:
         #: before the first :meth:`start`; published under :attr:`_lock` alongside the
         #: run-identity watchdog.
         self._pull_id: str = ""
+        #: Once-per-run throttle for the DIRECT-hook foreign-beat drop WARN
+        #: (``pull_job.foreign_beat_dropped`` — the :meth:`_beat` ambient run-id gate,
+        #: DEC-PULL-BEAT-PERRUN-001 fix round). Reset on every :meth:`start`; guarded by
+        #: :attr:`_lock`.
+        self._foreign_beat_warned = False
 
     def start(
         self,
@@ -519,9 +524,11 @@ class BackgroundPullJob:
             # unlocked ``self._watchdog = watchdog``, still see ``self._watchdog is wd_A`` →
             # clear ``_running`` → admit a third pull concurrently (the residual race).
             self._watchdog = watchdog
-            # Publish the run's pull_id under the SAME lock (the stall-edge handlers
-            # stamp it on their events; the property reads it).
+            # Publish the run's pull_id under the SAME lock (the property reads it; the
+            # stall-edge handlers stamp the race-free ``watchdog.run_id`` twin on their
+            # events) + re-arm the once-per-run direct-hook foreign-beat drop WARN.
             self._pull_id = run_pull_id
+            self._foreign_beat_warned = False
         # Cross-process account-wide single-flight gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
         # Taken AFTER the in-process flag (so a same-process double-click is filtered by the
         # cheap flag first) but BEFORE any work is spawned. On contention a peer process is
@@ -536,8 +543,13 @@ class BackgroundPullJob:
                 # here (unlike _run / _on_hung): _acquire_singleflight runs SYNCHRONOUSLY in
                 # this same start() call and never spawns / publishes a worker, so no other
                 # run can have superseded this one's watchdog between claiming the flag and
-                # here — this run unconditionally still owns it.
+                # here — this run unconditionally still owns it. ALSO roll back the
+                # published identity token + pull_id (DEC-PULL-BEAT-PERRUN-001 fix round):
+                # the refused run never existed, so ``job.pull_id`` must not report a
+                # phantom id and a stale timer edge must never stamp one.
                 self._running = False
+                self._watchdog = None
+                self._pull_id = ""
             return False
         self._ledger_synced = ledger_synced
         self._pair_progress = False  # per-run reset; a phase opts in via set_phase
@@ -718,7 +730,10 @@ class BackgroundPullJob:
                 phase=phase,
                 last_beat_seconds_ago=round(event.last_beat_seconds_ago, 1),
                 timeout_seconds=event.timeout_seconds,
-                pull_id=self._pull_id,
+                # The race-free per-run id (``watchdog.run_id``, stamped once in start()):
+                # ``self._pull_id`` is read here OUTSIDE the identity-gated lock, so a
+                # stale edge could stamp a NEWER run's id in the gap (fix round MINOR).
+                pull_id=watchdog.run_id,
             )
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_hung failed; the pull / timer is unaffected")
@@ -738,7 +753,8 @@ class BackgroundPullJob:
             _LOG.info(
                 "pull_stall.stalled_recovered",
                 last_beat_seconds_ago=round(event.last_beat_seconds_ago, 1),
-                pull_id=self._pull_id,
+                # Race-free per-run id (see _on_hung) — never a newer run's ``_pull_id``.
+                pull_id=watchdog.run_id,
             )
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_recovered failed; the pull / timer is unaffected")
@@ -804,7 +820,8 @@ class BackgroundPullJob:
                 last_beat_seconds_ago=round(event.last_beat_seconds_ago, 1),
                 timeout_seconds=event.timeout_seconds,
                 restart_required=True,
-                pull_id=self._pull_id,
+                # Race-free per-run id (see _on_hung) — never a newer run's ``_pull_id``.
+                pull_id=watchdog.run_id,
             )
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_wedged failed; the pull / timer is unaffected")
@@ -824,7 +841,10 @@ class BackgroundPullJob:
             if self._watchdog is not watchdog:
                 return
             watchdog.beat()
-            self._maybe_journal_heartbeat()
+            # The routed channel key IS the run id — pass it so the journal never
+            # pays a second ambient contextvars scan per delivered beat (fix round
+            # NIT) and is guaranteed identical to the channel key.
+            self._maybe_journal_heartbeat(pull_id=watchdog.run_id)
 
         return _run_beat
 
@@ -875,7 +895,8 @@ class BackgroundPullJob:
             # another run's id) can never reach it — a real stall is never masked.
             # Removed in the ``finally`` (own channel only) so a finished run leaves no
             # stale beat.
-            register_progress_beat(self._beat_for(watchdog), pull_id=run_pull_id)
+            run_beat = self._beat_for(watchdog)
+            register_progress_beat(run_beat, pull_id=run_pull_id)
             try:
                 result = work(self._on_progress)
             except Exception as exc:  # report ANY failure to the live feed, never crash the thread
@@ -907,11 +928,13 @@ class BackgroundPullJob:
                             "pull_job.on_success failed; the completed pull is unaffected"
                         )
             finally:
-                # Remove this run's liveness beat — its OWN keyed channel ONLY, so a
-                # stale worker's unregister can never starve a newer run's beat and a
-                # later poll can never fire into a dead watchdog (idempotent —
-                # DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15 / DEC-PULL-BEAT-PERRUN-001).
-                unregister_progress_beat(pull_id=run_pull_id)
+                # Remove this run's liveness beat — its OWN keyed channel ONLY, and only
+                # if the channel still holds THIS run's closure (the identity guard), so
+                # a stale worker's unregister can never starve a newer run's beat — even
+                # a duplicate-id survivor's — and a later poll can never fire into a dead
+                # watchdog (idempotent — DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15 /
+                # DEC-PULL-BEAT-PERRUN-001).
+                unregister_progress_beat(pull_id=run_pull_id, beat=run_beat)
                 # Stop this run's stall timer first (so it can never fire after the worker has
                 # already returned / raised). Outside the lock: stop() only sets an Event,
                 # never blocks. Idempotent with _on_hung's stop() (both target the SAME watchdog).
@@ -1017,37 +1040,80 @@ class BackgroundPullJob:
         self._beat()
 
     def _beat(self) -> None:
-        """Beat the current run's stall watchdog, if one is wired — O(1).
+        """Beat the CURRENT run's stall watchdog iff the emitting thread belongs to it — O(1).
 
-        Also appends the THROTTLED durable pull-journal heartbeat
-        (DEC-PULL-TELEMETRY-TRIAD-001) — only while a run is active (a stale beat between
-        runs, when :attr:`_watchdog` is ``None``, journals nothing).
+        DEC-PULL-BEAT-PERRUN-001 fix round (the direct-hook anti-masking gate): the
+        direct heartbeats (:meth:`_on_progress` / :meth:`sync_from_ledger` /
+        :meth:`add_bars`) funnel here from LONG-LIVED job methods that a STALE run's
+        abandoned thread can still invoke — e.g. a drain-abandoned fetch-pipeline
+        consumer un-wedging after run A ended and folding its backlog through the
+        ``on_bars`` → :meth:`add_bars` hook while run B is live. The keyed seam channels
+        never see those calls, so this gate mirrors them at the direct path: the
+        emitting thread's ambient ``pull_id`` (the consumers/fan-out workers carry their
+        OWN run's re-bound id) must be EMPTY (legacy callers / tests / unrebound hooks —
+        pre-gate behaviour preserved) or match the CURRENT run's id; a non-empty
+        mismatch is DROPPED + WARNed once per run (``pull_job.foreign_beat_dropped``) —
+        a stale run's thread can never refresh a newer run's heartbeat and mask a real
+        stall. The gate reads ``(watchdog, pull_id)`` atomically under :attr:`_lock` and
+        beats OUTSIDE it (the job-lock → watchdog-lock order would otherwise invert the
+        timer thread's watchdog-lock → job-lock edge). Also appends the THROTTLED
+        durable pull-journal heartbeat (DEC-PULL-TELEMETRY-TRIAD-001) — only while a run
+        is active (a stale beat between runs, when :attr:`_watchdog` is ``None``,
+        journals nothing).
         """
-        if self._watchdog is not None:
-            self._watchdog.beat()
-            self._maybe_journal_heartbeat()
+        ambient = current_pull_id()
+        with self._lock:
+            watchdog = self._watchdog
+            run_pull_id = self._pull_id
+            foreign = watchdog is not None and bool(ambient) and ambient != run_pull_id
+            warn = foreign and not self._foreign_beat_warned
+            if warn:
+                self._foreign_beat_warned = True
+        if watchdog is None:
+            return
+        if foreign:
+            if warn:
+                _LOG.warning(
+                    "pull_job.foreign_beat_dropped",
+                    ambient_pull_id=ambient,
+                    run_pull_id=run_pull_id,
+                    reason=(
+                        "a direct-hook heartbeat arrived from a thread bound to a "
+                        "DIFFERENT run's pull_id (a stale/abandoned worker) — dropped, "
+                        "never routed into the current run (anti-masking); worst case "
+                        "is a loud false stalled-SUSPECT, never a masked true stall"
+                    ),
+                )
+            return
+        watchdog.beat()
+        # ``ambient`` is either the run's own id or "" (the legacy skip) — pass it so
+        # the journal never pays a second contextvars scan (fix round NIT).
+        self._maybe_journal_heartbeat(pull_id=ambient)
 
-    def _maybe_journal_heartbeat(self) -> None:
+    def _maybe_journal_heartbeat(self, pull_id: str | None = None) -> None:
         """Durably journal ONE throttled watchdog-liveness heartbeat — O(1), best-effort.
 
         DEC-PULL-TELEMETRY-TRIAD-001 (wiring the existing, previously call-site-less
         :func:`~brutex.observability.pull_journal.record_pull_heartbeat`). Every real
         progress beat funnels here; at most one journal append lands per
-        :attr:`_journal_heartbeat_interval_s`. The record reuses the pull's BOUND
-        ``pull_id`` (:func:`~brutex.observability.correlation.current_pull_id` — the
+        :attr:`_journal_heartbeat_interval_s`. The record carries the pull's run id —
+        the explicit *pull_id* when the caller already resolved it (the per-run beat
+        closure passes ``watchdog.run_id``; :meth:`_beat` passes its already-read
+        ambient id — one contextvars scan per beat, never two: fix round NIT), else the
+        BOUND ambient :func:`~brutex.observability.correlation.current_pull_id` (the
         progress hooks fire inside the pull's ``pull_id_scope``, re-bound per worker
-        thread by the ingest spine) so :func:`~brutex.observability.pull_journal.last_run`
-        groups it with the run's ``started`` record and ``sleep_gaps`` gets narrower
-        suspend windows. Honest envelope (Golden Rule #10): a beat from a context with NO
-        bound ``pull_id`` (it would never group) and a ``None`` lake root each skip the
-        write — a missing heartbeat is a weaker forensic signal, never a wrong one; the
-        write itself is the journal's never-raise append, and this whole path is wrapped
-        so ANY failure is logged + swallowed — the pull is NEVER affected. The lazy
-        imports mirror :func:`is_pull_halt`'s import-hygiene discipline.
+        thread by the ingest spine) — so
+        :func:`~brutex.observability.pull_journal.last_run` groups it with the run's
+        ``started`` record and ``sleep_gaps`` gets narrower suspend windows. Honest
+        envelope (Golden Rule #10): a beat with NO run id (it would never group) and a
+        ``None`` lake root each skip the write — a missing heartbeat is a weaker
+        forensic signal, never a wrong one; the write itself is the journal's
+        never-raise append, and this whole path is wrapped so ANY failure is logged +
+        swallowed — the pull is NEVER affected. The lazy journal import mirrors
+        :func:`is_pull_halt`'s import-hygiene discipline.
         """
-        from brutex.observability.correlation import current_pull_id
-
-        pull_id = current_pull_id()
+        if pull_id is None:
+            pull_id = current_pull_id()
         if not pull_id:
             return
         with self._journal_lock:

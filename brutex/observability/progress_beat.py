@@ -83,10 +83,40 @@ _EPOCH: int = 0
 #: The epoch the drop WARN last fired for (``-1`` = never). Guarded by :data:`_BEAT_LOCK`.
 _WARNED_EPOCH: int = -1
 
+#: Count of beats DROPPED in the current register-epoch (the once-per-epoch WARN alone
+#: cannot convey magnitude — one stray beat vs a systematically-unattributed emitter
+#: population). Flushed to a debug ``progress_beat.drop_summary`` line whenever the epoch
+#: closes (register / unregister / reset). Guarded by :data:`_BEAT_LOCK`.
+_DROPPED_IN_EPOCH: int = 0
+
 #: Guards every read / mutation of :data:`_BEATS` / :data:`_EPOCH` / :data:`_WARNED_EPOCH`
 #: — register / unregister run on the dashboard control thread, while emit runs on the
 #: fetch worker threads.
 _BEAT_LOCK = threading.Lock()
+
+
+def _close_epoch_locked() -> int:
+    """Bump the register-epoch + collect the closed epoch's drop count — lock held.
+
+    The ONE place the epoch advances (register / unregister / reset all funnel here), so
+    the per-epoch drop counter can never straddle two epochs. Returns the closed epoch's
+    drop count so the caller can flush it to :func:`_log_drop_summary` OUTSIDE the lock.
+    """
+    global _EPOCH, _DROPPED_IN_EPOCH  # noqa: PLW0603 — the seam's epoch state, lock-guarded
+    _EPOCH += 1
+    dropped = _DROPPED_IN_EPOCH
+    _DROPPED_IN_EPOCH = 0
+    return dropped
+
+
+def _log_drop_summary(dropped: int) -> None:
+    """Debug-flush the closed epoch's drop tally (magnitude signal; 0 = silent)."""
+    if dropped:
+        logger.debug(
+            "progress_beat.drop_summary — %d beat(s) dropped in the closed register-epoch "
+            "(the once-per-epoch foreign_beat_dropped WARN carries the first drop only)",
+            dropped,
+        )
 
 
 def register_progress_beat(beat: ProgressBeat, *, pull_id: str = LEGACY_CHANNEL) -> None:
@@ -97,43 +127,80 @@ def register_progress_beat(beat: ProgressBeat, *, pull_id: str = LEGACY_CHANNEL)
     worker thread carrying the run's re-bound ``pull_id``) keep the heartbeat alive —
     and a foreign thread's beat can never reach it. The zero-arg call registers on the
     :data:`LEGACY_CHANNEL` with the exact pre-keyed semantics (back-compat).
+
+    A LIVE-channel collision — overwriting a DIFFERENT callback already registered on
+    the same channel — is always a caller bug (two live runs sharing one ``pull_id``:
+    while both live, the OLDER run's beats then route to the NEWER registrant — a
+    residual cross-run mask this seam cannot discriminate, because the channel key IS
+    the only identity). It is therefore WARNed loudly
+    (``progress_beat.channel_collision``), never silent.
     """
-    global _EPOCH  # noqa: PLW0603 — the seam's register-epoch, lock-guarded
     with _BEAT_LOCK:
+        collided = pull_id in _BEATS and _BEATS[pull_id] is not beat
         _BEATS[pull_id] = beat
-        _EPOCH += 1
+        dropped = _close_epoch_locked()
+    _log_drop_summary(dropped)
+    if collided:
+        logger.warning(
+            "progress_beat.channel_collision — channel %s was ALREADY registered by a "
+            "different callback and has been overwritten (last write wins). Two LIVE runs "
+            "sharing one pull_id is a caller bug: while both live, the older run's beats "
+            "route to the NEWER registrant.",
+            repr(pull_id),
+        )
 
 
-def unregister_progress_beat(*, pull_id: str = LEGACY_CHANNEL) -> None:
+def unregister_progress_beat(
+    *, pull_id: str = LEGACY_CHANNEL, beat: ProgressBeat | None = None
+) -> None:
     """Clear the *pull_id* channel's beat (idempotent). O(1).
 
     Called from the pull worker's ``finally`` so a finished run leaves no stale beat that
     a later poll could fire into a dead watchdog. A keyed unregister removes ONLY its OWN
     channel — never a blanket clear — so a stale worker's unregister can never starve a
     NEWER run's beat (the latent race the single-slot seam carried).
+
+    *beat* (optional) is an IDENTITY guard: when given, the channel is popped only if it
+    still holds exactly *beat* — so a finished run whose channel was re-keyed by a
+    duplicate-id survivor (see the collision WARN on :func:`register_progress_beat`) can
+    never starve that still-live survivor. ``None`` keeps the unconditional pop
+    (back-compat). A no-op (missing channel / identity mismatch) leaves the epoch — and
+    thus the drop-WARN throttle — untouched.
     """
-    global _EPOCH  # noqa: PLW0603 — the seam's register-epoch, lock-guarded
     with _BEAT_LOCK:
-        _BEATS.pop(pull_id, None)
-        _EPOCH += 1
+        current = _BEATS.get(pull_id)
+        if current is None or (beat is not None and current is not beat):
+            return  # nothing popped — no channel change, no epoch bump
+        del _BEATS[pull_id]
+        dropped = _close_epoch_locked()
+    _log_drop_summary(dropped)
 
 
 def reset_progress_beats() -> None:
-    """Clear EVERY channel + re-arm the drop WARN — THE sanctioned test reset seam. O(1).
+    """Clear EVERY channel + re-arm the drop WARN — THE sanctioned test reset seam.
 
-    Supersedes a bare :func:`unregister_progress_beat` for test fixtures: that clears
-    only the legacy channel, so a keyed registration leaked by a test would bleed into
-    the next one. Production never calls this (each run pops only its own channel).
+    O(registered channels) — the ``dict.clear`` walks every entry (trivially bounded:
+    production holds at most a couple of live channels). Supersedes a bare
+    :func:`unregister_progress_beat` for test fixtures: that clears only the legacy
+    channel, so a keyed registration leaked by a test would bleed into the next one.
+    Production never calls this (each run pops only its own channel).
     """
-    global _EPOCH, _WARNED_EPOCH  # noqa: PLW0603 — the sanctioned test reset, lock-guarded
+    global _WARNED_EPOCH  # noqa: PLW0603 — the sanctioned test reset, lock-guarded
     with _BEAT_LOCK:
         _BEATS.clear()
-        _EPOCH += 1
+        dropped = _close_epoch_locked()
         _WARNED_EPOCH = -1
+    _log_drop_summary(dropped)
 
 
 def emit_progress_beat(pull_id: str | None = None) -> None:
-    """Fire the beat registered for this context's run, if any — best-effort. O(1).
+    """Fire the beat registered for this context's run, if any — best-effort.
+
+    O(1) in REGISTERED CHANNELS (a dict lookup, never a scan of the registry); the
+    channel resolution itself costs one full contextvars-context copy + scan
+    (:func:`~brutex.observability.correlation.current_pull_id` — linear in the emitting
+    thread's BOUND contextvars, ≤ ~3 keys in this repo), skipped entirely on the
+    empty-registry fast path below.
 
     The hot liveness paths (the bounded partition lock-wait poll, the rate-controller
     ``pace`` return) call this after each poll / pace. Routing: the channel is the
@@ -142,16 +209,25 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
     that run's beat; a keyed MISS falls back OUTWARD to the :data:`LEGACY_CHANNEL`
     registrant (never into another keyed channel — the anti-masking invariant). With an
     EMPTY registry this is a silent cheap no-op (every non-dashboard caller); with a
-    non-empty registry an unroutable beat is DROPPED + WARNed once per register-epoch
-    (a foreign thread can never mask a real stall — it can only be loud). A raising beat
-    is swallowed + logged so it can never crash the worker that is merely signalling
-    liveness (Golden Rule #10).
+    non-empty registry an unroutable beat is DROPPED + counted, WARNed once per
+    register-epoch (a foreign thread can never mask a real stall — it can only be
+    loud; the closed epoch's drop tally is debug-flushed on the next
+    register/unregister/reset). A raising beat is swallowed + logged so it can never
+    crash the worker that is merely signalling liveness (Golden Rule #10).
     """
-    global _WARNED_EPOCH  # noqa: PLW0603 — the drop-WARN throttle stamp, lock-guarded
-    # Resolve the channel OUTSIDE the lock — one contextvars read, no I/O.
+    global _WARNED_EPOCH, _DROPPED_IN_EPOCH  # noqa: PLW0603 — throttle stamps, lock-guarded
+    # Empty-registry fast path (every CLI / unit-test caller): skip the contextvars
+    # channel resolution entirely. The UNLOCKED truthiness read is a benign race — the
+    # registry is best-effort liveness signal and a beat straddling a register boundary
+    # is already tolerated (the register itself seeds the watchdog's heartbeat).
+    if pull_id is None and not _BEATS:
+        return
+    # Resolve the channel OUTSIDE the lock — one contextvars-context copy + scan
+    # (current_pull_id), no I/O.
     channel = pull_id if pull_id is not None else current_pull_id()
     warn = False
     channel_count = 0
+    dropped_so_far = 0
     with _BEAT_LOCK:
         beat = _BEATS.get(channel)
         if beat is None and channel != LEGACY_CHANNEL:
@@ -161,7 +237,9 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
             beat = _BEATS.get(LEGACY_CHANNEL)
         if beat is None:
             if not _BEATS:
-                return  # empty registry — the CLI / unit-test silent no-op (no warn)
+                return  # empty registry — the explicit-pull_id silent no-op (no warn)
+            _DROPPED_IN_EPOCH += 1
+            dropped_so_far = _DROPPED_IN_EPOCH
             warn = _WARNED_EPOCH != _EPOCH
             if warn:
                 _WARNED_EPOCH = _EPOCH
@@ -170,12 +248,13 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
         if warn:
             logger.warning(
                 "progress_beat.foreign_beat_dropped — a beat from channel %s matched no "
-                "registered run (%d registered channel(s)); the emitting thread is missing "
-                "the capture-then-rebind pull_id binding. Dropped (never routed into a "
-                "foreign run — anti-masking); worst case is a loud false stalled-SUSPECT, "
-                "never a masked true stall.",
+                "registered run (%d registered channel(s), %d drop(s) this epoch); the "
+                "emitting thread is missing the capture-then-rebind pull_id binding. "
+                "Dropped (never routed into a foreign run — anti-masking); worst case is "
+                "a loud false stalled-SUSPECT, never a masked true stall.",
                 repr(channel),
                 channel_count,
+                dropped_so_far,
             )
         return
     # Copy-then-call preserved: the callback does journal I/O and must never run under
