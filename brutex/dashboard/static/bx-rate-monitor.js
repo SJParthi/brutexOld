@@ -66,7 +66,8 @@
  *
  * Self-recovering poll + client staleness (DEC-PULL-UI-STALENESS-001 — the 2026-07-06
  * 38-minute frozen-tab incident fix): a fetch rejection, a non-ok HTTP status, a
- * malformed payload or a hung fetch (10 s abort) is a COUNTED poll failure. The
+ * malformed payload or a hung fetch (10 s abort, armed through the BODY read — a
+ * headers-then-stalled-body response aborts too) is a COUNTED poll failure. The
  * "updated Xs ago" readout — a ~1 s CLIENT-clock ticker measuring time since the last
  * SUCCESSFUL poll — escalates amber past STALE_WARN_MS, then LOUD RED with explicit
  * "STALE" wording past STALE_RED_MS, while the next poll is scheduled on capped
@@ -86,7 +87,7 @@
   var STALE_RED_MS = 30000;    // red STALE: 10x POLL_MS; == BACKOFF_MAX_MS so "retrying" reads true
   var BACKOFF_BASE_MS = 3000;  // failure backoff base (the ask's 3 s), doubling per consecutive failure
   var BACKOFF_MAX_MS = 30000;  // backoff cap: recovery noticed <=30 s after the server returns
-  var FETCH_TIMEOUT_MS = 10000; // abort bound: a wedged fetch becomes a counted failure, the chain never hangs
+  var FETCH_TIMEOUT_MS = 10000; // abort bound (headers AND body): a wedged fetch becomes a counted failure, the chain never hangs
   var AGE_TICK_MS = 1000;      // the ~1 s client staleness ticker
   var WIDGET_ID = "bxRateMonitor";
   var OVERLAY_ID = "bxRateMonitorOverlay";
@@ -183,8 +184,13 @@
       "#" + WIDGET_ID + " .bxrm-stale{color:var(--red,#FF5C5C);font-weight:800;}" +
       "#" + WIDGET_ID + " .bxrm-stale-warn{color:var(--yellow,#FFB74D);font-weight:700;}" +
       "#" + WIDGET_ID + ".bxrm-stale{border-color:var(--red,#FF5C5C);}" +
-      "#" + OVERLAY_ID + " .bxrm-stale{color:var(--red,#FF5C5C);}" +
-      "#" + OVERLAY_ID + " .bxrm-stale-warn{color:var(--yellow,#FFB74D);}";
+      // Overlay "updated" value: the id+3-class selector (specificity 1-3-0)
+      // OUT-specifies the base `#…Overlay .bxrm-grid .gv` colour rule (1-2-0), so
+      // the expanded view's big value genuinely turns red/amber. (Refuter-confirmed
+      // fix: the earlier `#…Overlay .bxrm-stale` (1-1-0) LOST that contest — the
+      // overlay stale colour was dead CSS.)
+      "#" + OVERLAY_ID + " .bxrm-grid .gv.bxrm-stale{color:var(--red,#FF5C5C);}" +
+      "#" + OVERLAY_ID + " .bxrm-grid .gv.bxrm-stale-warn{color:var(--yellow,#FFB74D);}";
     var style = document.createElement("style");
     style.id = "bxRateMonitorStyles";
     style.textContent = css;
@@ -485,17 +491,23 @@
     pollTimer = setTimeout(poll, delayMs);
   }
   // Bounded JSON fetch: a non-ok status THROWS (a failed poll, never a silent skip),
-  // and a hung fetch is aborted after FETCH_TIMEOUT_MS so the self-scheduling poll
-  // chain can never wedge on a dead connection.
+  // and the abort timer stays ARMED through the BODY read — cleared only after
+  // r.json() settles — so a hung fetch (headers never arriving OR a headers-then-
+  // stalled-body response) is aborted at FETCH_TIMEOUT_MS and lands in the counted-
+  // failure backoff path; the self-scheduling poll chain can never wedge on a dead
+  // connection. (Refuter-confirmed fix: the earlier clearTimeout-at-headers left
+  // r.json() unbounded — a stalled body wedged the chain.)
   function fetchJson(url) {
     var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     var killer = ctrl ? setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS) : null;
     var opts = { headers: { Accept: "application/json" } };
     if (ctrl) { opts.signal = ctrl.signal; }
     return fetch(url, opts).then(function (r) {
-      if (killer) { clearTimeout(killer); }
       if (!r.ok) { throw new Error("HTTP " + r.status); }  // non-ok is a FAILED poll
-      return r.json();
+      return r.json();   // killer still armed: a stalled BODY aborts too
+    }).then(function (data) {
+      if (killer) { clearTimeout(killer); }
+      return data;
     }).catch(function (err) { if (killer) { clearTimeout(killer); } throw err; });
   }
 

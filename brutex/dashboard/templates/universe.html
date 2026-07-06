@@ -1951,7 +1951,9 @@ document.addEventListener('visibilitychange', () => {
 /* Per-expiry sub-unit progress (DEC-PULL-HEADER-SUBUNIT-001): one giant unit (a whole
    option chain) holds completed/total still while s.current ticks per processed pair —
    so count DISTINCT s.current labels observed since completed/total last moved (a
-   poll-sampled FLOOR: 600 ms sampling can miss fast transitions — never an overcount)
+   poll-sampled FLOOR while the Set is below SUBUNIT_SET_CAP: 600 ms sampling can miss
+   fast transitions; PAST the cap the unseen-label transition fallback can OVERCOUNT on
+   an alternating unseen-label sequence — an honest degraded approximation, not a floor)
    and parse the DDMmmYY expiry token out of the contract label, mirroring
    data/fno_symbol.py's right-anchored grammar. Derived ENTIRELY client-side — ZERO
    backend change. Spot ("NIFTY 1minute") / empty / junk labels => chunk omitted. */

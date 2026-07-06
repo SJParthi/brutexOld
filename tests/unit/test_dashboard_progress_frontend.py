@@ -192,6 +192,17 @@ def test_rate_widget_age_readout_and_thresholds() -> None:
     assert "function renderAge()" in js
     assert "setInterval(renderAge, AGE_TICK_MS);" in js, "the ~1 s age ticker is missing"
     assert '"STALE — " + base + " — retrying"' in js, "the explicit STALE wording is missing"
+    # BOTH escalation branches pinned — the red tier AND the amber warn tier
+    # (refuter finding: the warn BRANCH itself was unpinned; deleting it kept
+    # every test green while killing the ~3-missed-polls amber requirement).
+    assert (
+        'if (age >= STALE_RED_MS) { text = "STALE — " + base + " — retrying"; cls = "bxrm-stale"; }'
+        in js
+    )
+    assert (
+        'else if (age >= STALE_WARN_MS) { text = base + " — retrying"; cls = "bxrm-stale-warn"; }'
+        in js
+    ), "the amber warn tier branch is missing"
     assert '"no data yet (" + ageS + "s)"' in js, "the never-succeeded boot wording is missing"
     assert 'pillRow("updated", "bxrmAge", null)' in js, "the age pill row is missing"
     assert 'ageRow.id = "bxrmAgeRow"' in js
@@ -199,12 +210,29 @@ def test_rate_widget_age_readout_and_thresholds() -> None:
 
 def test_rate_widget_stale_css_classes() -> None:
     """The stale/warn CSS classes exist for both the pill and the overlay, plus the
-    widget-root red border while STALE. Presence pins only."""
+    widget-root red border while STALE. The OVERLAY rules must carry the
+    ``.bxrm-grid .gv.<state>`` compound selector (specificity 1-3-0) so they beat
+    the base ``#…Overlay .bxrm-grid .gv`` colour rule (1-2-0) — refuter finding:
+    the earlier ``#…Overlay .bxrm-stale`` (1-1-0) LOST that contest, so the
+    expanded view's "updated" value never turned red/amber (dead CSS).
+    Presence pins only."""
     js = _widget_js()
     assert ".bxrm-stale{color:var(--red,#FF5C5C);font-weight:800;}" in js
     assert ".bxrm-stale-warn{color:var(--yellow,#FFB74D)" in js
     assert ".bxrm-stale{border-color:var(--red,#FF5C5C);}" in js, "the root border rule is missing"
     assert 'w.classList.toggle("bxrm-stale"' in js, "the root-class toggle is missing"
+    # Overlay rules at winning specificity (id + 3 classes)…
+    assert ".bxrm-grid .gv.bxrm-stale{color:var(--red,#FF5C5C);}" in js, (
+        "the overlay red rule must out-specify the base .gv colour rule"
+    )
+    assert ".bxrm-grid .gv.bxrm-stale-warn{color:var(--yellow,#FFB74D);}" in js, (
+        "the overlay warn rule must out-specify the base .gv colour rule"
+    )
+    # … and the LOSING under-specified overlay rules are gone (regression pin).
+    assert 'OVERLAY_ID + " .bxrm-stale{' not in js, "the dead 1-1-0 overlay rule must be gone"
+    assert 'OVERLAY_ID + " .bxrm-stale-warn{' not in js, (
+        "the dead 1-1-0 overlay warn rule must be gone"
+    )
 
 
 def test_rate_widget_age_clock_is_monotonic_client_side() -> None:
@@ -216,6 +244,10 @@ def test_rate_widget_age_clock_is_monotonic_client_side() -> None:
     assert "performance.now" in js
     assert "Date.now()" in js
     assert "var bootMs = null;" in js, "the boot baseline is missing"
+    # The baseline must actually be STAMPED at start() (refuter finding: only the
+    # null declaration was pinned, so removing the stamp — killing the honest
+    # never-succeeded ageing this docstring claims — kept the suite green).
+    assert "bootMs = nowMs();" in js, "the boot-baseline stamp in start() is missing"
 
 
 def test_rate_widget_poll_overlap_guard() -> None:
@@ -239,14 +271,28 @@ def test_rate_widget_backgrounded_tab_repolls_on_visibility() -> None:
 def test_rate_widget_malformed_payload_and_hung_fetch_feed_backoff() -> None:
     """A 200-with-junk body throws into the same counted-failure path, and a hung
     fetch is aborted after FETCH_TIMEOUT_MS so the self-scheduling chain can never
-    wedge. Presence pins only."""
+    wedge. The abort timer must stay ARMED through the BODY read (refuter finding:
+    clearing it at headers left ``r.json()`` unbounded — a headers-then-stalled-body
+    response wedged the poll chain). Presence pins only."""
     js = _widget_js()
     assert 'throw new Error("malformed payload")' in js
     assert 'typeof data !== "object"' in js
     assert "AbortController" in js
     assert "ctrl.abort()" in js
-    assert "FETCH_TIMEOUT_MS" in js
+    assert "var FETCH_TIMEOUT_MS = 10000;" in js, "the 10 s abort bound value is missing"
     assert "function fetchJson(url)" in js
+    # The killer is cleared only AFTER the body parse settles …
+    assert "return r.json();   // killer still armed: a stalled BODY aborts too" in js
+    assert (
+        "}).then(function (data) {\n"
+        "      if (killer) { clearTimeout(killer); }\n"
+        "      return data;\n"
+        "    }).catch" in js
+    ), "the killer must be cleared only after r.json() settles"
+    # … and the old clear-at-headers pattern is gone (regression pin).
+    assert "if (killer) { clearTimeout(killer); }\n      if (!r.ok)" not in js, (
+        "the clear-at-headers pattern left the body read unbounded — must be gone"
+    )
 
 
 def test_rate_widget_eta_failure_hides_not_freezes() -> None:
@@ -334,6 +380,12 @@ def test_universe_feed_age_chip_dom_css_and_thresholds() -> None:
     assert "'⚠ STALE — no live update for ' + ageS + 's · '" in html
     assert "function renderFeedAge()" in html
     assert "setInterval(renderFeedAge, 1000)" in html
+    # The universe surface's MONOTONIC client clock (refuter finding: only the
+    # widget's nowMs was pinned — the universe twin had no pin at all).
+    assert (
+        "const nowMs = () => (typeof performance !== 'undefined' && performance.now)"
+        " ? performance.now() : Date.now();" in html
+    ), "the universe monotonic client clock is missing"
 
 
 def test_universe_stale_clears_on_success_and_settle() -> None:
