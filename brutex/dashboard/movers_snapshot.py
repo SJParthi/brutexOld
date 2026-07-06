@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_stored_read import read_stored_day_frame
+from brutex.data.derive_lock import derive_in_progress
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -699,8 +700,18 @@ def _read_intraday_bars(
     day: date_cls,
     minutes: int,
     cutoff_min: int | None,
+    prefer_resample: bool = False,
 ) -> tuple[list[CandleBar], bool]:
     """STORED-FIRST intraday day read → ``(bars, from_stored)``.
+
+    *prefer_resample* (DEC-MOVERS-GATE-PREBUILD-SCOPE-001): ``True`` skips the
+    stored-partition read entirely and takes the always-fresh 1-minute
+    resample. The ``/movers`` route passes it WHILE a dashboard pull is
+    running in this process: the stored TF partitions are rewritten only by
+    the pipeline's FINAL prebuild stage, so mid-fetch they can predate the
+    freshly-landing 1-minute bars — the resample is byte-equal semantics per
+    DEC-PIPELINE-AUTOPREBUILD-001's pinned equality, just slower and ALWAYS
+    fresh. Default ``False`` keeps the stored-first read byte-identical.
 
     DEC-PIPELINE-AUTOPREBUILD-001 (chunk 2, the movers arm): the pipeline's
     final prebuild stage materialises every derived timeframe as its own stored
@@ -725,8 +736,25 @@ def _read_intraday_bars(
     COMMON :func:`filter_to_ist_minute`); a MID-bucket as-of always takes the
     1-minute resample fallback, the only source that can aggregate the partial
     forming bucket honestly (never a leak of minutes past the as-of instant).
+
+    **Cross-process derive probe (DEC-ENGINE-MISC-PACK-001):** before touching
+    the stored partition the read probes
+    :func:`~brutex.data.derive_lock.derive_in_progress` — a non-blocking O(1)
+    shared-flock check of the fixed ``<lake_root>/.locks/derive.lock`` the
+    materialiser holds exclusively per symbol. While a SEPARATE-process derive
+    (a CLI-launched pipeline prebuild) is mid-rewrite of the TF set, the stored
+    partition may be half-refreshed, so the read takes the on-the-fly 1-minute
+    resample instead — the byte-equality REFERENCE path, honestly counted under
+    the existing ``resampled_reads`` provenance (no new payload field). The
+    in-process pipeline case is already gated by the process-local
+    ``PrebuildGate``; this closes the cross-PROCESS half — the probe is a
+    point-in-time signal, refreshed on every poll.
     """
-    if _stored_serves_cutoff(minutes, cutoff_min):
+    if (
+        not prefer_resample
+        and _stored_serves_cutoff(minutes, cutoff_min)
+        and not derive_in_progress(lake_root)
+    ):
         stored = read_stored_day_frame(
             lake_root,
             exchange=exchange,
@@ -971,6 +999,7 @@ def compute_spot_candidates(
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
     datasets: list[dict[str, str]] | None = None,
+    prefer_resample: bool = False,
 ) -> SpotCandidates:
     """Scan the lake → the spot :class:`SpotCandidates` for one snapshot coordinate.
 
@@ -1013,6 +1042,16 @@ def compute_spot_candidates(
         exact per-exchange ranking; ``None`` screens every exchange.
     names
         Optional ``symbol → display name`` map.
+    prefer_resample
+        ``True`` makes every INTRADAY read take the always-fresh 1-minute
+        resample instead of the stored-first path
+        (DEC-MOVERS-GATE-PREBUILD-SCOPE-001 — the ``/movers`` route passes it
+        while a dashboard pull runs, because mid-fetch the stored TF partitions
+        predate the freshly-landing 1-minute bars; the DAILY path still reads
+        the derived ``1day`` partitions directly — 1-minute is the only fetched
+        granularity and ``1day`` is rewritten only by the prebuild, so its
+        mid-pull staleness is bounded to the pull window and stated, not
+        resampled away). Default ``False`` is byte-identical.
 
     Returns
     -------
@@ -1084,6 +1123,7 @@ def compute_spot_candidates(
                     day=day,
                     minutes=minutes,
                     cutoff_min=cutoff_min,
+                    prefer_resample=prefer_resample,
                 )
             # Skip the prior-day 1-day read entirely when the symbol had no bars on
             # the selected day (no point computing a baseline for nothing).

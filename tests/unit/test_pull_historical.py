@@ -495,8 +495,15 @@ def test_fno_pull_constructs_passes_and_drains_fetch_pipeline(
     drained: list[object] = []
     pipelines_seen: list[object] = []
 
-    def _spy_build(*, dry_run: bool, lake_root: Path) -> FetchPipeline | None:
-        pipeline = _real_build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root)
+    def _spy_build(
+        *,
+        dry_run: bool,
+        lake_root: Path,
+        on_bars: Callable[[int], None] | None = None,
+    ) -> FetchPipeline | None:
+        # on_bars threaded since DEC-PULL-PROGRESS-HONESTY-001 (None here — this test
+        # pins the build/pass/drain lifecycle, not the live-bars hook).
+        pipeline = _real_build_fetch_pipeline(dry_run=dry_run, lake_root=lake_root, on_bars=on_bars)
         if pipeline is not None:
             built.append(pipeline)
         return pipeline
@@ -2481,6 +2488,116 @@ class TestGreeksEnrichWiring:
         assert "Greeks enrichment FAILED" not in report.note  # quarantines never flip ok
 
 
+class TestGreeksEnrichHaltReRaise:
+    """DEC-GREEKS-PARALLEL-001 (#1188 follow-up (a)): the fenced wrapper carves
+    out the two pull-wide HOST halts — ``LakeWriteHalt`` + the new
+    ``GreeksEnrichPoolBroken`` — and RE-RAISES them out of
+    ``pull_contract_candles`` so they reach ``BackgroundPullJob._run``'s halt
+    handling + the CRITICAL Telegram alert. Every other enrich failure stays
+    fenced (``ok=False``, the pull survives — pinned above)."""
+
+    def _halting_pull(
+        self,
+        registry: RegistryStore,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_lake: Path,
+        exc: BaseException,
+    ) -> None:
+        pytest.importorskip("trading_core")
+        import brutex.data.greeks_enrich as ge
+
+        monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)
+        monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
+
+        def _halt(**_kwargs: object) -> object:
+            raise exc
+
+        monkeypatch.setattr(ge, "enrich_greeks_for_targets", _halt)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        with pytest.raises(type(exc)):
+            pull_contract_candles(
+                registry.list_contracts(underlying="NIFTY"),
+                lake_root=tmp_lake,
+                dry_run=False,
+                intervals=("1day",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+            )
+
+    def test_lake_write_halt_raises_through_the_wrapper(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        """Fails-before/passes-after: pre-fix the blanket ``except Exception``
+        swallowed even a disk-full halt into ``ok=False``."""
+        from brutex.data.errors import LakeWriteHalt
+
+        self._halting_pull(registry, monkeypatch, tmp_lake, LakeWriteHalt("disk_full"))
+        # The _mark_complete HOIST regression: the vendor fetch was fully clean,
+        # so the completion stamps must survive the aborted overlay stage —
+        # otherwise the next pull needlessly re-plans vendor-clean contracts.
+        statuses = _statuses(registry)
+        assert statuses["NSE-NIFTY-25Jan24-21000-CE"] == CANDLE_STATUS_COMPLETE
+        assert statuses["NSE-NIFTY-25Jan24-FUT"] == CANDLE_STATUS_COMPLETE
+
+    def test_pool_broken_raises_through_the_wrapper(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        from brutex.data.errors import GreeksEnrichPoolBroken
+
+        self._halting_pull(registry, monkeypatch, tmp_lake, GreeksEnrichPoolBroken("a worker died"))
+        statuses = _statuses(registry)
+        assert statuses["NSE-NIFTY-25Jan24-21000-CE"] == CANDLE_STATUS_COMPLETE
+
+    def test_done_log_carries_bars_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+    ) -> None:
+        """#1188 follow-up (b): the ``fno.greeks_enrich.done`` telemetry now
+        surfaces the non-finite-row skip tally, never only the report field."""
+        pytest.importorskip("trading_core")
+        import brutex.data.greeks_enrich as ge
+
+        def _fake_enrich(**_kwargs: object) -> ge.GreeksEnrichReport:
+            return ge.GreeksEnrichReport(
+                enriched=1,
+                already_current=0,
+                futures_skipped=0,
+                undecodable=0,
+                no_bars=0,
+                errored=0,
+                bars_written=3,
+                bars_solved=2,
+                bars_null=1,
+                bars_reused=0,
+                spot_reads=1,
+                spot_hits=0,
+                bars_skipped=7,
+            )
+
+        monkeypatch.setattr(ge, "enrich_greeks_for_targets", _fake_enrich)
+        contract = DerivativeContract(
+            underlying_symbol="NIFTY",
+            expiry=date(2024, 1, 25),
+            symbol="NSE-NIFTY-25Jan24-21000-CE",
+            contract_type="CE",
+            strike=21000.0,
+        )
+        window = (date(2024, 1, 1), date(2024, 1, 20))
+        with capture_logs() as logs:
+            outcome = hp._enrich_greeks_from_minute(
+                rebuilt=cast("list[hp._RebuiltContract]", [(None, contract)]),
+                windows={contract.symbol: window},
+                lake_root=tmp_lake,
+            )
+        assert outcome.ok is True
+        done = [r for r in logs if r["event"] == "fno.greeks_enrich.done"]
+        assert len(done) == 1
+        assert done[0]["bars_skipped"] == 7
+
+
 # ── DEC-WINDOW-LEDGER-RESCUE-001: the lost-ledger rescue actually rescues ─────
 
 
@@ -2992,6 +3109,162 @@ class TestExpiryScope:
         assert "NSE-RELIANCE-29Feb24-2800-CE" not in scoped_sdk.candle_symbols
         after = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in stored}
         assert after == before, "an out-of-scope expiry's stored bars must never change"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Vendor-surface threading through the phase result (DEC-VENDOR-CONFLICT-SURFACE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestVendorSurfacePhaseThreading:
+    """The conflict/dup counters reach the phase result on BOTH modes.
+
+    Fail-before proof: on origin/main ``_PhaseResult`` / ``IngestReport`` /
+    ``HistoricalPullReport`` carry none of the three counters — every test
+    below raises ``TypeError`` / ``AttributeError`` there.
+    """
+
+    def test_reconcile_folds_consumer_vendor_surface_into_phase(self) -> None:
+        """ASYNC: the post-drain reconcile re-derives the phase's three counters."""
+        from decimal import Decimal
+
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+
+        pipeline = FetchPipeline(workers=1)
+        try:
+            pipeline.fold_totals(
+                bars_appended=30,
+                conflicts=2,
+                series_key=("SYM-A", "1minute"),
+                vendor_dup_rows_dropped=4,
+                max_close_delta=Decimal("0.10"),
+            )
+            pipeline.fold_totals(
+                bars_appended=10,
+                conflicts=1,
+                series_key=("SYM-B", "1minute"),
+                vendor_dup_rows_dropped=1,
+                max_close_delta=Decimal("44.70"),
+            )
+            phase = hp._PhaseResult(
+                bars=0,
+                windows=4,
+                failed_pairs=0,
+                still_failed_windows=0,
+                auth_aborted=False,
+                complete=frozenset({"SYM-A", "SYM-B"}),
+                clean=True,
+                merged_pairs={
+                    ("SYM-A", "1minute"): IngestReport(
+                        windows=2, bars_appended=0, transient_failures=0
+                    ),
+                    ("SYM-B", "1minute"): IngestReport(
+                        windows=2, bars_appended=0, transient_failures=0
+                    ),
+                },
+                failure_symbols=frozenset(),
+            )
+            out = hp._reconcile_phase_with_pipeline(
+                phase, pipeline, selected_symbols=frozenset({"SYM-A", "SYM-B"})
+            )
+        finally:
+            pipeline.drain()
+        assert out.conflicts == 3
+        assert out.vendor_dup_rows_dropped == 5
+        assert out.max_close_delta == Decimal("44.70")
+        pair_a = out.merged_pairs[("SYM-A", "1minute")]
+        assert pair_a.vendor_dup_rows_dropped == 4
+        assert pair_a.max_close_delta == Decimal("0.10")
+
+    def test_report_to_dict_serializes_delta_as_exact_string(self) -> None:
+        """JSON honesty: the Decimal renders as its string, never a float round-trip."""
+        from decimal import Decimal
+
+        base = {
+            "dry_run": False,
+            "intervals": ("1minute",),
+            "contracts_selected": 1,
+            "contracts_completed": 1,
+            "bars_appended": 10,
+            "windows": 1,
+            "failed_pairs": 0,
+            "still_failed_windows": 0,
+            "auth_aborted": False,
+            "note": "ok",
+            "phase1_clean": True,
+            "phase1_complete": ("C",),
+            "start_dates": {"C": "2024-01-01"},
+            "minute_requested": True,
+            "minute_skipped": False,
+        }
+        with_delta = HistoricalPullReport(
+            **base,  # type: ignore[arg-type]
+            conflicts=25,
+            vendor_dup_rows_dropped=9141,
+            max_close_delta=Decimal("44.70"),
+        )
+        payload = with_delta.to_dict()
+        assert payload["conflicts"] == 25
+        assert payload["vendor_dup_rows_dropped"] == 9141
+        assert payload["max_close_delta"] == "44.70"
+        without = HistoricalPullReport(**base)  # type: ignore[arg-type]
+        assert without.to_dict()["max_close_delta"] is None
+
+
+def test_fno_pull_emits_written_settled_mismatch_warning(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """DEC-WRITTEN-SETTLED-CENSUS-001 (F&O spine): a pre-pull ledger↔lake
+    disagreement surfaces as EXACTLY one ``pull.written_settled_mismatch``.
+
+    The durable ledger claims a selected contract's series settled SUCCESS
+    while the lake holds NO bars for it (the lost-partition shape) — the
+    post-drain census, fed the phase's already-loaded spans + the pre-plan
+    ledger snapshot, must WARN once, observe-only (the pull is untouched).
+    """
+    from brutex.data.fetch_coverage import WindowKey
+    from brutex.data.window_ledger import WindowLedger
+    from brutex.data.window_ledger_store import save_window_ledger
+
+    seeded = WindowLedger()
+    seeded.record(
+        WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-25Jan24-21000-CE",
+            # The F&O vendor phase is ALWAYS 1minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001),
+            # so the census scope is (selected symbols × "1minute").
+            interval="1minute",
+            start=_FROM,
+            end=_TO,
+        ),
+        raw_bars=5,
+        error_type=None,
+        bars_appended=5,
+        now=_NOW,
+    )
+    save_window_ledger(seeded, tmp_lake)
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", lambda *_a, **_kw: _empty_ingest_report())
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    with capture_logs() as logs:
+        pull_contract_candles(
+            selected,
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+    warnings = [log for log in logs if log["event"] == "pull.written_settled_mismatch"]
+    assert len(warnings) == 1
+    assert warnings[0]["source"] == "fno"
+    assert warnings[0]["settled_unwritten"] == 1
+    assert warnings[0]["samples"] == ["settled-unwritten: 'NSE-NIFTY-25Jan24-21000-CE' '1minute'"]
 
 
 def _write_overlay_sidecar(lake_root: Path, day: str = "2026-05-12") -> frozenset[date]:

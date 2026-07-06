@@ -34,6 +34,7 @@ import structlog
 
 from brutex.adapters.groww.pull_singleflight import (
     PullAlreadyRunningError,
+    account_pull_singleflight_lock,
     pull_singleflight_lock,
 )
 from brutex.config.paths import resolve_lake_root
@@ -105,6 +106,50 @@ LakeRootResolver = Callable[[], "Path | None"]
 #: a fake to exercise the held / contended paths without a real ``flock``.
 SingleflightFactory = Callable[[Path], AbstractContextManager[None]]
 
+#: The injected ACCOUNT-keyed single-flight lock factory (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001)
+#: — given the Groww api_key, returns a context manager holding the account-wide lock
+#: (``~/.brutex/locks/pull_account<pbkdf2[:16]>.flock``) for its lifetime, raising
+#: :class:`~brutex.adapters.groww.pull_singleflight.PullAlreadyRunningError` on
+#: ``__enter__`` when a peer process (possibly against a DIFFERENT lake root) already
+#: holds it. Default the live
+#: :func:`~brutex.adapters.groww.pull_singleflight.account_pull_singleflight_lock`;
+#: tests inject a fake.
+AccountSingleflightFactory = Callable[[str], AbstractContextManager[None]]
+
+#: The injected account-key resolver — returns the Groww api_key the account lock keys
+#: on, or ``None`` to SKIP the account lock gracefully (credentials unavailable — a
+#: dry-run / credential-less run makes zero vendor calls, so there is no account rate to
+#: protect). The default resolves via the AWS-only credential source
+#: (DEC-AWS-ONLY-CREDS-001), mapping a ``CredentialsError`` to ``None`` with one loud
+#: log line.
+AccountKeyResolver = Callable[[], "str | None"]
+
+
+def _default_account_key_resolver() -> str | None:
+    """Resolve the account-lock key from the AWS-only credential source, or ``None``.
+
+    DEC-ACCOUNT-KEY-SINGLEFLIGHT-001: delegates to
+    :func:`brutex.config.credentials.resolve_groww_aws_credentials` (the SOLE credential
+    source — the retired env-var path is NEVER read) and returns the ``api_key``. A
+    :class:`~brutex.config.credentials_types.CredentialsError` (AWS unreachable / not
+    configured) returns ``None`` — the account lock is then SKIPPED with one loud
+    ``pull_job.account_lock_skipped`` log line rather than blocking a credential-less
+    run behind a network dependency (the lake-root lock still guards same-lake peers).
+    Lazy import keeps this module light at import time (mirrors the #889 pattern).
+    """
+    from brutex.config.credentials import resolve_groww_aws_credentials
+    from brutex.config.credentials_types import CredentialsError
+
+    try:
+        return resolve_groww_aws_credentials().api_key
+    except CredentialsError as exc:
+        _LOG.warning(
+            "pull_job.account_lock_skipped",
+            reason="credentials unavailable — account-keyed single-flight not taken",
+            error=str(exc),
+        )
+        return None
+
 
 def _default_watchdog_factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
     """Build the live :class:`PullWatchdog` (daemon timer + audited timeout)."""
@@ -156,7 +201,9 @@ def is_pull_halt(exc: BaseException) -> bool:
     via :func:`~brutex.adapters.groww.errors.is_terminal_auth_failure` so the RETRYABLE
     auth-family subclasses NEVER read as a halt / DEC-VENDOR-DOWN-BREAKER-001 — the
     vendor-down error-storm + dead-credential stops, ``GrowwCredentialDeadError`` being
-    the TERMINAL auth escalation the predicate also matches). The error classes are
+    the TERMINAL auth escalation the predicate also matches / the Greeks-enrichment
+    pool-broken halt ``GreeksEnrichPoolBroken`` — a worker process died abruptly,
+    DEC-GREEKS-PARALLEL-001). The error classes are
     imported INSIDE the call — not at module top — so
     :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
     part of the heavy PyO3 chain), and this check only runs on the rare
@@ -173,7 +220,7 @@ def is_pull_halt(exc: BaseException) -> bool:
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import is_terminal_auth_failure
-    from brutex.data.errors import LakeWriteHalt
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     return isinstance(
@@ -184,6 +231,10 @@ def is_pull_halt(exc: BaseException) -> bool:
             QuotaInvariantError,
             MassEmptySettleHalt,
             VendorDownError,
+            # DEC-GREEKS-PARALLEL-001: a Greeks pool worker died abruptly —
+            # a HOST-resource condition (OOM SIGKILL / crash, honestly not
+            # distinguishable), alerted like a LakeWriteHalt.
+            GreeksEnrichPoolBroken,
         ),
     ) or is_terminal_auth_failure(exc)
 
@@ -257,6 +308,19 @@ class BackgroundPullJob:
         :func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock`, backed by
         a non-blocking ``fcntl.flock``). Tests inject a fake to exercise the held /
         contended paths deterministically. Injected, never a global (CLAUDE.md §4).
+    account_singleflight_factory
+        Optional factory building the ACCOUNT-keyed single-flight lock context manager
+        from the resolved api_key (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001; default the live
+        :func:`~brutex.adapters.groww.pull_singleflight.account_pull_singleflight_lock`).
+        Taken strictly BEFORE the lake-root lock — one fixed order everywhere, so two
+        processes can never deadlock-invert across the pair. Injected for tests.
+    account_key_resolver
+        Optional resolver of the account-lock key (default
+        :func:`_default_account_key_resolver` — the AWS-only credential source, mapping
+        a :class:`~brutex.config.credentials_types.CredentialsError` to ``None``).
+        ``None`` from the resolver SKIPS the account lock gracefully (logged) — a
+        credential-less run makes no vendor calls, so there is no account rate to
+        protect; the lake-root lock still guards same-lake peers.
     """
 
     def __init__(
@@ -269,6 +333,8 @@ class BackgroundPullJob:
         watchdog_factory: WatchdogFactory = _default_watchdog_factory,
         lake_root_resolver: LakeRootResolver | None = None,
         singleflight_factory: SingleflightFactory = pull_singleflight_lock,
+        account_singleflight_factory: AccountSingleflightFactory = account_pull_singleflight_lock,
+        account_key_resolver: AccountKeyResolver | None = None,
     ) -> None:
         self._progress = progress if progress is not None else PullProgress()
         self._spawn = spawn
@@ -286,6 +352,13 @@ class BackgroundPullJob:
         #: Factory building the account-wide cross-process single-flight lock context
         #: manager (default the live ``fcntl.flock``-backed one); injected for tests.
         self._singleflight_factory = singleflight_factory
+        #: Factory building the ACCOUNT-keyed single-flight lock context manager
+        #: (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001); injected for tests.
+        self._account_singleflight_factory = account_singleflight_factory
+        #: Resolver of the account-lock key (``None`` result ⇒ graceful skip, logged).
+        self._account_key_resolver: AccountKeyResolver = (
+            _default_account_key_resolver if account_key_resolver is None else account_key_resolver
+        )
         self._lock = threading.Lock()
         self._running = False
         #: The CURRENT run's account-wide single-flight lock context manager (entered in
@@ -293,6 +366,11 @@ class BackgroundPullJob:
         #: when the guard is disabled (no resolvable lake root). Held for the WHOLE pull so
         #: a peer process cannot start a second concurrent pull (Golden Rule #6).
         self._singleflight: AbstractContextManager[None] | None = None
+        #: The CURRENT run's ACCOUNT-keyed single-flight lock (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001;
+        #: entered in :meth:`start` strictly BEFORE the lake-root lock, exited in
+        #: :meth:`_run`'s ``finally`` strictly AFTER it — LIFO). ``None`` between runs,
+        #: when the guard is disabled, and when the key resolver skipped (no credentials).
+        self._account_singleflight: AbstractContextManager[None] | None = None
         #: When True the per-pair hook does NOT advance the bar — an authoritative
         #: per-WINDOW ledger sync drives the counters instead (DEC-SPOT-WINDOW-PROGRESS-001).
         self._ledger_synced = False
@@ -416,30 +494,69 @@ class BackgroundPullJob:
         # Set post-construction so the injected factory signature stays (on_hung) —
         # back-compat with every existing factory.
         watchdog.on_recovery = lambda event: self._on_recovered(event, watchdog)
+        # Wire the wedged-worker escalation (DEC-PULL-WEDGE-ESCALATE-001, STAGE 1): the
+        # terminal WEDGED verdict + ONE CRITICAL alert when the DUAL signal holds (zero
+        # heartbeats for the wedge multiple AND no lake-revision movement since the HUNG
+        # edge). Set post-construction like on_recovery (factory back-compat). A None
+        # revision probe (no resolvable lake root) makes the escalation ABSTAIN — the
+        # honest probe-less envelope, never a blind heartbeat-only WEDGED.
+        watchdog.on_wedged = lambda event: self._on_wedged(event, watchdog)
+        watchdog.revision_probe = self._build_revision_probe()
         watchdog.start()
         self._spawn(lambda: self._run(work, watchdog, on_success, on_finally))
         return True
 
     def _acquire_singleflight(self) -> bool:
-        """Acquire the account-wide cross-process pull lock; return whether it was taken.
+        """Acquire the cross-process pull locks (account-keyed FIRST, then lake-root).
 
         Resolves the lake root via :attr:`_lake_root_resolver`; a ``None`` root DISABLES
-        the guard (a dry-run / test) and returns ``True`` (nothing to hold). Otherwise it
-        ``__enter__``-s the :attr:`_singleflight_factory` context manager and stashes it in
-        :attr:`_singleflight` so :meth:`_run` can release it in its ``finally``. On
-        :class:`~brutex.adapters.groww.pull_singleflight.PullAlreadyRunningError` (a peer
-        process is mid-pull) it marks the progress failed with the actionable message,
-        logs it, and returns ``False`` so the caller refuses the pull (Golden Rule #6).
+        BOTH guards (a dry-run / test) and returns ``True`` (nothing to hold). Otherwise:
+
+        1. **Account-keyed lock FIRST** (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001): the key
+           resolver supplies the api_key; a ``None`` key SKIPS this lock gracefully (the
+           resolver already logged why — no credentials ⇒ no vendor calls ⇒ no account
+           rate to protect). Contention (the SAME account mid-pull, possibly against a
+           DIFFERENT lake root) refuses the pull.
+        2. **Lake-root lock second** (:attr:`_singleflight_factory`). Contention rolls
+           the account lock back (LIFO) and refuses the pull.
+
+        Held guards are stashed in :attr:`_account_singleflight` / :attr:`_singleflight`
+        so :meth:`_run` releases them in its ``finally``. On refusal the progress is
+        failed with the actionable message + one warning log (Golden Rule #6 — never
+        double the account request rate).
         """
         lake_root = self._lake_root_resolver()
         if lake_root is None:
             self._singleflight = None
+            self._account_singleflight = None
             return True
+        account_key = self._account_key_resolver()
+        if account_key is None:
+            # Graceful skip (already logged by the resolver): the lake-root lock below
+            # still guards same-lake peers.
+            self._account_singleflight = None
+        else:
+            account_guard = self._account_singleflight_factory(account_key)
+            try:
+                account_guard.__enter__()
+            except PullAlreadyRunningError as exc:
+                self._account_singleflight = None
+                self._singleflight = None
+                self._progress.fail(f"{type(exc).__name__}: {exc}")
+                _LOG.warning(
+                    "pull_job.account_singleflight_refused",
+                    reason="a pull is already running for this Groww account",
+                )
+                return False
+            self._account_singleflight = account_guard
         guard = self._singleflight_factory(lake_root)
         try:
             guard.__enter__()
         except PullAlreadyRunningError as exc:
             self._singleflight = None
+            # Roll back the account lock we just took (LIFO) — refusing the pull must
+            # not leave the account gate held with no run owning it.
+            self._release_account_singleflight()
             self._progress.fail(f"{type(exc).__name__}: {exc}")
             _LOG.warning(
                 "pull_job.singleflight_refused",
@@ -451,22 +568,34 @@ class BackgroundPullJob:
         return True
 
     def _release_singleflight(self) -> None:
-        """Release the account-wide single-flight lock held by the current run, if any.
+        """Release the cross-process pull locks held by the current run, if any (LIFO).
 
         Called from :meth:`_run`'s ``finally`` (and only there). ``__exit__``-s the held
-        guard (closing the ``flock`` fd) so a peer process can start the next pull, then
-        clears :attr:`_singleflight`. A ``None`` guard (disabled / never-taken) is a no-op.
-        Best-effort: any error closing the lock is logged + swallowed so it can never
-        crash the worker thread or leave the in-process flag stuck.
+        lake-root guard first, then the account-keyed guard — the reverse of the acquire
+        order — closing each ``flock`` fd so a peer process can start the next pull.
+        ``None`` guards (disabled / never-taken / skipped) are no-ops. Best-effort: any
+        error closing a lock is logged + swallowed so it can never crash the worker
+        thread or leave the in-process flag stuck.
         """
         guard = self._singleflight
         self._singleflight = None
+        if guard is not None:
+            try:
+                guard.__exit__(None, None, None)
+            except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
+                _LOG.exception("pull_job.singleflight_release failed; the pull is unaffected")
+        self._release_account_singleflight()
+
+    def _release_account_singleflight(self) -> None:
+        """Release the held account-keyed lock, if any — best-effort, never raises."""
+        guard = self._account_singleflight
+        self._account_singleflight = None
         if guard is None:
             return
         try:
             guard.__exit__(None, None, None)
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
-            _LOG.exception("pull_job.singleflight_release failed; the pull is unaffected")
+            _LOG.exception("pull_job.account_singleflight_release failed; the pull is unaffected")
 
     def _on_hung(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
         """Watchdog HEALTHY→HUNG edge for *watchdog*'s run: alert + mark STALLED-SUSPECT.
@@ -547,6 +676,71 @@ class BackgroundPullJob:
             )
         except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
             _LOG.exception("pull_stall.on_recovered failed; the pull / timer is unaffected")
+
+    def _build_revision_probe(self) -> Callable[[], str | None] | None:
+        """Build the wedge-escalation lake-revision probe, or ``None`` when no lake root.
+
+        DEC-PULL-WEDGE-ESCALATE-001: the DUAL wedge signal's second half — an O(1)
+        content token off the durable window-ledger sidecar
+        (:func:`brutex.dashboard.lake_revision.lake_revision`, DEC-HARDENING-LEFTOVERS-001)
+        that MOVES whenever a production pull checkpoints the ledger. A worker that is
+        silent on heartbeats but still checkpointing is NOT wedged. ``None`` (no
+        resolvable lake root — a dry-run / test) means the escalation abstains entirely
+        (documented honest envelope). Lazy import keeps this module wheel-free at import.
+        """
+        lake_root = self._lake_root_resolver()
+        if lake_root is None:
+            return None
+
+        def _probe() -> str | None:
+            from brutex.dashboard.lake_revision import lake_revision
+
+            return lake_revision(lake_root)
+
+        return _probe
+
+    def _on_wedged(self, event: WorkerEvent, watchdog: PullWatchdog) -> None:
+        """Wedge escalation (DEC-PULL-WEDGE-ESCALATE-001, STAGE 1): terminal mark + ONE alert.
+
+        The watchdog confirmed the DUAL signal — zero heartbeats for the wedge multiple
+        of the stall timeout AND no lake-revision movement since the HUNG edge — so this
+        run is judged WEDGED: (1) mark the progress WEDGED + ``restart_required`` (an
+        honest TERMINAL verdict for the run; the state stays ``running`` — the thread is
+        not killed), (2) fire ONE CRITICAL pull-halt alert naming the restart requirement.
+        Deliberately does NOT clear ``_running`` / release the single-flight — the zombie
+        worker still owns the lake (the DEC-PIPELINE-STALL-HEARTBEAT-001 double-run-race
+        fix is preserved); a PROCESS RESTART releases the ``flock`` on fd close.
+        AUTO-restart (supervisor kill + respawn) is a NAMED follow-up, NOT built here.
+        Identity-gated + best-effort, mirroring :meth:`_on_hung`.
+        """
+        try:
+            phase = self._progress.snapshot().phase or "unknown"
+            with self._lock:
+                if self._watchdog is not watchdog:
+                    return
+                self._progress.mark_wedged(
+                    f"WEDGED — no heartbeat for {event.last_beat_seconds_ago:.0f}s "
+                    f"(>= {watchdog.wedge_multiplier:g}x the {event.timeout_seconds:.0f}s "
+                    f"stall timeout) AND no lake-revision movement during phase '{phase}'; "
+                    "restart required (worker NOT killed; single-flight held)"
+                )
+            emit_pull_halt_alert(
+                TimeoutError(
+                    f"dashboard pull WEDGED: no heartbeat for "
+                    f"{event.last_beat_seconds_ago:.0f}s AND no lake-revision movement "
+                    f"during phase '{phase}' — restart required; worker NOT killed "
+                    "(auto-restart is a named follow-up)"
+                )
+            )
+            _LOG.error(
+                "pull_stall.wedged",
+                phase=phase,
+                last_beat_seconds_ago=round(event.last_beat_seconds_ago, 1),
+                timeout_seconds=event.timeout_seconds,
+                restart_required=True,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the timer
+            _LOG.exception("pull_stall.on_wedged failed; the pull / timer is unaffected")
 
     def _run(
         self,
@@ -730,7 +924,9 @@ class BackgroundPullJob:
         """The incremental coverage counters fed by the write funnel — O(1)."""
         return self._counters
 
-    def set_phase(self, phase: str, *, pair_progress: bool = False) -> None:
+    def set_phase(
+        self, phase: str, *, pair_progress: bool = False, open_ended: bool = False
+    ) -> None:
         """Set the COARSE pipeline phase currently in flight — O(1) passthrough.
 
         DEC-UNIVERSE-PER-PHASE-PROGRESS-001. The one-click pipeline's ``_work`` calls
@@ -741,12 +937,44 @@ class BackgroundPullJob:
 
         *pair_progress* (DEC-PIPELINE-STALL-HEARTBEAT-001, the frozen-counter fix):
         ``True`` declares the ENTERING phase has NO ledger-sync driver, so the per-pair
-        hook advances the counters open-endedly even on a ``ledger_synced`` run (the
-        pipeline's F&O historical phase). Default ``False`` keeps every other phase /
-        caller byte-identical (the ledger sync stays authoritative).
+        hook advances the counters open-endedly even on a ``ledger_synced`` run. Default
+        ``False`` keeps every other phase / caller byte-identical (the ledger sync stays
+        authoritative). The pipeline's F&O historical phase NO LONGER uses it
+        (DEC-PULL-PROGRESS-HONESTY-001 — it now drives absolute market-filtered ledger
+        counts through :meth:`sync_from_ledger` and declares itself *open_ended*
+        instead of pinning percent at 100); the mechanism stays for any phase that
+        genuinely has no ledger at all.
+
+        *open_ended* (DEC-PULL-PROGRESS-HONESTY-001): forwarded to
+        :meth:`~brutex.dashboard.pull_progress.PullProgress.set_phase` — ``True``
+        declares the entering phase's unit total NON-FINAL (the F&O historical
+        phase's ledger denominator grows as contracts are planned mid-phase), so the
+        frontend shows "N units · total unknown" and ETA is suppressed. STICKY:
+        the default ``False`` never clears a marker an earlier phase set.
         """
         self._pair_progress = pair_progress
-        self._progress.set_phase(phase)
+        self._progress.set_phase(phase, open_ended=open_ended)
+
+    def add_bars(self, delta: int) -> None:
+        """Fold a live bars DELTA into the progress tally — O(1), thread-safe.
+
+        DEC-PULL-PROGRESS-HONESTY-001 (the frozen-bars fix): the async F&O fetch
+        pipeline invokes this (via its ``on_bars`` seam) once per background-folded
+        window with the window's REAL appended-bar count — the producer-side per-pair
+        hook honestly reports 0 bars in async mode, so without this the headline bars
+        counter froze at the spot phase's count while millions of option bars
+        streamed in. Delegates to the O(1)
+        :meth:`~brutex.dashboard.pull_progress.PullProgress.add_bars` (each folded
+        window contributes its delta exactly once — the no-double-count invariant),
+        marks any wired summary cache dirty (a durable window landed — the same
+        funnel contract as :meth:`_on_progress`), and beats the stall watchdog
+        (bars landing IS real progress, so a long single-pair stream never
+        false-trips the hung detector).
+        """
+        self._progress.add_bars(delta)
+        if self._summary_cache is not None:
+            self._summary_cache.mark_dirty()
+        self._beat()
 
     def snapshot(self) -> ProgressSnapshot:
         """Return the current O(1) progress snapshot for the polling route."""

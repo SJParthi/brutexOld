@@ -3,11 +3,11 @@
 100% line+branch via a monkeypatched ``ingest_spot``: success fan-out across
 instruments × intervals, terminal-error quarantine (run continues), the
 aggregate report + its derived ``auth_aborted``, pace threading + the
-``_with_paced_client`` wiring, the empty-universe case, ledger / hook threading,
+``with_paced_client`` wiring, the empty-universe case, ledger / hook threading,
 on_progress, logging, the audit chain, and the post-run auto-retry wrapper.
 """
 
-# Whitebox test of the module-private `_with_paced_client`.
+# Whitebox coverage of run_ingest's module-private helpers.
 # pyright: reportPrivateUsage=none
 
 from __future__ import annotations
@@ -290,7 +290,7 @@ def test_single_pair_default_runner_is_a_pool(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_with_paced_client_three_branches() -> None:
-    """`_with_paced_client` covers pace None, non-Groww adapter, live Groww adapter."""
+    """`with_paced_client` covers pace None, non-Groww adapter, live Groww adapter."""
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.client import GrowwClient
     from brutex.adapters.groww.instruments import InstrumentIndex
@@ -312,7 +312,7 @@ def test_with_paced_client_three_branches() -> None:
     client = GrowwClient(sdk=_FakeSDK())  # type: ignore[arg-type]
     adapter = GrowwMarketAdapter(client=client, index=index)
 
-    paced = mod._with_paced_client(adapter, _pace)
+    paced = mod.with_paced_client(adapter, _pace)
     assert paced is not adapter
     # `adapter.client` is now typed GrowwClientProtocol (accepts a single client OR a pool),
     # which exposes `with_pace` not the private `pace` attribute — narrow to the concrete
@@ -320,9 +320,9 @@ def test_with_paced_client_three_branches() -> None:
     assert isinstance(paced, GrowwMarketAdapter)
     assert isinstance(paced.client, GrowwClient) and paced.client.pace is _pace
 
-    assert mod._with_paced_client(adapter, None) is adapter  # pace None → unchanged
+    assert mod.with_paced_client(adapter, None) is adapter  # pace None → unchanged
     sentinel = object()
-    assert mod._with_paced_client(sentinel, _pace) is sentinel  # type: ignore[arg-type]
+    assert mod.with_paced_client(sentinel, _pace) is sentinel  # type: ignore[arg-type]
 
 
 def test_non_groww_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:

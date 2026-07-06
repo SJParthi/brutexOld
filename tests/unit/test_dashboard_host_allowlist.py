@@ -3,7 +3,8 @@
 The module is the LEAF single source of truth for the dashboard's
 loopback-only ``Host``-header allowlist. Three contracts are pinned:
 
-1. CONTENT — exactly the four loopback spellings, in deterministic order,
+1. CONTENT — exactly the six loopback spellings (IPv4 + name + the bracketed
+   IPv6 ``[::1]`` added by DEC-ENGINE-MISC-PACK-002), in deterministic order,
    and ``testserver`` (the FastAPI ``TestClient`` default Host) is NEVER
    shipped (the hostile-review MAJOR: a single-label name an intranet DNS
    can rebind would bypass the guard).
@@ -26,12 +27,19 @@ from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 
 class TestDefaultAllowedHostsContent:
     def test_exact_loopback_only_entries_in_order(self) -> None:
-        """The default is EXACTLY the four loopback spellings (order pinned)."""
+        """The default is EXACTLY the six loopback spellings (order pinned).
+
+        ``[::1]`` is the IPv6 loopback in its bracketed RFC 3986 ``Host`` form
+        (DEC-ENGINE-MISC-PACK-002) — an ``http://[::1]:port`` client is a
+        LOOPBACK client and must not be 400ed by the default guard.
+        """
         assert DEFAULT_ALLOWED_HOSTS == (
             "127.0.0.1",
             "127.0.0.1:*",
             "localhost",
             "localhost:*",
+            "[::1]",
+            "[::1]:*",
         )
 
     def test_is_an_immutable_tuple_of_strings(self) -> None:
@@ -50,7 +58,7 @@ class TestDefaultAllowedHostsContent:
     def test_no_wildcard_and_no_non_loopback_host(self) -> None:
         """Loopback-ONLY by design: no ``*`` entry, no routable name."""
         bare_hosts = {entry.removesuffix(":*") for entry in DEFAULT_ALLOWED_HOSTS}
-        assert bare_hosts == {"127.0.0.1", "localhost"}
+        assert bare_hosts == {"127.0.0.1", "localhost", "[::1]"}
         assert "*" not in DEFAULT_ALLOWED_HOSTS
 
 

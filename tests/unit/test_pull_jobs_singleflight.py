@@ -273,3 +273,186 @@ def test_on_hung_holds_the_guard_until_worker_exit(
     workers[0]()
     assert spy.exited == 1
     assert job.running is False
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Account-keyed second lock wiring (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class _OrderedGuard(AbstractContextManager[None]):
+    """A guard double appending named enter/exit events to a SHARED order log."""
+
+    def __init__(self, name: str, order: list[str], *, raise_on_enter: bool = False) -> None:
+        self._name = name
+        self._order = order
+        self._raise_on_enter = raise_on_enter
+
+    def __enter__(self) -> None:
+        if self._raise_on_enter:
+            raise PullAlreadyRunningError(Path("/tmp/contended.flock"))
+        self._order.append(f"enter:{self._name}")
+
+    def __exit__(self, *exc: object) -> None:
+        self._order.append(f"exit:{self._name}")
+
+
+def test_account_lock_taken_first_released_last(tmp_path: Path) -> None:
+    """ORDER pin: account lock strictly BEFORE the lake lock; release is LIFO."""
+    order: list[str] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _OrderedGuard("lake", order),
+        account_singleflight_factory=lambda _key: _OrderedGuard("account", order),
+        account_key_resolver=lambda: "key-A",
+    )
+    assert job.start(lambda on_progress: on_progress("X", 1, False, False), total=1) is True
+    assert job.snapshot().state == STATE_DONE
+    assert order == ["enter:account", "enter:lake", "exit:lake", "exit:account"]
+
+
+def test_account_lock_contended_refuses_before_lake_lock(tmp_path: Path) -> None:
+    """A held ACCOUNT lock (peer pull, possibly another lake root) refuses the pull."""
+    order: list[str] = []
+    lake_calls: list[Path] = []
+
+    def lake_factory(root: Path) -> AbstractContextManager[None]:  # pragma: no cover
+        lake_calls.append(root)
+        return _OrderedGuard("lake", order)
+
+    spawned: list[Callable[[], None]] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=spawned.append,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lake_factory,
+        account_singleflight_factory=lambda _key: _OrderedGuard(
+            "account", order, raise_on_enter=True
+        ),
+        account_key_resolver=lambda: "key-A",
+    )
+    assert job.start(lambda _h: None, total=1) is False
+    assert spawned == []  # never doubles the account rate
+    assert lake_calls == []  # the lake lock was never even consulted
+    assert job.running is False  # in-process flag rolled back
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR
+    assert "PullAlreadyRunningError" in snap.detail
+
+
+def test_lake_contention_rolls_back_the_held_account_lock(tmp_path: Path) -> None:
+    """Lake-lock contention releases the just-taken account lock (LIFO rollback)."""
+    order: list[str] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _OrderedGuard("lake", order, raise_on_enter=True),
+        account_singleflight_factory=lambda _key: _OrderedGuard("account", order),
+        account_key_resolver=lambda: "key-A",
+    )
+    assert job.start(lambda _h: None, total=1) is False
+    assert order == ["enter:account", "exit:account"]  # rolled back, never leaked
+    assert job.running is False
+
+
+def test_none_account_key_skips_account_lock_gracefully(tmp_path: Path) -> None:
+    """No credentials → the account lock is SKIPPED; the lake lock still guards."""
+    order: list[str] = []
+    account_calls: list[str] = []
+
+    def account_factory(key: str) -> AbstractContextManager[None]:  # pragma: no cover
+        account_calls.append(key)
+        return _OrderedGuard("account", order)
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _OrderedGuard("lake", order),
+        account_singleflight_factory=account_factory,
+        account_key_resolver=lambda: None,
+    )
+    assert job.start(lambda on_progress: on_progress("X", 1, False, False), total=1) is True
+    assert job.snapshot().state == STATE_DONE
+    assert account_calls == []  # skipped — the factory was never consulted
+    assert order == ["enter:lake", "exit:lake"]
+
+
+def test_none_lake_root_disables_both_locks(tmp_path: Path) -> None:
+    """A None lake root (dry-run/test) skips BOTH locks AND the key resolver."""
+    resolver_calls: list[bool] = []
+
+    def key_resolver() -> str | None:  # pragma: no cover — never called
+        resolver_calls.append(True)
+        return "key-A"
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: None,
+        account_key_resolver=key_resolver,
+    )
+    assert job.start(lambda on_progress: on_progress("X", 1, False, False), total=1) is True
+    assert resolver_calls == []
+
+
+def test_account_release_is_best_effort_and_swallows_errors(tmp_path: Path) -> None:
+    """A raising account-guard __exit__ never crashes the worker; the run completes."""
+
+    class _BadExitGuard(AbstractContextManager[None]):
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *exc: object) -> None:
+            raise OSError("close failed")
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _SpyGuard(),
+        account_singleflight_factory=lambda _key: _BadExitGuard(),
+        account_key_resolver=lambda: "key-A",
+    )
+    assert job.start(lambda on_progress: on_progress("X", 1, False, False), total=1) is True
+    assert job.snapshot().state == STATE_DONE
+    assert job.running is False
+
+
+def test_default_account_key_resolver_returns_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default resolver reads the AWS-only source and returns the api_key."""
+    from types import SimpleNamespace
+
+    import brutex.config.credentials as credentials_mod
+    from brutex.dashboard.pull_jobs import (
+        _default_account_key_resolver,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    monkeypatch.setattr(
+        credentials_mod,
+        "resolve_groww_aws_credentials",
+        lambda: SimpleNamespace(api_key="aws-key", totp_secret="s"),
+    )
+    assert _default_account_key_resolver() == "aws-key"
+
+
+def test_default_account_key_resolver_maps_credentials_error_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CredentialsError (no AWS) → None → the account lock is skipped, never a crash."""
+    import brutex.config.credentials as credentials_mod
+    from brutex.config.credentials_types import CredentialsError
+    from brutex.dashboard.pull_jobs import (
+        _default_account_key_resolver,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    def _boom() -> object:
+        raise CredentialsError("aws unreachable")
+
+    monkeypatch.setattr(credentials_mod, "resolve_groww_aws_credentials", _boom)
+    assert _default_account_key_resolver() is None

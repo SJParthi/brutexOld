@@ -1734,12 +1734,17 @@ def cmd_reopen_skipped(
     )
     from brutex.data.window_ledger_store import (
         ledger_path,
+        list_ledger_deltas,
         load_window_ledger,
         save_window_ledger,
     )
 
     resolved = _resolve_lake_root(lake_root)
-    if not ledger_path(resolved).is_file():
+    # Delta-aware presence gate (P2 fix-round, DEC-REOPEN-DELTA-AWARE-001): a
+    # base-less lake HOLDING deltas (a first pull's mid-flight crash checkpoint,
+    # DEC-LEDGER-DELTA-FLUSH-001) is a LIVE ledger — load_or_migrate treats it
+    # exactly so — hence it must be operable here, not refused as "no ledger".
+    if not (ledger_path(resolved).is_file() or list_ledger_deltas(resolved)):
         print(
             f"[brutex] no window ledger found at {ledger_path(resolved)} — nothing to re-open "
             "(run a pull first, or pass the right --lake-root).",
@@ -3172,7 +3177,9 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     :class:`~brutex.notifications.sweep_alerts.SweepAlerter` swallows every publish
     error), so the alert NEVER masks the halt, which the caller re-raises so the CLI
     still exits non-zero. The ``LakeWriteHalt.reason`` (``disk_full`` /
-    ``out_of_memory``) is surfaced verbatim; any other stop uses its class name.
+    ``out_of_memory`` / ``volume_wedged`` — the latter from the keepalive probe OR the
+    per-partition write-health breaker, DEC-WRITE-HEALTH-BREAKER-001) is surfaced
+    verbatim; any other stop uses its class name.
 
     Thin wrapper delegating to the COMMON
     :func:`brutex.notifications.sweep_alerts.emit_pull_halt_alert` (CLAUDE.md §11 —
@@ -3184,7 +3191,7 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     emit_pull_halt_alert(exc)
 
 
-def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
+def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: Any = None) -> bool:
     """Take the cross-process account single-flight lock for the CLI pull; report contention.
 
     DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996) — the cross-process pull lock
@@ -3205,12 +3212,57 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
     Only the genuine persisting LIVE pull takes the lock; ``--dry-run`` / ``--inspect``
     (which write no real lake data and pace no real account requests) deliberately do
     NOT call this, so an offline test or an inspect run never contends.
+
+    **Account-keyed second lock, taken FIRST (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001,
+    MIGRATION.md #1285):** before the lake-root lock this enters the ACCOUNT-keyed
+    :func:`~brutex.adapters.groww.pull_singleflight.account_pull_singleflight_lock`
+    (``~/.brutex/locks/pull_account<pbkdf2[:16]>.flock``), keyed off the AWS-resolved
+    api_key (:func:`~brutex.config.credentials.resolve_groww_aws_credentials` — the SOLE
+    credential source, DEC-AWS-ONLY-CREDS-001; the retired env-var path is NEVER read) —
+    so the SAME account pulled into TWO distinct lake roots is refused too (the #996
+    residual, closed for the single-host case). A ``CredentialsError`` SKIPS the account
+    lock gracefully with one loud log line (a credential-less run makes zero vendor
+    calls); the lake-root lock below still guards same-lake peers. The account lock is
+    strictly FIRST + the ExitStack releases LIFO, so the pair can never deadlock-invert
+    against ``pull_jobs.start()``'s identical order. *account_key_resolver* is the
+    injectable ``() -> str | None`` key seam (tests); ``None`` (production) resolves via
+    the AWS-only source.
     """
+    import structlog
+
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,
+        account_pull_singleflight_lock,
         pull_singleflight_lock,
     )
 
+    if account_key_resolver is not None:
+        account_key: str | None = account_key_resolver()
+    else:
+        from brutex.config.credentials import resolve_groww_aws_credentials
+        from brutex.config.credentials_types import CredentialsError
+
+        try:
+            account_key = resolve_groww_aws_credentials().api_key
+        except CredentialsError as exc:
+            account_key = None
+            structlog.get_logger("brutex.cli").warning(
+                "pull.account_lock_skipped",
+                reason="credentials unavailable — account-keyed single-flight not taken",
+                error=str(exc),
+            )
+    if account_key is not None:
+        try:
+            stack.enter_context(account_pull_singleflight_lock(account_key))
+        except PullAlreadyRunningError as exc:
+            print(
+                f"[brutex] {exc} — refusing to start a second concurrent pull for this "
+                "Groww account (it may be running against a DIFFERENT lake root). Wait "
+                "for the running pull to finish (or stop it) before re-running "
+                "`brutex fetch`.",
+                file=sys.stderr,
+            )
+            return False
     try:
         stack.enter_context(pull_singleflight_lock(lake_root))
     except PullAlreadyRunningError as exc:
@@ -3323,6 +3375,10 @@ _build_pull_health_monitor` build failure) is a no-op.
                 meter_snap,
                 wall_time=time.time(),
                 monotonic=time.monotonic(),
+                # DEC-CLI-BRIDGE-PULL-ACTIVE-001: each per-window publish carries the
+                # AUTHORITATIVE "a pull IS running" signal, so the dashboard's stall
+                # verdict is gated exactly like a dashboard pull's.
+                pull_active=True,
             )
         except LakeWriteHalt:
             # Disk-full / OOM is a genuine pull-wide stop — let it propagate so the existing
@@ -3346,6 +3402,56 @@ _build_pull_health_monitor` build failure) is a no-op.
                 log.warning("cli.pull_health.observe_failed", exc_info=True)
 
     return _on_window
+
+
+def _publish_cli_pull_inactive(lake_root: Path, controller: Any, adapter: Any) -> None:
+    """Best-effort publish ONE final ``pull_active=False`` bridge snapshot at pull end.
+
+    DEC-CLI-BRIDGE-PULL-ACTIVE-001: the per-window bridge publishes ``pull_active=True``
+    while the CLI pull runs; this final publish (invoked from ``cmd_fetch``'s ``finally``,
+    after the pipeline drain + the durable ledger persist) flips the flag to ``False`` so
+    the dashboard widget reads an honest ``done``/``idle`` the moment the pull ends —
+    never a red "stalled" mislabel on a just-finished CLI pull.
+
+    Wholly best-effort: EVERY error — including a :class:`~brutex.data.errors.LakeWriteHalt`
+    — is swallowed + logged, because the pull is already ENDING and its real outcome (a
+    clean exit, a crash, or a re-raised halt) must never be masked by a visibility
+    side-effect. A ``None`` *controller* (``--dry-run`` / ``--inspect`` — no bridge was
+    ever published) is a no-op, preserving the persistence-free contract.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (locates the ``.rate`` sidecar dir).
+    controller
+        The live pull's :class:`~brutex.adapters.rate_common.RateController`, or ``None``.
+    adapter
+        The market adapter; its ``client.meter`` supplies the final throughput snapshot.
+    """
+    if controller is None:
+        return
+
+    import time
+
+    import structlog
+
+    from brutex.data.rate_bridge import publish_from_snapshots
+
+    try:
+        meter = getattr(getattr(adapter, "client", None), "meter", None)
+        meter_snap: Mapping[str, Any] = meter.snapshot() if meter is not None else {}
+        publish_from_snapshots(
+            lake_root,
+            controller.snapshot(),
+            meter_snap,
+            wall_time=time.time(),
+            monotonic=time.monotonic(),
+            pull_active=False,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        structlog.get_logger("brutex.cli.rate_bridge").warning(
+            "cli.rate_bridge.finalize_failed", exc_info=True
+        )
 
 
 def cmd_fetch(
@@ -3660,6 +3766,7 @@ def cmd_fetch(
             from brutex.adapters.groww.constants import (
                 GROWW_RATE_LIMIT_PER_MIN,
                 GROWW_RATE_LIMIT_RPS_CEILING,
+                resolve_smooth_pacing_mode,
             )
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
@@ -3669,10 +3776,15 @@ def cmd_fetch(
             # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 8×60 = 480 < 500,
             # so the per-second ceiling is the binding gate without fighting the
             # governor; the AIMD ladder still steps DOWN on 429s (raised 5 → 8 on
-            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002).
+            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002). The smooth-pacing mode is
+            # threaded HERE too (DEC-SMOOTH-PACING-AUTOLATCH-001 — the CLI previously
+            # built the controller WITHOUT it, so BRUTEX_GROWW_SMOOTH_PACING was a
+            # dead flag on the `brutex fetch` path): unset ⇒ ADAPTIVE (auto-latch on
+            # burst-evidenced 429s), truthy ⇒ ON, explicit falsy ⇒ OFF.
             _rate = RateController(
                 ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
                 ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+                smooth_pacing_mode=resolve_smooth_pacing_mode(),
             )
             # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
             # controller's own on_rate_limit so a sustained 429 storm also fires a
@@ -3938,6 +4050,12 @@ def cmd_fetch(
                 drain_fetch_pipeline(fetch_pipeline)
                 drain_write_consumer(write_consumer)
                 end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+                # Final bridge publish (DEC-CLI-BRIDGE-PULL-ACTIVE-001): flip pull_active
+                # → False so the dashboard widget reads done/idle the moment the pull
+                # ends. Best-effort — swallows EVERYTHING (even LakeWriteHalt): the pull
+                # is already exiting and its real outcome must never be masked. A None
+                # controller (--dry-run / --inspect) is a no-op.
+                _publish_cli_pull_inactive(resolved, rate_controller, adapter)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger

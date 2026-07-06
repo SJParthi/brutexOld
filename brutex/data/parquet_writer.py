@@ -93,8 +93,9 @@ import contextlib
 import hashlib
 import itertools
 import time
+from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -126,6 +127,18 @@ if TYPE_CHECKING:  # pragma: no cover
 #: log lines), so the ``write_consumer`` (Lever 1 of DEC-FETCH-WRITE-OVERLAP)
 #: could not be sized or gated honestly. This event makes that cost a measurable
 #: fact. Cheap, always-on, O(1) (one ``info`` per PARTITION write, not per bar).
+#: LEVEL is per-writer (DEC-PREBUILD-LOG-FLOOD-001): the LIVE-PULL writers keep
+#: the INFO default (rare + valuable — one vendor window per write), while the
+#: pipeline PREBUILD's derived-TF writers construct with
+#: ``partition_log_level="debug"`` — the prebuild materialises ~66k contracts ×
+#: 20 TFs of tiny derived partitions, and at INFO those 205,609 lines (~132/s)
+#: rolled the 10 MiB × 5 rotation over in ~26 min, WIPING the 15.7 h fetch
+#: phase's rate/429/window-settle audit trail (measured, pull 2026-07-04/05
+#: pull_id 22fc7739f719 — an undocumented DEC-LAKE-WRITE-INSTRUMENT-001 ×
+#: DEC-PIPELINE-AUTOPREBUILD-001 interaction). The telemetry is NOT dropped:
+#: the fields survive in aggregate via the per-symbol
+#: ``lake.derived.write_summary`` INFO (timeframe_materialize) and per-partition
+#: at DEBUG for a deliberately-verbose session.
 _LOG = structlog.get_logger("brutex.data.parquet_writer")
 
 
@@ -347,6 +360,39 @@ class BarConflict:
     vendor: CandleBar
 
 
+def max_conflict_close_delta(conflicts: Iterable[BarConflict]) -> Decimal | None:
+    """The max absolute vendor-vs-stored CLOSE delta across *conflicts* — exact Decimal.
+
+    DEC-VENDOR-CONFLICT-SURFACE-001: the ONE derivation of a conflict batch's
+    "how far did the vendor's re-stated close drift" figure, shared by the sink
+    fold, both ingest spines, and the pipeline headline (CLAUDE.md §11 COMMON).
+    Prices are Decimal rupees (CLAUDE.md §6 price-unit row — NEVER float), so the
+    delta stays exact through every fold. Returns ``None`` for an empty batch —
+    honestly distinct from a genuine ``Decimal("0")`` delta (a conflict whose
+    close matched while another OHLCV/OI field differed).
+    """
+    delta: Decimal | None = None
+    for c in conflicts:
+        delta = fold_max_close_delta(delta, abs(c.vendor.close - c.stored.close))
+    return delta
+
+
+def fold_max_close_delta(a: Decimal | None, b: Decimal | None) -> Decimal | None:
+    """MAX-fold two optional close deltas — ``None`` is the identity (DEC-VENDOR-CONFLICT-SURFACE-001).
+
+    The pure fold every aggregation level uses (window → series → phase →
+    pipeline headline): commutative, associative, ``None``-identity, and exact
+    (Decimal comparison — no float round-trip, CLAUDE.md §4 money rule). Two
+    ``None``\\s fold to ``None`` (no conflict observed anywhere), never a
+    fabricated zero (Golden Rule #1).
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
 @dataclass(frozen=True, slots=True)
 class WriteResult:
     """Outcome of a successful :meth:`ParquetWriter.write` call.
@@ -381,6 +427,17 @@ class WriteResult:
         fresh keep-first write (DEC-FRESH-WRITE-BATCH-DEDUP-001). The stored /
         first-occurrence bar was kept (keep-first, never overwritten). Empty tuple
         for a duplicate-free first write or a clean re-pull with no value changes.
+    vendor_dup_rows_dropped
+        WITHIN-BATCH duplicate-timestamp rows the vendor physically sent in THIS
+        write's batch and the writer collapsed (DEC-VENDOR-CONFLICT-SURFACE-001)
+        — the SAME count the aggregated ``lake.vendor_duplicate_rows`` WARNING
+        reports, now carried on the result so the pull can SUM it end-to-end
+        instead of the count dying in the log. Covers BOTH branches (the fresh
+        ``_dedup_batch`` collapse AND the merge branch's timestamp-keyed-dict
+        collapse — the count is the batch's ``len − len(unique timestamps)``
+        either way). STORED-poison heals (``lake.partition.dedup_healed`` — rows
+        a PRIOR write landed) are deliberately NOT counted here: they are a heal
+        surface, not this batch's vendor behaviour.
     """
 
     path: Path
@@ -391,6 +448,7 @@ class WriteResult:
     bytes_written: int
     bars_added: int = 0
     conflicts: tuple[BarConflict, ...] = ()
+    vendor_dup_rows_dropped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,10 +504,23 @@ class ParquetWriter:
     lake_root
         Top-level data-lake directory. Must be a :class:`pathlib.Path`.
         The directory is created on first write.
+    partition_log_level
+        The level of the per-partition ``lake.partition.write`` telemetry event
+        (DEC-PREBUILD-LOG-FLOOD-001): ``"info"`` (default — the LIVE-PULL
+        vendor-write path, rare + valuable) or ``"debug"`` (the pipeline
+        prebuild's DERIVED-timeframe writers, whose ~10⁵ per-partition lines at
+        INFO rotated the whole fetch-phase audit trail away in ~26 minutes).
+        Event NAME + FIELDS are identical at either level — only the level
+        moves; any other value raises :class:`WriterError` (fail-closed).
     """
 
-    def __init__(self, *, lake_root: Path) -> None:
+    def __init__(self, *, lake_root: Path, partition_log_level: str = "info") -> None:
+        if partition_log_level not in ("info", "debug"):
+            raise WriterError(
+                f"unknown partition_log_level {partition_log_level!r}; expected 'info' or 'debug'"
+            )
         self._lake_root = lake_root
+        self._partition_log = _LOG.debug if partition_log_level == "debug" else _LOG.info
 
     @property
     def lake_root(self) -> Path:
@@ -515,7 +586,11 @@ class ParquetWriter:
         — the throughput-binding step the pull-log forensic could only INFER —
         a measurable fact, so the overlap ``write_consumer`` (Lever 1 of
         DEC-FETCH-WRITE-OVERLAP) can be sized + gated honestly. Cheap, always-on,
-        O(1) (one ``info`` per partition write, NOT per bar).
+        O(1) (one event per partition write, NOT per bar) — emitted at the
+        writer's ``partition_log_level`` (INFO on the live-pull writers, DEBUG
+        on the prebuild's derived-TF writers — DEC-PREBUILD-LOG-FLOOD-001, so
+        the derived fan-out can never rotate the fetch-phase audit trail away;
+        same event name + fields at either level).
         """
         if merge_mode not in ("keep-first", "latest-wins"):
             raise WriterError(
@@ -659,9 +734,11 @@ class ParquetWriter:
 
         # Emit the per-partition write telemetry AFTER the locks are released (the
         # log call is not itself part of the serialised critical section). One
-        # `info` per successful partition write — the throughput-binding cost the
-        # pull-log forensic could only INFER, now a measurable fact.
-        _LOG.info(
+        # event per successful partition write — the throughput-binding cost the
+        # pull-log forensic could only INFER, now a measurable fact. INFO on the
+        # live-pull writers, DEBUG on the prebuild's derived-TF writers
+        # (DEC-PREBUILD-LOG-FLOOD-001 — the per-writer `partition_log_level`).
+        self._partition_log(
             "lake.partition.write",
             append_ms=round(append_ms, 3),
             lock_wait_ms=round(lock_wait_ms, 3),
@@ -686,6 +763,14 @@ class ParquetWriter:
                 dropped=duplicates_in_batch,
                 partition=str(dest),
             )
+            # Carry the SAME count on the result (DEC-VENDOR-CONFLICT-SURFACE-001)
+            # so the sink → spine → phase → headline fold can SUM it — the count
+            # no longer dies in the log. ONE stamp site covers BOTH branches (the
+            # fresh `_dedup_batch` collapse and the merge dict collapse both drop
+            # exactly the batch's within-batch duplicate timestamps counted above).
+            # The zero-duplicate path returns the branch result untouched
+            # (byte-identical fast path, no extra allocation).
+            result = replace(result, vendor_dup_rows_dropped=duplicates_in_batch)
         return result
 
     def _merge_write(

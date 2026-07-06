@@ -22,11 +22,14 @@ from brutex.adapters.error_storm_breaker import (
     ErrorStormBreaker,
     VendorDownError,
     _resolve_minutes,  # pyright: ignore[reportPrivateUsage] — whitebox env-resolver test
+    observe_authorisation_failure,
     observe_window_failure,
     observe_window_success,
     resolve_error_storm_breaker,
 )
 from brutex.adapters.groww.constants import (
+    GROWW_AUTHZ_STORM_MIN_SYMBOLS,
+    GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV,
     GROWW_CREDENTIAL_DEAD_MIN_MINUTES,
     GROWW_CREDENTIAL_DEAD_MINUTES_ENV,
     GROWW_CREDENTIAL_DEAD_STREAK,
@@ -38,6 +41,8 @@ from brutex.adapters.groww.constants import (
     GROWW_STORM_MIN_SYMBOLS_ENV,
 )
 from brutex.adapters.groww.errors import (
+    GrowwAuthorisationError,
+    GrowwAuthorisationStormError,
     GrowwCredentialDeadError,
     GrowwServerError,
     GrowwTimeoutError,
@@ -68,10 +73,12 @@ def _breaker(
     min_failures: int = 5,
     streak: int = 4,
     min_seconds: float = 0.0,
+    authz_min: int = 5,
     enabled: bool = True,
     now: Callable[[], float] | None = None,
     on_vendor: Callable[[VendorDownError], None] | None = None,
     on_cred: Callable[[GrowwCredentialDeadError], None] | None = None,
+    on_authz: Callable[[GrowwAuthorisationStormError], None] | None = None,
 ) -> ErrorStormBreaker:
     """A small-threshold breaker with recording no-op alert hooks by default."""
     return ErrorStormBreaker(
@@ -79,10 +86,12 @@ def _breaker(
         min_failed_windows=min_failures,
         credential_dead_streak=streak,
         credential_dead_min_seconds=min_seconds,
+        authz_min_distinct_symbols=authz_min,
         enabled=enabled,
         now=now if now is not None else _Clock(),
         alert_vendor_down=on_vendor if on_vendor is not None else (lambda _h: None),
         alert_credential_dead=on_cred if on_cred is not None else (lambda _h: None),
+        alert_authorisation_storm=on_authz if on_authz is not None else (lambda _h: None),
     )
 
 
@@ -639,13 +648,14 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         GROWW_STORM_MIN_FAILURES_ENV,
         GROWW_CREDENTIAL_DEAD_STREAK_ENV,
         GROWW_CREDENTIAL_DEAD_MINUTES_ENV,
+        GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV,
         GROWW_ERROR_STORM_ENABLED_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
 
 
-@pytest.mark.usefixtures("clean_env")
+@pytest.mark.usefixtures("clean_env")  # pyright: ignore[reportUntypedClassDecorator]
 class TestResolveEnvConfig:
     def test_defaults(self) -> None:
         b = resolve_error_storm_breaker()
@@ -653,6 +663,7 @@ class TestResolveEnvConfig:
         assert b.min_failed_windows == GROWW_STORM_MIN_FAILED_WINDOWS
         assert b.credential_dead_streak == GROWW_CREDENTIAL_DEAD_STREAK
         assert b.credential_dead_min_seconds == GROWW_CREDENTIAL_DEAD_MIN_MINUTES * 60.0
+        assert b.authz_min_distinct_symbols == GROWW_AUTHZ_STORM_MIN_SYMBOLS == 5
         assert b.enabled is True
 
     def test_env_overrides(self, clean_env: pytest.MonkeyPatch) -> None:
@@ -660,11 +671,13 @@ class TestResolveEnvConfig:
         clean_env.setenv(GROWW_STORM_MIN_FAILURES_ENV, "40")
         clean_env.setenv(GROWW_CREDENTIAL_DEAD_STREAK_ENV, "12")
         clean_env.setenv(GROWW_CREDENTIAL_DEAD_MINUTES_ENV, "2.5")
+        clean_env.setenv(GROWW_AUTHZ_STORM_MIN_SYMBOLS_ENV, "9")
         b = resolve_error_storm_breaker()
         assert b.min_distinct_symbols == 5
         assert b.min_failed_windows == 40
         assert b.credential_dead_streak == 12
         assert b.credential_dead_min_seconds == 150.0
+        assert b.authz_min_distinct_symbols == 9
 
     def test_bad_values_fail_safe_to_defaults(self, clean_env: pytest.MonkeyPatch) -> None:
         clean_env.setenv(GROWW_STORM_MIN_FAILURES_ENV, "not-an-int")
@@ -696,3 +709,180 @@ class TestResolveEnvConfig:
         assert _resolve_minutes(GROWW_CREDENTIAL_DEAD_MINUTES_ENV, 7.0) == 0.0  # zero OK
         clean_env.setenv(GROWW_CREDENTIAL_DEAD_MINUTES_ENV, "3.5")
         assert _resolve_minutes(GROWW_CREDENTIAL_DEAD_MINUTES_ENV, 7.0) == 3.5
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-GROWW-AUTHZ-QUARANTINE-001 — the authorisation-storm arm
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _authz_n(breaker: ErrorStormBreaker, symbols: list[str]) -> None:
+    """Observe one terminal authorisation rejection per symbol in *symbols*."""
+    for symbol in symbols:
+        breaker.observe_authz_failure(symbol, error_type="GrowwAuthorisationError")
+
+
+class TestAuthorisationStormArm:
+    """The distinct-symbol authorisation escalation (fail-before: the arm did not exist)."""
+
+    def test_trips_at_the_distinct_symbol_threshold(self) -> None:
+        fired: list[GrowwAuthorisationStormError] = []
+        b = _breaker(authz_min=5, on_authz=fired.append)
+        _authz_n(b, ["S1", "S2", "S3", "S4"])
+        assert b.tripped is False
+        with pytest.raises(GrowwAuthorisationStormError) as exc_info:
+            b.observe_authz_failure("S5", error_type="GrowwAuthorisationError")
+        assert b.trip_rule == "authorisation_storm"
+        assert exc_info.value.distinct_symbols == 5
+        assert exc_info.value.symbols == ("S1", "S2", "S3", "S4", "S5")
+        assert len(fired) == 1  # the CRITICAL alert hook fires ONCE at the transition
+
+    def test_below_threshold_never_trips(self) -> None:
+        b = _breaker(authz_min=5)
+        _authz_n(b, ["S1", "S2", "S3", "S4"])
+        assert b.tripped is False
+        assert b.authz_distinct_symbols == 4
+
+    def test_same_symbol_reobserved_never_inflates_the_distinct_count(self) -> None:
+        b = _breaker(authz_min=3)
+        _authz_n(b, ["STICKY"] * 10)  # one restricted symbol, many windows/rounds
+        assert b.tripped is False
+        assert b.authz_distinct_symbols == 1
+
+    def test_transport_success_resets_the_authz_set(self) -> None:
+        """An accepted fetch disproves account-wide suspension — the set clears."""
+        b = _breaker(authz_min=3)
+        _authz_n(b, ["S1", "S2"])
+        b.observe_success("HEALTHY")
+        assert b.authz_distinct_symbols == 0
+        _authz_n(b, ["S3", "S4"])
+        assert b.tripped is False  # 2 post-success symbols < 3 — the reset held
+
+    def test_threshold_zero_disables_the_arm(self) -> None:
+        b = _breaker(authz_min=0)
+        _authz_n(b, [f"S{i}" for i in range(50)])
+        assert b.tripped is False
+
+    def test_disabled_breaker_observes_nothing(self) -> None:
+        b = _breaker(authz_min=1, enabled=False)
+        _authz_n(b, ["S1"])
+        assert b.tripped is False
+        assert b.authz_distinct_symbols == 0
+
+    def test_latched_authz_trip_keeps_raising_on_further_authz(self) -> None:
+        fired: list[GrowwAuthorisationStormError] = []
+        b = _breaker(authz_min=1, on_authz=fired.append)
+        with pytest.raises(GrowwAuthorisationStormError):
+            b.observe_authz_failure("S1", error_type="GrowwAuthorisationError")
+        with pytest.raises(GrowwAuthorisationStormError):
+            b.observe_authz_failure("S2", error_type="GrowwAuthorisationError")
+        assert len(fired) == 1  # re-raises never re-alert
+
+    def test_latched_authz_trip_raises_on_further_transport_failures_too(self) -> None:
+        """Every in-flight worker stops promptly, whichever observation lands next."""
+        b = _breaker(authz_min=1)
+        with pytest.raises(GrowwAuthorisationStormError):
+            b.observe_authz_failure("S1", error_type="GrowwAuthorisationError")
+        with pytest.raises(GrowwAuthorisationStormError):
+            b.observe_transport_failure(
+                "OTHER", error_type="GrowwTimeoutError", window_key=_next_key()
+            )
+
+    def test_authz_observation_on_vendor_down_latched_breaker_raises_that_halt(self) -> None:
+        b = _breaker(min_symbols=1, min_failures=1, authz_min=99)
+        with pytest.raises(VendorDownError):
+            _fail_n(b, 1)
+        with pytest.raises(VendorDownError):
+            b.observe_authz_failure("S1", error_type="GrowwAuthorisationError")
+
+    def test_authz_observation_on_credential_dead_latched_breaker_raises_that_halt(self) -> None:
+        b = _breaker(streak=1, min_seconds=0.0, authz_min=99)
+        with pytest.raises(GrowwCredentialDeadError):
+            b.observe_transport_failure(
+                "A", error_type="stale", window_key=_next_key(), still_stale=True
+            )
+        with pytest.raises(GrowwCredentialDeadError):
+            b.observe_authz_failure("S1", error_type="GrowwAuthorisationError")
+
+    def test_authz_arm_is_orthogonal_to_the_other_two_arms(self) -> None:
+        """An authz observation neither counts toward nor resets vendor-down / stale."""
+        b = _breaker(min_symbols=3, min_failures=5, streak=4, authz_min=99)
+        _fail_n(b, 2, symbol="T1")
+        b.observe_transport_failure(
+            "A", error_type="stale", window_key=_next_key(), still_stale=True
+        )
+        before = b.counts()
+        _authz_n(b, ["Z1", "Z2"])
+        assert b.counts() == before  # vendor-down + stale state byte-unchanged
+        assert b.authz_distinct_symbols == 2
+
+    def test_trip_logs_the_critical_event_once(self) -> None:
+        b = _breaker(authz_min=1)
+        with capture_logs() as logs, pytest.raises(GrowwAuthorisationStormError):
+            b.observe_authz_failure("S1", error_type="GrowwAuthorisationError")
+        trips = [e for e in logs if e["event"] == "error_storm.tripped"]
+        assert len(trips) == 1
+        assert trips[0]["rule"] == "authorisation_storm"
+
+    def test_default_authz_alert_publishes_via_sweep_alerter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[int] = []
+
+        class _FakeAlerter:
+            def authorisation_storm(self, *, distinct_symbols: int) -> bool:
+                captured.append(distinct_symbols)
+                return True
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
+        b = ErrorStormBreaker(authz_min_distinct_symbols=1)
+        with pytest.raises(GrowwAuthorisationStormError):
+            b.observe_authz_failure("A", error_type="GrowwAuthorisationError")
+        assert captured == [1]
+
+    def test_default_authz_alert_swallows_its_own_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _BoomAlerter:
+            def __init__(self) -> None:
+                raise RuntimeError("alerter construction blew up")
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _BoomAlerter)
+        b = ErrorStormBreaker(authz_min_distinct_symbols=1)
+        with capture_logs() as logs, pytest.raises(GrowwAuthorisationStormError):
+            b.observe_authz_failure("A", error_type="GrowwAuthorisationError")
+        assert any(e["event"] == "error_storm.authorisation_storm_alert_failed" for e in logs)
+
+
+class TestAuthorisationSeam:
+    """The None-safe COMMON seam the spines' terminal authorisation paths call."""
+
+    def test_none_breaker_is_a_no_op(self) -> None:
+        observe_authorisation_failure(
+            None, symbol="S", window_key=("W", 0), exc=GrowwAuthorisationError("x")
+        )  # must not raise
+
+    def test_below_threshold_observation_returns_quietly(self) -> None:
+        b = _breaker(authz_min=5)
+        observe_authorisation_failure(
+            b, symbol="S1", window_key=_next_key(), exc=GrowwAuthorisationError("x")
+        )
+        assert b.authz_distinct_symbols == 1
+
+    def test_trip_propagates_through_the_seam(self) -> None:
+        b = _breaker(authz_min=1)
+        with pytest.raises(GrowwAuthorisationStormError):
+            observe_authorisation_failure(
+                b, symbol="S1", window_key=_next_key(), exc=GrowwAuthorisationError("x")
+            )
+
+    def test_breaker_bug_never_crashes_a_pull(self) -> None:
+        class _BuggyBreaker(ErrorStormBreaker):
+            def observe_authz_failure(self, symbol: str, *, error_type: str) -> None:
+                raise RuntimeError("bug in authz path")
+
+        with capture_logs() as logs:
+            observe_authorisation_failure(
+                _BuggyBreaker(), symbol="S1", window_key=("W", 1), exc=GrowwAuthorisationError("x")
+            )
+        assert any(e["event"] == "error_storm.observe_authz_failed" for e in logs)

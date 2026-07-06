@@ -1492,3 +1492,117 @@ def test_fetch_windows_template_renders_status_label() -> None:
     assert "esc(label)" in template  # escaped, never raw interpolation
     assert "label && label !== v" in template  # replace-not-double-print guard
     assert "r.empty_streak" in template  # the legacy fallback widget is kept
+
+
+class TestLedgerDeltaAwareness:
+    """DEC-LEDGER-DELTA-FLUSH-001 — every /coverage ledger reader sees pending deltas.
+
+    The mid-pull flush now APPENDS delta Parquets beside ``ledger.parquet``
+    instead of rewriting it; a base-only reader would freeze for the whole
+    pull. The fast DuckDB paths DEFER to the fold-aware legacy read while
+    deltas are pending (the SQL-side fold is the named follow-up).
+    """
+
+    @staticmethod
+    def _append_delta(tmp_path: Path, security_id: str) -> None:
+        from brutex.data.window_ledger_store import append_ledger_delta, load_window_ledger
+
+        live = load_window_ledger(tmp_path)
+        live.record(
+            _window_key(security_id), raw_bars=7, error_type=None, bars_appended=7, now=_WINDOW_NOW
+        )
+        assert append_ledger_delta(live, tmp_path) == 1
+
+    def test_deltas_dirname_pinned_to_the_store_constant(self) -> None:
+        """The not-imported dirname copy cannot drift from the ONE definition."""
+        from brutex.dashboard import db_view as db_view_module
+        from brutex.data.window_ledger_store import DELTAS_DIRNAME
+
+        assert db_view_module._LEDGER_DELTAS_DIRNAME == DELTAS_DIRNAME
+
+    def test_window_payload_fast_path_defers_to_the_delta_fold(self, tmp_path: Path) -> None:
+        """With a conn AND pending deltas, the payload reflects the delta rows.
+
+        Regression: the DuckDB fast path reads ONLY the base Parquet, which the
+        mid-pull flush no longer rewrites — without the defer the page froze at
+        pull-start state for the whole pull.
+        """
+        import duckdb
+
+        base = WindowLedger()
+        base.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(base, tmp_path)
+        self._append_delta(tmp_path, "BANKNIFTY")
+        conn = duckdb.connect()
+        try:
+            payload = build_window_payload(tmp_path, conn=conn)
+        finally:
+            conn.close()
+        assert payload["source"] == "ledger"
+        assert payload["count"] == 2  # base row + the delta-only row
+        assert {w["symbol"] for w in payload["windows"]} == {"NIFTY", "BANKNIFTY"}
+        # Byte-parity with the conn-less legacy path (ONE fold, one answer).
+        assert payload == build_window_payload(tmp_path)
+
+    def test_window_payload_base_less_deltas_read_as_ledger(self, tmp_path: Path) -> None:
+        """A first pull's delta-only checkpoint is a LIVE ledger, never status_log."""
+        self._append_delta(tmp_path, "NIFTY")
+        payload = build_window_payload(tmp_path)
+        assert payload["source"] == "ledger"
+        assert [w["symbol"] for w in payload["windows"]] == ["NIFTY"]
+
+    def test_records_cache_refreshes_on_a_delta_append(self, tmp_path: Path) -> None:
+        base = WindowLedger()
+        base.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(base, tmp_path)
+        assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {"NIFTY"}
+        self._append_delta(tmp_path, "SENSEX")  # base mtime UNTOUCHED
+        assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {
+            "NIFTY",
+            "SENSEX",
+        }
+
+    def test_spot_window_rollup_sees_mid_pull_deltas(self, tmp_path: Path) -> None:
+        from brutex.dashboard.db_view import spot_window_rollup
+
+        base = WindowLedger()
+        base.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(base, tmp_path)
+        assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
+        self._append_delta(tmp_path, "BANKNIFTY")  # base mtime UNTOUCHED
+        assert spot_window_rollup(tmp_path) == {
+            ("NIFTY", "1minute"): (1, 0, 0),
+            ("BANKNIFTY", "1minute"): (1, 0, 0),
+        }
+
+    def test_spot_window_rollup_base_less_deltas(self, tmp_path: Path) -> None:
+        from brutex.dashboard.db_view import spot_window_rollup
+
+        self._append_delta(tmp_path, "NIFTY")
+        assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
+
+    def test_phase_progress_folds_pending_deltas(self, tmp_path: Path) -> None:
+        """Mid-pull the live phase rows count over the fold, not the frozen base."""
+        import duckdb
+        from brutex.data.window_ledger_store import ledger_path as _ledger_path
+
+        base = WindowLedger()
+        base.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(base, tmp_path)
+        self._append_delta(tmp_path, "BANKNIFTY")
+        conn = duckdb.connect()
+        try:
+            rows = phase_progress_payload(conn, _ledger_path(tmp_path), current_phase="spot")
+        finally:
+            conn.close()
+        spot_row = next(r for r in rows if r["phase"] == "spot")
+        assert spot_row["done"] == 2  # the delta row is COUNTED mid-pull
+        assert spot_row["total"] == 2
