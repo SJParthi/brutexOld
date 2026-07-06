@@ -216,6 +216,19 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     ------
     UnsupportedTradeOutcomeError
         If ``trade.trade_outcome`` is not ``"NORMAL_CLOSE"`` (MAJOR-1).
+    UnverifiedCostRegimeError
+        If ``entry_dt_ist.date()`` < 2024-10-01: the ETC regime for the
+        date is an UNVERIFIED refusal window — the whole trade cost is
+        refused, no component fabricated (DEC-ETC-REGIME-HISTORY-001;
+        raised out of Step 6's ``exchange_charge_bps_x100``). The options
+        executor prechecks-and-rejects such trades BEFORE calling here,
+        so this raise is the defence-in-depth choke point for direct
+        callers. DEAD-CODE-AUDITOR NOTE: the VERIFIED pre-Oct-2024 STT
+        options regime (6_250) is retained but becomes unreachable
+        THROUGH ``compute_trade_cost`` for options (Step 5 computes it,
+        Step 6 refuses first) — it stays unit-covered directly via
+        ``stt_options_rate_bps_x100`` (test_costs_regime_table.py +
+        test_stt_regime_boundary_oct_2024).
     """
     # ── Step 0: fail loud on an unimplemented outcome (MAJOR-1) ─────────
     # Only NORMAL_CLOSE is implemented. Pricing an expiry outcome with the
@@ -258,9 +271,11 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
 
     # ── Step 6: exchange transaction charge (both sides on premium) ─────
     # Date-regime-selected like STT (COMMON rate_for_date mechanism). Only
-    # the current post-2024-10-01 rates are VERIFIED; pre-boundary dates
-    # ride an explicit UNVERIFIED same-rate placeholder (likely UNDER-
-    # costed) — see brutex.costs.constants' TODO(UNVERIFIED) ETC block.
+    # the current post-2024-10-01 rates are VERIFIED; a pre-boundary date
+    # lands on an explicit refusal row and RAISES UnverifiedCostRegimeError
+    # here (DEC-ETC-REGIME-HISTORY-001) — the options executor prechecks
+    # and rejects such trades before reaching this point, so this raise is
+    # the authoritative defence-in-depth choke point for direct callers.
     exch_rate_bps_x100 = C.exchange_charge_bps_x100(trade.instrument, trade.entry_dt_ist.date())
     exch_buy_paisa = _round_to_paisa(buy_notional_paisa * exch_rate_bps_x100)
     exch_sell_paisa = _round_to_paisa(sell_notional_paisa * exch_rate_bps_x100)

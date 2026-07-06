@@ -6527,6 +6527,21 @@ def _render_options_leaderboard(
             f"{format_inr(res.gross_pnl_paisa):>16} {format_inr(res.total_charges_paisa):>14} "
             f"{format_inr(res.net_pnl_paisa):>16}"
         )
+    # DEC-ETC-REGIME-HISTORY-001 honesty footer: trades skipped on an
+    # UNVERIFIED cost-regime window are surfaced, never silently absorbed.
+    # The boundary date is derived from the regime-table DATA (the max
+    # refusal-window end across exchanges), never hardcoded.
+    n_unverified = sum(getattr(r, "n_rejected_cost_regime_unverified", 0) for r in results)
+    if n_unverified:
+        from brutex.costs.constants import etc_unverified_windows
+
+        ends = [end for spans in etc_unverified_windows().values() for _start, end in spans if end]
+        verified_from = max(ends).isoformat() if ends else "open"
+        lines.append(
+            f"⚠ {n_unverified} trade(s) fell in the UNVERIFIED pre-{verified_from} ETC "
+            f"window — skipped, never priced with a fabricated rate "
+            f"(COSTS_VERIFIED §20 row 1)"
+        )
     return "\n".join(lines)
 
 

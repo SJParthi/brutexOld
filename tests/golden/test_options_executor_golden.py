@@ -1,4 +1,5 @@
-"""Golden byte-equality oracle for the options executor (DEC-OPTIONS-EXECUTOR-001).
+"""Golden byte-equality oracle for the options executor (DEC-OPTIONS-EXECUTOR-001
++ DEC-ETC-REGIME-HISTORY-001).
 
 Two fully hand-derived fixtures whose every emitted field — selected leg, paisa
 conversions, and the full per-charge cost breakdown — is computed by hand below
@@ -8,29 +9,35 @@ test. The cost-rate constants themselves are independently golden-tested in
 ``tests/golden`` / ``tests/unit/test_costs_calculator.py``; this test pins the
 *executor's use* of them.
 
-Entry date 2024-05-02 (STT regime: pre-2024-10-01 → 0.0625%). Lot sizes from
-``brutex.options.lot_size_history``: NIFTY = 25, SENSEX = 10. 1-tick = 5 paisa.
+Entry date 2024-10-03 (RELOCATED from the pre-boundary 2024-05-02 by
+DEC-ETC-REGIME-HISTORY-001 — a pre-2024-10-01 date now REJECTS on the
+UNVERIFIED ETC refusal window, pinned by the refusal golden below). Date
+hygiene: 2024-10-03 is a Thursday, 7 weeks clear of the 2024-11-20 NIFTY
+lot transition (lot 25 since 2024-04-26; SENSEX lot 10 until 2024-11-20).
+STT regime: 2024-10-01 → 0.10% (10_000 bps×100). 1-tick = 5 paisa.
 
 Fixture A — NIFTY BULL ``atm`` (long_call), entry ₹120.00 → exit ₹150.00:
   ATM(25012, step 50) = 25000; CE strike 25000, offset 0.
   buy_fill = 12000 + 5 = 12005;  sell_fill = 15000 − 5 = 14995;  n_shares = 25.
   buy_notional = 300125;  sell_notional = 374875;  gross = +74750.
   brokerage = 2×2000 = 4000.
-  STT = round₹(374875×6250//1e7 = 234) = 200.
+  STT = round₹(374875×10000//1e7 = 374) = 400.
   exch(NSE 3503) = ⌈300125×3503⌉ₚ + ⌈374875×3503⌉ₚ = 105 + 131 = 236.
   sebi(10) = 0 + 0 = 0;  ipft(NSE 50) = 2 + 2 = 4;  stamp(300, buy) = round₹(9) = 0.
   GST = round₹((4000+236+0+4)×18% = 763) = 800.
-  total = 4000+200+236+0+4+0+800 = 5240;  net = 74750 − 5240 = +69510.
+  total = 4000+400+236+0+4+0+800 = 5440;  net = 74750 − 5440 = +69310.
 
 Fixture B — SENSEX BEAR ``atm_plus_1_in_dir`` (long_put), entry ₹200.00 → ₹50.00:
   ATM(81012, step 100) = 81000; PE "further OTM" = lower strike 80900, offset −1.
   buy_fill = 20005;  sell_fill = 4995;  n_shares = 10.
   buy_notional = 200050;  sell_notional = 49950;  gross = −150100.
-  brokerage = 4000;  STT = round₹(49950×6250//1e7 = 31) = 0.
+  brokerage = 4000;  STT = round₹(49950×10000//1e7 = 49) = 0.
   exch(BSE 3250) = ⌈200050×3250⌉ₚ + ⌈49950×3250⌉ₚ = 65 + 16 = 81.
   sebi = 0;  ipft(BSE 0) = 0;  stamp = round₹(6) = 0.
   GST = round₹((4000+81)×18% = 734) = 700.
   total = 4000+0+81+0+0+0+700 = 4781;  net = −150100 − 4781 = −154881.
+  (Every cell byte-identical to the pre-relocation 2024-05-02 fixture —
+  STT rounds to 0 in both regimes; only the dates moved.)
 """
 
 from __future__ import annotations
@@ -43,6 +50,8 @@ from brutex.data.models import OptionBar
 from brutex.options.executor import (
     MaterializedTrade,
     OptionBarPair,
+    RejectedTrade,
+    RejectReason,
     SpotSignal,
     materialize_trade,
 )
@@ -50,8 +59,15 @@ from brutex.options.lot_size_history import OptionsUnderlying
 from brutex.options.strike_rules import RULES_BY_NAME, TradeDirection
 
 _IST = ZoneInfo("Asia/Kolkata")
-_ENTRY_TS = datetime(2024, 5, 2, 9, 16, tzinfo=_IST)
-_EXIT_TS = datetime(2024, 5, 2, 15, 20, tzinfo=_IST)
+_ENTRY_TS = datetime(2024, 10, 3, 9, 16, tzinfo=_IST)
+_EXIT_TS = datetime(2024, 10, 3, 15, 20, tzinfo=_IST)
+_EXPIRY = date(2024, 10, 31)
+
+#: The pre-boundary date the two fixtures used to live on — now the refusal
+#: golden's date (inside the UNVERIFIED [history-start → 2024-10-01) window).
+_PRE_BOUNDARY_ENTRY_TS = datetime(2024, 5, 2, 9, 16, tzinfo=_IST)
+_PRE_BOUNDARY_EXIT_TS = datetime(2024, 5, 2, 15, 20, tzinfo=_IST)
+_PRE_BOUNDARY_EXPIRY = date(2024, 5, 30)
 
 
 def _bar(side: str, open_rupees: str) -> OptionBar:
@@ -83,6 +99,14 @@ class _Source:
         )
 
 
+class _NeverCalledSource:
+    """A bar source that MUST NOT be read — proves the cost-regime precheck
+    fires BEFORE any lake I/O (zero reads per rejected pre-boundary signal)."""
+
+    def load_pair(self, **_kw: object) -> OptionBarPair | None:
+        raise AssertionError("load_pair must not be called for a pre-boundary signal")
+
+
 def test_golden_nifty_bull_atm() -> None:
     sig = SpotSignal(
         instrument=OptionsUnderlying.NIFTY,
@@ -90,7 +114,7 @@ def test_golden_nifty_bull_atm() -> None:
         entry_ts=_ENTRY_TS,
         exit_ts=_EXIT_TS,
         spot_at_entry=Decimal("25012"),
-        expiry_date=date(2024, 5, 30),
+        expiry_date=_EXPIRY,
     )
     out = materialize_trade(sig, RULES_BY_NAME["atm"], source=_Source("120.00", "150.00"))
     assert isinstance(out, MaterializedTrade)
@@ -109,16 +133,16 @@ def test_golden_nifty_bull_atm() -> None:
     assert b.buy_fill_paisa == 12005
     assert b.sell_fill_paisa == 14995
     assert b.brokerage_paisa == 4000
-    assert b.stt_paisa == 200
+    assert b.stt_paisa == 400
     assert b.exch_paisa == 236
     assert b.sebi_paisa == 0
     assert b.ipft_paisa == 4
     assert b.stamp_paisa == 0
     assert b.gst_paisa == 800
-    assert b.total_charges_paisa == 5240
+    assert b.total_charges_paisa == 5440
     assert b.gross_pnl_paisa == 74750
-    assert b.net_pnl_paisa == 69510
-    assert out.net_pnl_paisa == 69510
+    assert b.net_pnl_paisa == 69310
+    assert out.net_pnl_paisa == 69310
 
 
 def test_golden_sensex_bear_atm_plus_1() -> None:
@@ -128,7 +152,7 @@ def test_golden_sensex_bear_atm_plus_1() -> None:
         entry_ts=_ENTRY_TS,
         exit_ts=_EXIT_TS,
         spot_at_entry=Decimal("81012"),
-        expiry_date=date(2024, 5, 30),
+        expiry_date=_EXPIRY,
     )
     out = materialize_trade(
         sig, RULES_BY_NAME["atm_plus_1_in_dir"], source=_Source("200.00", "50.00")
@@ -157,3 +181,44 @@ def test_golden_sensex_bear_atm_plus_1() -> None:
     assert b.total_charges_paisa == 4781
     assert b.gross_pnl_paisa == -150100
     assert b.net_pnl_paisa == -154881
+
+
+def test_golden_boundary_exact_oct_1_materializes() -> None:
+    """Entry EXACTLY on 2024-10-01 (the verified ETC window start) returns a
+    MaterializedTrade through the FULL executor stack — kills bisect_right→
+    bisect_left mutants at the executor level (DEC-ETC-REGIME-HISTORY-001)."""
+    boundary_entry = datetime(2024, 10, 1, 9, 16, tzinfo=_IST)
+    boundary_exit = datetime(2024, 10, 1, 15, 20, tzinfo=_IST)
+    sig = SpotSignal(
+        instrument=OptionsUnderlying.NIFTY,
+        direction=TradeDirection.BULL,
+        entry_ts=boundary_entry,
+        exit_ts=boundary_exit,
+        spot_at_entry=Decimal("25012"),
+        expiry_date=_EXPIRY,
+    )
+    out = materialize_trade(sig, RULES_BY_NAME["atm"], source=_Source("120.00", "150.00"))
+    assert isinstance(out, MaterializedTrade)
+    assert out.breakdown.exch_paisa > 0
+
+
+def test_golden_pre_boundary_unverified_refusal() -> None:
+    """DEC-ETC-REGIME-HISTORY-001: the SAME two signals dated 2024-05-02
+    (inside the UNVERIFIED pre-2024-10-01 ETC window) are REJECTED with
+    ``COST_REGIME_UNVERIFIED`` for NIFTY (NSE) AND SENSEX (BSE) — and the
+    bar source is NEVER read (the precheck fires before any lake I/O)."""
+    for instrument, direction, spot, rule in (
+        (OptionsUnderlying.NIFTY, TradeDirection.BULL, Decimal("25012"), "atm"),
+        (OptionsUnderlying.SENSEX, TradeDirection.BEAR, Decimal("81012"), "atm_plus_1_in_dir"),
+    ):
+        sig = SpotSignal(
+            instrument=instrument,
+            direction=direction,
+            entry_ts=_PRE_BOUNDARY_ENTRY_TS,
+            exit_ts=_PRE_BOUNDARY_EXIT_TS,
+            spot_at_entry=spot,
+            expiry_date=_PRE_BOUNDARY_EXPIRY,
+        )
+        out = materialize_trade(sig, RULES_BY_NAME[rule], source=_NeverCalledSource())
+        assert isinstance(out, RejectedTrade)
+        assert out.reason is RejectReason.COST_REGIME_UNVERIFIED

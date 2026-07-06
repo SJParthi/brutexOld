@@ -1085,21 +1085,26 @@ jobs:
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
-          # 19d · brutex.costs.types (70 stmts, 10 branches, 37 tests)
+          # 19d · brutex.costs.types (95 stmts, 14 branches, 75 tests —
+          #       incl. the DEC-ETC-REGIME-HISTORY-001 UnverifiedCostRegimeError
+          #       direct-construction tests, REQUIRED here because this gate
+          #       collects test_costs_calculator.py ONLY)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
           else
             echo "(brutex.costs.types test file not present yet — gate inactive)"
           fi
-          # 19e · brutex.costs.constants (71 stmts, 10 branches; calculator tests
+          # 19e · brutex.costs.constants (112 stmts, 18 branches; calculator tests
           #       + the R2-OC-3 regime-table mechanism tests — rate_for_date's
-          #       ValueError guards live in test_costs_regime_table.py)
+          #       ValueError guards + the DEC-ETC-REGIME-HISTORY-001
+          #       UnverifiedCostRegimeError refusal branch live in
+          #       test_costs_regime_table.py + test_costs_calculator.py)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py tests/unit/test_costs_regime_table.py
           else
             echo "(brutex.costs.constants test file not present yet — gate inactive)"
           fi
-          # 19f · brutex.costs.calculator (51 stmts, 4 branches; same test)
+          # 19f · brutex.costs.calculator (63 stmts, 10 branches; same test)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.calculator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
           else
@@ -1362,7 +1367,7 @@ jobs:
           else
             echo "(brutex.options.strike_rules test file not present yet — gate inactive)"
           fi
-          # 21e · brutex.options.executor (221 stmts, 60 branches).
+          # 21e · brutex.options.executor (235 stmts, 64 branches).
           #       DEC-OPTIONS-EXECUTOR-001 — the spot-signal → priced-option
           #       materializer. The R2-OC reject-path tests live in
           #       test_options_executor_rejects.py (both files needed for 100%);
