@@ -66,6 +66,7 @@ from brutex.dashboard.gated_prebuild import (
     underlying_match_tokens,
 )
 from brutex.dashboard.prebuild_parallel import PrebuildWorkItem, run_work_items
+from brutex.data.derive_lock import derive_write_lock
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fs_probe import probe_allocation_granularity
 from brutex.data.timeframe_materialize import PrebuildKind
@@ -698,7 +699,16 @@ def run_pipeline_prebuild_parallel(
     # ONE pool over ALL phases' UNIQUE items (cores stay busy ACROSS phase
     # boundaries); results looked up per phase by partition coords.
     flat_items = [item for _, group, _ in deduped_groups for _, item in group]
-    results = run_work_items(flat_items, workers=workers)
+    # Hold the cross-process derive lock ONCE around the whole pool run
+    # (DEC-ENGINE-MISC-PACK-001's writer signal): each worker's
+    # ``materialize_lake_timeframes`` re-enters it via the process-local
+    # reentrancy registry (``derive_lock._HELD_DEPTHS``), so the workers run
+    # genuinely in parallel instead of serialising on the single exclusive
+    # flock. Readers (``derive_in_progress``) see "in flight" for the whole
+    # run — the conservative signal (the half-refreshed-TF-set hazard spans
+    # the run); cross-process serialisation vs a peer derive is unchanged.
+    with derive_write_lock(lake_root):
+        results = run_work_items(flat_items, workers=workers)
     result_by_coords = {
         (it.exchange, it.segment, it.symbol): res
         for it, res in zip(flat_items, results, strict=True)
