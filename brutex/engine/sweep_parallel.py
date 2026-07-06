@@ -255,6 +255,13 @@ def auto_sweep_workers(cpu_count: int | None) -> int:
     on exotic platforms) is treated as 1 → auto = 1 (sequential — never guess
     parallelism on an undetectable machine). O(1).
 
+    Since DEC-HARDWARE-ENVELOPE-001 this DELEGATES to the COMMON
+    :func:`brutex.config.hardware_envelope.cpu_pool_workers` (``reserve=2``,
+    ``cap=8``, sized off the logical count with ``prefer_performance=False`` and
+    an empty env so no override applies) — the ONE sizing formula (CLAUDE.md §11)
+    — with a byte-unchanged result:
+    ``min(max(1, n - 2), 8) == max(1, min(n - 2, 8))`` for the cap ``8 >= 1``.
+
     Parameters
     ----------
     cpu_count
@@ -265,9 +272,16 @@ def auto_sweep_workers(cpu_count: int | None) -> int:
     int
         The auto worker count (``>= 1``).
     """
-    if cpu_count is None:
-        cpu_count = 1
-    return max(1, min(cpu_count - AUTO_SWEEP_WORKERS_RESERVED_CPUS, AUTO_SWEEP_WORKERS_CAP))
+    from brutex.config.hardware_envelope import cpu_pool_workers, envelope_from
+
+    logical = cpu_count if cpu_count is not None and cpu_count >= 1 else 1
+    return cpu_pool_workers(
+        {},
+        reserve=AUTO_SWEEP_WORKERS_RESERVED_CPUS,
+        cap=AUTO_SWEEP_WORKERS_CAP,
+        prefer_performance=False,
+        envelope=envelope_from({"logical_cores": logical}),
+    )
 
 
 #: The bounded in-flight submission window, as a multiple of the pool size — caps
