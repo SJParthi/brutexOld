@@ -236,9 +236,7 @@ class TestReproHashesStructural:
         with pytest.raises(TypeError, match="data_snapshot_hash"):
             cast("Any", combo_digest)(1, "NIFTY", "5m", "bull")
 
-    def test_omitting_the_hashes_on_seen_and_record_is_a_typeerror(
-        self, tmp_path: Path
-    ) -> None:
+    def test_omitting_the_hashes_on_seen_and_record_is_a_typeerror(self, tmp_path: Path) -> None:
         with SweepCache.open(tmp_path / "c", bloom_capacity=1000) as cache:
             with pytest.raises(TypeError, match="data_snapshot_hash"):
                 cast("Any", cache.seen)(7, "NIFTY", "5m", "bull")
@@ -295,7 +293,9 @@ def test_open_creates_and_dedups(tmp_path: Path) -> None:
         assert cache.seen(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is False
         assert cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is True
         assert cache.seen(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is True
-        assert cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is False  # idempotent
+        assert (
+            cache.record(7, "NIFTY", "5m", "bull", {"sl": 100}, **_REPRO_KW) is False
+        )  # idempotent
 
 
 def test_close_is_idempotent(tmp_path: Path) -> None:
@@ -391,10 +391,10 @@ def test_property_recorded_combos_always_seen(
     d = tmp_path_factory.mktemp("kc")
     with SweepCache.open(d / "c", bloom_capacity=100_000) as cache:
         for mask, instrument, tf, direction in combos:
-            cache.record(mask, instrument, tf, direction, **_REPRO_KW)
+            cache.record(mask, instrument, tf, direction, None, **_REPRO_KW)
         # No false negatives — every recorded combo must be reported seen.
         for mask, instrument, tf, direction in combos:
-            assert cache.seen(mask, instrument, tf, direction, **_REPRO_KW) is True
+            assert cache.seen(mask, instrument, tf, direction, None, **_REPRO_KW) is True
 
 
 def test_reopen_reloads_persisted_membership(tmp_path: Path) -> None:
@@ -442,7 +442,7 @@ def test_resume_dedups_all_previously_recorded_without_manual_seed(
         assert snap["bloom_negatives"] == 0
         assert snap["hits"] == len(combos)
         # A genuinely-new combo is still correctly reported unseen (Bloom-negative).
-        assert resumed.seen(999, "NIFTY", "5m", "bull", **_REPRO_KW) is False
+        assert resumed.seen(999, "NIFTY", "5m", "bull", None, **_REPRO_KW) is False
 
 
 def test_cold_open_repopulate_is_noop(tmp_path: Path) -> None:
@@ -463,11 +463,11 @@ def test_resume_persisted_over_capacity_auto_grows_within_wall(tmp_path: Path) -
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask in range(5):
-            first.record(mask, "NIFTY", "5m", "bull", **_REPRO_KW)
+            first.record(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW)
     with capture_logs() as logs, SweepCache.open(root, bloom_capacity=3) as resumed:
         assert resumed._bloom.capacity == 5
         for mask in range(5):
-            assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
+            assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
     grows = [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
     assert len(grows) == 1
     assert grows[0]["persisted"] == 5
@@ -481,7 +481,7 @@ def test_resume_within_capacity_never_grows_and_never_logs(tmp_path: Path) -> No
     root = tmp_path / "c"
     with SweepCache.open(root, bloom_capacity=1000) as first:
         for mask in range(5):
-            first.record(mask, "NIFTY", "5m", "bull", **_REPRO_KW)
+            first.record(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW)
     with capture_logs() as logs, SweepCache.open(root, bloom_capacity=1000) as resumed:
         assert resumed._bloom.capacity == 1000
     assert not [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
@@ -705,7 +705,7 @@ class TestCapacityRefusalRemedy:
     def _seed(root: Path, count: int) -> None:
         with SweepCache.open(root, bloom_capacity=1000) as cache:
             for mask in range(count):
-                assert cache.record(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
+                assert cache.record(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
 
     def test_wall_refusal_closes_env_and_reopen_admits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -728,7 +728,7 @@ class TestCapacityRefusalRemedy:
                 SweepCache.open(root, bloom_capacity=3)
         with SweepCache.open(root, bloom_capacity=1000) as resumed:
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
 
     def test_bloom_config_error_after_exact_open_leaks_no_env(self, tmp_path: Path) -> None:
         """A BloomFilter CONFIG error (fpr out of range) also closes the env.
@@ -746,7 +746,7 @@ class TestCapacityRefusalRemedy:
             SweepCache.open(root, bloom_capacity=1000, bloom_fpr=0.9)
         with SweepCache.open(root, bloom_capacity=1000) as resumed:
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
 
     def test_env_knob_small_capacity_self_heals_by_auto_grow(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -757,7 +757,7 @@ class TestCapacityRefusalRemedy:
         monkeypatch.setenv(SWEEP_CACHE_BLOOM_CAPACITY_ENV, "3")
         with capture_logs() as logs, SweepCache.open(root) as resumed:
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
         assert [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
 
     def test_explicit_knob_still_pre_sizes_without_grow(self, tmp_path: Path) -> None:
@@ -767,7 +767,7 @@ class TestCapacityRefusalRemedy:
         with capture_logs() as logs, SweepCache.open(root, bloom_capacity=10) as resumed:
             assert resumed._bloom.capacity == 10
             for mask in range(5):
-                assert resumed.seen(mask, "NIFTY", "5m", "bull", **_REPRO_KW) is True
+                assert resumed.seen(mask, "NIFTY", "5m", "bull", None, **_REPRO_KW) is True
         assert not [e for e in logs if e["event"] == "sweep_cache.bloom_auto_grow"]
 
 

@@ -282,9 +282,7 @@ def _auto_grow_capacity(configured_capacity: int, persisted: int, fpr_target: fl
 #: (DEC-COMBO-DIGEST-REPRO-HASHES-001) and are injected into the canonical
 #: payload internally, so a caller-supplied ``params`` carrying any of them
 #: would be a second, conflicting channel — refused loudly, never merged.
-_RESERVED_REPRO_KEYS = frozenset(
-    {"data_snapshot_hash", "indicator_version", "code_commit_sha"}
-)
+_RESERVED_REPRO_KEYS = frozenset({"data_snapshot_hash", "indicator_version", "code_commit_sha"})
 
 
 def combo_digest(
