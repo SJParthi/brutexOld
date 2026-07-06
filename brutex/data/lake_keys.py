@@ -32,6 +32,13 @@ unresolved) are:
 2. the row's OWN ``"<exchange>-"`` prefix (``"NSE-M&M"`` → ``"M&M"``) —
    data-driven off the partition's exchange, never a hardcoded exchange list, so
    a hyphenated symbol like ``BAJAJ-AUTO`` is never mangled.
+
+DEC-GREEKS-SPOTJOIN-STOCK-001: case/space/hyphen folding happens ONLY inside
+the master-VERIFIED injected ``stock_drift`` map (evidence-grounded — built by
+:mod:`brutex.data.spot_drift` from the REAL on-disk spot dirs cross-checked
+against the instrument master; :func:`stock_drift_fold` is the shared fold);
+the raw ladder itself remains fold-free and unconditional case-folding remains
+refused, and the ``&``-encoding refusal above stands verbatim.
 """
 
 from __future__ import annotations
@@ -40,6 +47,36 @@ import json
 import os
 from collections.abc import Mapping
 from typing import Final
+
+#: The evidence-grounded stock drift map (DEC-GREEKS-SPOTJOIN-STOCK-001):
+#: ``(exchange, fold)`` → the ORDERED on-disk spot dir names that fold to that
+#: unique master symbol (master-exact name first, then lexicographic — the #911
+#: "best real data wins" rank-merge semantics; the PROBE decides which fragment
+#: carries data). Built and verified in :mod:`brutex.data.spot_drift`; this
+#: module stays pure and I/O-free — the map is passed IN. Treat as frozen: the
+#: production value is a plain ``dict`` so it can cross the spawn pickle
+#: boundary (never a ``MappingProxyType``).
+type StockDriftMap = Mapping[tuple[str, str], tuple[str, ...]]
+
+
+def stock_drift_fold(symbol: str) -> str:
+    """Irreversible-normalisation fold used ONLY for evidence matching.
+
+    EXACTLY mirrors :func:`brutex.universe.normalize_underlying_symbol`
+    (``symbol.upper().replace(" ", "").replace("-", "")``) — the
+    documented-mirror pattern of :data:`_SOURCED_INDEX_SPOT_ALIASES` /
+    the #1038 ``_is_pool_isolatable`` pin: ``lake_keys`` cannot import
+    :mod:`brutex.universe` (this module is a pure stdlib leaf), so a
+    mirror-pin unit test enforces agreement and both sites carry this
+    cross-reference comment. NO ``'%26'``→``'&'`` arm (the stored-key
+    encoding is UNVERIFIED — the module-docstring pledge stands); NO prefix
+    arm (the own-exchange legacy-prefix strip is DISK-SIDE ONLY, in
+    :mod:`brutex.data.spot_drift`, never applied to master symbols or
+    lookup-time underlyings). ``replace(" ", "")`` folds interior AND
+    trailing/leading ASCII spaces; other whitespace is deliberately NOT
+    folded (a tab-bearing dir is junk → unverified).
+    """
+    return symbol.upper().replace(" ", "").replace("-", "")
 
 
 def spot_key_candidates(symbol: str, exchange: str) -> tuple[str, ...]:
@@ -177,7 +214,12 @@ def fno_index_alias_pairs() -> tuple[tuple[str, str], ...]:
     return tuple(aliases.items())
 
 
-def spot_recovery_candidates(underlying: str, exchange: str) -> tuple[str, ...]:
+def spot_recovery_candidates(
+    underlying: str,
+    exchange: str,
+    *,
+    stock_drift: StockDriftMap | None = None,
+) -> tuple[str, ...]:
     """Ordered spot-key drift candidates for *underlying* — identity excluded.
 
     The FULL F&O→spot recovery ladder (DEC-GREEKS-CORRECTNESS-AUDIT-001
@@ -188,11 +230,17 @@ def spot_recovery_candidates(underlying: str, exchange: str) -> tuple[str, ...]:
     ``trading_symbol``; forward — the mirror case), (2) the
     ``"<exchange>-<underlying>"`` #911 drifted-directory form, (3) the
     :func:`spot_key_candidates` #911 ladder applied to *underlying* itself (a
-    drifted-SHAPED underlying walks back down to its canonical key). STOCK
-    drift pairs (``BAJAJ-AUTO`` vs ``BAJAJAUTO``) are deliberately ABSENT: the
-    normalisation that produced them is not reversible without an instrument
-    master, so the stock arm stays an honest no-spot + a named follow-up (the
-    operator env lever above covers a known pair today via the reverse rung).
+    drifted-SHAPED underlying walks back down to its canonical key), (4) the
+    STOCK drift rung (``BAJAJ-AUTO`` vs ``BAJAJAUTO``) — supplied
+    evidence-grounded via the optional *stock_drift* map
+    (:mod:`brutex.data.spot_drift`, DEC-GREEKS-SPOTJOIN-STOCK-001: every
+    candidate is a REAL on-disk spot dir verified against a UNIQUE instrument
+    master fold-match); this module stays pure and I/O-free — the map is
+    built elsewhere and injected. ``stock_drift=None`` (the default) or an
+    empty map is byte-identical to the pre-stock ladder, so the stock rung can
+    only APPEND: ``spot_recovery_candidates(u, e, stock_drift=m)`` always
+    startswith ``spot_recovery_candidates(u, e)`` (the pinned prefix
+    invariant).
     """
     candidates: list[str] = []
 
@@ -209,13 +257,20 @@ def spot_recovery_candidates(underlying: str, exchange: str) -> tuple[str, ...]:
     _add(f"{exchange}-{underlying}")
     for drifted in spot_key_candidates(underlying, exchange):
         _add(drifted)
+    if stock_drift:
+        fold = stock_drift_fold(underlying)
+        if fold:
+            for recovered in stock_drift.get((exchange, fold), ()):
+                _add(recovered)
     return tuple(candidates)
 
 
 __all__ = [
     "FNO_INDEX_ALIASES_ENV",
+    "StockDriftMap",
     "fno_index_alias_pairs",
     "resolve_spot_key",
     "spot_key_candidates",
     "spot_recovery_candidates",
+    "stock_drift_fold",
 ]

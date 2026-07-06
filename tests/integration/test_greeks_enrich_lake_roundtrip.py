@@ -436,3 +436,87 @@ class TestMixedSchemaDownstreamReaders:
         assert len(rows) == 4
         assert rows[0]["iv"] is not None  # January enriched
         assert rows[-1]["iv"] is None  # February raw reads NULL overlay
+
+
+class TestStockDriftHeldOpenStore:
+    """DEC-GREEKS-SPOTJOIN-STOCK-001 — the MANDATORY held-open-store pin.
+
+    The drift-map loader opens ``<lake>/instruments.duckdb`` — the SAME file a
+    long-lived dashboard ``InstrumentStore`` handle holds open in-process.
+    Without this pin, a same-path open conflict would silently degrade the
+    fail-soft loader to ``master_error`` → ``None`` on EVERY production pass —
+    a permanently-dormant feature (the exact #935/#1014 dormant-feature trap;
+    ``instrument_store.py`` documents that same-path config conflicts are
+    real). The pin: the map MUST load and the recovery MUST fire while the
+    dashboard-style handle is held.
+    """
+
+    _BAJAJ_CE = "NSE-BAJAJAUTO-25Jan24-1500-CE"
+
+    def test_enrich_recovers_stock_spot_while_store_handle_is_held(self, lake: Path) -> None:
+        pytest.importorskip("duckdb")
+        from datetime import date as date_type
+        from decimal import Decimal as Dec
+
+        from brutex.data.instrument_store import Instrument, InstrumentStore
+        from brutex.models import Exchange, InstrumentType, Segment
+        from structlog.testing import capture_logs
+
+        # A drifted stock chain: option underlying BAJAJAUTO, spot dir the
+        # master trading_symbol BAJAJ-AUTO under CASH.
+        spot = [_bar(_TS + timedelta(minutes=i), "1500", oi=None) for i in range(3)]
+        _sink(lake).append(
+            exchange="NSE", segment="CASH", symbol="BAJAJ-AUTO", interval="1minute", bars=spot
+        )
+        option = [_bar(_TS + timedelta(minutes=i), "40") for i in range(3)]
+        _sink(lake).append(
+            exchange="NSE", segment="FNO", symbol=self._BAJAJ_CE, interval="1minute", bars=option
+        )
+        # The dashboard-style handle: opened BEFORE the pass, held THROUGHOUT.
+        held = InstrumentStore.open(lake / "instruments.duckdb")
+        try:
+            held.upsert_many(
+                [
+                    Instrument(
+                        exch_id=Exchange.NSE,
+                        security_id=42,
+                        symbol_name="BAJAJ-AUTO",
+                        display_name="BAJAJ-AUTO",
+                        instrument=InstrumentType.EQ,
+                        segment=Segment.CASH,
+                        series="EQ",
+                        isin=None,
+                        underlying_symbol=None,
+                        underlying_security_id=None,
+                        lot_size=1,
+                        tick_size=Dec("0.05"),
+                        sm_freeze_qty=None,
+                        sm_expiry_date=None,
+                        strike_price=None,
+                        asm_gsm_flag=False,
+                    )
+                ],
+                snapshot_date=date_type(2024, 1, 1),
+                run_id="held-open-pin",
+                csv_source_sha256="0" * 64,
+            )
+            with capture_logs() as logs:
+                report = enrich_greeks_for_targets(
+                    targets=_targets(self._BAJAJ_CE), lake_root=lake, rate_source=_RATE
+                )
+        finally:
+            held.close()
+        # The map LOADED (no fail-soft degrade masked the conflict) …
+        assert not [e for e in logs if e["event"] == "spot_drift.master_error"]
+        assert [e for e in logs if e["event"] == "spot_drift.map_built"]
+        # … and the recovery actually FIRED through it.
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["recovered_key"] == "BAJAJ-AUTO"
+        assert recovered[0]["rung"] == "stock_drift"
+        assert report.enriched == 1 and report.bars_solved == 3
+        part = lake / "bars" / "NSE" / "FNO" / self._BAJAJ_CE / "1minute" / "2024" / "01.parquet"
+        df = pl.read_parquet(part)
+        assert df["iv"].null_count() == 0
+        for pid in df["greeks_provenance_id"].to_list():
+            assert unpack_greeks_provenance(pid).status == STATUS_OK

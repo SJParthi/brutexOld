@@ -12,6 +12,8 @@ byte-equivalence matrix at the bottom pins that the move is lossless (the
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from brutex.data.lake_keys import (
     FNO_INDEX_ALIASES_ENV,
@@ -19,7 +21,10 @@ from brutex.data.lake_keys import (
     resolve_spot_key,
     spot_key_candidates,
     spot_recovery_candidates,
+    stock_drift_fold,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 _CATS: dict[str, str] = {
     "M&M": "equity",
@@ -208,3 +213,146 @@ class TestSpotRecoveryCandidates:
         from brutex.data.greeks_enrich import _spot_recovery_candidates
 
         assert _spot_recovery_candidates is spot_recovery_candidates
+
+
+_FOLD_CASES: list[tuple[str, str]] = [
+    ("BAJAJ-AUTO", "BAJAJAUTO"),
+    ("bajaj-auto", "BAJAJAUTO"),
+    ("M&M", "M&M"),  # `&` preserved — identical on both sides of every real pair
+    ("M&M ", "M&M"),  # trailing space folded
+    (" M&M", "M&M"),  # leading space folded
+    ("M&MFIN", "M&MFIN"),
+    ("L&TFH", "L&TFH"),
+    ("J&KBANK", "J&KBANK"),
+    ("NIFTY NEXT 50", "NIFTYNEXT50"),  # interior spaces folded
+    ("", ""),
+    ("M%26M", "M%26M"),  # NO %26 decode arm — the encoding is UNVERIFIED
+    ("A\tB", "A\tB"),  # only ASCII space folds; a tab-bearing name stays junk
+]
+
+
+class TestStockDriftFold:
+    """DEC-GREEKS-SPOTJOIN-STOCK-001 — the pure evidence-matching fold."""
+
+    @pytest.mark.parametrize(("raw", "folded"), _FOLD_CASES)
+    def test_named_literals(self, raw: str, folded: str) -> None:
+        assert stock_drift_fold(raw) == folded
+
+    @pytest.mark.parametrize(("raw", "_folded"), _FOLD_CASES)
+    def test_mirror_pins_universe_normalizer_on_literals(self, raw: str, _folded: str) -> None:
+        """The anti-drift mirror pin: ``stock_drift_fold`` EXACTLY mirrors
+        ``brutex.universe.normalize_underlying_symbol`` (lake_keys is a pure
+        stdlib leaf and cannot import ``brutex.universe`` — the documented-mirror
+        pattern of ``_SOURCED_INDEX_SPOT_ALIASES`` / the #1038
+        ``_is_pool_isolatable`` pin)."""
+        from brutex.universe import normalize_underlying_symbol
+
+        assert stock_drift_fold(raw) == normalize_underlying_symbol(raw)
+
+    @given(st.text(alphabet="ABZaz&-% 0123456789\t", max_size=24))
+    def test_mirror_pins_universe_normalizer_property(self, raw: str) -> None:
+        from brutex.universe import normalize_underlying_symbol
+
+        assert stock_drift_fold(raw) == normalize_underlying_symbol(raw)
+
+    @given(st.text(alphabet="ABZaz&-% 0123456789", max_size=24))
+    def test_fold_is_idempotent(self, raw: str) -> None:
+        assert stock_drift_fold(stock_drift_fold(raw)) == stock_drift_fold(raw)
+
+
+class TestStockDriftRung:
+    """The evidence-grounded stock rung of ``spot_recovery_candidates``."""
+
+    _MAP: ClassVar[dict[tuple[str, str], tuple[str, ...]]] = {
+        ("NSE", "BAJAJAUTO"): ("BAJAJ-AUTO",),
+    }
+
+    _MATRIX: ClassVar[list[tuple[str, str]]] = [
+        ("M&M", "NSE"),
+        ("NSE-M&M", "NSE"),
+        ("BAJAJAUTO", "NSE"),
+        ("MIDCPNIFTY", "NSE"),
+        ("NIFTYJR", "NSE"),
+        ("BAZ", "BSE"),
+        ("", "NSE"),
+        ("   ", "NSE"),
+    ]
+
+    def test_default_none_is_byte_identical(self) -> None:
+        """The 2-arg ladder, ``stock_drift=None`` and ``stock_drift={}`` all
+        return the IDENTICAL tuple — the pre-stock ladder is byte-preserved."""
+        for underlying, exchange in self._MATRIX:
+            base = spot_recovery_candidates(underlying, exchange)
+            assert spot_recovery_candidates(underlying, exchange, stock_drift=None) == base
+            assert spot_recovery_candidates(underlying, exchange, stock_drift={}) == base
+
+    def test_stock_rung_appends_last(self) -> None:
+        base = spot_recovery_candidates("BAJAJAUTO", "NSE")
+        extended = spot_recovery_candidates("BAJAJAUTO", "NSE", stock_drift=self._MAP)
+        assert extended == (*base, "BAJAJ-AUTO")
+
+    def test_prefix_invariant(self) -> None:
+        """For every input the 3-arg tuple STARTSWITH the 2-arg tuple — the
+        stock rung can only APPEND (the rung-provenance attribution basis)."""
+        big_map: dict[tuple[str, str], tuple[str, ...]] = {
+            **self._MAP,
+            ("NSE", "M&M"): ("M&M ", "NSE-M&M"),
+            ("BSE", "BAZ"): ("baz",),
+        }
+        for underlying, exchange in self._MATRIX:
+            base = spot_recovery_candidates(underlying, exchange)
+            extended = spot_recovery_candidates(underlying, exchange, stock_drift=big_map)
+            assert extended[: len(base)] == base
+
+    def test_multi_candidate_order_preserved(self) -> None:
+        drift: dict[tuple[str, str], tuple[str, ...]] = {
+            ("NSE", "BAJAJAUTO"): ("BAJAJ-AUTO", "BAJAJAUTO ", "NSE-BAJAJ-AUTO"),
+        }
+        base = spot_recovery_candidates("BAJAJAUTO", "NSE")
+        extended = spot_recovery_candidates("BAJAJAUTO", "NSE", stock_drift=drift)
+        assert extended == (*base, "BAJAJ-AUTO", "BAJAJAUTO ", "NSE-BAJAJ-AUTO")
+
+    def test_stock_candidate_equal_to_earlier_rung_is_deduped(self) -> None:
+        """A stock candidate already emitted by an earlier rung appears ONCE
+        (the shared ``_add`` dedup)."""
+        drift: dict[tuple[str, str], tuple[str, ...]] = {
+            ("NSE", "M&M"): ("NSE-M&M", "M&M "),  # first value == the #911 rung
+        }
+        candidates = spot_recovery_candidates("M&M", "NSE", stock_drift=drift)
+        assert candidates.count("NSE-M&M") == 1
+        assert candidates[-1] == "M&M "
+
+    def test_identity_shaped_entry_is_excluded(self) -> None:
+        """An identity-shaped map entry (``(NSE, RELIANCE) → ("RELIANCE",)``)
+        never yields the underlying itself as a candidate."""
+        drift: dict[tuple[str, str], tuple[str, ...]] = {
+            ("NSE", "RELIANCE"): ("RELIANCE",),
+        }
+        base = spot_recovery_candidates("RELIANCE", "NSE")
+        assert spot_recovery_candidates("RELIANCE", "NSE", stock_drift=drift) == base
+
+    def test_case_drift_identity_entry_still_recovers(self) -> None:
+        """The identity-EXCLUSION is by exact string — a case-drift fragment
+        (``reliance``) in an identity-shaped entry IS offered."""
+        drift: dict[tuple[str, str], tuple[str, ...]] = {
+            ("NSE", "RELIANCE"): ("RELIANCE", "reliance"),
+        }
+        candidates = spot_recovery_candidates("RELIANCE", "NSE", stock_drift=drift)
+        assert "reliance" in candidates
+        assert "RELIANCE" not in candidates
+
+    def test_blank_fold_skips_the_lookup(self) -> None:
+        """An underlying that folds to the empty string never keys the map
+        (a pathological ``"-"`` dir name can't alias a blank-fold entry)."""
+        drift: dict[tuple[str, str], tuple[str, ...]] = {("NSE", ""): ("GHOST",)}
+        base = spot_recovery_candidates("-", "NSE")
+        assert spot_recovery_candidates("-", "NSE", stock_drift=drift) == base
+
+    def test_exchange_scoped_lookup(self) -> None:
+        """The map key is ``(exchange, fold)`` — a BSE entry never leaks into
+        an NSE lookup."""
+        drift: dict[tuple[str, str], tuple[str, ...]] = {
+            ("BSE", "BAJAJAUTO"): ("BAJAJ-AUTO",),
+        }
+        base = spot_recovery_candidates("BAJAJAUTO", "NSE")
+        assert spot_recovery_candidates("BAJAJAUTO", "NSE", stock_drift=drift) == base

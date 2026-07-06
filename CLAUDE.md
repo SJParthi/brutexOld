@@ -18,7 +18,37 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+_Last updated: 2026-07-06 (DEC-GREEKS-SPOTJOIN-STOCK-001, MIGRATION.md #1482 —
+the Greeks spot-join drift-recovery ladder gains the evidence-grounded STOCK
+arm, CLOSING the SPOTJOIN-2 named follow-up of #1188: NEW
+`brutex/data/spot_drift.py` scans the REAL `bars/<exch>/{INDEX,CASH}` symbol
+dirs once per enrich pass (O(dirs), parent-only, partial-tolerant) and
+verifies each against the instrument master's IDX/EQ `symbol_name`s
+(`<lake_root>/instruments.duckdb`; empty master → zero lake I/O) under ONE
+pure fold (`lake_keys.stock_drift_fold` — upper + drop space/hyphen, the
+EXACT mirror-pinned twin of `universe.normalize_underlying_symbol`; the
+own-`<EXCH>-` prefix strip is DISK-SIDE ONLY with raw-fold precedence). An
+entry needs a real dir + a UNIQUE master fold-match — a ≥2-master fold is
+POISONED even with one dir (capped `spot_drift.ambiguous_master` WARNs);
+same-instrument fragments are ALL offered ordered (master-exact first, then
+lexicographic — the probe decides, so a dataless clean dir never shadows a
+data-carrying fragment). The map rides `spot_recovery_candidates(stock_drift=)`
+as the APPENDED last rung (2-arg calls byte-identical, prefix invariant
+pinned), threaded per-pass-stably through `_default_seams`/
+`_GreeksWorkerContext` (plain picklable dict; workers never scan; sequential
+≡ parallel bytes golden-pinned); the ONE `spot_key_recovered` log gains an
+additive `rung∈{alias_ladder,stock_drift}` field. No master / confirmed read
+error / no drift → the honest NO_SPOT (never a fabricated spot, never a
+failed pull; MemoryError always re-raises raw); the held-open-store
+integration pin proves the loader works beside a live dashboard
+`InstrumentStore` handle. HONEST: NO `%26`→`&` recovery (stored-key encoding
+UNVERIFIED — the lake_keys pledge stands); read-time recovery ONLY —
+`lake_heal`/`detect_legacy_drift` untouched; the `/db` moneyness twin is the
+NAMED follow-up DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 (until it lands a drifted
+stock lake shows recovered Greeks but `/db` moneyness UNKNOWN). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; `lake_keys.py`/`spot_drift.py`/
+`greeks_enrich.py` ALL 100% line+branch).
+Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -317,7 +347,31 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+- **Active branch:** `claude/zealous-maxwell-w257yf` (**DEC-GREEKS-SPOTJOIN-STOCK-001, MIGRATION.md #1482** — the
+  Greeks spot-join drift-recovery ladder gains the evidence-grounded STOCK arm, CLOSING the SPOTJOIN-2 named follow-up
+  of #1188. NEW `brutex/data/spot_drift.py` (scan the real `bars/<exch>/{INDEX,CASH}` spot dirs once per enrich pass +
+  the PURE `build_stock_drift_map` verifier + the fail-soft `load_stock_drift_map` loader over
+  `<lake_root>/instruments.duckdb`); `lake_keys.py` gains the pure `stock_drift_fold` (the mirror-pinned twin of
+  `universe.normalize_underlying_symbol`) + the `StockDriftMap` alias + the kw-only default-`None` `stock_drift` param
+  on `spot_recovery_candidates` (APPENDED last rung; 2-arg calls byte-identical; prefix invariant pinned);
+  `greeks_enrich.py` threads the parent-built map through `read_spot_join_with_recovery` (additive
+  `rung∈{alias_ladder,stock_drift}` field on the ONE `spot_key_recovered` log) → `_default_seams` →
+  `_GreeksWorkerContext` (defaulted-LAST picklable dict field) → `_run_unit`/`_greeks_worker`/`_parallel_pickle_ok`/
+  `_run_parallel`, built ONCE per pass in `enrich_greeks_for_targets` gated `ordered and read_spot is None` (public
+  signature UNCHANGED; injected seams / empty targets / dry-run / CLI fetch ⇒ zero scans). Verification rule: a
+  candidate needs a REAL on-disk dir + a UNIQUE master fold-match; ≥2-master folds POISONED (capped WARNs); fragment
+  dirs offered ORDERED (master-exact first) — the probe decides; unverified evidence never mapped (Golden Rule #1).
+  Fail-soft: no master → `None` (honest NO_SPOT preserved byte-identically), confirmed read errors (`CatalogError` /
+  `duckdb.Error` / `OSError`) → WARN + `None`, MemoryError re-raises raw, unexpected defects reach the #1188
+  `fno.greeks_enrich.error` fence. Sequential ≡ parallel bytes golden-pinned (real 2-worker spawn over a drifted
+  2-stock lake + real master); the held-open-store integration pin closes the #935/#1014 dormant-feature trap. HONEST:
+  NO `%26`→`&` recovery (stored-key encoding UNVERIFIED); read-time recovery ONLY (`lake_heal`/`detect_legacy_drift`
+  untouched); genuine abbreviations stay alias-map territory; the `/db` moneyness twin is the NAMED follow-up
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — until it lands a drifted stock lake shows recovered Greeks but a `/db`
+  moneyness UNKNOWN (honest split-brain). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no
+  scope/vocab/rate change; `lake_keys.py` (75/44) + `spot_drift.py` (128/42, NEW) + `greeks_enrich.py` (539/130) ALL
+  100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).
+  Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
@@ -370,7 +424,8 @@ hostile-review pass._
   canonical OHLCV via the latest-wins write; (4) SPOTJOIN-2 — a spot-key drift-recovery ladder in the
   default reader (index aliases BOTH directions + env `BRUTEX_FNO_INDEX_ALIASES` parsed locally · the
   `<EXCH>-<underlying>` #911 form · `lake_keys.spot_key_candidates`; ONE `spot_key_recovered` log; stock
-  drift pairs NOT invented — named follow-up); (5) CTR-2 — `LakeWriteHalt` re-raises past the per-target
+  drift pairs NOT invented — named follow-up (closed by DEC-GREEKS-SPOTJOIN-STOCK-001 #1482 — the
+  evidence-grounded `stock_drift` map)); (5) CTR-2 — `LakeWriteHalt` re-raises past the per-target
   quarantine (the fenced wrapper still never fails the pull); (6) IVX-2/IVX-3 — NaN-row per-bar skip
   (`bars_skipped`), invalid-spot → NO_SPOT, non-positive close → BAD_INPUT before the floor screen; plus
   PROV-2 loud pack band validation, RF-2/RF-3 `CsvRateSource` construction validation +
@@ -1681,7 +1736,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/nice-wright-qmb2bz`
+- **Active feature branch:** `claude/zealous-maxwell-w257yf`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
