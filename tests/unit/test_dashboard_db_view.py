@@ -747,25 +747,32 @@ class TestSpotWindowRollup:
         save_window_ledger(ledger, tmp_path)
 
         calls = {"n": 0}
-        real_records = db_view_module._ledger_records_cached
+        from brutex.data import window_ledger_store as store_module
 
-        def _counting_records(root: Path) -> tuple[object, ...]:
+        real_load = store_module.load_window_ledger
+
+        def _counting_load(root: Path, **kwargs: object) -> object:
             calls["n"] += 1
-            return real_records(root)
+            return real_load(root, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(db_view_module, "_ledger_records_cached", _counting_records)
+        monkeypatch.setattr(store_module, "load_window_ledger", _counting_load)
 
         first = spot_window_rollup(tmp_path)
         second = spot_window_rollup(tmp_path)
         assert first == second
-        assert calls["n"] <= 1  # second poll served from the rollup cache
+        # Object IDENTITY: the second poll is served from the rollup cache —
+        # the O(rows) regroup never re-ran (a recompute builds a new dict).
+        assert second is first
+        assert calls["n"] <= 1  # and the ledger was parsed at most once
 
         path = ledger_path(tmp_path)
         os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
         clock["t"] += 121.0  # step past the adaptive-floor cap
         before = calls["n"]
-        spot_window_rollup(tmp_path)
-        assert calls["n"] == before + 1  # mtime bump re-groups exactly once
+        third = spot_window_rollup(tmp_path)
+        assert calls["n"] == before + 1  # mtime bump re-parses exactly once…
+        assert third is not first  # …and re-groups (a genuinely new rollup)
+        assert spot_window_rollup(tmp_path) is third  # then cached again
 
     def test_spot_rows_are_byte_unchanged_by_the_map(self, tmp_path: Path) -> None:
         ledger = WindowLedger()

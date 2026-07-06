@@ -9,7 +9,7 @@ the composite ledger stamp token
 
 * T-b1  8 concurrent cold-stamp pollers pay EXACTLY ONE ledger parse
         (per-key single-flight — the concurrent ~13.6 s duplicate-parse bug);
-* T-b2  the nested rows→records compute (two key families, one instance)
+* T-b2  the two-key rows→records read (two key families, one instance)
         completes threaded without deadlock, still one parse;
 * T-b3  a stamp move within the adaptive floor serves the prior entry STALE with
         ONE ``movers_cache.stale_served`` log (the honesty surface — never a
@@ -22,7 +22,12 @@ the composite ledger stamp token
 * T-b7  the ``_reset_ledger_read_cache`` test seam replaces the dict-clear idiom;
 * T-b8  ``effective_adaptive_floor`` boundary cases + the one-source-of-truth
         delegation pins (summary_cache is THE home; movers_cache + the db_view
-        cap delegate — CLAUDE.md §11 COMMON).
+        cap delegate — CLAUDE.md §11 COMMON);
+* T-b9  the fix-round LATCH regression: a derived projection (rows / rollup)
+        built from floor-STALE records is stamped at the records' SERVED
+        generation — never the fresh one — so it reconverges to on-disk truth
+        the moment the records floor passes instead of serving pre-flush
+        content indefinitely under a clean generation hit.
 
 Tests MAY import ``window_ledger_store`` (the module itself must not — the
 pinned no-import edge, verified by ``test_db_view_no_window_ledger_store_import``
@@ -144,9 +149,11 @@ class TestSingleFlight:
     def test_nested_rows_records_compute_completes_without_deadlock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """T-b2: the rows compute re-enters the SAME cache instance under a
-        DIFFERENT key (``ledger-rows`` → ``ledger-records``) — per-key
-        single-flight, so the nested compute never self-deadlocks."""
+        """T-b2: the rows read crosses TWO key families of the SAME cache
+        instance (``ledger-records`` served first, then the ``ledger-rows``
+        projection stamped at the served records generation) — per-key
+        single-flight, so the two-key read never self-deadlocks and 8
+        concurrent grid pollers still pay exactly ONE parse."""
         _install_clocked_cache(monkeypatch)
         _seed(tmp_path, ["NIFTY"])
         parses = {"n": 0}
@@ -229,7 +236,11 @@ class TestAdaptiveFloor:
     ) -> None:
         """T-b3: within ``min(max(2 s, duration), 120 s)`` of the last parse a
         stamp move serves the PRIOR entry with the ``movers_cache.stale_served``
-        honesty log; past the floor the same read parses fresh."""
+        honesty log; past the floor the same read parses fresh. The log fires on
+        the ``ledger-records`` BASE key — the entry that actually serves stale;
+        the derived rollup is stamped at the SERVED records generation, so it is
+        a clean generation hit on that stale epoch (the latch fix), never a
+        silently-fresh-stamped copy."""
         clock = _install_clocked_cache(monkeypatch)
         _seed(tmp_path, ["NIFTY"])
         assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}  # warm @ t=0
@@ -242,7 +253,7 @@ class TestAdaptiveFloor:
         assert served["stale"] is True
         assert served["age_s"] == 1.0
         assert served["floor_s"] == 2.0
-        assert str(served["key"]).startswith("spot-rollup|")
+        assert str(served["key"]).startswith("ledger-records|")
         assert served["entry_generation"] != served["generation"]
         clock["t"] = 2.5  # past the floor → fresh parse
         assert spot_window_rollup(tmp_path) == {
@@ -352,6 +363,104 @@ class TestResetSeam:
         assert db_view._LEDGER_READ_CACHE is not before  # a genuinely new instance
         _ledger_records_cached(tmp_path)
         assert parses["n"] == 2  # cold again — the seam's whole purpose
+
+
+class TestDerivedKeysNeverLatchStaleRecords:
+    """T-b9 — the fix-round MAJOR: derived keys must never latch stale records.
+
+    Pre-fix, ``window_ledger_rows_cached`` / ``spot_window_rollup`` computed
+    their projections at the CURRENT stamp generation while the nested
+    ``_ledger_records_cached`` read could be adaptive-floor STALE-served —
+    caching pre-flush content AT THE FRESH generation, which every later poll
+    then hit cleanly (no recompute, no ``stale_served`` log) until the NEXT
+    writer flush, hours or days later. The fix stamps the derived entry with
+    the generation the records were ACTUALLY served at
+    (``_ledger_records_stamped`` embeds it in the cached value), so the derived
+    entry stays generation-stale and reconverges once the records floor passes.
+    """
+
+    def test_rows_and_rollup_reconverge_once_the_records_floor_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE latch repro (fails-before/passes-after): cold records parse with
+        a long duration (10 s floor) → cheap derived computes on a records HIT
+        (2 s floor) → stamp move → a poll in the (2 s, 10 s) age window builds
+        the derived values from floor-stale records → long past every floor the
+        derived keys MUST serve the on-disk truth (pre-fix: latched forever)."""
+        clock = _install_clocked_cache(monkeypatch)
+        _seed(tmp_path, ["NIFTY"])
+        real_load = load_window_ledger
+
+        def _slow_load(lake_root: Path, **kwargs: object) -> WindowLedger:
+            clock["t"] += 10.0  # the records parse "takes" 10 s → records floor 10 s
+            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _slow_load)
+        # One consumer parses records COLD (duration 10 s → floor 10 s)…
+        _ledger_records_cached(tmp_path)  # computed_at = 10.0
+        # …the derived consumers compute cheaply on a records HIT (floor 2 s).
+        assert [r[1] for r in window_ledger_rows_cached(tmp_path)] == ["NIFTY"]
+        assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
+        _append_delta(tmp_path, "BANKNIFTY")  # the pull-end flush — the stamp moves
+        # A poll past the derived 2 s floor but WITHIN the records 10 s floor:
+        # the derived values rebuild/serve from the floor-stale records epoch.
+        clock["t"] = 13.0  # derived age 3 s > 2 s; records age 3 s < 10 s
+        with capture_logs() as logs:
+            stale_rows = window_ledger_rows_cached(tmp_path)
+            stale_rollup = spot_window_rollup(tmp_path)
+        assert [r[1] for r in stale_rows] == ["NIFTY"]  # bounded stale — records floor
+        assert stale_rollup == {("NIFTY", "1minute"): (1, 0, 0)}
+        served = _events(logs, "movers_cache.stale_served")
+        assert len(served) == 2  # one honest log PER serve — never silent
+        assert {str(e["key"]).split("|")[0] for e in served} == {"ledger-records"}
+        # THE LATCH PIN: long past every floor the derived keys reconverge to
+        # the on-disk truth. Pre-fix both were cached at the FRESH generation
+        # (a clean hit forever) and this still read ["NIFTY"] / settled-only.
+        clock["t"] = 990.0
+        with capture_logs() as logs:
+            rows = window_ledger_rows_cached(tmp_path)
+            rollup = spot_window_rollup(tmp_path)
+        assert sorted(r[1] for r in rows) == ["BANKNIFTY", "NIFTY"]
+        assert list(rows) == load_window_ledger(tmp_path).to_rows()
+        assert rollup == {
+            ("NIFTY", "1minute"): (1, 0, 0),
+            ("BANKNIFTY", "1minute"): (1, 0, 0),
+        }
+        assert _events(logs, "movers_cache.stale_served") == []  # a genuinely fresh read
+
+    def test_derived_value_is_never_stamped_newer_than_its_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The structural invariant behind T-b9, asserted on the cache entries
+        themselves: a derived projection built COLD from a floor-stale records
+        serve is stamped with the records entry's generation (the stale epoch)
+        — never the fresh stamp the records serve did not reach (which is
+        exactly what the pre-fix code stored, creating the latch)."""
+        clock = _install_clocked_cache(monkeypatch)
+        _seed(tmp_path, ["NIFTY"])
+        real_load = load_window_ledger
+
+        def _slow_load(lake_root: Path, **kwargs: object) -> WindowLedger:
+            clock["t"] += 10.0
+            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _slow_load)
+        # Warm ONLY the records key (the derived keys stay cold), then move the
+        # stamp: the derived computes below build from the STALE-served records.
+        _ledger_records_cached(tmp_path)
+        _append_delta(tmp_path, "BANKNIFTY")
+        clock["t"] = 13.0  # inside the records 10 s floor
+        window_ledger_rows_cached(tmp_path)
+        spot_window_rollup(tmp_path)
+        from brutex.data.window_ledger_store import ledger_path
+
+        path = ledger_path(tmp_path).as_posix()
+        entries = db_view._LEDGER_READ_CACHE._entries
+        records_gen = entries[f"ledger-records|{path}"].generation
+        fresh_gen = revision_generation(db_view._ledger_stamp_token(ledger_path(tmp_path)))
+        assert records_gen != fresh_gen  # the records really are floor-stale here
+        assert entries[f"ledger-rows|{path}"].generation == records_gen
+        assert entries[f"spot-rollup|{path}"].generation == records_gen
 
 
 class TestEffectiveAdaptiveFloorExtraction:

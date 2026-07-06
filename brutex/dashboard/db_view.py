@@ -3616,6 +3616,11 @@ def _make_ledger_read_cache(
 #: floor serves the prior entry stale — bounded to
 #: ``min(max(2 s, its own compute duration), 120 s)``, at most one stamp stale,
 #: ALWAYS logged (``movers_cache.stale_served``) — the #920 ≤50%-duty law.
+#: The DERIVED families (rows / spot-rollup) are stamped with the generation
+#: the records were ACTUALLY served at (:func:`_ledger_records_stamped` embeds
+#: it in the cached value), so a projection built from a floor-stale records
+#: serve is itself generation-stale — never latched under the fresh generation
+#: (the fix-round latch defect, Golden Rule #1).
 _LEDGER_READ_CACHE: MoversSnapshotCache = _make_ledger_read_cache()
 
 
@@ -3747,19 +3752,33 @@ def _ledger_scan_source(ledger_file: Path) -> _LedgerScanSource:
     )
 
 
-def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
-    """Load the ledger's records ONCE per ledger stamp (the C3 read path).
+def _ledger_records_stamped(lake_root: Path) -> tuple[int, tuple[Any, ...]]:
+    """Load the ledger's records ONCE per ledger stamp, WITH their true epoch.
 
     Rides THE shared :data:`_LEDGER_READ_CACHE` (DEC-LEDGER-DELTA-O-PAGE-001),
     keyed ``ledger-records|<path>`` at the stamp-token generation — base mtime
     PLUS the pending delta name set (DEC-LEDGER-DELTA-FLUSH-001), so a mid-pull
     delta append OR a cross-process CLI write refreshes it exactly as a full
     save always did. The underlying ``load_window_ledger`` folds the deltas
-    newer-file-wins. HONEST envelope (Golden Rule #10): concurrent stamp-miss
-    pollers pay ONE parse (single-flight); a stamp move within
-    ``min(max(2 s, the last parse's own duration), 120 s)`` serves the prior
-    entry STALE — bounded, at most one stamp stale, always logged
-    (``movers_cache.stale_served``); the FIRST parse per stamp stays O(rows).
+    newer-file-wins.
+
+    Returns ``(generation, records)`` where *generation* is the stamp-token
+    generation the records were actually COMPUTED at — the cached value EMBEDS
+    its own epoch, so an adaptive-floor STALE serve (which returns the PRIOR
+    entry verbatim) hands the caller the OLD generation, never the fresh one.
+    The derived key families (``ledger-rows`` / ``spot-rollup``) MUST stamp
+    their projections with THIS served generation: a projection built from
+    floor-stale records is then cached generation-STALE itself and recomputes
+    the moment the records floor passes — never latched under the fresh
+    generation serving pre-flush content indefinitely (the fix-round latch
+    defect: a derived value may never be cached at a generation newer than the
+    records it was built from — Golden Rule #1).
+
+    HONEST envelope (Golden Rule #10): concurrent stamp-miss pollers pay ONE
+    parse (single-flight); a stamp move within ``min(max(2 s, the last parse's
+    own duration), 120 s)`` serves the prior entry STALE — bounded, at most one
+    stamp stale, always logged (``movers_cache.stale_served``); the FIRST parse
+    per stamp stays O(rows).
     """
     from brutex.data.window_ledger_store import ledger_path, load_window_ledger
 
@@ -3768,8 +3787,19 @@ def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
     return _LEDGER_READ_CACHE.get_or_compute(
         f"ledger-records|{path.as_posix()}",
         generation=generation,
-        compute=lambda: tuple(load_window_ledger(lake_root).records()),
+        compute=lambda: (generation, tuple(load_window_ledger(lake_root).records())),
     )
+
+
+def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
+    """Load the ledger's records ONCE per ledger stamp (the C3 read path).
+
+    Thin unwrap of :func:`_ledger_records_stamped` for the consumers that fold
+    the records directly (the legacy window-payload path, the phase-progress
+    double-failure fallback) and so cannot latch — a later call re-keys on the
+    stamp itself. Derived CACHED projections must use the stamped variant.
+    """
+    return _ledger_records_stamped(lake_root)[1]
 
 
 def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
@@ -3786,22 +3816,26 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     to ``WindowLedger.to_rows`` by construction, ONE source of the shape) as a
     SEPARATE key family (``ledger-rows|<path>``) on THE shared
     :data:`_LEDGER_READ_CACHE` (DEC-LEDGER-DELTA-O-PAGE-001) — a grid poll never
-    rebuilds the O(rows) tuple projection either, and the nested rows→records
-    compute crosses DIFFERENT keys of the per-key single-flight (no deadlock). A
-    paging click within one ledger stamp is an O(1) cache handoff; the composite
-    stamp token (base mtime PLUS the pending delta name set,
-    DEC-LEDGER-DELTA-FLUSH-001) re-keys it on a full save OR a mid-pull delta
-    append. A lake with no ledger Parquet AND no pending deltas returns ``()`` —
-    the same empty grid the uncached read produced; a base-less DELTA-ONLY lake
-    (a first pull's mid-flight checkpoint) now renders its live rows like every
-    other ledger reader (the fixed base-less inconsistency —
-    ``_ledger_records_cached`` always read it, this projection returned ``()``).
+    rebuilds the O(rows) tuple projection either. A paging click within one
+    ledger stamp is an O(1) cache handoff; the composite stamp token (base mtime
+    PLUS the pending delta name set, DEC-LEDGER-DELTA-FLUSH-001) re-keys it on a
+    full save OR a mid-pull delta append. A lake with no ledger Parquet AND no
+    pending deltas returns ``()`` — the same empty grid the uncached read
+    produced; a base-less DELTA-ONLY lake (a first pull's mid-flight checkpoint)
+    now renders its live rows like every other ledger reader (the fixed
+    base-less inconsistency — ``_ledger_records_cached`` always read it, this
+    projection returned ``()``). The projection is stamped with the SERVED
+    records generation (:func:`_ledger_records_stamped` — never the fresh stamp
+    a floor-stale records serve did not reach), so rows built from floor-stale
+    records stay generation-stale and recompute the moment the records floor
+    passes — never latched (the fix-round latch defect, Golden Rule #1).
     HONEST envelope (Golden Rule #10): the first read per stamp is still O(rows)
-    (parse + projection) and a stamp move within the adaptive floor serves the
-    prior rows STALE — bounded to ``min(max(2 s, the parse's own duration),
-    120 s)``, always logged (``movers_cache.stale_served``); only the REPEAT
-    read is O(1) — true O(page) needs a write-time manifest, NOT claimed (the
-    #867/#1025 envelope).
+    (parse + projection) and a stamp move within the records adaptive floor
+    serves the prior rows STALE — bounded to ``min(max(2 s, the parse's own
+    duration), 120 s)`` and logged on EVERY such serve
+    (``movers_cache.stale_served``, on the ``ledger-records`` key); only the
+    REPEAT read is O(1) — true O(page) needs a write-time manifest, NOT claimed
+    (the #867/#1025 envelope).
     """
     from brutex.data.window_ledger import ledger_record_row
     from brutex.data.window_ledger_store import ledger_path
@@ -3809,11 +3843,14 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     path = ledger_path(lake_root)
     if not path.is_file() and not _ledger_delta_files(path):
         return ()
-    generation = revision_generation(_ledger_stamp_token(path))
+    # The records read runs FIRST (O(1) on a hit) so the projection is stamped
+    # with the generation the records were ACTUALLY served at — the compute
+    # closes over that exact snapshot, never re-reading under a fresher stamp.
+    generation, records = _ledger_records_stamped(lake_root)
     return _LEDGER_READ_CACHE.get_or_compute(
         f"ledger-rows|{path.as_posix()}",
         generation=generation,
-        compute=lambda: tuple(ledger_record_row(r) for r in _ledger_records_cached(lake_root)),
+        compute=lambda: tuple(ledger_record_row(r) for r in records),
     )
 
 
@@ -3884,10 +3921,15 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     the stamp token = base mtime + the pending delta name set,
     DEC-LEDGER-DELTA-FLUSH-001, so a mid-pull delta append refreshes the chips
     exactly as a full save always did); O(1) per cached call, single-flight on a
-    concurrent cold stamp. HONEST envelope (Golden Rule #10): a stamp move
-    within the adaptive floor serves the prior rollup STALE — bounded to
-    ``min(max(2 s, its own compute duration), 120 s)``, always logged
-    (``movers_cache.stale_served``).
+    concurrent cold stamp. The rollup is stamped with the SERVED records
+    generation (:func:`_ledger_records_stamped` — never the fresh stamp a
+    floor-stale records serve did not reach), so a rollup built from floor-stale
+    records stays generation-stale and recomputes the moment the records floor
+    passes — never latched (the fix-round latch defect, Golden Rule #1). HONEST
+    envelope (Golden Rule #10): a stamp move within the records adaptive floor
+    serves the prior rollup STALE — bounded to ``min(max(2 s, the parse's own
+    duration), 120 s)`` and logged on EVERY such serve
+    (``movers_cache.stale_served``, on the ``ledger-records`` key).
     """
     from brutex.data.window_ledger import EMPTY, FAILED, SETTLED_STATUSES
     from brutex.data.window_ledger_store import ledger_path
@@ -3895,10 +3937,13 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     path = ledger_path(lake_root)
     if not path.is_file() and not _ledger_delta_files(path):
         return {}
+    # Records first (O(1) on a hit): the grouping is stamped with the generation
+    # the records were ACTUALLY served at and closes over that exact snapshot.
+    generation, records = _ledger_records_stamped(lake_root)
 
     def _compute() -> dict[tuple[str, str], tuple[int, int, int]]:
         counts: dict[tuple[str, str], list[int]] = {}
-        for record in _ledger_records_cached(lake_root):
+        for record in records:
             if record.market != _SPOT_WINDOW_MARKET:
                 continue
             cell = counts.setdefault((record.security_id, record.interval), [0, 0, 0])
@@ -3922,7 +3967,6 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
                 cell[1] += 1
         return {k: (v[0], v[1], v[2]) for k, v in counts.items()}
 
-    generation = revision_generation(_ledger_stamp_token(path))
     return _LEDGER_READ_CACHE.get_or_compute(
         f"spot-rollup|{path.as_posix()}",
         generation=generation,
