@@ -114,7 +114,7 @@ def test_footer_boundary_is_latest_end_across_differing_exchanges(
     is still unverified. Kills the ``max(ends)`` → ``min(ends)`` mutant the
     shipped tables cannot distinguish (both real ends are 2024-10-01); the
     shape becomes reachable the day one exchange's window closes earlier
-    (MIGRATION.md #1523 follow-up (ii) per-window circular closure)."""
+    (MIGRATION.md #1524 follow-up (ii) per-window circular closure)."""
     import brutex.costs.constants as costs_constants
 
     monkeypatch.setattr(

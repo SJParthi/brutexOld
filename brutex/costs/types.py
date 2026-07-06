@@ -80,7 +80,7 @@ class UnverifiedCostRegimeError(ValueError):
     """Raised by ``rate_for_date`` when the regime row selected for a date is
     an explicit UNVERIFIED refusal row (``RegimeRow.rate_bps_x100 is None``).
 
-    Per DEC-ETC-REGIME-HISTORY-001 (MIGRATION.md #1523) a statutory rate that
+    Per DEC-ETC-REGIME-HISTORY-001 (MIGRATION.md #1524) a statutory rate that
     is not citation-grounded is NEVER fabricated (Golden Rule #1): the lookup
     refuses loudly, carrying the refusal window, the identified-but-unverified
     circulars (in ``source``), and the remediation path.

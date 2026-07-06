@@ -5,7 +5,7 @@ mechanism the STT options / STT exercise / NSE ETC / BSE ETC lookups ride —
 plus the honesty contract of the ETC tables: only the CURRENT (effective
 2024-10-01) rates are verified, so every pre-boundary date lands on an
 explicit rate-less REFUSAL row and raises ``UnverifiedCostRegimeError``
-(DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1523) — never a fabricated or
+(DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524) — never a fabricated or
 silently-current rate.
 
 The synthetic-table tests below exercise the MECHANISM with fabricated rates

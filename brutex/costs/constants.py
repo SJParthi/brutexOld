@@ -108,7 +108,7 @@ STT_REGIME_APR_2026_START: Final[date] = date(2026, 4, 1)
 #
 # Every PRE-2024-10-01 window is an explicit rate-less REFUSAL row
 # (``RegimeRow.rate_bps_x100 = None`` — DEC-ETC-REGIME-HISTORY-001,
-# MIGRATION.md #1523): the 2026-07-06 fetch round IDENTIFIED all the
+# MIGRATION.md #1524): the 2026-07-06 fetch round IDENTIFIED all the
 # superseded circulars (NSE FA46730 / FA56129 / FA61137; BSE notices
 # 20231020-46 / 20240430-42) but retrieved ZERO official bodies (all
 # official hosts + web.archive.org egress-blocked), and the pre-boundary
@@ -140,7 +140,7 @@ STT_REGIME_APR_2026_START: Final[date] = date(2026, 4, 1)
 # options txn/IPFT split to ₹3,552 + ₹1 per cr (TOTAL unchanged at
 # 0.03553%), which would bound the current NSE row's window. Until that
 # circular body lands officially, the 3,503 + 50 split below stands —
-# MIGRATION.md #1523 follow-up (i).
+# MIGRATION.md #1524 follow-up (i).
 #
 # TODO(UNVERIFIED): closes by replacing each ``rate_bps_x100=None``
 # refusal row below with true cited ``RegimeRow(effective_date, rate,
@@ -390,7 +390,7 @@ _STT_OPTIONS_REGIMES: Final[RegimeTable] = validate_regime_table(
             "COSTS_VERIFIED §1 + DEC-COST-002 — 0.0625% verified for the repo "
             "envelope; NOTE follow-up probe: Finance Act 2023 reportedly moved "
             "options STT 0.05%→0.0625% effective 2023-04-01 — UNVERIFIED "
-            "training-knowledge, deliberately NOT encoded (MIGRATION.md #1523 "
+            "training-knowledge, deliberately NOT encoded (MIGRATION.md #1524 "
             "follow-up (iii))",
         ),
         RegimeRow(
@@ -438,7 +438,7 @@ _NSE_ETC_OPTIONS_REGIMES: Final[RegimeTable] = validate_regime_table(
             "· FA56129 2023-04→2024-03 · FA61137 2024-04→2024-09 — all IDENTIFIED, "
             "NONE officially retrieved; no honest flat per-trade equivalent "
             "exists). Refusal window per DEC-ETC-REGIME-HISTORY-001 "
-            "(MIGRATION.md #1523); Golden Rule #1.",
+            "(MIGRATION.md #1524); Golden Rule #1.",
         ),
         RegimeRow(
             ETC_REGIME_OCT_2024_START,
@@ -446,7 +446,7 @@ _NSE_ETC_OPTIONS_REGIMES: Final[RegimeTable] = validate_regime_table(
             "NSE circular FA64232 (SEBI 2024/92 true-to-label); COSTS_VERIFIED §2 "
             "row 3 — VERIFIED. NOTE: window end may be bounded by FA73061 "
             "(eff. 2026-03-01, txn/IPFT split 3,552+1/cr, total unchanged) — "
-            "UNVERIFIED, NOT encoded (MIGRATION.md #1523 follow-up (i)).",
+            "UNVERIFIED, NOT encoded (MIGRATION.md #1524 follow-up (i)).",
         ),
     ),
     label="NSE ETC options",
@@ -463,7 +463,7 @@ _BSE_ETC_OPTIONS_REGIMES: Final[RegimeTable] = validate_regime_table(
             "(slab hike, active flat-vs-slab source conflict) — NONE officially "
             "retrieved; slab + expiry-scoped applicability the flat table cannot "
             "express. Part of this window may predate the SENSEX options relaunch "
-            "(no contract existed — refusal still correct). MIGRATION.md #1523.",
+            "(no contract existed — refusal still correct). MIGRATION.md #1524.",
         ),
         RegimeRow(
             ETC_REGIME_OCT_2024_START,
