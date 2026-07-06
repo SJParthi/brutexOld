@@ -43,6 +43,7 @@ from brutex.dashboard.pull_stall import (
     resolve_wedge_multiplier,
 )
 from brutex.observability.watchdog import WorkerEvent, WorkerState
+from structlog.typing import EventDict
 
 
 class _FakeClock:
@@ -1046,3 +1047,121 @@ class TestPullWatchdogWedgeEscalation:
         clock.advance(500.0)
         wd.check_once()
         assert wedges == []
+
+
+# ════════════════════════════════════════════════════════════════════════
+# pull_stall.watchdog_alive — the throttled happy-path proof of life
+# (DEC-PULL-TELEMETRY-TRIAD-001; ≤ 18 lines/hour, no new thread).
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestWatchdogAliveBeat:
+    """One throttled INFO per check interval, derived from the EXISTING cadence."""
+
+    @staticmethod
+    def _alive(logs: list[EventDict]) -> list[EventDict]:
+        return [e for e in logs if e["event"] == "pull_stall.watchdog_alive"]
+
+    def test_first_check_logs_then_throttles_within_interval(self) -> None:
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
+        wd.start()
+        with capture_logs() as logs:
+            wd.check_once()  # first check → an early proof of life
+            clock.advance(50.0)
+            wd.check_once()  # 50 s < 200 s → throttled
+        alive = self._alive(logs)
+        assert len(alive) == 1
+        assert alive[0]["state"] == WorkerState.HEALTHY.value
+        assert alive[0]["timeout_seconds"] == 600.0
+        assert alive[0]["interval_seconds"] == 200.0  # timeout/3 at the audited default
+
+    def test_default_cadence_is_bounded_at_18_lines_per_hour(self) -> None:
+        """At the default 600 s timeout the check cadence is 200 s = EXACTLY 18
+        checks/hour; simulating one hour of timer ticks yields exactly 18 lines —
+        the documented bound falls out of the existing cadence, no new thread."""
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
+        wd.start()
+        with capture_logs() as logs:
+            for _ in range(18):  # one hour of 200 s timer ticks
+                wd.beat()  # a progressing worker (never hung)
+                wd.check_once()
+                clock.advance(200.0)
+        assert len(self._alive(logs)) == 18
+
+    def test_shrunk_env_timeout_still_respects_the_floor(self) -> None:
+        """A small timeout (env-shrunk) checks every 10 s, but the alive log floors at
+        ALIVE_LOG_MIN_INTERVAL_S — an hour of 10 s checks still logs ≤ 18 lines."""
+        from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=30.0, spawn=spawn, clock=clock)
+        wd.start()  # cadence timeout/3 = 10 s → the throttle floors at 200 s
+        with capture_logs() as logs:
+            for _ in range(360):  # one hour of 10 s checks
+                wd.beat()
+                wd.check_once()
+                clock.advance(10.0)
+        alive = self._alive(logs)
+        assert len(alive) <= 18
+        assert alive[0]["interval_seconds"] == ALIVE_LOG_MIN_INTERVAL_S
+
+    def test_explicit_poll_seconds_above_floor_sets_the_interval(self) -> None:
+        """start(poll_seconds=300) → the alive interval tracks the ACTUAL cadence."""
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
+        wd.start(poll_seconds=300.0)
+        with capture_logs() as logs:
+            wd.check_once()
+            clock.advance(250.0)
+            wd.check_once()  # 250 < 300 → throttled (a 200 s floor alone would log)
+            clock.advance(60.0)
+            wd.check_once()  # 310 ≥ 300 → logs
+        alive = self._alive(logs)
+        assert len(alive) == 2
+        assert alive[0]["interval_seconds"] == 300.0
+
+    def test_alive_log_reports_hung_state(self) -> None:
+        """The alive line carries the worker's CURRENT state — a hung worker reads
+        ``hung`` (the happy-path line never masks a stall; the edge events are
+        byte-identical, logging is the only delta)."""
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        edges: list[WorkerEvent] = []
+        wd = PullWatchdog(on_hung=edges.append, timeout_seconds=600.0, spawn=spawn, clock=clock)
+        wd.start()
+        clock.advance(601.0)  # past the timeout with no beat → HUNG on the next check
+        with capture_logs() as logs:
+            events = wd.check_once()
+        assert len(events) == 1  # PARITY: the hung edge fired exactly as before
+        assert len(edges) == 1
+        alive = self._alive(logs)
+        assert len(alive) == 1
+        assert alive[0]["state"] == WorkerState.HUNG.value
+
+    def test_bare_check_once_without_start_reads_unregistered(self) -> None:
+        """A never-started wrapper logs ``state="unregistered"`` instead of raising."""
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
+        with capture_logs() as logs:
+            assert wd.check_once() == ()  # PARITY: the empty-registry return is unchanged
+        alive = self._alive(logs)
+        assert len(alive) == 1
+        assert alive[0]["state"] == "unregistered"
