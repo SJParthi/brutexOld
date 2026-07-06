@@ -85,6 +85,7 @@ from brutex.data.lake_invariants import (
     OptionIntraFileDup,
     scan_lake_invariants,
 )
+from brutex.data.lake_manifest import invalidate_manifest
 from brutex.data.models import CandleBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionWriterError
 from brutex.data.parquet_writer import ParquetWriter, PartitionHealResult
@@ -452,6 +453,13 @@ def _quarantine_move(state: _BatchState, source: Path) -> Path:
     source.unlink()
     with contextlib.suppress(OSError):
         source.parent.rmdir()  # prune a now-empty <yyyy>/ dir; non-empty is fine
+    # A quarantine-MOVE removes a stored file, which can empty its dataset —
+    # the durable dataset manifest may now over-list, so invalidate it
+    # (DEC-LAKE-MANIFEST-O1-001; best-effort + idempotent, the next discovery
+    # walks + rebuilds). Covers BOTH removal routes through this ONE
+    # chokepoint: the whole-file quarantine AND the intraday-TF
+    # delete-and-rebuild (`_rebuild_tf_months` moves each month through here).
+    invalidate_manifest(state.lake_root)
     state.quarantined_files += 1
     _LOG.warning("lake_heal.file_quarantined", source=str(source), quarantine=str(dest))
     _audit_append(
