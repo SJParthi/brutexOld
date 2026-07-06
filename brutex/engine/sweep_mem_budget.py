@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from brutex.hardware_envelope import memory_budget_bytes
+from brutex.config.hardware_envelope import memory_budget_bytes
 
 #: Env knob selecting the bounded-rank mode (``off`` / ``auto`` / ``on``).
 BOUNDED_RANK_MODE_ENV: Final[str] = "BRUTEX_SWEEP_BOUNDED_RANK"
@@ -137,7 +137,7 @@ def resolve_bounded_rank_mode(environ: Mapping[str, str] | None = None) -> Bound
 def resolve_mem_budget_bytes(environ: Mapping[str, str] | None = None) -> int:
     """Resolve the rank-region byte budget from ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``.
 
-    Delegates to the COMMON :func:`brutex.hardware_envelope.memory_budget_bytes`
+    Delegates to the COMMON :func:`brutex.config.hardware_envelope.memory_budget_bytes`
     (DEC-RAM-BUDGETS-001). Resolution order: a set, non-blank env value is the
     validated explicit override (byte-unchanged #1352 contract — a non-integer
     or non-positive value raises, a broken budget must never silently disable
