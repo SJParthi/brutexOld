@@ -22,7 +22,7 @@ import errno
 import fcntl
 import json
 import os
-from collections.abc import Generator
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -104,8 +104,9 @@ def _mutate_shard(shard: Path, mutate: Any) -> None:
     shard.write_text(json.dumps(obj, sort_keys=True), encoding="utf-8")
 
 
-def _fallback_clauses(logs: list[dict[str, Any]]) -> list[str]:
-    return [e["clause"] for e in logs if e["event"] == "lake.stats_manifest.fallback"]
+def _fallback_clauses(logs: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The failed-clause names in order (accepts structlog's captured EventDicts)."""
+    return [str(e["clause"]) for e in logs if e["event"] == "lake.stats_manifest.fallback"]
 
 
 @contextmanager
@@ -777,22 +778,74 @@ class TestScanDatasetRels:
     def test_missing_options_dir_is_empty(self, tmp_path: Path) -> None:
         assert lsm.scan_dataset_rels(tmp_path, lsm.KIND_OPTIONS, OPTIONS_KEY) == set()
 
-    def test_bars_fixed_depth_scan(self, tmp_path: Path) -> None:
+    def test_bars_any_depth_scan_sees_strays(self, tmp_path: Path) -> None:
+        """The scan mirrors the legacy ``**/*.parquet`` glob: ANY depth, files only.
+
+        A depth-1 / depth-3 stray IS read by the readers' legacy DuckDB glob
+        (``**`` matches zero or more directories — empirically verified), so the
+        file-set clause must SEE it: a stray-carrying dataset then fails set
+        equality against any shard (whose rels are always month-grammar paths)
+        and honestly falls back to the live scan instead of silently diverging.
+        """
         ddir = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY)
         (ddir / "2026").mkdir(parents=True)
         (ddir / "2026" / "07.parquet").write_bytes(b"x")
         (ddir / "2026" / "notes.txt").write_bytes(b"x")  # non-parquet leaf: ignored
         (ddir / "2026" / "08.parquet").mkdir()  # a DIR named *.parquet: ignored
-        (ddir / "stray.parquet").write_bytes(b"x")  # depth-1 stray: invisible (both paths)
-        assert lsm.scan_dataset_rels(tmp_path, lsm.KIND_BARS, BARS_KEY) == {"2026/07.parquet"}
+        (ddir / "stray.parquet").write_bytes(b"x")  # depth-1 stray: the glob reads it
+        (ddir / "2026" / "08.parquet" / "deep.parquet").write_bytes(b"x")  # depth-3 stray
+        assert lsm.scan_dataset_rels(tmp_path, lsm.KIND_BARS, BARS_KEY) == {
+            "2026/07.parquet",
+            "stray.parquet",
+            "2026/08.parquet/deep.parquet",
+        }
 
-    def test_options_fixed_depth_scan(self, tmp_path: Path) -> None:
+    def test_options_any_depth_scan_sees_strays(self, tmp_path: Path) -> None:
         ddir = lsm.dataset_dir(tmp_path, lsm.KIND_OPTIONS, OPTIONS_KEY)
         ddir.mkdir(parents=True)
         (ddir / "2026-07.parquet").write_bytes(b"x")
         (ddir / "readme.md").write_bytes(b"x")
-        (ddir / "sub").mkdir()  # a subdir: ignored at options depth
-        assert lsm.scan_dataset_rels(tmp_path, lsm.KIND_OPTIONS, OPTIONS_KEY) == {"2026-07.parquet"}
+        (ddir / "sub").mkdir()  # an EMPTY subdir contributes nothing…
+        (ddir / "sub" / "nested.parquet").write_bytes(b"x")  # …but a nested stray IS seen
+        assert lsm.scan_dataset_rels(tmp_path, lsm.KIND_OPTIONS, OPTIONS_KEY) == {
+            "2026-07.parquet",
+            "sub/nested.parquet",
+        }
+
+    def test_walk_error_propagates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-missing-dir walk failure PROPAGATES (the caller fails closed)."""
+        ddir = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY)
+        (ddir / "2026").mkdir(parents=True)
+        (ddir / "2026" / "07.parquet").write_bytes(b"x")
+
+        real_scandir = os.scandir
+
+        def _deny(path: Any = None) -> Any:  # os.walk scandirs each dir it visits
+            if str(path) == str(ddir / "2026"):
+                raise PermissionError("scandir denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", _deny)
+        with pytest.raises(PermissionError):
+            lsm.scan_dataset_rels(tmp_path, lsm.KIND_BARS, BARS_KEY)
+
+    def test_dir_vanishing_mid_walk_is_fail_closed_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FileNotFoundError mid-walk returns the EMPTY set (never a partial lie)."""
+        ddir = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY)
+        (ddir / "2026").mkdir(parents=True)
+        (ddir / "2026" / "07.parquet").write_bytes(b"x")
+
+        real_scandir = os.scandir
+
+        def _vanish(path: Any = None) -> Any:
+            if str(path) == str(ddir / "2026"):
+                raise FileNotFoundError("dir vanished mid-walk")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", _vanish)
+        assert lsm.scan_dataset_rels(tmp_path, lsm.KIND_BARS, BARS_KEY) == set()
 
 
 class TestLoadValidDatasetStats:

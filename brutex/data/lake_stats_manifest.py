@@ -50,8 +50,9 @@ following hold, re-checked on every consult (O(D) in the ONE dataset's month
 files — metadata syscalls only, independent of total lake depth):
 
 1. parse + version + key echo + well-formed rows + sorted + sum invariant;
-2. FILE-SET EQUALITY — one fixed-depth scandir of the dataset dir
-   (``*.parquet`` only) yields exactly the shard's ``rel`` set;
+2. FILE-SET EQUALITY — one recursive walk of the dataset dir (``*.parquet``
+   only, ANY depth — the exact file set the readers' legacy ``**/*.parquet``
+   DuckDB glob scans) yields exactly the shard's ``rel`` set;
 3. PER-FILE STAT EQUALITY — a fresh ``os.stat`` ``mtime_ns`` + ``size``
    equals the stamped token for EVERY listed file;
 4. MONTH-BOUNDS SANITY — each file's stamped ``[min_ts, max_ts]`` lies inside
@@ -797,43 +798,45 @@ def load_shard_stats(lake_root: Path, *, kind: str, key: Mapping[str, str]) -> D
 
 
 def scan_dataset_rels(lake_root: Path, kind: str, key: Mapping[str, str]) -> set[str]:
-    """One fixed-depth scandir of the dataset dir → its ``*.parquet`` rel set.
+    """One recursive walk of the dataset dir → EVERY ``*.parquet`` rel path.
 
-    Bars scan exactly depth 2 (``<year-dir>/<file>.parquet``), options exactly
-    depth 1 — the same depths the legacy globs read, so a stray file at any
-    other depth is invisible to BOTH paths (equivalence preserved). A missing
-    dataset dir is the empty set; any other :class:`OSError` propagates
-    (the validation caller fails closed to the legacy scan). O(D).
+    ANY depth, deliberately — the readers' legacy ``<dataset>/**/*.parquet``
+    DuckDB glob matches zero-or-more directories, so a stray ``stray.parquet``
+    at depth 1 (bars) or a nested one at depth 3 IS read by the legacy scan
+    (empirically verified against the pinned DuckDB). File-set equality
+    against the shard therefore FAILS for any such stray: the manifest is
+    honestly disabled for the dataset (fallback to the live scan that DOES
+    count the stray) instead of silently diverging from the legacy numbers —
+    the anti-illusion law. A prior fixed-depth version of this scan was blind
+    to exactly that stray class. A missing dataset dir is the empty set; any
+    other :class:`OSError` (including one raised mid-walk) propagates via
+    ``os.walk``'s ``onerror`` hook (the validation caller fails closed to the
+    legacy scan). O(D).
 
     Raises
     ------
     ValueError
         On an unknown *kind* or malformed *key*.
     OSError
-        On a scandir failure other than a missing dataset dir.
+        On a walk failure other than a missing dataset dir.
     """
+
+    def _raise(error: OSError) -> None:
+        raise error
+
     root = dataset_dir(lake_root, kind, key)
     rels: set[str] = set()
-    if kind == KIND_BARS:
-        try:
-            entries = list(os.scandir(root))
-        except FileNotFoundError:
-            return rels
-        for entry in entries:
-            if not entry.is_dir():
-                continue
-            with os.scandir(entry.path) as inner:
-                for leaf in inner:
-                    if leaf.is_file() and leaf.name.endswith(".parquet"):
-                        rels.add(f"{entry.name}/{leaf.name}")
-        return rels
     try:
-        entries = list(os.scandir(root))
+        for dirpath, _dirnames, filenames in os.walk(root, onerror=_raise):
+            rel_dir = os.path.relpath(dirpath, root)
+            for name in filenames:
+                if not name.endswith(".parquet"):
+                    continue
+                rels.add(name if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{name}")
     except FileNotFoundError:
-        return rels
-    for entry in entries:
-        if entry.is_file() and entry.name.endswith(".parquet"):
-            rels.add(entry.name)
+        # The ROOT (or a dir mid-walk) vanished: an empty/partial set is the
+        # fail-closed direction — a non-empty shard can never match it.
+        return set()
     return rels
 
 
@@ -849,7 +852,8 @@ def load_valid_dataset_stats(
 
     The anti-illusion gate (module docstring): clause 1 structural (parse +
     version + key echo + rows well-formed + sorted + sum invariant), clause 2
-    FILE-SET EQUALITY (fixed-depth scandir), clause 3 PER-FILE STAT EQUALITY
+    FILE-SET EQUALITY (recursive walk, any depth — the legacy-glob file set),
+    clause 3 PER-FILE STAT EQUALITY
     (``mtime_ns`` + ``size`` vs the stamped token), clause 4 MONTH-BOUNDS
     SANITY (stamped bounds inside the rel's UTC month). ANY failure returns
     ``None`` after ONE ``lake.stats_manifest.fallback`` log naming the failed

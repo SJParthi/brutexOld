@@ -289,7 +289,13 @@ class TestDbOptionsRouteCountCache:
             build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
         )
 
-        # Three paging clicks of the SAME series + generation → ONE COUNT, stable total.
+        # Three paging clicks of the SAME series + generation → stable total with
+        # NO per-click recount. The FIRST click pays exactly two O(files) scans:
+        # the legacy COUNT (a cache miss — the stats shard does not exist yet)
+        # plus the ONE-TIME write-behind seed of the stats manifest
+        # (DEC-LAKE-STATS-MANIFEST-001 — the route opts in, and a fallback
+        # rebuilds the shard so every later click is manifest-served); clicks
+        # 2-3 run ZERO counts (cache hit + manifest-pruned page).
         p1 = client.get("/api/v1/db/options", params={"series": series, "limit": 1}).json()
         p2 = client.get(
             "/api/v1/db/options", params={"series": series, "limit": 1, "offset": 1}
@@ -298,10 +304,18 @@ class TestDbOptionsRouteCountCache:
             "/api/v1/db/options", params={"series": series, "limit": 1, "desc": "true"}
         ).json()
         assert p1["total"] == p2["total"] == p3["total"] == 2
-        assert execs["count"] == 1, "the O(files) COUNT must run once, then serve cached"
+        assert execs["count"] == 2, (
+            "click 1 = one legacy COUNT + the one-time seed scan; later clicks recount NOTHING"
+        )
 
-        # A pull bumps the generation → the next click rediscovers the total (no stale).
+        # A pull bumps the generation → the next click REVALIDATES instead of
+        # blindly recounting: the seeded stats shard still matches the live
+        # directory (per-request stat-token validation), so the fresh total is
+        # served from the manifest with ZERO further COUNT scans — never stale,
+        # and cheaper than the pre-manifest recount (DEC-LAKE-STATS-MANIFEST-001).
         summary_cache.mark_dirty()
         after = client.get("/api/v1/db/options", params={"series": series, "limit": 1}).json()
         assert after["total"] == 2
-        assert execs["count"] == 2, "the bumped generation must force exactly one recount"
+        assert execs["count"] == 2, (
+            "the bumped generation must revalidate via the manifest — no recount scan"
+        )
