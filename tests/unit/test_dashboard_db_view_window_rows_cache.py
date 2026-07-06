@@ -65,17 +65,14 @@ class TestWindowLedgerRowsCached:
         """THE D3 read-count pin: repeated paging reads within one ledger
         generation cost EXACTLY ONE Parquet parse; a ledger flush (mtime bump)
         costs exactly one more — never one per click."""
-        import brutex.data.window_ledger_store as store_mod
-
         _seed(tmp_path, ["NIFTY"])
         parses = {"n": 0}
-        real_load = store_mod.load_window_ledger
 
         def _counting_load(lake_root: Path, **kwargs: object) -> WindowLedger:
             parses["n"] += 1
-            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+            return load_window_ledger(lake_root, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(store_mod, "load_window_ledger", _counting_load)
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _counting_load)
         first = window_ledger_rows_cached(tmp_path)
         second = window_ledger_rows_cached(tmp_path)
         third = window_ledger_rows_cached(tmp_path)
@@ -103,18 +100,15 @@ class TestWindowLedgerRowsCached:
         """The rows projection rides ``_ledger_records_cached`` — a grid read
         after another ledger reader already parsed this generation costs ZERO
         additional parses (ONE COMMON parse, CLAUDE.md §11)."""
-        import brutex.data.window_ledger_store as store_mod
-
         _seed(tmp_path, ["NIFTY"])
         # Warm the shared records cache the way the other readers do.
         db_view._ledger_records_cached(tmp_path)  # pyright: ignore[reportPrivateUsage]
         parses = {"n": 0}
-        real_load = store_mod.load_window_ledger
 
         def _counting_load(lake_root: Path, **kwargs: object) -> WindowLedger:
             parses["n"] += 1
-            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+            return load_window_ledger(lake_root, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(store_mod, "load_window_ledger", _counting_load)
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _counting_load)
         assert len(window_ledger_rows_cached(tmp_path)) == 1
         assert parses["n"] == 0  # the records parse was reused, rows only projected

@@ -1279,11 +1279,14 @@ class TestSelfReportsPredicatesAndRateHooksRebind:
         assert client_self_reports_successes(None) is False  # getattr-safe
 
     def test_with_rate_hooks_binds_all_three(self) -> None:
-        def _pace() -> None: ...
+        def _pace() -> None:
+            """Sentinel pace hook — identity-compared after the rebind."""
 
-        def _rl() -> None: ...
+        def _rl() -> None:
+            """Sentinel on_rate_limit hook — identity-compared after the rebind."""
 
-        def _ok() -> None: ...
+        def _ok() -> None:
+            """Sentinel on_success hook — identity-compared after the rebind."""
 
         client = GrowwClient(sdk=_FakeSDK())
         rebound = client.with_rate_hooks(pace=_pace, on_rate_limit=_rl, on_success=_ok)
@@ -1299,7 +1302,8 @@ class TestSelfReportsPredicatesAndRateHooksRebind:
         """A ``None`` hook keeps the CURRENT binding — it can never downgrade a
         bound hook back to the no-op (the pace-only-caller back-compat)."""
 
-        def _rl() -> None: ...
+        def _rl() -> None:
+            """Sentinel on_rate_limit hook — identity-compared after the rebind."""
 
         client = GrowwClient(sdk=_FakeSDK(), on_rate_limit=_rl)
         rebound = client.with_rate_hooks()

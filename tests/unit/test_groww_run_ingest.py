@@ -348,11 +348,14 @@ def test_with_paced_client_binds_controller_feedback_hooks() -> None:
         def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
             return {}
 
-    def _pace() -> None: ...
+    def _pace() -> None:
+        """Sentinel pace hook — identity-compared after the seam binds it."""
 
-    def _rl() -> None: ...
+    def _rl() -> None:
+        """Sentinel on_rate_limit hook — identity-compared after the seam binds it."""
 
-    def _ok() -> None: ...
+    def _ok() -> None:
+        """Sentinel on_success hook — identity-compared after the seam binds it."""
 
     index = InstrumentIndex(by_groww_symbol={}, by_exchange_symbol={}, universe=())
     adapter = GrowwMarketAdapter(client=GrowwClient(sdk=_FakeSDK()), index=index)  # type: ignore[arg-type]

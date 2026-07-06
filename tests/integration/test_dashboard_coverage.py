@@ -1325,10 +1325,9 @@ class TestWindowLedgerApi:
         a ledger flush (mtime bump) costs exactly one more."""
         from datetime import UTC, date, datetime
 
-        import brutex.data.window_ledger_store as store_mod
         from brutex.data.fetch_coverage import WindowKey
         from brutex.data.window_ledger import WindowLedger
-        from brutex.data.window_ledger_store import save_window_ledger
+        from brutex.data.window_ledger_store import load_window_ledger, save_window_ledger
 
         ledger = WindowLedger()
         for i in range(4):
@@ -1349,13 +1348,12 @@ class TestWindowLedgerApi:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
 
         parses = {"n": 0}
-        real_load = store_mod.load_window_ledger
 
         def _counting_load(lake_root: Path, **kwargs: object) -> WindowLedger:
             parses["n"] += 1
-            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+            return load_window_ledger(lake_root, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(store_mod, "load_window_ledger", _counting_load)
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _counting_load)
         full = client.get("/api/v1/db/window-ledger?limit=500&offset=0").json()
         page1 = client.get("/api/v1/db/window-ledger?limit=2&offset=0").json()
         page2 = client.get("/api/v1/db/window-ledger?limit=2&offset=2").json()
