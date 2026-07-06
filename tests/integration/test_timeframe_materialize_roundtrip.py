@@ -1010,3 +1010,144 @@ def test_intraday_only_materialize_also_emits_one_summary(tmp_path: Path) -> Non
     assert summaries[0]["include_daily"] is False
     assert summaries[0]["timeframes_written"] == 1
     assert [e["log_level"] for e in logs if e["event"] == "lake.partition.write"] == ["debug"]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Corrupt 1-minute input is QUARANTINED, never laundered
+# (DEC-STORED-DATA-VALIDATION-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _plant_corrupt_1m(lake_root: Path, symbol: str) -> None:
+    """Raw-plant a 1-minute partition holding one high<low poison bar.
+
+    Raw pyarrow — the fixed writer refuses corrupt bars, exactly like a
+    legacy poisoned lake (the #1067 convention).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = (
+        lake_root
+        / "bars"
+        / _EXCHANGE
+        / _SEGMENT
+        / symbol
+        / "1minute"
+        / f"{_SESSION_OPEN_UTC.year:04d}"
+        / f"{_SESSION_OPEN_UTC.month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    timestamps = [_SESSION_OPEN_UTC + timedelta(minutes=i) for i in range(3)]
+    pq.write_table(
+        pa.table(
+            {
+                "timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array([100.0, 100.0, 100.0], type=pa.float64()),
+                # Bar 1 is the audit's live repro: high(1.0) < low(50.0),
+                # close 0.0 — previously LAUNDERED into a self-consistent
+                # derived bucket emitting low: 0.0 across all 19 TFs + 1day.
+                "high": pa.array([110.0, 1.0, 110.0], type=pa.float64()),
+                "low": pa.array([90.0, 50.0, 90.0], type=pa.float64()),
+                "close": pa.array([105.0, 0.0, 105.0], type=pa.float64()),
+                "volume": pa.array([10, 10, 10], type=pa.int64()),
+                "open_interest": pa.array([None, None, None], type=pa.int64()),
+            }
+        ),
+        dest,
+    )
+
+
+def test_corrupt_1m_partition_refuses_to_derive(tmp_path: Path) -> None:
+    """FAILS-BEFORE: the corrupt bar resampled into clean-looking 5m buckets."""
+    from brutex.data.errors import ResampleInputError
+
+    _plant_corrupt_1m(tmp_path, _SYMBOL)
+    with pytest.raises(ResampleInputError, match="price-insane") as excinfo:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+        )
+    assert f"{_EXCHANGE}/{_SEGMENT}/{_SYMBOL}/1minute" in str(excinfo.value)
+    # No derived partition was written — the corruption did not launder.
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "5minute").exists()
+
+
+def test_prebuild_quarantines_corrupt_symbol_and_names_it(tmp_path: Path) -> None:
+    """The pipeline prebuild quarantines the corrupt symbol via the EXISTING
+    per-symbol machinery (ResampleInputError is already in
+    ``gated_prebuild._per_symbol_data_errors``): the clean sibling still
+    builds, the corrupt one is NAMED in ``failed``, and its derived TFs are
+    NOT written."""
+    from brutex.dashboard.fno_cascade import build_fno_cascade
+    from brutex.dashboard.pipeline_prebuild import PrebuildTarget, run_pipeline_prebuild
+    from brutex.data.timeframe_materialize import MaterializeResult
+    from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+    def _spot(name: str) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=abs(hash(name)) & 0xFFFF,
+            symbol_name=name,
+            display_name=name,
+            instrument=InstrumentType.IDX,
+            segment=Segment.INDEX,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=0,
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+        )
+
+    corrupt, clean = "BADSYM", "GOODSYM"
+    _plant_corrupt_1m(tmp_path, corrupt)
+    _write_1m_bars_for(tmp_path, clean)
+
+    def _materialize(target: PrebuildTarget) -> MaterializeResult:
+        return materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=target.exchange,
+            segment=target.segment,
+            symbol=target.symbol,
+            kind=target.kind,
+            tfs=("5m",),
+        )
+
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot(corrupt), _spot(clean)],
+        cascade=build_fno_cascade([]),
+        materialize=_materialize,
+    )
+    assert outcome.ok is False
+    assert outcome.failed == (corrupt,)  # the corrupt symbol is NAMED
+    assert outcome.failed_count == 1
+    assert outcome.symbols_built == 1  # the clean sibling still built
+    # The corrupt symbol's derived TFs were NOT written; the clean one's were.
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / corrupt / "5minute").exists()
+    assert (tmp_path / "bars" / _EXCHANGE / _SEGMENT / clean / "5minute").exists()
+
+
+def _write_1m_bars_for(lake_root: Path, symbol: str, n: int = 10) -> None:
+    """Write *n* clean in-session 1-minute bars for *symbol* via the real sink."""
+    bars = [
+        CandleBar(
+            timestamp=_SESSION_OPEN_UTC + timedelta(minutes=i),
+            open=Decimal(str(100.0 + i)),
+            high=Decimal(str(110.0 + i)),
+            low=Decimal(str(90.0 + i)),
+            close=Decimal(str(105.0 + i)),
+            volume=10 + i,
+            open_interest=0,
+        )
+        for i in range(n)
+    ]
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    sink.append(exchange=_EXCHANGE, segment=_SEGMENT, symbol=symbol, interval="1minute", bars=bars)
