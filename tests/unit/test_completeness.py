@@ -10,6 +10,7 @@ skips, sorting, and the cell-status drift guard against ``coverage_ledger``.
 from __future__ import annotations
 
 import math
+import threading
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -31,6 +32,8 @@ from brutex.dashboard.completeness import (
     OPT_STABLE,
     RECONCILE_MISMATCH_EVENT,
     SPOT_SESSION_RATIO_FLOOR,
+    SYMBOLS_NOT_YET_PULLED_EVENT,
+    ReconcileLogGate,
     SymbolReconcileReport,
     _aggregate_options,
     _contracts_note,
@@ -1413,3 +1416,238 @@ def test_log_reconcile_from_board_is_guarded_against_a_malformed_row() -> None:
     errors = [e for e in logs if e.get("event") == "completeness.symbol_reconcile_error"]
     assert len(errors) == 1
     assert errors[0]["log_level"] == "warning"
+
+
+# ---------------------------------------------------------------------------
+# DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001 — severity split + fingerprint gate.
+# ---------------------------------------------------------------------------
+
+
+def test_partial_lake_shape_logs_counts_only_info_never_the_warning() -> None:
+    """The 953x/night STORM shape: ZERO stray lake keys (every partition scored) while some
+    scored symbols simply have NO lake data yet (a deliberately-partial lake mid-backfill).
+    That is NOT a key drift — it must log the counts-only ``completeness.symbols_not_yet_pulled``
+    INFO, never the ``RECONCILE_MISMATCH_EVENT`` WARNING (fails-before: pre-change this shape
+    WARNed on every scoreboard build)."""
+    spot_rows = [
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+    ]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX, "RELIANCE": CATEGORY_EQUITY, "TCS": CATEGORY_EQUITY}
+
+    with capture_logs() as logs:
+        report = log_symbol_reconcile_from_board(spot_rows, cats)
+
+    # The report itself is UNCHANGED (parity: same return values as the pure reconcile).
+    assert report == reconcile_symbol_coverage(
+        lake_symbols=["NSE-NIFTY"], scored_symbols=cats.keys()
+    )
+    assert report.stray_lake_count == 0
+    assert report.unmatched_scored_count == 2
+    # No WARNING — the storm shape is downgraded.
+    assert [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT] == []
+    infos = [e for e in logs if e.get("event") == SYMBOLS_NOT_YET_PULLED_EVENT]
+    assert len(infos) == 1
+    entry = infos[0]
+    assert entry["log_level"] == "info"
+    assert entry["unmatched_scored_count"] == 2
+    assert entry["suppressed_repeats"] == 0
+    # Counts-only: NO symbol sample lists on the INFO shape.
+    assert "stray_lake_symbols" not in entry
+    assert "unmatched_scored_symbols" not in entry
+
+
+def test_partial_lake_shape_leaves_scoreboard_payload_byte_identical() -> None:
+    """Parity pin (Session-B contract): the INFO downgrade is logging-ONLY — the scoreboard
+    built from the SAME inputs before vs after the diagnostic runs is byte-identical (no row
+    added / removed / altered, no input mutated)."""
+    spot_rows = [
+        _spot_row("NSE-NIFTY", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+    ]
+    cats = {"NSE-NIFTY": CATEGORY_INDEX, "RELIANCE": CATEGORY_EQUITY}
+    board_before = build_completeness_scoreboard(spot_rows, cats, [], {})
+    log_symbol_reconcile_from_board(spot_rows, cats, gate=ReconcileLogGate())
+    board_after = build_completeness_scoreboard(spot_rows, cats, [], {})
+    assert board_after == board_before
+
+
+def test_warning_shape_carries_suppressed_repeats_zero_when_ungated() -> None:
+    """The stray>0 WARNING keeps its full payload; ungated (``gate=None``) every call logs —
+    the pre-gate control flow — and ``suppressed_repeats`` reads an honest 0."""
+    spot_rows = [
+        _spot_row("M&M ", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01"),
+    ]
+    cats = {"M&M": CATEGORY_EQUITY}
+    with capture_logs() as logs:
+        log_symbol_reconcile_from_board(spot_rows, cats)
+        log_symbol_reconcile_from_board(spot_rows, cats)
+    warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+    # Ungated = byte-identical legacy cadence: BOTH calls log.
+    assert len(warnings) == 2
+    assert all(e["suppressed_repeats"] == 0 for e in warnings)
+    assert warnings[0]["stray_lake_symbols"] == [repr("M&M ")]
+
+
+class TestReconcileLogGate:
+    """The thread-safe fingerprint gate primitive."""
+
+    def test_first_observation_logs_with_zero_carried(self) -> None:
+        gate = ReconcileLogGate()
+        assert gate.observe(("warn", 1)) == (True, 0)
+
+    def test_byte_identical_repeats_are_suppressed(self) -> None:
+        gate = ReconcileLogGate()
+        assert gate.observe("fp-a") == (True, 0)
+        assert gate.observe("fp-a") == (False, 0)
+        assert gate.observe("fp-a") == (False, 0)
+
+    def test_fingerprint_change_logs_and_carries_suppressed_count(self) -> None:
+        gate = ReconcileLogGate()
+        gate.observe("fp-a")
+        for _ in range(3):
+            gate.observe("fp-a")  # 3 suppressed repeats
+        assert gate.observe("fp-b") == (True, 3)
+        # The tally reset with the new fingerprint.
+        assert gate.observe("fp-c") == (True, 0)
+
+    def test_flush_returns_suppressed_count_and_rearms(self) -> None:
+        gate = ReconcileLogGate()
+        gate.observe("fp-a")
+        gate.observe("fp-a")
+        gate.observe("fp-a")
+        assert gate.flush() == 2
+        # After a flush the SAME fingerprint logs again (cleared), carrying 0 (consumed).
+        assert gate.observe("fp-a") == (True, 0)
+
+    def test_flush_on_a_fresh_gate_is_zero(self) -> None:
+        assert ReconcileLogGate().flush() == 0
+
+    def test_concurrent_observations_of_one_fingerprint_log_exactly_once(self) -> None:
+        """Lock contention: N threads racing the SAME fingerprint through one gate — EXACTLY
+        one wins ``should_log``; the rest are suppressed. The follow-up fingerprint change
+        then carries exactly N-1 suppressed repeats (no lost/double counts under the lock)."""
+        gate = ReconcileLogGate()
+        n = 16
+        barrier = threading.Barrier(n)
+        verdicts: list[tuple[bool, int]] = []
+        verdicts_lock = threading.Lock()
+
+        def _observe() -> None:
+            barrier.wait()
+            verdict = gate.observe("fp-race")
+            with verdicts_lock:
+                verdicts.append(verdict)
+
+        threads = [threading.Thread(target=_observe) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sum(1 for should_log, _ in verdicts if should_log) == 1
+        assert gate.observe("fp-next") == (True, n - 1)
+
+
+def _stray_rows() -> list[dict[str, Any]]:
+    """A fresh stray-drift fixture (the WARNING shape) per call — never shared-mutable."""
+    return [_spot_row("M&M ", "1minute", COMPLETENESS_SETTLED, first_date="2020-01-01")]
+
+
+def _stray_cats() -> dict[str, str]:
+    return {"M&M": CATEGORY_EQUITY}
+
+
+class TestReconcileGateWiring:
+    """The gate seam through ``log_symbol_reconcile_from_board`` (the production wiring)."""
+
+    def test_stable_state_logs_once_not_per_poll(self) -> None:
+        """The headline fix: 953 identical scoreboard builds against ONE gate log ONE line —
+        and every call still RETURNS the identical report (suppression is logging-only)."""
+        gate = ReconcileLogGate()
+        reports = []
+        with capture_logs() as logs:
+            for _ in range(5):
+                reports.append(
+                    log_symbol_reconcile_from_board(_stray_rows(), _stray_cats(), gate=gate)
+                )
+        warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+        assert len(warnings) == 1
+        assert warnings[0]["suppressed_repeats"] == 0
+        assert len(set(reports)) == 1  # every call returned the SAME frozen report
+
+    def test_fingerprint_change_relogs_and_names_suppressed_repeats(self) -> None:
+        """A real STATE change (a new stray key) re-logs immediately, carrying the count of
+        identical lines the gate swallowed since the last change."""
+        gate = ReconcileLogGate()
+        changed_rows = [*_stray_rows()]
+        changed_rows.append(
+            {
+                "symbol": "NSE-TCS",
+                "exchange": "NSE",
+                "segment": "CASH",
+                "interval": "1minute",
+                "completeness": COMPLETENESS_SETTLED,
+                "first_date": "2020-01-01",
+                "last_date": None,
+            }
+        )
+        with capture_logs() as logs:
+            for _ in range(4):
+                log_symbol_reconcile_from_board(_stray_rows(), _stray_cats(), gate=gate)
+            log_symbol_reconcile_from_board(changed_rows, _stray_cats(), gate=gate)
+        warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+        assert len(warnings) == 2
+        assert warnings[0]["suppressed_repeats"] == 0
+        assert warnings[1]["suppressed_repeats"] == 3  # the 3 swallowed repeats, named
+        assert warnings[1]["stray_lake_count"] == 2
+
+    def test_one_gate_covers_both_shapes_warn_then_info(self) -> None:
+        """ONE gate tracks BOTH log shapes: a stray-drift WARNING followed by the partial-lake
+        INFO is a fingerprint change (logged), and flipping back re-logs the WARNING — the two
+        shapes never suppress across a genuine state change."""
+        gate = ReconcileLogGate()
+        info_rows = [
+            {
+                "symbol": "NSE-NIFTY",
+                "exchange": "NSE",
+                "segment": "INDEX",
+                "interval": "1minute",
+                "completeness": COMPLETENESS_SETTLED,
+                "first_date": "2020-01-01",
+                "last_date": None,
+            }
+        ]
+        info_cats = {"NSE-NIFTY": CATEGORY_INDEX, "RELIANCE": CATEGORY_EQUITY}
+        with capture_logs() as logs:
+            log_symbol_reconcile_from_board(_stray_rows(), _stray_cats(), gate=gate)  # warn
+            log_symbol_reconcile_from_board(_stray_rows(), _stray_cats(), gate=gate)  # repeat
+            log_symbol_reconcile_from_board(info_rows, info_cats, gate=gate)  # shape flip
+            log_symbol_reconcile_from_board(_stray_rows(), _stray_cats(), gate=gate)  # flip back
+        warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+        infos = [e for e in logs if e.get("event") == SYMBOLS_NOT_YET_PULLED_EVENT]
+        assert len(warnings) == 2
+        assert len(infos) == 1
+        assert infos[0]["suppressed_repeats"] == 1  # the one swallowed WARNING repeat, named
+        assert warnings[1]["suppressed_repeats"] == 0
+
+    def test_clean_interlude_rearms_the_gate(self) -> None:
+        """mismatch → clean → the SAME mismatch again: the clean state is a fingerprint change
+        (silent by design — the existing clean-is-silent pin), so the RE-appearing mismatch
+        logs again instead of being suppressed as a stale repeat."""
+        gate = ReconcileLogGate()
+        clean_rows = [
+            {
+                "symbol": "M&M",
+                "exchange": "NSE",
+                "segment": "CASH",
+                "interval": "1minute",
+                "completeness": COMPLETENESS_SETTLED,
+                "first_date": "2020-01-01",
+                "last_date": None,
+            }
+        ]
+        with capture_logs() as logs:
+            log_symbol_reconcile_from_board(_stray_rows(), _stray_cats(), gate=gate)  # logs
+            log_symbol_reconcile_from_board(clean_rows, _stray_cats(), gate=gate)  # silent, re-arms
+            log_symbol_reconcile_from_board(_stray_rows(), _stray_cats(), gate=gate)  # logs again
+        warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+        assert len(warnings) == 2
+        assert [e for e in logs if e.get("event") == SYMBOLS_NOT_YET_PULLED_EVENT] == []

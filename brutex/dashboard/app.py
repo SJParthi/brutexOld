@@ -61,6 +61,7 @@ from brutex.adapters.ingest_common import (
 from brutex.calendars.nse import IST
 from brutex.config.credentials import groww_credentials_error
 from brutex.dashboard.completeness import (
+    ReconcileLogGate,
     build_completeness_scoreboard,
     categorize_instruments,
     log_symbol_reconcile_from_board,
@@ -4224,6 +4225,13 @@ def build_app(
         """
         return JSONResponse(await _completeness_board())
 
+    # Per-app fingerprint gate for the reconcile diagnostic (DEC-TELEMETRY-RECONCILE-
+    # LEDGERSAVE-001): suppresses byte-identical repeats of the mismatch WARNING / the
+    # counts-only not-yet-pulled INFO across scoreboard polls — a stable state logs once
+    # per change, not once per build. Injected here (the production call site) so tests
+    # control their own gate (or pass none = ungated).
+    _reconcile_log_gate = ReconcileLogGate()
+
     def _completeness_inputs(
         store: Any, lake: Path
     ) -> tuple[list[dict[str, Any]], dict[str, str], list[Any]]:
@@ -4269,7 +4277,11 @@ def build_app(
         # returned inputs NOR the scoreboard payload (it only reads the SAME rows scored just
         # below), and is itself best-effort + internally guarded, so it adds no new failure
         # surface — a malformed row logs a warning and returns empty rather than break the page.
-        log_symbol_reconcile_from_board(spot_rows, categories)
+        # The per-app _reconcile_log_gate (DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001) deduplicates
+        # byte-identical repeats across polls, so a STABLE state logs once per change, not
+        # once per scoreboard build (the 953x/night storm); the benign zero-stray partial-lake
+        # shape is a counts-only INFO, never the WARNING.
+        log_symbol_reconcile_from_board(spot_rows, categories, gate=_reconcile_log_gate)
         return spot_rows, categories, store.list_coverage()
 
     def _build_completeness_board(store: Any, lake: Path) -> dict[str, Any]:
