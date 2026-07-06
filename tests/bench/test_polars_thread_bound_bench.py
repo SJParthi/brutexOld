@@ -2,21 +2,26 @@
 
 DEC-THREAD-BUDGET-BOUNDS-001. Because polars sizes its ONE process-global
 thread pool at FIRST import from ``POLARS_MAX_THREADS``, the A/B must run in
-SUBPROCESSES — one with the derived bound applied (the entrypoint behaviour),
-one without (today's default = all logical cores). Each child runs the SAME
-deterministic workload: two concurrent threads resampling a synthetic
-1-minute frame to 5-minute buckets in a loop, mirroring the movers/prebuild
-concurrent-reader shape.
+SUBPROCESSES. The A/B arms use an EXPLICIT divided budget
+(``expected_workers=2``) to prove the bounding MECHANISM takes effect and to
+measure its cost; the DEFAULT entrypoint budget is deliberately FULL physical
+width (the hostile-review MAJOR: the #1401 prebuild's worker threads share
+the one global pool, and halving it would waste half the box in the phase
+the operator cares most about) — pinned here by the default-width arm
+(``pool == physical_cores``). Each child runs the SAME deterministic
+workload: two concurrent threads resampling a synthetic 1-minute frame to
+5-minute buckets in a loop.
 
-HONEST envelope (Golden Rule #10): this is a CONTENTION fix — on this small
-CI fixture (few cores, tiny frame) the measured effect is expected to be
-~NEUTRAL, and the real win (avoiding polars + N DuckDB full-width pools
-stacking during a prebuild/movers storm) only shows at production scale on
-the CLAUDE.md §8 M4 Pro. The bench therefore asserts (a) the bound genuinely
-took effect in the child (``pl.thread_pool_size() == budget``), (b) the two
-arms compute BYTE-IDENTICAL results (checksum), and (c) the bounded arm is
-not catastrophically slower (a loose 3× ceiling — a regression guard, not a
-speedup claim); the measured times are printed for the PR record.
+HONEST envelope (Golden Rule #10): the contention fix is the per-connection
+DuckDB caps; the polars entrypoint bound caps polars at PHYSICAL cores (its
+own default is all LOGICAL cpus) and gives the operator one lever. On this
+small CI fixture the divided-budget arm is expected ~NEUTRAL-to-slower; no
+speedup is claimed. The bench asserts (a) the explicit bound genuinely took
+effect in the child (``pl.thread_pool_size() == budget``), (b) the arms
+compute BYTE-IDENTICAL results (checksum), (c) the bounded arm is not
+catastrophically slower (a loose 3× ceiling — a regression guard), and
+(d) the DEFAULT budget keeps the pool at full physical width; measured times
+are printed for the PR record.
 """
 
 from __future__ import annotations
@@ -120,8 +125,21 @@ def _run_child(extra_env: dict[str, str]) -> dict[str, object]:
 
 
 class TestPolarsThreadBoundBench:
+    def test_default_budget_keeps_full_physical_width(self) -> None:
+        # The hostile-review MAJOR pin: the DEFAULT entrypoint budget must
+        # keep the prebuild-path polars pool at FULL physical width.
+        from brutex.config.hardware_envelope import cached_envelope
+
+        default_budget = polars_thread_budget({})
+        assert default_budget == cached_envelope().physical_cores
+        child = _run_child({"POLARS_MAX_THREADS": str(default_budget)})
+        assert child["pool"] == cached_envelope().physical_cores
+
     def test_bounded_vs_unbounded_two_concurrent_resample_workers(self, tmp_path: Path) -> None:
-        budget = polars_thread_budget({})
+        # Mechanism A/B with an EXPLICIT divided budget (the default is full
+        # width — see the pin above); proves the env-var bound takes effect
+        # and measures its cost honestly.
+        budget = polars_thread_budget({}, expected_workers=2)
         bounded = _run_child({"POLARS_MAX_THREADS": str(budget)})
         unbounded = _run_child({})
 

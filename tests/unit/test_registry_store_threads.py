@@ -27,15 +27,9 @@ def _threads_setting(store: RegistryStore) -> int:
 
 class TestRegistryStoreThreadBound:
     def test_open_defaults_to_envelope_budget(self, tmp_path: Path) -> None:
-        store = RegistryStore.open(tmp_path / "registry.duckdb")
-        try:
+        with RegistryStore.open(tmp_path / "registry.duckdb") as store:
             assert _threads_setting(store) == duckdb_thread_budget()
-        finally:
-            store.close()
 
     def test_open_honours_explicit_threads(self, tmp_path: Path) -> None:
-        store = RegistryStore.open(tmp_path / "registry.duckdb", threads=1)
-        try:
+        with RegistryStore.open(tmp_path / "registry.duckdb", threads=1) as store:
             assert _threads_setting(store) == 1
-        finally:
-            store.close()

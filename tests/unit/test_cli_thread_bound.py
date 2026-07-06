@@ -98,7 +98,12 @@ class TestCliPolarsThreadBound:
         # polars (else the entrypoint bound would always be too late).
         assert got["polars_loaded_before"] is False
         assert got["env"] is not None
-        assert int(str(got["env"])) >= 1
+        # The hostile-review MAJOR pin: the DEFAULT bound is FULL physical
+        # width — the #1401 prebuild's shared polars pool must never be
+        # halved by the entrypoint (the operator's USE EVERYTHING goal).
+        from brutex.config.hardware_envelope import cached_envelope
+
+        assert int(str(got["env"])) == cached_envelope().physical_cores
 
     def test_kill_switch_env_wins(self) -> None:
         got = _run(_PROBE, _clean_env(BRUTEX_POLARS_THREADS="3"))

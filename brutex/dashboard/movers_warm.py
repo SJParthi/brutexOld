@@ -234,6 +234,10 @@ def latest_movers_date(lake_root: Path) -> str | None:
         with duckdb.connect() as conn:
             # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
             # thread pool (DuckDB defaults to ALL logical cores per connection).
+            # Honest tradeoff: an ISOLATED run on an idle box now scans at
+            # physical//2 — accepted, because the warm fires right after a
+            # pull (prebuild/writer activity) and reads only the tiny spot
+            # 1day partitions.
             apply_duckdb_thread_bound(conn)
             row = conn.execute(
                 "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "

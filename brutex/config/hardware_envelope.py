@@ -33,20 +33,39 @@ SUPERSEDES the interim two-module split (and its RAM-delegation pin) that the
 
 ## Thread bounding (DEC-THREAD-BUDGET-BOUNDS-001)
 
-The polars global thread pool and every DuckDB connection default to ALL
-logical cores, so a dashboard process running the parallel prebuild + movers
-+ request handlers stacks multiple full-width library pools and thrashes.
-:func:`polars_thread_budget` / :func:`apply_polars_thread_bound` (entrypoint,
-BEFORE the first ``import polars``) and :func:`duckdb_thread_budget` /
-:func:`apply_duckdb_thread_bound` (per connection) split the physical cores
-across the concurrently-competing library pools. HONEST premise note (Golden
-Rule #1): polars keeps ONE process-global pool — N worker THREADS share it
-and do NOT multiply it (unlike DuckDB, whose pool is per CONNECTION), so the
-divisor here is the number of concurrent library POOLS
-(:data:`DEFAULT_EXPECTED_LIBRARY_POOLS`), NOT the prebuild worker count —
-dividing by the outer thread-worker count would serialise the shared resample
-pool (the exact hazard DEC-HARDWARE-ENVELOPE-001 #1401 documents). Kill
-switches: ``BRUTEX_POLARS_THREADS`` / ``BRUTEX_DUCKDB_THREADS``.
+DuckDB defaults EVERY connection to ALL logical cores, so a dashboard process
+holding the instrument-master + registry + ad-hoc reader connections stacks
+several full-width pools next to polars' one process-global pool.
+:func:`duckdb_thread_budget` / :func:`apply_duckdb_thread_bound` cap each
+concurrent-reader connection to ``physical_cores //``
+:data:`DEFAULT_EXPECTED_LIBRARY_POOLS` — the per-CONNECTION DuckDB caps ARE
+the contention fix. :func:`polars_thread_budget` /
+:func:`apply_polars_thread_bound` (entrypoint, BEFORE the first ``import
+polars`` — the CLI is the REQUIRED launcher for the bound to apply) pin the
+polars global pool to FULL PHYSICAL WIDTH by default (divisor 1): the
+operator's goal is USE EVERYTHING, the #1401 parallel prebuild deliberately
+runs polars at full width (its worker THREADS share the ONE global pool — a
+divided budget would waste half the box in the prebuild, the phase that
+matters most, and polars reads the env exactly once so the choice is
+irreversible per process), and during a prebuild the heavy movers/DuckDB
+reader load is GATED away (`PrebuildGate`, DEC-PIPELINE-AUTOPREBUILD-001
+#1145), so there is no real cross-library contention then. The bound still
+does real work: it caps polars at PHYSICAL cores (its own default is ALL
+LOGICAL cpus — an SMT over-report where they differ) and gives the operator
+ONE lever. HONEST premise note (Golden Rule #1): "N workers each spawn a
+full-width polars pool" is true for DuckDB (per-connection) but FALSE for
+polars (process-global, shared by worker threads) — dividing polars by the
+outer worker count would serialise the shared resample pool (the exact
+hazard DEC-HARDWARE-ENVELOPE-001 #1401 documents). For a genuinely-concurrent
+multi-pool setup pass ``expected_workers`` or set the kill switches:
+``BRUTEX_POLARS_THREADS`` / ``BRUTEX_DUCKDB_THREADS``. Deliberately NOT
+bounded: :mod:`brutex.data.catalog`'s connection (the ENGINE bar-stream path
+— O(1) discipline, CLAUDE.md §2 Rule 5; its latency budget owns the whole
+box). Tradeoff note for the two bounded EPHEMERAL readers
+(``coverage_reconcile.load_lake_spans`` / ``movers_warm.latest_movers_date``):
+an ISOLATED scan on an otherwise-idle box now runs at ``physical // 2`` —
+accepted, because both fire alongside pull/prebuild activity in production
+and both are bounded, small reads (the 1day partitions / footer aggregates).
 
 ## Honest envelope (Golden Rule #10)
 
@@ -116,8 +135,9 @@ POLARS_MAX_THREADS_VAR: str = "POLARS_MAX_THREADS"
 
 #: How many numeric-library pools compete for the CPU in one BruteX process —
 #: polars' ONE process-global pool + the live DuckDB connection pools. The
-#: thread budgets split the physical cores across THESE (see the module
-#: docstring for why the divisor is NOT the prebuild worker count).
+#: per-connection DUCKDB budget splits the physical cores across these (the
+#: contention fix); the POLARS budget deliberately does NOT (divisor 1 = full
+#: physical width — prebuild throughput priority; see the module docstring).
 DEFAULT_EXPECTED_LIBRARY_POOLS: int = 2
 
 #: Logical CPUs the default pool RESERVES for the rest of the machine — the
@@ -171,7 +191,6 @@ class SupportsExecute(Protocol):
 
     def execute(self, sql: str, /) -> object:
         """Run one SQL statement (the ``SET threads`` pragma)."""
-        ...  # pragma: no cover — Protocol stub, never executed
 
 
 @dataclass(frozen=True, slots=True)
@@ -758,24 +777,31 @@ def polars_thread_budget(
 
     A valid ``>= 1`` :data:`POLARS_THREADS_ENV` kill-switch override wins
     verbatim; otherwise :func:`library_thread_budget` over *expected_workers*
-    concurrently-competing library pools (default
-    :data:`DEFAULT_EXPECTED_LIBRARY_POOLS` — polars' single process-global
-    pool + the live DuckDB connection pools; NOT the prebuild thread-worker
-    count, which SHARES the one polars pool). O(1).
+    — which DEFAULTS TO 1, i.e. FULL PHYSICAL WIDTH: the #1401 parallel
+    prebuild's worker threads SHARE the one process-global polars pool and
+    deliberately run it at full width (dividing it would waste half the box
+    in the phase the operator cares most about, and polars reads the env
+    exactly once, so the choice is irreversible per process); cross-library
+    contention is handled by the per-connection DuckDB caps
+    (:func:`duckdb_thread_budget`) + the movers `PrebuildGate`. Pass
+    ``expected_workers`` (or the kill switch) for a genuinely-concurrent
+    multi-pool setup. O(1).
 
     Parameters
     ----------
     env
         Environment mapping (defaults to :data:`os.environ`).
     expected_workers
-        The competing-pool divisor; ``None``/``< 1`` → the default.
+        Explicit competing-pool divisor; ``None``/``< 1`` → ``1`` (full
+        physical width).
     envelope
         Pre-detected envelope (defaults to :func:`cached_envelope`).
     """
     override = _env_int(env, POLARS_THREADS_ENV)
     if override is not None:
         return override
-    return library_thread_budget(env, _pool_divisor(expected_workers), envelope=envelope)
+    divisor = expected_workers if expected_workers is not None and expected_workers >= 1 else 1
+    return library_thread_budget(env, divisor, envelope=envelope)
 
 
 def apply_polars_thread_bound(

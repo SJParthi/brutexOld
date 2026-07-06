@@ -27,19 +27,13 @@ def _threads_setting(store: InstrumentStore) -> int:
 
 class TestInstrumentStoreThreadBound:
     def test_open_defaults_to_envelope_budget(self, tmp_path: Path) -> None:
-        store = InstrumentStore.open(tmp_path / "master.duckdb")
-        try:
+        with InstrumentStore.open(tmp_path / "master.duckdb") as store:
             assert _threads_setting(store) == duckdb_thread_budget()
-        finally:
-            store.close()
 
     def test_open_honours_explicit_threads(self, tmp_path: Path) -> None:
-        store = InstrumentStore.open(tmp_path / "master.duckdb", threads=1)
-        try:
+        with InstrumentStore.open(tmp_path / "master.duckdb", threads=1) as store:
             assert _threads_setting(store) == 1
             # The bound changes parallelism only — a real query still works.
             row = store.connection.execute("SELECT COUNT(*) FROM instruments").fetchone()
             assert row is not None
             assert row[0] == 0
-        finally:
-            store.close()

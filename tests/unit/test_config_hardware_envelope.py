@@ -401,14 +401,23 @@ class TestPoolDivisor:
 
 
 class TestPolarsThreadBudget:
-    def test_derived_splits_physical_across_pools(self) -> None:
+    def test_default_is_full_physical_width(self) -> None:
+        # The hostile-review MAJOR: the default deliberately keeps polars at
+        # FULL physical width (divisor 1) — the #1401 prebuild's worker
+        # threads share the ONE global pool, and dividing it would waste half
+        # the box in the phase that matters most (the operator's USE
+        # EVERYTHING goal). Contention is handled by the per-connection
+        # DuckDB caps + the movers PrebuildGate.
         env = hw.envelope_from({"physical_cores": 14})
-        # 14 physical // 2 competing library pools (polars + DuckDB) = 7.
-        assert hw.polars_thread_budget({}, envelope=env) == 7
+        assert hw.polars_thread_budget({}, envelope=env) == 14
 
     def test_explicit_expected_workers(self) -> None:
         env = hw.envelope_from({"physical_cores": 14})
         assert hw.polars_thread_budget({}, expected_workers=7, envelope=env) == 2
+
+    def test_expected_workers_below_one_uses_full_width(self) -> None:
+        env = hw.envelope_from({"physical_cores": 14})
+        assert hw.polars_thread_budget({}, expected_workers=0, envelope=env) == 14
 
     def test_kill_switch_env_wins(self) -> None:
         env = hw.envelope_from({"physical_cores": 14})
@@ -416,7 +425,7 @@ class TestPolarsThreadBudget:
 
     def test_invalid_kill_switch_ignored(self) -> None:
         env = hw.envelope_from({"physical_cores": 14})
-        assert hw.polars_thread_budget({"BRUTEX_POLARS_THREADS": "zero"}, envelope=env) == 7
+        assert hw.polars_thread_budget({"BRUTEX_POLARS_THREADS": "zero"}, envelope=env) == 14
 
     def test_floors_at_one(self) -> None:
         env = hw.envelope_from({"physical_cores": 1})
@@ -428,8 +437,8 @@ class TestApplyPolarsThreadBound:
         env = hw.envelope_from({"physical_cores": 14})
         environ: dict[str, str] = {}
         got = hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
-        assert got == 7
-        assert environ["POLARS_MAX_THREADS"] == "7"
+        assert got == 14  # full physical width — the prebuild-throughput default.
+        assert environ["POLARS_MAX_THREADS"] == "14"
 
     def test_operator_preset_respected_never_overwritten(self) -> None:
         environ = {"POLARS_MAX_THREADS": "3"}
@@ -441,8 +450,8 @@ class TestApplyPolarsThreadBound:
         env = hw.envelope_from({"physical_cores": 4})
         environ = {"POLARS_MAX_THREADS": "  "}
         got = hw.apply_polars_thread_bound(environ, envelope=env, loaded_modules={})
-        assert got == 2
-        assert environ["POLARS_MAX_THREADS"] == "2"
+        assert got == 4
+        assert environ["POLARS_MAX_THREADS"] == "4"
 
     def test_polars_already_imported_is_honest_noop(self) -> None:
         # Setting the env var after polars imported would be silently ignored
@@ -468,8 +477,8 @@ class TestApplyPolarsThreadBound:
         monkeypatch.delenv("BRUTEX_POLARS_THREADS", raising=False)
         got = hw.apply_polars_thread_bound(envelope=env, loaded_modules={})
         try:
-            assert got == 1
-            assert os.environ["POLARS_MAX_THREADS"] == "1"
+            assert got == 2  # physical_cores of the injected envelope — full width.
+            assert os.environ["POLARS_MAX_THREADS"] == "2"
         finally:
             # monkeypatch restores the pre-test absence at teardown too; this
             # keeps the assertion failure path clean.

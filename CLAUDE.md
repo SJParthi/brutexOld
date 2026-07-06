@@ -36,11 +36,13 @@ fast path and before the first `import polars` any dispatch can trigger — CLI 
 the in-process uvicorn dashboard both enter there; outcomes log once per process) and
 every concurrent-reader DuckDB connection (`InstrumentStore.open` / `RegistryStore.open`
 / `coverage_reconcile` / `movers_warm`) is bounded at creation (`SET threads TO
-<budget>`); budgets = `physical_cores // DEFAULT_EXPECTED_LIBRARY_POOLS(2)` — the
-divisor is the number of competing library POOLS, NOT the prebuild worker count
-(polars' pool is process-global and shared by worker threads — dividing by workers
-would serialise it, the #1401-documented hazard; DuckDB's pool IS per-connection, hence
-the per-connection bound); kill switches `BRUTEX_POLARS_THREADS` /
+<budget>`, `physical_cores // DEFAULT_EXPECTED_LIBRARY_POOLS(2)`) — the per-connection
+DuckDB caps ARE the contention fix, while the POLARS default is FULL physical width
+(divisor 1 — the #1401 prebuild's worker threads share the one global pool; halving it
+would waste half the box in the phase that matters most, and the movers PrebuildGate
+serialises the heavy reader load away; the bound still caps polars at PHYSICAL cores
+vs its own all-LOGICAL default); `data/catalog.py`'s engine connection deliberately
+NOT bounded; kill switches `BRUTEX_POLARS_THREADS` /
 `BRUTEX_DUCKDB_THREADS`; an operator-preset `POLARS_MAX_THREADS` is respected and an
 already-imported polars gets ONE loud too-late WARN per process, never a pretend-bound.
 Parallelism-only — results byte-identical; measured A/B on the small CI fixture
@@ -353,8 +355,9 @@ hostile-review pass._
   `brutex/hardware_envelope.py` DELETED, consumers repointed, the #1360 RAM-budget contract ported verbatim, the
   interim #1167-resolution RAM-delegation pin superseded, `greeks_pool_workers` delegated to the COMMON
   `cpu_pool_workers` byte-unchanged) + the polars global pool bounded once at the `brutex.cli` dispatch before the
-  first polars import and every concurrent-reader DuckDB connection bounded at creation, budgets from the envelope
-  (`physical_cores // 2` competing library pools), kill switches `BRUTEX_POLARS_THREADS`/`BRUTEX_DUCKDB_THREADS`;
+  first polars import (default = FULL physical width — prebuild throughput priority) and every concurrent-reader
+  DuckDB connection bounded at creation (`physical_cores // 2` per connection — the contention fix), kill switches
+  `BRUTEX_POLARS_THREADS`/`BRUTEX_DUCKDB_THREADS`;
   parallelism-only, byte-identical results; ENGINE UNCHANGED). Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
@@ -1955,10 +1958,11 @@ prefer_performance=True)` → 8 on this machine; `memory_budget_bytes` for the
 RAM-scaled byte budgets). The engine sweep pool (`auto_sweep_workers`), the
 Greeks enrichment pool (`greeks_pool_workers`), and the pull pipeline's
 timeframe PREBUILD (parallelised across cores via a `ThreadPoolExecutor`,
-byte-identical lake output) all size off it; the polars global pool + every
-concurrent-reader DuckDB connection are bounded off it too
-(DEC-THREAD-BUDGET-BOUNDS-001 #1491, `physical_cores // 2` competing library
-pools, kill switches `BRUTEX_POLARS_THREADS`/`BRUTEX_DUCKDB_THREADS`).
+byte-identical lake output) all size off it; the polars global pool (pinned to FULL
+physical width at the CLI entrypoint) + every concurrent-reader DuckDB
+connection (`physical_cores // 2` per connection — the contention fix) are
+bounded off it too (DEC-THREAD-BUDGET-BOUNDS-001 #1491, kill switches
+`BRUTEX_POLARS_THREADS`/`BRUTEX_DUCKDB_THREADS`).
 `BRUTEX_CPU_WORKERS` / `BRUTEX_PREBUILD_WORKERS` / `BRUTEX_SWEEP_WORKERS=1`
 override. The Groww FETCH pool + the per-second rate ceiling + the 500/min
 governor are a REAL vendor limit (a single TOTP token; §2 Rule 6) and are

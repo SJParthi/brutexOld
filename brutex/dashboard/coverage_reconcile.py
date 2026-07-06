@@ -61,6 +61,9 @@ def load_lake_spans(
     try:
         # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
         # thread pool (DuckDB defaults to ALL logical cores per connection).
+        # Honest tradeoff: an ISOLATED cold-start scan on an idle box now runs
+        # at physical//2 — accepted, because this read fires alongside pull
+        # activity in production and is a bounded footer-aggregate read.
         apply_duckdb_thread_bound(conn)
         return summarize_spot_datasets(conn, lake_root, session_date_segments=session_date_segments)
     finally:
