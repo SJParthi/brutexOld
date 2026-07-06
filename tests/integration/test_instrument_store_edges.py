@@ -989,7 +989,9 @@ class TestIndexSegmentPkFix:
 # ONE deadline-guarded batch; a wedged volume raises the TRANSIENT
 # StoreWriteDeadlineExceeded (the metaclass-held writer RLock unwinds on the OWNING
 # thread), later coverage writes fail fast on the latch, the coverage READ family
-# refuses loudly, and ``close()`` skips the raw closes under a zombie. Hangs are
+# AND the split-read ``connection`` view refuse loudly (fix round 4 — read-cursor
+# survival under an ENGINE-level wedge is UNVERIFIED; these proxy hangs never reach
+# the engine), and ``close()`` skips the raw closes under a zombie. Hangs are
 # DETERMINISTIC (a proxy conn blocking on a gate, released in ``finally``).
 
 
@@ -1055,6 +1057,11 @@ class TestCoverageWriteDeadline:
         monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_coverage(_coverage_cell("NIFTY"))  # healthy prior row
+            # A whitebox view that already HOLDS the read lock from a healthy
+            # execute (no fetch) BEFORE the breach — fix round 4 pins that its
+            # next execute drops the stale hold BEFORE the wedge raise.
+            stale_view = s.connection
+            stale_view.execute("SELECT 1")
             proxy = _CoverageGateConn(s._conn)
             s._conn = proxy
             start = _time.monotonic()
@@ -1113,6 +1120,25 @@ class TestCoverageWriteDeadline:
                     )
                 with pytest.raises(CatalogError, match="wedged"):
                     _ = s.schema_version
+                # /db whitebox read path (fix round 4): read-cursor survival
+                # under an ENGINE-level wedge is UNVERIFIED (the proxy hangs
+                # BEFORE the engine, so no test can exercise it) — the split
+                # read view therefore refuses in O(1) instead of gambling on
+                # DuckDB internals.
+                read_start = _time.monotonic()
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.connection.execute("SELECT 1")
+                assert _time.monotonic() - read_start < 0.1
+                # The refusal leaked no read-lock hold.
+                assert s._read_lock.acquire(timeout=2.0)
+                s._read_lock.release()
+                # A view holding the read lock from a PRIOR healthy execute
+                # drops that hold BEFORE the wedge raise (release-then-check
+                # order) — the read lane can never be frozen by the refusal.
+                with pytest.raises(CatalogError, match="wedged"):
+                    stale_view.execute("SELECT 1")
+                assert s._read_lock.acquire(timeout=2.0)
+                s._read_lock.release()
             finally:
                 proxy.gate.set()
             # Recovery: the zombie's idempotent DELETE+INSERT lands late and the
@@ -1121,6 +1147,8 @@ class TestCoverageWriteDeadline:
             _wait_until_healed(s)
             assert s.get_meta("schema_version") == str(SCHEMA_VERSION)
             assert s.schema_version == SCHEMA_VERSION
+            # The split read view self-heals off the same latch (fix round 4).
+            assert s.connection.execute("SELECT 1").fetchone() == (1,)
             cells = {r.underlying_symbol for r in s.list_coverage()}
             assert cells == {"NIFTY", "BANKNIFTY"}
             s.upsert_coverage(_coverage_cell("SENSEX", run_id="r2"))

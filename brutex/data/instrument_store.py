@@ -79,7 +79,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -760,11 +760,24 @@ class _LockedReadConn:
     cannot race the background pull's writes (DEC-STORE-THREADSAFE-001). It
     supports exactly the read pattern db_view uses; mutation still goes through
     the store's typed, locked methods.
+
+    Wedge fail-fast (DEC-STORE-WRITE-DEADLINE-001 fix round 4): *ensure_ready*
+    is the store's own :meth:`InstrumentStore._ensure_not_wedged` (ONE source of
+    truth — §11 COMMON), invoked at the top of every :meth:`execute` BEFORE the
+    read lock is acquired. Whether this child read cursor would survive a REAL
+    engine-level wedge is UNVERIFIED (see :attr:`InstrumentStore.connection`),
+    so a wedged store refuses the read in O(1) instead of gambling on DuckDB
+    internals — and, by checking before ``acquire``, a post-breach reader never
+    even queues on ``read_lock`` behind a pre-breach reader that may already be
+    blocked inside the engine.
     """
 
-    def __init__(self, conn: Any, lock: threading.RLock) -> None:
+    def __init__(
+        self, conn: Any, lock: threading.RLock, *, ensure_ready: Callable[[], None]
+    ) -> None:
         self._conn = conn
         self._lock = lock
+        self._ensure_ready = ensure_ready
         self._result: Any = None
         # Tracks whether THIS view currently holds the store lock, so release is
         # idempotent — a caller that reads only ``description`` (no fetch) can
@@ -773,12 +786,22 @@ class _LockedReadConn:
         self._held = False
 
     def execute(self, sql: str, parameters: Any = None) -> _LockedReadConn:
-        """Acquire the store lock and execute *sql*; lock is held until fetch/close."""
+        """Acquire the store lock and execute *sql*; lock is held until fetch/close.
+
+        Raises :class:`~brutex.data.errors.CatalogError` in O(1) while an
+        abandoned coverage write wedges the store (*ensure_ready*), BEFORE
+        acquiring the read lock — see the class docstring
+        (DEC-STORE-WRITE-DEADLINE-001 fix round 4). Self-heals the moment the
+        zombie completes.
+        """
         # Drop any lock still held from a PRIOR execute on this same view (a
         # caller that re-executed without fetching) before re-acquiring, so a
         # re-execute can never leak an extra acquisition — at most one hold per
         # view, always balanced by the next fetch/close (DEC-STORE-LOCK-LEAK-FIX-001).
         self._release()
+        # Wedge fail-fast BEFORE acquire: no prior hold remains (the _release()
+        # above), so raising here can never leak the read lock.
+        self._ensure_ready()
         self._lock.acquire()
         self._held = True
         try:
@@ -896,7 +919,9 @@ class InstrumentStore(metaclass=_StoreMeta):
         # STORE-WIDE via the :func:`_synchronized` wrapper (fix round 2 — every
         # non-:data:`_WEDGE_EXEMPT` typed method refuses while the conn is wedged,
         # so a per-request route call can never re-freeze the guarded pull lane
-        # through the shared RLock). The other typed WRITERS (``set_meta`` /
+        # through the shared RLock) AND on the split-read view (fix round 4 —
+        # `connection` threads `_ensure_not_wedged` into `_LockedReadConn.execute`,
+        # since read-cursor survival under an engine-level wedge is UNVERIFIED). The other typed WRITERS (``set_meta`` /
         # ``upsert_many`` / …) still carry no deadline of their own (a NAMED
         # follow-up) — but they now fail fast once a coverage breach latched.
         self._write_guard = StoreWriteDeadlineGuard(store_label="coverage")
@@ -915,11 +940,28 @@ class InstrumentStore(metaclass=_StoreMeta):
         MVCC hands it a consistent committed snapshot even mid-write. Per
         DEC-P0-017 (PR #39) it avoids per-call-site private-access ignores.
 
+        Wedge fail-fast (DEC-STORE-WRITE-DEADLINE-001 fix round 4): the view's
+        ``execute`` runs :meth:`_ensure_not_wedged` first, so a ``/db`` read on
+        a wedged store raises the terminal :class:`CatalogError` in O(1)
+        instead of reaching the engine. Whether the split read cursor would
+        survive a REAL engine-level wedge is UNVERIFIED — the "empirically
+        verified on 1.5.3" MVCC note above covers reads during an OPEN write
+        transaction, NOT a zombie wedged inside an auto-commit ``execute``
+        (WAL write / fsync on the wedged volume), which plausibly holds
+        engine-level transaction-manager/commit locks that block a NEW read
+        transaction; the wedge-hang test recipe hangs a Python-level proxy
+        BEFORE the engine, so no test exercises a genuine engine-level wedge
+        (Golden Rule #1). The fail-fast closes the hole regardless of DuckDB
+        internals: one blocked read can no longer hold ``_read_lock`` forever
+        and freeze every later dashboard read behind it.
+
         Treat as read-only — any state mutation MUST go through the
         InstrumentStore's typed methods (upsert_many, verify_integrity,
         etc.) to preserve audit + idempotence guarantees.
         """
-        return _LockedReadConn(self._read_conn, self._read_lock)
+        return _LockedReadConn(
+            self._read_conn, self._read_lock, ensure_ready=self._ensure_not_wedged
+        )
 
     @classmethod
     def open(cls, path: Path, *, threads: int | None = None) -> Self:
@@ -2114,8 +2156,13 @@ class InstrumentStore(metaclass=_StoreMeta):
         public method therefore fails FAST + LOUD via the :func:`_synchronized`
         wrapper (a failed job/request headline, never a frozen thread); the
         check self-heals the moment the zombie completes. One boolean check on
-        the healthy path. The ``/db`` whitebox reads survive on the SPLIT read
-        cursor (:class:`_LockedReadConn`), untouched here. HONEST residual
+        the healthy path. The ``/db`` whitebox reads carry the SAME check (fix
+        round 4): :attr:`connection` is a ``property`` — never
+        metaclass-wrapped — so it threads THIS method into
+        :meth:`_LockedReadConn.execute` as its ``ensure_ready`` hook; whether
+        the split read cursor would survive a REAL engine-level wedge is
+        UNVERIFIED (see :attr:`connection`), so the read path fails fast too
+        rather than resting on an unverified MVCC claim. HONEST residual
         (Golden Rule #10): the latch is set only AT the first breach — a caller
         that reached the wedged conn BEFORE that breach still blocks unboundedly
         on the conn mutex (it dies with the process, like the zombie itself).
