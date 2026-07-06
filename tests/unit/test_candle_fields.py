@@ -287,3 +287,57 @@ class TestAssembleCandle:
         """A negative open-interest clamps to 0 (same DEC-VENDOR-VOLUME-NORMALIZE-001)."""
         bar = self._call(open_interest="-5")
         assert bar.open_interest == 0
+
+
+class TestOnClampObserveHook:
+    """The observe-only OHLC-clamp hook (DEC-STORED-DATA-VALIDATION-001).
+
+    Fails-before: the DEC-OHLC-VENDOR-NORMALIZE-001 clamp at the high=max /
+    low=min site fired SILENTLY — no counter, no log — so a vendor
+    systematically under-reporting highs could never surface.
+    """
+
+    def _call(self, *, high: object, low: object, on_clamp: object) -> CandleBar:
+        return assemble_candle(
+            ts_raw="ignored",
+            parse_timestamp=_fixed_ts,
+            open_="100",
+            high=high,
+            low=low,
+            close="105",
+            volume="10",
+            open_interest=None,
+            on_clamp=on_clamp,  # type: ignore[arg-type]
+        )
+
+    def test_hook_fires_once_when_high_clamped(self) -> None:
+        calls: list[int] = []
+        bar = self._call(high="101", low="90", on_clamp=lambda: calls.append(1))
+        assert calls == [1]  # close 105 > vendor high 101 → clamp moved high
+        assert bar.high == Decimal("105")
+
+    def test_hook_fires_when_low_clamped(self) -> None:
+        calls: list[int] = []
+        bar = self._call(high="110", low="102", on_clamp=lambda: calls.append(1))
+        assert calls == [1]  # open 100 < vendor low 102 → clamp moved low
+        assert bar.low == Decimal("100")
+
+    def test_hook_silent_on_consistent_bar(self) -> None:
+        calls: list[int] = []
+        bar = self._call(high="110", low="90", on_clamp=lambda: calls.append(1))
+        assert calls == []
+        assert (bar.high, bar.low) == (Decimal("110"), Decimal("90"))
+
+    def test_default_none_hook_returns_identical_bar(self) -> None:
+        clamped_with_hook = self._call(high="101", low="90", on_clamp=lambda: None)
+        clamped_without = assemble_candle(
+            ts_raw="ignored",
+            parse_timestamp=_fixed_ts,
+            open_="100",
+            high="101",
+            low="90",
+            close="105",
+            volume="10",
+            open_interest=None,
+        )
+        assert clamped_with_hook == clamped_without  # parse behavior unchanged
