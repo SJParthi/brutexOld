@@ -928,6 +928,11 @@ def pull_expiries_contracts(
         # the raise IS the defer — PoolRunParallel captures it per job, the job
         # counts into ``contract_failures``, persisted no contracts, and is rebuilt
         # + re-pulled on the NEXT pull (DEC-PHASE2-REGISTRY-REBUILD-001).
+        # "Persisted no contracts" is GUARANTEED by ``upsert_contracts``' atomic
+        # transaction (fix round 3): a mid-batch breach whose zombie dies with the
+        # process commits ZERO legs, so ``settled_contract_jobs`` can never infer
+        # this expired job settled from a durable prefix (which would have skipped
+        # the remaining legs forever — a silent permanent partial chain).
         contracts_stored = registry.upsert_contracts(
             exchange,
             underlying,

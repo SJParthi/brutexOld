@@ -36,6 +36,7 @@ from brutex.data.registry_store import (
     open_registry,
 )
 from brutex.data.store_write_deadline import STORE_CLOSE_SKIPPED_EVENT
+from brutex.orchestrator.universe_phases import contract_jobs_to_pull, settled_contract_jobs
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
@@ -414,17 +415,21 @@ class _GateConn:
     pins the wedged-close skip.
     """
 
-    def __init__(self, real: object, *, hang_on: str) -> None:
+    def __init__(self, real: object, *, hang_on: str, hang_on_match: int = 1) -> None:
         self._real = real
         self._hang_on = hang_on
+        self._hang_on_match = hang_on_match
+        self._matches = 0
         self.gate = threading.Event()
         self.entered = threading.Event()
         self.close_calls = 0
 
     def execute(self, sql: str, params: list[object] | None = None) -> object:
         if self._hang_on in sql:
-            self.entered.set()
-            self.gate.wait(timeout=30.0)
+            self._matches += 1
+            if self._matches == self._hang_on_match:
+                self.entered.set()
+                self.gate.wait(timeout=30.0)
         real: Any = self._real
         if params is None:
             return real.execute(sql)
@@ -445,10 +450,16 @@ def _wait_until(predicate: Callable[[], bool], *, timeout: float = 10.0) -> None
         time.sleep(0.005)
 
 
-def _wedge(store: RegistryStore, monkeypatch: pytest.MonkeyPatch, *, hang_on: str) -> _GateConn:
+def _wedge(
+    store: RegistryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hang_on: str,
+    hang_on_match: int = 1,
+) -> _GateConn:
     """Swap the store's conn for a gate proxy + shrink the deadline to 0.2 s."""
     monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
-    proxy = _GateConn(store._conn, hang_on=hang_on)
+    proxy = _GateConn(store._conn, hang_on=hang_on, hang_on_match=hang_on_match)
     store._conn = proxy
     return proxy
 
@@ -496,6 +507,54 @@ class TestStoreWriteDeadline:
         finally:
             proxy.gate.set()
         _wait_until(lambda: not store._write_guard.wedged)
+        store.close()
+
+    def test_mid_batch_breach_commits_nothing_and_expired_job_still_pulled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix round 3 [MAJOR]: a mid-batch breach must never settle the job via a prefix.
+
+        Pre-fix each leg's INSERT auto-committed, so a wedge at leg 2 of 3 left
+        leg 1 DURABLE; if the process then died before the volume recovered, the
+        next pull's ``settled_contract_jobs`` saw the surviving row, inferred the
+        (exch, underlying, expiry) job settled, and ``contract_jobs_to_pull``
+        skipped the EXPIRED expiry forever — a silent permanent partial chain.
+        With the atomic transaction a second connection (the durability oracle:
+        uncommitted data is invisible to it, exactly what a restart would see)
+        reads ZERO rows mid-wedge, so the job stays pull-able; when the zombie
+        completes in-process the FULL batch commits atomically and only THEN does
+        the settle inference skip it.
+        """
+        store = _store(tmp_path)
+        today = date(2026, 7, 6)
+        assert today > _EXP  # the job's expiry is EXPIRED — the skip-forever arm
+        job = ("NSE", "NIFTY", _EXP)
+        legs: list[tuple[str, str, float | None]] = [
+            ("NSE-NIFTY-02Jan20-12100-CE", "CE", 12100.0),
+            ("NSE-NIFTY-02Jan20-12100-PE", "PE", 12100.0),
+            ("NSE-NIFTY-02Jan20-FUT", "FUT", None),
+        ]
+        proxy = _wedge(store, monkeypatch, hang_on=_CONTRACT_WRITE, hang_on_match=2)
+        oracle = duckdb.connect(str(tmp_path / "registry.duckdb"))
+        try:
+            with pytest.raises(StoreWriteDeadlineExceeded):
+                store.upsert_contracts("NSE", "NIFTY", _EXP, legs, run_id="r", fetched_at=_NOW)
+            assert proxy.entered.is_set()  # the wedge genuinely hit leg 2, not leg 1
+            durable = oracle.execute(
+                "SELECT exch, underlying, expiry_date FROM contracts"
+            ).fetchall()
+            assert durable == []  # pre-fix: leg 1 was already durably committed here
+            settled = settled_contract_jobs((r[0], r[1], r[2]) for r in durable)
+            assert contract_jobs_to_pull([job], settled=settled, today=today) == [job]
+        finally:
+            proxy.gate.set()
+            oracle.close()
+        _wait_until(lambda: not store._write_guard.wedged)
+        # The in-process recovery arm: the zombie commits the FULL batch atomically,
+        # and only a COMPLETE leg-set settles the expired job.
+        assert store.count_contracts() == 3
+        settled_after = settled_contract_jobs(store.list_contract_jobs())
+        assert contract_jobs_to_pull([job], settled=settled_after, today=today) == []
         store.close()
 
     def test_hung_set_candle_status_defers(
@@ -724,6 +783,50 @@ class TestBatchWriteMethods:
         store = _store(tmp_path)
         assert store.upsert_expiries("NSE", "NIFTY", [], run_id="r", fetched_at=_NOW) == 0
         assert store.count_expiries() == 0
+        store.close()
+
+    def test_upsert_contracts_empty_batch_is_a_no_op(self, tmp_path: Path) -> None:
+        """A zero-leg batch commits an empty transaction — no rows, no error."""
+        store = _store(tmp_path)
+        assert store.upsert_contracts("NSE", "NIFTY", _EXP, [], run_id="r", fetched_at=_NOW) == 0
+        assert store.count_contracts() == 0
+        store.close()
+
+    def test_upsert_contracts_mid_batch_statement_error_rolls_back_whole_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Fix round 3: a REAL mid-batch statement error persists NOTHING (rollback).
+
+        The error propagates UNCHANGED (never re-typed by the guard) and the
+        explicit transaction rolls back the already-executed prefix — the same
+        nothing-or-all contract the upfront validation gives an invalid leg.
+        """
+        store = _store(tmp_path)
+        real: Any = store._conn
+        boom = RuntimeError("disk went away mid-batch")
+
+        class _RaiseOnSecondInsert:
+            def __init__(self) -> None:
+                self._matches = 0
+
+            def execute(self, sql: str, params: list[object] | None = None) -> object:
+                if "INSERT OR REPLACE INTO contracts" in sql:
+                    self._matches += 1
+                    if self._matches == 2:
+                        raise boom
+                if params is None:
+                    return real.execute(sql)
+                return real.execute(sql, params)
+
+        store._conn = _RaiseOnSecondInsert()
+        legs: list[tuple[str, str, float | None]] = [
+            ("NSE-NIFTY-02Jan20-12100-CE", "CE", 12100.0),
+            ("NSE-NIFTY-02Jan20-12100-PE", "PE", 12100.0),
+        ]
+        with pytest.raises(RuntimeError, match="disk went away mid-batch"):
+            store.upsert_contracts("NSE", "NIFTY", _EXP, legs, run_id="r", fetched_at=_NOW)
+        store._conn = real
+        assert store.count_contracts() == 0  # leg 1 rolled back, never a durable prefix
         store.close()
 
     def test_upsert_contracts_invalid_mid_list_leg_persists_nothing(self, tmp_path: Path) -> None:

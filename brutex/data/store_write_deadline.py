@@ -44,7 +44,11 @@ set) still blocks the lane unboundedly on the conn's internal mutex — it dies 
 process, exactly like the zombie itself; only callers arriving AFTER the breach are
 protected. A late-completing zombie write is harmless by construction: every guarded
 statement is an idempotent keyed ``INSERT OR REPLACE`` / ``UPDATE`` /
-``DELETE``+``INSERT`` carrying exactly the values the healthy path would have written.
+``DELETE``+``INSERT`` carrying exactly the values the healthy path would have written —
+and the contract batch additionally runs in ONE explicit transaction (fix round 3), so
+a zombie that dies with the process commits NOTHING (never a durable mid-batch PREFIX
+of legs, which would wrongly settle the Phase-2 job and permanently skip an expired
+expiry's remaining legs) while one that later completes commits the FULL batch.
 
 O(1) per write BATCH: one daemon thread + one :class:`threading.Event` per
 :meth:`~StoreWriteDeadlineGuard.run` (never per row); a wedged store costs one pointer

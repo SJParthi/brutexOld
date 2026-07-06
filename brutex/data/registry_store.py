@@ -428,6 +428,25 @@ class RegistryStore:
         fails + re-pulls idempotently; Golden Rule #1 — never store an
         un-vocabularised value). Returns ``len(legs)``.
 
+        The batch is ATOMIC — one explicit DuckDB transaction around the per-leg
+        INSERTs (fix round 3). Without it each auto-committing statement made a
+        mid-batch deadline breach durable UP TO the wedged leg: if the abandoned
+        zombie then died with the process (the realistic operator response to a
+        wedged external SSD), the next pull's
+        :func:`~brutex.orchestrator.universe_phases.settled_contract_jobs` saw the
+        surviving prefix row, inferred the ``(exch, underlying, expiry)`` job
+        settled (ANY row settles it), and — for an already-EXPIRED expiry —
+        :func:`~brutex.orchestrator.universe_phases.contract_jobs_to_pull` skipped
+        it FOREVER: a silent permanent partial chain. With the transaction a
+        zombie that dies with the process commits NOTHING (DuckDB discards the
+        uncommitted transaction on the next open), so the settled-job inference
+        stays sound; a zombie that later completes IN-process commits the FULL
+        batch atomically (the honest recovery case). A real mid-batch statement
+        error rolls the transaction back and propagates unchanged — same
+        nothing-or-all contract as the upfront validation. Guard + transaction
+        cost is O(1) per BATCH (``BEGIN``/``COMMIT`` bracket the loop), never per
+        row.
+
         Raises
         ------
         RegistryError
@@ -450,21 +469,36 @@ class RegistryStore:
             self._ensure_open()
 
             def _write() -> None:
-                for contract_symbol, side, strike in legs:
-                    self._conn.execute(
-                        _SQL_UPSERT_CONTRACT,
-                        [
-                            exch,
-                            underlying,
-                            expiry_date,
-                            contract_symbol,
-                            strike,
-                            side,
-                            candle_status,
-                            run_id,
-                            fetched_at,
-                        ],
-                    )
+                # ATOMIC batch (fix round 3): the explicit transaction guarantees a
+                # mid-batch wedge whose zombie dies with the process persists ZERO
+                # legs — never a durable prefix that would wrongly settle the
+                # Phase-2 job (see the docstring). The wedge latch already
+                # serializes the conn, so no other statement can interleave with
+                # the open transaction.
+                self._conn.execute("BEGIN TRANSACTION")
+                try:
+                    for contract_symbol, side, strike in legs:
+                        self._conn.execute(
+                            _SQL_UPSERT_CONTRACT,
+                            [
+                                exch,
+                                underlying,
+                                expiry_date,
+                                contract_symbol,
+                                strike,
+                                side,
+                                candle_status,
+                                run_id,
+                                fetched_at,
+                            ],
+                        )
+                except BaseException:
+                    # A real statement error (not a breach — the breach abandons
+                    # this thread mid-wait, it never raises HERE): roll back so the
+                    # error path persists NOTHING, then propagate unchanged.
+                    self._conn.execute("ROLLBACK")
+                    raise
+                self._conn.execute("COMMIT")
 
             self._write_guard.run(_write, op="upsert_contracts")
         return len(legs)
