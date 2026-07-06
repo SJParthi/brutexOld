@@ -269,13 +269,21 @@ class TestParallelReexports:
         assert params["condition_bits"] == sorted(set(grid.condition_bits))
         assert params["top_k"] == grid.top_k
         assert params["min_hits"] == grid.min_hits
+        # The three reproducibility hashes are NO LONGER in the params dict —
+        # they are structural keyword-only parameters of ``combo_digest``
+        # (DEC-COMBO-DIGEST-REPRO-HASHES-001); ``combo_digest`` would REFUSE a
+        # params dict carrying them (reserved-key guard).
+        assert "data_snapshot_hash" not in params
+        assert "indicator_version" not in params
+        assert "code_commit_sha" not in params
 
     def test_tuple_cache_params_reproduces_the_cache_key(self) -> None:
         """The public params dict rebuilds the byte-identical SweepCache key.
 
         Proves the re-export is the SAME identity the private path uses — feeding
         it into ``combo_digest`` with the public ``tuple_label`` direction leg
-        reproduces ``tuple_cache_key`` exactly (no silent divergence).
+        AND the grid's three structural reproducibility hashes reproduces
+        ``tuple_cache_key`` exactly (no silent divergence).
         """
         from brutex.engine.sweep_cache import combo_digest
 
@@ -287,8 +295,27 @@ class TestParallelReexports:
             tuple_.tf.label,
             "bull",
             tuple_cache_params(tuple_, grid),
+            data_snapshot_hash=grid.data_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
         )
         assert rebuilt == tuple_cache_key(tuple_, grid)
+
+    def test_tuple_cache_key_byte_identical_to_pre_structural_convention(self) -> None:
+        """PRODUCTION-path byte-identity golden (DEC-COMBO-DIGEST-REPRO-HASHES-001).
+
+        The hex below was captured by running the PRE-change (main)
+        ``tuple_cache_key`` — where the three reproducibility hashes travelled
+        INSIDE ``_tuple_cache_params`` by convention — over exactly this
+        ``_grid()`` fixture. The structural-kwargs code must reproduce it
+        EXACTLY: existing Bloom/LMDB dedup stores keyed under the legacy
+        convention remain valid (no stale-skip, no store invalidation).
+        """
+        grid = _grid()
+        tuple_ = next(iter_sweep_tuples(grid))
+        assert tuple_cache_key(tuple_, grid).hex() == (
+            "a840ae6838edd7ab87b457ed898c2a51f48ca5435959f52f9916bec1c5baac92"
+        )
 
 
 # ────── _drive_watchdog ──────
