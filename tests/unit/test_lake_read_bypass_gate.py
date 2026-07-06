@@ -75,7 +75,11 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "candidate-discovery aggregate over symbols (ranking warm), not a bar-serving read"
     ),
     "brutex/options/lake_source.py": "wired: _contract_bars dedups before the bar map build",
-    "brutex/doctor.py": "wired: check_derived_freshness _read dedups",
+    # DEC-SUSPICION-SWEEP-FIXES-001 (G1): the doctor's freshness `_read` moved into
+    # the COMMON tf_autoderive.read_lake_bars_frame (shared by the doctor probe AND
+    # the sweep-preflight freshness gate) — the raw read feeds dedup_bars_frame
+    # IMMEDIATELY, exactly as the superseded doctor.py entry did.
+    "brutex/data/tf_autoderive.py": "wired: read_lake_bars_frame dedups",
     "brutex/engine/results_store.py": "results-tree Parquet (run_id-keyed), not the bar lake",
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "

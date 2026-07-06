@@ -75,7 +75,11 @@ from brutex.adapters.error_storm_breaker import (
     observe_window_success,
 )
 from brutex.adapters.groww.chunks import window_days_for_interval
-from brutex.adapters.groww.client import client_self_paces
+from brutex.adapters.groww.client import (
+    client_self_paces,
+    client_self_reports_rate_limits,
+    client_self_reports_successes,
+)
 from brutex.adapters.groww.errors import (
     GrowwAuthorisationError,
     GrowwError,
@@ -478,7 +482,19 @@ def ingest_spot(
     # 500/min governor. The client is the canonical admission point; the window-level
     # pace stays ONLY as the fallback for an un-paceable adapter (a fake / synthetic).
     # The raw *pace* is still read above for pool SIZING (a hint, never an admission).
-    window_pace = None if client_self_paces(getattr(adapter, "client", None)) else pace
+    spine_client = getattr(adapter, "client", None)
+    window_pace = None if client_self_paces(spine_client) else pace
+    # SINGLE FEEDBACK (DEC-SUSPICION-SWEEP-FIXES-001): when the client self-reports —
+    # ``run_groww_spot_ingest`` now binds the controller's on_rate_limit/on_success
+    # into the client too, so ``_call`` fires the decrement on EVERY 429 occurrence
+    # (the final, budget-exhausting one included) and the recovery on every clean
+    # call — the spine's own per-window hooks below stand down: firing them again on
+    # the propagated error / the settled window would DOUBLE-COUNT the final
+    # occurrence (over-braking the AIMD ladder) / double-credit the recovery.
+    # ``on_timeout`` deliberately does NOT stand down — the client never fires the
+    # timeout ladder, so the spine remains its only feedback point.
+    window_on_rate_limit = None if client_self_reports_rate_limits(spine_client) else on_rate_limit
+    window_on_success = None if client_self_reports_successes(spine_client) else on_success
 
     def _fetch_window(window: tuple[date, date]) -> _WindowOutcome:
         """Pull ONE window — runs inside a worker thread under the fan-out.
@@ -497,9 +513,9 @@ def ingest_spot(
                 window=window,
                 pace=window_pace,
                 ledger=ledger,
-                on_rate_limit=on_rate_limit,
+                on_rate_limit=window_on_rate_limit,
                 on_timeout=on_timeout,
-                on_success=on_success,
+                on_success=window_on_success,
                 pull_id=pull_id,
                 series_fields=series_fields,
                 empty_retry_attempts=empty_retry_attempts,

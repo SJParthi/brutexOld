@@ -25,9 +25,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+    from pathlib import Path
+
     import polars as pl
 
-__all__ = ["compare_derived_freshness"]
+__all__ = [
+    "compare_derived_freshness",
+    "lake_derived_freshness_verdicts",
+    "read_lake_bars_frame",
+]
 
 
 def compare_derived_freshness(df_1m: pl.DataFrame, df_stored: pl.DataFrame, tf_minutes: int) -> str:
@@ -48,3 +55,90 @@ def compare_derived_freshness(df_1m: pl.DataFrame, df_stored: pl.DataFrame, tf_m
     if expected.height != stored.height:
         return "stale"
     return "fresh" if expected.equals(stored.cast(expected.schema)) else "stale"
+
+
+def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -> pl.DataFrame:
+    """Read ONE stored ``(symbol, interval)`` partition as the canonical compare frame.
+
+    The COMMON lake read the freshness compares run on (CLAUDE.md §11 —
+    DEC-SUSPICION-SWEEP-FIXES-001 G1 extracted it from the doctor's
+    ``check_derived_freshness`` so the doctor probe and the sweep-preflight gate
+    share ONE reader): keep-FIRST read dedup BEFORE the sort
+    (DEC-LAKE-READ-UNIQUE-001 — the compare must see the same deduped bars every
+    wired reader serves, never a poisoned-era physical duplicate), renamed +
+    projected to the resampler's canonical ``ts_utc``/OHLCV columns, sorted.
+    *source* labels the dedup log event; blank derives ``<symbol>/<interval>``.
+    """
+    import polars as pl
+
+    from brutex.data.lake_read import dedup_bars_frame
+
+    frame, _dropped = dedup_bars_frame(
+        pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
+        source=source or f"{symbol_dir.name}/{interval}",
+    )
+    return (
+        frame.rename({"timestamp": "ts_utc"})
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+        .sort("ts_utc")
+    )
+
+
+def lake_derived_freshness_verdicts(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbols: Sequence[str],
+    intervals: Iterable[str],
+) -> dict[tuple[str, str], str]:
+    """Freshness verdict per requested DERIVED ``(symbol, interval)`` pair with stored data.
+
+    The sweep-preflight freshness source (DEC-SUSPICION-SWEEP-FIXES-001 G1): for
+    every requested *symbol* × *interval* where the interval is a DERIVED intraday
+    timeframe (:data:`~brutex.data.timeframe_materialize.INTRADAY_TF_INTERVALS`)
+    AND the lake stores BOTH the symbol's ``1minute`` base and the derived
+    partition, re-derive from the 1-minute via the canonical session-anchored
+    resampler and record :func:`compare_derived_freshness`'s verdict (``"fresh"``
+    / ``"stale"``). HONEST abstain envelope (Golden Rule #1 — never guess):
+
+    * a NON-derived interval (``1minute`` / ``1day``) is never keyed — there is
+      nothing to re-derive (the daily partition derives via the midnight-IST
+      resample, a different law — deliberately out of this gate's scope, exactly
+      as the doctor probe scopes it);
+    * a pair with NO stored derived partition is never keyed — the ZERO-bar
+      slice preflight (:func:`~brutex.engine.sweep_preflight.preflight_slices`)
+      already owns the missing-data refusal;
+    * a symbol with NO stored ``1minute`` base is never keyed — the verdict is
+      unknowable without the base (abstain, mirroring the doctor's skip).
+
+    The per-pair 1-minute frame is read ONCE per symbol. O(stored bars) per
+    launch — a deliberate one-time preflight cost against consuming a stale
+    derived table into run identity.
+    """
+    from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
+    from brutex.data.timeframes import parse_label
+
+    interval_to_label = {v: k for k, v in INTRADAY_TF_INTERVALS.items()}
+    verdicts: dict[tuple[str, str], str] = {}
+    requested = [i for i in intervals if i in interval_to_label]
+    if not requested:
+        return verdicts
+    for symbol in symbols:
+        symbol_dir = lake_root / "bars" / exchange / segment / symbol
+        base = symbol_dir / "1minute"
+        if not (base.is_dir() and any(base.rglob("*.parquet"))):
+            continue  # no 1-minute base → verdict unknowable → honest abstain
+        df_1m: pl.DataFrame | None = None
+        for interval in requested:
+            derived_dir = symbol_dir / interval
+            if not (derived_dir.is_dir() and any(derived_dir.rglob("*.parquet"))):
+                continue  # nothing stored → the zero-bar preflight owns this pair
+            if df_1m is None:
+                df_1m = read_lake_bars_frame(symbol_dir, "1minute")
+            verdicts[(symbol, interval)] = compare_derived_freshness(
+                df_1m,
+                read_lake_bars_frame(symbol_dir, interval),
+                parse_label(interval_to_label[interval]),
+            )
+    return verdicts
