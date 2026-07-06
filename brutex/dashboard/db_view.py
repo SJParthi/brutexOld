@@ -3613,9 +3613,11 @@ def _make_ledger_read_cache(
 #: delta append/prune, a cross-process CLI write — moves the generation.
 #: Concurrent stamp-miss pollers are SINGLE-FLIGHT (one thread pays the parse,
 #: the rest wait on the per-key event) and a stamp move within the adaptive
-#: floor serves the prior entry stale — bounded to
-#: ``min(max(2 s, its own compute duration), 120 s)``, at most one stamp stale,
-#: ALWAYS logged (``movers_cache.stale_served``) — the #920 ≤50%-duty law.
+#: floor serves the prior entry stale — stale by at most
+#: ``min(max(2 s, its own compute duration), 120 s)`` of ledger movement,
+#: possibly spanning several ≥2 s delta flushes (a TIME bound, never a
+#: stamp-COUNT bound — the floor branch ages ``computed_at`` only), ALWAYS
+#: logged (``movers_cache.stale_served``) — the #920 ≤50%-duty law.
 #: The DERIVED families (rows / spot-rollup) are stamped with the generation
 #: the records were ACTUALLY served at (:func:`_ledger_records_stamped` embeds
 #: it in the cached value), so a projection built from a floor-stale records
@@ -3776,9 +3778,10 @@ def _ledger_records_stamped(lake_root: Path) -> tuple[int, tuple[Any, ...]]:
 
     HONEST envelope (Golden Rule #10): concurrent stamp-miss pollers pay ONE
     parse (single-flight); a stamp move within ``min(max(2 s, the last parse's
-    own duration), 120 s)`` serves the prior entry STALE — bounded, at most one
-    stamp stale, always logged (``movers_cache.stale_served``); the FIRST parse
-    per stamp stays O(rows).
+    own duration), 120 s)`` serves the prior entry STALE — stale by at most
+    that TIME bound of ledger movement, possibly spanning several ≥2 s delta
+    flushes (never a stamp-count bound), always logged
+    (``movers_cache.stale_served``); the FIRST parse per stamp stays O(rows).
     """
     from brutex.data.window_ledger_store import ledger_path, load_window_ledger
 
@@ -3831,8 +3834,10 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     passes — never latched (the fix-round latch defect, Golden Rule #1).
     HONEST envelope (Golden Rule #10): the first read per stamp is still O(rows)
     (parse + projection) and a stamp move within the records adaptive floor
-    serves the prior rows STALE — bounded to ``min(max(2 s, the parse's own
-    duration), 120 s)`` and logged on EVERY such serve
+    serves the prior rows STALE — stale by at most ``min(max(2 s, the parse's
+    own duration), 120 s)`` of ledger movement (possibly spanning several ≥2 s
+    delta flushes — a time bound, never a stamp-count bound) and logged on
+    EVERY such serve
     (``movers_cache.stale_served``, on the ``ledger-records`` key); only the
     REPEAT read is O(1) — true O(page) needs a write-time manifest, NOT claimed
     (the #867/#1025 envelope).
@@ -3927,8 +3932,10 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     records stays generation-stale and recomputes the moment the records floor
     passes — never latched (the fix-round latch defect, Golden Rule #1). HONEST
     envelope (Golden Rule #10): a stamp move within the records adaptive floor
-    serves the prior rollup STALE — bounded to ``min(max(2 s, the parse's own
-    duration), 120 s)`` and logged on EVERY such serve
+    serves the prior rollup STALE — stale by at most ``min(max(2 s, the parse's
+    own duration), 120 s)`` of ledger movement (possibly spanning several ≥2 s
+    delta flushes — a time bound, never a stamp-count bound) and logged on
+    EVERY such serve
     (``movers_cache.stale_served``, on the ``ledger-records`` key).
     """
     from brutex.data.window_ledger import EMPTY, FAILED, SETTLED_STATUSES

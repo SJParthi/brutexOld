@@ -514,7 +514,8 @@ hostile-review pass._
   `MoversSnapshotCache` (`_LEDGER_READ_CACHE`: single-flight — 8 concurrent cold pollers pay exactly 1 parse; the #920
   adaptive floor EXTRACTED to `summary_cache.effective_adaptive_floor` with `SummaryCache._plan` + `movers_cache`
   delegating byte-equal — §11 COMMON, no second copy; floor cap 120 s, a stale serve bounded to min(max(2 s, parse
-  duration), 120 s), at most one stamp stale, ALWAYS logged `movers_cache.stale_served`; NEW
+  duration), 120 s) of ledger movement — possibly spanning several ≥2 s delta flushes, a TIME bound never a
+  stamp-count bound — ALWAYS logged `movers_cache.stale_served`; NEW
   `lake_revision.revision_generation` digest bridge; the base-less delta-only /db grid inconsistency FIXED). (c)
   `api_sweep_leaderboard` keys on NEW `lake_revision.sweep_results_revision` (the sweeps dir-mtime digest + the audit
   chain's `(mtime_ns:size)` stat — a SWEEP_START append moves NO dir mtime, the stat closes that gap; a CLI `brutex

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 # Whitebox viewer tests read module-private helpers by design (DEC-P0-017 convention).
 # pyright: reportPrivateUsage=false
+import re
 import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
@@ -519,3 +520,97 @@ class TestEffectiveAdaptiveFloorExtraction:
         assert a == revision_generation("100.0.abc")
         assert a != revision_generation("101.0.abc")
         assert 0 <= a < 2**64
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The REFUTED freshness claim (DEC-LEDGER-DELTA-O-PAGE-001 fix round): the
+#: adaptive floor ages ``entry.computed_at`` only — it is a TIME bound, never a
+#: stamp-COUNT bound, so "at most one stamp stale" overstated freshness.
+_REFUTED_STALENESS_CLAIM = "at most one stamp"
+
+#: The accurate replacement wording every reworded surface must carry.
+_ACCURATE_STALENESS_CLAIM = "possibly spanning several ≥2 s delta flushes"
+
+
+class TestStaleServeManyStampsBehind:
+    """Fix-round behavioral pin: the adaptive floor is TIME-bounded, never
+    stamp-COUNTED (DEC-LEDGER-DELTA-O-PAGE-001 fix round).
+
+    The refuted docstring wording claimed a floor-stale serve is "at most one
+    stamp stale"; in reality the floor branch compares only the entry's age
+    against ``min(max(2 s, its own parse duration), 120 s)``, so a slow parse's
+    floor window spans MANY ≥2 s delta flushes and every read inside it serves
+    the SAME prior entry — each serve logged. This pins the ACCURATE envelope
+    the reworded docs now state (Golden Rule #10).
+    """
+
+    def test_slow_parse_serves_six_stamps_behind_within_the_time_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Six ≥2 s delta flushes inside one 13.6 s floor window (the measured
+        841k-row parse shape) all serve the SAME warmed entry — six stamps
+        behind by the last serve, six honesty logs — and the first read past
+        the floor folds ALL six deltas fresh (self-healing, time-bounded)."""
+        clock = _install_clocked_cache(monkeypatch)
+        _seed(tmp_path, ["NIFTY"])
+        real_load = load_window_ledger
+
+        def _slow_load(lake_root: Path, **kwargs: object) -> WindowLedger:
+            clock["t"] += 13.6  # the parse itself "takes" the measured ~13.6 s
+            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _slow_load)
+        warmed = _ledger_records_cached(tmp_path)  # computed_at = 13.6 → floor 13.6 s
+        flushed = [f"SYM{i}" for i in range(1, 7)]
+        with capture_logs() as logs:
+            for i, symbol in enumerate(flushed, start=1):
+                _append_delta(tmp_path, symbol)  # a FRESH stamp per flush
+                clock["t"] = 13.6 + 2.0 * i  # the ≥2 s flush cadence, all < the floor
+                # The SAME prior entry, now i stamps behind — never re-parsed.
+                assert _ledger_records_cached(tmp_path) == warmed
+        served = _events(logs, "movers_cache.stale_served")
+        assert len(served) == 6  # EVERY multi-stamp-behind serve is logged
+        clock["t"] = 13.6 + 13.7  # past min(max(2, 13.6), 120) → fresh parse
+        refreshed = _ledger_records_cached(tmp_path)
+        assert {r.security_id for r in refreshed} == {"NIFTY", *flushed}
+
+
+class TestDocWordingHonesty:
+    """Fix-round doc pins: the refuted claim is scrubbed everywhere it was
+    stated (Golden Rule #10) and the ledger entry's Files citations resolve to
+    real repo paths (Golden Rule #2 traceability)."""
+
+    @pytest.mark.parametrize(
+        "doc",
+        [
+            Path(db_view.__file__),
+            _REPO_ROOT / "CLAUDE.md",
+            _REPO_ROOT / "docs" / "MIGRATION.md",
+        ],
+        ids=["db_view", "claude_md", "migration_md"],
+    )
+    def test_refuted_one_stamp_claim_is_scrubbed_for_the_time_bound_wording(
+        self, doc: Path
+    ) -> None:
+        """Each surface that carried the refuted stamp-count claim now states
+        the accurate time-bound wording instead."""
+        text = doc.read_text(encoding="utf-8")
+        assert _REFUTED_STALENESS_CLAIM not in text
+        assert _ACCURATE_STALENESS_CLAIM in text
+
+    def test_migration_1522_files_list_paths_all_exist(self) -> None:
+        """MIGRATION.md #1522's Files list cites only paths that exist — the
+        fix-round citation defect was `tests/unit/test_lake_read.py` (never
+        created; the real file is `tests/unit/test_data_lake_read.py`)."""
+        text = (_REPO_ROOT / "docs" / "MIGRATION.md").read_text(encoding="utf-8")
+        entry = next(
+            line
+            for line in text.splitlines()
+            if line.startswith("1522. **DEC-LEDGER-DELTA-O-PAGE-001")
+        )
+        files_blob = entry.split("**Files:**", 1)[1].split("**Decision ID:**", 1)[0]
+        cited = re.findall(r"`([^`]+)`", files_blob)
+        assert "tests/unit/test_data_lake_read.py" in cited  # the corrected citation
+        missing = [path for path in cited if not (_REPO_ROOT / path).exists()]
+        assert missing == [], f"MIGRATION.md #1522 cites missing paths: {missing}"
