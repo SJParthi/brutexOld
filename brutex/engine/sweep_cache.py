@@ -277,18 +277,46 @@ def _auto_grow_capacity(configured_capacity: int, persisted: int, fpr_target: fl
     return grown
 
 
+#: The three Golden-Rule-#4 reproducibility keys, RESERVED inside ``params``:
+#: they are structural keyword-only parameters of :func:`combo_digest`
+#: (DEC-COMBO-DIGEST-REPRO-HASHES-001) and are injected into the canonical
+#: payload internally, so a caller-supplied ``params`` carrying any of them
+#: would be a second, conflicting channel — refused loudly, never merged.
+_RESERVED_REPRO_KEYS = frozenset({"data_snapshot_hash", "indicator_version", "code_commit_sha"})
+
+
 def combo_digest(
     mask: int,
     instrument: str,
     tf: str,
     direction: str,
     params: Mapping[str, Any] | None = None,
+    *,
+    data_snapshot_hash: str,
+    indicator_version: str,
+    code_commit_sha: str,
 ) -> bytes:
     """Return the 32-byte BLAKE3 digest of a combo identity.
 
     The digest is the dedup key (Bloom + LMDB). It is deterministic and
     order-independent in *params* (keys are sorted), so the same logical combo
     always maps to the same key across runs (Golden Rule #4 reproducibility).
+
+    **The three reproducibility hashes are STRUCTURAL, required keyword-only
+    parameters (DEC-COMBO-DIGEST-REPRO-HASHES-001).** Golden Rule #4's
+    run-identity formula requires ``data_snapshot_hash`` / ``indicator_version``
+    / ``code_commit_hash`` in every run identity; before this change the dedup
+    key carried them only by CONVENTION (the supervisor injected them into
+    ``params``), so a caller that forgot silently ALIASED dedup entries across
+    different data snapshots — a combo evaluated on OLD data would be skipped on
+    NEW data (a stale-skip bug). Omitting any of the three is now a
+    ``TypeError`` at the call site and a type-check failure, never a silent
+    alias. Internally the three are injected into the canonical params payload
+    under the SAME keys the legacy convention used (``data_snapshot_hash`` /
+    ``indicator_version`` / ``code_commit_sha``), so for identical logical
+    inputs the digest is BYTE-IDENTICAL to the pre-change convention — existing
+    Bloom/LMDB dedup stores are NOT invalidated (golden-pinned in
+    ``tests/unit/test_engine_sweep_cache.py``).
 
     Parameters
     ----------
@@ -298,7 +326,17 @@ def combo_digest(
         Context labels (e.g. ``"NIFTY"``, ``"5m"``, ``"bull"``).
     params
         The combo's parameter dict (stop/target/proximity/…), or ``None`` for
-        the no-parameter combo. Must be JSON-serialisable.
+        the no-parameter combo. Must be JSON-serialisable and must NOT carry
+        any of the three reserved reproducibility keys.
+    data_snapshot_hash
+        The full-content ``bxsnap2`` digest of every loaded bar (Golden
+        Rule #4; ``stage3_wire.data_snapshot_hash``).
+    indicator_version
+        The indicator-vocabulary version stamp.
+    code_commit_sha
+        The code commit SHA — Golden Rule #4's ``code_commit_hash`` leg, named
+        ``code_commit_sha`` to match ``SweepGridConfig.code_commit_sha`` and
+        the legacy canonical-params key (byte-identity).
 
     Returns
     -------
@@ -308,8 +346,10 @@ def combo_digest(
     Raises
     ------
     SweepCacheError
-        If *params* contains a value that is not JSON-serialisable, or a
-        non-finite float (``NaN`` / ``inf`` / ``-inf``).
+        If *params* contains a value that is not JSON-serialisable, a
+        non-finite float (``NaN`` / ``inf`` / ``-inf``), or any of the three
+        RESERVED reproducibility keys (the structural parameters are the ONE
+        channel — a second in-``params`` channel could silently disagree).
 
     Notes
     -----
@@ -327,6 +367,23 @@ def combo_digest(
     identical to before (``allow_nan=False`` only ever rejects, never reshapes a
     finite value).
     """
+    merged: dict[str, Any] = dict(params) if params else {}
+    overlap = _RESERVED_REPRO_KEYS.intersection(merged)
+    if overlap:
+        raise SweepCacheError(
+            "combo params carry RESERVED reproducibility key(s) "
+            f"{sorted(overlap)!r}: data_snapshot_hash / indicator_version / "
+            "code_commit_sha are structural keyword-only parameters of "
+            "combo_digest (DEC-COMBO-DIGEST-REPRO-HASHES-001) — pass them "
+            "there, never inside params (two channels could silently disagree)"
+        )
+    # Injected under the SAME keys the pre-change convention placed inside
+    # canonical_params, so the serialisation — and therefore the digest — is
+    # byte-for-byte identical for identical logical inputs (dedup stores and
+    # run identities are NOT invalidated; golden-pinned).
+    merged["data_snapshot_hash"] = data_snapshot_hash
+    merged["indicator_version"] = indicator_version
+    merged["code_commit_sha"] = code_commit_sha
     try:
         canonical = json.dumps(
             {
@@ -334,7 +391,7 @@ def combo_digest(
                 "instrument": instrument,
                 "tf": tf,
                 "direction": direction,
-                "params": dict(params) if params else {},
+                "params": merged,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -610,9 +667,29 @@ class SweepCache:
         tf: str,
         direction: str,
         params: Mapping[str, Any] | None = None,
+        *,
+        data_snapshot_hash: str,
+        indicator_version: str,
+        code_commit_sha: str,
     ) -> bool:
-        """Return ``True`` iff this combo has already been evaluated — O(1)."""
-        return self.seen_digest(combo_digest(mask, instrument, tf, direction, params))
+        """Return ``True`` iff this combo has already been evaluated — O(1).
+
+        The three reproducibility hashes are structurally REQUIRED — see
+        :func:`combo_digest` (DEC-COMBO-DIGEST-REPRO-HASHES-001): a caller that
+        omitted them would silently alias dedup entries across data snapshots.
+        """
+        return self.seen_digest(
+            combo_digest(
+                mask,
+                instrument,
+                tf,
+                direction,
+                params,
+                data_snapshot_hash=data_snapshot_hash,
+                indicator_version=indicator_version,
+                code_commit_sha=code_commit_sha,
+            )
+        )
 
     def record(
         self,
@@ -621,9 +698,28 @@ class SweepCache:
         tf: str,
         direction: str,
         params: Mapping[str, Any] | None = None,
+        *,
+        data_snapshot_hash: str,
+        indicator_version: str,
+        code_commit_sha: str,
     ) -> bool:
-        """Mark this combo evaluated; return ``True`` if newly recorded — O(1)."""
-        return self.record_digest(combo_digest(mask, instrument, tf, direction, params))
+        """Mark this combo evaluated; return ``True`` if newly recorded — O(1).
+
+        The three reproducibility hashes are structurally REQUIRED — see
+        :func:`combo_digest` (DEC-COMBO-DIGEST-REPRO-HASHES-001).
+        """
+        return self.record_digest(
+            combo_digest(
+                mask,
+                instrument,
+                tf,
+                direction,
+                params,
+                data_snapshot_hash=data_snapshot_hash,
+                indicator_version=indicator_version,
+                code_commit_sha=code_commit_sha,
+            )
+        )
 
     # ── Observability ──────────────────────────────────────────────────────
 
