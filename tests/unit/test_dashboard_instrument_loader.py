@@ -26,7 +26,9 @@ from __future__ import annotations
 # Whitebox tests of the cache-first TTL helper (_ntm_cache_ttl_seconds) read
 # module-private names by design (DEC-P0-017 convention).
 # pyright: reportPrivateUsage=false
-from collections.abc import Mapping, Sequence
+import json
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -295,6 +297,12 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
     ei = result["economics_integrity"]
     assert ei["is_green"] is True and ei["total_legs"] == 1
     assert store.get_meta("economics_integrity") is not None
+    # Parse-skip honesty (DEC-PARSE-SKIP-REPORT-001): a clean master reads green with
+    # zero skips over the 4 in-scope rows; persisted to schema_meta for the panel.
+    ps = result["parse_skips"]
+    assert ps["is_green"] is True and ps["skipped_count"] == 0
+    assert ps["in_scope_rows"] == 4 and ps["samples"] == []
+    assert store.get_meta("instrument_parse_skips.report") is not None
 
 
 def test_default_run_id_factory(tmp_path: Path) -> None:
@@ -400,6 +408,47 @@ def test_load_report_carries_security_id_collisions(tmp_path: Path) -> None:
     assert groww_events[0]["security_id_collisions"] == 1
 
 
+def test_load_persists_parse_skip_report_for_dirty_master(tmp_path: Path) -> None:
+    """A master with malformed in-scope rows persists an HONEST parse-skip report.
+
+    DEC-PARSE-SKIP-REPORT-001 regression: before the report, the skip accounting
+    (DEC-INSTRUMENT-SKIP-NO-GSYM-001) was logged then DISCARDED — the load result
+    and schema_meta carried nothing, so master rot was invisible outside /logs.
+    One junk row (blank groww_symbol) stays GREEN (within max(10, 0.1%)); the
+    count + sample reason land on BOTH the load result and the persisted snapshot.
+    """
+    junk = _row(
+        exchange="BSE",
+        exchange_token="93",
+        name="BSE FOCUSED IT",
+        instrument_type="IDX",
+        segment="CASH",
+    )
+    store = _store(tmp_path)
+    with capture_logs() as logs:
+        result = load_instrument_master(
+            store,
+            http_get=lambda _url: _csv([*_ROWS, junk]),
+            run_id_factory=lambda: "test-skips",
+            constituent_opener=_empty_opener,
+            constituent_cache_dir=tmp_path / "cache",
+        )
+    ps = result["parse_skips"]
+    assert ps["skipped_count"] == 1
+    assert ps["in_scope_rows"] == 5  # 4 parsed + 1 skipped
+    assert ps["threshold"] == 10
+    assert ps["is_green"] is True  # 1 <= max(10, ceil(0.1% of 5))
+    assert len(ps["samples"]) == 1 and "groww_symbol" in ps["samples"][0]
+    assert ps["run_id"] == "test-skips"
+    # Persisted to schema_meta (read by GET /api/v1/universe/parse-skips).
+    raw = store.get_meta("instrument_parse_skips.report")
+    assert raw is not None
+    assert json.loads(raw)["skipped_count"] == 1
+    # One structlog counts line from the persist hook.
+    events = _events(logs, "universe.load.parse_skips")
+    assert len(events) == 1 and events[0]["is_green"] is True
+
+
 def test_idx_same_token_collision_intercepted_at_build_index(tmp_path: Path) -> None:
     """An IDX identity collision is caught UPSTREAM — the store never sees it.
 
@@ -479,6 +528,9 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     # Empty master → economics audit green with zero legs (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
     ei = result.pop("economics_integrity")
     assert ei["is_green"] is True and ei["total_legs"] == 0
+    # Empty master → zero skips over zero in-scope rows, green (DEC-PARSE-SKIP-REPORT-001).
+    ps = result.pop("parse_skips")
+    assert ps["is_green"] is True and ps["skipped_count"] == 0 and ps["in_scope_rows"] == 0
     assert result == {
         "parsed": 0,
         "persisted": 0,
@@ -737,42 +789,67 @@ def test_ntm_fresh_cache_served_without_any_network(tmp_path: Path) -> None:
     assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
 
 
-def test_ntm_stale_cache_refreshed_by_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A STALE cache (TTL=0) triggers a live refresh that REWRITES the cache.
+def test_ntm_stale_cache_served_instantly_then_background_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A POST-TTL cache is served IMMEDIATELY; the refresh runs in the BACKGROUND.
 
-    DEC-NTM-CACHE-FIRST-001 — the rare cold/post-TTL path: with the fast path disabled
-    (``BRUTEX_NTM_CACHE_TTL_SECONDS=0`` ⇒ every cache treated stale), the bounded live
-    fetch runs, succeeds with a DIFFERENT constituent list, and persists it as the new
-    last-good cache (so the NEXT load is a ``cache_fresh`` hit on the refreshed data).
+    DEC-NTM-STALE-WHILE-REVALIDATE-001 (supersedes the synchronous post-TTL arm of
+    DEC-NTM-CACHE-FIRST-001): with TTL=0 (every cache post-TTL) the load serves the
+    STALE list instantly — the live opener is NEVER called on the request thread
+    (the captured job is not run yet) — and the captured single-flight background
+    job then refreshes the cache, so the NEXT load is a ``cache_fresh`` hit on the
+    refreshed data.
     """
     monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
     cache_dir = tmp_path / "cache"
     stale = _constituents_csv([("OLDCO", "INE111A01011")])  # the now-stale cache
     assert save_constituent_csv(stale, cache_dir=cache_dir) is True
     fresh = _constituents_csv([("SMALLCO", "INE999A01010")])  # what the live source returns
+    opener_calls: list[str] = []
+
+    def _opener(url: str) -> str:
+        opener_calls.append(url)
+        return fresh
+
+    captured: list[Callable[[], None]] = []
     store = _store(tmp_path)
     result = load_instrument_master(
         store,
         http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
-        constituent_opener=lambda _url: fresh,  # stale ⇒ live is attempted and wins
+        constituent_opener=_opener,
         constituent_cache_dir=cache_dir,
+        ntm_revalidate_runner=captured.append,  # capture — do NOT run on the request path
     )
     ntm = result["ntm"]
-    assert ntm["source"] == "live"
-    assert ntm["from_cache"] is False
-    assert ntm["reference"] == 1  # SMALLCO from the LIVE list, not OLDCO
-    # The live refresh overwrote the stale cache with the freshly-fetched list.
+    assert ntm["source"] == "cache_stale_revalidating"
+    assert ntm["from_cache"] is True
+    assert "stale-while-revalidate" in ntm["constituent_note"]
+    assert opener_calls == []  # the request thread NEVER waited on niftyindices
+    assert load_cached_constituent_csv(cache_dir=cache_dir) == stale  # not yet refreshed
+    # Run the captured background job: the cache is atomically refreshed.
+    assert len(captured) == 1
+    captured[0]()
+    assert opener_calls != []
     assert load_cached_constituent_csv(cache_dir=cache_dir) == fresh
+    # The NEXT load picks up the refreshed cache... (TTL=0 keeps revalidating —
+    # pinned semantics: the cache is ALWAYS served instantly, never a sync re-fetch.)
+    result2 = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
+        constituent_opener=_opener,
+        constituent_cache_dir=cache_dir,
+        ntm_revalidate_runner=lambda job: job(),  # inline — deterministic
+    )
+    assert result2["ntm"]["source"] == "cache_stale_revalidating"  # TTL=0 ⇒ always post-TTL
+    assert result2["ntm"]["reference"] == 1  # SMALLCO from the refreshed cache
     assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
 
 
-def test_ntm_stale_cache_covers_live_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A STALE cache + an EMPTY live fetch falls back to the cache (universe stays full).
-
-    DEC-NTM-CACHE-FIRST-001 — fast path disabled (TTL=0), live returns nothing, so the
-    stale cache covers it: ``source == "cache_stale"``, the universe keeps the cached
-    SMALLCO constituent rather than cratering to the base set.
-    """
+def test_ntm_stale_cache_covers_background_live_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stale cache + an EMPTY background refresh: the stale list still serves (full universe)."""
     monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
     cache_dir = tmp_path / "cache"
     constituents = _constituents_csv([("SMALLCO", "INE999A01010")])
@@ -781,39 +858,52 @@ def test_ntm_stale_cache_covers_live_empty(tmp_path: Path, monkeypatch: pytest.M
     result = load_instrument_master(
         store,
         http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
-        constituent_opener=_empty_opener,  # stale cache + empty live → cache covers it
+        constituent_opener=_empty_opener,  # the background refresh finds nothing
         constituent_cache_dir=cache_dir,
+        ntm_revalidate_runner=lambda job: job(),  # inline — deterministic
     )
     ntm = result["ntm"]
     assert ntm["admitted"] is True
     assert ntm["reference"] == 1
     assert ntm["from_cache"] is True
-    assert ntm["source"] == "cache_stale"
-    assert "last-good cache" in ntm["constituent_note"]
+    assert ntm["source"] == "cache_stale_revalidating"
+    # The empty refresh left the last-good cache untouched (never clobbered).
+    assert load_cached_constituent_csv(cache_dir=cache_dir) == constituents
     assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
 
 
-def test_ntm_stale_cache_covers_live_raises(
+def test_ntm_stale_cache_covers_background_live_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A STALE cache + a niftyindices timeout falls back to the cache, not the base set."""
+    """Stale cache + a niftyindices timeout in the BACKGROUND refresh: swallowed + logged.
+
+    The request path already returned the stale list; the background worker's
+    ``OSError`` is logged (``ntm.revalidate_failed``) and swallowed — never a crash,
+    never a crater to the base set, and the in-flight flag is cleared so a later
+    load can revalidate again.
+    """
     monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
     cache_dir = tmp_path / "cache"
     constituents = _constituents_csv([("SMALLCO", "INE999A01010")])
     save_constituent_csv(constituents, cache_dir=cache_dir)
     store = _store(tmp_path)
-    result = load_instrument_master(
-        store,
-        http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
-        constituent_opener=_boom_opener,  # stale cache + live raises → cache covers it
-        constituent_cache_dir=cache_dir,
-    )
+    with capture_logs() as logs:
+        result = load_instrument_master(
+            store,
+            http_get=lambda _url: _csv([*_ROWS, _SMALLCO]),
+            constituent_opener=_boom_opener,  # the background refresh raises
+            constituent_cache_dir=cache_dir,
+            ntm_revalidate_runner=lambda job: job(),  # inline — deterministic
+        )
     ntm = result["ntm"]
     assert ntm["admitted"] is True
     assert ntm["reference"] == 1
     assert ntm["from_cache"] is True
-    assert ntm["source"] == "cache_stale"
+    assert ntm["source"] == "cache_stale_revalidating"
     assert store.reference_only_security_ids() == frozenset({_SMALLCO_ID})
+    assert any(e["event"] == "ntm.revalidate_failed" for e in logs)
+    # The flag was cleared in the worker's finally — a later spawn is possible.
+    assert il._NTM_REVALIDATE_STATE["in_flight"] is False
 
 
 def test_ntm_no_cache_empty_live_degrades_to_base(tmp_path: Path) -> None:
@@ -1167,6 +1257,84 @@ class TestNtmCacheTtlSeconds:
         assert il._ntm_cache_ttl_seconds() == 0.0
         monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "-1")
         assert il._ntm_cache_ttl_seconds() == -1.0
+
+
+class TestNtmStaleWhileRevalidate:
+    """DEC-NTM-STALE-WHILE-REVALIDATE-001 — the single-flight background refresh."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_single_flight(self) -> Iterator[None]:
+        il._NTM_REVALIDATE_STATE["in_flight"] = False
+        yield
+        il._NTM_REVALIDATE_STATE["in_flight"] = False
+
+    def test_no_cache_boot_stays_synchronous_live(self, tmp_path: Path) -> None:
+        """Truly-no-cache boot: the bounded SYNCHRONOUS fetch runs and seeds the cache."""
+        cache_dir = tmp_path / "cache"
+        fresh = _constituents_csv([("SMALLCO", "INE999A01010")])
+        spawned: list[Callable[[], None]] = []
+        text, source = il._resolve_constituent_csv(
+            lambda _url: fresh, cache_dir=cache_dir, revalidate_runner=spawned.append
+        )
+        assert (text, source) == (fresh, "live")
+        assert spawned == []  # nothing to serve meanwhile — no background job
+        assert load_cached_constituent_csv(cache_dir=cache_dir) == fresh  # seeded
+
+    def test_no_cache_boot_oserror_propagates(self, tmp_path: Path) -> None:
+        """No cache + unreachable live source: the OSError reaches the fail-soft handler."""
+        with pytest.raises(OSError, match="timed out"):
+            il._resolve_constituent_csv(_boom_opener, cache_dir=tmp_path / "cache")
+
+    def test_second_post_ttl_call_never_double_spawns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Single-flight: while a refresh is in flight, a second load spawns NOTHING."""
+        monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
+        cache_dir = tmp_path / "cache"
+        stale = _constituents_csv([("OLDCO", "INE111A01011")])
+        assert save_constituent_csv(stale, cache_dir=cache_dir) is True
+        captured: list[Callable[[], None]] = []
+        first = il._resolve_constituent_csv(
+            _empty_opener, cache_dir=cache_dir, revalidate_runner=captured.append
+        )
+        second = il._resolve_constituent_csv(
+            _empty_opener, cache_dir=cache_dir, revalidate_runner=captured.append
+        )
+        assert first == (stale, "cache_stale_revalidating")
+        assert second == (stale, "cache_stale_revalidating")  # still served instantly
+        assert len(captured) == 1  # ONE background job — the slow host is never doubled
+        captured[0]()  # the in-flight job finishes → the flag clears
+        third = il._resolve_constituent_csv(
+            _empty_opener, cache_dir=cache_dir, revalidate_runner=captured.append
+        )
+        assert third == (stale, "cache_stale_revalidating")
+        assert len(captured) == 2  # a NEW cycle may revalidate again
+
+    def test_spawn_failure_clears_the_flag_and_never_breaks_the_load(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising runner (spawn failure) is swallowed + logged; the flag is cleared."""
+        monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
+        cache_dir = tmp_path / "cache"
+        stale = _constituents_csv([("OLDCO", "INE111A01011")])
+        assert save_constituent_csv(stale, cache_dir=cache_dir) is True
+
+        def _bad_runner(_job: Callable[[], None]) -> None:
+            raise RuntimeError("thread spawn failed")
+
+        with capture_logs() as logs:
+            text, source = il._resolve_constituent_csv(
+                _empty_opener, cache_dir=cache_dir, revalidate_runner=_bad_runner
+            )
+        assert (text, source) == (stale, "cache_stale_revalidating")  # load unaffected
+        assert any(e["event"] == "ntm.revalidate_spawn_failed" for e in logs)
+        assert il._NTM_REVALIDATE_STATE["in_flight"] is False  # a later load can revalidate again
+
+    def test_default_runner_spawns_a_daemon_thread(self) -> None:
+        """The production spawner runs the job on a named daemon thread."""
+        done = threading.Event()
+        il._default_revalidate_runner(done.set)
+        assert done.wait(timeout=30.0)
 
 
 # ── OPT-vs-REF bridge primitives (DEC-FNO-INDEX-ALIAS-001) ────────────────────

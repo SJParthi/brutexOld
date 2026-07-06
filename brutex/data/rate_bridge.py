@@ -78,8 +78,14 @@ RATE_BRIDGE_FILENAME = "pull_rate.json"
 #: (``recent_1s`` / ``recent_600s`` / ``recent_3600s``) for the expanded rate monitor
 #: (DEC-RATE-MONITOR-EXPAND-001, MIGRATION.md #1004); an old (schema-1) CLI bridge file is
 #: ignored as unrecognised, so the dashboard simply projects the in-memory panel until the
-#: CLI re-publishes — never a crash, never a fabricated number.
-_SCHEMA_VERSION = 2
+#: CLI re-publishes — never a crash, never a fabricated number. Bumped 2 → 3 to carry the
+#: AUTHORITATIVE ``pull_active`` flag (DEC-CLI-BRIDGE-PULL-ACTIVE-001) so the dashboard's
+#: stall verdict is gated on the CLI pull actually RUNNING (the follow-up the
+#: DEC-RATE-STALL-PULL-GATE-001 disclaimer named). The field decodes via ``.get`` with a
+#: graceful ``None`` default (the old-reader tick-freshness fallback), so a hand-edited v3
+#: file missing the key still reads; a stale v2 file is ignored exactly like any
+#: unrecognised schema and is re-published within one window tick.
+_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +123,12 @@ class RateBridgeSnapshot:
     monotonic
         The publisher's ``time.monotonic()`` reading at the tick — carried for in-process
         diagnostic parity ONLY; NOT used for the cross-process staleness decision.
+    pull_active
+        The publisher's AUTHORITATIVE pull-run signal (DEC-CLI-BRIDGE-PULL-ACTIVE-001):
+        ``True`` while the CLI pull is running (each per-window publish), ``False`` on the
+        pull's final publish (the ``cmd_fetch`` ``finally``), ``None`` when the publisher
+        carried no signal (a hand-edited file / graceful old-reader default) — the reader
+        then keeps the honest tick-freshness fallback.
     """
 
     schema: int
@@ -130,6 +142,7 @@ class RateBridgeSnapshot:
     recent_3600s: int
     wall_time: float
     monotonic: float
+    pull_active: bool | None = None
 
     def to_json_bytes(self) -> bytes:
         """Serialise to compact UTF-8 JSON bytes (the on-disk bridge payload)."""
@@ -165,6 +178,7 @@ def publish_rate_snapshot(
     recent_1s: int = 0,
     recent_600s: int = 0,
     recent_3600s: int = 0,
+    pull_active: bool | None = None,
 ) -> None:
     """Atomically write one rate snapshot to the lake-root bridge file (best-effort, O(1)).
 
@@ -191,6 +205,10 @@ def publish_rate_snapshot(
         The controller's MEASURED trailing 1 s / 600 s / 3600 s real issue counts
         (DEC-RATE-MONITOR-EXPAND-001), default ``0`` so a caller without them publishes an
         honest zero rather than omitting the field.
+    pull_active
+        The AUTHORITATIVE pull-run signal (DEC-CLI-BRIDGE-PULL-ACTIVE-001) — ``True``
+        per-window during the pull, ``False`` on the final end-of-pull publish, default
+        ``None`` (no signal — every pre-existing call site stays byte-compatible).
     """
     snapshot = RateBridgeSnapshot(
         schema=_SCHEMA_VERSION,
@@ -204,6 +222,7 @@ def publish_rate_snapshot(
         recent_3600s=recent_3600s,
         wall_time=wall_time,
         monotonic=monotonic,
+        pull_active=pull_active,
     )
     dest = rate_bridge_path(lake_root)
     with lake_write_guard():
@@ -218,6 +237,7 @@ def publish_from_snapshots(
     *,
     wall_time: float,
     monotonic: float,
+    pull_active: bool | None = None,
 ) -> None:
     """Publish a bridge snapshot from raw controller + call-meter snapshot mappings.
 
@@ -242,6 +262,10 @@ def publish_from_snapshots(
         ``time.time()`` at the tick (the cross-process freshness clock).
     monotonic
         ``time.monotonic()`` at the tick (in-process diagnostic parity only).
+    pull_active
+        The AUTHORITATIVE pull-run signal (DEC-CLI-BRIDGE-PULL-ACTIVE-001), forwarded to
+        :func:`publish_rate_snapshot`; default ``None`` keeps every existing call site
+        byte-compatible.
     """
     # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired
     # (DEC-GROWW-RATE-PERMIN-001) — map that to the ``-1`` "no cap" sentinel the panel
@@ -261,6 +285,7 @@ def publish_from_snapshots(
         recent_3600s=int(controller_snap.get("recent_3600s", 0)),
         wall_time=wall_time,
         monotonic=monotonic,
+        pull_active=pull_active,
     )
 
 
@@ -297,8 +322,14 @@ def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
     if not isinstance(data, dict):
         return None
     if data.get("schema") != _SCHEMA_VERSION:
-        # Unrecognised version — forward-safe: never mis-decode a future shape.
+        # Unrecognised version (incl. a stale pre-#3 v2 file) — forward/backward-safe:
+        # never mis-decode another shape; the publisher re-writes within one window tick.
         return None
+    # Graceful old-reader default (DEC-CLI-BRIDGE-PULL-ACTIVE-001): a missing / non-bool
+    # ``pull_active`` (JSON ``null``, a hand-edited file) reads ``None`` — the honest
+    # tick-freshness fallback — never a KeyError, never a fabricated run signal.
+    raw_pull_active = data.get("pull_active")
+    pull_active = raw_pull_active if isinstance(raw_pull_active, bool) else None
     try:
         return RateBridgeSnapshot(
             schema=_SCHEMA_VERSION,
@@ -312,6 +343,7 @@ def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
             recent_3600s=int(data["recent_3600s"]),
             wall_time=float(data["wall_time"]),
             monotonic=float(data["monotonic"]),
+            pull_active=pull_active,
         )
     except (KeyError, TypeError, ValueError):
         # A missing or wrong-typed field (a hand-edited / truncated / alien file).

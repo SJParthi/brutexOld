@@ -240,7 +240,7 @@ Groww SDK exposes 11 exception classes (`brutex/adapters/groww/groww_errors.py` 
 | `GrowwAPIRateLimitException` | Backoff (2^n, max 60s) + retry; increment rate-limiter hit counter | INFO after 3 retries |
 | `GrowwAPITimeoutException` | Backoff + retry up to 10× | WARN after 3 |
 | `GrowwAPIAuthenticationException` | Halt; refresh TOTP; retry max 3; then CRITICAL | CRITICAL |
-| `GrowwAPIAuthorisationException` | Halt — account suspended or scope error | CRITICAL |
+| `GrowwAPIAuthorisationException` | Quarantine the ONE symbol (terminal `GrowwAuthorisationError` — an entitlement restriction is per-instrument, never a pull-wide stop); ≥ threshold (default 5, `BRUTEX_GROWW_AUTHZ_STORM_MIN_SYMBOLS`) DISTINCT authz-rejected symbols with ZERO successes escalates fleet-wide → `GrowwAuthorisationStormError` HALT (a real account suspension hits every symbol) — DEC-GROWW-AUTHZ-QUARANTINE-001 | WARN per quarantined symbol; CRITICAL on the storm HALT |
 | `GrowwAPIBadRequestException` | Quarantine chunk; do not retry (request shape bug) | WARN |
 | `GrowwAPINotFoundException` | Suspicious — instrument symbol may have changed; quarantine + manual review | WARN |
 | `GrowwFeedException` | n/a (live feed out of scope) | — |
@@ -499,7 +499,7 @@ Every row's **spine outcome** is one of: `RETRY` (backoff ladder) · `QUARANTINE
 | A2 | Token file corrupt / unreadable | file I/O / parse error | re-mint via TOTP | L6 |
 | A3 | 6 AM / token rollover (UNVERIFIED) | mid-run 401 | REAUTH (reactive); proactive only if probe confirms | L7 |
 | A4 | Network down during auth | `GrowwAPITimeoutException` | RETRY 3× / use cache | L6 |
-| A5 | Account suspended / scope error | `GrowwAPIAuthorisationException` | HALT+CRITICAL | L7 |
+| A5 | Entitlement-restricted instrument / account suspension | `GrowwAPIAuthorisationException` | QUARANTINE (single symbol — terminal, WARN, re-pullable) → fleet HALT+CRITICAL only at ≥ 5 distinct authz-rejected symbols with zero successes (`GrowwAuthorisationStormError`, DEC-GROWW-AUTHZ-QUARANTINE-001) | L7 |
 
 **Surface B — Instrument master (6)**
 

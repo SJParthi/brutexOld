@@ -412,11 +412,13 @@ async function load() {
     const bodyText = await r.text();
     const j = JSON.parse(bodyText);
     if (j.gated) {
-      /* Prebuild gate (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): the pipeline is
-         still writing the derived partitions the movers read — render the honest
-         server note PROMINENTLY (textContent only, never innerHTML for the
-         dynamic string — the repo's XSS-guard convention) with an empty grid,
-         and schedule an auto-retry so the screen recovers when the gate lifts. */
+      /* Prebuild gate (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2 + the phase-aware
+         note of DEC-PIPELINE-PHASE-UI-HONESTY-001): the pull pipeline is running
+         (the server note names the ACTUAL phase — spot / metadata / historical /
+         movers / prebuild) — render the honest server note PROMINENTLY
+         (textContent only, never innerHTML for the dynamic string — the repo's
+         XSS-guard convention) with an empty grid, and schedule an auto-retry so
+         the screen recovers when the gate lifts. */
       lastPayload = null;  /* a pill switch must re-fetch, never re-render the gated shell. */
       lastRenderSig = null;  /* the gate lift must always repaint the real table. */
       rowsData = [];
@@ -429,18 +431,26 @@ async function load() {
         renderHead(); renderRows();
       }
       wasGated = true; lastGatedKey = gatedKey;
-      /* Honest live status (DEC-PREBUILD-GATE-HONEST-NOTE-001): name the running
-         final stage + how long the pipeline has been at it (+ the movers-warm i/N
-         when reported), instead of a bare "gated". textContent only — never
-         innerHTML for server strings (DEC-DASHBOARD-XSS-HARDENING-001). */
-      let gatedStatus = `as-of ${(j.date||"")} — gated`;
+      /* Honest gate scope + live status (DEC-MOVERS-GATE-PREBUILD-SCOPE-001 +
+         DEC-PREBUILD-GATE-HONEST-NOTE-001 + DEC-MOVERS-WARM-UNBLOCK-001): the
+         gate covers ONLY the pipeline's final prebuild stage (begin as the
+         prebuild's first statement; released the moment its outcome is known —
+         the movers warm continues un-gated) — name the running stage, how long
+         the pipeline has been at it (+ the movers-warm i/N when reported —
+         SEGMENT-labelled, so a per-segment "6/9" reads "futures 6/9", never
+         mistaken for 7-of-9-total), and fall back to the gate's own duration
+         (gated_for_s) when no phase is reported. Both lines refresh on every
+         5 s retry (they sit OUTSIDE the paint-once shell). textContent only —
+         never innerHTML for server strings (DEC-DASHBOARD-XSS-HARDENING-001). */
+      const gatedFor = (typeof j.gated_for_s === "number") ? ` · ${Math.round(j.gated_for_s)}s` : "";
+      let gatedStatus = `as-of ${(j.date||"")} — gated (${j.phase||"prebuild"}${gatedFor})`;
       if (j.phase) {
         const warm = (j.warm_total != null && j.warm_done != null)
-          ? ` — movers warm ${j.warm_done}/${j.warm_total}` : "";
+          ? ` — movers warm ${j.warm_segment ? j.warm_segment + " " : ""}${j.warm_done}/${j.warm_total}` : "";
         gatedStatus = `final stage: ${j.phase}${warm} — running ${fmtElapsed(j.elapsed_s)} (auto-refreshes)`;
       }
       $("asof").textContent = gatedStatus;
-      $("noteText").textContent = j.note || "pull pipeline running — movers gated until the prebuild and movers warm finish.";
+      $("noteText").textContent = j.note || "pull pipeline running — movers gated until the prebuild finishes.";
       clearTimeout(gateTimer);
       gateTimer = setTimeout(load, GATE_RETRY_MS);
       return;

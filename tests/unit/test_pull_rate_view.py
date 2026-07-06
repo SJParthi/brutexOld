@@ -17,7 +17,9 @@ from brutex.dashboard.pull_rate_view import (
     FLOW_FAILING,
     FLOW_FLOWING,
     FLOW_IDLE,
+    FLOW_LOCAL,
     FLOW_STALLED,
+    LOCAL_PHASES,
     STALE_AFTER_S,
     STALL_RPS_FLOOR,
     PullRateView,
@@ -799,6 +801,212 @@ def test_merged_bridge_default_keeps_tick_freshness_fallback() -> None:
         bridge_seconds_since_update=1.0,
     )
     assert view.flow_state == FLOW_STALLED  # unchanged pre-gate bridge behaviour
+
+
+# ---------------------------------------------------------------------------
+# DEC-PIPELINE-PHASE-UI-HONESTY-001 — the amber FLOW_LOCAL verdict.
+# The pipeline's prebuild + movers-warm stages are LOCAL processing (ZERO vendor
+# calls by design — DEC-PIPELINE-AUTOPREBUILD-001), so the vendor-rate heuristics
+# (measured completed-rate at/below the floor · zero admissions · a stale tick)
+# read a perfectly healthy local stage as a red "stalled". FLOW_LOCAL keys
+# STRICTLY on ``pull_active is True ∧ phase ∈ LOCAL_PHASES`` — never on meter
+# absence / zero admissions — so every DEC-RATE-WIDGET-FNO-HONEST-001 stall pin
+# stays green unmodified.
+# ---------------------------------------------------------------------------
+
+
+def test_local_phases_are_exactly_the_zero_vendor_call_stages() -> None:
+    """LOCAL_PHASES = {prebuild, movers} — the two post-fetch local pipeline stages."""
+    assert frozenset({"prebuild", "movers"}) == LOCAL_PHASES
+
+
+def test_prebuild_phase_reads_local_amber_not_stalled() -> None:
+    """Regression (fails before the fix): a healthy prebuild used to read red.
+
+    During the prebuild the sampler keeps ticking with a ~0 completed rate, so the
+    pre-fix verdict (``meter_present=True ∧ effective_rps <= floor``) was STALLED —
+    a dishonest red alarm on a healthy local stage. With the phase threaded it now
+    reads the amber ``local``.
+    """
+    before = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+    )
+    assert before.flow_state == FLOW_STALLED  # the pre-fix (phase-blind) verdict
+    after = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="prebuild",
+    )
+    assert after.flow_state == FLOW_LOCAL
+    assert after.stalled is False
+    assert after.active is False  # zero vendor traffic — live numbers zeroed
+    assert after.req_per_sec_achieved == 0.0
+    assert after.req_per_min == 0
+
+
+def test_movers_warm_phase_reads_local_amber_not_stalled() -> None:
+    """The movers-warm stage is the second LOCAL phase — same amber verdict."""
+    view = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0, recent_minute=0),  # type: ignore[arg-type]
+        meter_present=False,
+        pull_active=True,
+        phase="movers",
+    )
+    assert view.flow_state == FLOW_LOCAL
+    assert view.stalled is False
+
+
+def test_local_verdict_carries_flow_detail_naming_the_phase() -> None:
+    """flow_detail = "local processing — <phase> (no vendor calls)" for the widget."""
+    view = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="prebuild",
+    )
+    assert view.flow_detail == "local processing — prebuild (no vendor calls)"
+    data = view.to_dict()
+    assert data["flow_detail"] == "local processing — prebuild (no vendor calls)"
+    assert data["flow_state"] == FLOW_LOCAL
+
+
+def test_flow_detail_is_empty_for_every_non_local_state() -> None:
+    """flow_detail is an ADDITIVE field — empty everywhere but FLOW_LOCAL."""
+    flowing = build_pull_rate_view(**_live_kwargs(), pull_active=True)  # type: ignore[arg-type]
+    stalled = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=True,
+    )
+    done = build_pull_rate_view(**_live_kwargs(), pull_active=False)  # type: ignore[arg-type]
+    idle = build_pull_rate_view(
+        **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 60.0),  # type: ignore[arg-type]
+    )
+    for view in (flowing, stalled, done, idle):
+        assert view.flow_detail == ""
+        assert view.to_dict()["flow_detail"] == ""
+
+
+def test_zero_admission_historical_phase_still_reads_stalled() -> None:
+    """THE MANDATED PIN: FLOW_LOCAL keys on the PHASE, never on zero admissions.
+
+    A zero-admission HISTORICAL (fetch) phase must STILL read STALLED — the
+    DEC-RATE-WIDGET-FNO-HONEST-001 fake-alive guard is untouched: ``historical``
+    is a VENDOR-fetch phase, so a dead pull there is a real stall, not local work.
+    """
+    view = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0, recent_minute=0),  # type: ignore[arg-type]
+        meter_present=False,
+        pull_active=True,
+        phase="historical",
+    )
+    assert view.flow_state == FLOW_STALLED
+    assert view.stalled is True
+    # And the spot/metadata fetch phases behave identically (never local).
+    for fetch_phase in ("spot", "metadata"):
+        fetch_view = build_pull_rate_view(
+            **_live_kwargs(effective_rps=0.0, recent_minute=0),  # type: ignore[arg-type]
+            meter_present=False,
+            pull_active=True,
+            phase=fetch_phase,
+        )
+        assert fetch_view.flow_state == FLOW_STALLED
+
+
+def test_healthy_fetch_phase_with_phase_label_keeps_measured_verdict() -> None:
+    """A flowing spot phase with its label threaded stays the measured FLOWING."""
+    view = build_pull_rate_view(
+        **_live_kwargs(),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="spot",
+    )
+    assert view.flow_state == FLOW_FLOWING
+    assert view.req_per_sec_achieved == 6.4  # the _live_kwargs measured rate
+
+
+def test_local_requires_pull_active_true() -> None:
+    """The amber verdict needs the AUTHORITATIVE active signal — never fabricated.
+
+    ``pull_active=False`` (pull finished) outranks a lingering local phase label
+    (→ done); ``pull_active=None`` (the CLI bridge — which never has a pipeline
+    phase anyway) keeps the byte-identical legacy tick-freshness verdict.
+    """
+    finished = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=False,
+        phase="prebuild",
+    )
+    assert finished.flow_state == FLOW_DONE
+    no_signal = build_pull_rate_view(
+        **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+        pull_active=None,
+        phase="prebuild",
+    )
+    assert no_signal.flow_state == FLOW_STALLED  # legacy phase-blind verdict
+
+
+def test_local_with_stale_tick_still_reads_local_not_stalled() -> None:
+    """A between-tick gap during a local stage can never read red either.
+
+    The local check runs BEFORE the tick-freshness stall (an active pull whose
+    ticks paused mid-prebuild is doing local work, not a vendor stall).
+    """
+    view = build_pull_rate_view(
+        **_live_kwargs(now_monotonic=100.0 + STALE_AFTER_S + 5.0),  # type: ignore[arg-type]
+        pull_active=True,
+        phase="prebuild",
+    )
+    assert view.flow_state == FLOW_LOCAL
+    assert view.stalled is False
+
+
+def test_empty_or_unknown_phase_never_reads_local() -> None:
+    """phase="" (cleared) / an unknown label / None → the pre-phase verdicts."""
+    for phase in ("", "unknown-future-phase", None):
+        view = build_pull_rate_view(
+            **_live_kwargs(effective_rps=0.0),  # type: ignore[arg-type]
+            pull_active=True,
+            phase=phase,
+        )
+        assert view.flow_state == FLOW_STALLED
+
+
+def test_merged_panel_phase_threads_through_to_local() -> None:
+    """build_pull_rate_view_merged threads panel_phase into the panel projection."""
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=1.0,
+        panel_pull_active=True,
+        panel_phase="prebuild",
+    )
+    assert view.flow_state == FLOW_LOCAL
+    assert view.flow_detail == "local processing — prebuild (no vendor calls)"
+
+
+def test_merged_bridge_never_receives_a_phase() -> None:
+    """A fresher CLI bridge keeps its byte-identical verdict — local is panel-only.
+
+    The bridge is a separate ``brutex fetch`` process with NO pipeline phase, so
+    even with the panel side sitting in a local phase the bridge projection can
+    never read amber.
+    """
+    view = build_pull_rate_view_merged(
+        panel_effective_rps=0.0,
+        panel_current_rps=8.0,
+        panel_recent_minute=0,
+        panel_recent_429_count=0,
+        panel_seconds_since_update=500.0,
+        panel_pull_active=True,
+        panel_phase="prebuild",
+        bridge_effective_rps=0.0,
+        bridge_current_rps=8.0,
+        bridge_recent_minute=3,
+        bridge_recent_429_count=0,
+        bridge_seconds_since_update=1.0,
+    )
+    assert view.flow_state == FLOW_STALLED  # the bridge's unchanged legacy verdict
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -197,12 +197,19 @@ class TestCoverageApi:
         # row without the raw code comments (the operator-reported confusion).
         assert "How to read a row" in win.text
         assert "in-pull" in win.text
-        # DEC-FETCHES-COL-HONESTY-001: the column is RELABELLED "EMPTY-retries" and the
-        # legend states it is NOT the total vendor calls — the deeper timeout/429 in-call
-        # retry ladder a FAILED window burns is not counted, so the operator cannot read
-        # the column as "barely retried".
-        assert "EMPTY-retries" in win.text
+        # DEC-FETCHES-COL-RENAME-001: the column is RELABELLED "In-pull retries" (the
+        # #924 "EMPTY-retries" name was itself a mislabel — the in_pull_fetches counter
+        # ALSO counts transient 429/timeout re-attempts, option_ingest.py's inner retry
+        # loop bumps it on every GrowwError retry) and the legend still states it is NOT
+        # the total vendor calls — the deeper timeout/429 in-call retry ladder a FAILED
+        # window burns is not counted, so the operator cannot read the column as
+        # "barely retried".
+        assert "In-pull retries" in win.text
+        assert "EMPTY-retries" not in win.text
         assert "NOT the total vendor calls" in win.text
+        # Context-aware honesty: the legend explains a FAILED row's depth is the
+        # transient-retry depth, an EMPTY row's the empty-retry depth.
+        assert "transient" in win.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
@@ -225,7 +232,13 @@ class TestSpotCoverageApi:
         resp = client.get("/api/v1/coverage/spot")
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
+        assert body == {
+            "headline": {"datasets": 0, "total_bars": 0},
+            "rows": [],
+            # Freshness honesty fields (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
+            "duty_degraded": False,
+            "snapshot_age_s": 0.0,
+        }
 
     def test_spot_reports_written_datasets(self, store: InstrumentStore, tmp_path: Path) -> None:
         # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
@@ -317,7 +330,13 @@ class TestSpotCoverageApi:
         fake = SimpleNamespace(path=None)
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
         body = client.get("/api/v1/coverage/spot").json()
-        assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
+        assert body == {
+            "headline": {"datasets": 0, "total_bars": 0},
+            "rows": [],
+            # Freshness honesty fields (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
+            "duty_degraded": False,
+            "snapshot_age_s": 0.0,
+        }
 
 
 def _index_inst(symbol: str) -> Instrument:
@@ -764,6 +783,55 @@ class TestCoverageHelpers:
             assert "outline: 2px solid var(--blue)" in html
 
 
+class TestCoverageFreshnessStamps:
+    """The duty_degraded + snapshot_age_s honesty fields (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001)."""
+
+    def test_coverage_and_scoreboard_payloads_carry_freshness_fields(self, store: Any) -> None:
+        # All three SummaryCache-riding payloads ship the fields on a normal
+        # (fresh) read: honest False / a non-negative age.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        for url in (
+            "/api/v1/coverage/spot",
+            "/api/v1/coverage/options",
+            "/api/v1/completeness/scoreboard",
+        ):
+            body = client.get(url).json()
+            assert body["duty_degraded"] is False, url
+            assert isinstance(body["snapshot_age_s"], int | float), url
+            assert body["snapshot_age_s"] >= 0.0, url
+
+    def test_duty_degraded_visible_when_stale_served_under_pull(self, store: Any) -> None:
+        """REGRESSION companion (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001): a
+        pull-time stale serve is VISIBLE in the payload — duty_degraded flips
+        True while the pull holds the entry back, and back to False the moment
+        the staleness is no longer pull-held (never a silent stale number)."""
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        pull_on = {"v": True}
+        # A wide injected base floor (300 s) makes the two same-second requests
+        # deterministic on any CI machine (no real-clock race with the 2 s floor).
+        cache = SummaryCache(ttl_floor_s=300.0)
+        client = TestClient(
+            build_app(
+                DashboardState(),
+                instrument_store=store,
+                summary_cache=cache,
+                pull_active_probe=lambda: pull_on["v"],
+            )
+        )
+        first = client.get("/api/v1/coverage/spot").json()
+        assert first["duty_degraded"] is False  # cold compute — fresh by definition
+        cache.mark_dirty()  # a pull write landed → the entry is dirty
+        second = client.get("/api/v1/coverage/spot").json()
+        assert second["duty_degraded"] is True  # stale served while the pull runs
+        assert second["snapshot_age_s"] >= 0.0
+        # The pull ends: the same throttled read is now a plain non-pull
+        # throttle — the flag honestly drops back to False.
+        pull_on["v"] = False
+        third = client.get("/api/v1/coverage/spot").json()
+        assert third["duty_degraded"] is False
+
+
 class TestCompletenessScoreboard:
     """GET /api/v1/completeness/scoreboard{,.csv} + /completeness page
     (DEC-COMPLETENESS-SCOREBOARD-001 / DEC-COMPLETENESS-PAGE-001)."""
@@ -774,7 +842,7 @@ class TestCompletenessScoreboard:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         body = client.get("/api/v1/completeness/scoreboard").json()
         # The well-shaped payload: spot + options each with a per-category table + drill-down.
-        assert set(body) == {"spot", "options"}
+        assert set(body) == {"spot", "options", "duty_degraded", "snapshot_age_s"}
         for cat in ("index", "equity", "reference"):
             assert cat in body["spot"]["by_category"]
             assert cat in body["options"]["by_category"]
@@ -815,7 +883,7 @@ class TestCompletenessScoreboard:
         # The expensive lake scan ran EXACTLY ONCE across all three loads (shared cache).
         assert calls["n"] == 1
         # Correctness preserved — the cached scan serves a consistent, well-shaped board.
-        assert set(first.json()) == {"spot", "options"}
+        assert set(first.json()) == {"spot", "options", "duty_degraded", "snapshot_age_s"}
         assert first.json() == second.json()
 
     def test_csv_scoreboard_is_attachment_with_sections(self, store: InstrumentStore) -> None:
@@ -852,7 +920,7 @@ class TestCompletenessScoreboard:
         fake = SimpleNamespace(path=None)
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
         body = client.get("/api/v1/completeness/scoreboard").json()
-        assert set(body) == {"spot", "options"}
+        assert set(body) == {"spot", "options", "duty_degraded", "snapshot_age_s"}
         assert body["spot"]["per_symbol"] == [] and body["options"]["per_underlying"] == []
         csv_resp = client.get("/api/v1/completeness/scoreboard.csv")
         assert csv_resp.status_code == 200
@@ -910,6 +978,52 @@ class TestCompletenessScoreboard:
         assert entry["log_level"] == "warning"
         assert entry["stray_lake_symbols"] == [repr("NSE-M&M")]
         assert entry["unmatched_scored_symbols"] == [repr("M&M")]
+
+    def test_sparse_settled_range_reads_amber_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SPOT-PARTIAL-RANGE-CHIP-001 end-to-end: a SETTLED symbol whose real lake
+        holds only 3 session-days over a 3-month span reads the amber
+        ``settled_partial_range`` on the /completeness scoreboard — the ``session_days``
+        scalar rides the real ``summarize_spot_datasets`` scan, the ledger rollup is
+        settled (nothing left to re-pull), yet the range density (3 / ~60 sessions)
+        honestly fails the 0.95 floor. Pre-fix this read a false ``full``."""
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("SPARSECO")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-sparse",
+                csv_source_sha256="0" * 64,
+            )
+            # A REAL sparse lake: Jan-2020-anchored (the floor passes) but only 3 distinct
+            # session dates across Jan→Mar 2020 (one write per month partition).
+            writer = ParquetWriter(lake_root=tmp_path)
+            for ts, close in [
+                (datetime(2020, 1, 1, 9, 15, tzinfo=UTC), "100.4"),
+                (datetime(2020, 2, 3, 9, 15, tzinfo=UTC), "100.8"),
+                (datetime(2020, 3, 31, 9, 15, tzinfo=UTC), "101.00"),
+            ]:
+                writer.write(
+                    exchange="NSE",
+                    segment="CASH",
+                    symbol="SPARSECO",
+                    interval="1minute",
+                    bars=[_bar(ts, close)],
+                )
+            # A fully-SETTLED ledger rollup for the cell (5 settled, 0 pending, 0 failed) —
+            # the base verdict is ``full``; only the range audit can downgrade it.
+            monkeypatch.setattr(
+                _app_module,
+                "spot_window_rollup",
+                lambda _lake: {("SPARSECO", "1minute"): (5, 0, 0)},
+            )
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
+            body = client.get("/api/v1/completeness/scoreboard").json()
+        per_symbol = {row["symbol"]: row for row in body["spot"]["per_symbol"]}
+        assert per_symbol["SPARSECO"]["1minute"] == "settled_partial_range"
+        assert per_symbol["SPARSECO"]["1minute_start"] == "2020-01-01"
+        # …and it does NOT inflate the FULL 1-minute aggregate.
+        assert body["spot"]["by_category"]["equity"]["full_1minute"] == 0
 
     def test_reconcile_diagnostic_silent_when_lake_key_matches_scored(self, tmp_path: Path) -> None:
         """The clean counterpart: when the lake partition key EQUALS the scored ``symbol_name``

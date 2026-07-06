@@ -172,6 +172,54 @@ def test_pull_halt_global_stop_fires_alert_once(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(halts[0], LakeWriteHalt)
 
 
+def test_greeks_pool_broken_fires_pull_halt_alert_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead Greeks pool worker → error state AND the CRITICAL alert fires once.
+
+    DEC-GREEKS-PARALLEL-001: ``GreeksEnrichPoolBroken`` (a spawn worker died
+    abruptly — an OOM SIGKILL / external kill / hard interpreter crash,
+    honestly indistinguishable through the public executor API) is a
+    HOST-resource halt: ``is_pull_halt`` recognises it and the alert fires,
+    exactly like a ``LakeWriteHalt``.
+    """
+    from brutex.data.errors import GreeksEnrichPoolBroken
+
+    assert pull_jobs.is_pull_halt(GreeksEnrichPoolBroken("a worker died")) is True
+    halts: list[BaseException] = []
+    monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", halts.append)
+    job = _job()
+
+    def work(_on_progress: ProgressHook) -> None:
+        raise GreeksEnrichPoolBroken("a worker process died before completing its unit")
+
+    assert job.start(work, total=1) is True
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR  # error state byte-unchanged
+    assert "GreeksEnrichPoolBroken" in snap.detail
+    assert len(halts) == 1  # alert fired EXACTLY once for the global stop
+    assert isinstance(halts[0], GreeksEnrichPoolBroken)
+
+
+def test_greeks_pool_broken_rides_the_generic_reason_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``emit_pull_halt_alert`` needed ZERO source change: the non-LakeWriteHalt
+    branch reasons on the type name — pinned so a refactor cannot drop it."""
+    from brutex.data.errors import GreeksEnrichPoolBroken
+    from brutex.notifications import sweep_alerts
+
+    reasons: list[str] = []
+
+    class _Recorder:
+        def pull_halted(self, *, reason: str) -> None:
+            reasons.append(reason)
+
+    monkeypatch.setattr(sweep_alerts, "SweepAlerter", _Recorder)
+    sweep_alerts.emit_pull_halt_alert(GreeksEnrichPoolBroken("a worker died"))
+    assert reasons == ["GreeksEnrichPoolBroken"]
+
+
 def test_generic_worker_error_does_not_fire_pull_halt_alert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

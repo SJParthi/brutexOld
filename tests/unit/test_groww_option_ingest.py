@@ -885,8 +885,16 @@ def test_ingest_async_pipeline_spine_wires_rehydrate_hook() -> None:
         def submit(self, result: RawFetchResult) -> None:
             self.captured = result
 
-        def fold_totals(self, *, bars_appended: int, conflicts: int, series_key: object) -> None:
-            del series_key
+        def fold_totals(
+            self,
+            *,
+            bars_appended: int,
+            conflicts: int,
+            series_key: object,
+            vendor_dup_rows_dropped: int = 0,
+            max_close_delta: object = None,
+        ) -> None:
+            del series_key, vendor_dup_rows_dropped, max_close_delta
             self.folded = (bars_appended, conflicts)
 
     sdk = _FakeSDK(payload=_candles())
@@ -1652,7 +1660,9 @@ def test_run_out_of_scope_error_quarantines_contract_not_crashes(
     # the bulk option pull CONTINUES, exactly like the spot spine — never a crash.
     ok, bad = _ce(), _ce2()
 
-    def _fake_fetch(client, *, contract, interval, start, end, on_raw_payload=None):
+    def _fake_fetch(
+        client, *, contract, interval, start, end, on_raw_payload=None, form_preference=None
+    ):
         del client, interval, start, end, on_raw_payload
         if contract.symbol == bad.symbol:
             raise OutOfScopeError(f"symbol not in Groww universe: {contract.symbol}")
@@ -1691,7 +1701,9 @@ def test_run_global_stop_quota_error_propagates_not_quarantined(
     # stop, NOT one contract's problem — every remaining contract would fail the same way —
     # so it must PROPAGATE (the caller maps it to the quota_exhausted verdict,
     # DEC-SPOT-QUOTA-MIDROUND-001), never be quarantined per contract like an OutOfScopeError.
-    def _fake_fetch(client, *, contract, interval, start, end, on_raw_payload=None):
+    def _fake_fetch(
+        client, *, contract, interval, start, end, on_raw_payload=None, form_preference=None
+    ):
         del client, contract, interval, start, end, on_raw_payload
         raise quota_exc
 
@@ -1804,7 +1816,9 @@ def test_run_parallel_pool_global_stop_propagates(monkeypatch: pytest.MonkeyPatc
     # A GLOBAL stop raised inside a pool worker must still PROPAGATE through the drain
     # (re-raised, never quarantined) AND the pool must shut down cleanly — the test
     # COMPLETING proves the generator-close → ThreadPoolExecutor teardown never hangs.
-    def _fake_fetch(client, *, contract, interval, start, end, on_raw_payload=None):
+    def _fake_fetch(
+        client, *, contract, interval, start, end, on_raw_payload=None, form_preference=None
+    ):
         del client, contract, interval, start, end, on_raw_payload
         raise DailyQuotaExceeded("daily quota spent")
 
@@ -2573,19 +2587,74 @@ class TestSuspiciousEmptyFlag:
         assert [r.underlying for r in scan.suspicious] == ["RELIANCE"]
 
     def test_low_leg_never_planned_sibling_still_flags(self) -> None:
-        # HONEST-residual pin (docstring-documented, accepted): a NEVER-PLANNED sibling —
+        # HONEST-residual pin (docstring-documented): a NEVER-PLANNED sibling —
         # a far-future contract skipped at planning time (fno.window_not_open,
         # DEC-FNO-FAR-EXPIRY-WINDOW-001: zero vendor calls, zero ledger rows, no
-        # IngestReport pair, no failure) — is structurally INVISIBLE to Tier B, so a
+        # IngestReport pair, no failure) — stays structurally INVISIBLE to Tier B, so a
         # 1-clean-empty-near-leg + 1-not-yet-open-far-leg chain STILL flags low_leg=True.
-        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically);
-        # observe-only WARN noise, deliberately not mechanised away.
+        # Consistent with tried-vs-never-tried (Tier A ignores never-tried identically).
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: the flag now SELF-DESCRIBES — when the
+        # caller threads never_planned_symbols the report carries never_planned_pairs,
+        # but the flag DECISION is untouched (annotate, NEVER suppress).
         contracts, _ = _empty_chain("BEL", 2)
         pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
         # contracts[1] was never planned: absent from pairs AND from failed_symbols.
         scan = scan_underlying_all_empty(pairs, contracts, [])
         assert scan.suspicious == (
             UnderlyingEmptyReport(underlying="BEL", attempted_pairs=1, stored_bars=0, low_leg=True),
+        )
+        # Threading the planner's omitted set STILL flags — now self-described.
+        annotated = scan_underlying_all_empty(pairs, contracts, [], [contracts[1].symbol])
+        assert annotated.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="BEL",
+                attempted_pairs=1,
+                stored_bars=0,
+                low_leg=True,
+                never_planned_pairs=1,
+            ),
+        )
+
+    def test_never_planned_default_empty_scan_byte_identical(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001 back-compat: an explicit empty
+        # never_planned_symbols yields the EXACT same scan as omitting the param
+        # (every report carries the default never_planned_pairs=0).
+        contracts, pairs = _empty_chain("M&M", 3)
+        assert scan_underlying_all_empty(pairs, contracts, [], []) == scan_underlying_all_empty(
+            pairs, contracts
+        )
+
+    def test_never_planned_unknown_symbol_is_skipped(self) -> None:
+        # An omitted symbol NOT in contract_list is defensively dropped (mirrors the
+        # unknown failed_symbols drop) — the flag + annotation are unaffected.
+        contracts, pairs = _empty_chain("RELIANCE", 1)
+        scan = scan_underlying_all_empty(pairs, contracts, [], ["NSE-GHOST-99-FUT"])
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="RELIANCE",
+                attempted_pairs=1,
+                stored_bars=0,
+                low_leg=True,
+                never_planned_pairs=0,
+            ),
+        )
+
+    def test_never_planned_never_suppresses_tier_a(self) -> None:
+        # A Tier A whole-chain flag with never-planned siblings STILL fires and is
+        # annotated — the count is data, never a suppression lever.
+        contracts, _ = _empty_chain("VEDL", 5)
+        pairs = {(c.symbol, "1day"): _ireport(windows=1, bars=0) for c in contracts[:3]}
+        scan = scan_underlying_all_empty(
+            pairs, contracts, [], [contracts[3].symbol, contracts[4].symbol]
+        )
+        assert scan.suspicious == (
+            UnderlyingEmptyReport(
+                underlying="VEDL",
+                attempted_pairs=3,
+                stored_bars=0,
+                low_leg=False,
+                never_planned_pairs=2,
+            ),
         )
 
     def test_tier_a_ignores_nonclean_and_failed_siblings(self) -> None:
@@ -2632,6 +2701,42 @@ class TestSuspiciousEmptyFlag:
         assert warns[0]["underlying"] == repr("WIPRO")
         assert warns[0]["attempted_pairs"] == 1
         assert warns[0]["low_leg"] is True
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: the payload always carries the
+        # annotation key (0 when nothing was omitted by the planner).
+        assert warns[0]["never_planned_pairs"] == 0
+
+    def test_emit_warn_payload_carries_never_planned_pairs(self) -> None:
+        # DEC-SILENT-VANISH-LOWLEG-ANNOTATE-001: a low-leg flag with a never-planned
+        # sibling self-describes in the WARN payload — triage reads low_leg=True +
+        # never_planned_pairs=1 as "probably a far-leg-not-open chain, weigh lower".
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        scan = scan_underlying_all_empty(pairs, contracts, [], [contracts[1].symbol])
+        with capture_logs() as logs:
+            _oi._log_underlying_all_empty(scan, pull_id="pid-1")
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["underlying"] == repr("BEL")
+        assert warns[0]["low_leg"] is True
+        assert warns[0]["never_planned_pairs"] == 1
+
+    def test_emit_helper_threads_never_planned_symbols(self) -> None:
+        # emit_underlying_all_empty threads never_planned_symbols → scan → WARN payload
+        # (the guarded COMMON helper, used by the production post-drain call site).
+        contracts, _ = _empty_chain("BEL", 2)
+        pairs = {(contracts[0].symbol, "1day"): _ireport(windows=1, bars=0)}
+        with capture_logs() as logs:
+            _oi.emit_underlying_all_empty(
+                pairs,
+                contracts,
+                never_planned_symbols=[contracts[1].symbol],
+                pull_id="pid-9",
+            )
+        warns = [r for r in logs if r["event"] == UNDERLYING_ALL_EMPTY_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["pull_id"] == "pid-9"
+        assert warns[0]["never_planned_pairs"] == 1
+        assert warns[0]["low_leg"] is True  # annotated, NEVER suppressed
 
     def test_emit_silent_when_clean(self) -> None:
         with capture_logs() as logs:
@@ -4186,6 +4291,235 @@ def test_option_kept_bars_emit_no_all_filtered_warn() -> None:
             now_ist=_now,
         )
     assert not any(e["event"] == "ingest.window.all_bars_filtered" for e in logs)
+
+
+# ── DEC-WRITE-HEALTH-BREAKER-001 — the F&O spine's write-health breaker wiring ──
+
+
+def _chain_ce(underlying: str, strike: int) -> DerivativeContract:
+    """One CE of *underlying*'s chain (same expiry, distinct strike per contract)."""
+    return DerivativeContract(
+        underlying_symbol=underlying,
+        expiry=date(2025, 1, 2),
+        symbol=f"NSE-{underlying}-02Jan25-{strike}-CE",
+        contract_type="CE",
+        strike=float(strike),
+    )
+
+
+def test_run_wired_breaker_escalates_multi_underlying_wedge_to_volume_halt() -> None:
+    """A wedged VOLUME (defers across >= 3 distinct underlying health keys) HALTS the pull.
+
+    The trip is a GLOBAL stop (``LakeWriteHalt`` ∈ ``_GLOBAL_STOP_ERRORS``): it propagates
+    out of :func:`run_groww_option_ingest`, NEVER a per-contract quarantine. The F&O
+    health key groups by UNDERLYING (review MAJOR P3-1), so three wedged underlyings at
+    an injected ``consecutive_limit=1`` open three distinct keys.
+    """
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    sdk = _FakeSDK(payload=_candles())
+    breaker = WriteHealthBreaker(consecutive_limit=1, distinct_open_limit=3)
+    with pytest.raises(LakeWriteHalt) as excinfo:
+        run_groww_option_ingest(
+            _client(sdk),
+            _LockTimeoutSink(),
+            contracts=[
+                _chain_ce("NIFTY", 28500),
+                _chain_ce("BANKNIFTY", 51000),
+                _chain_ce("RELIANCE", 3000),
+            ],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=WindowLedger(),
+            max_attempts=0,
+            now_ist=_now,
+            write_breaker=breaker,
+        )
+    assert excinfo.value.reason == "volume_wedged"
+    assert len(breaker.open_partitions) >= 3
+
+
+def test_run_shipped_default_limits_escalate_on_fno_spine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SHIPPED-DEFAULTS regression (review MAJOR P3-1): the F&O spine trips at 2/3.
+
+    No injected breaker and no env overrides — ``write_breaker=None`` makes the spine
+    build its own via ``resolve_write_breaker()`` (consecutive=2, distinct=3). Each F&O
+    ``(contract, interval)`` pair has exactly ONE clamped ledger window per pass with NO
+    in-pass tail retry, so the pre-fix per-CONTRACT health key saw at most ONE defer and
+    could NEVER open — the breaker was structurally INERT on this spine and this test
+    FAILED. With the key grouped by UNDERLYING, two wedged sibling contracts per chain
+    reach the consecutive limit and three wedged chains trip the volume halt.
+    """
+    for env in (
+        "BRUTEX_WRITE_BREAKER",
+        "BRUTEX_WRITE_BREAKER_CONSECUTIVE",
+        "BRUTEX_WRITE_BREAKER_DISTINCT",
+    ):
+        monkeypatch.delenv(env, raising=False)
+    sdk = _FakeSDK(payload=_candles())
+    with pytest.raises(LakeWriteHalt) as excinfo:
+        run_groww_option_ingest(
+            _client(sdk),
+            _LockTimeoutSink(),
+            contracts=[
+                _chain_ce("NIFTY", 28500),
+                _chain_ce("NIFTY", 28600),
+                _chain_ce("BANKNIFTY", 51000),
+                _chain_ce("BANKNIFTY", 51100),
+                _chain_ce("RELIANCE", 3000),
+                _chain_ce("RELIANCE", 3100),
+            ],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=WindowLedger(),
+            max_attempts=0,
+            now_ist=_now,
+        )
+    assert excinfo.value.reason == "volume_wedged"
+
+
+def test_run_shipped_defaults_single_underlying_defers_only() -> None:
+    """Honest floor at shipped defaults: ONE wedged chain opens ONE key — no halt.
+
+    Two sibling contracts of one underlying reach the consecutive limit (the key opens),
+    but a single distinct open key stays below the 3-DISTINCT volume gate: the pull keeps
+    today's per-window defer behaviour (documented envelope, never a false halt).
+    """
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    sdk = _FakeSDK(payload=_candles())
+    breaker = WriteHealthBreaker()  # shipped default limits (2 consecutive / 3 distinct)
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _LockTimeoutSink(),
+        contracts=[_chain_ce("NIFTY", 28500), _chain_ce("NIFTY", 28600)],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+        write_breaker=breaker,
+    )
+    assert report.failed_pairs == 0  # deferred, never quarantined, never halted
+    assert report.still_failed_windows == 2
+    assert breaker.open_partitions == frozenset({"NSE/FNO/NIFTY/1day/2024-01"})
+
+
+def test_run_breaker_below_distinct_limit_defers_only() -> None:
+    """Defers on fewer distinct underlying keys than the limit stay per-window defers."""
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    sdk = _FakeSDK(payload=_candles())
+    breaker = WriteHealthBreaker(consecutive_limit=1, distinct_open_limit=3)
+    report = run_groww_option_ingest(
+        _client(sdk),
+        _LockTimeoutSink(),
+        contracts=[_chain_ce("NIFTY", 28500), _chain_ce("BANKNIFTY", 51000)],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+        write_breaker=breaker,
+    )
+    assert report.failed_pairs == 0  # deferred, never quarantined, never halted
+    assert report.still_failed_windows == 2
+    assert len(breaker.open_partitions) == 2
+
+
+def test_contract_successful_write_resets_partition_streak() -> None:
+    """A durable F&O write calls ``observe_success`` on the contract partition's key."""
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    class _SpyBreaker(WriteHealthBreaker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.defers: list[str] = []
+            self.successes: list[str] = []
+
+        def observe_defer(self, partition_key: str) -> None:
+            self.defers.append(partition_key)
+            super().observe_defer(partition_key)
+
+        def observe_success(self, partition_key: str) -> None:
+            self.successes.append(partition_key)
+            super().observe_success(partition_key)
+
+    sdk = _FakeSDK(payload=_candles())
+    spy = _SpyBreaker()
+    report = ingest_option_contract(
+        _client(sdk),
+        _Sink(),
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        ledger=WindowLedger(),
+        max_attempts=0,
+        now_ist=_now,
+        write_breaker=spy,
+    )
+    assert report.bars_appended > 0
+    assert spy.defers == []
+    # The F&O health key groups by UNDERLYING, never the contract symbol (P3-1).
+    assert spy.successes == ["NSE/FNO/NIFTY/1day/2024-01"]
+
+
+def test_blank_underlying_health_key_falls_back_to_contract_symbol() -> None:
+    """A blank ``underlying_symbol`` keys on the contract symbol — never an empty group."""
+    from brutex.data.write_breaker import WriteHealthBreaker
+
+    class _SpyBreaker(WriteHealthBreaker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.defers: list[str] = []
+
+        def observe_defer(self, partition_key: str) -> None:
+            self.defers.append(partition_key)
+            super().observe_defer(partition_key)
+
+    contract = DerivativeContract(
+        underlying_symbol="",
+        expiry=date(2025, 1, 2),
+        symbol="NSE-NIFTY-02Jan25-28500-CE",
+        contract_type="CE",
+        strike=28500.0,
+    )
+    key = WindowKey(
+        market=GROWW_OPTION_COVERAGE_MARKET,
+        security_id="NSE-NIFTY-02Jan25-28500-CE",
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+    )
+    spy = _SpyBreaker()
+    report = _oi._process_option_window_tail(
+        _LockTimeoutSink(),
+        _oi._OptionRawWindow(
+            contract=contract,
+            interval="1day",
+            exchange="NSE",
+            key=key,
+            raw_bars=[_partial_bar(date(2024, 1, 1))],
+            fetch_count=1,
+            settle_empty=False,
+            old_window=False,
+            attempt=0,
+        ),
+        ledger=None,
+        on_success=None,
+        pull_id="p",
+        fields={"symbol": key.security_id, "interval": "1day"},
+        write_breaker=spy,
+    )
+    assert report.still_failed_windows == 1
+    assert spy.defers == ["NSE/FNO/NSE-NIFTY-02Jan25-28500-CE/1day/2024-01"]
 
 
 # ── make_breaker_canary_probe (DEC-EMPTY-BREAKER-CANARY-001) ─────────────────

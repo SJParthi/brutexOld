@@ -68,7 +68,7 @@ from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-    from datetime import date
+    from datetime import date, datetime
     from pathlib import Path
 
     import polars as pl
@@ -103,6 +103,49 @@ MATERIALIZABLE_TFS: Final[tuple[str, ...]] = tuple(INTRADAY_TF_INTERVALS)
 DAILY_TF_LABEL: Final[str] = "1day"
 
 
+def _now_ist() -> datetime:
+    """The current IST wall-clock instant — the ONE injectable clock seam for
+    the default daily-derive cutoff (tests freeze THIS, never the cutoff law —
+    DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001)."""
+    from datetime import UTC, datetime
+
+    from brutex.calendars.nse import IST
+
+    return datetime.now(UTC).astimezone(IST)
+
+
+def month_partition_files(base: Path, months: Iterable[tuple[int, int]]) -> list[str]:
+    """The EXISTING ``<base>/<yyyy>/<mm>.parquet`` files for explicit *months* — pure.
+
+    DEC-TF-REBUILD-MONTH-BOUND-001: the month-bounded read core for
+    :func:`make_lake_read_1m` (the explicit-month twin of
+    :func:`~brutex.data.spot_daily_resample.ist_span_partition_files`, which is
+    span-derived — this one takes the caller's exact ``(year, month)`` set, e.g.
+    the lake healer's touched-months set). Only months that EXIST on disk are
+    returned (an absent month is skipped cleanly), as ascending POSIX path
+    strings ready for :func:`polars.scan_parquet`. De-duplicated + sorted, so a
+    repeated month is read once and the order is deterministic (Golden Rule #7).
+
+    CORRECTNESS BASIS (the invariant this bounding rests on, pinned by
+    ``tests/unit/test_calendar_nse_utc_month_invariant.py``): every NSE trading
+    session — regular, special-weekend Budget Saturday/Sunday, and the Diwali
+    Muhurat evening — opens AND closes on the SAME UTC calendar date as its IST
+    session date (09:15–15:30 IST = 03:45–10:00 UTC; even a Muhurat close at
+    ~19:15 IST is 13:45 UTC), so an intraday session NEVER straddles a UTC
+    month boundary and a month's derived intraday-TF bars are fully computable
+    from that month's own 1-minute partition. The derived ``1day`` does NOT
+    share the invariant (midnight-IST stamping lands an IST date-D bar in the
+    UTC month of D−1), which is why ``months`` + ``include_daily`` is refused
+    in :func:`materialize_lake_timeframes`.
+    """
+    files: list[str] = []
+    for year, month in sorted(set(months)):
+        candidate = base / f"{year:04d}" / f"{month:02d}.parquet"
+        if candidate.is_file():
+            files.append(candidate.as_posix())
+    return files
+
+
 class PrebuildKind(Enum):
     """How an instrument's derived timeframes are pre-built (DEC-PREBUILD-SELECT-001).
 
@@ -124,9 +167,14 @@ class PrebuildKind(Enum):
         FUTURES (option bars are OI-carrying F&O bars) since
         DEC-PIPELINE-AUTOPREBUILD-001, which SUPERSEDES the earlier on-demand
         design (DEC-PREBUILD-SELECT-001's explicit no-op). Honest storage
-        envelope (Golden Rule #10): once all 19 intraday + the ``1day``
-        partitions exist, the options lake costs **~2-3× its 1-minute
-        footprint** — an operator-accepted cost of the decree.
+        envelope (Golden Rule #10, DEC-LAKE-FOOTPRINT-MEASURED-001): the
+        fully-materialised cost is a MEASURED multiple of the 1-minute
+        footprint — the observed multiplier is persisted to ``schema_meta``
+        (``lake_footprint.*``) after every prebuild run, with a conservative
+        **6.5×** fallback before the first observation. The retired "~2-3×"
+        estimate IGNORED the 17-column Greeks-enriched option 1-minute rewrite
+        (:mod:`brutex.data.greeks_enrich`), which alone pushes the realistic
+        all-in cost toward ~5-6× — operator-accepted either way.
     """
 
     SPOT = "spot"
@@ -370,6 +418,7 @@ def materialize_lake_timeframes(
     tfs: Iterable[str] = MATERIALIZABLE_TFS,
     include_daily: bool = False,
     daily_before: date | None = None,
+    months: Iterable[tuple[int, int]] | None = None,
     incremental: bool | None = None,
     dense_symbol: bool = False,
 ) -> MaterializeResult:
@@ -384,8 +433,11 @@ def materialize_lake_timeframes(
       (SPOT → OI-dropping spot resampler; FUTURES/OPTIONS → OI-aware F&O
       resampler — option materialisation enabled by
       DEC-PIPELINE-AUTOPREBUILD-001, which supersedes the on-demand-only
-      design; honest cost: a fully-materialised options lake is **~2-3× its
-      1-minute footprint**, operator-accepted);
+      design; honest cost per DEC-LAKE-FOOTPRINT-MEASURED-001: a MEASURED
+      multiple of the 1-minute footprint — observed multiplier persisted to
+      ``schema_meta``, conservative 6.5× fallback; the retired "~2-3×" guess
+      ignored the Greeks-enriched 17-column 1-minute rewrite — operator-
+      accepted);
     * reads the 1-minute base ONCE, with the OI column for FUTURES + OPTIONS
       (``with_open_interest=kind is not PrebuildKind.SPOT``), so a spot
       partition's output is byte-identical to before;
@@ -400,32 +452,65 @@ def materialize_lake_timeframes(
       daily bar count joins the result under :data:`DAILY_TF_LABEL`.
 
     ``daily_before`` is the forming-session cutoff (an IST date); ``None``
-    (production) resolves to today IST, so a still-forming session is never
-    written as a final daily bar (no look-ahead). Rerun-safe: the derived
-    intraday partitions AND the derived daily are both latest-wins
-    (DEC-TF-REMAT-LATEST-WINS-001 — a re-derivation of identical data is a
-    silent byte-identical no-op, and a bucket recomputed from GROWN 1-minute
-    data REPLACES its stale partial-day predecessor instead of being
-    keep-first-discarded) — CLAUDE.md §2 Rule 7. The vendor 1-minute base
-    itself stays keep-first (only DERIVED data is recomputable/replaceable).
+    (production) resolves via
+    :func:`~brutex.calendars.nse.daily_derive_cutoff` on the current IST
+    instant (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001): a still-forming /
+    pre-close session is never written as a final daily bar (no look-ahead),
+    while a run on a non-trading day OR provably AFTER the run day's own
+    close (per-date close honored — regular, ``SPECIAL_WEEKEND_TRADING_
+    SESSIONS`` Budget weekends, Muhurat evenings) includes the run day.
+    Rerun-safe: the derived intraday partitions AND the derived daily are
+    both latest-wins (DEC-TF-REMAT-LATEST-WINS-001 — a re-derivation of
+    identical data is a silent byte-identical no-op, and a bucket recomputed
+    from GROWN 1-minute data REPLACES its stale partial-day predecessor
+    instead of being keep-first-discarded) — CLAUDE.md §2 Rule 7. The vendor
+    1-minute base itself stays keep-first (only DERIVED data is
+    recomputable/replaceable).
 
     DELIBERATE live-edge divergence (DEC-DOCTOR-KIT-HONESTY-001 fix-4 verdict,
     pinned by ``TestPrebuildLiveEdgeDivergencePinned``): the intraday TFs carry
     the RUN DAY's own session when the stored 1-minute contains it, while the
     derived ``1day`` EXCLUDES it (``ist_date >= before`` — the forming-session
-    guard above), so such a prebuild run writes exactly ONE fewer daily session
-    than the intraday TFs (the operator's 122-vs-123 ADANIENT observation).
-    The guard is whole-day-granular — even a post-close run excludes the run
-    day (the code cannot cheaply prove the session closed) — and SELF-HEALS on
-    the next pipeline run via the latest-wins derived ``1day``. Partition-row
+    guard above), so a MID-SESSION prebuild run writes exactly ONE fewer daily
+    session than the intraday TFs (the operator's 122-vs-123 ADANIENT
+    observation). Since DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 the divergence is
+    confined to a mid-session run: a POST-CLOSE run derives the run day too
+    (superseding the fix-4 "whole-day-granular — the code cannot cheaply prove
+    the session closed" clause), and a mid-session run still SELF-HEALS on the
+    next pipeline run via the latest-wins derived ``1day``. Partition-row
     counting note: midnight-IST stamping places an IST date-D daily bar in the
     UTC month of D−1 (a Jan-1 bar lives in the December partition) — shifted,
     never missing.
 
-    Cost: one O(bars) partition read + one O(bars) resample per timeframe —
-    NOT an O(1)-total claim (Golden Rule #10). Returns the per-TF written
-    counts. Raw lake I/O is composed from the ``# pragma: no cover`` builders;
-    integration-tested by the round-trip tests.
+    *months* (DEC-TF-REBUILD-MONTH-BOUND-001): an optional explicit
+    ``(year, month)`` bound on the 1-minute READ — ``None`` (the default; the
+    pipeline prebuild + doctor call sites) is the byte-identical whole-tree
+    read, a set makes a targeted INTRADAY-TF rebuild O(affected-months) instead
+    of O(symbol-history) (the lake healer's recall). Sound for the intraday TFs
+    because an NSE session never crosses a UTC month boundary (the pinned
+    invariant on :func:`month_partition_files`). ``months`` +
+    ``include_daily=True`` RAISES :class:`ValueError`: the derived ``1day`` is
+    midnight-IST-stamped, so an IST date-D daily bar lives in the UTC month of
+    D−1 — a month-bounded daily derive needs the ±1-day straddle pad the daily
+    recall path already has (``make_lake_read_1m_window``); month-bounding the
+    daily arm here is the NAMED follow-up, not silently mis-derived. A
+    month-bounded run additionally DISABLES the incremental skip/stamp below —
+    a partial (months-subset) derive must never skip, and must never stamp
+    itself as a full derive (DEC-PREBUILD-INCREMENTAL-001 interplay).
+
+    Cost: one O(bars) partition read (month-bounded when *months* is given) +
+    one O(bars) resample per timeframe — NOT an O(1)-total claim (Golden Rule
+    #10). Returns the per-TF written counts. Raw lake I/O is composed from the
+    ``# pragma: no cover`` builders; integration-tested by the round-trip tests.
+
+    **Log-volume envelope (DEC-PREBUILD-LOG-FLOOD-001):** a completed derive
+    emits ONE ``lake.derived.write_summary`` INFO per SYMBOL (timeframe count +
+    total bars); the per-partition ``lake.partition.write`` telemetry on this
+    derived path rides DEBUG (see :func:`make_lake_write_tf`), so a prebuild of
+    N partitions costs O(symbols) INFO lines, never O(partitions) — the fetch
+    phase's rate/429/settle audit trail can no longer be rotated away by the
+    derived fan-out (measured: 205,609 INFO lines ≈ ~26 min to roll the
+    10 MiB × 5 rotation, pull 2026-07-04/05).
 
     **Daily-open substitution observe (DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001,
     SPOT + ``include_daily=True`` only):** after the daily derive, the SAME
@@ -458,7 +543,7 @@ def materialize_lake_timeframes(
     """
     from datetime import UTC, datetime
 
-    from brutex.calendars.nse import IST
+    from brutex.calendars.nse import daily_derive_cutoff
     from brutex.data.derive_stamp import (
         DeriveStamp,
         derive_stamp_path,
@@ -469,17 +554,29 @@ def materialize_lake_timeframes(
         source_1m_token,
     )
 
+    if months is not None and include_daily:
+        raise ValueError(
+            "months= cannot be combined with include_daily=True — the midnight-IST "
+            "derived 1day straddles UTC months (use the daily recall path's "
+            "±1-day-padded window read instead; DEC-TF-REBUILD-MONTH-BOUND-001)"
+        )
     requested = tuple(dict.fromkeys(tfs))
     # Resolve the daily forming-session cutoff up-front — the skip rule must
     # see the SAME value the derive would use (resolved unconditionally so the
     # daily branch below needs no Optional narrowing; a non-daily run simply
     # never uses it and its stamp records daily_before=None).
-    before: date = (
-        daily_before if daily_before is not None else datetime.now(UTC).astimezone(IST).date()
-    )
+    # DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001: the production default is the
+    # session-close-aware cutoff — a post-close (or non-trading-day) run
+    # includes the run day's completed session; a mid-session run excludes it.
+    before: date = daily_before if daily_before is not None else daily_derive_cutoff(_now_ist())
     before_iso = before.isoformat() if include_daily else None
 
-    inc = incremental_prebuild_enabled() if incremental is None else incremental
+    # A months-bounded (partial) derive never skips and never stamps
+    # (DEC-TF-REBUILD-MONTH-BOUND-001 × DEC-PREBUILD-INCREMENTAL-001).
+    if months is not None:
+        inc = False
+    else:
+        inc = incremental_prebuild_enabled() if incremental is None else incremental
     token: str | None = None
     stamp_file = derive_stamp_path(lake_root, exchange, segment, symbol)
     if inc:
@@ -514,6 +611,7 @@ def materialize_lake_timeframes(
         segment=segment,
         symbol=symbol,
         with_open_interest=kind is not PrebuildKind.SPOT,
+        months=months,
     )
     write_tf = make_lake_write_tf(
         lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
@@ -536,11 +634,32 @@ def materialize_lake_timeframes(
             ),
         )
 
+    def _log_write_summary(result: MaterializeResult) -> None:
+        """ONE aggregate INFO per materialised SYMBOL (DEC-PREBUILD-LOG-FLOOD-001).
+
+        The per-partition ``lake.partition.write`` telemetry is DEBUG on this
+        derived path (see ``make_lake_write_tf``), so the prebuild's audit
+        record survives log rotation in O(symbols) not O(partitions): one line
+        per symbol carrying the timeframe count + total derived bars — the
+        aggregate form of the per-partition fields the forensics rely on.
+        """
+        _LOG.info(
+            "lake.derived.write_summary",
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            timeframes_written=len(result.written),
+            total_bars=result.total_bars,
+            skipped=len(result.skipped),
+            include_daily=include_daily,
+        )
+
     if not include_daily:
         result = materialize_timeframes(
             tfs=requested, read_1m=read_1m, write_tf=write_tf, resampler=resampler
         )
         _stamp(last_1m_ist_date=None)
+        _log_write_summary(result)
         return result
 
     from brutex.data.spot_daily_resample import (
@@ -574,11 +693,13 @@ def materialize_lake_timeframes(
             df_1m, before=before, symbol=symbol, dense=dense_symbol
         )
     _stamp(last_1m_ist_date=_last_ist_date(df_1m))
-    return MaterializeResult(
+    result = MaterializeResult(
         written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
         skipped=intraday.skipped,
         opens_substituted=opens_substituted,
     )
+    _log_write_summary(result)
+    return result
 
 
 def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
@@ -617,6 +738,7 @@ __all__ = [
     "make_lake_write_tf",
     "materialize_lake_timeframes",
     "materialize_timeframes",
+    "month_partition_files",
     "prebuild_kind_for",
 ]
 
@@ -628,6 +750,7 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     segment: str,
     symbol: str,
     with_open_interest: bool = False,
+    months: Iterable[tuple[int, int]] | None = None,
 ) -> Callable[[], pl.DataFrame]:
     """Build the injected 1-minute reader for :func:`materialize_timeframes`.
 
@@ -640,6 +763,15 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     Moved here from the dashboard route glue (DEC-TF-MATERIALIZE-002) so the
     manual route AND the pull-settle auto-derive share ONE builder
     (CLAUDE.md §11 COMMON).
+
+    *months* (DEC-TF-REBUILD-MONTH-BOUND-001): an optional explicit
+    ``(year, month)`` set. ``None`` (the default — every existing caller) is
+    the byte-identical whole-tree ``/**/*.parquet`` read; a set bounds the read
+    to ONLY those existing month partitions (via the pure
+    :func:`month_partition_files`), so a targeted rebuild is
+    O(affected-months), not O(symbol-history). The "no stored 1minute bars"
+    :class:`ValueError` contract is kept in BOTH modes (a months set matching
+    nothing on disk raises, mirroring the empty-tree raise).
     """
     import polars as pl
 
@@ -649,7 +781,19 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        if months is not None:
+            # Month-bounded read (DEC-TF-REBUILD-MONTH-BOUND-001): the explicit
+            # existing-file list replaces the whole-tree glob. Sound because an
+            # NSE session never crosses a UTC month (see month_partition_files).
+            source: str | list[str] = month_partition_files(base, months)
+            if not source:
+                raise ValueError(
+                    f"no stored 1minute bars for {exchange}/{segment}/{symbol} in the "
+                    "requested months — pull the 1-minute first, then derive timeframes"
+                )
+        elif base.is_dir() and any(base.rglob("*.parquet")):
+            source = base.as_posix() + "/**/*.parquet"
+        else:
             raise ValueError(
                 f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
                 "pull the 1-minute spot first, then derive timeframes"
@@ -660,7 +804,7 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         # OHLCV(+OI) columns are selected below, which every shape carries —
         # byte-identical for a uniform tree.
         df = pl.scan_parquet(
-            base.as_posix() + "/**/*.parquet",
+            source,
             missing_columns="insert",
             extra_columns="ignore",
         ).collect()
@@ -704,7 +848,14 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    # DERIVED-TF writer → per-partition `lake.partition.write` telemetry at
+    # DEBUG (DEC-PREBUILD-LOG-FLOOD-001): the prebuild writes ~10⁵-10⁶ tiny
+    # derived partitions per run — at INFO those lines (~132/s measured,
+    # 205,609 of 206,606 retained lines) rotated the 10 MiB × 5 log over in
+    # ~26 min and WIPED the fetch phase's rate/429/settle audit trail. The
+    # fields survive per-SYMBOL in the `lake.derived.write_summary` INFO
+    # (materialize_lake_timeframes); the live-pull vendor writers keep INFO.
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root, partition_log_level="debug"))
 
     def _write(tf_label: str, frame: pl.DataFrame) -> int:
         interval = INTRADAY_TF_INTERVALS[tf_label]

@@ -9,14 +9,19 @@ and the error message carrying the lock path.
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import stat
 from pathlib import Path
 
 import pytest
 from brutex.adapters.groww.pull_singleflight import (
+    ACCOUNT_LOCK_FILE_PREFIX,
     PULL_SINGLEFLIGHT_LOCK_NAME,
     PullAlreadyRunningError,
+    account_pull_singleflight_lock,
+    account_singleflight_lock_path,
+    default_account_lock_dir,
     pull_singleflight_lock,
     pull_singleflight_lock_path,
 )
@@ -124,5 +129,95 @@ def test_lockfile_open_enospc_maps_to_lake_write_halt(
 
     monkeypatch.setattr("brutex.adapters.groww.pull_singleflight.os.open", _enospc)
     with pytest.raises(LakeWriteHalt) as excinfo, pull_singleflight_lock(tmp_path):
+        pass  # pragma: no cover — open raises before the body runs
+    assert excinfo.value.reason == "disk_full"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Account-keyed single-flight lock (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def test_account_lock_path_is_digest_only(tmp_path: Path) -> None:
+    """The filename carries a 16-hex-char PBKDF2 fingerprint — NEVER the api_key itself.
+
+    PBKDF2-HMAC-SHA256 over the fixed app salt instead of a bare sha256, so the
+    visible filename cannot be used as a cheap offline-guessing oracle for the
+    credential it fingerprints (CodeQL py/weak-sensitive-data-hashing).
+    """
+    api_key = "super-secret-api-key"
+    path = account_singleflight_lock_path(api_key, lock_dir=tmp_path)
+    assert path.parent == tmp_path
+    name = path.name
+    assert name.startswith(ACCOUNT_LOCK_FILE_PREFIX)
+    assert name.endswith(".flock")
+    digest = name[len(ACCOUNT_LOCK_FILE_PREFIX) : -len(".flock")]
+    assert len(digest) == 16
+    assert all(c in "0123456789abcdef" for c in digest)
+    assert api_key not in str(path)  # no secret in a path or a log line
+    expected = hashlib.pbkdf2_hmac(
+        "sha256", api_key.encode("utf-8"), b"brutex-pull-account-lock", 200_000
+    ).hex()[:16]
+    assert digest == expected
+    # Computed only — never created by the path helper.
+    assert not path.exists()
+
+
+def test_account_lock_path_stable_per_key_distinct_across_keys(tmp_path: Path) -> None:
+    a1 = account_singleflight_lock_path("key-A", lock_dir=tmp_path)
+    a2 = account_singleflight_lock_path("key-A", lock_dir=tmp_path)
+    b = account_singleflight_lock_path("key-B", lock_dir=tmp_path)
+    assert a1 == a2
+    assert a1 != b
+
+
+def test_account_lock_default_dir_is_per_user_home() -> None:
+    assert default_account_lock_dir() == Path.home() / ".brutex" / "locks"
+    # The default-dir branch of the path helper (path computation only — no disk touch).
+    path = account_singleflight_lock_path("key-A")
+    assert path.parent == default_account_lock_dir()
+
+
+def test_account_lock_acquire_creates_dir_and_owner_only_file(tmp_path: Path) -> None:
+    lock_dir = tmp_path / "locks"  # not pre-created — mkdir(parents=True) path
+    with account_pull_singleflight_lock("key-A", lock_dir=lock_dir):
+        path = account_singleflight_lock_path("key-A", lock_dir=lock_dir)
+        assert path.exists()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_account_lock_contended_refused_and_released_on_exit(tmp_path: Path) -> None:
+    """The SAME api_key contends across two handles — even with DIFFERENT lake roots."""
+    with (
+        account_pull_singleflight_lock("key-A", lock_dir=tmp_path),
+        pytest.raises(PullAlreadyRunningError) as excinfo,
+        account_pull_singleflight_lock("key-A", lock_dir=tmp_path),  # pragma: no cover
+    ):
+        pass  # pragma: no cover — the inner acquire raises first
+    assert excinfo.value.lock_path == account_singleflight_lock_path("key-A", lock_dir=tmp_path)
+    # Holder released on exit → a fresh acquire succeeds.
+    with account_pull_singleflight_lock("key-A", lock_dir=tmp_path):
+        pass
+
+
+def test_account_lock_distinct_keys_never_contend(tmp_path: Path) -> None:
+    with (
+        account_pull_singleflight_lock("key-A", lock_dir=tmp_path),
+        account_pull_singleflight_lock("key-B", lock_dir=tmp_path),
+    ):
+        pass  # two DIFFERENT accounts may pull concurrently
+
+
+def test_account_lock_enospc_maps_to_lake_write_halt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _enospc(*_args: object, **_kwargs: object) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("brutex.adapters.groww.pull_singleflight.os.open", _enospc)
+    with (
+        pytest.raises(LakeWriteHalt) as excinfo,
+        account_pull_singleflight_lock("key-A", lock_dir=tmp_path),
+    ):
         pass  # pragma: no cover — open raises before the body runs
     assert excinfo.value.reason == "disk_full"

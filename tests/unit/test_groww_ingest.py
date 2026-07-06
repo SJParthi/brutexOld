@@ -1573,9 +1573,15 @@ class TestIngestSpotAsyncPipeline:
                 self.captured = result
 
             def fold_totals(
-                self, *, bars_appended: int, conflicts: int, series_key: object
+                self,
+                *,
+                bars_appended: int,
+                conflicts: int,
+                series_key: object,
+                vendor_dup_rows_dropped: int = 0,
+                max_close_delta: object = None,
             ) -> None:
-                del series_key
+                del series_key, vendor_dup_rows_dropped, max_close_delta
                 self.folded = (bars_appended, conflicts)
 
         sink = _Sink()
@@ -2173,6 +2179,133 @@ class TestEmptyBreakerSpotSpine:
         statuses = [r.status for r in ledger.records()]
         assert statuses.count(SKIPPED) == 4  # the genuine pre-listing gap settled
         assert statuses.count(SUCCESS) == 4  # …and the listed range landed bars
+
+
+class TestWriteHealthBreakerSpotSpine:
+    """DEC-WRITE-HEALTH-BREAKER-001 — the spot spine's write-health breaker wiring."""
+
+    def test_wired_breaker_escalates_multi_partition_wedge_to_volume_halt(self) -> None:
+        """A wedged VOLUME (defers across >= 3 distinct partitions) HALTS the pull.
+
+        Regression for the pre-breaker envelope: every deferred window was independent,
+        so a dead volume burned the whole pull deferring window after window. With the
+        breaker wired, the third distinct wedged partition raises
+        ``LakeWriteHalt("volume_wedged")`` out of the spine.
+        """
+        from brutex.data.errors import LakeWriteHalt
+        from brutex.data.window_ledger import FAILED, WindowLedger
+        from brutex.data.write_breaker import WriteHealthBreaker
+
+        breaker = WriteHealthBreaker(consecutive_limit=1, distinct_open_limit=3)
+        led = WindowLedger()
+        with pytest.raises(LakeWriteHalt) as excinfo:
+            ingest_spot(
+                _Adapter(),  # type: ignore[arg-type]
+                _LockTimeoutSink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),  # 8 windows -> 8 distinct month partitions
+                ledger=led,
+                max_retry_passes=0,
+                write_breaker=breaker,
+            )
+        assert excinfo.value.reason == "volume_wedged"
+        # Every window deferred BEFORE the trip is durably FAILED — never lost: the
+        # ledger row is recorded BEFORE the breaker observes the defer.
+        recorded = list(led.records())
+        assert recorded
+        assert {r.status for r in recorded} == {FAILED}
+        assert len(breaker.open_partitions) >= 3
+
+    def test_shipped_default_limits_escalate_via_retry_passes(self) -> None:
+        """SHIPPED-DEFAULTS regression (review MAJOR P3-1): spot trips at 2 consecutive / 3 distinct.
+
+        No injected limits — ``WriteHealthBreaker()`` carries the shipped defaults and
+        ``max_retry_passes`` stays at its default (2). A spot month key reaches the
+        consecutive limit via the bounded IN-RUN retry pass: pass 0 defers every window
+        (streak 1 per month key), the retry pass defers them again (streak 2 → open), and
+        the third opened key raises ``LakeWriteHalt("volume_wedged")``.
+        """
+        from brutex.data.errors import LakeWriteHalt
+        from brutex.data.window_ledger import FAILED, WindowLedger
+        from brutex.data.write_breaker import WriteHealthBreaker
+
+        breaker = WriteHealthBreaker()  # shipped default limits — nothing injected
+        led = WindowLedger()
+        with pytest.raises(LakeWriteHalt) as excinfo:
+            ingest_spot(
+                _Adapter(),  # type: ignore[arg-type]
+                _LockTimeoutSink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),  # 8 windows -> 8 distinct month keys
+                ledger=led,
+                retry_backoff=lambda _i: None,  # no real sleep between passes
+                write_breaker=breaker,
+            )
+        assert excinfo.value.reason == "volume_wedged"
+        recorded = list(led.records())
+        assert recorded
+        assert {r.status for r in recorded} == {FAILED}
+        assert len(breaker.open_partitions) >= 3
+
+    def test_below_distinct_limit_keeps_todays_defer_behaviour(self) -> None:
+        """Defers on FEWER distinct partitions than the limit never halt (deferred only)."""
+        from brutex.data.window_ledger import FAILED, WindowLedger
+        from brutex.data.write_breaker import WriteHealthBreaker
+
+        breaker = WriteHealthBreaker(consecutive_limit=1, distinct_open_limit=3)
+        led = WindowLedger()
+        report = ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            _LockTimeoutSink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            # 3 windows starting 2021-01-01 / 01-31 / 03-02 -> 2 DISTINCT month keys.
+            end=date(2021, 4, 1),
+            ledger=led,
+            max_retry_passes=0,
+            write_breaker=breaker,
+        )
+        assert report.transient_failures == 3
+        assert {r.status for r in led.records()} == {FAILED}
+        assert len(breaker.open_partitions) == 2
+
+    def test_successful_write_resets_partition_streak(self) -> None:
+        """A durable write calls ``observe_success`` on the partition's health key."""
+        from brutex.data.write_breaker import WriteHealthBreaker
+
+        class _SpyBreaker(WriteHealthBreaker):
+            def __init__(self) -> None:
+                super().__init__()
+                self.defers: list[str] = []
+                self.successes: list[str] = []
+
+            def observe_defer(self, partition_key: str) -> None:
+                self.defers.append(partition_key)
+                super().observe_defer(partition_key)
+
+            def observe_success(self, partition_key: str) -> None:
+                self.successes.append(partition_key)
+                super().observe_success(partition_key)
+
+        spy = _SpyBreaker()
+        report = ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            write_breaker=spy,
+        )
+        assert report.bars_appended > 0
+        assert spy.defers == []
+        assert spy.successes  # every durable window write reset its partition streak
+        assert all("/NIFTY/1day/" in key for key in spy.successes)
 
 
 class _NetNewSink:

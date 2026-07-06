@@ -204,6 +204,26 @@ def test_end_before_start_400(client: TestClient, monkeypatch: pytest.MonkeyPatc
     assert "must not precede start" in resp.json()["detail"]
 
 
+def test_out_of_scope_400_carries_the_corp_action_rationale(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 400 detail carries the corporate-action rationale + both DEC ids.
+
+    DEC-CORP-ACTION-GATE-001 / ADR-0016 — the extension of the
+    DEC-ENGINE-SCOPE-GUARD-001 eager 400 proven above: the operator sees WHY
+    an out-of-scope launch is dangerous (no corporate-action adjustment
+    layer exists), not just that it is refused.
+    """
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run", params={"symbols": "NIFTY,RELIANCE"})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "corporate-action adjustment layer missing" in detail
+    assert "- RELIANCE:" in detail
+    assert "DEC-CORP-ACTION-GATE-001" in detail
+    assert "ADR-0016" in detail
+
+
 # ── single-flight + no-lake guards ────────────────────────────────────────────
 
 

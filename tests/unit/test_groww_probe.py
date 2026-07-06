@@ -9,7 +9,7 @@ DEC-DOCTOR-LIVE-PROOF-KIT-001) are 100% covered.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from brutex.adapters.groww.errors import GrowwError, GrowwNotFoundError
 from brutex.adapters.groww.probe import (
@@ -23,6 +23,8 @@ from brutex.adapters.groww.probe import (
     probe_vix,
     run_probe,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 
 class _FakeClient:
@@ -318,6 +320,54 @@ class TestProbeDepth:
         assert result.verdict == VERDICT_OK
         assert result.calls_used == 4
         assert "call budget hit — floor is an UPPER bound" in result.detail
+
+    def test_bisect_budget_of_one_stops_after_boundary_call(self) -> None:
+        """DEC-PROBE-BUDGET-PROLOGUE-001 regression: the hi-at-today prologue
+        honours the budget — ``bisect=True, max_calls=1`` issues EXACTLY one
+        vendor call and returns the SAME honest ABSENT verdict."""
+        client = _DepthClient(date(2021, 6, 14))
+        result = probe_depth(client, today=date(2026, 7, 2), bisect=True, max_calls=1)
+        assert result.verdict == VERDICT_ABSENT
+        assert result.calls_used == 1
+        assert client.calls == 1
+        assert result.first_ts is None
+        assert result.probed_floor is None
+        assert "call budget (1) is exhausted before locating hi" in result.detail
+        assert "true floor unknown" in result.detail
+
+    def test_budget_zero_clamps_up_to_one_boundary_call(self) -> None:
+        """``max_calls=0`` clamps UP to 1 — the boundary call is still made
+        ("if uncertain, fetch"); no further call follows."""
+        client = _DepthClient(date(2020, 1, 1))
+        result = probe_depth(client, today=date(2026, 7, 2), bisect=True, max_calls=0)
+        assert result.verdict == VERDICT_OK
+        assert result.boundary_has_data is True
+        assert result.calls_used == 1
+        assert client.calls == 1
+
+    def test_budget_zero_bisect_empty_boundary_stops_at_one(self) -> None:
+        client = _DepthClient(date(2021, 6, 14))
+        result = probe_depth(client, today=date(2026, 7, 2), bisect=True, max_calls=0)
+        assert result.verdict == VERDICT_ABSENT
+        assert result.calls_used == 1
+        assert client.calls == 1
+        assert "call budget (0) is exhausted" in result.detail
+
+    @given(
+        max_calls=st.integers(min_value=0, max_value=25),
+        bisect=st.booleans(),
+        floor_offset=st.one_of(st.none(), st.integers(min_value=0, max_value=2000)),
+    )
+    def test_property_calls_used_never_exceeds_clamped_budget(
+        self, max_calls: int, bisect: bool, floor_offset: int | None
+    ) -> None:
+        """Invariant: ``calls_used <= max(max_calls, 1)`` over random shapes."""
+        boundary = date(2020, 1, 1)
+        floor = None if floor_offset is None else boundary + timedelta(days=floor_offset)
+        client = _DepthClient(floor)
+        result = probe_depth(client, today=date(2026, 7, 2), bisect=bisect, max_calls=max_calls)
+        assert result.calls_used <= max(max_calls, 1)
+        assert client.calls == result.calls_used
 
     def test_first_row_ts_defensive_arms(self) -> None:
         from brutex.adapters.groww.probe import _date_of_first_ts, _first_row_ts

@@ -4,7 +4,7 @@ The bug (refuter-CONFIRMED, runtime-proven): every live fetch paid TWO rate-cont
 admissions — the window-level ``pace()`` in the ingest spines
 (``ingest._fetch_window_raw`` / ``option_ingest.ingest_option_contract``) AND the
 client-level ``pace()`` inside ``GrowwClient._call`` (rebound by
-``run_ingest._with_paced_client`` on the spot spine; baked in by
+``run_ingest.with_paced_client`` on the spot spine; baked in by
 ``build_live_client``/``build_live_pool`` on the F&O spine) — halving the physical pull
 rate and double-charging the 500/min governor.
 

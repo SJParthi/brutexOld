@@ -11,7 +11,7 @@ PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): this module
 was repointed from the retired-vendor 31-column detailed scrip master to the
 Groww 21-column instrument master — the J2-equivalent the dashboard never got.
 The Groww CSV schema differs, so the parse goes through the Groww parser
-(:func:`~brutex.adapters.groww.instrument_loader.load_index` →
+(:func:`~brutex.adapters.groww.instrument_loader.load_index_with_report` →
 :class:`~brutex.adapters.groww.instruments.InstrumentIndex`), NOT the retired one.
 
 This module is the thin, fully-testable seam that:
@@ -90,8 +90,17 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
-from brutex.adapters.groww.instruments import InstrumentIndex, index_symbol_of
+from brutex.adapters.groww.instrument_loader import load_index_with_report, urllib_http_get
+from brutex.adapters.groww.instruments import (
+    PARSE_SKIPS_META_KEY as _PARSE_SKIPS_META_KEY,
+)
+from brutex.adapters.groww.instruments import (
+    InstrumentIndex,
+    ParseSkipReport,
+    index_symbol_of,
+    parse_skip_threshold,
+    parse_skip_verdict,
+)
 from brutex.dashboard.nse_constituents import fetch_constituent_csv, parse_constituents
 from brutex.dashboard.ntm_cache import (
     default_cache_dir,
@@ -222,19 +231,106 @@ def _ntm_cache_ttl_seconds() -> float:
 _LOAD_LOCK: threading.Lock = threading.Lock()
 
 
+#: Single-flight guard for the BACKGROUND NTM cache revalidation
+#: (DEC-NTM-STALE-WHILE-REVALIDATE-001). Module-level by the SAME sanctioned precedent
+#: as :data:`_LOAD_LOCK` above (a process-wide coordination primitive, documented — not
+#: hidden business state): while one background refresh is in flight, a concurrent
+#: post-TTL load serves its stale cache WITHOUT spawning a second refresh, so the slow
+#: niftyindices host is hit AT MOST once per revalidation cycle per process. The
+#: in-flight flag lives in a one-key mutable holder (mutated in place under the lock)
+#: rather than a rebindable module global — same semantics, no ``global`` statement.
+_NTM_REVALIDATE_LOCK: threading.Lock = threading.Lock()
+_NTM_REVALIDATE_STATE: Final[dict[str, bool]] = {"in_flight": False}
+
+
+def _default_revalidate_runner(job: Callable[[], None]) -> None:
+    """Run *job* on a named daemon thread — the production revalidation spawner.
+
+    Daemon so a hung niftyindices fetch can never block interpreter exit; tests
+    inject a synchronous/capturing runner instead (never a real thread).
+    """
+    threading.Thread(target=job, name="brutex-ntm-revalidate", daemon=True).start()
+
+
+def _refresh_constituent_cache(opener: Callable[[str], str] | None, *, cache_dir: Path) -> str:
+    """Fetch the live NTM CSV and persist a NON-EMPTY result — the ONE refresh body.
+
+    COMMON (§11): shared verbatim by the synchronous truly-no-cache boot path and the
+    background stale-while-revalidate worker, so the two can never drift. Returns the
+    live text (``""`` when the source returned nothing — the cache is then left
+    untouched); a network ``OSError`` PROPAGATES to the caller (the sync path lets it
+    reach the fail-soft handler; the background worker swallows + logs it).
+    The save is atomic (DEC-ATOMIC-WRITE-FINISH-001), so a reader never sees a torn
+    cache file.
+    """
+    live = fetch_constituent_csv(_NTM_INDEX_NAME, opener=opener) or ""
+    if live:
+        save_constituent_csv(live, cache_dir=cache_dir)
+    return live
+
+
+def _spawn_ntm_revalidation(
+    opener: Callable[[str], str] | None,
+    *,
+    cache_dir: Path,
+    runner: Callable[[Callable[[], None]], None] | None,
+) -> bool:
+    """Kick ONE single-flight background NTM cache refresh; report whether it spawned.
+
+    DEC-NTM-STALE-WHILE-REVALIDATE-001. Best-effort by construction: the worker
+    swallows + logs EVERY error (``ntm.revalidate_failed``) and only ever touches the
+    on-disk cache (atomic save) — it NEVER takes :data:`_LOAD_LOCK` and NEVER touches
+    the instrument store, so it cannot deadlock or interleave a concurrent load. The
+    in-flight flag is cleared in the worker's ``finally`` (and on a failed SPAWN), so
+    a later post-TTL load can always revalidate again. Returns ``False`` when a
+    refresh is already in flight (single-flight — no second spawn).
+    """
+    with _NTM_REVALIDATE_LOCK:
+        if _NTM_REVALIDATE_STATE["in_flight"]:
+            return False
+        _NTM_REVALIDATE_STATE["in_flight"] = True
+
+    def _job() -> None:
+        try:
+            refreshed = _refresh_constituent_cache(opener, cache_dir=cache_dir)
+            _LOG.info(
+                "ntm.revalidate_done",
+                refreshed=bool(refreshed),
+                cache_dir=str(cache_dir),
+            )
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort background refresh
+            _LOG.warning("ntm.revalidate_failed", cache_dir=str(cache_dir), exc_info=True)
+        finally:
+            with _NTM_REVALIDATE_LOCK:
+                _NTM_REVALIDATE_STATE["in_flight"] = False
+
+    run = _default_revalidate_runner if runner is None else runner
+    try:
+        run(_job)
+    except Exception:  # pylint: disable=broad-exception-caught — a failed spawn must never break the load
+        with _NTM_REVALIDATE_LOCK:
+            _NTM_REVALIDATE_STATE["in_flight"] = False
+        _LOG.warning("ntm.revalidate_spawn_failed", cache_dir=str(cache_dir), exc_info=True)
+    return True
+
+
 def _resolve_constituent_csv(
     opener: Callable[[str], str] | None,
     *,
     cache_dir: Path,
+    revalidate_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[str, str]:
-    """Resolve the NTM constituent CSV — **CACHE-FIRST**, fail-fast, never blocks on a fresh cache.
+    """Resolve the NTM constituent CSV — CACHE-FIRST + **stale-while-revalidate**.
 
-    DEC-NTM-CACHE-FIRST-001 (supersedes the LIVE-FIRST DEC-NTM-CONSTITUENT-CACHE-001
-    ordering). The old path re-hit the SLOW niftyindices.com host on EVERY load (a
-    live fetch was always tried first, the cache used only on failure), so the
-    ``/universe`` page blocked ~30–160 s on every refresh even with a good cache on
-    disk. This serves a FRESH cache instantly with NO network call, and only the
-    rare cold/stale path touches the (now bounded, fail-fast) live fetch.
+    DEC-NTM-CACHE-FIRST-001 made the fresh-cache load instant;
+    DEC-NTM-STALE-WHILE-REVALIDATE-001 extends the same courtesy to the POST-TTL
+    load: a cache OLDER than the TTL is served IMMEDIATELY (zero request-thread
+    network wait — the old path blocked the ``/universe`` load ~30–61 s on the slow
+    niftyindices host, under ``_LOAD_LOCK``) while ONE single-flight BACKGROUND
+    refresh (:func:`_spawn_ntm_revalidation`) re-fetches + atomically re-saves the
+    cache, so the NEXT load is a ``cache_fresh`` hit on the refreshed data. Only a
+    truly-no-cache boot still pays the synchronous bounded fetch (there is nothing
+    to serve meanwhile).
 
     Returns ``(csv_text, source)`` where ``source`` is one of:
 
@@ -242,35 +338,35 @@ def _resolve_constituent_csv(
       was served WITHOUT any network call (the fast hot path: one small ``stat``+read,
       no network — constant w.r.t. the slow niftyindices host, so every load after the
       first is instant; NOT a literal O(1) over the CSV, which is still parsed);
-    * ``"live"`` — no fresh cache, so ONE bounded fail-fast live fetch succeeded; the
-      cache is refreshed (so the next load is a ``cache_fresh`` hit);
-    * ``"cache_stale"`` — no fresh cache and the live refresh failed (timeout /
-      bot-block) OR returned empty, but a STALE cache covered it (universe stays full);
-    * ``"none"`` — no fresh cache, live failed/empty, AND no stale cache to fall back
-      on → ``("", "none")``.
+    * ``"cache_stale_revalidating"`` — a POST-TTL cache was served IMMEDIATELY and a
+      single-flight background refresh was kicked (or is already in flight). The data
+      is honestly one cycle stale (NTM rebalances semi-annually — CLAUDE.md §7);
+    * ``"live"`` — NO cache at all, so the synchronous bounded live fetch ran and
+      succeeded; the cache is seeded (the next load is a ``cache_fresh`` hit);
+    * ``"none"`` — no cache AND the live fetch returned empty → ``("", "none")``.
 
-    The live ``OSError`` is swallowed ONLY when a (stale) cache can cover it; with NO
-    cache at all it PROPAGATES so the caller's single fail-soft handler notes the
-    honest "unreachable, no cache" reason (one tested except site, not a dead nested
-    one).
+    A non-positive TTL (the "disable the fast path" lever) now means
+    revalidate-in-background on EVERY load that has a cache — the cache is still
+    always served instantly, never a synchronous re-fetch (pinned; the worst case is
+    one background refresh per load, request latency never worse). With NO cache the
+    live ``OSError`` PROPAGATES so the caller's single fail-soft handler notes the
+    honest "unreachable, no cache" reason.
     """
     cached = load_cached_constituent_with_age(cache_dir=cache_dir)
-    # 1. FRESH cache → serve instantly, NO network (the ultra-fast hot path).
-    if cached is not None and cached.age_seconds < _ntm_cache_ttl_seconds():
-        return cached.csv_text, "cache_fresh"
-    # 2. No fresh cache → ONE bounded fail-fast live fetch (cold boot / post-TTL refresh).
-    try:
-        live = fetch_constituent_csv(_NTM_INDEX_NAME, opener=opener) or ""
-    except OSError:
-        if cached is not None:
-            return cached.csv_text, "cache_stale"  # a stale cache still covers the outage
-        raise  # no cache at all → caller's fail-soft handler notes why
-    if live:
-        save_constituent_csv(live, cache_dir=cache_dir)
-        return live, "live"
-    # 3. Live returned empty → serve a stale cache if present, else nothing.
     if cached is not None:
-        return cached.csv_text, "cache_stale"
+        # 1. FRESH cache → serve instantly, NO network (the ultra-fast hot path).
+        if cached.age_seconds < _ntm_cache_ttl_seconds():
+            return cached.csv_text, "cache_fresh"
+        # 2. POST-TTL cache → serve IMMEDIATELY + kick ONE background refresh
+        #    (stale-while-revalidate; single-flight — a refresh already in flight is
+        #    not doubled). The request thread NEVER waits on niftyindices here.
+        _spawn_ntm_revalidation(opener, cache_dir=cache_dir, runner=revalidate_runner)
+        return cached.csv_text, "cache_stale_revalidating"
+    # 3. Truly-no-cache boot → the synchronous bounded fail-fast live fetch (nothing
+    #    to serve meanwhile). OSError propagates to the caller's fail-soft handler.
+    live = _refresh_constituent_cache(opener, cache_dir=cache_dir)
+    if live:
+        return live, "live"
     return "", "none"
 
 
@@ -281,6 +377,7 @@ def _ntm_admission(
     fno_eligible_security_ids: frozenset[int],
     constituent_opener: Callable[[str], str] | None,
     cache_dir: Path,
+    revalidate_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[frozenset[int], dict[str, Any]]:
     """Resolve NIFTY-Total-Market constituents → REFERENCE_ONLY ``SECURITY_ID``s.
 
@@ -294,8 +391,11 @@ def _ntm_admission(
     ``"admitted"``; on a skip it adds a ``"reason"``; on success it adds the
     coverage counts (``constituents`` / ``matched`` / ``reference`` / ``unmatched``
     / ``from_cache`` / ``source``) for the operator's at-a-glance audit. ``source`` ∈
-    ``{"cache_fresh", "live", "cache_stale"}`` records WHY the CSV was served (the
-    cache-first fast path vs a live refresh vs a stale fallback — DEC-NTM-CACHE-FIRST-001).
+    ``{"cache_fresh", "live", "cache_stale_revalidating"}`` records WHY the CSV was
+    served (the cache-first fast path vs a cold-boot live fetch vs the served-stale +
+    background-refresh path — DEC-NTM-CACHE-FIRST-001 /
+    DEC-NTM-STALE-WHILE-REVALIDATE-001; *revalidate_runner* is the injectable
+    background spawner seam, ``None`` = a daemon thread).
 
     **Fail-soft (Golden Rule #1 + #10):** any miss (no equities to match,
     niftyindices unreachable with no cache, an empty CSV) returns an EMPTY set + an
@@ -333,7 +433,9 @@ def _ntm_admission(
     # (niftyindices.com bot-blocks / times out plain HTTP clients — a live failure
     # would otherwise crater the universe from ~750 to the F&O-eligible base set).
     try:
-        csv_text, source = _resolve_constituent_csv(constituent_opener, cache_dir=cache_dir)
+        csv_text, source = _resolve_constituent_csv(
+            constituent_opener, cache_dir=cache_dir, revalidate_runner=revalidate_runner
+        )
     except OSError as exc:
         note["reason"] = (
             "NIFTY Total Market constituents need niftyindices.com, currently "
@@ -378,10 +480,11 @@ def _ntm_admission(
             "served the fresh last-good NTM constituent cache "
             "(~/.brutex/cache/ntm_constituents.csv) — no network call (fast path)"
         )
-    elif source == "cache_stale":
+    elif source == "cache_stale_revalidating":
         note["constituent_note"] = (
-            "live NTM constituent source unavailable — used the last-good cache "
-            "(~/.brutex/cache/ntm_constituents.csv)"
+            "served the post-TTL last-good NTM constituent cache IMMEDIATELY and "
+            "kicked one background refresh (stale-while-revalidate) — the next load "
+            "picks up the refreshed cache (~/.brutex/cache/ntm_constituents.csv)"
         )
     return reference_security_ids, note
 
@@ -958,6 +1061,41 @@ def _persist_economics_integrity(
     return payload
 
 
+def _persist_parse_skips(
+    report: ParseSkipReport, store: Any, *, run_id: str, csv_sha256: str
+) -> dict[str, Any]:
+    """Persist the master's bounded parse-skip report, log it, return the summary.
+
+    DEC-PARSE-SKIP-REPORT-001 — the skip sibling of the mapping / economics audits.
+    The parser's per-row skip accounting (DEC-INSTRUMENT-SKIP-NO-GSYM-001) was
+    previously logged then DISCARDED; this persists the bounded JSON summary to
+    ``schema_meta`` (read by ``GET /api/v1/universe/parse-skips`` + the green/red
+    ``/universe`` panel) so master rot is visible without grepping ``/logs``.
+    GREEN iff ``skipped_count <= max(10, ceil(0.1% of in-scope rows))``
+    (:func:`~brutex.adapters.groww.instruments.parse_skip_verdict`). Pure fold +
+    one INSERT; the samples tuple is already capped at the parser.
+    """
+    payload: dict[str, Any] = {
+        "skipped_count": report.skipped_count,
+        "in_scope_rows": report.in_scope_rows,
+        "samples": list(report.samples),
+        "threshold": parse_skip_threshold(report.in_scope_rows),
+        "is_green": parse_skip_verdict(report),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "run_id": run_id,
+        "csv_source_sha256": csv_sha256,
+    }
+    store.set_meta(_PARSE_SKIPS_META_KEY, json.dumps(payload))
+    _LOG.info(
+        "universe.load.parse_skips",
+        is_green=payload["is_green"],
+        skipped_count=report.skipped_count,
+        in_scope_rows=report.in_scope_rows,
+        threshold=payload["threshold"],
+    )
+    return payload
+
+
 def load_instrument_master(
     store: Any,
     *,
@@ -965,6 +1103,7 @@ def load_instrument_master(
     run_id_factory: Callable[[], str] | None = None,
     constituent_opener: Callable[[str], str] | None = None,
     constituent_cache_dir: Path | None = None,
+    ntm_revalidate_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> dict[str, Any]:
     """Keylessly download + parse the Groww instrument master into *store*.
 
@@ -1006,6 +1145,11 @@ def load_instrument_master(
         the base set. The operator can also seed the fallback by dropping the
         browser-downloaded ``ind_niftytotalmarket_list.csv`` at
         ``<cache_dir>/ntm_constituents.csv``. Tests inject a tmp dir for isolation.
+    ntm_revalidate_runner
+        Injectable spawner for the POST-TTL stale-while-revalidate background NTM
+        cache refresh (DEC-NTM-STALE-WHILE-REVALIDATE-001). ``None`` (production)
+        runs the single-flight refresh on a daemon thread; tests inject a
+        synchronous / capturing runner so no real thread is ever spawned.
 
     Returns
     -------
@@ -1017,8 +1161,13 @@ def load_instrument_master(
         universe underlyings. ``filtered`` is always ``0`` (the Groww parser
         skips out-of-scope MCX / COMMODITY rows BEFORE they reach the index, so
         ``parsed`` already counts only in-scope rows) and ``quarantined`` is
-        always ``0`` (the Groww parser **fails closed** on a malformed in-scope
-        row — Golden Rule #1 — rather than quarantining).
+        always ``0`` — kept for BACK-COMPAT only: since
+        DEC-INSTRUMENT-SKIP-NO-GSYM-001 the Groww parser does NOT fail closed on
+        a malformed in-scope row — it isolates, counts and skips it — and that
+        skip accounting is surfaced in the NEW ``parse_skips`` key
+        (DEC-PARSE-SKIP-REPORT-001: count + in-scope denominator + capped sample
+        reasons + the green/red verdict, also persisted to ``schema_meta``).
+        Only HEADER schema drift still fail-louds.
         ``security_id_collisions`` is the write-boundary identity-collision
         count from :class:`~brutex.data.instrument_store.UpsertResult` —
         DISTINCT-``symbol_name`` rows dropped by the store's
@@ -1030,8 +1179,10 @@ def load_instrument_master(
     Raises
     ------
     brutex.models.InstrumentFormatError
-        On CSV header schema drift (the Groww 21-column header is enforced) or
-        any malformed in-scope row — the store keeps its last good snapshot.
+        On CSV header schema drift (the Groww 21-column header is enforced) —
+        the store keeps its last good snapshot. A malformed in-scope ROW does
+        NOT raise: it is skipped-and-counted
+        (DEC-INSTRUMENT-SKIP-NO-GSYM-001), surfaced via ``parse_skips``.
     """
     fetch = http_get
     if fetch is None:
@@ -1047,7 +1198,11 @@ def load_instrument_master(
         # parser, which fails loud on schema drift (Golden Rule #1).
         master_text = fetch(load_index_url())
         csv_sha256 = hashlib.sha256(master_text.encode("utf-8")).hexdigest()
-        index = load_index(lambda _url: master_text)
+        # DEC-PARSE-SKIP-REPORT-001: the report-carrying twin of ``load_index`` —
+        # same SSRF check + parse + index build, but the per-row skip accounting
+        # (DEC-INSTRUMENT-SKIP-NO-GSYM-001) is RETURNED instead of discarded, so
+        # it can be persisted + surfaced below.
+        index, parse_skip_report = load_index_with_report(lambda _url: master_text)
         parsed = len(index.universe)
         fno_eligible = build_fno_eligible_underlyings(index.universe)
         # The options-bearing underlyings (CE/PE legs) — harvested NOW, while the
@@ -1091,6 +1246,7 @@ def load_instrument_master(
             cache_dir=(
                 constituent_cache_dir if constituent_cache_dir is not None else default_cache_dir()
             ),
+            revalidate_runner=ntm_revalidate_runner,
         )
         if ntm_note.get("admitted"):
             _LOG.info("universe.load.ntm_admitted", **ntm_note)
@@ -1140,6 +1296,12 @@ def load_instrument_master(
         economics_integrity = _persist_economics_integrity(
             index, store, run_id=run_id, csv_sha256=csv_sha256
         )
+        # Parse-skip honesty (DEC-PARSE-SKIP-REPORT-001): persist the parser's bounded
+        # skip report (count + capped reasons + green/red verdict) — same fail-safe
+        # persist-after-upsert ordering as the two audits above.
+        parse_skips = _persist_parse_skips(
+            parse_skip_report, store, run_id=run_id, csv_sha256=csv_sha256
+        )
         summary = _summarise_stored(store)
 
     _LOG.info(
@@ -1161,7 +1323,10 @@ def load_instrument_master(
         # The Groww parser skips out-of-scope rows BEFORE the index, so they
         # never reach this layer — `parsed` already counts only in-scope rows.
         "filtered": 0,
-        # Groww fails closed on a malformed in-scope row — no quarantine bucket.
+        # BACK-COMPAT stub: since DEC-INSTRUMENT-SKIP-NO-GSYM-001 the parser
+        # skips-and-counts a malformed in-scope row (it does NOT fail closed);
+        # the honest accounting lives in "parse_skips" below — this key is kept
+        # 0 so no existing consumer breaks (DEC-PARSE-SKIP-REPORT-001).
         "quarantined": 0,
         # Write-boundary identity collisions (DEC-MAPPING-COLLISION-HONESTY-001):
         # rows the store's (security_id, exch_id, segment) dedup DROPPED because a
@@ -1181,6 +1346,9 @@ def load_instrument_master(
         "master_integrity": master_integrity,
         # Economics (lot-per-expiry) integrity audit (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001).
         "economics_integrity": economics_integrity,
+        # Parse-skip honesty report (DEC-PARSE-SKIP-REPORT-001) — the malformed
+        # in-scope rows the parser skipped-and-counted, with the green/red verdict.
+        "parse_skips": parse_skips,
     }
 
 
