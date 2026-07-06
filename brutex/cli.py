@@ -66,7 +66,7 @@ from typing import Any, Final
 
 from brutex import __version__
 from brutex.config.paths import resolve_lake_root
-from brutex.config.runtime import read_runtime_file
+from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 
 # ────────────────────────────────────────────────────────────────────────
@@ -90,6 +90,16 @@ EXIT_HEAL_REFUSED = 5
 #: NON-ZERO so an operator script never mistakes a partial sweep for a clean one
 #: (the failed tuples are un-sentineled and will redo next run).
 EXIT_SWEEP_TUPLE_FAILED = 6
+
+
+class CliUserError(Exception):
+    """A user-input error that must exit cleanly (DEC-CLI-USER-ERROR-HYGIENE-001).
+
+    Raised by CLI parse/read/guard helpers that cannot themselves return an
+    exit code; :func:`main` converts it to the standard one-line
+    ``[brutex] <message>`` on stderr + :data:`EXIT_USER_ERROR` — never a raw
+    traceback. CLI layer ONLY: library code keeps its own error hierarchies.
+    """
 
 
 def default_condition_bits() -> list[int]:
@@ -118,6 +128,56 @@ def default_condition_bits() -> list[int]:
         The implemented condition-bit indices in ascending order.
     """
     return [bit for bit in range(TOTAL_CONDITIONS) if IMPLEMENTED_MASK & (1 << bit)]
+
+
+def _parse_int_csv(raw: str, *, flag: str) -> list[int]:
+    """Parse a comma-separated integer list for *flag* (CLAUDE.md §11 COMMON).
+
+    Byte-identical to the historical inline
+    ``[int(tok) for tok in raw.split(",") if tok.strip()]`` for valid input
+    (blank tokens skipped, surrounding whitespace tolerated, order AND
+    duplicates preserved). A non-integer token raises :class:`CliUserError`
+    naming the token (DEC-CLI-USER-ERROR-HYGIENE-001).
+    """
+    out: list[int] = []
+    for tok in raw.split(","):
+        token = tok.strip()
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except ValueError as exc:
+            raise CliUserError(
+                f"invalid {flag} token {token!r}: expected a comma-separated list of integers"
+            ) from exc
+    return out
+
+
+def parse_condition_ids(raw: str) -> list[int]:
+    """Parse the ``--conditions`` CSV of condition-bit indices (COMMON helper).
+
+    The ONE parser behind all three sweep surfaces (``sweep`` / ``sweep-all`` /
+    ``sweep-verify``), replacing three inline copies. Valid input parses
+    byte-identically to the old inline expression. Each id is a 0-indexed bit
+    position validated against the VOCABULARY range
+    ``0..TOTAL_CONDITIONS - 1`` (0..59) — deliberately NOT the engine's
+    forward-compat ``[0, 128)`` u128 ceiling: bits 60..127 are
+    reserved/undefined dead bits the results store rejects
+    (``MASK_BITS_MAX``), so admitting them here would be a silent illusion.
+
+    Raises
+    ------
+    CliUserError
+        On a non-integer token or an out-of-range bit index.
+    """
+    bits = _parse_int_csv(raw, flag="--conditions")
+    for bit in bits:
+        if not 0 <= bit <= TOTAL_CONDITIONS - 1:
+            raise CliUserError(
+                f"--conditions bit {bit} out of range: valid bit indices are "
+                f"0..{TOTAL_CONDITIONS - 1}"
+            )
+    return bits
 
 
 def sweep_all_exit_code(tuples_failed: int) -> int:
@@ -1454,7 +1514,23 @@ def cmd_version() -> int:
 
 def cmd_status(run_id: str | None) -> int:
     """Print the current pipeline status from the runtime file."""
-    runtime = read_runtime_file()
+    try:
+        runtime = read_runtime_file()
+    # read_runtime_file wraps unreadable-file / invalid-JSON / missing-field
+    # failures in RuntimeFileError; a structurally-valid but WRONG-TYPED file
+    # leaks raw from RuntimeInfo.from_json (int("abc") → ValueError,
+    # int(None) → TypeError, env_snapshot-not-a-dict → AttributeError) — all
+    # caught here so a hand-corrupted runtime.json is a clean user error,
+    # never a traceback (DEC-CLI-USER-ERROR-HYGIENE-001). The file is NEVER
+    # auto-deleted — the operator inspects/removes it.
+    except (RuntimeFileError, ValueError, TypeError, AttributeError) as exc:
+        print(
+            f"[brutex] runtime file corrupt/unreadable: {runtime_file_path()} ({exc}) — "
+            "inspect or remove that file to clear the stale state (it is never "
+            "auto-deleted), then re-run",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     if runtime is None:
         print("[brutex] no runtime file (no pipeline running)")
         return EXIT_OK
@@ -1514,6 +1590,12 @@ def cmd_catalog_reconcile(lake_root: Path | None) -> int:
     from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
     resolved = _resolve_lake_root(lake_root)
+    # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
+    # fresh empty lake and report an honest-looking "partitions=0". The
+    # catalog FILE itself is deliberately NOT gated — reconcile's purpose
+    # includes rebuilding a deleted catalog.duckdb inside a REAL lake
+    # (DEC-CLI-USER-ERROR-HYGIENE-001).
+    _require_lake_dir(resolved, command="catalog reconcile")
     with Catalog.open(resolved / "catalog.duckdb") as cat:
         result = reconcile_catalog_from_lake(lake_root=resolved, catalog=cat)
     print(
@@ -2709,8 +2791,24 @@ def cmd_run(
 
 
 def _parse_dt(value: str) -> datetime:
-    """Parse a ``YYYY-MM-DD`` or full-ISO string to a UTC-aware datetime."""
-    parsed = datetime.fromisoformat(value)
+    """Parse a ``YYYY-MM-DD`` or full-ISO string to a UTC-aware datetime.
+
+    Raises
+    ------
+    CliUserError
+        On a malformed value. Every ``--start``/``--end`` (fetch / sweep /
+        sweep-all / verify-lookahead / sweep-verify --recount / options-sim)
+        funnels through here, so a typo'd date is one clean line +
+        :data:`EXIT_USER_ERROR` via the :func:`main` net — never a raw
+        ``ValueError`` traceback (DEC-CLI-USER-ERROR-HYGIENE-001).
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise CliUserError(
+            f"invalid --start/--end value {value!r}: expected ISO format "
+            "'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS'"
+        ) from exc
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
@@ -2719,6 +2817,47 @@ def _resolve_lake_root(lake_root: Path | None) -> Path:
     if lake_root is not None:
         return lake_root
     return resolve_lake_root()
+
+
+def _require_lake_dir(lake_root: Path, *, command: str) -> None:
+    """Refuse a nonexistent lake root on a lake-READING command.
+
+    ``Catalog.open`` mkdirs the whole missing directory chain, so a typo'd
+    ``--lake-root`` on a read command silently materialised a fresh empty
+    lake + empty catalog and reported "partitions=0" / "no bars" — a silent
+    illusion (Golden Rule #1). Read commands must fail loudly instead
+    (DEC-CLI-USER-ERROR-HYGIENE-001); the ``fetch`` write path keeps
+    create-on-first-write.
+
+    Raises
+    ------
+    CliUserError
+        If *lake_root* is not an existing directory.
+    """
+    if not lake_root.is_dir():
+        raise CliUserError(
+            f"lake root not found: {lake_root} — pass the right --lake-root "
+            f"(or $BRUTEX_LAKE_ROOT); `brutex {command}` reads an existing lake "
+            "and never creates one"
+        )
+
+
+def _require_catalog_exists(catalog: Path) -> None:
+    """Refuse a nonexistent catalog file on a catalog-READING command.
+
+    Raises
+    ------
+    CliUserError
+        If *catalog* is not an existing file — with the reconcile remedy for
+        a lake that has bars but was never catalogued
+        (DEC-CATALOG-RECONCILE-WIRE-001 lakes).
+    """
+    if not catalog.is_file():
+        raise CliUserError(
+            f"catalog not found: {catalog} — pass the right --lake-root/--catalog "
+            "(read-only commands never create a lake); if the lake HAS bars but no "
+            "catalog, run `brutex catalog reconcile --lake-root <lake>` first"
+        )
 
 
 def _resolve_fetch_intervals(interval: str) -> list[str]:
@@ -4104,12 +4243,9 @@ def cmd_sweep(
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     tf_minutes = trading_minutes_for_lake_interval(interval)
     side = Side.BUY if direction.upper() == "BUY" else Side.SELL
-    condition_bits = (
-        [int(tok) for tok in conditions.split(",") if tok.strip()]
-        if conditions
-        else default_condition_bits()
-    )
-    with Catalog.open(catalog) as cat:
+    condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
+    _require_catalog_exists(catalog)
+    with Catalog.open(catalog, require_exists=True) as cat:
         feed = ReplayFeed(
             catalog=cat,
             lake_root=resolved_lake,
@@ -4214,13 +4350,27 @@ def _data_snapshot_hash(  # pragma: no cover — cli-omitted thin delegate (help
 
 
 def _parse_paisa_list(raw: str) -> list[int | None]:
-    """Parse a comma list of paisa values; the token ``none`` (any case) → ``None``."""
+    """Parse a comma list of paisa values; the token ``none`` (any case) → ``None``.
+
+    A non-integer token (other than ``none``) raises :class:`CliUserError`
+    naming the token — a bad ``--sl``/``--tp`` CSV must be a clean user error,
+    never a traceback (DEC-CLI-USER-ERROR-HYGIENE-001).
+    """
     out: list[int | None] = []
     for tok in raw.split(","):
         token = tok.strip()
         if not token:
             continue
-        out.append(None if token.lower() == "none" else int(token))
+        if token.lower() == "none":
+            out.append(None)
+            continue
+        try:
+            out.append(int(token))
+        except ValueError as exc:
+            raise CliUserError(
+                f"invalid --sl/--tp token {token!r}: expected a comma-separated "
+                "list of integer paisa values or 'none'"
+            ) from exc
     return out
 
 
@@ -4362,12 +4512,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = [int(tok) for tok in k.split(",") if tok.strip()]
-    condition_bits = (
-        [int(tok) for tok in conditions.split(",") if tok.strip()]
-        if conditions
-        else default_condition_bits()
-    )
+    k_list = _parse_int_csv(k, flag="--k")
+    condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # Off-heap dedup-store knobs (R2-SL-F4-F5): validate flag + env EAGERLY —
     # before the lake preload and any store open — so a mistyped knob is a
     # clean user-config error, never a mid-launch traceback (and never a false
@@ -4380,6 +4526,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
+
+    # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
+    # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). The catalog FILE is
+    # deliberately NOT gated — sweep-all reconciles the catalog from the lake
+    # below, so it must keep rebuilding a missing catalog inside a REAL lake.
+    _require_lake_dir(resolved_lake, command="sweep-all")
 
     # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
     # content fingerprint and each tuple reuses the cached bars (no re-read).
@@ -5212,7 +5364,8 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
-    with Catalog.open(catalog) as cat:
+    _require_catalog_exists(catalog)
+    with Catalog.open(catalog, require_exists=True) as cat:
         feed = ReplayFeed(
             catalog=cat,
             lake_root=resolved_lake,
@@ -5411,12 +5564,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = [int(tok) for tok in k.split(",") if tok.strip()]
-    condition_bits = (
-        [int(tok) for tok in conditions.split(",") if tok.strip()]
-        if conditions
-        else default_condition_bits()
-    )
+    k_list = _parse_int_csv(k, flag="--k")
+    condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
     # condition B9): the `// 60` form maps 1day to 1440 wall-clock minutes while
     # the launcher uses the 375-minute session — tf_minutes is in every tuple
@@ -5454,7 +5603,11 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         grid_kwargs["max_tuples"] = max_tuples
     if max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
-    grid = SweepGridConfig(**grid_kwargs)
+    try:
+        grid = SweepGridConfig(**grid_kwargs)
+    except ValueError as exc:
+        print(f"[brutex] sweep-verify config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
 
     # Stage-3 cell attribution via the cascade manifest (condition 2c) —
     # absent/unreadable manifest leaves cells honestly unattributed.
@@ -5494,6 +5647,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         from brutex.orchestrator.audit import AuditWriter
 
         catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+        # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
+        # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). Like sweep-all the
+        # catalog FILE is NOT gated — the recount reconciles it from the lake.
+        _require_lake_dir(resolved_lake, command="sweep-verify --recount")
         slices: dict[tuple[str, str], list[Any]] = {}
         with Catalog.open(catalog) as cat:
             for symbol in symbol_list:
@@ -6452,7 +6609,23 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point — parse args and dispatch to handler."""
+    """Entry point — parse args and dispatch to handler.
+
+    A :class:`CliUserError` raised by any command or shared helper below is
+    converted to the standard one-line ``[brutex] <message>`` on stderr +
+    :data:`EXIT_USER_ERROR` — the CLI's last-resort user-error net
+    (DEC-CLI-USER-ERROR-HYGIENE-001). Anything else still propagates raw: a
+    genuine code bug must traceback, never be papered over (Golden Rule #10).
+    """
+    try:
+        return _dispatch(argv)
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+
+def _dispatch(argv: list[str] | None) -> int:
+    """Parse *argv* and dispatch to the command handler (may raise CliUserError)."""
     from brutex.config.dotenv import bootstrap_env
 
     # GAP C6 — load a persisted ``.env`` ONCE at startup (no-op when absent;
