@@ -18,7 +18,42 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-SUSPICION-SWEEP-FIXES-001, MIGRATION.md #1492 —
+_Last updated: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
+MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
+adversarial audit's confirmed defects fixed as ONE change set: (a) price
+POSITIVITY is enforced at the ENGINE READ BOUNDARY
+(`feed/replay.py::arrow_table_to_bars`, which gains `source=` + names the
+partition + bar ts on a corrupt row), NOT the universal `CandleBar` constructor
+— a zero/negative but internally-ORDERED legacy stored bar (reproduced: day_low
+−1000 into Stage-1A) now raises LOUDLY when READ into the engine, while the bar
+container stays permissive so the legitimate downstream corrupt-input
+classifiers that build a non-positive bar on purpose (Greeks BAD_INPUT, the
+executor `require_tradeable_price` guard, the Rust trade-sim out-of-envelope
+fallback) keep working (O(1)/bar, bench-neutral). (b) NEW COMMON `brutex/data/price_sanity.py` (ONE vectorized
+positivity+ordering mask) wired at the prebuild's 1-minute read boundary
+(`make_lake_read_1m`) — a high<low 1m bar can no longer LAUNDER into
+self-consistent-looking derived buckets across the 19 TFs + 1day; the raised
+`ResampleInputError` rides the EXISTING per-symbol prebuild quarantine (symbol
+named, derived TFs not written, rows never silently dropped/fixed). (c) the
+lake census/heal scanner reads the OHLC columns in its SAME per-file pass
+(`BAR_SCAN_COLUMNS`) and emits an OBSERVE-ONLY `PriceSanityRows` finding
+(census `price_files`, engine verdict flips; the healer FILTERS it — strictly
+row-removing, never value-editing). (d) the vendor OHLC clamp is counted +
+WARNed once per window (`groww.parse.ohlc_clamped`, observe-only, parse
+byte-unchanged). (e) movers/db 2dp display cells ride ONE shared
+`static/bx-format.js::bxFixed2` (string-based ROUND_HALF_UP — the
+`preopen_report._round2` twin; node-executed golden), fixing the IEEE
+`toFixed(2)` half-boundary divergence ('1.005' → "1.01", not "1.00"). (f) the
+mutation workflow's alert steps fire on `cancelled()` too — a timeout-KILLED
+cargo-mutants job (live-probed run 28748795864, both Rust jobs killed at
+exactly 120 min) now alerts instead of dying silently; the Rust jobs'
+chronic timeout itself is honestly ledgered, NOT papered over with an
+unevidenced budget raise. Sanctioned behavior change: a previously-silently-
+accepted CORRUPT stored bar now fails loudly; clean lakes byte-unaffected
+(ONE corrupt golden FIXTURE — a fabricated negative low — repaired + regenerated,
+honest note in #1510; every other golden unmodified). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-SUSPICION-SWEEP-FIXES-001, MIGRATION.md #1492 —
 the 19-agent suspicion-sweep fix + hardening pack, 3 confirmed defects + 4 gap pins in ONE
 change set: **(D1, MED)** the SPOT pull's AIMD ladder is no longer blind to client-absorbed
 429s — the spot build sites bind NO controller feedback hooks into the Groww client and
@@ -393,7 +428,18 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/suspicion-sweep-fixes` (**DEC-SUSPICION-SWEEP-FIXES-001, MIGRATION.md #1492** — the
+- **Active branch:** `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
+  DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
+  the ENGINE READ BOUNDARY (`arrow_table_to_bars`, partition-naming corrupt-bar errors) — NOT the general bar
+  constructor, which stays permissive for the Greeks BAD_INPUT / executor-guard / trade-sim-fallback classifiers; the NEW COMMON
+  vectorized `brutex/data/price_sanity.py` gate at the prebuild's `make_lake_read_1m` boundary (corrupt symbol
+  quarantined + named via the existing `ResampleInputError` machinery, derived TFs not written); the lake census
+  scanner's OBSERVE-ONLY `PriceSanityRows` finding over the same per-file pass (healer filters it — never
+  value-editing); the `groww.parse.ohlc_clamped` per-window clamp counter; the shared `bx-format.js` ROUND_HALF_UP
+  2dp display formatter for movers/db; and the mutation workflow alerting on `cancelled()` so a timeout-killed
+  mutation job is visible. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; clean lakes byte-unaffected; touched modules
+  100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/suspicion-sweep-fixes` (**DEC-SUSPICION-SWEEP-FIXES-001, MIGRATION.md #1492** — the
   19-agent suspicion-sweep fix pack: D1 the spot AIMD ladder now sees every client-absorbed 429 (the FULL controller
   hook triple bound at the ONE COMMON `run_ingest._with_paced_client` spine seam both spot build sites feed; NEW
   `with_rate_hooks` on `GrowwClient`+`ClientPool`; spine hooks stand down via the NEW `client_self_reports_*`
@@ -1775,7 +1821,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/nice-wright-qmb2bz`
+- **Active feature branch:** `claude/stored-data-validation`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
