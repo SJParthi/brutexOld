@@ -24,17 +24,25 @@ envelope. These pins keep its safety properties from silently rotting:
 * **Alerting** — every alert step fires on ``cancelled()`` too
   (DEC-MUTATION-ALERT-CANCELLED-001: a job killed by its own
   ``timeout-minutes`` reports CANCELLED, live-probed run 28748795864)
-  and is STEP-SCOPED to the doctor/assert outcomes (bare ``failure()``
-  is job-scoped — a post-doctor summary/upload flake on a GREEN doctor
-  day must never file a 'doctor is RED' alarm over an all-green table);
-  the tracking issue title is STABLE (SHA-free) so red days fold into
-  ONE open issue via ``createComment`` and a green day closes it; BOTH
-  issue-lifecycle steps are ref-gated to ``refs/heads/main`` (the issue
-  is repo-global state while concurrency serializes only per-ref — an
-  ungated branch ``workflow_dispatch`` could falsely close the live
-  alarm or race a duplicate same-titled issue); the Telegram step
-  degrades gracefully when its secrets are unset and can NEVER fail the
-  job.
+  and BOTH arms — ``failure()`` AND ``cancelled()`` — are STEP-SCOPED
+  to the doctor/assert outcomes (bare job-scoped forms are Golden-Rule
+  #1 hazards: a post-doctor summary/upload flake OR a manual cancel of
+  the tail steps on a GREEN doctor day must never file a 'doctor is
+  RED' alarm over an all-green table); both red-path guards are pinned
+  by EXACT string equality, not substrings — a one-token ``||`` ->
+  ``&&`` mutation was empirically verified to hollow the entire alert
+  channel while every substring pin stayed green; the tracking issue
+  title is STABLE (SHA-free) AND byte-identical between the filer and
+  the closer (the exact-title find is the other half of the dedupe key
+  — a one-sided title edit would break close-on-green forever); red
+  days fold into ONE open issue via ``createComment`` and a green day
+  closes it; BOTH issue-lifecycle steps AND the Telegram step are
+  ref-gated to ``refs/heads/main`` (the issue is repo-global state
+  while concurrency serializes only per-ref, and a red branch
+  ``workflow_dispatch`` — the natural debug move while main is red —
+  must never ping the operator with a message indistinguishable from
+  the main daily alarm); the Telegram step degrades gracefully when its
+  secrets are unset and can NEVER fail the job.
 * **Token hygiene** — checkout sets ``persist-credentials: false``
   (DEC-CI-FORK-PR-HARDEN-001 convention): the job's ``issues: write``
   GITHUB_TOKEN must never land in ``.git/config`` under the third-party
@@ -47,6 +55,7 @@ impact: ``--cov=brutex`` measures the package only).
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -55,6 +64,25 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCTOR_DAILY_YML = REPO_ROOT / ".github" / "workflows" / "doctor-daily.yml"
+
+# The ONE red-path alert guard, pinned by EXACT equality (mirroring the
+# closer's existing equality pin). Substring pins alone were empirically
+# mutation-vulnerable: rewriting `(failure() || cancelled()) && (...)` to
+# `(failure() && cancelled()) && (...)` — one token — keeps every
+# substring assert green while failure() and cancelled() are mutually
+# exclusive job states, so NO alert would EVER fire. Any future guard
+# refinement must red this pin and be reclassified consciously. BOTH arms
+# are step-scoped (a manual cancel AFTER a green doctor+assert is not a
+# doctor verdict) and the guard is main-ref-gated (a red branch dispatch
+# must never masquerade as the main daily alarm).
+RED_ALERT_GUARD = (
+    "((failure() || cancelled()) && "
+    "(steps.doctor.outcome != 'success' || steps.assert.outcome != 'success')) "
+    "&& github.ref == 'refs/heads/main'"
+)
+
+# The stable dedupe-key title, byte-identical in the filer AND the closer.
+ISSUE_TITLE = "doctor-daily: brutex doctor is RED"
 
 EXPECTED_STATUSES = {
     "audit_chain": "SKIP",
@@ -368,37 +396,60 @@ def test_alert_steps_fire_on_cancelled() -> None:
 
 
 def test_alert_guards_are_step_scoped_to_doctor_and_assert() -> None:
-    """Alert guards key on the doctor/assert step outcomes, never bare failure().
+    """Both red-path guards equal RED_ALERT_GUARD exactly — never bare forms.
 
-    ``failure()`` alone is JOB-scoped: a transient post-doctor infra
+    Bare ``failure()`` is JOB-scoped: a transient post-doctor infra
     failure (summary write / artifact upload — a real recurring GHA
     failure mode) on a GREEN doctor day would file/extend the
     'brutex doctor is RED' critical issue whose own body shows an
     all-green report table — an alarm overclaiming a doctor verdict the
-    run never produced (Golden Rule #1). Step-scoping fires the alert
-    only when the doctor or its envelope-honesty assert did not succeed
-    (``!= 'success'`` also covers a setup/bootstrap failure — the doctor
-    step is then SKIPPED) or the run was cancelled.
+    run never produced (Golden Rule #1). Bare ``cancelled()`` is
+    job-scoped the same way: a manual cancel of the summary/upload tail
+    AFTER a green doctor+assert is not a doctor verdict either. Both
+    arms therefore key on the doctor/assert outcomes (``!= 'success'``
+    also covers a setup/bootstrap failure — the doctor step is then
+    SKIPPED — and a timeout-kill mid-doctor — outcome 'cancelled').
+
+    EXACT-equality pin (not substrings): a one-token ``||`` -> ``&&``
+    guard mutation was empirically verified to pass every substring
+    assert while disabling ALL red alerting (failure() and cancelled()
+    are effectively mutually exclusive), as does a ``false && (...)``
+    prefix. The closer already carries the same equality-pin pattern.
     """
     data = _load()
     assert _doctor_step(data).get("id") == "doctor"
     assert_step = next(s for s in _steps(data) if "assert_status" in str(s.get("run", "")))
     assert assert_step.get("id") == "assert"
     for step in _alert_steps(data):
-        guard = str(step["if"])
-        assert "steps.doctor.outcome != 'success'" in guard
-        assert "steps.assert.outcome != 'success'" in guard
+        assert step["if"] == RED_ALERT_GUARD, (
+            "red-path alert guard drifted from the pinned expression — any "
+            "refinement must be reclassified here consciously"
+        )
 
 
 def test_issue_title_stable_and_lifecycle_wired() -> None:
-    """SHA-free stable title + comment dedupe + close-on-green."""
+    """SHA-free stable title, filer==closer title, dedupe + close-on-green."""
     raw = _raw()
     title_lines = [ln for ln in raw.splitlines() if "const title" in ln]
-    assert title_lines, "issue steps must define a title constant"
+    assert len(title_lines) == 2, "filer + closer must each define the title constant"
     for line in title_lines:
         assert "context.sha" not in line, (
             "a per-SHA title mints one issue per red day — title must be stable"
         )
+    # Pin the dedupe KEY's other half end-to-end, mirroring the labels-filter
+    # count pin below: the closer finds the filer-created issue by EXACT
+    # title match, so the two duplicated `const title` literals must stay
+    # byte-identical — a one-sided edit (empirically verified to pass every
+    # other pin) would leave the open 'critical' alarm never auto-closed on
+    # green, silently breaking the issue body's own 'a green day auto-closes
+    # it' promise (Golden Rule #1).
+    titles = re.findall(r"const title = '([^']*)';", raw)
+    assert len(titles) == 2, "filer + closer must each define exactly one title constant"
+    assert set(titles) == {ISSUE_TITLE}, (
+        "filer and closer title constants must both equal the pinned stable "
+        "title byte-for-byte — a divergent closer title breaks close-on-green "
+        "forever"
+    )
     assert "createComment" in raw, "repeat reds must fold into one issue"
     # Pin the dedupe QUERY end-to-end: both lifecycle steps must list with
     # the SAME label filter, and the created issue must carry a superset of
@@ -451,6 +502,10 @@ def test_telegram_degrades_gracefully() -> None:
     for step in _steps(data):
         assert "secrets." not in str(step.get("if", ""))
     assert "cancelled()" in str(telegram["if"])
+    # MAIN-REF-GATED like the issue steps: a red branch workflow_dispatch
+    # (the natural debug move while main is red) must never ping the
+    # operator with a message indistinguishable from the main daily alarm.
+    assert "github.ref == 'refs/heads/main'" in str(telegram["if"])
 
 
 def test_continue_on_error_only_on_telegram() -> None:

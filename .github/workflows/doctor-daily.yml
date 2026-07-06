@@ -47,12 +47,17 @@ permissions:
 
 concurrency:
   # Never cancel an in-flight run (nightly convention). With this false,
-  # a CANCELLED conclusion can only mean job-timeout-kill or manual cancel
-  # — both alert-worthy, which is exactly what `failure() || cancelled()`
-  # below gives (a superseded QUEUED run never starts, so it never alerts).
-  # Per-ref group: a branch dispatch never blocks the main cron. The
-  # repo-global ISSUE lifecycle is additionally ref-gated to main below,
-  # so every issue-touching run serializes in the ONE main group.
+  # a CANCELLED conclusion can only mean job-timeout-kill or manual
+  # cancel. Both alert steps below treat cancelled() like failure() but
+  # STEP-SCOPE it to the doctor/assert outcomes: a kill/cancel landing
+  # BEFORE the doctor+assert are green alerts (their outcomes read
+  # 'cancelled'/'skipped', != success), while a manual cancel of the
+  # summary/upload tail AFTER a green doctor+assert does NOT raise a
+  # false 'doctor is RED' (a superseded QUEUED run never starts, so it
+  # never alerts). Per-ref group: a branch dispatch never blocks the
+  # main cron. The repo-global ISSUE lifecycle is additionally ref-gated
+  # to main below, so every issue-touching run serializes in the ONE
+  # main group.
   group: doctor-daily-${{ github.ref }}
   cancel-in-progress: false
 
@@ -69,7 +74,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Cold run ~12-15 min (two cargo wheel builds dominate); 30 = ~2x. A
     # JOB-timeout kill reports CANCELLED -> the alert steps still fire
-    # (the DEC-MUTATION-ALERT-CANCELLED-001 class, live-probed run
+    # whenever the kill lands before the doctor+assert are green (their
+    # outcomes then read 'cancelled'/'skipped', != success — the
+    # DEC-MUTATION-ALERT-CANCELLED-001 class, live-probed run
     # 28748795864). A STEP-timeout kill reports step FAILURE -> also fires.
     timeout-minutes: 30
     steps:
@@ -238,14 +245,23 @@ jobs:
         # is the PRIMARY channel — itself best-effort (its filer try/catch
         # degrades an API/permission failure to a warning, retried on the
         # next red run), never a guarantee (Golden Rule #10).
-        # STEP-SCOPED guard: bare `failure()` is JOB-scoped — a transient
-        # post-doctor infra failure (summary write / artifact upload) on a
-        # GREEN doctor day would alert 'doctor is RED' over an all-green
-        # report (Golden Rule #1). The alert fires only when the doctor or
-        # its envelope-honesty assert did not SUCCEED — which also covers a
+        # STEP-SCOPED guard (BOTH arms): bare `failure()` is JOB-scoped — a
+        # transient post-doctor infra failure (summary write / artifact
+        # upload) on a GREEN doctor day would alert 'doctor is RED' over an
+        # all-green report (Golden Rule #1) — and a bare `cancelled()` is
+        # job-scoped the same way: a manual cancel seconds AFTER a green
+        # doctor+assert (during the summary/upload tail) is not a doctor
+        # verdict either. Both arms therefore key on the doctor/assert
+        # outcomes: the alert fires only when the doctor or its
+        # envelope-honesty assert did not SUCCEED — which also covers a
         # setup/bootstrap failure (the doctor step is then SKIPPED, i.e.
-        # != success) — or the run was cancelled (timeout-kill).
-        if: (failure() && (steps.doctor.outcome != 'success' || steps.assert.outcome != 'success')) || cancelled()
+        # != success) and a timeout-kill/cancel mid-doctor (outcome
+        # 'cancelled', != success).
+        # MAIN-REF-GATED like the issue steps below: a red branch
+        # workflow_dispatch (the natural debug move while main is red) must
+        # never ping the operator with a message indistinguishable from the
+        # main daily alarm.
+        if: ((failure() || cancelled()) && (steps.doctor.outcome != 'success' || steps.assert.outcome != 'success')) && github.ref == 'refs/heads/main'
         continue-on-error: true
         shell: bash
         env:
@@ -266,9 +282,11 @@ jobs:
             || echo "::warning::Telegram send failed (non-fatal — the GitHub issue is the primary channel)"
 
       - name: File or update the single doctor-daily tracking issue
-        # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
-        # killed by its own timeout-minutes reports CANCELLED, not FAILED
-        # (live-probed run 28748795864). Dedupe is STRONGER than
+        # DEC-MUTATION-ALERT-CANCELLED-001: cancelled() is in the guard
+        # because a job killed by its own timeout-minutes reports CANCELLED,
+        # not FAILED (live-probed run 28748795864); a kill mid-doctor leaves
+        # steps.doctor.outcome = 'cancelled' != 'success', so the step-scoped
+        # guard still fires. Dedupe is STRONGER than
         # mutation.yml's per-SHA title: a daily red on a moving main would
         # mint one issue per day — the title here is STABLE (no sha), so all
         # red days fold into ONE open tracking issue via createComment.
@@ -283,12 +301,14 @@ jobs:
         # main means every issue-touching run sits in the ONE
         # doctor-daily-refs/heads/main group (cancel-in-progress: false),
         # so the find-then-create is genuinely serialized.
-        # STEP-SCOPED like the Telegram guard above: the 'brutex doctor is
-        # RED' issue must never be filed/extended by a post-doctor infra
-        # flake (summary/upload) on a green doctor day — that would open a
-        # 'critical' alarm whose own body shows an all-green table, and on
-        # a recovery day would post 'Still red' while skipping the closer.
-        if: ((failure() && (steps.doctor.outcome != 'success' || steps.assert.outcome != 'success')) || cancelled()) && github.ref == 'refs/heads/main'
+        # STEP-SCOPED like the Telegram guard above (BOTH arms — failure()
+        # AND cancelled()): the 'brutex doctor is RED' issue must never be
+        # filed/extended by a post-doctor infra flake (summary/upload) OR a
+        # manual cancel of the tail steps on a green doctor day — that would
+        # open a 'critical' alarm whose own body shows an all-green table,
+        # and on a recovery day would post 'Still red' while skipping the
+        # closer.
+        if: ((failure() || cancelled()) && (steps.doctor.outcome != 'success' || steps.assert.outcome != 'success')) && github.ref == 'refs/heads/main'
         uses: actions/github-script@v9
         with:
           script: |
