@@ -80,13 +80,26 @@ class Catalog:
         self._lock = threading.Lock()
 
     @classmethod
-    def open(cls, path: Path) -> Self:
+    def open(cls, path: Path, *, require_exists: bool = False) -> Self:
         """Open or create the catalog DB at *path*.
+
+        Parameters
+        ----------
+        path
+            The DuckDB file path (conventionally ``<lake_root>/catalog.duckdb``).
+        require_exists
+            When ``True``, refuse a *path* that does not already exist instead
+            of creating it — the guard for READ-ONLY callers, who must never
+            conjure a fresh empty lake/catalog out of a typo'd path
+            (DEC-CLI-USER-ERROR-HYGIENE-001). The default ``False`` preserves
+            the historical create-on-open behaviour byte-identically (the
+            ``fetch`` write path + dashboard boot).
 
         Raises
         ------
         CatalogError
-            If duckdb is not installed or the DB cannot be opened.
+            If duckdb is not installed, ``require_exists=True`` and *path*
+            does not exist, or the DB cannot be opened.
         """
         try:
             import duckdb
@@ -96,6 +109,10 @@ class Catalog:
                 "'pip install -e .[data]' to enable the P2 data lake"
             ) from exc
 
+        if require_exists and not path.exists():
+            raise CatalogError(
+                f"catalog not found at {path} (require_exists=True — refusing to create one)"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             conn = duckdb.connect(str(path))

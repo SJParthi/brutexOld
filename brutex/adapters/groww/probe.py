@@ -333,8 +333,19 @@ def probe_depth(
     The window-has-rows predicate is monotone when vendor history is
     contiguous-from-floor (the honest assumption; a vendor serving old ranges
     INTERMITTENTLY makes any probe a lower bound — stated in the detail line).
+
+    Budget contract (DEC-PROBE-BUDGET-PROLOGUE-001): EVERY vendor call —
+    the boundary prologue, the hi-at-today prologue AND the bisection loop —
+    honours ``max_calls``. The budget is clamped UP to 1 (``max(max_calls,
+    1)`` — "if uncertain, fetch": the single boundary call is always
+    permitted, preserving the downstream non-bisect cost-of-exactly-1
+    assumption), so the invariant is ``calls_used <= max(max_calls, 1)``.
+    A budget exhausted BEFORE the hi-at-today prologue returns the SAME
+    honest :data:`VERDICT_ABSENT` (never a fabricated floor) with zero
+    further vendor calls.
     """
     calls = 0
+    budget = max(max_calls, 1)
 
     def _window_rows(start_day: date) -> tuple[int, str | None]:
         nonlocal calls
@@ -384,6 +395,23 @@ def probe_depth(
         # there too has no probed 1m data at all.
         span_days = max((today - boundary).days, 1)
         lo, hi = 0, span_days
+        if calls >= budget:
+            # Budget exhausted before the hi-at-today prologue: the SAME
+            # honest ABSENT verdict — zero further vendor calls, never a
+            # fabricated floor (DEC-PROBE-BUDGET-PROLOGUE-001).
+            return DepthProbeResult(
+                symbol=symbol,
+                verdict=VERDICT_ABSENT,
+                first_ts=None,
+                probed_floor=None,
+                boundary_has_data=False,
+                calls_used=calls,
+                detail=(
+                    f"{symbol} 1m boundary window at {boundary.isoformat()} is EMPTY and "
+                    f"the call budget ({max_calls}) is exhausted before locating hi — "
+                    f"true floor unknown"
+                ),
+            )
         hi_rows, hi_first = _window_rows(boundary + timedelta(days=hi))
         if not hi_rows:
             return DepthProbeResult(
@@ -399,7 +427,13 @@ def probe_depth(
                 ),
             )
         floor_first = hi_first
-        while hi - lo > 1 and calls < max_calls:
+        while hi - lo > 1:
+            # ``calls`` is nonlocal-mutated inside ``_window_rows`` — checked at the
+            # TOP of each iteration (an explicit break, not a compound loop guard, so
+            # a static analyser that cannot see the closure mutation never misreads
+            # the budget check as constant).
+            if calls >= budget:
+                break
             mid = (lo + hi) // 2
             mid_rows, mid_first = _window_rows(boundary + timedelta(days=mid))
             if mid_rows:

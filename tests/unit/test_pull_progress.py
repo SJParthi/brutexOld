@@ -170,8 +170,19 @@ def test_to_dict_shape() -> None:
         "phase": "",
         "stalled": False,
         "stall_detail": "",
+        "wedged": False,
+        "wedge_detail": "",
+        "restart_required": False,
+        # DEC-PULL-PROGRESS-HONESTY-001 — ADDITIVE ETA / open-ended keys: the FIRST
+        # counter mutation only STAMPS the phase rate baseline (no measured rate
+        # yet), so units_per_sec is an honest 0.0 and eta_seconds an honest None.
+        "started_at": d["started_at"],
+        "units_per_sec": 0.0,
+        "eta_seconds": None,
+        "open_ended": False,
     }
     assert isinstance(d["updated_at"], float)
+    assert isinstance(d["started_at"], float)
 
 
 def test_advance_counts_no_data_gaps_separately_from_failures() -> None:
@@ -432,3 +443,62 @@ def test_start_resets_the_stalled_marker() -> None:
     p.start(total=1)  # a fresh run never inherits the prior run's marker
     snap = p.snapshot()
     assert snap.stalled is False and snap.stall_detail == ""
+
+
+# ── DEC-PULL-WEDGE-ESCALATE-001 — the terminal WEDGED marker ────────────────
+
+
+def test_mark_wedged_sets_terminal_marker_while_running_only() -> None:
+    p = PullProgress()
+    p.start(total=1)
+    p.mark_wedged("WEDGED — restart required")
+    snap = p.snapshot()
+    assert snap.state == STATE_RUNNING  # the worker is NOT killed
+    assert snap.wedged is True
+    assert snap.wedge_detail == "WEDGED — restart required"
+    assert snap.to_dict()["wedged"] is True
+    assert snap.to_dict()["restart_required"] is True
+
+
+def test_mark_wedged_is_a_noop_on_a_settled_run() -> None:
+    p = PullProgress()
+    p.start(total=1)
+    p.finish()
+    p.mark_wedged("late timer edge")
+    snap = p.snapshot()
+    assert snap.wedged is False
+    assert snap.to_dict()["restart_required"] is False
+
+
+def test_clear_stalled_does_not_clear_wedged() -> None:
+    """WEDGED is terminal: a stray late heartbeat recovery never withdraws the verdict."""
+    p = PullProgress()
+    p.start(total=1)
+    p.mark_stalled("suspect")
+    p.mark_wedged("WEDGED")
+    p.clear_stalled()
+    snap = p.snapshot()
+    assert snap.stalled is False
+    assert snap.wedged is True  # the restart-required verdict survives
+
+
+def test_finish_and_fail_clear_the_wedged_marker() -> None:
+    p = PullProgress()
+    p.start(total=1)
+    p.mark_wedged("WEDGED")
+    p.finish()
+    assert p.snapshot().wedged is False
+    p.start(total=1)
+    p.mark_wedged("WEDGED")
+    p.fail("boom")
+    snap = p.snapshot()
+    assert snap.wedged is False and snap.wedge_detail == ""
+
+
+def test_start_resets_the_wedged_marker() -> None:
+    p = PullProgress()
+    p.start(total=1)
+    p.mark_wedged("WEDGED")
+    p.start(total=1)
+    snap = p.snapshot()
+    assert snap.wedged is False and snap.wedge_detail == ""

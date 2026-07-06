@@ -549,13 +549,20 @@ class TestPrebuildLiveEdgeDivergencePinned:
     forming-session guard — while the intraday materialisation
     (:func:`brutex.data.tf_resampler.resample_1m_to_tf`) has no such guard.
     So when the stored 1-minute contains the run day's own session, EXACTLY
-    ONE session (the live edge) is absent from the ``1day`` partition. The
-    guard is whole-day-granular (even a post-close run excludes the run day)
-    and SELF-HEALS on the next pipeline run (latest-wins derived ``1day``).
-    The 2025/12-partition observation is the midnight-IST stamping, also
-    deliberate: an IST date-D daily bar stamps (D−1) 18:30 UTC, so the IST
-    2026-01-01 session's bar lives in the DECEMBER UTC month partition.
-    NO behaviour change — these tests pin the documented, intended semantics.
+    ONE session (the live edge) is absent from the ``1day`` partition —
+    since DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 for a MID-SESSION run ONLY:
+    the production default ``before`` is now the session-close-aware
+    :func:`brutex.calendars.nse.daily_derive_cutoff`, so a POST-CLOSE run
+    passes ``before = run_day + 1`` and derives the run day too (superseding
+    the fix-4 whole-day-granular clause). The PRIMITIVE semantics pinned here
+    are UNCHANGED — ``resample_1m_to_daily`` drops ``ist_date >= before``
+    verbatim for whatever ``before`` the caller resolves — and a mid-session
+    run still SELF-HEALS on the next pipeline run (latest-wins derived
+    ``1day``). The 2025/12-partition observation is the midnight-IST
+    stamping, also deliberate: an IST date-D daily bar stamps (D−1) 18:30
+    UTC, so the IST 2026-01-01 session's bar lives in the DECEMBER UTC month
+    partition. These tests pin the primitive's documented, intended
+    semantics.
     """
 
     def test_daily_excludes_exactly_the_run_day_session_intraday_keeps_it(self) -> None:
@@ -589,10 +596,12 @@ class TestPrebuildLiveEdgeDivergencePinned:
         assert bar.timestamp.astimezone(_IST).date() == date(2026, 1, 1)
 
     def test_post_close_run_day_still_excluded_and_next_day_run_writes_it(self) -> None:
-        # Whole-day-granular guard: even a run AFTER the 15:30 close on D
-        # excludes D's session (the code cannot cheaply prove the session
-        # closed); the NEXT day's pipeline run (before = D+1) derives it —
-        # the self-healing arm (latest-wins derived 1day partition).
+        # PRIMITIVE pin: with before = D the run day's session is excluded and
+        # with before = D+1 it derives — exactly the two cutoffs
+        # daily_derive_cutoff resolves for a mid-session vs a post-close /
+        # non-trading-day run (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001). A
+        # post-close PRODUCTION run now derives D directly; a mid-session run
+        # still self-heals on the next run (latest-wins derived 1day).
         frame = _frame((date(2026, 7, 3), 120.0))
         assert resample_1m_to_daily(frame, before=date(2026, 7, 3)) == []
         bars = resample_1m_to_daily(frame, before=date(2026, 7, 4))

@@ -66,7 +66,7 @@ from typing import Any, Final
 
 from brutex import __version__
 from brutex.config.paths import resolve_lake_root
-from brutex.config.runtime import read_runtime_file
+from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 
 # ────────────────────────────────────────────────────────────────────────
@@ -90,6 +90,16 @@ EXIT_HEAL_REFUSED = 5
 #: NON-ZERO so an operator script never mistakes a partial sweep for a clean one
 #: (the failed tuples are un-sentineled and will redo next run).
 EXIT_SWEEP_TUPLE_FAILED = 6
+
+
+class CliUserError(Exception):
+    """A user-input error that must exit cleanly (DEC-CLI-USER-ERROR-HYGIENE-001).
+
+    Raised by CLI parse/read/guard helpers that cannot themselves return an
+    exit code; :func:`main` converts it to the standard one-line
+    ``[brutex] <message>`` on stderr + :data:`EXIT_USER_ERROR` — never a raw
+    traceback. CLI layer ONLY: library code keeps its own error hierarchies.
+    """
 
 
 def default_condition_bits() -> list[int]:
@@ -118,6 +128,56 @@ def default_condition_bits() -> list[int]:
         The implemented condition-bit indices in ascending order.
     """
     return [bit for bit in range(TOTAL_CONDITIONS) if IMPLEMENTED_MASK & (1 << bit)]
+
+
+def _parse_int_csv(raw: str, *, flag: str) -> list[int]:
+    """Parse a comma-separated integer list for *flag* (CLAUDE.md §11 COMMON).
+
+    Byte-identical to the historical inline
+    ``[int(tok) for tok in raw.split(",") if tok.strip()]`` for valid input
+    (blank tokens skipped, surrounding whitespace tolerated, order AND
+    duplicates preserved). A non-integer token raises :class:`CliUserError`
+    naming the token (DEC-CLI-USER-ERROR-HYGIENE-001).
+    """
+    out: list[int] = []
+    for tok in raw.split(","):
+        token = tok.strip()
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except ValueError as exc:
+            raise CliUserError(
+                f"invalid {flag} token {token!r}: expected a comma-separated list of integers"
+            ) from exc
+    return out
+
+
+def parse_condition_ids(raw: str) -> list[int]:
+    """Parse the ``--conditions`` CSV of condition-bit indices (COMMON helper).
+
+    The ONE parser behind all three sweep surfaces (``sweep`` / ``sweep-all`` /
+    ``sweep-verify``), replacing three inline copies. Valid input parses
+    byte-identically to the old inline expression. Each id is a 0-indexed bit
+    position validated against the VOCABULARY range
+    ``0..TOTAL_CONDITIONS - 1`` (0..59) — deliberately NOT the engine's
+    forward-compat ``[0, 128)`` u128 ceiling: bits 60..127 are
+    reserved/undefined dead bits the results store rejects
+    (``MASK_BITS_MAX``), so admitting them here would be a silent illusion.
+
+    Raises
+    ------
+    CliUserError
+        On a non-integer token or an out-of-range bit index.
+    """
+    bits = _parse_int_csv(raw, flag="--conditions")
+    for bit in bits:
+        if not 0 <= bit <= TOTAL_CONDITIONS - 1:
+            raise CliUserError(
+                f"--conditions bit {bit} out of range: valid bit indices are "
+                f"0..{TOTAL_CONDITIONS - 1}"
+            )
+    return bits
 
 
 def sweep_all_exit_code(tuples_failed: int) -> int:
@@ -1454,7 +1514,23 @@ def cmd_version() -> int:
 
 def cmd_status(run_id: str | None) -> int:
     """Print the current pipeline status from the runtime file."""
-    runtime = read_runtime_file()
+    try:
+        runtime = read_runtime_file()
+    # read_runtime_file wraps unreadable-file / invalid-JSON / missing-field
+    # failures in RuntimeFileError; a structurally-valid but WRONG-TYPED file
+    # leaks raw from RuntimeInfo.from_json (int("abc") → ValueError,
+    # int(None) → TypeError, env_snapshot-not-a-dict → AttributeError) — all
+    # caught here so a hand-corrupted runtime.json is a clean user error,
+    # never a traceback (DEC-CLI-USER-ERROR-HYGIENE-001). The file is NEVER
+    # auto-deleted — the operator inspects/removes it.
+    except (RuntimeFileError, ValueError, TypeError, AttributeError) as exc:
+        print(
+            f"[brutex] runtime file corrupt/unreadable: {runtime_file_path()} ({exc}) — "
+            "inspect or remove that file to clear the stale state (it is never "
+            "auto-deleted), then re-run",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     if runtime is None:
         print("[brutex] no runtime file (no pipeline running)")
         return EXIT_OK
@@ -1514,6 +1590,12 @@ def cmd_catalog_reconcile(lake_root: Path | None) -> int:
     from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
     resolved = _resolve_lake_root(lake_root)
+    # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
+    # fresh empty lake and report an honest-looking "partitions=0". The
+    # catalog FILE itself is deliberately NOT gated — reconcile's purpose
+    # includes rebuilding a deleted catalog.duckdb inside a REAL lake
+    # (DEC-CLI-USER-ERROR-HYGIENE-001).
+    _require_lake_dir(resolved, command="catalog reconcile")
     with Catalog.open(resolved / "catalog.duckdb") as cat:
         result = reconcile_catalog_from_lake(lake_root=resolved, catalog=cat)
     print(
@@ -1652,12 +1734,17 @@ def cmd_reopen_skipped(
     )
     from brutex.data.window_ledger_store import (
         ledger_path,
+        list_ledger_deltas,
         load_window_ledger,
         save_window_ledger,
     )
 
     resolved = _resolve_lake_root(lake_root)
-    if not ledger_path(resolved).is_file():
+    # Delta-aware presence gate (P2 fix-round, DEC-REOPEN-DELTA-AWARE-001): a
+    # base-less lake HOLDING deltas (a first pull's mid-flight crash checkpoint,
+    # DEC-LEDGER-DELTA-FLUSH-001) is a LIVE ledger — load_or_migrate treats it
+    # exactly so — hence it must be operable here, not refused as "no ledger".
+    if not (ledger_path(resolved).is_file() or list_ledger_deltas(resolved)):
         print(
             f"[brutex] no window ledger found at {ledger_path(resolved)} — nothing to re-open "
             "(run a pull first, or pass the right --lake-root).",
@@ -2704,8 +2791,24 @@ def cmd_run(
 
 
 def _parse_dt(value: str) -> datetime:
-    """Parse a ``YYYY-MM-DD`` or full-ISO string to a UTC-aware datetime."""
-    parsed = datetime.fromisoformat(value)
+    """Parse a ``YYYY-MM-DD`` or full-ISO string to a UTC-aware datetime.
+
+    Raises
+    ------
+    CliUserError
+        On a malformed value. Every ``--start``/``--end`` (fetch / sweep /
+        sweep-all / verify-lookahead / sweep-verify --recount / options-sim)
+        funnels through here, so a typo'd date is one clean line +
+        :data:`EXIT_USER_ERROR` via the :func:`main` net — never a raw
+        ``ValueError`` traceback (DEC-CLI-USER-ERROR-HYGIENE-001).
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise CliUserError(
+            f"invalid --start/--end value {value!r}: expected ISO format "
+            "'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS'"
+        ) from exc
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
@@ -2714,6 +2817,47 @@ def _resolve_lake_root(lake_root: Path | None) -> Path:
     if lake_root is not None:
         return lake_root
     return resolve_lake_root()
+
+
+def _require_lake_dir(lake_root: Path, *, command: str) -> None:
+    """Refuse a nonexistent lake root on a lake-READING command.
+
+    ``Catalog.open`` mkdirs the whole missing directory chain, so a typo'd
+    ``--lake-root`` on a read command silently materialised a fresh empty
+    lake + empty catalog and reported "partitions=0" / "no bars" — a silent
+    illusion (Golden Rule #1). Read commands must fail loudly instead
+    (DEC-CLI-USER-ERROR-HYGIENE-001); the ``fetch`` write path keeps
+    create-on-first-write.
+
+    Raises
+    ------
+    CliUserError
+        If *lake_root* is not an existing directory.
+    """
+    if not lake_root.is_dir():
+        raise CliUserError(
+            f"lake root not found: {lake_root} — pass the right --lake-root "
+            f"(or $BRUTEX_LAKE_ROOT); `brutex {command}` reads an existing lake "
+            "and never creates one"
+        )
+
+
+def _require_catalog_exists(catalog: Path) -> None:
+    """Refuse a nonexistent catalog file on a catalog-READING command.
+
+    Raises
+    ------
+    CliUserError
+        If *catalog* is not an existing file — with the reconcile remedy for
+        a lake that has bars but was never catalogued
+        (DEC-CATALOG-RECONCILE-WIRE-001 lakes).
+    """
+    if not catalog.is_file():
+        raise CliUserError(
+            f"catalog not found: {catalog} — pass the right --lake-root/--catalog "
+            "(read-only commands never create a lake); if the lake HAS bars but no "
+            "catalog, run `brutex catalog reconcile --lake-root <lake>` first"
+        )
 
 
 def _resolve_fetch_intervals(interval: str) -> list[str]:
@@ -3033,7 +3177,9 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     :class:`~brutex.notifications.sweep_alerts.SweepAlerter` swallows every publish
     error), so the alert NEVER masks the halt, which the caller re-raises so the CLI
     still exits non-zero. The ``LakeWriteHalt.reason`` (``disk_full`` /
-    ``out_of_memory``) is surfaced verbatim; any other stop uses its class name.
+    ``out_of_memory`` / ``volume_wedged`` — the latter from the keepalive probe OR the
+    per-partition write-health breaker, DEC-WRITE-HEALTH-BREAKER-001) is surfaced
+    verbatim; any other stop uses its class name.
 
     Thin wrapper delegating to the COMMON
     :func:`brutex.notifications.sweep_alerts.emit_pull_halt_alert` (CLAUDE.md §11 —
@@ -3045,7 +3191,7 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     emit_pull_halt_alert(exc)
 
 
-def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
+def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: Any = None) -> bool:
     """Take the cross-process account single-flight lock for the CLI pull; report contention.
 
     DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996) — the cross-process pull lock
@@ -3066,12 +3212,57 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path) -> bool:
     Only the genuine persisting LIVE pull takes the lock; ``--dry-run`` / ``--inspect``
     (which write no real lake data and pace no real account requests) deliberately do
     NOT call this, so an offline test or an inspect run never contends.
+
+    **Account-keyed second lock, taken FIRST (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001,
+    MIGRATION.md #1285):** before the lake-root lock this enters the ACCOUNT-keyed
+    :func:`~brutex.adapters.groww.pull_singleflight.account_pull_singleflight_lock`
+    (``~/.brutex/locks/pull_account<pbkdf2[:16]>.flock``), keyed off the AWS-resolved
+    api_key (:func:`~brutex.config.credentials.resolve_groww_aws_credentials` — the SOLE
+    credential source, DEC-AWS-ONLY-CREDS-001; the retired env-var path is NEVER read) —
+    so the SAME account pulled into TWO distinct lake roots is refused too (the #996
+    residual, closed for the single-host case). A ``CredentialsError`` SKIPS the account
+    lock gracefully with one loud log line (a credential-less run makes zero vendor
+    calls); the lake-root lock below still guards same-lake peers. The account lock is
+    strictly FIRST + the ExitStack releases LIFO, so the pair can never deadlock-invert
+    against ``pull_jobs.start()``'s identical order. *account_key_resolver* is the
+    injectable ``() -> str | None`` key seam (tests); ``None`` (production) resolves via
+    the AWS-only source.
     """
+    import structlog
+
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,
+        account_pull_singleflight_lock,
         pull_singleflight_lock,
     )
 
+    if account_key_resolver is not None:
+        account_key: str | None = account_key_resolver()
+    else:
+        from brutex.config.credentials import resolve_groww_aws_credentials
+        from brutex.config.credentials_types import CredentialsError
+
+        try:
+            account_key = resolve_groww_aws_credentials().api_key
+        except CredentialsError as exc:
+            account_key = None
+            structlog.get_logger("brutex.cli").warning(
+                "pull.account_lock_skipped",
+                reason="credentials unavailable — account-keyed single-flight not taken",
+                error=str(exc),
+            )
+    if account_key is not None:
+        try:
+            stack.enter_context(account_pull_singleflight_lock(account_key))
+        except PullAlreadyRunningError as exc:
+            print(
+                f"[brutex] {exc} — refusing to start a second concurrent pull for this "
+                "Groww account (it may be running against a DIFFERENT lake root). Wait "
+                "for the running pull to finish (or stop it) before re-running "
+                "`brutex fetch`.",
+                file=sys.stderr,
+            )
+            return False
     try:
         stack.enter_context(pull_singleflight_lock(lake_root))
     except PullAlreadyRunningError as exc:
@@ -3184,6 +3375,10 @@ _build_pull_health_monitor` build failure) is a no-op.
                 meter_snap,
                 wall_time=time.time(),
                 monotonic=time.monotonic(),
+                # DEC-CLI-BRIDGE-PULL-ACTIVE-001: each per-window publish carries the
+                # AUTHORITATIVE "a pull IS running" signal, so the dashboard's stall
+                # verdict is gated exactly like a dashboard pull's.
+                pull_active=True,
             )
         except LakeWriteHalt:
             # Disk-full / OOM is a genuine pull-wide stop — let it propagate so the existing
@@ -3207,6 +3402,56 @@ _build_pull_health_monitor` build failure) is a no-op.
                 log.warning("cli.pull_health.observe_failed", exc_info=True)
 
     return _on_window
+
+
+def _publish_cli_pull_inactive(lake_root: Path, controller: Any, adapter: Any) -> None:
+    """Best-effort publish ONE final ``pull_active=False`` bridge snapshot at pull end.
+
+    DEC-CLI-BRIDGE-PULL-ACTIVE-001: the per-window bridge publishes ``pull_active=True``
+    while the CLI pull runs; this final publish (invoked from ``cmd_fetch``'s ``finally``,
+    after the pipeline drain + the durable ledger persist) flips the flag to ``False`` so
+    the dashboard widget reads an honest ``done``/``idle`` the moment the pull ends —
+    never a red "stalled" mislabel on a just-finished CLI pull.
+
+    Wholly best-effort: EVERY error — including a :class:`~brutex.data.errors.LakeWriteHalt`
+    — is swallowed + logged, because the pull is already ENDING and its real outcome (a
+    clean exit, a crash, or a re-raised halt) must never be masked by a visibility
+    side-effect. A ``None`` *controller* (``--dry-run`` / ``--inspect`` — no bridge was
+    ever published) is a no-op, preserving the persistence-free contract.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (locates the ``.rate`` sidecar dir).
+    controller
+        The live pull's :class:`~brutex.adapters.rate_common.RateController`, or ``None``.
+    adapter
+        The market adapter; its ``client.meter`` supplies the final throughput snapshot.
+    """
+    if controller is None:
+        return
+
+    import time
+
+    import structlog
+
+    from brutex.data.rate_bridge import publish_from_snapshots
+
+    try:
+        meter = getattr(getattr(adapter, "client", None), "meter", None)
+        meter_snap: Mapping[str, Any] = meter.snapshot() if meter is not None else {}
+        publish_from_snapshots(
+            lake_root,
+            controller.snapshot(),
+            meter_snap,
+            wall_time=time.time(),
+            monotonic=time.monotonic(),
+            pull_active=False,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        structlog.get_logger("brutex.cli.rate_bridge").warning(
+            "cli.rate_bridge.finalize_failed", exc_info=True
+        )
 
 
 def cmd_fetch(
@@ -3521,6 +3766,7 @@ def cmd_fetch(
             from brutex.adapters.groww.constants import (
                 GROWW_RATE_LIMIT_PER_MIN,
                 GROWW_RATE_LIMIT_RPS_CEILING,
+                resolve_smooth_pacing_mode,
             )
             from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
@@ -3530,10 +3776,15 @@ def cmd_fetch(
             # (DEC-GROWW-RATE-PERMIN-001) is the hard per-minute cap. 8×60 = 480 < 500,
             # so the per-second ceiling is the binding gate without fighting the
             # governor; the AIMD ladder still steps DOWN on 429s (raised 5 → 8 on
-            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002).
+            # 2026-06-24, DEC-GROWW-RATE-CEILING-8-002). The smooth-pacing mode is
+            # threaded HERE too (DEC-SMOOTH-PACING-AUTOLATCH-001 — the CLI previously
+            # built the controller WITHOUT it, so BRUTEX_GROWW_SMOOTH_PACING was a
+            # dead flag on the `brutex fetch` path): unset ⇒ ADAPTIVE (auto-latch on
+            # burst-evidenced 429s), truthy ⇒ ON, explicit falsy ⇒ OFF.
             _rate = RateController(
                 ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
                 ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+                smooth_pacing_mode=resolve_smooth_pacing_mode(),
             )
             # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
             # controller's own on_rate_limit so a sustained 429 storm also fires a
@@ -3799,6 +4050,12 @@ def cmd_fetch(
                 drain_fetch_pipeline(fetch_pipeline)
                 drain_write_consumer(write_consumer)
                 end_pull_ledger(ledger, resolved, dry_run=_no_persist)
+                # Final bridge publish (DEC-CLI-BRIDGE-PULL-ACTIVE-001): flip pull_active
+                # → False so the dashboard widget reads done/idle the moment the pull
+                # ends. Best-effort — swallows EVERYTHING (even LakeWriteHalt): the pull
+                # is already exiting and its real outcome must never be masked. A None
+                # controller (--dry-run / --inspect) is a no-op.
+                _publish_cli_pull_inactive(resolved, rate_controller, adapter)
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -3986,12 +4243,9 @@ def cmd_sweep(
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     tf_minutes = trading_minutes_for_lake_interval(interval)
     side = Side.BUY if direction.upper() == "BUY" else Side.SELL
-    condition_bits = (
-        [int(tok) for tok in conditions.split(",") if tok.strip()]
-        if conditions
-        else default_condition_bits()
-    )
-    with Catalog.open(catalog) as cat:
+    condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
+    _require_catalog_exists(catalog)
+    with Catalog.open(catalog, require_exists=True) as cat:
         feed = ReplayFeed(
             catalog=cat,
             lake_root=resolved_lake,
@@ -4096,13 +4350,27 @@ def _data_snapshot_hash(  # pragma: no cover — cli-omitted thin delegate (help
 
 
 def _parse_paisa_list(raw: str) -> list[int | None]:
-    """Parse a comma list of paisa values; the token ``none`` (any case) → ``None``."""
+    """Parse a comma list of paisa values; the token ``none`` (any case) → ``None``.
+
+    A non-integer token (other than ``none``) raises :class:`CliUserError`
+    naming the token — a bad ``--sl``/``--tp`` CSV must be a clean user error,
+    never a traceback (DEC-CLI-USER-ERROR-HYGIENE-001).
+    """
     out: list[int | None] = []
     for tok in raw.split(","):
         token = tok.strip()
         if not token:
             continue
-        out.append(None if token.lower() == "none" else int(token))
+        if token.lower() == "none":
+            out.append(None)
+            continue
+        try:
+            out.append(int(token))
+        except ValueError as exc:
+            raise CliUserError(
+                f"invalid --sl/--tp token {token!r}: expected a comma-separated "
+                "list of integer paisa values or 'none'"
+            ) from exc
     return out
 
 
@@ -4244,12 +4512,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = [int(tok) for tok in k.split(",") if tok.strip()]
-    condition_bits = (
-        [int(tok) for tok in conditions.split(",") if tok.strip()]
-        if conditions
-        else default_condition_bits()
-    )
+    k_list = _parse_int_csv(k, flag="--k")
+    condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # Off-heap dedup-store knobs (R2-SL-F4-F5): validate flag + env EAGERLY —
     # before the lake preload and any store open — so a mistyped knob is a
     # clean user-config error, never a mid-launch traceback (and never a false
@@ -4262,6 +4526,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
+
+    # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
+    # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). The catalog FILE is
+    # deliberately NOT gated — sweep-all reconciles the catalog from the lake
+    # below, so it must keep rebuilding a missing catalog inside a REAL lake.
+    _require_lake_dir(resolved_lake, command="sweep-all")
 
     # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
     # content fingerprint and each tuple reuses the cached bars (no re-read).
@@ -5094,7 +5364,8 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
-    with Catalog.open(catalog) as cat:
+    _require_catalog_exists(catalog)
+    with Catalog.open(catalog, require_exists=True) as cat:
         feed = ReplayFeed(
             catalog=cat,
             lake_root=resolved_lake,
@@ -5293,12 +5564,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = [int(tok) for tok in k.split(",") if tok.strip()]
-    condition_bits = (
-        [int(tok) for tok in conditions.split(",") if tok.strip()]
-        if conditions
-        else default_condition_bits()
-    )
+    k_list = _parse_int_csv(k, flag="--k")
+    condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
     # condition B9): the `// 60` form maps 1day to 1440 wall-clock minutes while
     # the launcher uses the 375-minute session — tf_minutes is in every tuple
@@ -5336,7 +5603,11 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         grid_kwargs["max_tuples"] = max_tuples
     if max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
-    grid = SweepGridConfig(**grid_kwargs)
+    try:
+        grid = SweepGridConfig(**grid_kwargs)
+    except ValueError as exc:
+        print(f"[brutex] sweep-verify config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
 
     # Stage-3 cell attribution via the cascade manifest (condition 2c) —
     # absent/unreadable manifest leaves cells honestly unattributed.
@@ -5376,6 +5647,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         from brutex.orchestrator.audit import AuditWriter
 
         catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+        # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
+        # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). Like sweep-all the
+        # catalog FILE is NOT gated — the recount reconciles it from the lake.
+        _require_lake_dir(resolved_lake, command="sweep-verify --recount")
         slices: dict[tuple[str, str], list[Any]] = {}
         with Catalog.open(catalog) as cat:
             for symbol in symbol_list:
@@ -6334,7 +6609,23 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point — parse args and dispatch to handler."""
+    """Entry point — parse args and dispatch to handler.
+
+    A :class:`CliUserError` raised by any command or shared helper below is
+    converted to the standard one-line ``[brutex] <message>`` on stderr +
+    :data:`EXIT_USER_ERROR` — the CLI's last-resort user-error net
+    (DEC-CLI-USER-ERROR-HYGIENE-001). Anything else still propagates raw: a
+    genuine code bug must traceback, never be papered over (Golden Rule #10).
+    """
+    try:
+        return _dispatch(argv)
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+
+def _dispatch(argv: list[str] | None) -> int:
+    """Parse *argv* and dispatch to the command handler (may raise CliUserError)."""
     from brutex.config.dotenv import bootstrap_env
 
     # GAP C6 — load a persisted ``.env`` ONCE at startup (no-op when absent;

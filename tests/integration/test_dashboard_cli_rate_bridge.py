@@ -150,3 +150,49 @@ def test_route_corrupt_bridge_file_falls_back_to_panel(tmp_path: Path) -> None:
     body = resp.json()
     assert body["req_per_sec_achieved"] == 6.0  # panel, not the corrupt bridge
     assert body["req_per_min"] == 333
+
+
+def test_route_bridge_pull_inactive_reads_done_not_stalled(tmp_path: Path) -> None:
+    """DEC-CLI-BRIDGE-PULL-ACTIVE-001: a FRESH bridge with pull_active=False reads "done".
+
+    Before schema v3 a just-finished CLI pull's fresh-but-zero final tick could read as a
+    red "stalled"; the authoritative False flag now gates the verdict exactly like a
+    dashboard pull's ``BackgroundPullJob.running`` probe.
+    """
+    publish_rate_snapshot(
+        tmp_path,
+        effective_rps=0.0,  # the pull just ended — nothing is completing any more
+        current_rps=5.0,
+        recent_minute=0,
+        recent_429=0,
+        ceiling_per_min=500,
+        wall_time=time.time(),
+        monotonic=time.monotonic(),
+        pull_active=False,
+    )
+    state = DashboardState()
+    with _client(state, _FakeStore(tmp_path)) as c:
+        body = c.get("/api/v1/pull/rate").json()
+    assert body["flow_state"] == "done"
+    assert body["stalled"] is False
+    assert body["active"] is False
+
+
+def test_route_bridge_pull_active_true_zero_rate_reads_stalled(tmp_path: Path) -> None:
+    """The True flag keeps the stall teeth: a running CLI pull at 0 achieved reads stalled."""
+    publish_rate_snapshot(
+        tmp_path,
+        effective_rps=0.0,
+        current_rps=5.0,
+        recent_minute=0,
+        recent_429=0,
+        ceiling_per_min=500,
+        wall_time=time.time(),
+        monotonic=time.monotonic(),
+        pull_active=True,
+    )
+    state = DashboardState()
+    with _client(state, _FakeStore(tmp_path)) as c:
+        body = c.get("/api/v1/pull/rate").json()
+    assert body["flow_state"] == "stalled"
+    assert body["stalled"] is True

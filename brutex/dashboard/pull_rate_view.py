@@ -26,7 +26,7 @@ the wall-clock age of its last update, :func:`build_pull_rate_view` derives a
   ``stalled`` verdict the pull-health monitor's ``pull.stalled`` rule encodes
   (achieved r/s below a floor while a pull is ACTIVELY ticking).
 
-## The four flow states (honest, never fabricated)
+## The five flow states (honest, never fabricated)
 
 * ``idle`` — no live tick within ``stale_after_s`` (no pull running / the pull ended a
   while ago): the view ZEROES every live number so the widget shows a dark "idle" light,
@@ -41,7 +41,20 @@ the wall-clock age of its last update, :func:`build_pull_rate_view` derives a
   achieved r/s at/below :data:`STALL_RPS_FLOOR`, or (when the caller asserts
   ``pull_active=True``) NO tick within ``stale_after_s`` at all → a RED light. STALLED
   is NEVER shown when the caller knows no pull is running.
+* ``failing`` — the meter-fed variant of ``stalled`` where the transport meter's MEASURED
+  ``failed_rps`` shows calls actively burning while the completed-rate sits at/below the
+  floor (an issuing-but-ALL-FAILING pull — DEC-PULL-TELEMETRY-TRIAD-001, the #1022
+  follow-up): a RED light with the honest "failing" word; ``stalled`` stays ``True``.
 * ``flowing`` — a recent tick with achieved r/s above the floor → a GREEN light.
+* ``local`` — a pull IS ACTIVE but its CURRENT pipeline phase is LOCAL processing
+  (``phase`` ∈ :data:`LOCAL_PHASES` — the timeframe prebuild + the movers warm, which
+  make ZERO vendor calls by design): an AMBER light labelled
+  ``"local processing — <phase> (no vendor calls)"`` (carried in
+  :attr:`PullRateView.flow_detail`), never the red "stalled" the vendor-rate heuristics
+  would read off the correctly-flatlined fetch rate
+  (DEC-PIPELINE-PHASE-UI-HONESTY-001). Keyed STRICTLY on the phase label — a
+  zero-admission FETCH phase (spot/metadata/historical) still reads STALLED
+  (DEC-RATE-WIDGET-FNO-HONEST-001's pins are untouched).
 
 ``pull_active=None`` (the default) means the caller has NO pull-run signal (e.g. the
 cross-process CLI bridge, which carries no active flag) — the projection then falls back
@@ -107,6 +120,27 @@ FLOW_STALLED: Final[str] = "stalled"
 #: dark light, honest label, never a red "stalled" on a completed pull
 #: (DEC-RATE-STALL-PULL-GATE-001).
 FLOW_DONE: Final[str] = "done"
+#: An ACTIVE pull is in a LOCAL processing phase (zero vendor calls by design) —
+#: an AMBER light, never the red "stalled" the vendor-rate heuristics would read off
+#: the (correctly) flatlined fetch rate (DEC-PIPELINE-PHASE-UI-HONESTY-001).
+FLOW_LOCAL: Final[str] = "local"
+
+#: The pipeline ``set_phase`` labels that are LOCAL processing — zero vendor calls by
+#: design (the timeframe prebuild writes derived partitions from the stored 1-minute;
+#: the movers warm re-ranks cached/lake data): DEC-PIPELINE-AUTOPREBUILD-001's two
+#: post-fetch stages. The FLOW_LOCAL verdict keys STRICTLY on ``phase in LOCAL_PHASES``
+#: (never on "no admissions" / meter absence), so a zero-admission FETCH phase — spot /
+#: metadata / historical — STILL reads STALLED exactly as DEC-RATE-WIDGET-FNO-HONEST-001
+#: pinned (the fake-alive guard is untouched).
+LOCAL_PHASES: Final[frozenset[str]] = frozenset({"prebuild", "movers"})
+
+#: An ISSUING-but-ALL-FAILING pull (DEC-PULL-TELEMETRY-TRIAD-001, closing the #1022
+#: flagged follow-up): the meter's MEASURED completed-rate sits at/below the stall floor
+#: while its MEASURED ``failed_rps`` shows calls actively burning — the honest verdict is
+#: this DISTINCT red "failing" (calls are being spent and every one fails), not the
+#: ambiguous "stalled" (nothing happening at all). ``stalled`` stays ``True`` for it, so
+#: every existing red-light consumer keeps treating it as degraded.
+FLOW_FAILING: Final[str] = "failing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +199,13 @@ class PullRateView:
         (measured completed) slot (the over-report + fake-alive bug this decision fixes). Zeroed
         when idle. Always populated (it is a pure projection of ``recent_minute``), so the spot
         phase also carries it as a secondary view alongside its real ``req_per_sec_achieved``.
+    req_per_sec_failed
+        The transport meter's MEASURED rolling failed-calls rate (``failed_rps`` — calls
+        that FAILED per second over the meter's trailing window;
+        DEC-PULL-TELEMETRY-TRIAD-001). The evidence behind the :data:`FLOW_FAILING`
+        verdict: an issuing-but-all-failing pull shows the burn rate here while
+        ``req_per_sec_achieved`` honestly reads ~0. ``0.0`` when the meter is absent
+        (the admission-only phases push no failure measurement) and zeroed when idle.
     recent_429_count
         Recent vendor 429 hits (``recent_hits``) — context for WHY the achieved rate may
         sit below the ceiling. Zeroed when idle.
@@ -175,6 +216,14 @@ class PullRateView:
         The configured per-second ceiling LIMIT (:data:`CEILING_RPS_LIMIT`).
     ceiling_per_min
         The HARD per-minute governor LIMIT (:data:`CEILING_PER_MIN_LIMIT`).
+    flow_detail
+        A human-readable verdict detail for the widget's expanded view
+        (DEC-PIPELINE-PHASE-UI-HONESTY-001). Non-empty ONLY for
+        :data:`FLOW_LOCAL` — ``"local processing — <phase> (no vendor calls)"``,
+        naming the pipeline phase the amber light stands for. Every other flow
+        state carries ``""`` (the widget falls back to the flow-state word), so
+        the pre-existing wire payloads gain one additive field and change no
+        existing value.
     """
 
     flow_state: str
@@ -188,10 +237,12 @@ class PullRateView:
     req_per_10min: int
     req_per_hour_measured: int
     req_per_min_rate: float
+    req_per_sec_failed: float
     recent_429_count: int
     seconds_since_update: float
     ceiling_rps: float
     ceiling_per_min: int
+    flow_detail: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serialisable mapping (``inf`` ``seconds_since_update`` → ``None``).
@@ -217,7 +268,9 @@ def build_pull_rate_view(
     recent_600s: int = 0,
     recent_3600s: int = 0,
     meter_present: bool = True,
+    failed_rps: float = 0.0,
     pull_active: bool | None = None,
+    phase: str | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
 ) -> PullRateView:
@@ -257,6 +310,15 @@ def build_pull_rate_view(
         signal (``recent_minute == 0`` ⇒ stalled / idle) and ``req_per_sec_achieved`` stays a
         HONEST ``0`` (no fabricated completed-rate), the per-minute admission average being
         carried separately in :attr:`~PullRateView.req_per_min_rate`.
+    failed_rps
+        The transport meter's MEASURED rolling failed-calls rate (the meter snapshot's
+        ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001, closing the #1022 flagged
+        follow-up). On the METER-FED path (``meter_present=True``) a completed-rate
+        at/below the stall floor WITH ``failed_rps > 0`` reads the distinct
+        :data:`FLOW_FAILING` verdict — the pull IS burning calls and every one fails —
+        instead of the ambiguous "stalled" (``stalled`` stays ``True`` either way, so
+        red-light consumers are unchanged). The default ``0.0`` (an older panel / no
+        meter / no failures) is BYTE-IDENTICAL to the pre-decision projection.
     pull_active
         The caller's AUTHORITATIVE pull-run signal (DEC-RATE-STALL-PULL-GATE-001).
         ``False`` = the caller KNOWS no pull is running (the dashboard's
@@ -268,6 +330,18 @@ def build_pull_rate_view(
         tick within ``stale_after_s`` reads ``stalled`` (an active pull whose rate
         ticks flatlined). ``None`` (the default) = no signal available (the CLI
         bridge) ⇒ the pre-existing tick-freshness heuristic, byte-identical.
+    phase
+        The pipeline's CURRENT coarse ``set_phase`` label
+        (DEC-PIPELINE-PHASE-UI-HONESTY-001), or ``None`` when the caller has no
+        phase signal (the CLI bridge / a non-pipeline pull) — the default,
+        byte-identical to the pre-phase behaviour. When ``pull_active is True``
+        AND ``phase`` ∈ :data:`LOCAL_PHASES` (``prebuild`` / ``movers`` — LOCAL
+        processing, zero vendor calls by design) the verdict is
+        :data:`FLOW_LOCAL` (amber, never ``stalled``) with
+        :attr:`~PullRateView.flow_detail` naming the phase. Keyed STRICTLY on
+        the phase label, NEVER on zero admissions / meter absence — a
+        zero-admission fetch phase (``spot``/``metadata``/``historical``) still
+        reads STALLED exactly as DEC-RATE-WIDGET-FNO-HONEST-001 pinned.
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -290,12 +364,13 @@ def build_pull_rate_view(
 
     tick_fresh = seconds_since_update <= stale_after_s
 
-    def _quiet(flow_state: str, *, stalled: bool) -> PullRateView:
+    def _quiet(flow_state: str, *, stalled: bool, flow_detail: str = "") -> PullRateView:
         """A zeroed (no live numbers) view — the limits + staleness stay real."""
         return PullRateView(
             flow_state=flow_state,
             active=False,
             stalled=stalled,
+            flow_detail=flow_detail,
             req_per_sec_achieved=0.0,
             req_per_sec_allowed=0.0,
             req_per_min=0,
@@ -304,6 +379,7 @@ def build_pull_rate_view(
             req_per_10min=0,
             req_per_hour_measured=0,
             req_per_min_rate=0.0,
+            req_per_sec_failed=0.0,
             recent_429_count=0,
             seconds_since_update=seconds_since_update,
             ceiling_rps=CEILING_RPS_LIMIT,
@@ -318,6 +394,23 @@ def build_pull_rate_view(
         # live number is zeroed either way (the last live figures are history, not a
         # current rate — Golden Rule #1).
         return _quiet(FLOW_DONE if tick_fresh else FLOW_IDLE, stalled=False)
+
+    if pull_active is True and phase in LOCAL_PHASES:
+        # An ACTIVE pull in a LOCAL processing phase (DEC-PIPELINE-PHASE-UI-HONESTY-001):
+        # the prebuild / movers-warm stages make ZERO vendor calls by design, so the
+        # vendor-rate heuristics below (measured completed-rate at/below the floor, zero
+        # admissions, or even a stale tick) would read a perfectly healthy local stage as
+        # a red "stalled" — a dishonest alarm. The verdict is AMBER "local" with the
+        # phase named in ``flow_detail``; the live vendor numbers are zeroed (there IS no
+        # vendor traffic to show — Golden Rule #1). Checked BEFORE the tick-freshness
+        # stall so a between-tick gap during a local stage can never read red either.
+        # STRICTLY phase-keyed: a fetch phase (spot/metadata/historical) never lands here,
+        # so every DEC-RATE-WIDGET-FNO-HONEST-001 stall pin below is untouched.
+        return _quiet(
+            FLOW_LOCAL,
+            stalled=False,
+            flow_detail=f"local processing — {phase} (no vendor calls)",
+        )
 
     if not tick_fresh:
         if pull_active is True:
@@ -335,23 +428,33 @@ def build_pull_rate_view(
     req_per_min_rate = recent_minute / 60.0
 
     if meter_present:
-        # The spot phase: ``effective_rps`` is the transport CallMeter's MEASURED completed-rate,
-        # so the verdict reads it directly — an issued-but-all-failing pull (admissions happening
-        # but nothing COMPLETING) reads STALLED because its measured completed-rate is at/below the
-        # floor. ``req_per_sec_achieved`` carries that real measured number.
+        # The meter-fed path: ``effective_rps`` is the transport CallMeter's MEASURED
+        # completed-rate, so the verdict reads it directly — an issued-but-all-failing pull
+        # (admissions happening but nothing COMPLETING) reads at/below the floor. With the
+        # meter's MEASURED ``failed_rps`` now threaded in (DEC-PULL-TELEMETRY-TRIAD-001),
+        # that case splits honestly: failures actively burning ⇒ the DISTINCT "failing"
+        # verdict (calls spent, all failing — the #1022 flagged follow-up); no failures ⇒
+        # the plain "stalled" (nothing happening). ``failed_rps=0.0`` (the default — an
+        # older panel / no failures) keeps the projection byte-identical.
         stalled = effective_rps <= stall_rps_floor
+        failing = stalled and failed_rps > 0.0
         achieved = effective_rps
+        measured_failed_rps = failed_rps
     else:
         # The metadata + F&O phases: the meter is unreachable from the sampler seam, so there is
         # NO measured completed-rate. Fall back to the controller's ADMISSION signal — a pull with
         # ZERO admissions in the trailing minute is idle/stalled; any admissions ⇒ flowing — and
         # keep ``achieved`` an HONEST 0 (never the fabricated ``recent_minute / 60`` the old
         # sampler poured into this slot, which both over-reported AND blinded the stall verdict).
+        # NO ``failing`` verdict here: with no meter there is no measured failure rate to
+        # evidence it (the honest envelope — never a fabricated "failing").
         stalled = recent_minute == 0
+        failing = False
         achieved = 0.0
+        measured_failed_rps = 0.0
 
     return PullRateView(
-        flow_state=FLOW_STALLED if stalled else FLOW_FLOWING,
+        flow_state=FLOW_FAILING if failing else (FLOW_STALLED if stalled else FLOW_FLOWING),
         active=True,
         stalled=stalled,
         req_per_sec_achieved=achieved,
@@ -366,6 +469,9 @@ def build_pull_rate_view(
         req_per_10min=recent_600s,
         req_per_hour_measured=recent_3600s,
         req_per_min_rate=req_per_min_rate,
+        # The MEASURED failed-calls rate rides along as evidence on the active view; the
+        # meter-less phases carry an honest 0.0 (no failure measurement exists there).
+        req_per_sec_failed=measured_failed_rps,
         recent_429_count=recent_429_count,
         seconds_since_update=seconds_since_update,
         ceiling_rps=CEILING_RPS_LIMIT,
@@ -384,7 +490,9 @@ def build_pull_rate_view_merged(
     panel_recent_600s: int = 0,
     panel_recent_3600s: int = 0,
     panel_meter_present: bool = True,
+    panel_failed_rps: float = 0.0,
     panel_pull_active: bool | None = None,
+    panel_phase: str | None = None,
     bridge_effective_rps: float | None = None,
     bridge_current_rps: float | None = None,
     bridge_recent_minute: int | None = None,
@@ -394,6 +502,7 @@ def build_pull_rate_view_merged(
     bridge_recent_600s: int | None = None,
     bridge_recent_3600s: int | None = None,
     bridge_meter_present: bool = True,
+    bridge_failed_rps: float | None = None,
     bridge_pull_active: bool | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
@@ -434,6 +543,15 @@ def build_pull_rate_view_merged(
         sampler) — DEC-RATE-WIDGET-FNO-HONEST-001. Threaded into
         :func:`build_pull_rate_view` so the ``stalled`` verdict reads the measured rate when
         present and the admission signal otherwise. Default ``True`` (the meter-fed contract).
+    panel_failed_rps
+        The in-memory panel's MEASURED rolling failed-calls rate (the meter snapshot's
+        ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001), threaded into
+        :func:`build_pull_rate_view` so an issuing-but-all-failing meter-fed pull reads
+        the distinct :data:`FLOW_FAILING` verdict. Default ``0.0`` — byte-identical to
+        the pre-decision projection.
+    bridge_failed_rps
+        The bridge snapshot's failed-calls rate (``None`` when the bridge file is absent
+        or predates the field — projected as an honest ``0.0``, never fabricated).
     bridge_effective_rps, bridge_current_rps, bridge_recent_minute, bridge_recent_429_count
         The bridge snapshot's measured rate fields (``None`` when no bridge file is present).
     bridge_seconds_since_update
@@ -451,9 +569,18 @@ def build_pull_rate_view_merged(
         wins the freshness pick. The dashboard route passes its
         ``BackgroundPullJob.running`` as ``panel_pull_active``, so a just-completed
         dashboard pull reads ``done``/``idle``, never ``stalled``. The CLI bridge file
-        carries NO active flag, so ``bridge_pull_active`` stays ``None`` (the honest
-        tick-freshness fallback) until the bridge publishes one — an explicit follow-up,
-        NOT claimed here.
+        NOW carries the flag too (schema v3, DEC-CLI-BRIDGE-PULL-ACTIVE-001): each
+        per-window publish stamps ``pull_active=True`` and ``cmd_fetch``'s ``finally``
+        publishes one final ``pull_active=False`` — so a just-finished CLI pull ALSO
+        reads ``done``/``idle``. ``None`` remains the honest tick-freshness fallback for
+        a pre-v3 / absent / flagless bridge file.
+    panel_phase
+        The dashboard pipeline's CURRENT ``set_phase`` label threaded into the
+        PANEL-side projection only (DEC-PIPELINE-PHASE-UI-HONESTY-001) — the CLI
+        bridge is a separate ``brutex fetch`` process with NO pipeline phase, so
+        its projection NEVER receives a phase (a fresher bridge keeps its
+        byte-identical verdict; ``local`` can only ever come from the
+        dashboard's own pipeline).
     stale_after_s
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
@@ -484,6 +611,7 @@ def build_pull_rate_view_merged(
             recent_600s=bridge_recent_600s if bridge_recent_600s is not None else 0,
             recent_3600s=bridge_recent_3600s if bridge_recent_3600s is not None else 0,
             meter_present=bridge_meter_present,
+            failed_rps=bridge_failed_rps if bridge_failed_rps is not None else 0.0,
             pull_active=bridge_pull_active,
             last_update_monotonic=0.0,
             now_monotonic=bridge_seconds_since_update,
@@ -499,7 +627,9 @@ def build_pull_rate_view_merged(
         recent_600s=panel_recent_600s,
         recent_3600s=panel_recent_3600s,
         meter_present=panel_meter_present,
+        failed_rps=panel_failed_rps,
         pull_active=panel_pull_active,
+        phase=panel_phase,
         last_update_monotonic=0.0 if math.isfinite(panel_seconds_since_update) else float("-inf"),
         now_monotonic=panel_seconds_since_update
         if math.isfinite(panel_seconds_since_update)
@@ -513,9 +643,12 @@ __all__ = [
     "CEILING_PER_MIN_LIMIT",
     "CEILING_RPS_LIMIT",
     "FLOW_DONE",
+    "FLOW_FAILING",
     "FLOW_FLOWING",
     "FLOW_IDLE",
+    "FLOW_LOCAL",
     "FLOW_STALLED",
+    "LOCAL_PHASES",
     "STALE_AFTER_S",
     "STALL_RPS_FLOOR",
     "PullRateView",

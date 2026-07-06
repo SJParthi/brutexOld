@@ -25,9 +25,11 @@ from brutex.calendars.nse import (
     SESSION_CLOSE_IST,
     SESSION_DURATION_MINUTES,
     SESSION_OPEN_IST,
+    SPECIAL_WEEKEND_TRADING_SESSIONS,
     TICK_SIZE_PAISA,
     HolidayDataUnavailableError,
     SessionType,
+    daily_derive_cutoff,
     expected_bars_per_day_for_tf,
     forced_exit_seconds_for_session,
     forced_exit_time_for_session,
@@ -946,6 +948,72 @@ class TestFacadeIntegration:
         assert exit_t == cal.FORCED_EXIT_IST
         assert cal.is_forced_exit_bar(exit_t, tf_minutes=1)
         assert cal.expected_bars_per_day_for_tf(5) == 75
+
+
+# ── daily_derive_cutoff (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001) ───────────────
+
+
+class TestDailyDeriveCutoff:
+    """The session-close-aware forming-session cutoff for the derived 1day.
+
+    ``today`` while the run day's session is forming (or exactly AT close —
+    strict ``>``, conservative); ``today + 1`` once the session provably
+    closed OR on a non-trading day — honoring the per-date close of regular
+    days, SPECIAL_WEEKEND_TRADING_SESSIONS Budget weekends and the Muhurat
+    afternoon/evening hours.
+    """
+
+    @staticmethod
+    def _at(d: date, t: time) -> datetime:
+        return datetime.combine(d, t, tzinfo=IST)
+
+    def test_regular_weekday_pre_close_keeps_today(self) -> None:
+        d = date(2026, 7, 1)  # a regular Wednesday session
+        assert daily_derive_cutoff(self._at(d, time(12, 0))) == d
+
+    def test_regular_weekday_exactly_at_close_keeps_today(self) -> None:
+        # Strict `>` — exactly 15:30:00 is NOT provably past the close
+        # (conservative; boundary tightening is a named follow-up).
+        d = date(2026, 7, 1)
+        assert daily_derive_cutoff(self._at(d, SESSION_CLOSE_IST)) == d
+
+    def test_regular_weekday_post_close_includes_today(self) -> None:
+        d = date(2026, 7, 1)
+        assert daily_derive_cutoff(self._at(d, time(16, 0))) == d + timedelta(days=1)
+
+    def test_weekend_returns_tomorrow(self) -> None:
+        d = date(2026, 7, 5)  # Sunday, no special session
+        assert get_session(d) is None
+        assert daily_derive_cutoff(self._at(d, time(12, 0))) == d + timedelta(days=1)
+
+    def test_holiday_returns_tomorrow(self) -> None:
+        d = date(2026, 1, 26)  # Republic Day (Monday) — verified holiday
+        assert is_holiday(d)
+        assert daily_derive_cutoff(self._at(d, time(12, 0))) == d + timedelta(days=1)
+
+    def test_special_weekend_budget_session_pre_and_post_close(self) -> None:
+        # 2026-02-01 is a SUNDAY Budget session (SPECIAL_WEEKEND_TRADING_SESSIONS):
+        # mid-session it must be protected like any forming session; post-close
+        # it derives — a plain weekend rule would have wrongly returned
+        # tomorrow ALL day (deriving the forming session mid-day).
+        d = date(2026, 2, 1)
+        open_t, close_t = SPECIAL_WEEKEND_TRADING_SESSIONS[d]
+        assert daily_derive_cutoff(self._at(d, open_t)) == d
+        assert daily_derive_cutoff(self._at(d, time(12, 0))) == d
+        assert daily_derive_cutoff(self._at(d, close_t)) == d  # at-close: conservative
+        assert daily_derive_cutoff(self._at(d, time(16, 0))) == d + timedelta(days=1)
+
+    def test_muhurat_close_time_honored(self) -> None:
+        # 2025-10-21 Muhurat runs 13:45-14:45 IST (the verified afternoon
+        # shift): 14:00 is mid-session (today), 15:00 is past ITS close
+        # (tomorrow) even though a regular day would still be open at 15:00.
+        d = date(2025, 10, 21)
+        open_t, close_t = MUHURAT_SESSIONS[d]
+        assert daily_derive_cutoff(self._at(d, open_t)) == d
+        assert daily_derive_cutoff(self._at(d, time(14, 0))) == d
+        assert daily_derive_cutoff(
+            self._at(d, (datetime.combine(d, close_t) + timedelta(minutes=15)).time())
+        ) == d + timedelta(days=1)
 
 
 class TestExchangeSplit:

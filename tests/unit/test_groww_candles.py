@@ -16,6 +16,7 @@ import pytest
 from brutex.adapters.groww.candles import fetch_candle_windows
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.errors import GrowwRateLimitError
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from structlog.testing import capture_logs
 
 
@@ -185,6 +186,8 @@ def _fetch_mm(
     interval: str = "1day",
     start: date = date(2024, 1, 1),
     end: date = date(2024, 1, 2),
+    form_preference: SymbolFormPreference | None = None,
+    preference_key: str | None = None,
 ) -> list[object]:
     return list(
         fetch_candle_windows(
@@ -196,6 +199,8 @@ def _fetch_mm(
             start=start,
             end=end,
             drop_volume=False,
+            form_preference=form_preference,
+            preference_key=preference_key,
         )
     )
 
@@ -373,3 +378,43 @@ def test_ampersand_retryable_error_on_encoded_form_still_propagates() -> None:
         # max_attempts=1 → the client's own fast-retry never fires; the raise is direct.
         _fetch_mm(_form_client(sdk, max_attempts=1))
     assert sdk.symbols == ["NSE-M&M", "NSE-M%26M"]  # the encoded attempt raised out
+
+
+def test_form_preference_records_fallback_winner_then_first_form_win() -> None:
+    """DEC-SYMBOL-FORM-PREFERENCE-001 — both ``record_winner`` sites in the candle fetch.
+
+    Fetch 1 (fresh preference): plain clean-empty → the encoded FALLBACK recovers the
+    bars → the fallback winner is RECORDED (the post-fallback record site). Fetch 2
+    (same preference): the learned winner is tried FIRST and returns data → the
+    FIRST-form record site fires and the wasted plain fetch is gone (ONE physical call).
+    """
+    sdk = _FormFakeSDK({"NSE-M%26M": [_CANDLE_PAYLOAD, _CANDLE_PAYLOAD]})
+    pref = SymbolFormPreference()
+    first = _fetch_mm(_form_client(sdk), form_preference=pref, preference_key="M&M")
+    assert len(first) == 1
+    assert sdk.symbols == ["NSE-M&M", "NSE-M%26M"]  # canonical order on the fresh pref
+    # The fallback winner was recorded under the injected key: the encoded ROLE now
+    # orders first (learning is keyed by UNDERLYING, shared across contract strings).
+    assert pref.order("M&M", ("NSE-M&M", "NSE-M%26M")) == ("NSE-M%26M", "NSE-M&M")
+    second = _fetch_mm(_form_client(sdk), form_preference=pref, preference_key="M&M")
+    assert len(second) == 1
+    # The learned winner went FIRST and won — no wasted plain fetch, winner re-recorded.
+    assert sdk.symbols == ["NSE-M&M", "NSE-M%26M", "NSE-M%26M"]
+    assert pref.order("M&M", ("NSE-M&M", "NSE-M%26M")) == ("NSE-M%26M", "NSE-M&M")
+
+
+def test_form_preference_flips_back_when_plain_form_recovers() -> None:
+    """A stale encoded-first memory flips back when the PLAIN form is the one with data.
+
+    The preference orders encoded first (a previous winner); the encoded form is now
+    clean-empty and the plain FALLBACK recovers — the record flips the memory back to
+    the canonical plain-first order (a pure reorder, never a dropped form).
+    """
+    sdk = _FormFakeSDK({"NSE-M&M": [_CANDLE_PAYLOAD]})
+    pref = SymbolFormPreference()
+    pref.record_winner("M&M", ("NSE-M&M", "NSE-M%26M"), "NSE-M%26M")  # stale memory
+    bars = _fetch_mm(_form_client(sdk), form_preference=pref, preference_key="M&M")
+    assert len(bars) == 1
+    assert sdk.symbols == ["NSE-M%26M", "NSE-M&M"]  # learned order tried encoded first
+    # The PLAIN fallback won → the memory flips back to the canonical order.
+    assert pref.order("M&M", ("NSE-M&M", "NSE-M%26M")) == ("NSE-M&M", "NSE-M%26M")
