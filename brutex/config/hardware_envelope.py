@@ -160,9 +160,16 @@ _LOGGED_BUDGETS: set[str] = set()
 
 class SupportsExecute(Protocol):
     """A DuckDB-connection-shaped object (duck-typed — this config leaf never
-    imports ``duckdb``)."""
+    imports ``duckdb``).
 
-    def execute(self, sql: str) -> object:
+    The parameter is POSITIONAL-ONLY (``/``): the real
+    ``duckdb.DuckDBPyConnection.execute`` names its first parameter
+    ``query``, so a positional-or-keyword ``sql`` here would make the
+    Protocol structurally incompatible with it (pyright rejects the
+    keyword-name mismatch — caught on CI, where the duckdb stubs resolve).
+    """
+
+    def execute(self, sql: str, /) -> object:
         """Run one SQL statement (the ``SET threads`` pragma)."""
         ...  # pragma: no cover — Protocol stub, never executed
 
