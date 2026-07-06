@@ -48,18 +48,34 @@ envelope. These pins keep its safety properties from silently rotting:
   GITHUB_TOKEN must never land in ``.git/config`` under the third-party
   pip/cargo build surface the later steps execute.
 
-YAML-parse meta-tests plus a subprocess-executed bash harness for the
-assert step — no network, no ``brutex`` import (zero coverage-gate
-impact: ``--cov=brutex`` measures the package only).
+YAML-parse meta-tests plus THREE functional harnesses — no network, no
+``brutex`` import (zero coverage-gate impact: ``--cov=brutex`` measures
+the package only):
+
+* a subprocess-executed bash harness for the ASSERT step;
+* a node-executed harness for BOTH ``actions/github-script`` bodies
+  (filer + closer), run against a stubbed ``github``/``context``/``core``
+  (the DEC-CI-FORK-PR-HARDEN-001 executed-script precedent + the
+  node-executed ``bx-format.js`` golden of #1510) — empirically-verified
+  surviving mutations (filer ``if (open)`` inverted, closer
+  ``if (!open) return;`` inverted) hollow the issue lifecycle while every
+  textual pin stays green, so the branch logic is executed, not grepped;
+* a subprocess-executed bash harness for the TELEGRAM step with a stub
+  ``curl`` on PATH — deleting the send left the step a silent no-op while
+  the ``exit 0``/``||`` substring pins stayed satisfied.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -506,6 +522,259 @@ def test_telegram_degrades_gracefully() -> None:
     # (the natural debug move while main is red) must never ping the
     # operator with a message indistinguishable from the main daily alarm.
     assert "github.ref == 'refs/heads/main'" in str(telegram["if"])
+
+
+# ---------------------------------------------------------------------------
+# Functional teeth for the two actions/github-script bodies (filer + closer).
+# DEC-CI-FORK-PR-HARDEN-001 precedent (execute the REAL script against stubs)
+# + the node-executed bx-format.js golden (#1510). Empirically-verified
+# surviving mutations these kill: (a) filer `if (open)` -> `if (!open)` — the
+# FIRST red day files NOTHING (createComment on undefined `.number` throws,
+# swallowed into a core.warning) and every later red day mints a DUPLICATE
+# same-titled 'critical' issue; (b) closer `if (!open) return;` ->
+# `if (open) return;` — close-on-green broken forever, the exact stale-alarm
+# hazard (Golden Rule #1), while the `createComment`/`state: 'closed'`
+# substring pins stay green on the dead literals.
+# ---------------------------------------------------------------------------
+
+# Runs a github-script body the way actions/github-script does (an async
+# function body with `github`/`context`/`core`/`require` in scope, so a bare
+# top-level `return` is legal), records every issues.* call, and prints the
+# call log + core.warning log as JSON. Stub-only — no network, no token.
+_GITHUB_SCRIPT_HARNESS = """
+'use strict';
+const scriptBody = process.argv[1];
+const fixture = JSON.parse(process.argv[2]);
+const calls = [];
+const record = (name) => async (args) => { calls.push({ name, args }); return {}; };
+const github = { rest: { issues: {
+  listForRepo: async (args) => {
+    calls.push({ name: 'listForRepo', args });
+    return { data: fixture.issues };
+  },
+  create: record('create'),
+  createComment: record('createComment'),
+  update: record('update'),
+} } };
+const context = {
+  serverUrl: 'https://github.example',
+  repo: { owner: 'SJParthi', repo: 'bruteX' },
+  runId: 123,
+  sha: 'deadbeefcafe',
+  eventName: 'schedule',
+};
+const warnings = [];
+const core = { warning: (m) => warnings.push(String(m)) };
+const fn = new Function(
+  'github', 'context', 'core', 'require',
+  'return (async () => {\\n' + scriptBody + '\\n})();'
+);
+fn(github, context, core, require).then(() => {
+  process.stdout.write(JSON.stringify({ calls, warnings }));
+}).catch((e) => { process.stderr.write(String(e)); process.exit(1); });
+"""
+
+requires_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+
+
+def _lifecycle_script(marker: str) -> str:
+    """Return the github-script body whose text contains ``marker``."""
+    for step in _steps(_load()):
+        script = step.get("with", {}).get("script", "")
+        if isinstance(script, str) and marker in script:
+            return script
+    raise AssertionError(f"no github-script step contains {marker!r}")
+
+
+def _filer_script() -> str:
+    """The file-or-update tracking-issue script body."""
+    return _lifecycle_script("issues.create(")
+
+
+def _closer_script() -> str:
+    """The close-on-recovery script body."""
+    return _lifecycle_script("state: 'closed'")
+
+
+def _run_lifecycle_script(
+    tmp_path: Path, script_body: str, issues: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Node-execute a github-script body against the stubbed API fixture."""
+    proc = subprocess.run(  # nosec B603 — fixed argv, repo-owned script, test-only
+        ["node", "-e", _GITHUB_SCRIPT_HARNESS, script_body, json.dumps({"issues": issues})],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"harness failed: {proc.stderr}"
+    result = json.loads(proc.stdout)
+    assert isinstance(result, dict)
+    return result
+
+
+def _calls(result: dict[str, Any], name: str) -> list[dict[str, Any]]:
+    """Return the recorded calls to the named issues.* method."""
+    return [c["args"] for c in result["calls"] if c["name"] == name]
+
+
+# An open same-labelled issue with a DIFFERENT title: the dedupe/close key is
+# the exact stable title, so this distractor must never be commented/closed.
+_DISTRACTOR_ISSUE = {"number": 7, "title": "doctor-daily: some other thread"}
+_OPEN_TRACKING_ISSUE = {"number": 42, "title": ISSUE_TITLE}
+
+
+@requires_node
+def test_filer_creates_the_pinned_issue_when_none_open(tmp_path: Path) -> None:
+    """First red day: exactly one create with the pinned title/labels.
+
+    Kills the empirically-verified surviving `if (open)` -> `if (!open)`
+    inversion: inverted, this case throws inside the try (createComment on
+    undefined `.number`), swallows the error into a core.warning, and
+    files NOTHING on the first red day.
+    """
+    (tmp_path / "doctor-report.txt").write_text("FIXTURE TABLE\n", encoding="utf-8")
+    result = _run_lifecycle_script(tmp_path, _filer_script(), [_DISTRACTOR_ISSUE])
+    creates = _calls(result, "create")
+    assert len(creates) == 1, "the first red day must file exactly one issue"
+    assert creates[0]["title"] == ISSUE_TITLE
+    assert creates[0]["labels"] == ["bug", "doctor", "critical"]
+    assert "FIXTURE TABLE" in creates[0]["body"], "the doctor report must be threaded in"
+    assert _calls(result, "createComment") == []
+    assert _calls(result, "update") == []
+    assert result["warnings"] == [], "the happy path must not swallow an error"
+
+
+@requires_node
+def test_filer_folds_a_repeat_red_into_the_open_issue(tmp_path: Path) -> None:
+    """Repeat red day: one createComment on the open issue, NO duplicate."""
+    result = _run_lifecycle_script(
+        tmp_path, _filer_script(), [_DISTRACTOR_ISSUE, _OPEN_TRACKING_ISSUE]
+    )
+    comments = _calls(result, "createComment")
+    assert len(comments) == 1, "a repeat red must fold into the ONE open issue"
+    assert comments[0]["issue_number"] == 42, "the comment must land on the exact-title match"
+    assert comments[0]["body"].startswith("Still red:")
+    assert _calls(result, "create") == [], "a repeat red must never mint a duplicate issue"
+    assert _calls(result, "update") == []
+    assert result["warnings"] == []
+
+
+@requires_node
+def test_closer_comments_and_closes_the_open_issue(tmp_path: Path) -> None:
+    """Green with an open alarm: recovery comment + state closed.
+
+    Kills the empirically-verified surviving `if (!open) return;` ->
+    `if (open) return;` inversion, which breaks close-on-green forever
+    (the stale open 'critical' alarm — the exact Golden-Rule-#1 hazard
+    this step exists to prevent) while the substring pins stay green.
+    """
+    result = _run_lifecycle_script(
+        tmp_path, _closer_script(), [_DISTRACTOR_ISSUE, _OPEN_TRACKING_ISSUE]
+    )
+    comments = _calls(result, "createComment")
+    assert len(comments) == 1
+    assert comments[0]["issue_number"] == 42
+    assert "Recovered" in comments[0]["body"]
+    updates = _calls(result, "update")
+    assert len(updates) == 1, "a green day must close the tracking issue"
+    assert updates[0]["issue_number"] == 42
+    assert updates[0]["state"] == "closed"
+    assert result["warnings"] == []
+
+
+@requires_node
+def test_closer_is_a_noop_when_no_tracking_issue_open(tmp_path: Path) -> None:
+    """Green with no open alarm: list only — never comment/close/create."""
+    result = _run_lifecycle_script(tmp_path, _closer_script(), [_DISTRACTOR_ISSUE])
+    assert _calls(result, "createComment") == []
+    assert _calls(result, "update") == []
+    assert _calls(result, "create") == []
+    assert result["warnings"] == [], "the no-issue path must return early, not throw"
+
+
+# ---------------------------------------------------------------------------
+# Functional teeth for the Telegram step: run the REAL bash with a stub
+# `curl` on PATH. Empirically verified: deleting the curl send left the step
+# a silent no-op while the `exit 0` / `||` substring pins stayed satisfied
+# by the secret-check if-statement alone.
+# ---------------------------------------------------------------------------
+
+
+def _telegram_run() -> str:
+    """Return the Telegram alert step's real run script."""
+    step = next(s for s in _steps(_load()) if "TG_TOKEN" in str(s.get("env", {})))
+    run = step["run"]
+    assert isinstance(run, str)
+    return run
+
+
+def _run_telegram_step(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, list[str]]:
+    """Execute the Telegram bash with a call-recording stub curl on PATH.
+
+    Returns (exit code, combined output, one recorded line per curl call).
+    """
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir()
+    call_log = tmp_path / "curl-calls.log"
+    stub = bin_dir / "curl"
+    stub.write_text(
+        '#!/usr/bin/env bash\necho "CURL $*" >> "$CURL_CALL_LOG"\nexit "${CURL_STUB_EXIT:-0}"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "CURL_CALL_LOG": str(call_log),
+        "GITHUB_SHA": "deadbeefcafe",
+        "RUN_URL": "https://github.example/SJParthi/bruteX/actions/runs/123",
+        **extra_env,
+    }
+    proc = subprocess.run(  # nosec B603 — fixed argv, repo-owned script, test-only
+        ["bash", "-c", _telegram_run()],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = call_log.read_text(encoding="utf-8").splitlines() if call_log.exists() else []
+    return proc.returncode, proc.stdout + proc.stderr, calls
+
+
+def test_telegram_sends_exactly_once_when_secrets_set(tmp_path: Path) -> None:
+    """Both secrets set: exactly ONE curl sendMessage call, exit 0.
+
+    Kills the verified surviving delete-the-curl-send mutation (a silent
+    no-op alert channel behind green substring pins).
+    """
+    code, _, calls = _run_telegram_step(
+        tmp_path, {"TG_TOKEN": "test-token", "TG_CHAT": "test-chat"}
+    )
+    assert code == 0
+    assert len(calls) == 1, "the red-path alert must invoke curl exactly once"
+    assert "api.telegram.org/bottest-token/sendMessage" in calls[0]
+    assert "chat_id=test-chat" in calls[0]
+    assert "doctor-daily RED" in calls[0]
+
+
+def test_telegram_skips_silently_when_secrets_unset(tmp_path: Path) -> None:
+    """Unset secrets: notice + exit 0, curl NEVER invoked."""
+    code, output, calls = _run_telegram_step(tmp_path, {"TG_TOKEN": "", "TG_CHAT": ""})
+    assert code == 0, "the missing-secret path must exit 0, never fail the job"
+    assert calls == [], "no secrets => no network attempt at all"
+    assert "::notice::" in output
+
+
+def test_telegram_send_failure_is_nonfatal(tmp_path: Path) -> None:
+    """A failed curl degrades to a ::warning:: and still exits 0."""
+    code, output, calls = _run_telegram_step(
+        tmp_path,
+        {"TG_TOKEN": "test-token", "TG_CHAT": "test-chat", "CURL_STUB_EXIT": "7"},
+    )
+    assert code == 0, "a failed send must never fail the job"
+    assert len(calls) == 1
+    assert "::warning::" in output
 
 
 def test_continue_on_error_only_on_telegram() -> None:
