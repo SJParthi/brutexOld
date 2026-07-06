@@ -269,4 +269,25 @@ docstring for the YAML-loader roadmap.
 
 ---
 
-_Last updated: 2026-05-25 (added compose_standard_monitor verification per DEC-STANDARD-MONITOR-001)._
+## CI Actions secrets (optional — doctor-daily Telegram alert)
+
+The daily `brutex doctor` cron (`.github/workflows/doctor-daily.yml`,
+DEC-DOCTOR-DAILY-CRON-001) can additionally send a best-effort Telegram
+alert when a run goes red. To enable it, provision two **repository
+Actions secrets** (GitHub → Settings → Secrets and variables → Actions)
+with the SAME values as the app env vars above:
+
+| Actions secret | Value |
+|---|---|
+| `BRUTEX_TELEGRAM_BOT_TOKEN` | the BotFather bot token from Step 1 |
+| `BRUTEX_TELEGRAM_CHAT_ID` | the chat ID from Step 2 |
+
+This is an **operator task and never required for green**: when the
+secrets are absent the workflow's Telegram step degrades gracefully to a
+skip notice (exit 0) and the GitHub tracking issue remains the
+guaranteed alert channel. The secret NAMES mirror the app env vars and
+are already allowlisted by name in `.gitleaks.toml`.
+
+---
+
+_Last updated: 2026-07-06 (added the optional CI Actions secrets section for the doctor-daily cron per DEC-DOCTOR-DAILY-CRON-001; earlier 2026-05-25 — compose_standard_monitor verification per DEC-STANDARD-MONITOR-001)._

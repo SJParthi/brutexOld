@@ -1,0 +1,326 @@
+# doctor-daily.yml — the 07:30 IST daily `brutex doctor` cron
+# (DEC-DOCTOR-DAILY-CRON-001, MIGRATION.md #1521). Closes the
+# STANDARDS_100PCT.md §11 P2 row "Wire .github/workflows/doctor-daily.yml
+# 07:30 IST cron" (DEC-DOCTOR-001 #209 built the CLI; this wires the cron).
+#
+# HONEST ENVELOPE (Golden Rule #10) — what a green run PROVES / does NOT:
+#   PROVES : the `brutex doctor` CLI boots on a clean runner (full import
+#            chain incl. both PyO3 wheels); BOTH wheel-freshness handshakes
+#            PASS against the in-repo EXPECTED_BUILD.json fingerprints; the
+#            doctor's skip-with-reason machinery abstained honestly on every
+#            check needing the operator envelope (ASSERTED below — a
+#            fabricated PASS on a hosted runner goes red, never fake-green;
+#            a hollowed-out wheel check (SKIP/WARN) also goes red, never
+#            quietly green).
+#   NOT    : production lake / audit-chain / vendor / AWS health. The
+#            production-envelope doctor is verify-m4pro.yml (daily 12:00 UTC
+#            = 17:30 IST on the operator's M4 Pro, real lake) — this
+#            workflow is its always-on morning complement, NOT a duplicate
+#            claim. `brutex doctor --live` (sandbox-blind) NEVER runs here.
+#
+# TRIGGERS: cron + dispatch + push-of-owned-paths only. NO pull_request —
+# a scheduled observability contract must never gate PRs or join ci-ok.
+# "Alert if missed" (detecting a cron GitHub silently skipped) is a NAMED
+# NON-GOAL — see MIGRATION.md #1521.
+
+name: doctor-daily
+
+on:
+  schedule:
+    # 02:00 UTC = 07:30 IST (IST is fixed UTC+05:30, no DST — exact
+    # year-round). The STANDARDS §8 SLA / DEC-OBS-008 morning slot. Daily
+    # (not workdays-only): strictly covers the SLA, weekend runs are
+    # hermetic + cheap + idempotent.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Smoke the cron path immediately when the workflow or the doctor
+    # itself changes (nightly-sibling convention: mutation/stress/redteam).
+    paths:
+      - ".github/workflows/doctor-daily.yml"
+      - "brutex/doctor.py"
+
+permissions:
+  contents: read
+  issues: write # file/update/close the single doctor-daily tracking issue
+
+concurrency:
+  # Never cancel an in-flight run (nightly convention). With this false,
+  # a CANCELLED conclusion can only mean job-timeout-kill or manual cancel
+  # — both alert-worthy, which is exactly what `failure() || cancelled()`
+  # below gives (a superseded QUEUED run never starts, so it never alerts).
+  group: doctor-daily-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONHASHSEED: "0"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  doctor:
+    name: brutex doctor (hosted, envelope-honest)
+    runs-on: ubuntu-24.04
+    # Cold run ~12-15 min (two cargo wheel builds dominate); 30 = ~2x. A
+    # JOB-timeout kill reports CANCELLED -> the alert steps still fire
+    # (the DEC-MUTATION-ALERT-CANCELLED-001 class, live-probed run
+    # 28748795864). A STEP-timeout kill reports step FAILURE -> also fires.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install BruteX (minimum CLI-boot set)
+        # ci.yml run-smoke precedent: [data]+[ui] is the proven minimum to
+        # boot brutex.cli ([data] carries the polars the doctor imports).
+        run: pip install -e ".[data,ui]"
+
+      - name: Install Rust toolchain (for the PyO3 wheels)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install fno_math Rust extension
+        # brutex.cli transitively imports fno_math — the doctor cannot boot
+        # without it. 3-attempt retry loop verbatim from ci.yml.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Install trading_core Rust extension
+        # brutex.cli -> brutex.vocabulary -> trading_core.
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Run brutex doctor (hermetic CI envelope — NEVER --live)
+        # Hermetic paths make the expected-SKIP set deterministic regardless
+        # of runner-image residue: empty audit dir, absent runtime file,
+        # nonexistent lake root. BRUTEX_SKIP_WHEEL_FRESHNESS is deliberately
+        # NOT set. Step-level timeout kills a wedged check sharply (step
+        # timeout = step FAILURE, alertable). pipefail: GitHub's default
+        # `bash -e` lacks it — without it `tee` masks the doctor's exit 1.
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BRUTEX_LAKE_ROOT: ${{ runner.temp }}/ci-doctor/lake
+        run: |
+          set -o pipefail
+          CI_DOCTOR_HOME="${RUNNER_TEMP}/ci-doctor"
+          mkdir -p "${CI_DOCTOR_HOME}/audit"
+          brutex doctor \
+            --audit-dir "${CI_DOCTOR_HOME}/audit" \
+            --runtime-file "${CI_DOCTOR_HOME}/runtime.json" \
+            | tee doctor-report.txt
+
+      - name: Assert envelope honesty (5x SKIP-with-reason, 2x wheel PASS)
+        # Exit 0 from the doctor is necessary but NOT sufficient: (a) an
+        # envelope check reading PASS against the hermetic empty envelope is
+        # a fabricated verdict -> red ("CI must never claim operator-envelope
+        # health it cannot see"); (b) a wheel-freshness WARN/SKIP means the
+        # run proved nothing (in CI the wheel was built from THIS commit, so
+        # a mismatch = stale EXPECTED_BUILD.json = repo defect) -> red, never
+        # quietly green; (c) a MISSING check name means the doctor check set
+        # changed -> red, forcing a conscious reclassification here.
+        # Report line shape: "<glyph> <name padded> <status> <detail>", so
+        # awk $2 = check name, $3 = status (never match on the glyphs — the
+        # WARN glyph carries a variation selector).
+        shell: bash
+        run: |
+          assert_status() {
+            name="$1"; want="$2"
+            got="$(awk -v n="$name" '$2 == n { print $3 }' doctor-report.txt)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::doctor check '$name' expected $want in the hermetic CI envelope, got '${got:-MISSING}' — envelope-honesty contract broken (a MISSING name means the doctor check set changed: reclassify it here consciously)"
+              exit 1
+            fi
+          }
+          assert_status audit_chain SKIP
+          assert_status runtime_file SKIP
+          assert_status audit_replay SKIP
+          assert_status derived_freshness SKIP
+          assert_status lake_uniqueness SKIP
+          assert_status wheel_freshness PASS
+          assert_status wheel_freshness_fno_math PASS
+          echo "envelope-honesty contract holds: 5 SKIP-with-reason + 2 PASS"
+
+      - name: Publish run summary (envelope-honest)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## brutex doctor — daily 07:30 IST health check"
+            echo ""
+            echo "**CI envelope:** hosted runner — no production lake, no audit chain,"
+            echo "no vendor network, no AWS. Envelope checks self-SKIP with a reason and"
+            echo "are contract-asserted to stay SKIP — never fake-green. Production-"
+            echo "envelope doctor: \`verify-m4pro.yml\` (daily 12:00 UTC, M4 Pro, real lake)."
+            echo ""
+            if [ -f doctor-report.txt ]; then
+              echo '```'
+              cat doctor-report.txt
+              echo '```'
+            else
+              echo "_doctor never ran — see the failed setup step in this run._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload doctor report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: doctor-report
+          path: doctor-report.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Telegram alert on red (best-effort — NEVER fails the job)
+        # No Telegram secret is provisioned in this repo's Actions today (the
+        # only CI secret anywhere is GITHUB_TOKEN) — this step MUST degrade
+        # gracefully: unset secrets => notice + exit 0. Secrets are
+        # env-mapped because `secrets.*` is not usable in a step `if:`.
+        # Secret names mirror the app env vars (BRUTEX_TELEGRAM_*, already
+        # gitleaks-allowlisted by name; docs/runbooks/telegram-setup.md).
+        # Plain-text sendMessage (no parse_mode — MarkdownV2 escaping stays
+        # an app-side concern). Every exit path is 0; the GitHub issue below
+        # is the guaranteed channel.
+        if: failure() || cancelled()
+        continue-on-error: true
+        shell: bash
+        env:
+          TG_TOKEN: ${{ secrets.BRUTEX_TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.BRUTEX_TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
+            echo "::notice::Telegram secrets unset — skipping Telegram alert (the GitHub issue is the guaranteed channel)"
+            exit 0
+          fi
+          text="doctor-daily RED: brutex doctor failed or was cancelled (e.g. timeout-killed) on ${GITHUB_SHA}. ${RUN_URL}"
+          curl -fsS --max-time 15 \
+            "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "text=${text}" \
+            >/dev/null \
+            || echo "::warning::Telegram send failed (non-fatal — the GitHub issue is the guaranteed channel)"
+
+      - name: File or update the single doctor-daily tracking issue
+        # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
+        # killed by its own timeout-minutes reports CANCELLED, not FAILED
+        # (live-probed run 28748795864). Dedupe is STRONGER than
+        # mutation.yml's per-SHA title: a daily red on a moving main would
+        # mint one issue per day — the title here is STABLE (no sha), so all
+        # red days fold into ONE open tracking issue via createComment.
+        # try/catch so a denied issues:write degrades to a warning, never a
+        # masking second failure.
+        if: failure() || cancelled()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'doctor-daily: brutex doctor is RED';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let table = '(doctor output unavailable — the failure was in setup/bootstrap or a timeout-kill; see the run log)';
+            try {
+              table = require('fs').readFileSync('doctor-report.txt', 'utf8').slice(0, 6000);
+            } catch (e) { /* no report file exists */ }
+            const line = `Red on \`${context.sha}\` (${context.eventName}) — [run](${runUrl}).\n\n\`\`\`\n${table}\n\`\`\``;
+            try {
+              const existing = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                labels: 'bug,doctor',
+              });
+              const open = existing.data.find((i) => i.title === title);
+              if (open) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: open.number,
+                  body: `Still red: ${line}`,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body: [
+                    `The daily 07:30 IST \`brutex doctor\` cron (DEC-DOCTOR-DAILY-CRON-001) is red.`,
+                    '',
+                    line,
+                    '',
+                    '### Honest CI envelope (Golden Rule #10)',
+                    'Hosted runner: NO production lake, NO audit chain, NO Groww/NSE network, NO AWS.',
+                    'Envelope checks self-SKIP with a reason and are contract-asserted to stay SKIP.',
+                    'A red here means a CI-provable defect — wheel freshness vs EXPECTED_BUILD.json,',
+                    'CLI boot/import chain, an envelope-contract violation, or a timeout-kill — NOT a',
+                    'production-lake verdict (that is verify-m4pro.yml, daily 12:00 UTC on the M4 Pro).',
+                    '',
+                    'This is the single tracking issue — subsequent red days append comments here;',
+                    'a green day auto-closes it.',
+                  ].join('\n'),
+                  labels: ['bug', 'doctor', 'critical'],
+                });
+              }
+            } catch (e) {
+              core.warning(`doctor-daily alert issue could not be filed/updated: ${e.message}`);
+            }
+
+      - name: Close the tracking issue on recovery
+        # Golden Rule #1: a recovered doctor must not leave a stale open
+        # 'critical' alarm. Green closes with a recovery comment; the next
+        # red opens a fresh thread (one issue per red EPISODE).
+        if: success()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'doctor-daily: brutex doctor is RED';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            try {
+              const existing = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                labels: 'bug,doctor',
+              });
+              const open = existing.data.find((i) => i.title === title);
+              if (!open) return;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.number,
+                body: `Recovered: green on \`${context.sha}\` — [run](${runUrl}). Closing.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            } catch (e) {
+              core.warning(`doctor-daily recovery close failed (non-fatal): ${e.message}`);
+            }
