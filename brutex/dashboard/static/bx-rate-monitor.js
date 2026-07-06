@@ -469,6 +469,12 @@
   }
 
   function poll() {
+    // Hidden-tab pause (DEC-LEDGER-DELTA-O-PAGE-001, the v29.html pattern): a
+    // background tab fires ZERO fetches; the visibilitychange listener below
+    // fires an immediate catch-up tick on return so the pill is never stale to
+    // a returning operator (Golden Rule #1). Pure scheduling — render
+    // semantics unchanged; the interval keeps ticking (hidden ticks are free).
+    if (document.hidden) return;
     fetch(ENDPOINT, { headers: { Accept: "application/json" } })
       .then(function (r) {
         return r.ok ? r.json() : null;
@@ -501,6 +507,9 @@
     buildOverlay();
     poll();
     setInterval(poll, POLL_MS);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) poll();
+    });
   }
 
   if (document.readyState === "loading") {
