@@ -38,6 +38,7 @@ from brutex.engine.sweep_verify import (
     compare_recount,
     plan_expected_stores,
     recorded_context_from_audit,
+    recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
     verify_identity,
     verify_structural,
@@ -242,6 +243,89 @@ class TestRecordedContext:
         path.write_text("{not jsonl\n", encoding="utf-8")
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_context_from_audit(path)
+
+
+# ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
+
+
+class TestRecordedRollSchedules:
+    """`recorded_roll_schedules_from_audit` — the tree-describes-itself channel."""
+
+    _SCHEDULE: tuple[int, ...] = (739428, 739463)
+
+    def _payload(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "instrument": "NSE-NIFTY-FUT",
+            "params": {"roll_schedule": list(self._SCHEDULE)},
+        }
+        base.update(overrides)
+        return base
+
+    def test_absent_audit_returns_empty(self, tmp_path: Path) -> None:
+        assert recorded_roll_schedules_from_audit(tmp_path / "nope.jsonl") == {}
+
+    def test_reads_the_recorded_schedule(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._payload())
+        assert recorded_roll_schedules_from_audit(path) == {"NSE-NIFTY-FUT": tuple(self._SCHEDULE)}
+
+    def test_spot_tree_without_schedules_returns_empty(self, tmp_path: Path) -> None:
+        # Non-SWEEP_START entries + SWEEP_START without params/roll_schedule
+        # are all skipped — every spot tree reads {} (never a fabricated map).
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="OTHER", subject="s", payload=self._payload())
+            audit.append(action="SWEEP_START", subject="s", payload={"instrument": "NIFTY"})
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={"instrument": "NIFTY", "params": {"sl_paisa": 80}},
+            )
+        assert recorded_roll_schedules_from_audit(path) == {}
+
+    def test_consistent_repeat_entries_agree(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s1", payload=self._payload())
+            audit.append(action="SWEEP_START", subject="s2", payload=self._payload())
+        assert recorded_roll_schedules_from_audit(path) == {"NSE-NIFTY-FUT": tuple(self._SCHEDULE)}
+
+    def test_inconsistent_schedules_raise(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._payload())
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._payload(params={"roll_schedule": [739428]}),
+            )
+        with pytest.raises(SweepVerifyError, match="inconsistent recorded roll_schedule"):
+            recorded_roll_schedules_from_audit(path)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # Missing instrument — a schedule with no owner is unverifiable.
+            {"params": {"roll_schedule": [739428]}},
+            # Not a list.
+            {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": "739428"}},
+            # Non-int items (bool is an int subclass — explicitly rejected).
+            {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": [True]}},
+        ],
+    )
+    def test_malformed_schedule_raises(self, tmp_path: Path, payload: dict[str, object]) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=payload)
+        with pytest.raises(SweepVerifyError, match="malformed recorded roll_schedule"):
+            recorded_roll_schedules_from_audit(path)
+
+    def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_roll_schedules_from_audit(path)
 
 
 # ── Tier 1 — verify_structural ───────────────────────────────────────────────
@@ -491,6 +575,42 @@ class TestIdentity:
         assert "row_conflict_mask" in _codes(trusted)
         untrusted = verify_identity(tree, grid)
         assert "row_conflict_mask" not in _codes(untrusted)
+
+    def test_futures_tree_with_and_without_recorded_schedule(self, tmp_path: Path) -> None:
+        # ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 (F16): Tier 2
+        # re-derives a futures tuple's identity from the tree's RECORDED
+        # schedule; with NO schedule the run config cannot be rebuilt (the
+        # instrument⟺schedule invariant raises) — an honest WARN finding,
+        # never a crash, and the tree stays otherwise verifiable.
+        from datetime import date
+
+        from brutex.engine.sweep_orchestrator import make_store_for
+
+        schedule = (date(2026, 3, 31).toordinal(),)
+        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        root = tmp_path / "results"
+        root.mkdir()
+        with AuditWriter.open(root / "audit.jsonl") as audit:
+            run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: _trending_bars(),
+                store_for=make_store_for(root, grid),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                audit=audit,
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": schedule},
+            )
+        with_map = verify_identity(
+            root, grid, roll_schedule_by_instrument={"NSE-NIFTY-FUT": schedule}
+        )
+        assert "row_identity_underivable" not in _codes(with_map)
+        assert with_map.clean is True
+        # The recorded schedule really is the audit's own (the F16 channel).
+        assert recorded_roll_schedules_from_audit(root / "audit.jsonl") == {
+            "NSE-NIFTY-FUT": schedule
+        }
+        without_map = verify_identity(root, grid)
+        assert "row_identity_underivable" in _codes(without_map)
+        assert without_map.clean is True  # warn — Tier-1 verifiability stands
 
 
 # ── Stage-3 cell attribution (plan_expected_stores) ──────────────────────────

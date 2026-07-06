@@ -201,21 +201,45 @@ class _FakeKernel:
     """A stand-in kernel so cache tests assert build-once without a real build."""
 
     def __init__(
-        self, bars: object, *, proximity: object, prior_n: int, fib_anchor: object
+        self,
+        bars: object,
+        *,
+        proximity: object,
+        prior_n: int,
+        fib_anchor: object,
+        roll_schedule: tuple[int, ...] | None = None,
+        apply_1day_mask: bool = False,
     ) -> None:
         self.bars = bars
         self.proximity = proximity
         self.prior_n = prior_n
         self.fib_anchor = fib_anchor
+        self.roll_schedule = roll_schedule
+        self.apply_1day_mask = apply_1day_mask
 
 
 def _fake_builder() -> tuple[list[int], object]:
     """Return ``(call_log, builder)`` — the builder appends 1 per build call."""
     calls: list[int] = []
 
-    def build(bars: object, *, proximity: object, prior_n: int, fib_anchor: object) -> _FakeKernel:
+    def build(
+        bars: object,
+        *,
+        proximity: object,
+        prior_n: int,
+        fib_anchor: object,
+        roll_schedule: tuple[int, ...] | None = None,
+        apply_1day_mask: bool = False,
+    ) -> _FakeKernel:
         calls.append(1)
-        return _FakeKernel(bars, proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor)
+        return _FakeKernel(
+            bars,
+            proximity=proximity,
+            prior_n=prior_n,
+            fib_anchor=fib_anchor,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
+        )
 
     return calls, build
 
@@ -251,6 +275,10 @@ class TestResidentKernelCache:
             # bar_bits matrix is anchor-specific, so a different anchor must build
             # its own kernel, never reuse a stale one (R-1).
             {"fib_anchor": FibAnchorKind.ROLLING_WEEKLY},
+            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is the 6th
+            # key slot — a long-lived daemon re-launching over a changed lake
+            # must never serve a stale-schedule kernel (roll twin of R-1).
+            {"roll_schedule": (739428, 739463)},
         ],
     )
     def test_each_key_field_distinguishes_kernels(self, differing: dict[str, object]) -> None:
@@ -262,6 +290,7 @@ class TestResidentKernelCache:
             "proximity": None,
             "prior_n": 3,
             "fib_anchor": FibAnchorKind.PREV_DAY,
+            "roll_schedule": None,
         }
         a = cache.get([], **base)  # type: ignore[arg-type]
         b = cache.get([], **{**base, **differing})  # type: ignore[arg-type]
