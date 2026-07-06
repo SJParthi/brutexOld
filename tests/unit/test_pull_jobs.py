@@ -1122,6 +1122,164 @@ def test_pair_progress_phase_advances_open_ended_counters() -> None:
     assert job.snapshot().state == STATE_DONE
 
 
+# ════════════════════════════════════════════════════════════════════════
+# Durable pull-journal watchdog heartbeat (DEC-PULL-TELEMETRY-TRIAD-001) —
+# wiring the previously call-site-less ``record_pull_heartbeat``.
+# ════════════════════════════════════════════════════════════════════════
+
+
+class TestJournalHeartbeat:
+    """The throttled durable heartbeat: O(1), best-effort, never affects the pull."""
+
+    @staticmethod
+    def _manual_clock(values: list[float]) -> Callable[[], float]:
+        """A scripted journal clock (one value per throttle probe, in order)."""
+
+        def clock() -> float:
+            return values.pop(0)
+
+        return clock
+
+    @staticmethod
+    def _job(tmp_path: object, clock: Callable[[], float], interval: float) -> BackgroundPullJob:
+        return BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,  # type: ignore[arg-type, return-value]
+            journal_heartbeat_interval_s=interval,
+            journal_clock=clock,
+        )
+
+    def test_heartbeat_written_once_per_interval_with_bound_pull_id(self, tmp_path: object) -> None:
+        """Three beats inside one run → the first + the post-interval one journal; the
+        mid-interval one is throttled. Each record carries the BOUND pull_id."""
+        from pathlib import Path
+
+        from brutex.observability.correlation import pull_id_scope
+        from brutex.observability.pull_journal import EVENT_HEARTBEAT, read_journal
+
+        root = Path(str(tmp_path))
+        job = self._job(root, self._manual_clock([0.0, 50.0, 150.0]), 100.0)
+
+        def work(on_progress: ProgressHook) -> None:
+            with pull_id_scope("abc123def456"):
+                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=0 → writes
+                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=50 → throttled
+                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=150 → writes
+
+        assert job.start(work, total=3) is True
+        assert job.snapshot().state == STATE_DONE  # PARITY: the pull is unaffected
+        beats = [e for e in read_journal(root) if e.event == EVENT_HEARTBEAT]
+        assert len(beats) == 2
+        assert {b.pull_id for b in beats} == {"abc123def456"}
+
+    def test_unbound_pull_id_journals_nothing(self, tmp_path: object) -> None:
+        """A beat outside any ``pull_id_scope`` (no started record could group it) skips
+        the durable write — a missing heartbeat is a weaker signal, never a wrong one."""
+        from pathlib import Path
+
+        from brutex.observability.pull_journal import read_journal
+
+        root = Path(str(tmp_path))
+        job = self._job(root, self._manual_clock([0.0, 1.0, 2.0]), 0.5)
+
+        def work(on_progress: ProgressHook) -> None:
+            on_progress("NSE-NIFTY 1minute", 10, False, False)
+
+        assert job.start(work, total=1) is True
+        assert read_journal(root) == []
+
+    def test_none_lake_root_journals_nothing(self, tmp_path: object) -> None:
+        """A ``None`` resolved lake root (dry-run / test) skips the write gracefully."""
+        from pathlib import Path
+
+        from brutex.observability.correlation import pull_id_scope
+        from brutex.observability.pull_journal import read_journal
+
+        root = Path(str(tmp_path))
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: None,
+            journal_heartbeat_interval_s=1.0,
+            journal_clock=self._manual_clock([0.0]),
+        )
+
+        def work(on_progress: ProgressHook) -> None:
+            with pull_id_scope("abc123def456"):
+                on_progress("NSE-NIFTY 1minute", 10, False, False)
+
+        assert job.start(work, total=1) is True
+        assert job.snapshot().state == STATE_DONE
+        assert read_journal(root) == []  # nothing written anywhere under tmp
+
+    def test_write_failure_never_affects_the_pull(
+        self, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising journal writer is swallowed + logged; the pull finishes DONE with
+        the SAME progress it would have had (the Session-B best-effort parity pin)."""
+        from pathlib import Path
+
+        from brutex.observability import pull_journal
+        from brutex.observability.correlation import pull_id_scope
+        from structlog.testing import capture_logs
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("journal disk wedged")
+
+        monkeypatch.setattr(pull_journal, "record_pull_heartbeat", _boom)
+        root = Path(str(tmp_path))
+        job = self._job(root, self._manual_clock([0.0]), 1.0)
+
+        def work(on_progress: ProgressHook) -> None:
+            with pull_id_scope("abc123def456"):
+                on_progress("NSE-NIFTY 1minute", 42, False, False)
+
+        with capture_logs() as logs:
+            assert job.start(work, total=1) is True
+        snap = job.snapshot()
+        assert snap.state == STATE_DONE  # the pull is UNAFFECTED
+        assert snap.bars == 42
+        assert any(
+            e["event"] == "pull_job.journal_heartbeat failed; the pull is unaffected" for e in logs
+        )
+
+    def test_heartbeats_group_into_last_run_forensics(self, tmp_path: object) -> None:
+        """The journaled heartbeat carries the run's pull_id, so ``last_run`` groups it
+        with the ``started`` record — the post-mortem 'the run was alive' evidence."""
+        from pathlib import Path
+
+        from brutex.observability.correlation import pull_id_scope
+        from brutex.observability.pull_journal import last_run, read_journal, record_pull_start
+
+        root = Path(str(tmp_path))
+        record_pull_start(root, pull_id="abc123def456", dry_run=False)
+        job = self._job(root, self._manual_clock([0.0]), 100.0)
+
+        def work(on_progress: ProgressHook) -> None:
+            with pull_id_scope("abc123def456"):
+                on_progress("NSE-NIFTY 1minute", 10, False, False)
+
+        assert job.start(work, total=1) is True
+        run = last_run(read_journal(root))
+        assert run is not None
+        assert len(run.heartbeats) == 1
+        assert run.interrupted is True  # start + heartbeat, no finish (died-mid-run shape)
+
+    def test_stale_beat_between_runs_journals_nothing(self, tmp_path: object) -> None:
+        """A beat with NO active run (``_watchdog is None``) never journals."""
+        from pathlib import Path
+
+        from brutex.observability.correlation import pull_id_scope
+        from brutex.observability.pull_journal import read_journal
+
+        root = Path(str(tmp_path))
+        job = self._job(root, self._manual_clock([0.0]), 1.0)
+        with pull_id_scope("abc123def456"):
+            job._beat()  # pyright: ignore[reportPrivateUsage] — whitebox: no run active
+        assert read_journal(root) == []
+
+
 # ── the on_finally completion hook (DEC-PULL-INTENT-RESUME-001) ───────────────
 
 

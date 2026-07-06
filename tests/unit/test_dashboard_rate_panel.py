@@ -246,3 +246,38 @@ class TestQuotaRoute:
             "quota_limit": 100_000,
             "quota_remaining": 18_000,
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# failed_rps wiring (DEC-PULL-TELEMETRY-TRIAD-001) — the meter's measured
+# failed-calls rate flows meter snapshot → observer → panel.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_rate_panel_default_failed_rps_is_zero() -> None:
+    """The panel's failed-calls rate defaults 0.0 — byte-identical pre-decision shape."""
+    assert RateLimitPanel().failed_rps == 0.0
+
+
+def test_update_throughput_records_failed_rps() -> None:
+    """``update_throughput`` stores the meter's measured failed_rps (default 0.0)."""
+    state = DashboardState()
+    state.update_throughput(effective_rps=0.0, latency_ms_p95=0.0, failed_rps=2.4)
+    assert state.rate_limit.failed_rps == 2.4
+    # Omitting it (an older caller) resets to the honest 0.0 default — never sticky.
+    state.update_throughput(effective_rps=1.0, latency_ms_p95=5.0)
+    assert state.rate_limit.failed_rps == 0.0
+
+
+def test_make_rate_observer_maps_failed_rps_and_defaults_absent_to_zero() -> None:
+    """The observer reads the meter snapshot's ``failed_rps``; an older snapshot (or the
+    admission-only sampler sentinel) without the key maps to an honest 0.0."""
+    state = DashboardState()
+    observe = make_rate_observer(state)
+    observe({}, {"effective_rps": 0.0, "failed_rps": 3.1})
+    assert state.rate_limit.failed_rps == 3.1
+    observe({}, {"effective_rps": 0.0})  # key absent → 0.0, never a stale carry-over
+    assert state.rate_limit.failed_rps == 0.0
+    observe({}, {"meter_present": False})  # the sampler sentinel carries no failed_rps
+    assert state.rate_limit.failed_rps == 0.0
+    assert state.rate_limit.meter_present is False
