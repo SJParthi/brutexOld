@@ -53,5 +53,15 @@ pub use indicators::pivots::{PivotLevels, compute_pivot_levels};
 pub use indicators::vwap::VwapState;
 pub use spec::{Direction, SPEC_SCHEMA_VERSION, Signal, StrategySpec, evaluate};
 
+/// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
+/// baked at build time by `build.rs` under the shared FRAMING v1 of
+/// `rust/source_digest_core.rs` (DEC-RUST-SOURCE-DIGEST-TWIN-001,
+/// `docs/MIGRATION.md` #1258). The PyO3 module exports it as
+/// `__source_digest__`; `brutex doctor`'s `wheel_source_digest` stage compares
+/// it against the Python twin's (`brutex/wheel_digest.py`) fresh recompute
+/// over the repo checkout, catching a LOCAL wheel built from older source at
+/// the same crate version (same-version behavioural drift).
+pub const SOURCE_DIGEST: &str = env!("BRUTEX_SOURCE_DIGEST");
+
 #[cfg(feature = "python")]
 mod python;

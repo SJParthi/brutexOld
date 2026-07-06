@@ -8,10 +8,22 @@ per-symbol GIL-light Python overhead, and only materialises on a COLD contract
 build; an incremental re-run is near-zero work either way). On a shared CI box
 with ≤ 2 usable cores the threaded run can be at parity — hence the tolerant
 ceiling; a genuine cross-run improvement is reported, never required.
+
+M4-Pro gate (DEC-PREBUILD-BENCH-M4PRO-GATE-001, mirroring DEC-P0-020 /
+DEC-HARDENING-LEFTOVERS-001 #1149): this is an A/B WALL-CLOCK comparison —
+exactly the bench class every sibling in this job env-gates behind
+``BRUTEX_M4PRO_ABS=1`` — and it FLAKED on shared GHA within a day of landing
+(run 28772957825: ``1.827 s <= 1.329 s * 1.05`` failed while every other gate
+passed; reproduced locally on an idle 4-core box at ~1-in-4 — GIL noise flips
+the cross-arm median, the #1149 write-consumer failure mode verbatim). The
+timing assertion now runs only on the M4 Pro self-hosted runner; the threaded
+prebuild's CORRECTNESS (byte-identical lake output vs sequential) stays
+always-on in ``tests/unit/test_prebuild_parallel.py``.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -36,6 +48,24 @@ from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 _FIXED_CUTOFF = date(2021, 1, 8)
 _OPEN_UTC = datetime(2021, 1, 4, 3, 45, tzinfo=UTC)
+
+#: The SAME opt-in env the sibling A/B wall-clock benches key on (DEC-P0-020;
+#: e.g. tests/bench/test_write_consumer_overlap_bench.py) — set only on the
+#: M4 Pro self-hosted runner, never on shared GHA.
+_ENV_M4PRO_ABS = "BRUTEX_M4PRO_ABS"
+
+skip_unless_m4pro = pytest.mark.skipif(
+    os.environ.get(_ENV_M4PRO_ABS, "").strip() != "1",
+    reason=(
+        f"{_ENV_M4PRO_ABS}=1 not set — the sequential-vs-threaded prebuild "
+        "A/B wall-clock gate runs only on the M4 Pro self-hosted runner "
+        "(skipping on shared GHA to avoid chronic flake per DEC-P0-020 "
+        "honest-envelope; measured flake: run 28772957825 + ~1-in-4 on an "
+        "idle 4-core box — DEC-PREBUILD-BENCH-M4PRO-GATE-001). The threaded "
+        "prebuild's byte-identical-output correctness stays always-on in "
+        "tests/unit/test_prebuild_parallel.py."
+    ),
+)
 
 
 def _spot(name: str) -> Instrument:
@@ -86,6 +116,7 @@ def _seed_lake(root: Path, instruments: list[Instrument]) -> None:
 
 
 @pytest.mark.bench
+@skip_unless_m4pro
 def test_threaded_prebuild_not_slower(tmp_path: Path) -> None:
     instruments = _instruments(12)
     empty = build_fno_cascade([])

@@ -62,6 +62,11 @@ BRUTE-FORCE ENGINE is UNCHANGED (NIFTY/BANKNIFTY/SENSEX only) — this is the LA
 * **Network-bound, NOT O(1)-total** — both phases are I/O-bound (one
   ``get_expiries`` per cell + one ``get_historical_candles`` per contract-window);
   the phasing optimises the work set, it does NOT make the pull O(1)-total.
+* **A wedged store volume defers, never crashes** — a phase-(a) registry/coverage
+  write-deadline deferral (DEC-STORE-WRITE-DEADLINE-001) skips phase (b) with an
+  honest note instead of letting the wedged registry re-read raise the terminal
+  ``RegistryError`` past the composite; the deferred underlyings re-attempt on
+  the NEXT pull.
 """
 
 from __future__ import annotations
@@ -132,7 +137,10 @@ class CompositePullReport:
         reference-only — phase (a) never ran).
     historical
         The phase-(b) candle-pull report (``None`` when phase (a) found no tradable
-        underlying OR the freshly-cached registry held no matching contract).
+        underlying, the freshly-cached registry held no matching contract, OR phase
+        (a) deferred ≥1 registry/coverage write batch on a wedged store volume —
+        DEC-STORE-WRITE-DEADLINE-001: phase (b) is skipped and the deferred
+        underlyings re-attempt on the next pull).
     note
         An honest one-line outcome summary.
     """
@@ -372,6 +380,38 @@ def pull_historical_for_underlyings(
         now=now,
         today=today,
     )
+
+    # ── Wedged-store gate (DEC-STORE-WRITE-DEADLINE-001) ────────────────────────
+    # A store-write deadline breach during phase (a) leaves the SHARED registry
+    # WEDGED (the abandoned zombie write still holds the DuckDB connection's
+    # internal mutex), so phase (b)'s registry re-read (``list_contracts`` →
+    # ``_ensure_not_wedged``) would raise the TERMINAL ``RegistryError`` UNCAUGHT —
+    # failing the WHOLE composite job (and the one-click pipeline's phase 3, which
+    # shares ONE registry across the composite) instead of the per-underlying
+    # defer this change guarantees ("defers the CELL, never the pull"). Mirror the
+    # pipeline's phase-2 gate (``metadata_phase_ok``'s deferral arm): skip phase
+    # (b) and return an HONEST report — the deferred underlyings re-attempt on the
+    # NEXT pull (a graceful stop, never a crash, never a halt).
+    if metadata.store_write_deferrals > 0:
+        _LOG.warning(
+            "composite_pull.metadata_write_deferred",
+            tradable=list(tradable_names),
+            store_write_deferrals=metadata.store_write_deferrals,
+        )
+        note = (
+            f"metadata deferred {metadata.store_write_deferrals} registry/coverage "
+            "write batch(es) on a wedged store volume — candle phase skipped; "
+            "deferred underlyings re-attempt next pull"
+        )
+        return CompositePullReport(
+            dry_run=dry_run,
+            requested=requested,
+            tradable=tradable_names,
+            skipped_reference_only=tuple(skipped),
+            metadata=metadata,
+            historical=None,
+            note=note,
+        )
 
     # ── Phase (b) — CANDLE pull over the FRESHLY-cached registry rows (no re-enum) ──
     # Read with the RESOLVED registry keys (the SAME primary form phase (a) persisted

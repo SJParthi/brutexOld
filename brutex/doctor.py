@@ -51,6 +51,22 @@ Currently implemented checks
    ``fno_math``). That ImportError IS the operator remedy for the
    symbol-stale class; the "not importable" WARN arm is reachable
    only from programmatic ``run_doctor`` embeddings.
+4. **Wheel source digest** (DEC-RUST-SOURCE-DIGEST-TWIN-001 — closes the
+   "same-version, symbol-compatible behavioural drift" residual gap the
+   freshness stage names). ONE generic sibling helper
+   (:func:`_check_one_wheel_source_digest` over the SAME
+   :class:`_WheelSpec`) compares each installed wheel's build.rs-baked
+   ``__source_digest__`` against a fresh Python-twin recompute
+   (:func:`brutex.wheel_digest.crate_source_digest`) over the repo
+   checkout's ``rust/<crate>`` tree. Mismatch / absent stamp = non-fatal
+   ``WARN`` (consistent with the freshness stage);
+   ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips these stages too (still ONE
+   escape hatch for all wheel stages). HONEST scope (Golden Rule #10):
+   LOCAL machines only — CI builds every wheel from source per job
+   (no committed wheel exists anywhere), so CI can never see a stale
+   wheel; the exposure is a developer wheel built from older source at
+   the same crate version. No repo checkout next to the installed
+   package → honest ``SKIP`` (not checkable).
 
 Future checks (tracked for follow-up PRs, NOT in this PR)
 ---------------------------------------------------------
@@ -78,6 +94,7 @@ from pathlib import Path
 from typing import Any
 
 from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
+from brutex.wheel_digest import SourceDigestError, crate_source_digest
 
 # ────────────────────────────────────────────────────────────────────────
 # Defaults
@@ -606,10 +623,12 @@ def _check_one_wheel_freshness(
     HONEST residual gap (Golden Rule #10): version + symbol-set checks catch
     a stale wheel that dropped/added a symbol or changed crate version. They
     do NOT catch same-version, symbol-compatible BEHAVIORAL drift (Rust
-    source changed, version + symbols unchanged) — closing that needs a
-    source-content digest baked into the wheel, the named follow-up (out of
-    this change's scope); the CI golden/parity suites remain the correctness
-    proof for that class. Likewise, a NON-editable wheel install whose
+    source changed, version + symbols unchanged) — THAT class is now watched
+    by the SIBLING :func:`_check_one_wheel_source_digest` stage
+    (DEC-RUST-SOURCE-DIGEST-TWIN-001: the build.rs-baked source digest vs the
+    Python-twin recompute over the repo crate tree), which closed the
+    follow-up previously named here; the CI golden/parity suites remain the
+    behavioral correctness proof. Likewise, a NON-editable wheel install whose
     default fingerprint ships inside the wheel itself self-snapshots at
     build time; the check has teeth when the fingerprint read is the repo
     checkout's (the editable/`maturin develop` layout).
@@ -687,7 +706,8 @@ def _check_one_wheel_freshness(
         )
     # HONEST residual gap (Golden Rule #10): a PASS here means version +
     # symbol surface match — it does NOT prove behavioral freshness of a
-    # same-version, symbol-compatible rebuild (source digest = follow-up).
+    # same-version, symbol-compatible rebuild (that class is the sibling
+    # wheel_source_digest stage's job — DEC-RUST-SOURCE-DIGEST-TWIN-001).
     return CheckResult(
         name=spec.check_name,
         status="PASS",
@@ -748,6 +768,195 @@ def check_fno_math_wheel_freshness(
     return _check_one_wheel_freshness(_FNO_MATH_WHEEL, fingerprint_file, env)
 
 
+def _default_crate_root(spec: _WheelSpec) -> Path:
+    """Repo-checkout crate directory for ``spec`` (``rust/<crate>``).
+
+    Resolved relative to the ``brutex`` package location — under a repo
+    checkout / editable install that is ``<repo>/rust/<crate>``; under a
+    pure site-packages install the path does not exist and the digest stage
+    reports an honest SKIP (not checkable).
+    """
+    return Path(__file__).resolve().parents[1] / spec.crate_dir
+
+
+def _check_one_wheel_source_digest(
+    spec: _WheelSpec,
+    crate_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel source-content digest handshake for ONE compiled wheel.
+
+    DEC-RUST-SOURCE-DIGEST-TWIN-001 — the sibling of
+    :func:`_check_one_wheel_freshness` that closes its named residual gap:
+    a wheel built from OLDER source at the SAME crate version with the SAME
+    symbol surface (behavioural drift the version+symbol check cannot see).
+    ``build.rs`` bakes a BLAKE3 digest of the crate source (``Cargo.toml`` +
+    ``src/**/*.rs``, FRAMING v1 — ``rust/source_digest_core.rs``) into the
+    compiled module as ``__source_digest__``; this stage recomputes the same
+    digest over the repo checkout with the byte-for-byte Python twin
+    (:func:`brutex.wheel_digest.crate_source_digest`) and compares.
+
+    * ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` in ``env`` → SKIP (the ONE escape
+      hatch shared by every wheel stage, deliberately).
+    * Compiled module not importable → WARN with the rebuild instruction
+      (same reachability envelope as the freshness stage: through the
+      ``brutex`` CLI a broken wheel import kills the process at
+      ``import brutex.cli`` first; this arm serves programmatic embeddings).
+    * Installed module lacks a usable ``__source_digest__`` (an older wheel
+      predating the handshake) → **WARN (non-fatal)** with the rebuild hint.
+    * No crate source tree next to the installed ``brutex`` package (a
+      wheel-only install with no repo checkout) → SKIP, honestly not
+      checkable.
+    * Twin recompute fails (unreadable tree / non-UTF-8 name / a
+      symlink-cycle ``RecursionError``) → WARN.
+    * Digest mismatch → **WARN (non-fatal)** naming BOTH hex digests + the
+      actionable ``maturin develop --release`` rebuild hint (consistent with
+      the freshness stage's WARN semantics — an operator observation, never
+      a hard stop).
+    * Match → PASS.
+
+    HONEST scope (Golden Rule #10): LOCAL machines only. CI builds every
+    wheel from source in-job (there is NO committed wheel anywhere and no
+    other top-level build.rs consumer), so CI can never observe a stale
+    wheel — this stage has no CI teeth and claims none. The digest INPUT is
+    read from the checkout by pure Python and hashed with the ``blake3``
+    PyPI package (a BruteX base dependency), so a stale wheel cannot
+    influence its own expected value. ONE NAMED residual: FRAMING v1
+    excludes the crate's ``python/`` shim, yet maturin's mixed layout
+    packages ``rust/<crate>/python/<pkg>/__init__.py`` INTO the wheel — so
+    a local wheel stale ONLY in the shim escapes all four wheel stages
+    (this digest covers the compiled kernel's source; the freshness stages
+    fingerprint the compiled module's version+symbols, not shim content).
+    Folding the shim into a future FRAMING v2 is the named follow-up.
+    """
+    env_map: Mapping[str, str] = os.environ if env is None else env
+    if env_map.get("BRUTEX_SKIP_WHEEL_FRESHNESS") == "1":
+        return CheckResult(
+            name=spec.check_name,
+            status="SKIP",
+            detail="skipped via BRUTEX_SKIP_WHEEL_FRESHNESS=1",
+        )
+
+    rebuild_hint = f"rebuild via `maturin develop --release` in {spec.crate_dir}"
+    try:
+        compiled = importlib.import_module(f"{spec.package}.{spec.compiled_submodule}")
+    except ImportError as exc:
+        return CheckResult(
+            name=spec.check_name,
+            status="WARN",
+            detail=f"{spec.package} wheel not importable ({exc}) — {rebuild_hint}",
+        )
+
+    installed_digest = getattr(compiled, "__source_digest__", None)
+    if not isinstance(installed_digest, str):
+        return CheckResult(
+            name=spec.check_name,
+            status="WARN",
+            detail=(
+                f"installed {spec.package} wheel carries no usable __source_digest__ "
+                "(built before the source-digest handshake — "
+                f"DEC-RUST-SOURCE-DIGEST-TWIN-001) — {rebuild_hint}"
+            ),
+        )
+
+    root = crate_root if crate_root is not None else _default_crate_root(spec)
+    if not (root / "Cargo.toml").is_file():
+        return CheckResult(
+            name=spec.check_name,
+            status="SKIP",
+            detail=f"no crate source tree at {root} — source digest not checkable",
+        )
+
+    try:
+        expected_digest = crate_source_digest(root)
+    # RecursionError: an adversarial symlink CYCLE under src/ makes the
+    # twin's recursive walk exceed the interpreter limit — WARN, never a
+    # doctor crash (hostile-review fold, DEC-RUST-SOURCE-DIGEST-TWIN-001).
+    except (OSError, RecursionError, SourceDigestError) as exc:
+        return CheckResult(
+            name=spec.check_name,
+            status="WARN",
+            detail=f"source-digest recompute failed over {root}: {exc}",
+        )
+
+    if installed_digest != expected_digest:
+        return CheckResult(
+            name=spec.check_name,
+            status="WARN",
+            detail=(
+                f"installed {spec.package} wheel source digest {installed_digest} != "
+                f"repo tree digest {expected_digest} — the wheel was built from "
+                f"DIFFERENT source than this checkout — {rebuild_hint}"
+            ),
+        )
+    return CheckResult(
+        name=spec.check_name,
+        status="PASS",
+        detail=(
+            f"installed {spec.package} source digest matches the repo crate tree "
+            f"({expected_digest})"
+        ),
+    )
+
+
+_TRADING_CORE_SOURCE_DIGEST = _WheelSpec(
+    check_name="wheel_source_digest",
+    package=_TRADING_CORE_WHEEL.package,
+    compiled_submodule=_TRADING_CORE_WHEEL.compiled_submodule,
+    crate_dir=_TRADING_CORE_WHEEL.crate_dir,
+)
+
+_FNO_MATH_SOURCE_DIGEST = _WheelSpec(
+    check_name="wheel_source_digest_fno_math",
+    package=_FNO_MATH_WHEEL.package,
+    compiled_submodule=_FNO_MATH_WHEEL.compiled_submodule,
+    crate_dir=_FNO_MATH_WHEEL.crate_dir,
+)
+
+
+def check_wheel_source_digest(
+    crate_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel source-digest handshake for the trading_core wheel.
+
+    Thin binding of the COMMON :func:`_check_one_wheel_source_digest` to the
+    ``trading_core`` wheel (DEC-RUST-SOURCE-DIGEST-TWIN-001) — the sibling
+    of :func:`check_wheel_freshness`, mirroring its naming.
+
+    Parameters
+    ----------
+    crate_root
+        Explicit crate directory to digest. ``None`` = the repo checkout's
+        ``rust/trading-core`` resolved next to the installed ``brutex``
+        package (absent → honest SKIP).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_source_digest(_TRADING_CORE_SOURCE_DIGEST, crate_root, env)
+
+
+def check_fno_math_wheel_source_digest(
+    crate_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel source-digest handshake for the fno_math wheel.
+
+    The fno_math twin of :func:`check_wheel_source_digest`, bound to the
+    SAME common helper (DEC-RUST-SOURCE-DIGEST-TWIN-001).
+
+    Parameters
+    ----------
+    crate_root
+        Explicit crate directory to digest. ``None`` = the repo checkout's
+        ``rust/fno-math`` resolved next to the installed ``brutex`` package
+        (absent → honest SKIP).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_source_digest(_FNO_MATH_SOURCE_DIGEST, crate_root, env)
+
+
 def run_doctor(
     audit_file: Path | None = None,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
@@ -757,6 +966,8 @@ def run_doctor(
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
+    wheel_source_crate_root: Path | None = None,
+    fno_math_wheel_source_crate_root: Path | None = None,
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -788,6 +999,13 @@ def run_doctor(
         stage (DEC-FNOMATH-WHEEL-FRESHNESS-001). ``None`` = the
         ``EXPECTED_BUILD.json`` shipped next to the installed ``fno_math``
         package.
+    wheel_source_crate_root
+        Explicit crate directory for the trading_core wheel-source-digest
+        stage (DEC-RUST-SOURCE-DIGEST-TWIN-001). ``None`` = the repo
+        checkout's ``rust/trading-core``.
+    fno_math_wheel_source_crate_root
+        Explicit crate directory for the fno_math wheel-source-digest stage.
+        ``None`` = the repo checkout's ``rust/fno-math``.
 
     Returns
     -------
@@ -813,6 +1031,8 @@ def run_doctor(
     report.add(check_lake_uniqueness(resolved_lake))
     report.add(check_wheel_freshness(fingerprint_file=wheel_fingerprint_file))
     report.add(check_fno_math_wheel_freshness(fingerprint_file=fno_math_wheel_fingerprint_file))
+    report.add(check_wheel_source_digest(crate_root=wheel_source_crate_root))
+    report.add(check_fno_math_wheel_source_digest(crate_root=fno_math_wheel_source_crate_root))
     return report
 
 
@@ -825,6 +1045,8 @@ def main(
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
+    wheel_source_crate_root: Path | None = None,
+    fno_math_wheel_source_crate_root: Path | None = None,
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
@@ -836,6 +1058,8 @@ def main(
         lake_root=lake_root,
         wheel_fingerprint_file=wheel_fingerprint_file,
         fno_math_wheel_fingerprint_file=fno_math_wheel_fingerprint_file,
+        wheel_source_crate_root=wheel_source_crate_root,
+        fno_math_wheel_source_crate_root=fno_math_wheel_source_crate_root,
     )
     print(report.format())
     return 0 if report.ok else 1
