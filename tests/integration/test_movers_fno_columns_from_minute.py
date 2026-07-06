@@ -201,9 +201,10 @@ class TestOptionsColumnsFromMinute:
 class TestNoMaterialisedView:
     def test_reads_only_real_minute_partitions_no_view_created(self, tmp_path: Path) -> None:
         # Snapshot the whole lake tree BEFORE the read, run BOTH F&O snapshots, then
-        # assert the on-disk tree is UNCHANGED — the readers create NO materialised
-        # view / pre-materialised table; every value is computed live from the real
-        # 1-minute Parquet partitions (the operator's hard rule).
+        # assert the on-disk tree gained NOTHING but the dataset-DISCOVERY manifest
+        # sidecar — the readers create NO materialised view / pre-materialised table;
+        # every VALUE is computed live from the real 1-minute Parquet partitions
+        # (the operator's hard rule).
         _seed_minute_only_lake(tmp_path)
         before = {p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_file()}
 
@@ -215,12 +216,31 @@ class TestNoMaterialisedView:
         )
 
         after = {p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_file()}
-        assert after == before  # no new file (no view / no materialised table) written
+        # The ONLY read-side addition allowed: the durable dataset-DISCOVERY
+        # manifest sidecar (DEC-LAKE-MANIFEST-O1-001) — the first unfiltered
+        # discovery REBUILDS it so a restart stops paying the O(files) walk.
+        # It lives OUTSIDE bars/ (the ``.locks/`` placement rule) and holds
+        # dataset COORDINATES only — proven below — so the operator's hard
+        # rule (no materialised view / table of DATA) still holds bar-for-bar.
+        manifest_sidecar = {
+            Path(".manifest/datasets.jsonl"),
+            Path(".manifest/datasets.meta.json"),
+        }
+        assert after - manifest_sidecar == before  # no OTHER new file — no view, no table
+        # TEETH: the manifest sidecar carries coordinates + bookkeeping ONLY —
+        # never an OHLCV/OI value (it is a directory listing, not a data view).
+        import json
+
+        allowed_row_keys = {"exchange", "segment", "symbol", "interval", "first_seen"}
+        manifest_body = (tmp_path / ".manifest" / "datasets.jsonl").read_text(encoding="utf-8")
+        for line in manifest_body.splitlines():
+            assert set(json.loads(line)) <= allowed_row_keys, line
         # Every DATA file is a real 1-minute partition Parquet — no derived 1day
-        # partition, no view, no manifest, nothing pre-materialised. (The ``.locks/``
-        # sidecars are the write-time partition flock of DEC-LAKE-PARTITION-FLOCK-001,
-        # created by the SEED writes — not a read-time materialisation; excluded here.)
-        data_files = {rel for rel in after if not str(rel).startswith(".locks")}
+        # partition, no view, nothing pre-materialised. (The ``.locks/`` sidecars
+        # are the write-time partition flock of DEC-LAKE-PARTITION-FLOCK-001,
+        # created by the SEED writes; the ``.manifest/`` sidecar is the discovery
+        # manifest above — both metadata, both excluded here.)
+        data_files = {rel for rel in after if not str(rel).startswith((".locks", ".manifest"))}
         assert data_files, sorted(str(r) for r in after)
         assert all("1minute" in str(rel) and rel.suffix == ".parquet" for rel in data_files), (
             sorted(str(r) for r in data_files)
