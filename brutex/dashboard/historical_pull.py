@@ -117,6 +117,7 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
+from brutex.data.errors import StoreWriteDeadlineExceeded
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
@@ -162,6 +163,13 @@ _ONE_DAY: Final[timedelta] = timedelta(days=1)
 #: SAME discipline the bulk pull uses (DEC-GROWW-FUTURE-INGEST-001) so the two never
 #: collide on the same expiry.
 _FUTURE_SIDE: Final[str] = "FUT"
+
+#: WARN — the completion-stamp batch (``mark_candle_statuses``) blew the store-write
+#: wall-clock deadline (DEC-STORE-WRITE-DEADLINE-001): the stamps are DEFERRED — the
+#: unmarked contracts keep ``candle_status="none"`` and are re-marked idempotently by
+#: the next pull (the window ledger, not this stamp, drives window re-pull — no candle
+#: data is ever lost). Fields: ``contracts`` / ``error_type`` / ``defer_seconds``.
+HISTORICAL_MARK_COMPLETE_DEFERRED_EVENT: Final[str] = "historical.mark_complete.write_deferred"
 
 #: Deterministic pull ORDER over the per-market buckets: the FUTURES market is processed
 #: BEFORE the OPTIONS market (futures-first), with any unknown market sorted LAST. Without
@@ -877,15 +885,34 @@ def _mark_complete(
     (an EMPTY window is a settled, clean window), so the selected contracts ARE marked
     complete — the registry status reflects coverage of the SELECTED range, which the
     dry-run honestly settled as empty.
+
+    The whole stamp loop runs as ONE deadline-guarded registry write batch
+    (:meth:`~brutex.data.registry_store.RegistryStore.mark_candle_statuses` — O(1)
+    guard cost, DEC-STORE-WRITE-DEADLINE-001). A store-write-deadline breach DEFERS
+    the stamps (one loud WARN, return ``0`` — the durably-marked count is honestly
+    unknown): the unmarked contracts keep ``candle_status="none"`` and are re-marked
+    idempotently by the next pull; the window LEDGER, not this stamp, drives window
+    re-pull, so no candle data is ever lost. Never a raise past this seam — a wedged
+    registry volume must not fail the pull whose candles already landed durably.
     """
-    marked = 0
-    for row, _contract in rebuilt:
-        if row.contract_symbol in completed_symbols:
-            registry.set_candle_status(
-                row.exch, row.underlying, row.contract_symbol, CANDLE_STATUS_COMPLETE
-            )
-            marked += 1
-    return marked
+    rows = [
+        (row.exch, row.underlying, row.contract_symbol)
+        for row, _contract in rebuilt
+        if row.contract_symbol in completed_symbols
+    ]
+    if not rows:
+        return 0
+    try:
+        registry.mark_candle_statuses(rows, CANDLE_STATUS_COMPLETE)
+    except StoreWriteDeadlineExceeded as exc:
+        _LOG.warning(
+            HISTORICAL_MARK_COMPLETE_DEFERRED_EVENT,
+            contracts=len(rows),
+            error_type=type(exc).__name__,
+            defer_seconds=exc.deadline_seconds,
+        )
+        return 0
+    return len(rows)
 
 
 #: The per-window ledger identity — ``(market, security_id, interval, window_start,

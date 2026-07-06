@@ -94,6 +94,7 @@ from brutex.config.hardware_envelope import apply_duckdb_thread_bound
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.errors import CatalogError
 from brutex.data.fno_candle_lake import register_fno_candle_lake
+from brutex.data.store_write_deadline import STORE_CLOSE_SKIPPED_EVENT, StoreWriteDeadlineGuard
 from brutex.execution.types import InstrumentMeta as ExecutionInstrumentMeta
 from brutex.models import (
     Exchange,
@@ -858,6 +859,15 @@ class InstrumentStore(metaclass=_StoreMeta):
         # (the legs are discarded per DEC-INSTRUMENT-UNIVERSE-FAST-001), so the
         # index is a small, O(1)-bounded footprint, NOT an unbounded cache.
         self._symbol_index: dict[str, list[tuple[date, Instrument]]] | None = None
+        # Wall-clock deadline + wedge fail-fast latch for the COVERAGE-ledger write
+        # (DEC-STORE-WRITE-DEADLINE-001). The guard runs ONLY raw ``self._conn``
+        # statements on its daemon thread — the metaclass-held writer RLock stays
+        # caller-held, so a breach releases it deterministically on the OWNING
+        # thread. Scoped to the coverage family (write: :meth:`upsert_coverage`;
+        # wedge-checked reads: the coverage read family) — the other typed writers
+        # (``set_meta`` / ``upsert_many`` / …) stay unwrapped (a NAMED follow-up;
+        # exposure unchanged from today, honest envelope Golden Rule #10).
+        self._write_guard = StoreWriteDeadlineGuard(store_label="coverage")
 
     @property
     def connection(self) -> Any:
@@ -1256,35 +1266,51 @@ class InstrumentStore(metaclass=_StoreMeta):
         re-pull of the same cell replaces it in place. The DELETE+INSERT style
         means the latest attempt's counts + status + error always win
         deterministically.
+
+        The pair runs as ONE deadline-guarded write batch
+        (DEC-STORE-WRITE-DEADLINE-001): a wedged volume raises the TRANSIENT
+        :class:`~brutex.data.errors.StoreWriteDeadlineExceeded` after one deadline
+        — the metaclass wrapper then unwinds, so the SHARED dashboard writer RLock
+        is released instead of held forever. Atomicity honesty (Golden Rule #10):
+        there was never a transaction here; a breach between the DELETE and the
+        INSERT can leave the row ABSENT — the cell then reads never-pulled and is
+        re-attempted on the next pull (the fail-safe direction, never a fabricated
+        row).
         """
         self._ensure_open()
-        self._conn.execute(
-            "DELETE FROM coverage_ledger WHERE exch_id = ? AND underlying_symbol = ? AND year = ?",
-            [record.exch_id, record.underlying_symbol, record.year],
-        )
-        self._conn.execute(
-            "INSERT INTO coverage_ledger ("
-            "exch_id, underlying_symbol, year, expiries_pulled, contracts_pulled, "
-            "status, last_run_id, last_fetched_at, error_message"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                record.exch_id,
-                record.underlying_symbol,
-                record.year,
-                record.expiries_pulled,
-                record.contracts_pulled,
-                record.status,
-                record.last_run_id,
-                record.last_fetched_at,
-                record.error_message,
-            ],
-        )
+
+        def _write() -> None:
+            self._conn.execute(
+                "DELETE FROM coverage_ledger "
+                "WHERE exch_id = ? AND underlying_symbol = ? AND year = ?",
+                [record.exch_id, record.underlying_symbol, record.year],
+            )
+            self._conn.execute(
+                "INSERT INTO coverage_ledger ("
+                "exch_id, underlying_symbol, year, expiries_pulled, contracts_pulled, "
+                "status, last_run_id, last_fetched_at, error_message"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    record.exch_id,
+                    record.underlying_symbol,
+                    record.year,
+                    record.expiries_pulled,
+                    record.contracts_pulled,
+                    record.status,
+                    record.last_run_id,
+                    record.last_fetched_at,
+                    record.error_message,
+                ],
+            )
+
+        self._write_guard.run(_write, op="upsert_coverage")
 
     def get_coverage(
         self, exch_id: str, underlying_symbol: str, year: int
     ) -> CoverageRecord | None:
         """Return one cell by ``(exch_id, underlying_symbol, year)``, O(1) via PK."""
         self._ensure_open()
+        self._ensure_not_wedged()
         row = self._conn.execute(
             "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
@@ -1297,6 +1323,7 @@ class InstrumentStore(metaclass=_StoreMeta):
     def list_coverage(self) -> list[CoverageRecord]:
         """Return every coverage cell in a stable ``(exch_id, underlying, year)`` order."""
         self._ensure_open()
+        self._ensure_not_wedged()
         rows = self._conn.execute(
             "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
@@ -1312,6 +1339,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         (CLAUDE.md §5 O(1) discipline / Merge Charter §7).
         """
         self._ensure_open()
+        self._ensure_not_wedged()
         rows = self._conn.execute(
             "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
@@ -1998,14 +2026,27 @@ class InstrumentStore(metaclass=_StoreMeta):
     # ── Lifecycle ────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Close the underlying DuckDB connection. Idempotent."""
+        """Close the underlying DuckDB connection. Idempotent.
+
+        When a coverage-write deadline breach left a zombie write wedged inside the
+        writer connection, BOTH raw closes are SKIPPED (closing under a
+        mid-``execute`` zombie is the one call that could turn a bounded block into
+        a crash) and one
+        :data:`~brutex.data.store_write_deadline.STORE_CLOSE_SKIPPED_EVENT` WARN is
+        emitted; the store is still marked closed, so shutdown can never freeze
+        (DEC-STORE-WRITE-DEADLINE-001). The orphaned connections die with the
+        process (the zombie is a daemon thread).
+        """
         if self._closed:
             return
         try:
-            # Close the child READ cursor first, then the parent writer
-            # connection (DEC-STORE-READ-WRITE-SPLIT-001).
-            self._read_conn.close()
-            self._conn.close()
+            if self._write_guard.wedged:
+                _LOG.warning(STORE_CLOSE_SKIPPED_EVENT, store="coverage", path=str(self._path))
+            else:
+                # Close the child READ cursor first, then the parent writer
+                # connection (DEC-STORE-READ-WRITE-SPLIT-001).
+                self._read_conn.close()
+                self._conn.close()
         finally:
             self._closed = True
 
@@ -2026,6 +2067,24 @@ class InstrumentStore(metaclass=_StoreMeta):
         """Raise :class:`CatalogError` if the store has been closed."""
         if self._closed:
             raise CatalogError("InstrumentStore is closed")
+
+    def _ensure_not_wedged(self) -> None:
+        """Raise :class:`CatalogError` while an abandoned coverage write wedges the conn.
+
+        DEC-STORE-WRITE-DEADLINE-001: after a coverage-write deadline breach the
+        zombie write still holds the writer connection's internal mutex, so a
+        coverage read (e.g. the NEXT pull's Phase-1 seed ``list_coverage``) would
+        block on it unboundedly WHILE HOLDING the shared dashboard writer RLock.
+        The coverage read family therefore fails FAST + LOUD with the terminal
+        :class:`CatalogError` (a failed job headline, never a frozen thread); the
+        check self-heals the moment the zombie completes. One boolean check on the
+        healthy path. The ``/db`` whitebox reads survive on the SPLIT read cursor
+        (:class:`_LockedReadConn`), untouched here.
+        """
+        if self._write_guard.wedged:
+            raise CatalogError(
+                "InstrumentStore coverage write wedged; read refused until the volume recovers"
+            )
 
 
 # ────────────────────────────────────────────────────────────────────────
