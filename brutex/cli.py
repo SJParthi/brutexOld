@@ -6511,10 +6511,14 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     )
 
 
-def _render_options_leaderboard(
-    row: Any, results: tuple[Any, ...]
-) -> str:  # pragma: no cover — formatting over real-run output
-    """Render the per-rule priced-options leaderboard for one winning spot run."""
+def _render_options_leaderboard(row: Any, results: tuple[Any, ...]) -> str:
+    """Render the per-rule priced-options leaderboard for one winning spot run.
+
+    A pure formatter over ``(row, OptionsRuleResult…)`` — no lake I/O — so it
+    is directly unit-tested (the former ``pragma: no cover`` was LIFTED when
+    the DEC-ETC-REGIME-HISTORY-001 honesty footer added real derivation logic;
+    tests/unit/test_cli_options_leaderboard.py).
+    """
     from brutex.money import format_inr
 
     lines = [
@@ -6531,7 +6535,10 @@ def _render_options_leaderboard(
     # UNVERIFIED cost-regime window are surfaced, never silently absorbed.
     # The boundary date is derived from the regime-table DATA (the max
     # refusal-window end across exchanges), never hardcoded.
-    n_unverified = sum(getattr(r, "n_rejected_cost_regime_unverified", 0) for r in results)
+    # Direct attribute access, deliberately NOT getattr(..., 0): a future
+    # field rename on OptionsRuleResult must fail LOUD here, never silently
+    # render no footer forever (the honesty purpose would be defeated).
+    n_unverified = sum(r.n_rejected_cost_regime_unverified for r in results)
     if n_unverified:
         from brutex.costs.constants import etc_unverified_windows
 

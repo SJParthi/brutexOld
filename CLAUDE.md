@@ -46,7 +46,12 @@ circulars land; the FA73061 forward alert (NSE split 3,552+1/cr eff.
 2026-03-01, total unchanged) stays UNVERIFIED + NOT encoded (§20 row 6,
 highest-priority fetch). Costs + options-executor + CLI-footer + tests + docs
 only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate-cap
-change; brutex.costs + executor 100% line+branch).
+change; brutex.costs + executor 100% line+branch; the CLI leaderboard
+renderer's pre-existing `# pragma: no cover` LIFTED after the round-1 review
+caught the honesty footer riding it with ZERO executing tests —
+`_render_options_leaderboard` is now directly unit-tested at 100% line+branch
+with fail-loud direct attribute access instead of the silent `getattr`
+default, tests/unit/test_cli_options_leaderboard.py).
 Earlier: 2026-07-06 (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522 —
 the `GET /api/v1/pull/rate` CLI-bridge file read moved OFF the uvicorn event loop: a NEW
 `brutex/dashboard/rate_bridge_cache.py` `RateBridgeCache` memoises the decoded bridge
@@ -526,7 +531,9 @@ hostile-review pass._
   (eff. 2026-03-01) is a documented UNVERIFIED follow-up, NOT encoded. Goldens relocated 2024-05-02 → 2024-10-03 with
   every literal hand-re-derived + a boundary-exact 2024-10-01 golden + a pre-boundary refusal golden (zero lake reads
   proven). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; brutex.costs + executor 100%
-  line+branch; ruff/ruff-format clean, `mypy --strict` clean, pyright 0 errors).
+  line+branch; the CLI leaderboard renderer's `# pragma: no cover` LIFTED post-round-1-review —
+  `_render_options_leaderboard` directly unit-tested at 100% line+branch, `getattr` default → fail-loud direct access
+  (tests/unit/test_cli_options_leaderboard.py); ruff/ruff-format clean, `mypy --strict` clean, pyright 0 errors).
   Earlier: `claude/vibrant-knuth-itozu6` (**DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001, MIGRATION.md #1522** —
   the `GET /api/v1/pull/rate` CLI-bridge file read (`<lake_root>/.rate/pull_rate.json`, previously a synchronous
   `Path.read_bytes()` executed ON the uvicorn event loop on EVERY ~3 s site-wide widget poll — a slow/stalled external
