@@ -690,12 +690,37 @@ class IntegrityReport:
 # handlers can no longer overlap on the connection.
 
 
-def _synchronized(method: Any) -> Any:
-    """Wrap a public store method so its whole body runs under ``self._lock``."""
+#: Public methods EXEMPT from the wrapper-level wedge fail-fast
+#: (DEC-STORE-WRITE-DEADLINE-001 fix round 2): ``upsert_coverage`` is guarded by
+#: :class:`~brutex.data.store_write_deadline.StoreWriteDeadlineGuard`, whose latch
+#: already raises the TRANSIENT ``StoreWriteDeadlineExceeded`` the metadata-pull
+#: defer sites catch (a terminal ``CatalogError`` here would break the
+#: per-underlying deferral contract); ``close()`` handles the wedge ITSELF
+#: (skip-the-raw-close + WARN — shutdown must never be refused).
+_WEDGE_EXEMPT: frozenset[str] = frozenset({"close", "upsert_coverage"})
+
+
+def _synchronized(method: Any, *, wedge_check: bool = True) -> Any:
+    """Wrap a public store method so its whole body runs under ``self._lock``.
+
+    ``wedge_check`` (DEC-STORE-WRITE-DEADLINE-001 fix round 2): every non-exempt
+    public method fails FAST with the terminal ``CatalogError`` while an abandoned
+    coverage write still wedges the writer connection — ANY typed method reaching
+    the wedged ``self._conn`` would block unboundedly on its internal mutex WHILE
+    HOLDING the shared writer RLock, transitively re-freezing the guarded pull
+    lane (the next ``upsert_coverage`` would queue on the RLock BEFORE the guard's
+    latch could raise). One boolean check on the healthy path; a CLOSED store
+    skips the check so the method's own ``_ensure_open`` raises the honest
+    "closed" error first.
+    """
 
     @functools.wraps(method)
     def _wrapper(self: InstrumentStore, *args: Any, **kwargs: Any) -> Any:
         with self._lock:
+            # Same intimate module-level-helper access as ``self._lock`` above
+            # (DEC-P0-017 convention — the wrapper IS part of the store).
+            if wedge_check and not self._closed:  # pyright: ignore[reportPrivateUsage]
+                self._ensure_not_wedged()  # pyright: ignore[reportPrivateUsage]
             return method(self, *args, **kwargs)
 
     return _wrapper
@@ -708,7 +733,9 @@ class _StoreMeta(type):
     a ``property`` / ``staticmethod`` / ``classmethod``) in :func:`_synchronized`
     at class-creation time, so the per-store ``threading.RLock`` is acquired for
     the full execute→fetch of every read/write — no per-method decorator churn,
-    and a future method added to the class is thread-safe by default.
+    and a future method added to the class is thread-safe by default (and, per
+    DEC-STORE-WRITE-DEADLINE-001 fix round 2, wedge-fail-fast by default: only
+    the :data:`_WEDGE_EXEMPT` members skip the check).
     """
 
     def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> _StoreMeta:
@@ -718,7 +745,9 @@ class _StoreMeta(type):
                 and not attr_name.startswith("_")
                 and not isinstance(attr, staticmethod | classmethod | property)
             ):
-                namespace[attr_name] = _synchronized(attr)
+                namespace[attr_name] = _synchronized(
+                    attr, wedge_check=attr_name not in _WEDGE_EXEMPT
+                )
         return super().__new__(mcs, name, bases, namespace)
 
 
@@ -863,10 +892,13 @@ class InstrumentStore(metaclass=_StoreMeta):
         # (DEC-STORE-WRITE-DEADLINE-001). The guard runs ONLY raw ``self._conn``
         # statements on its daemon thread — the metaclass-held writer RLock stays
         # caller-held, so a breach releases it deterministically on the OWNING
-        # thread. Scoped to the coverage family (write: :meth:`upsert_coverage`;
-        # wedge-checked reads: the coverage read family) — the other typed writers
-        # (``set_meta`` / ``upsert_many`` / …) stay unwrapped (a NAMED follow-up;
-        # exposure unchanged from today, honest envelope Golden Rule #10).
+        # thread. DEADLINE-guarded write: :meth:`upsert_coverage`; WEDGE fail-fast:
+        # STORE-WIDE via the :func:`_synchronized` wrapper (fix round 2 — every
+        # non-:data:`_WEDGE_EXEMPT` typed method refuses while the conn is wedged,
+        # so a per-request route call can never re-freeze the guarded pull lane
+        # through the shared RLock). The other typed WRITERS (``set_meta`` /
+        # ``upsert_many`` / …) still carry no deadline of their own (a NAMED
+        # follow-up) — but they now fail fast once a coverage breach latched.
         self._write_guard = StoreWriteDeadlineGuard(store_label="coverage")
 
     @property
@@ -972,9 +1004,12 @@ class InstrumentStore(metaclass=_StoreMeta):
     def schema_version(self) -> int:
         """Return the schema version recorded in ``schema_meta``."""
         # A property, so _StoreMeta does not wrap it — lock explicitly so its
-        # execute→fetch can't race the background pull (DEC-STORE-THREADSAFE-001).
+        # execute→fetch can't race the background pull (DEC-STORE-THREADSAFE-001)
+        # and wedge-check explicitly (it touches self._conn like any typed
+        # method; DEC-STORE-WRITE-DEADLINE-001 fix round 2).
         with self._lock:
             self._ensure_open()
+            self._ensure_not_wedged()
             row = self._conn.execute(
                 "SELECT value FROM schema_meta WHERE key = ?",
                 ["schema_version"],
@@ -1310,7 +1345,6 @@ class InstrumentStore(metaclass=_StoreMeta):
     ) -> CoverageRecord | None:
         """Return one cell by ``(exch_id, underlying_symbol, year)``, O(1) via PK."""
         self._ensure_open()
-        self._ensure_not_wedged()
         row = self._conn.execute(
             "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
@@ -1323,7 +1357,6 @@ class InstrumentStore(metaclass=_StoreMeta):
     def list_coverage(self) -> list[CoverageRecord]:
         """Return every coverage cell in a stable ``(exch_id, underlying, year)`` order."""
         self._ensure_open()
-        self._ensure_not_wedged()
         rows = self._conn.execute(
             "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
@@ -1339,7 +1372,6 @@ class InstrumentStore(metaclass=_StoreMeta):
         (CLAUDE.md §5 O(1) discipline / Merge Charter §7).
         """
         self._ensure_open()
-        self._ensure_not_wedged()
         rows = self._conn.execute(
             "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
@@ -2071,19 +2103,26 @@ class InstrumentStore(metaclass=_StoreMeta):
     def _ensure_not_wedged(self) -> None:
         """Raise :class:`CatalogError` while an abandoned coverage write wedges the conn.
 
-        DEC-STORE-WRITE-DEADLINE-001: after a coverage-write deadline breach the
-        zombie write still holds the writer connection's internal mutex, so a
-        coverage read (e.g. the NEXT pull's Phase-1 seed ``list_coverage``) would
-        block on it unboundedly WHILE HOLDING the shared dashboard writer RLock.
-        The coverage read family therefore fails FAST + LOUD with the terminal
-        :class:`CatalogError` (a failed job headline, never a frozen thread); the
-        check self-heals the moment the zombie completes. One boolean check on the
-        healthy path. The ``/db`` whitebox reads survive on the SPLIT read cursor
-        (:class:`_LockedReadConn`), untouched here.
+        DEC-STORE-WRITE-DEADLINE-001 (store-wide since fix round 2): after a
+        coverage-write deadline breach the zombie write still holds the writer
+        connection's internal mutex, so ANY typed method touching ``self._conn``
+        (a coverage read like the NEXT pull's Phase-1 seed ``list_coverage``, but
+        equally ``get_meta`` / ``fno_eligible_underlyings`` / ``upsert_many`` —
+        the per-request dashboard-route calls) would block on it unboundedly
+        WHILE HOLDING the shared dashboard writer RLock, transitively re-freezing
+        the guarded pull lane behind that RLock. Every non-:data:`_WEDGE_EXEMPT`
+        public method therefore fails FAST + LOUD via the :func:`_synchronized`
+        wrapper (a failed job/request headline, never a frozen thread); the
+        check self-heals the moment the zombie completes. One boolean check on
+        the healthy path. The ``/db`` whitebox reads survive on the SPLIT read
+        cursor (:class:`_LockedReadConn`), untouched here. HONEST residual
+        (Golden Rule #10): the latch is set only AT the first breach — a caller
+        that reached the wedged conn BEFORE that breach still blocks unboundedly
+        on the conn mutex (it dies with the process, like the zombie itself).
         """
         if self._write_guard.wedged:
             raise CatalogError(
-                "InstrumentStore coverage write wedged; read refused until the volume recovers"
+                "InstrumentStore write wedged; store access refused until the volume recovers"
             )
 
 

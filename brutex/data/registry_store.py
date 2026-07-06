@@ -240,8 +240,8 @@ class RegistryStore:
         is rebuildable from a re-pull, so the drop is safe); a fresh or
         already-current store skips the drop.
 
-        The whole connect + DDL + ``schema_meta`` stamp — a REAL disk write on every
-        open — runs under the store-write wall-clock deadline
+        The whole ``mkdir`` + connect + DDL + ``schema_meta`` stamp — REAL disk
+        writes on every open — runs under the store-write wall-clock deadline
         (DEC-STORE-WRITE-DEADLINE-001), so a NEXT pull opening a fresh store on a
         still-wedged volume fails LOUDLY with the terminal :class:`RegistryError`
         after one deadline instead of freezing the job/request thread forever.
@@ -253,9 +253,14 @@ class RegistryStore:
                 "RegistryStore requires 'duckdb' — install with 'pip install -e .[data]'"
             ) from exc
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-
         def _connect() -> Any:
+            # The mkdir is a metadata WRITE syscall — on the exact targeted
+            # failure mode (a wedged external SSD / hard NFS mount) it blocks in
+            # uninterruptible sleep just like the wedged fsync of #999, so it
+            # MUST run inside the deadline with the rest of the open sequence
+            # (fix round 2 — pre-fix it ran on the caller thread, freezing a
+            # fresh open at the mkdir before any guard existed).
+            path.parent.mkdir(parents=True, exist_ok=True)
             conn = duckdb.connect(str(path))
             apply_duckdb_thread_bound(conn, threads=threads)
             conn.execute(_DDL_SCHEMA_META)

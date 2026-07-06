@@ -32,12 +32,17 @@ finally returns (the volume recovered), its ``finally`` clears the token, logs o
 
 **Honest envelope (Golden Rule #10):** the abandoned daemon write CANNOT be killed —
 it dies with the process. The guarantee is "no pull driver/worker lane is ever blocked
-longer than one deadline; every Python store lock is caller-held and deterministically
-released on breach; the affected underlying is deferred, loudly WARNed, and
-re-attempted on the next pull; while the volume stays wedged, new guarded writes fail
-fast and loud; when the volume recovers the zombie completes its idempotent keyed
+longer than one deadline ONCE the wedge latch is set; every Python store lock is
+caller-held and deterministically released on breach; the affected underlying is
+deferred, loudly WARNed, and re-attempted on the next pull; while the volume stays
+wedged, new guarded writes — and, store-wide, every non-exempt typed store method —
+fail fast and loud; when the volume recovers the zombie completes its idempotent keyed
 write, the wedge self-clears, and the store resumes" — NOT "the zombie write thread is
-terminated". A late-completing zombie write is harmless by construction: every guarded
+terminated". NAMED RESIDUAL: the latch is set only AT the first breach, so a caller
+whose statement reached the wedged connection BEFORE that breach (the latch not yet
+set) still blocks the lane unboundedly on the conn's internal mutex — it dies with the
+process, exactly like the zombie itself; only callers arriving AFTER the breach are
+protected. A late-completing zombie write is harmless by construction: every guarded
 statement is an idempotent keyed ``INSERT OR REPLACE`` / ``UPDATE`` /
 ``DELETE``+``INSERT`` carrying exactly the values the healthy path would have written.
 

@@ -1090,11 +1090,37 @@ class TestCoverageWriteDeadline:
                     s.get_coverage("NSE", "NIFTY", 2026)
                 with pytest.raises(CatalogError, match="wedged"):
                     s.list_incomplete_coverage()
+                # Store-wide wedge fail-fast (fix round 2): typed methods OUTSIDE
+                # the coverage family refuse too — pre-fix they blocked unboundedly
+                # on the zombie-held conn mutex WHILE HOLDING the shared writer
+                # RLock, transitively re-freezing the guarded pull lane (the next
+                # upsert_coverage queued on the RLock BEFORE the guard's latch
+                # could raise).
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.get_meta("schema_version")
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.set_meta("k", "v")
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.fno_eligible_underlyings()
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.list_index_equity_instruments()
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.upsert_many(
+                        [],
+                        snapshot_date=date(2026, 6, 14),
+                        run_id="r-wedged",
+                        csv_source_sha256=hashlib.sha256(b"x").hexdigest(),
+                    )
+                with pytest.raises(CatalogError, match="wedged"):
+                    _ = s.schema_version
             finally:
                 proxy.gate.set()
             # Recovery: the zombie's idempotent DELETE+INSERT lands late and the
-            # store resumes — prior row intact, deferred row present, reads work.
+            # store resumes — prior row intact, deferred row present, reads work
+            # (incl. the store-wide wrapper check self-healing off the latch).
             _wait_until_healed(s)
+            assert s.get_meta("schema_version") == str(SCHEMA_VERSION)
+            assert s.schema_version == SCHEMA_VERSION
             cells = {r.underlying_symbol for r in s.list_coverage()}
             assert cells == {"NIFTY", "BANKNIFTY"}
             s.upsert_coverage(_coverage_cell("SENSEX", run_id="r2"))

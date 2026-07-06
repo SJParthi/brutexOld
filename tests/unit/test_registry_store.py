@@ -665,6 +665,37 @@ class TestStoreWriteDeadline:
         finally:
             gate.set()
 
+    def test_hung_mkdir_fails_loudly_within_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix round 2: the parent-dir mkdir hangs → same bounded loud failure.
+
+        The mkdir is a metadata WRITE syscall — on a wedged external SSD / hard
+        NFS mount it blocks in uninterruptible sleep exactly like the wedged
+        fsync of #999. Pre-fix it ran on the CALLER thread BEFORE the deadline
+        wrapped ``_connect``, so a fresh open froze at the mkdir with no guard.
+        """
+        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+        gate = threading.Event()
+        entered = threading.Event()
+
+        def _hanging_mkdir(self: Path, *args: Any, **kwargs: Any) -> None:
+            entered.set()
+            gate.wait(timeout=30.0)
+            # Raise after release so the abandoned daemon never opens a real
+            # connection (nothing leaks past the test).
+            raise RuntimeError("released after the deadline already fired")
+
+        monkeypatch.setattr(Path, "mkdir", _hanging_mkdir)
+        start = time.monotonic()
+        try:
+            with pytest.raises(RegistryError, match="failed to open RegistryStore"):
+                RegistryStore.open(tmp_path / "sub" / "registry.duckdb")
+            assert entered.is_set()
+            assert time.monotonic() - start < 5.0
+        finally:
+            gate.set()
+
 
 class TestBatchWriteMethods:
     def test_batch_vs_per_row_byte_equality(self, tmp_path: Path) -> None:
