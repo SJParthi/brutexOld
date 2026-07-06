@@ -1476,6 +1476,119 @@ def test_enter_pull_singleflight_refuses_on_contention(
     assert "refusing to start a second concurrent pull" in captured.err
 
 
+# ── account-keyed second lock, taken FIRST (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001) ──
+
+
+def test_enter_pull_singleflight_takes_account_lock_first_and_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a resolvable key the ACCOUNT lock is taken (and held) alongside the lake lock."""
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        account_pull_singleflight_lock,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # never write the real $HOME
+    with contextlib.ExitStack() as stack:
+        assert (
+            cli._enter_pull_singleflight(
+                stack, tmp_path / "lake", account_key_resolver=lambda: "key-A"
+            )
+            is True
+        )
+        # The ACCOUNT lock is held: a peer acquire for the SAME key — even with a
+        # DIFFERENT lake root — is refused (the #996 residual, closed).
+        with (
+            pytest.raises(PullAlreadyRunningError),
+            account_pull_singleflight_lock("key-A"),
+        ):
+            pass  # pragma: no cover — __enter__ raises first
+    # Stack exited (LIFO) → both released → a fresh account acquire succeeds.
+    with account_pull_singleflight_lock("key-A"):
+        pass
+
+
+def test_enter_pull_singleflight_refuses_on_account_contention(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A held ACCOUNT lock refuses the pull BEFORE the lake lock is even attempted."""
+    from brutex.adapters.groww.pull_singleflight import (
+        account_pull_singleflight_lock,
+        pull_singleflight_lock,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    lake_root = tmp_path / "lake"
+    with (
+        account_pull_singleflight_lock("key-A"),  # a peer pull holds the ACCOUNT
+        contextlib.ExitStack() as stack,
+    ):
+        assert (
+            cli._enter_pull_singleflight(stack, lake_root, account_key_resolver=lambda: "key-A")
+            is False
+        )
+        # The lake lock was never taken (account refused first) — a fresh lake acquire
+        # succeeds even while the peer still holds the account lock.
+        with pull_singleflight_lock(lake_root):
+            pass
+    captured = capsys.readouterr()
+    assert "for this Groww account" in captured.err
+    assert "DIFFERENT lake root" in captured.err
+
+
+def test_enter_pull_singleflight_skips_account_lock_on_none_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A None key (no credentials) skips the account lock; the lake lock still guards."""
+    from brutex.adapters.groww.pull_singleflight import default_account_lock_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with contextlib.ExitStack() as stack:
+        assert (
+            cli._enter_pull_singleflight(
+                stack, tmp_path / "lake", account_key_resolver=lambda: None
+            )
+            is True
+        )
+        assert not default_account_lock_dir().exists()  # no account lock file created
+
+
+def test_enter_pull_singleflight_default_resolver_uses_aws_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production default resolves the AWS-only api_key and locks on its digest."""
+    from types import SimpleNamespace
+
+    from brutex.adapters.groww.pull_singleflight import account_singleflight_lock_path
+
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(
+        credentials,
+        "resolve_groww_aws_credentials",
+        lambda: SimpleNamespace(api_key="aws-key", totp_secret="s"),
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with contextlib.ExitStack() as stack:
+        assert cli._enter_pull_singleflight(stack, tmp_path / "lake") is True
+        assert account_singleflight_lock_path("aws-key").exists()
+
+
+def test_enter_pull_singleflight_default_resolver_skips_on_credentials_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CredentialsError from the AWS source → graceful skip, the pull still starts."""
+    from brutex.config.credentials_types import CredentialsError
+
+    def _boom() -> Any:
+        raise CredentialsError("aws unreachable")
+
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "resolve_groww_aws_credentials", _boom)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with contextlib.ExitStack() as stack:
+        assert cli._enter_pull_singleflight(stack, tmp_path / "lake") is True
+
+
 def test_cmd_fetch_live_refused_when_peer_pull_holds_lock(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1656,6 +1769,79 @@ def test_make_cli_rate_bridge_on_window_reraises_lake_write_halt(
     with pytest.raises(LakeWriteHalt) as excinfo:
         wrapped()
     assert excinfo.value.reason == "disk_full"
+
+
+def test_per_window_publish_carries_pull_active_true(tmp_path: Path) -> None:
+    """DEC-CLI-BRIDGE-PULL-ACTIVE-001: each per-window publish stamps pull_active=True."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    wrapped = cli._make_cli_rate_bridge_on_window(lambda: None, tmp_path, controller, object())
+    wrapped()
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    assert snap.pull_active is True
+
+
+def test_publish_cli_pull_inactive_publishes_false(tmp_path: Path) -> None:
+    """The end-of-pull finalize publishes ONE snapshot with pull_active=False."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    cli._publish_cli_pull_inactive(tmp_path, controller, object())
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    assert snap.pull_active is False
+    assert snap.current_rps == controller.snapshot()["current_rps"]
+    # A bare object() adapter has no client.meter → the meter-None branch (achieved 0).
+    assert snap.effective_rps == 0.0
+
+
+def test_publish_cli_pull_inactive_none_controller_is_noop(tmp_path: Path) -> None:
+    """A dry-run / inspect pull (no controller) publishes NOTHING at pull end."""
+    cli._publish_cli_pull_inactive(tmp_path, None, object())
+    assert not (tmp_path / ".rate" / "pull_rate.json").exists()
+
+
+def test_publish_cli_pull_inactive_uses_meter_when_present(tmp_path: Path) -> None:
+    """A real client.meter snapshot feeds the final publish's achieved rps."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.rate_bridge import read_rate_snapshot
+
+    class _Meter:
+        def snapshot(self) -> dict[str, object]:
+            return {"effective_rps": 3.25}
+
+    class _Client:
+        meter = _Meter()
+
+    class _Adapter:
+        client = _Client()
+
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    cli._publish_cli_pull_inactive(tmp_path, controller, _Adapter())
+    snap = read_rate_snapshot(tmp_path)
+    assert snap is not None
+    assert snap.effective_rps == 3.25
+    assert snap.pull_active is False
+
+
+def test_publish_cli_pull_inactive_swallows_every_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The finalize swallows EVERYTHING — even LakeWriteHalt — the pull is already ending."""
+    from brutex.adapters.rate_common import RateController
+    from brutex.data.errors import LakeWriteHalt
+
+    def _halt(*_a: Any, **_k: Any) -> None:
+        raise LakeWriteHalt("disk_full")
+
+    monkeypatch.setattr("brutex.data.rate_bridge.publish_from_snapshots", _halt)
+    controller = RateController(ceiling_rps=5.0, ceiling_per_min=500)
+    # Must NOT raise (contrast: the per-window hook re-raises LakeWriteHalt).
+    cli._publish_cli_pull_inactive(tmp_path, controller, object())
 
 
 # ── Pull-health monitor on the CLI fetch path (DEC-PULL-HEALTH-CLI-WIRING-001) ──
