@@ -979,6 +979,35 @@ class TestCompletenessScoreboard:
         assert entry["stray_lake_symbols"] == [repr("NSE-M&M")]
         assert entry["unmatched_scored_symbols"] == [repr("M&M")]
 
+    def test_reconcile_gate_dedupes_repeat_scoreboard_polls(self, tmp_path: Path) -> None:
+        """DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001 production wiring: the per-app
+        ``ReconcileLogGate`` built in ``build_app`` deduplicates the reconcile WARNING across
+        repeat scoreboard polls of a STABLE drifted state — ONE warning for three requests
+        (pre-change: one per request, the 953x/night storm) — while every response payload
+        stays byte-identical (logging is the only delta)."""
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("M&M")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-mnm-gate",
+                csv_source_sha256="0" * 64,
+            )
+            ParquetWriter(lake_root=tmp_path).write(
+                exchange="NSE",
+                segment="CASH",
+                symbol="NSE-M&M",  # the DIVERGENT stored key → the stray-drift WARNING shape
+                interval="1minute",
+                bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+            )
+            client = TestClient(build_app(DashboardState(), instrument_store=s))
+            with capture_logs() as logs:
+                bodies = [client.get("/api/v1/completeness/scoreboard").json() for _ in range(3)]
+        warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
+        assert len(warnings) == 1  # the storm fix: a stable state logs once, not per poll
+        assert warnings[0]["suppressed_repeats"] == 0
+        # Parity: suppression never changes the served payload.
+        assert bodies[0] == bodies[1] == bodies[2]
+
     def test_sparse_settled_range_reads_amber_end_to_end(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
