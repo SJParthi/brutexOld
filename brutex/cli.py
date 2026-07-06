@@ -4252,7 +4252,10 @@ def cmd_sweep(
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
     Loads the bars for one ``(symbol, interval)`` window from the Parquet lake via
-    the SAME ``Catalog`` / ``ReplayFeed`` path the engine uses, runs the assembled
+    the ONE alias-aware loader (``brutex.feed.series_load.load_sweep_slice`` — the
+    SAME ``Catalog`` / ``ReplayFeed`` path the engine uses; the NIFTY-futures
+    series alias ``NSE-NIFTY-FUT`` is roll-resolved + stitched,
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), runs the assembled
     funnel (sweep → Stage-1B prune → hard gates → composite rank), and prints the
     self-describing leaderboard (``brutex.engine.sweep_report``). Signal-only —
     nothing is persisted (DEC-SWEEP-CLI-001). ``--exchange`` / ``--segment`` /
@@ -4260,15 +4263,23 @@ def cmd_sweep(
     (segment ``INDEX`` for the spot indexes — the lake partition label, NOT the Groww
     API's ``IDX_I`` request segment).
     """
+    from brutex.calendars.nse import IST
     from brutex.data.catalog import Catalog
+    from brutex.data.futures_series import (
+        FuturesSeriesError,
+        FuturesSeriesResolution,
+        is_futures_series_symbol,
+        resolve_futures_series,
+    )
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.stage1a import apply_1day_mask_for
     from brutex.engine.sweep_report import sweep_report
 
     # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2):
     # refuse an out-of-engine-scope launch BEFORE any lake I/O. Report-only
     # command, but an out-of-scope brute-force IS the violation.
     from brutex.engine.sweep_scope import check_sweep_scope
-    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.series_load import load_sweep_slice
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
 
@@ -4296,18 +4307,34 @@ def cmd_sweep(
     side = Side.BUY if direction.upper() == "BUY" else Side.SELL
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     _require_catalog_exists(catalog)
-    with Catalog.open(catalog, require_exists=True) as cat:
-        feed = ReplayFeed(
-            catalog=cat,
-            lake_root=resolved_lake,
-            exchange=exchange,
-            segment=segment,
-            symbols=[symbol],
-            interval=interval,
-            start=_parse_dt(start),
-            end=_parse_dt(end),
-        )
-        bars = [event.bar for event in feed]
+    start_dt, end_dt = _parse_dt(start), _parse_dt(end)
+    # ADR-0012: resolve the futures series ONCE (vendor lake dirs → ownership
+    # windows + the roll schedule); a spot symbol resolves to None and takes
+    # the byte-identical verbatim-dir path inside the loader.
+    resolution: FuturesSeriesResolution | None = None
+    try:
+        if is_futures_series_symbol(symbol):
+            resolution = resolve_futures_series(
+                resolved_lake,
+                start=start_dt.astimezone(IST).date(),
+                end=end_dt.astimezone(IST).date(),
+            )
+        with Catalog.open(catalog, require_exists=True) as cat:
+            bars = load_sweep_slice(
+                cat=cat,
+                lake_root=resolved_lake,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                start=start_dt,
+                end=end_dt,
+                reconcile=False,  # cmd_sweep's no-reconcile law, preserved
+                resolution=resolution,
+            )
+    except FuturesSeriesError as exc:
+        print(f"[brutex] sweep error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     if not bars:
         print(
             f"[brutex] no bars for {symbol} {interval} {start}→{end} "
@@ -4331,6 +4358,8 @@ def cmd_sweep(
             sort_by=sort_by,
             validate_oos=validate_oos,
             oos_only=oos_only,
+            roll_schedule=resolution.roll_schedule if resolution is not None else None,
+            apply_1day_mask=apply_1day_mask_for(symbol, interval),
         )
     except ValueError as exc:
         # Honest user errors (over-cap sweep, bad k, --oos-only on a < 2-day window)
@@ -4465,8 +4494,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
     The launch entry point for DEC-SWEEP-ORCHESTRATOR-001: it pre-loads every
-    ``(symbol, interval)`` slice from the Parquet lake (the SAME Catalog/ReplayFeed
-    path :func:`cmd_sweep` uses), derives a REAL reproducibility context (git SHA,
+    ``(symbol, interval)`` slice from the Parquet lake (the ONE alias-aware
+    ``load_sweep_slice`` loader :func:`cmd_sweep` also uses — the NIFTY-futures
+    series alias is roll-resolved + stitched, DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001),
+    derives a REAL reproducibility context (git SHA,
     indicator-stack version, a content fingerprint of the loaded bars — never
     placeholders, Golden Rule #1), then drives
     :func:`brutex.engine.sweep_orchestrator.run_sweep_grid` with a shared
@@ -4499,7 +4530,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         run_supervised_grid,
     )
     from brutex.engine.sweep_watchdog import SweepWatchdog
-    from brutex.feed.replay import ReplayFeed
     from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.orchestrator.audit import AuditWriter
     from brutex.ranking import OverfitGateConfig
@@ -4584,41 +4614,58 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # below, so it must keep rebuilding a missing catalog inside a REAL lake.
     _require_lake_dir(resolved_lake, command="sweep-all")
 
-    # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
-    # content fingerprint and each tuple reuses the cached bars (no re-read).
-    slices: dict[tuple[str, str], list[Any]] = {}
-    with Catalog.open(catalog) as cat:
-        # Rebuild the catalog from the on-disk Parquet truth for the swept
-        # coordinates BEFORE reading, so a lake whose partitions were never
-        # registered (every production ingest sink historically passed
-        # catalog=None — DEC-CATALOG-RECONCILE-WIRE-001) is still sweep-able
-        # with no re-pull. O(P) one-time over the requested partitions, not in
-        # the per-combo hot loop (Golden Rule #10).
-        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    # ADR-0012 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): resolve the NIFTY-futures
+    # series alias ONCE up front — vendor lake dirs → per-contract ownership
+    # windows + the ONE roll schedule every consumer below shares (loader cut,
+    # Stage-1A cursor, run identity, freshness-gate expansion). A resolution
+    # refusal (interior hole, empty series, …) is a clean user error whose
+    # message IS the remediation.
+    from brutex.calendars.nse import IST
+    from brutex.data.futures_series import (
+        FuturesSeriesError,
+        FuturesSeriesResolution,
+        is_futures_series_symbol,
+        resolve_futures_series,
+    )
+    from brutex.feed.series_load import load_sweep_slice
 
-        for symbol in symbol_list:
-            for interval in interval_list:
-                reconcile_catalog_from_lake(
-                    lake_root=resolved_lake,
-                    catalog=cat,
-                    exchange=exchange,
-                    segment=segment,
-                    symbol=symbol,
-                    interval=interval,
-                )
-        for symbol in symbol_list:
-            for interval in interval_list:
-                feed = ReplayFeed(
-                    catalog=cat,
-                    lake_root=resolved_lake,
-                    exchange=exchange,
-                    segment=segment,
-                    symbols=[symbol],
-                    interval=interval,
-                    start=_parse_dt(start),
-                    end=_parse_dt(end),
-                )
-                slices[(symbol, interval)] = [event.bar for event in feed]
+    start_dt, end_dt = _parse_dt(start), _parse_dt(end)
+    resolution: FuturesSeriesResolution | None = None
+    roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
+    futures_symbols = [s for s in symbol_list if is_futures_series_symbol(s)]
+    try:
+        if futures_symbols:
+            resolution = resolve_futures_series(
+                resolved_lake,
+                start=start_dt.astimezone(IST).date(),
+                end=end_dt.astimezone(IST).date(),
+            )
+            roll_schedule_by_instrument = dict.fromkeys(futures_symbols, resolution.roll_schedule)
+
+        # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is
+        # a real content fingerprint and each tuple reuses the cached bars (no
+        # re-read). The ONE alias-aware loader reconciles the catalog from the
+        # on-disk Parquet truth per physical dir BEFORE reading
+        # (DEC-CATALOG-RECONCILE-WIRE-001 — O(P) one-time, not per combo) and
+        # roll-stitches the futures alias per contract.
+        slices: dict[tuple[str, str], list[Any]] = {}
+        with Catalog.open(catalog) as cat:
+            for symbol in symbol_list:
+                for interval in interval_list:
+                    slices[(symbol, interval)] = load_sweep_slice(
+                        cat=cat,
+                        lake_root=resolved_lake,
+                        exchange=exchange,
+                        segment=segment,
+                        symbol=symbol,
+                        interval=interval,
+                        start=start_dt,
+                        end=end_dt,
+                        resolution=resolution,
+                    )
+    except FuturesSeriesError as exc:
+        print(f"[brutex] sweep-all REFUSED: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
 
     loaded = {key: len(bars) for key, bars in slices.items() if bars}
     if not loaded:
@@ -4668,12 +4715,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
     from brutex.engine.sweep_preflight import preflight_derived_freshness
 
+    # G1 expansion (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the futures ALIAS names
+    # no lake dir — probing `bars/NSE/FNO/NSE-NIFTY-FUT/` would silently abstain
+    # (a gate bypass) — so the gate probes the resolved CONTRACT dirs instead.
+    # HONEST envelope (pre-existing #1492): the gate stays OI-blind
+    # (`read_lake_bars_frame` drops open_interest) and 1day-abstaining —
+    # results-safe, no condition bit reads OI.
+    freshness_symbols = [s for s in symbol_list if not is_futures_series_symbol(s)]
+    if resolution is not None:
+        freshness_symbols.extend(resolution.contract_symbols)
     freshness = preflight_derived_freshness(
         lake_derived_freshness_verdicts(
             resolved_lake,
             exchange=exchange,
             segment=segment,
-            symbols=symbol_list,
+            symbols=freshness_symbols,
             intervals=interval_list,
         )
     )
@@ -4899,6 +4955,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
                 )
             else:
                 result = run_supervised_grid(
@@ -4911,6 +4968,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     on_tuple=_on_tuple,
                     on_progress=_on_progress,
                     watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
                 )
             # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
             # Runs INSIDE the open audit with-block on this single thread (review
@@ -4930,6 +4988,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 segment=segment,
                 start=start,
                 end=end,
+                roll_schedule_by_instrument=roll_schedule_by_instrument,
             )
         # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
         # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
@@ -5424,8 +5483,10 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     :class:`~brutex.strategies.runner.StrategyRunner` /
     :class:`~brutex.execution.driver.BacktestDriver` build on every sweep eval
     (DEC-LOOKAHEAD-BARRIER-001). It loads one ``(symbol, interval)`` window
-    from the lake via the SAME ``Catalog`` / ``ReplayFeed`` path the engine
-    uses, then walks those bars **forward** through a recording
+    from the lake via the ONE alias-aware ``load_sweep_slice`` loader the
+    engine uses (the NIFTY-futures series alias is roll-stitched,
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), then walks those bars **forward**
+    through a recording
     :class:`~brutex.feed.lookahead.LookAheadBarrier` — advancing the cursor to
     bar ``i`` and accessing index ``i`` — and reports the
     :class:`~brutex.feed.lookahead.LookAheadReport` verdict via
@@ -5441,24 +5502,29 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     strategy-consumption oracle. An empty slice is a user error.
     """
     from brutex.data.catalog import Catalog
+    from brutex.data.futures_series import FuturesSeriesError
     from brutex.feed.lookahead import LookAheadBarrier, verify_with_barrier
-    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.series_load import load_sweep_slice
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     _require_catalog_exists(catalog)
-    with Catalog.open(catalog, require_exists=True) as cat:
-        feed = ReplayFeed(
-            catalog=cat,
-            lake_root=resolved_lake,
-            exchange=exchange,
-            segment=segment,
-            symbols=[symbol],
-            interval=interval,
-            start=_parse_dt(start),
-            end=_parse_dt(end),
-        )
-        bars = [event.bar for event in feed]
+    try:
+        with Catalog.open(catalog, require_exists=True) as cat:
+            bars = load_sweep_slice(
+                cat=cat,
+                lake_root=resolved_lake,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+                reconcile=False,  # this mouth never reconciled; law preserved
+            )
+    except FuturesSeriesError as exc:
+        print(f"[brutex] verify-lookahead: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     if not bars:
         print(
             f"[brutex] verify-lookahead: no bars for {symbol} {interval} {start}→{end} "
@@ -5549,6 +5615,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         compare_recount,
         plan_expected_stores,
         recorded_context_from_audit,
+        recorded_roll_schedules_from_audit,
         verify_identity,
         verify_structural,
     )
@@ -5704,9 +5771,24 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     current_sha = _resolve_code_commit_sha()
     current_indicator = _indicator_version()
     vocabulary_trusted = code_sha == current_sha and indicator == current_indicator
+    # ADR-0012 futures trees are SELF-DESCRIBING (DEC-NIFTY-FUTURES-SWEEP-
+    # LAUNCH-001 F16): each futures run's SWEEP_START params carries its
+    # roll_schedule, so Tier 2 re-derives futures row identities from the
+    # tree's OWN recorded schedule — never the operator's memory.
+    try:
+        recorded_schedules = recorded_roll_schedules_from_audit(
+            out_root / "audit" / "sweep-all.jsonl"
+        )
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     try:
         identity = verify_identity(
-            out_root, grid, stage3=stage3, vocabulary_trusted=vocabulary_trusted
+            out_root,
+            grid,
+            stage3=stage3,
+            vocabulary_trusted=vocabulary_trusted,
+            roll_schedule_by_instrument=recorded_schedules or None,
         )
     except SweepVerifyError as exc:
         print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
@@ -5718,14 +5800,20 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     if recount:
         import tempfile
 
+        from brutex.calendars.nse import IST
         from brutex.data.catalog import Catalog
-        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+        from brutex.data.futures_series import (
+            FuturesSeriesError,
+            FuturesSeriesResolution,
+            is_futures_series_symbol,
+            resolve_futures_series,
+        )
         from brutex.engine.sweep_launch import plan_launch_dedup
         from brutex.engine.sweep_orchestrator import (
             make_store_for,
             run_sweep_grid,
         )
-        from brutex.feed.replay import ReplayFeed
+        from brutex.feed.series_load import load_sweep_slice
         from brutex.orchestrator.audit import AuditWriter
 
         catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -5733,29 +5821,41 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). Like sweep-all the
         # catalog FILE is NOT gated — the recount reconciles it from the lake.
         _require_lake_dir(resolved_lake, command="sweep-verify --recount")
+        # The recount MUST load bars through the SAME alias-aware loader +
+        # resolver the launch used, or Tier 3 false-fails on a futures tree
+        # (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16).
+        start_dt, end_dt = _parse_dt(start), _parse_dt(end)
+        resolution: FuturesSeriesResolution | None = None
+        roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
+        recount_futures = [s for s in symbol_list if is_futures_series_symbol(s)]
         slices: dict[tuple[str, str], list[Any]] = {}
-        with Catalog.open(catalog) as cat:
-            for symbol in symbol_list:
-                for interval in interval_list:
-                    reconcile_catalog_from_lake(
-                        lake_root=resolved_lake,
-                        catalog=cat,
-                        exchange=exchange,
-                        segment=segment,
-                        symbol=symbol,
-                        interval=interval,
-                    )
-                    feed = ReplayFeed(
-                        catalog=cat,
-                        lake_root=resolved_lake,
-                        exchange=exchange,
-                        segment=segment,
-                        symbols=[symbol],
-                        interval=interval,
-                        start=_parse_dt(start),
-                        end=_parse_dt(end),
-                    )
-                    slices[(symbol, interval)] = [event.bar for event in feed]
+        try:
+            if recount_futures:
+                resolution = resolve_futures_series(
+                    resolved_lake,
+                    start=start_dt.astimezone(IST).date(),
+                    end=end_dt.astimezone(IST).date(),
+                )
+                roll_schedule_by_instrument = dict.fromkeys(
+                    recount_futures, resolution.roll_schedule
+                )
+            with Catalog.open(catalog) as cat:
+                for symbol in symbol_list:
+                    for interval in interval_list:
+                        slices[(symbol, interval)] = load_sweep_slice(
+                            cat=cat,
+                            lake_root=resolved_lake,
+                            exchange=exchange,
+                            segment=segment,
+                            symbol=symbol,
+                            interval=interval,
+                            start=start_dt,
+                            end=end_dt,
+                            resolution=resolution,
+                        )
+        except FuturesSeriesError as exc:
+            print(f"[brutex] sweep-verify --recount: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
         if not any(slices.values()):
             print(
                 f"[brutex] sweep-verify --recount: no bars for any {symbol_list} × "
@@ -5777,6 +5877,22 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             if rec != cur
         ]
+        # F16 schedule evidence (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): a lake
+        # that gained/lost a contract since the recorded run is surfaced with
+        # BOTH schedules named — not just a bare snapshot-hash diff.
+        for fut_symbol in recount_futures:
+            recorded_schedule = recorded_schedules.get(fut_symbol)
+            derived_schedule = (
+                roll_schedule_by_instrument.get(fut_symbol)
+                if roll_schedule_by_instrument is not None
+                else None
+            )
+            if recorded_schedule is not None and recorded_schedule != derived_schedule:
+                mismatches.append(
+                    f"roll_schedule[{fut_symbol}]: recorded {list(recorded_schedule)!r} "
+                    f"vs re-derived {list(derived_schedule or ())!r} — the lake's "
+                    "futures contract set changed since the recorded run"
+                )
         context_match = not mismatches
         if mismatches:
             print(
@@ -5925,6 +6041,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     store_for=make_store_for(scratch, grid),
                     dedup=plan_launch_dedup(grid, digest_path=True),
                     audit=audit,
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
                 )
                 # "Resilient: skip + continue" (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001):
                 # run_sweep_grid now SKIPS a raising tuple and completes a PARTIAL
@@ -5952,6 +6069,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         segment=segment,
                         start=start,
                         end=end,
+                        roll_schedule_by_instrument=roll_schedule_by_instrument,
                     )
                     # Condition B6: the recomputed train hash must match the
                     # manifest's recorded one — the cell path digests fold it.
@@ -6443,13 +6561,12 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     bar's OPEN is the spot at entry; the expiry is resolved per the calendar).
     """
     from brutex.data.catalog import Catalog
-    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.combo_mask import mask_to_entry_signals
     from brutex.engine.stage1a import build_bar_bits
     from brutex.engine.trade_sim import simulate_trades
-    from brutex.feed.replay import ReplayFeed
     from brutex.feed.resampler import INTERVAL_SECONDS
+    from brutex.feed.series_load import load_sweep_slice
     from brutex.options.executor import signals_from_spot_trades
     from brutex.options.lot_size_history import OptionsUnderlying
     from brutex.options.strike_rules import TradeDirection
@@ -6463,28 +6580,24 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     is_bull = row.direction.lower() in ("bull", "buy", "long")
     side = Side.BUY if is_bull else Side.SELL
     direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
+    # A futures winner row (instrument == the ADR-0012 series alias) raises
+    # ValueError HERE — caught + honestly SKIPPED by the caller's existing
+    # per-row net (futures→options translation is the ADR-0012 PR-6 named
+    # follow-up, DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), so the loader below only
+    # ever sees spot rows on this path today.
     underlying = OptionsUnderlying(row.instrument)
 
     with Catalog.open(catalog_path) as cat:
-        reconcile_catalog_from_lake(
+        bars = load_sweep_slice(
+            cat=cat,
             lake_root=lake_root,
-            catalog=cat,
             exchange=exchange,
             segment=segment,
             symbol=row.instrument,
             interval=interval,
-        )
-        feed = ReplayFeed(
-            catalog=cat,
-            lake_root=lake_root,
-            exchange=exchange,
-            segment=segment,
-            symbols=[row.instrument],
-            interval=interval,
             start=_parse_dt(start),
             end=_parse_dt(end),
         )
-        bars = [event.bar for event in feed]
 
     if not bars:
         return []
