@@ -228,15 +228,23 @@ class TestPullRateRoute:
         assert "backoffDelayMs" in js.text
         assert "visibilitychange" in js.text
         # The abort signal is WIRED (refuter finding: without this line ctrl.abort()
-        # is a no-op) and the secondary ETA fetch is seq-guarded.
+        # is a no-op) and the secondary ETA fetch rides its OWN latest-settled-wins
+        # token pair (round 3: reusing the main chain's pollSeq starved the ETA row
+        # whenever progress latency exceeded the poll cadence).
         assert "opts.signal = ctrl.signal" in js.text
+        assert "etaSettledSeq" in js.text
         assert uni.status_code == 200
         assert 'id="feedage"' in uni.text
         assert 'id="subunit"' in uni.text
         # The universe poll carries the SAME hung-fetch abort bound + the
-        # watch-active visibility gate (refuter-confirmed fixes).
+        # watch-active visibility gate (refuter-confirmed fixes), and the chip's
+        # wording is state-honest (round 3): "updated Xs ago" only after a real
+        # success this watch, and a not-yet-started poll chain never claims
+        # "retrying".
         assert "FEED_FETCH_TIMEOUT_MS" in uni.text
         assert "watchActive" in uni.text
+        assert "hadProgressSuccess" in uni.text
+        assert "'start request pending — re-click to re-attach'" in uni.text
 
 
 def test_widget_referenced_on_operator_and_universe_templates() -> None:

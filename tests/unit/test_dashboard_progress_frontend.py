@@ -308,26 +308,45 @@ def test_rate_widget_eta_failure_hides_not_freezes() -> None:
     assert "renderEta(null)" in js
 
 
-def test_rate_widget_eta_fetch_seq_guarded() -> None:
-    """The secondary progress/ETA fetch is seq-guarded like the main chain
-    (refuter finding: it was NOT — a visibility re-poll racing a slow progress
-    fetch let the OLD response settle out of order, repainting a stale ETA over a
-    fresher render, or its abort landing in the catch and HIDING the row a fresh
-    poll just painted). Both callbacks now drop a superseded response. The
-    multi-line pin encodes the guard-before-render ordering; the old unguarded
-    one-liners are regression-pinned gone."""
+def test_regression_rate_widget_eta_row_starved_by_shared_pollseq() -> None:
+    """REGRESSION (refuter-confirmed, round 3): the round-2 reorder fix guarded BOTH
+    ETA callbacks on the MAIN chain's ``pollSeq`` — which the main poll bumps every
+    3 s on success. Whenever ``/api/v1/universe/pull-progress`` was consistently
+    slower than that cadence (but inside the 10 s abort bound — e.g. threadpool
+    starvation during a heavy pull, the exact incident conditions), EVERY progress
+    response resolved after the next ``poll()`` had bumped ``pollSeq``, so
+    ``renderEta`` was NEVER called and the ETA row froze stale (or frozen-hidden)
+    for as long as the latency band persisted. The ETA chain now carries its OWN
+    monotonic token pair — ``etaSeq`` (issue counter) + ``etaSettledSeq`` (newest
+    SETTLED response) — latest-settled-wins: an out-of-order straggler still can
+    neither repaint an older ETA over a fresher render nor hide the row a fresher
+    response painted (the round-2 reorder fix preserved), while liveness no longer
+    couples to main-poll cadence. Substring-presence pins (no headless JS runner)."""
     js = _widget_js()
+    assert "var etaSeq = 0;" in js, "the ETA chain's own issue counter is missing"
+    assert "var etaSettledSeq = 0;" in js, "the newest-settled stamp is missing"
+    assert "var etaReq = ++etaSeq;" in js, "each ETA fetch must claim its own token"
     assert (
         "fetchJson(PROGRESS_ENDPOINT)\n"
         "      .then(function (progress) {\n"
-        "        if (seq !== pollSeq) { return; }\n"
+        "        if (etaReq <= etaSettledSeq) { return; }\n"
+        "        etaSettledSeq = etaReq;\n"
         "        renderEta(progress);\n"
         "      })\n"
         "      .catch(function () {\n"
-        "        if (seq !== pollSeq) { return; }\n"
+        "        if (etaReq <= etaSettledSeq) { return; }\n"
+        "        etaSettledSeq = etaReq;\n"
         "        renderEta(null);\n"
         "      });" in js
-    ), "both ETA callbacks must drop a superseded response BEFORE touching the row"
+    ), "both ETA callbacks must ride the latest-settled-wins guard"
+    # The starving shared-token guard is GONE from the ETA callbacks (the MAIN
+    # chain keeps its pollSeq guard — pinned in test_rate_widget_poll_overlap_guard).
+    eta_block = js[js.index("fetchJson(PROGRESS_ENDPOINT)") :]
+    assert "if (seq !== pollSeq) { return; }" not in eta_block, (
+        "the ETA callbacks must NOT reuse the main chain's pollSeq — sustained"
+        " progress latency above the poll cadence starved the row forever"
+    )
+    # The pre-round-2 unguarded one-liners stay gone (the reorder regression pin).
     assert ".then(function (progress) { renderEta(progress); })" not in js, (
         "the unguarded success callback must be gone"
     )
@@ -388,6 +407,24 @@ def _finish_live_src(html: str) -> str:
     return fn.group(0)
 
 
+def _render_feed_age_src(html: str) -> str:
+    fn = re.search(r"function renderFeedAge\(\) \{.*?\n\}", html, re.DOTALL)
+    assert fn is not None, "renderFeedAge is missing"
+    return fn.group(0)
+
+
+def _stop_feed_age_ticker_src(html: str) -> str:
+    fn = re.search(r"function stopFeedAgeTicker\(\) \{.*?\n\}", html, re.DOTALL)
+    assert fn is not None, "stopFeedAgeTicker is missing"
+    return fn.group(0)
+
+
+def _track_sub_unit_src(html: str) -> str:
+    fn = re.search(r"function trackSubUnit\(s\) \{.*?\n\}", html, re.DOTALL)
+    assert fn is not None, "trackSubUnit is missing"
+    return fn.group(0)
+
+
 def test_regression_universe_hung_fetch_could_wedge_poll_forever() -> None:
     """REGRESSION (refuter-confirmed): ``pollProgress`` fetched with NO abort bound
     while the visibilitychange recovery was gated on ``pollTimer`` — which is null
@@ -428,6 +465,14 @@ def test_regression_universe_hung_fetch_could_wedge_poll_forever() -> None:
         "if (!document.hidden && watchActive && lastPollLabel !== null) pollProgress(lastPollLabel);"
         in html
     ), "the visibility re-poll must gate on the watch-active flag"
+    # The label STAMP inside pollProgress is the gate's ONLY non-null source
+    # (refuter finding, round 3: it was unpinned — deleting it left the gate's
+    # `lastPollLabel !== null` permanently false, killing the tab-return re-poll
+    # with the suite green; the other writes are the null declaration +
+    # startAndPoll's null reset).
+    assert "lastPollLabel = label;" in poll, (
+        "pollProgress must stamp the label — without it tab-return recovery is dead"
+    )
     assert "pollTimer && lastPollLabel" not in html, (
         "the old pollTimer gate blocked tab-return recovery while a poll was in flight"
     )
@@ -474,8 +519,16 @@ def test_regression_universe_poll_gave_up_and_froze_38_minutes() -> None:
     assert "(the pull may still be running); ⟳ Refresh the verdict below to re-check" not in html, (
         "the old give-up tail must be gone"
     )
-    assert "live progress feed dropped" in html, (
-        "the pinned wording must survive (now inside the never-give-up stale chip)"
+    # The pinned wording survives as EXECUTABLE chip text — asserted as the full JS
+    # string literal INSIDE the extracted renderFeedAge body, so a comment mention
+    # can never satisfy this pin (refuter finding, round 3: the bare substring was
+    # satisfied by a block comment this same PR introduced, so deleting the chip's
+    # actual wording kept the suite green).
+    assert "'live progress feed dropped — retrying'" in _render_feed_age_src(html), (
+        "the pinned wording must survive as executable text inside the stale chip"
+    )
+    assert html.count("'live progress feed dropped — retrying'") == 1, (
+        "exactly ONE executable site — the never-give-up stale chip tail"
     )
 
 
@@ -509,7 +562,10 @@ def test_universe_feed_age_chip_dom_css_and_thresholds() -> None:
     assert "const FEED_STALE_RED_MS = 15000;" in html
     assert "const FEED_BACKOFF_BASE_MS = 3000;" in html
     assert "const FEED_BACKOFF_MAX_MS = 30000;" in html
-    assert "'updated ' + ageS + 's ago — retrying'" in html
+    # The amber wording splits on hadProgressSuccess (round 3 — see the dedicated
+    # regression test); its two honest forms + the red prefix are pinned here.
+    assert "'updated ' + ageS + 's ago'" in html
+    assert "'no update yet (' + ageS + 's)'" in html
     assert "'⚠ STALE — no live update for ' + ageS + 's · '" in html
     assert "function renderFeedAge()" in html
     assert "setInterval(renderFeedAge, 1000)" in html
@@ -531,6 +587,77 @@ def test_universe_feed_age_chip_dom_css_and_thresholds() -> None:
         "if (lastProgressOkMs === null) { chip.classList.remove('on', 'red');"
         " chip.textContent = ''; return; }" in html
     ), "the null-clear branch (settled page never reads STALE) is missing"
+
+
+def test_regression_universe_amber_chip_claimed_update_that_never_arrived() -> None:
+    """REGRESSION (refuter-confirmed, round 3): the amber branch rendered
+    "updated Xs ago — retrying" off ``lastProgressOkMs``, but ``startFeedAgeTicker``
+    seeds that stamp with the WATCH-START baseline, not a success — so a watch
+    whose progress endpoint 500s/stalls from the very FIRST poll read
+    "updated 7s ago" although no payload was EVER received, telling the operator
+    fresh data had arrived. The chip now claims "updated Xs ago" ONLY after a
+    validated snapshot landed THIS watch (``hadProgressSuccess``); before that it
+    reads "no update yet (Xs)" — mirroring the widget's honest "no data yet"
+    split. Substring-presence pins (no headless JS runner)."""
+    html = _render_universe_html()
+    assert "let hadProgressSuccess = false;" in html, "the wording flag is missing"
+    # The flag flips ONLY on the validated-success path inside pollProgress, AFTER
+    # the shape guard (a malformed body is never a success) …
+    poll = _poll_progress_src(html)
+    assert "hadProgressSuccess = true;" in poll, "the success path must flip the flag"
+    assert poll.index("throw new Error('malformed snapshot')") < poll.index(
+        "hadProgressSuccess = true;"
+    ), "the flag must flip only AFTER the shape guard"
+    # … and resets at watch start + settle, so it never leaks across watches.
+    assert "hadProgressSuccess = false;" in _start_and_poll_src(html), (
+        "a new watch must start with the flag down"
+    )
+    assert "hadProgressSuccess = false;" in _stop_feed_age_ticker_src(html), (
+        "a settled watch must drop the flag"
+    )
+    # The amber branch splits on the flag …
+    feed_age = _render_feed_age_src(html)
+    assert (
+        "(hadProgressSuccess ? 'updated ' + ageS + 's ago' : 'no update yet (' + ageS + 's)')"
+        in feed_age
+    ), "the amber wording must split on whether a snapshot ever arrived this watch"
+    # … and the old unconditional claim is gone (the regression pin).
+    assert "'updated ' + ageS + 's ago — retrying'" not in html, (
+        "the unconditional 'updated Xs ago' amber literal must be gone"
+    )
+
+
+def test_regression_universe_stale_chip_claimed_retrying_during_hung_start_post() -> None:
+    """REGRESSION (refuter-confirmed, round 3): during a hung/wedged start POST the
+    poll chain has never started — ``pollProgress`` was never invoked,
+    ``lastPollLabel`` is null (the visibility gate is closed), the POST is
+    deliberately un-aborted — yet the red branch unconditionally appended
+    "· retrying", telling the operator to wait for a retry that would NEVER come.
+    The chip's action tail is now state-honest: while ``lastPollLabel === null``
+    (poll chain not started) it renders "start request pending — re-click to
+    re-attach" — the actually-correct remedy, since the route is single-flight and
+    a re-click safely attaches to the already-running pull; only a LIVE poll chain
+    claims "retrying". This retires the MIGRATION.md #1493 disclosed residual.
+    Substring-presence pins (no headless JS runner)."""
+    html = _render_universe_html()
+    feed_age = _render_feed_age_src(html)
+    assert "const tail = (lastPollLabel === null)" in feed_age, (
+        "the tail must branch on whether the poll chain is live"
+    )
+    assert "? 'start request pending — re-click to re-attach'" in feed_age
+    assert (
+        ": (pollFeedRetries > POLL_MAX_FEED_RETRIES"
+        " ? 'live progress feed dropped — retrying' : 'retrying');" in feed_age
+    ), "a live poll chain keeps the retrying/feed-dropped tails"
+    # BOTH escalation branches carry the computed tail — never a hardcoded
+    # "retrying" that could overstate again.
+    assert (
+        "chip.textContent = '⚠ STALE — no live update for ' + ageS + 's · ' + tail;" in feed_age
+    ), "the red branch must render the state-honest tail"
+    assert "+ ' — ' + tail;" in feed_age, "the amber branch must render the state-honest tail"
+    # The start-pending wording has exactly ONE executable site (renderFeedAge) —
+    # a comment double can never satisfy the pins above.
+    assert html.count("'start request pending — re-click to re-attach'") == 1
 
 
 def test_universe_stale_clears_on_success_and_settle() -> None:
@@ -617,6 +744,22 @@ def test_regression_giant_unit_progress_was_invisible() -> None:
     assert "if (suEl) suEl.textContent = '';" in finish, (
         "a settled watch must clear the #subunit counter"
     )
+    # The counting CORE (refuter finding, round 3: it was unpinned — deleting the
+    # Set-branch increment kept the whole suite green while the counter never left
+    # 0 below the 4096 cap, resurrecting this exact bug; deleting the per-unit
+    # reset body made the count span units, a misleading cross-unit total). All
+    # three load-bearing branches are pinned INSIDE the extracted trackSubUnit body.
+    track = _track_sub_unit_src(html)
+    assert "if (subUnitAnchor !== anchor) {" in track, "the per-unit reset branch is missing"
+    assert (
+        "subUnitSeen = new Set(); subUnitCount = 0; subUnitAnchor = anchor; subUnitLastCur = '';"
+        in track
+    ), "the reset body must clear the Set + count and re-anchor"
+    assert "if (cur && !subUnitSeen.has(cur))" in track, "the distinct-label gate is missing"
+    assert (
+        "if (subUnitSeen.size < SUBUNIT_SET_CAP) { subUnitSeen.add(cur); subUnitCount += 1; }"
+        in track
+    ), "the below-cap increment is the counter's heart — without it the count never leaves 0"
 
 
 def test_universe_expiry_token_parse_right_anchored_mirrors_fno_symbol() -> None:
@@ -657,6 +800,15 @@ def test_universe_subunit_resets_per_unit_and_per_pull() -> None:
     assert "resetSubUnit();" in _finish_live_src(html), (
         "resetSubUnit must run at settle (finishLive)"
     )
+    # The anchor-change RESET BRANCH itself (refuter finding, round 3: this test's
+    # docstring claimed "resets on ANY completed/total movement" but pinned only
+    # the anchor STRING + the watch-boundary resets — deleting the branch made
+    # "sub-unit N this unit" display a cross-unit total with the suite green).
+    track = _track_sub_unit_src(html)
+    assert "if (subUnitAnchor !== anchor) {" in track, (
+        "the tracker must reset when the completed/total anchor moves"
+    )
+    assert "subUnitAnchor = anchor;" in track, "the reset must re-anchor to the new unit"
 
 
 def test_universe_subunit_cap_bounds_memory() -> None:

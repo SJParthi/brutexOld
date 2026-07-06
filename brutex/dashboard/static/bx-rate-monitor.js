@@ -475,6 +475,16 @@
   var bootMs = null;        // widget-boot baseline: a never-succeeding page still ages honestly
   var pollTimer = null;
   var pollSeq = 0;          // re-entrancy token: a superseded response never renders or schedules
+  // The secondary ETA chain carries its OWN token pair (refuter-confirmed fix,
+  // round 3): guarding it on the MAIN chain's pollSeq starved renderEta whenever
+  // the progress endpoint was consistently slower than the 3 s poll cadence —
+  // every response resolved after the next poll() bumped pollSeq, so the ETA row
+  // froze stale for as long as the latency band persisted. Latest-SETTLED-wins:
+  // a response renders unless a strictly NEWER ETA response already settled, so
+  // an out-of-order straggler still never repaints an older ETA (the round-2
+  // reorder fix preserved) while liveness no longer couples to main-poll cadence.
+  var etaSeq = 0;           // ETA request issue counter
+  var etaSettledSeq = 0;    // newest ETA request whose response has settled (rendered)
 
   // Monotonic client clock: performance.now() is immune to NTP/wall-clock jumps.
   function nowMs() {
@@ -603,16 +613,22 @@
     // tick (so it backs off with the main poll). On failure the ETA row HIDES
     // (renderEta(null)) instead of freezing a stale figure; it never drives
     // scheduling/staleness — the main endpoint owns the widget's numbers. Both
-    // callbacks are seq-guarded like the main chain (refuter-confirmed fix): a
-    // superseded out-of-order response can neither repaint an OLDER ETA over a
-    // fresher render nor hide the ETA row a fresher poll just painted.
+    // callbacks ride the ETA chain's OWN latest-settled-wins guard (see the
+    // etaSeq/etaSettledSeq declaration): an out-of-order straggler can neither
+    // repaint an OLDER ETA over a fresher render nor hide the row a fresher
+    // response just painted, and — unlike the round-2 shared-pollSeq guard — a
+    // progress endpoint consistently slower than the poll cadence can no longer
+    // starve the row (every response renders unless a NEWER one already settled).
+    var etaReq = ++etaSeq;
     fetchJson(PROGRESS_ENDPOINT)
       .then(function (progress) {
-        if (seq !== pollSeq) { return; }
+        if (etaReq <= etaSettledSeq) { return; }
+        etaSettledSeq = etaReq;
         renderEta(progress);
       })
       .catch(function () {
-        if (seq !== pollSeq) { return; }
+        if (etaReq <= etaSettledSeq) { return; }
+        etaSettledSeq = etaReq;
         renderEta(null);
       });
   }

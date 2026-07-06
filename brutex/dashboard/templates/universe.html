@@ -1660,6 +1660,9 @@ const FEED_FETCH_TIMEOUT_MS = 10000;  // hung-fetch abort bound (headers AND bod
 const nowMs = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
 let pollGen = 0;              // re-entrancy generation: a superseded response never repaints
 let lastProgressOkMs = null;  // client clock of the last SUCCESSFUL progress poll
+let hadProgressSuccess = false;  // true once THIS watch received a validated snapshot — the
+                                 // "updated Xs ago" wording is claimed ONLY then, never off
+                                 // the watch-start baseline (refuter-confirmed fix, round 3)
 let feedAgeTimer = null;      // the ~1 s ticker — runs ONLY while a live watch is active
 let lastPollLabel = null;
 let watchActive = false;      // true from watch start (startAndPoll) until settle (finishLive)
@@ -1726,14 +1729,17 @@ async function startAndPoll(path, label) {
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
   pullStarted = true;   // DEC-UNIVERSE-WINDOW-SEGMENTS-001: gate the all-segments line on a started pull
-  pollFeedRetries = 0; lastProgressOkMs = null; lastPollLabel = null; resetSubUnit();   // a new watch starts clean
+  pollFeedRetries = 0; lastProgressOkMs = null; hadProgressSuccess = false; lastPollLabel = null; resetSubUnit();   // a new watch starts clean
   watchActive = true;   // opens the visibility re-poll gate for the whole watch (cleared in finishLive)
   // Refuter-confirmed fix: start the staleness ticker BEFORE the start POST, so a
   // hung/wedged POST escalates the #feedage chip amber → red STALE from the
   // watch-start baseline instead of freezing "Starting …" with zero indication.
   // (The POST itself is deliberately NOT aborted — a slow-but-successful start
   // would be mislabelled failed; the route is single-flight, so a re-click safely
-  // attaches to the already-running pull. Indication, not auto-retry.)
+  // attaches to the already-running pull. Indication, not auto-retry — and the
+  // chip's tail says so honestly in this mode: while the poll chain has not
+  // started (lastPollLabel still null) renderFeedAge names the pending start
+  // request + the re-click remedy, never a false "retrying".)
   startFeedAgeTicker();
   refreshWindowsLine();
   try {
@@ -1921,10 +1927,18 @@ function feedRetryDelayMs() {
   const exp = Math.min(pollFeedRetries - POLL_MAX_FEED_RETRIES - 1, 4);  // overflow-proof clamp
   return Math.min(FEED_BACKOFF_MAX_MS, FEED_BACKOFF_BASE_MS * Math.pow(2, exp));  // 3s,6s,12s,24s,30s cap
 }
-/* The #feedage chip: hidden while fresh, amber "updated Xs ago — retrying" past
-   FEED_STALE_WARN_MS, LOUD RED explicit-STALE past FEED_STALE_RED_MS. Client-clock
-   only (the snapshot's updated_at is a server-side time.monotonic float — useless
-   as wall-clock); textContent ONLY, never innerHTML (CodeQL XSS guard). */
+/* The #feedage chip: hidden while fresh, amber past FEED_STALE_WARN_MS, LOUD RED
+   explicit-STALE past FEED_STALE_RED_MS. Client-clock only (the snapshot's
+   updated_at is a server-side time.monotonic float — useless as wall-clock);
+   textContent ONLY, never innerHTML (CodeQL XSS guard). HONEST wording
+   (refuter-confirmed fixes, round 3): the "updated Xs ago" claim is made ONLY
+   after a validated snapshot actually arrived THIS watch (hadProgressSuccess) —
+   before that the watch-start baseline reads the honest no-payload-yet form,
+   mirroring the widget's "no data yet" split; and the action tail claims
+   "retrying" ONLY while the poll chain is actually live (lastPollLabel non-null)
+   — during a hung/wedged start POST nothing retries, so the tail names the
+   real state + the real remedy instead (the route is single-flight, so a
+   re-click safely re-attaches — see the startAndPoll comment). */
 function renderFeedAge() {
   const chip = document.getElementById('feedage');
   if (!chip) return;
@@ -1935,11 +1949,13 @@ function renderFeedAge() {
   const warn = age >= FEED_STALE_WARN_MS;
   chip.classList.toggle('on', warn || red);
   chip.classList.toggle('red', red);
+  const tail = (lastPollLabel === null)
+    ? 'start request pending — re-click to re-attach'
+    : (pollFeedRetries > POLL_MAX_FEED_RETRIES ? 'live progress feed dropped — retrying' : 'retrying');
   if (red) {
-    chip.textContent = '⚠ STALE — no live update for ' + ageS + 's · '
-      + (pollFeedRetries > POLL_MAX_FEED_RETRIES ? 'live progress feed dropped — retrying' : 'retrying');
+    chip.textContent = '⚠ STALE — no live update for ' + ageS + 's · ' + tail;
   } else if (warn) {
-    chip.textContent = 'updated ' + ageS + 's ago — retrying';
+    chip.textContent = (hadProgressSuccess ? 'updated ' + ageS + 's ago' : 'no update yet (' + ageS + 's)') + ' — ' + tail;
   } else {
     chip.textContent = '';
   }
@@ -1952,6 +1968,7 @@ function startFeedAgeTicker() {
 function stopFeedAgeTicker() {
   if (feedAgeTimer) { clearInterval(feedAgeTimer); feedAgeTimer = null; }
   lastProgressOkMs = null;
+  hadProgressSuccess = false;   // the wording flag never leaks across watches
   pollFeedRetries = 0;
   renderFeedAge();   // clears the chip — a settled page never reads STALE
 }
@@ -2039,6 +2056,7 @@ async function pollProgress(label) {
     if (!s || typeof s !== 'object' || typeof s.state !== 'string') throw new Error('malformed snapshot');
     pollFeedRetries = 0;            // success resets the quick-retry budget + backoff
     lastProgressOkMs = nowMs();     // the CLIENT staleness stamp
+    hadProgressSuccess = true;      // a validated snapshot landed — "updated Xs ago" is now honest
     renderFeedAge();                // stale chip clears immediately on success
     /* open_ended (DEC-PULL-PROGRESS-HONESTY-001): the phase's total is NOT final
        (the F&O denominator grows as contracts are planned), so show the honest
