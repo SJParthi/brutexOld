@@ -210,6 +210,27 @@ class TestPullRateRoute:
         assert uni.status_code == 200
         assert "/static/bx-rate-monitor.js" in uni.text
 
+    def test_widget_serves_staleness_and_backoff(self) -> None:
+        """DEC-PULL-UI-STALENESS-001: the SERVED widget carries the client staleness
+        readout + the self-recovering backoff poll, and the SERVED /universe page
+        carries the #feedage staleness chip + the #subunit counter
+        (DEC-PULL-HEADER-SUBUNIT-001). HONEST envelope (Golden Rule #10): substring
+        asserts on the served bodies pin PRESENCE of the JS, not its execution —
+        this repo has no headless JS runner.
+        """
+        state = DashboardState()
+        with _client(state) as c:  # type: ignore[attr-defined]
+            js = c.get("/static/bx-rate-monitor.js")
+            uni = c.get("/universe")
+        assert js.status_code == 200
+        assert "bxrmAgeRow" in js.text
+        assert "STALE_RED_MS" in js.text
+        assert "backoffDelayMs" in js.text
+        assert "visibilitychange" in js.text
+        assert uni.status_code == 200
+        assert 'id="feedage"' in uni.text
+        assert 'id="subunit"' in uni.text
+
 
 def test_widget_referenced_on_operator_and_universe_templates() -> None:
     """Both the operator (v29) and /universe templates load the widget site-wide."""
