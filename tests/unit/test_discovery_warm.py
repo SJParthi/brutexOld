@@ -1,6 +1,6 @@
 """Unit tests for the post-pipeline discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001).
 
-Proves :mod:`brutex.dashboard.discovery_warm`: ONE shared walk seeds all five
+Proves :mod:`brutex.dashboard.discovery_warm`: ONE shared walk seeds all seven
 discovery memos at the given generation (a subsequent read is a clean hit that
 never re-walks), the seeded ``/db`` datasets payload is byte-identical to the
 route-shaped builder, the warm FORCE-refreshes through an opted-in pull-active
@@ -26,10 +26,12 @@ from brutex.dashboard.discovery_warm import (
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    preopen_datasets_key,
     warm_discovery_memos,
 )
 from brutex.dashboard.fno_cascade import FnoCascadeIndex
 from brutex.dashboard.movers_cache import MoversSnapshotCache
+from brutex.dashboard.preopen_report import REPORT_BASES, resolve_report_datasets
 from brutex.dashboard.spot_cascade import SpotCascadeIndex
 from structlog.testing import capture_logs
 
@@ -103,14 +105,14 @@ class TestBuildDbDatasetsPayload:
 
 
 class TestWarmSeedsAllMemos:
-    def test_all_five_memos_seeded_at_generation(self, lake: Path) -> None:
+    def test_all_seven_memos_seeded_at_generation(self, lake: Path) -> None:
         caches = _caches()
         with capture_logs() as logs:
-            assert _warm(lake, caches, generation=7) == 5
+            assert _warm(lake, caches, generation=7) == 7
         done = [e for e in logs if e["event"] == "discovery.warm_done"]
         assert len(done) == 1
         assert done[0]["generation"] == 7
-        assert done[0]["memos"] == 5
+        assert done[0]["memos"] == 7
 
         def _must_not_run() -> Any:
             raise AssertionError("a seeded memo must be a clean hit — no re-walk")
@@ -163,7 +165,7 @@ class TestWarmSeedsAllMemos:
             return real_walk(root)
 
         monkeypatch.setattr(dw, "list_candle_datasets", _counting)
-        assert _warm(lake, _caches()) == 5
+        assert _warm(lake, _caches()) == 7
         assert calls["n"] == 1
 
     def test_force_refreshes_through_pull_active_floor(self, lake: Path) -> None:
@@ -175,13 +177,42 @@ class TestWarmSeedsAllMemos:
         floored.get_or_compute(DB_DATASETS_KEY, generation=1, compute=lambda: {"stale": True})
         caches = _caches()
         caches["db_datasets_cache"] = floored
-        assert _warm(lake, caches, generation=2) == 5
+        assert _warm(lake, caches, generation=2) == 7
 
         def _must_not_run() -> list[dict[str, str]]:
             raise AssertionError("the warm seed must be the clean hit at generation 2")
 
         fresh = floored.get_or_compute(MOVERS_DATASETS_KEY, generation=2, compute=_must_not_run)
         assert {d["segment"] for d in fresh} == {"INDEX", "FNO"}  # the fresh seed, not "stale"
+
+
+class TestPreopenMemos:
+    def test_preopen_datasets_key_format(self) -> None:
+        # Key-constant drift pin: the |-joined per-basis memo keys.
+        assert preopen_datasets_key("day") == "preopen_datasets|day"
+        assert preopen_datasets_key("minute") == "preopen_datasets|minute"
+
+    def test_preopen_memos_seeded_per_basis(self, lake: Path) -> None:
+        # DEC-O1-CLAIMS-HONESTY-001: the warm seeds one preopen memo per basis
+        # off its ONE shared unfiltered walk (datasets= seam), byte-identical
+        # to a direct filtered resolve.
+        caches = _caches()
+        assert _warm(lake, caches, generation=7) == 7
+
+        def _poison() -> Any:
+            raise AssertionError("a seeded preopen memo must be a clean hit — no re-walk")
+
+        seeded = {
+            basis: caches["db_datasets_cache"].get_or_compute(
+                preopen_datasets_key(basis), generation=7, compute=_poison
+            )
+            for basis in REPORT_BASES
+        }
+        for basis in REPORT_BASES:
+            assert seeded[basis] == resolve_report_datasets(lake, basis=basis)
+        assert seeded["day"] == []  # the fixture holds no 1day partition
+        # The F&O contract partition is excluded — only the spot INDEX symbol.
+        assert seeded["minute"] == [("NSE", "INDEX", "NIFTY")]
 
 
 class TestWarmBestEffort:

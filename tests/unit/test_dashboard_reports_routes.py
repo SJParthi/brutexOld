@@ -14,6 +14,7 @@ import zipfile
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -165,6 +166,108 @@ def test_symbols_tags_option_pullability(tmp_path: Path) -> None:
     by_sym = {s["symbol"]: s["option_pullable"] for s in resp.json()["symbols"]}
     assert by_sym["COALINDIA"] is True  # F&O-eligible → has an option chain
     assert by_sym["SPOTONLY"] is False  # absent from the universe → spot-only
+
+
+def _counting_resolver(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Spy on the route's module-global resolver (the offload-test seam).
+
+    Wraps the REAL ``resolve_report_datasets`` so payloads stay genuine while
+    the returned list records each computed ``basis`` in call order — its
+    length is the compute count (a cache hit never reaches the resolver).
+    """
+    from brutex.dashboard.preopen_report import resolve_report_datasets as real_resolve
+
+    bases: list[str] = []
+
+    def _counting(*args: Any, **kwargs: Any) -> Any:
+        bases.append(str(kwargs.get("basis", "day")))
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr("brutex.dashboard.app.resolve_report_datasets", _counting)
+    return bases
+
+
+def test_symbols_discovery_cached_across_polls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DEC-O1-CLAIMS-HONESTY-001 (PART 1a): a repeat poll within one write
+    # generation is an O(1) cache handoff (ONE resolver call), and a pull
+    # (generation bump via mark_dirty) forces exactly one re-discovery.
+    from brutex.dashboard.summary_cache import SummaryCache
+
+    bases = _counting_resolver(monkeypatch)
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="COALINDIA",
+        interval="1day",
+        bars=[_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="455", close="458.15")],
+    )
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    summary_cache = SummaryCache()
+    client = TestClient(
+        build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
+    )
+    first = client.get("/api/v1/reports/preopen/symbols")
+    second = client.get("/api/v1/reports/preopen/symbols")
+    assert first.status_code == second.status_code == 200
+    assert len(bases) == 1  # the second poll was a generation-memo hit
+    assert first.json() == second.json()
+    summary_cache.mark_dirty()  # a pull bumps the write generation
+    third = client.get("/api/v1/reports/preopen/symbols")
+    assert third.status_code == 200
+    assert len(bases) == 2  # bumped generation → exactly one re-discovery
+    assert third.json() == first.json()  # same lake → same payload, fresh
+
+
+def test_symbols_cache_keys_per_basis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each basis holds its OWN memo (the basis is IN the cache key): minute is
+    # never served day triples, and a repeat of either basis is a hit.
+    bases = _counting_resolver(monkeypatch)
+    client = _client(tmp_path)
+    day_first = client.get("/api/v1/reports/preopen/symbols?basis=day")
+    minute_first = client.get("/api/v1/reports/preopen/symbols?basis=minute")
+    assert day_first.status_code == minute_first.status_code == 200
+    assert bases == ["day", "minute"]  # each computed with ITS basis
+    day_second = client.get("/api/v1/reports/preopen/symbols?basis=day")
+    minute_second = client.get("/api/v1/reports/preopen/symbols?basis=minute")
+    assert bases == ["day", "minute"]  # both repeats were per-basis memo hits
+    assert day_second.json() == day_first.json()
+    assert minute_second.json() == minute_first.json()
+    assert day_first.json()["basis"] == "day"
+    assert minute_first.json()["basis"] == "minute"
+
+
+def test_symbols_pullability_not_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only the discovery TRIPLES are cached — the pullability tagging reads the
+    # instrument master LIVE (a keyless load-instruments moves the master
+    # WITHOUT a generation bump — the master_revision trap), so the badge
+    # flips while the resolver still shows one call.
+    bases = _counting_resolver(monkeypatch)
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="COALINDIA",
+        interval="1day",
+        bars=[_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="455", close="458.15")],
+    )
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    client = TestClient(build_app(DashboardState(), instrument_store=store))
+    first = client.get("/api/v1/reports/preopen/symbols").json()
+    assert [s["symbol"] for s in first["symbols"]] == ["COALINDIA"]
+    assert first["symbols"][0]["option_pullable"] is False  # empty master
+    # A keyless load-instruments: the master moves, the generation does NOT.
+    store.upsert_many(
+        [_eq("COALINDIA"), _ce("COALINDIA")],
+        snapshot_date=date.today(),
+        run_id="seed",
+        csv_source_sha256="0" * 64,
+    )
+    second = client.get("/api/v1/reports/preopen/symbols").json()
+    assert second["symbols"][0]["option_pullable"] is True  # tagged LIVE
+    assert len(bases) == 1  # ...while the cached triples were a hit
 
 
 def test_xlsx_download_matches_nse(tmp_path: Path) -> None:

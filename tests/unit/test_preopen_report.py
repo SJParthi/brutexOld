@@ -17,13 +17,19 @@ from decimal import Decimal
 from pathlib import Path
 
 import duckdb
+import pytest
+from brutex.dashboard import preopen_report
+from brutex.dashboard.db_view import list_candle_datasets
 from brutex.dashboard.preopen_report import (
+    _BASIS_INTERVAL,
     _COL_WIDTHS,
     _STYLE_GREEN,
     _STYLE_GREEN_BOLD,
     _STYLE_RED,
     _STYLE_RED_BOLD,
+    REPORT_BASES,
     REPORT_COLUMNS,
+    REPORT_EXCLUDED_SEGMENTS,
     PreOpenRow,
     _col_letter,
     _daily_close_by_date,
@@ -161,6 +167,87 @@ def test_resolve_filters_to_requested_symbols(tmp_path: Path) -> None:
 
 def test_resolve_empty_lake(tmp_path: Path) -> None:
     assert resolve_report_datasets(tmp_path) == []
+
+
+def _write_fno(lake: Path, intervals: tuple[str, ...] = ("1minute",)) -> None:
+    """Seed one F&O contract partition per interval (segment='FNO')."""
+    writer = ParquetWriter(lake_root=lake)
+    for interval in intervals:
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-26Jun2024-FUT",
+            interval=interval,
+            bars=[_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="100", close="101")],
+        )
+
+
+def test_resolve_excludes_fno_datasets(tmp_path: Path) -> None:
+    # DEC-O1-CLAIMS-HONESTY-001 SANCTIONED behavior change: an F&O contract
+    # partition holding a basis interval is never a pre-open report symbol —
+    # it is pruned at the walk level. Fails before PART 1b, passes after.
+    _coalindia(tmp_path)  # CASH: 1day + 1minute
+    _write_fno(tmp_path, intervals=("1day", "1minute"))
+    for basis in REPORT_BASES:
+        triples = resolve_report_datasets(tmp_path, basis=basis)
+        assert ("NSE", "CASH", "COALINDIA") in triples
+        assert all(seg != "FNO" for _exch, seg, _sym in triples)
+
+
+def test_resolve_walk_is_filtered_at_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The discovery call itself carries the filters (walk-level pruning —
+    # DEC-O1-CLAIMS-HONESTY-001), never a walk-everything-then-discard.
+    captured: list[dict[str, object]] = []
+
+    def _spy(
+        lake_root: Path,
+        *,
+        exclude_segments: frozenset[str] = frozenset(),
+        intervals: object = None,
+    ) -> list[dict[str, str]]:
+        captured.append({"exclude_segments": exclude_segments, "intervals": intervals})
+        return []
+
+    monkeypatch.setattr(preopen_report, "list_candle_datasets", _spy)
+    assert resolve_report_datasets(tmp_path, basis="day") == []
+    assert resolve_report_datasets(tmp_path, basis="minute") == []
+    assert captured == [
+        {"exclude_segments": REPORT_EXCLUDED_SEGMENTS, "intervals": frozenset({"1day"})},
+        {"exclude_segments": REPORT_EXCLUDED_SEGMENTS, "intervals": frozenset({"1minute"})},
+    ]
+
+
+def test_resolve_datasets_seam_byte_identical(tmp_path: Path) -> None:
+    # The pre-walked ``datasets=`` seam (the warm's zero-extra-walk path) must
+    # produce a result byte-identical to the filtered-walk path — the in-loop
+    # screens are the semantic truth, the walk filters a pure optimization.
+    _write(
+        tmp_path,
+        "ONLYDAY",
+        "1day",
+        [_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="1", close="2")],
+    )
+    _write(
+        tmp_path,
+        "ONLYMIN",
+        "1minute",
+        [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="1", close="2")],
+    )
+    _write_fno(tmp_path)
+    unfiltered = list_candle_datasets(tmp_path)
+    for basis in REPORT_BASES:
+        walked = resolve_report_datasets(tmp_path, basis=basis)
+        assert walked == resolve_report_datasets(tmp_path, basis=basis, datasets=unfiltered)
+    assert resolve_report_datasets(tmp_path, basis="day") == [("NSE", "CASH", "ONLYDAY")]
+    assert resolve_report_datasets(tmp_path, basis="minute") == [("NSE", "CASH", "ONLYMIN")]
+
+
+def test_report_bases_pins_basis_interval() -> None:
+    # DYNAMIC drift pin: a new basis added to _BASIS_INTERVAL must extend
+    # REPORT_BASES too (else it would never be warmed post-pull).
+    assert set(REPORT_BASES) == set(_BASIS_INTERVAL)
 
 
 # ── build_preopen_rows ──────────────────────────────────────────────────────

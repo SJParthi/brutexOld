@@ -43,7 +43,7 @@ import bisect
 import io
 import re
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -70,6 +70,7 @@ from brutex.dashboard.db_view import (
     _prev_trading_close,
     list_candle_datasets,
 )
+from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.session import IST
 
 #: Module logger — surfaces a per-symbol skip (DEC-PREOPEN-SPACE-SYMBOL-001) so a
@@ -155,9 +156,27 @@ _BASIS_INTERVAL: Final[dict[str, str]] = {
     "minute": _INTRADAY_BASE_INTERVAL,
 }
 
+#: Every report basis, in picker order — the DYNAMIC iteration source for the
+#: post-pull discovery warm (DEC-O1-CLAIMS-HONESTY-001): adding a basis to
+#: :data:`_BASIS_INTERVAL` must extend this tuple too (test-pinned equal key
+#: sets), so a new basis is auto-warmed, never silently cold.
+REPORT_BASES: Final[tuple[ReportBasis, ...]] = ("day", "minute")
+
+#: Segments EXCLUDED from report discovery (DEC-O1-CLAIMS-HONESTY-001): an F&O
+#: contract partition is never a pre-open report symbol, so it is PRUNED at the
+#: walk level (an excluded segment's tree is never descended —
+#: DEC-COMPLETENESS-FNO-SKIP-001 machinery) instead of parse-then-discarded.
+#: The ONE constant both the walk call and the pre-walked ``datasets`` screen
+#: share (CLAUDE.md §11 COMMON).
+REPORT_EXCLUDED_SEGMENTS: Final[frozenset[str]] = frozenset({FNO_CANDLE_LAKE_SEGMENT})
+
 
 def resolve_report_datasets(
-    lake_root: Path, symbols: list[str] | None = None, *, basis: ReportBasis = "day"
+    lake_root: Path,
+    symbols: list[str] | None = None,
+    *,
+    basis: ReportBasis = "day",
+    datasets: Sequence[Mapping[str, str]] | None = None,
 ) -> list[tuple[str, str, str]]:
     """Resolve the ``(exchange, segment, symbol)`` triples the report can build.
 
@@ -166,20 +185,46 @@ def resolve_report_datasets(
     (the original DEC-PREOPEN-REPORT-1DAY-001 behaviour), else the ``1minute``
     partition for ``basis="minute"``. When *symbols* is given, the result is
     filtered to that set (case-sensitive on the lake symbol). Sorted by symbol
-    for a stable picker / report order. An empty or missing lake yields ``[]``
+    for a stable picker / report order (ties broken by the deterministic
+    4-key-sorted discovery order). An empty or missing lake yields ``[]``
     (the report degrades to a header-only sheet).
+
+    DEC-O1-CLAIMS-HONESTY-001: discovery is FILTERED at the source —
+    ``exclude_segments=REPORT_EXCLUDED_SEGMENTS`` prunes the F&O contract tree
+    at the walk level (never descended; ~10⁵–10⁶ dirs on a materialised
+    options lake) and ``intervals={required}`` bounds the listing to the one
+    partition the basis reads. SANCTIONED behaviour change: an F&O contract
+    that happens to hold the required interval is no longer offered as a
+    report symbol (it never was one — a contract is not a spot underlying).
+    NOTE: a filtered discovery deliberately never (re)builds the lake
+    manifest (``db_view.list_candle_datasets`` unfiltered-only gate) — the
+    unfiltered consumers (/db datasets, movers, the post-pull warm) remain
+    the rebuilders.
+
+    *datasets* is the pre-walked seam (the ``build_db_datasets_payload``
+    pattern): the post-pull discovery warm passes its ONE shared unfiltered
+    walk result so the preopen memos are seeded with zero extra walks; the
+    in-loop screens below then produce a result byte-identical to the
+    filtered-walk path (test-pinned).
     """
     required = _BASIS_INTERVAL[basis]
     wanted = set(symbols) if symbols else None
-    intervals_by_key: dict[tuple[str, str, str], set[str]] = {}
-    for ds in list_candle_datasets(lake_root):
-        key = (ds["exchange"], ds["segment"], ds["symbol"])
-        intervals_by_key.setdefault(key, set()).add(ds["interval"])
-    resolved = [
-        key
-        for key, intervals in intervals_by_key.items()
-        if required in intervals and (wanted is None or key[2] in wanted)
-    ]
+    source: Sequence[Mapping[str, str]] = (
+        datasets
+        if datasets is not None
+        else list_candle_datasets(
+            lake_root,
+            exclude_segments=REPORT_EXCLUDED_SEGMENTS,
+            intervals=frozenset({required}),
+        )
+    )
+    resolved: dict[tuple[str, str, str], None] = {}
+    for ds in source:
+        if ds["segment"] in REPORT_EXCLUDED_SEGMENTS or ds["interval"] != required:
+            continue
+        if wanted is not None and ds["symbol"] not in wanted:
+            continue
+        resolved.setdefault((ds["exchange"], ds["segment"], ds["symbol"]), None)
     return sorted(resolved, key=lambda k: k[2])
 
 
@@ -1102,7 +1147,9 @@ def report_filename(
 
 
 __all__ = [
+    "REPORT_BASES",
     "REPORT_COLUMNS",
+    "REPORT_EXCLUDED_SEGMENTS",
     "PreOpenRow",
     "ReportMode",
     "build_preopen_rows",
