@@ -281,6 +281,11 @@ def test_rate_widget_malformed_payload_and_hung_fetch_feed_backoff() -> None:
     assert "ctrl.abort()" in js
     assert "var FETCH_TIMEOUT_MS = 10000;" in js, "the 10 s abort bound value is missing"
     assert "function fetchJson(url)" in js
+    # The signal WIRE (refuter finding: deleting `opts.signal = ctrl.signal;` made
+    # ctrl.abort() a no-op — nothing listened — with the whole suite green).
+    assert "if (ctrl) { opts.signal = ctrl.signal; }" in js, (
+        "the abort signal must be wired into the fetch options — the bound's teeth"
+    )
     # The killer is cleared only AFTER the body parse settles …
     assert "return r.json();   // killer still armed: a stalled BODY aborts too" in js
     assert (
@@ -303,6 +308,54 @@ def test_rate_widget_eta_failure_hides_not_freezes() -> None:
     assert "renderEta(null)" in js
 
 
+def test_rate_widget_eta_fetch_seq_guarded() -> None:
+    """The secondary progress/ETA fetch is seq-guarded like the main chain
+    (refuter finding: it was NOT — a visibility re-poll racing a slow progress
+    fetch let the OLD response settle out of order, repainting a stale ETA over a
+    fresher render, or its abort landing in the catch and HIDING the row a fresh
+    poll just painted). Both callbacks now drop a superseded response. The
+    multi-line pin encodes the guard-before-render ordering; the old unguarded
+    one-liners are regression-pinned gone."""
+    js = _widget_js()
+    assert (
+        "fetchJson(PROGRESS_ENDPOINT)\n"
+        "      .then(function (progress) {\n"
+        "        if (seq !== pollSeq) { return; }\n"
+        "        renderEta(progress);\n"
+        "      })\n"
+        "      .catch(function () {\n"
+        "        if (seq !== pollSeq) { return; }\n"
+        "        renderEta(null);\n"
+        "      });" in js
+    ), "both ETA callbacks must drop a superseded response BEFORE touching the row"
+    assert ".then(function (progress) { renderEta(progress); })" not in js, (
+        "the unguarded success callback must be gone"
+    )
+    assert ".catch(function () { renderEta(null); })" not in js, (
+        "the unguarded failure callback must be gone"
+    )
+
+
+def test_rate_widget_age_row_attached_and_dom_writes_pinned() -> None:
+    """The collapsed pill's age readout is genuinely REACHABLE (refuter finding:
+    only the row's CREATION was pinned — detaching `ageRow,` from buildWidget's
+    children, or deleting the `if (pill)`/`if (big)` writes, silently blanked the
+    always-visible "updated Xs ago" text while every test stayed green, leaving
+    only the red border at 30 s)."""
+    js = _widget_js()
+    # The attachment: etaRow + ageRow close buildWidget's children array.
+    assert "        etaRow,\n        ageRow,\n      ]" in js, (
+        "ageRow must be attached to the collapsed widget's children"
+    )
+    # The DOM writes for both twins (collapsed pill + expanded overlay value).
+    assert "if (pill) { pill.textContent = text; pill.className = cls; }" in js, (
+        "the collapsed-pill age write is missing"
+    )
+    assert (
+        'if (big) { big.textContent = text; big.className = "gv" + (cls ? " " + cls : ""); }' in js
+    ), "the overlay age write (gv base class preserved) is missing"
+
+
 def test_rate_widget_server_age_shown_additionally_never_replacing() -> None:
     """The payload's SERVER-side seconds_since_update is shown ADDITIONALLY in the
     overlay — it never replaces the client-clock measurement (a null value reads
@@ -321,6 +374,86 @@ def _poll_progress_src(html: str) -> str:
     fn = re.search(r"async function pollProgress\(label\) \{.*?\n\}", html, re.DOTALL)
     assert fn is not None, "pollProgress is missing"
     return fn.group(0)
+
+
+def _start_and_poll_src(html: str) -> str:
+    fn = re.search(r"async function startAndPoll\(path, label\) \{.*?\n\}", html, re.DOTALL)
+    assert fn is not None, "startAndPoll is missing"
+    return fn.group(0)
+
+
+def _finish_live_src(html: str) -> str:
+    fn = re.search(r"function finishLive\(\) \{.*?\n\}", html, re.DOTALL)
+    assert fn is not None, "finishLive is missing"
+    return fn.group(0)
+
+
+def test_regression_universe_hung_fetch_could_wedge_poll_forever() -> None:
+    """REGRESSION (refuter-confirmed): ``pollProgress`` fetched with NO abort bound
+    while the visibilitychange recovery was gated on ``pollTimer`` — which is null
+    exactly while a poll is IN FLIGHT. A headers-then-stalled-body response (or a
+    half-open connection dying silently) hung ``await r.json()`` indefinitely
+    (browsers have NO body-read timeout) with nothing scheduled, no abort and no
+    tab-return re-poll: a permanent wedge while the chip claimed "retrying". Now
+    the fetch carries the SAME 10 s abort bound the widget has (killer armed
+    through the BODY read, cleared only in the ``finally`` — i.e. after
+    ``r.json()`` settles) and the visibility gate rides the ``watchActive`` flag
+    (set in startAndPoll, cleared in finishLive; the ``pollGen`` token makes a
+    re-poll during an in-flight fetch safe). Substring-presence pins (no headless
+    JS runner)."""
+    html = _render_universe_html()
+    poll = _poll_progress_src(html)
+    # The abort bound — constant, controller, killer, and the signal wire.
+    assert "const FEED_FETCH_TIMEOUT_MS = 10000;" in html
+    assert (
+        "const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;"
+        in poll
+    )
+    assert (
+        "const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;"
+        in poll
+    )
+    assert "if (ctrl) opts.signal = ctrl.signal;" in poll, "the signal wire is the abort's teeth"
+    assert "const r = await fetch('/api/v1/universe/pull-progress', opts);" in poll
+    # The killer is cleared ONLY in the finally — after r.json() settles — so a
+    # stalled BODY aborts too; and the finally is the one clear site.
+    assert "} finally {\n    if (killer) clearTimeout(killer);" in poll, (
+        "the killer must be cleared only after the body read settles"
+    )
+    assert poll.count("clearTimeout(killer)") == 1, "exactly ONE clear site (the finally)"
+    assert poll.index("await r.json();") < poll.index("} finally {")
+    # The visibility recovery gate rides watchActive, never the in-flight-null pollTimer.
+    assert "let watchActive = false;" in html
+    assert (
+        "if (!document.hidden && watchActive && lastPollLabel !== null) pollProgress(lastPollLabel);"
+        in html
+    ), "the visibility re-poll must gate on the watch-active flag"
+    assert "pollTimer && lastPollLabel" not in html, (
+        "the old pollTimer gate blocked tab-return recovery while a poll was in flight"
+    )
+    assert "watchActive = true;" in _start_and_poll_src(html), (
+        "the watch-active gate must open at watch start"
+    )
+    assert "watchActive = false;" in _finish_live_src(html), (
+        "the watch-active gate must close on settle"
+    )
+
+
+def test_regression_universe_hung_start_post_shows_stale() -> None:
+    """REGRESSION (refuter-confirmed): ``startAndPoll``'s start POST ran BEFORE any
+    staleness machinery existed — ``pollProgress`` had not run, so the ticker never
+    started and a wedged POST left "Starting …" painted indefinitely with ZERO
+    stale indication. The ticker now starts BEFORE the POST, so the watch-start
+    baseline escalates the #feedage chip amber → red STALE if the POST hangs.
+    HONEST envelope: indication only — the POST itself is deliberately NOT aborted
+    (a slow-but-successful start would be mislabelled failed; the single-flight
+    route lets a re-click attach to the running pull)."""
+    html = _render_universe_html()
+    start = _start_and_poll_src(html)
+    assert "startFeedAgeTicker();" in start, "the ticker must start inside startAndPoll"
+    assert start.index("startFeedAgeTicker();") < start.index(
+        "await fetch(path, {method: 'POST'})"
+    ), "the ticker must start BEFORE the start POST so a wedged POST reads STALE"
 
 
 def test_regression_universe_poll_gave_up_and_froze_38_minutes() -> None:
@@ -386,6 +519,18 @@ def test_universe_feed_age_chip_dom_css_and_thresholds() -> None:
         "const nowMs = () => (typeof performance !== 'undefined' && performance.now)"
         " ? performance.now() : Date.now();" in html
     ), "the universe monotonic client clock is missing"
+    # The VISIBILITY wiring (refuter finding: `.chip.stale` is display:none and only
+    # these toggles reveal it — deleting them left the chip's textContent written but
+    # permanently invisible, resurrecting the zero-indication outage with the suite
+    # green). Both classList writes + the null-clear branch are load-bearing.
+    assert "chip.classList.toggle('on', warn || red);" in html, (
+        "the .on toggle is the ONLY thing that reveals the display:none chip"
+    )
+    assert "chip.classList.toggle('red', red);" in html, "the red escalation toggle is missing"
+    assert (
+        "if (lastProgressOkMs === null) { chip.classList.remove('on', 'red');"
+        " chip.textContent = ''; return; }" in html
+    ), "the null-clear branch (settled page never reads STALE) is missing"
 
 
 def test_universe_stale_clears_on_success_and_settle() -> None:
@@ -402,6 +547,12 @@ def test_universe_stale_clears_on_success_and_settle() -> None:
     assert "function startFeedAgeTicker()" in html
     assert "if (lastProgressOkMs === null) lastProgressOkMs = nowMs();" in html, (
         "the watch-start baseline is missing — a first-poll failure must still escalate"
+    )
+    # The ticker must actually be STARTED from the poll loop (refuter finding: the
+    # invocation was unpinned — deleting it meant the 1 s clock never ran and the
+    # chip never escalated, with the suite green).
+    assert "startFeedAgeTicker();" in poll, (
+        "pollProgress must start the 1 s age ticker on every watch"
     )
 
 
@@ -449,6 +600,23 @@ def test_regression_giant_unit_progress_was_invisible() -> None:
     )
     assert "'sub-unit ' + count.toLocaleString('en-IN') + ' this unit'" in html
     assert 'id="subunit"' in html
+    # The tracker→header LINK (refuter finding: only the DEFINITIONS were pinned —
+    # `const subNote = '';` fully resurrected the invisible-giant-unit bug with the
+    # suite green). Pin the derivation call, the #subunit write (its '· ' prefix
+    # differs from the header's ' · ', so the count pin above does not cover it),
+    # and finishLive's clear.
+    poll = _poll_progress_src(html)
+    assert "const subNote = subUnitNote(s, trackSubUnit(s));" in poll, (
+        "the derivation call is the tracker→header link — without it nothing moves"
+    )
+    assert "if (suEl) suEl.textContent = subNote ? '· ' + subNote : '';" in poll, (
+        "the #subunit counter write is missing"
+    )
+    finish = _finish_live_src(html)
+    assert "const suEl = document.getElementById('subunit');" in finish
+    assert "if (suEl) suEl.textContent = '';" in finish, (
+        "a settled watch must clear the #subunit counter"
+    )
 
 
 def test_universe_expiry_token_parse_right_anchored_mirrors_fno_symbol() -> None:
@@ -464,16 +632,30 @@ def test_universe_expiry_token_parse_right_anchored_mirrors_fno_symbol() -> None
     assert "parts.length >= 4" in html
     assert "(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)" in html
     assert ".split(' ')[0]" in html, "the label's interval suffix must be stripped first"
+    # The CE/PE/FUT TYPE gates the docstring claims (refuter finding: they were
+    # unpinned — only the length/index math was asserted).
+    assert (
+        "if ((t === 'CE' || t === 'PE') && parts.length >= 5) tok = parts[parts.length - 3];"
+        in html
+    ), "the option (CE/PE) type gate is missing"
+    assert "else if (t === 'FUT' && parts.length >= 4) tok = parts[parts.length - 2];" in html, (
+        "the future (FUT) type gate is missing"
+    )
 
 
 def test_universe_subunit_resets_per_unit_and_per_pull() -> None:
     """The tracker resets on ANY completed/total movement (the unit boundary,
-    covering frozen-total AND grow-total phases) and on watch start + settle."""
+    covering frozen-total AND grow-total phases) and on watch start + settle.
+    Location-AWARE pins (refuter finding: the old ``count >= 2`` was location-blind
+    — both calls could sit anywhere and the assert message overclaimed)."""
     html = _render_universe_html()
     assert "String(s.completed || 0) + '/' + String(s.total || 0)" in html
     assert "function resetSubUnit()" in html
-    assert html.count("resetSubUnit();") >= 2, (
-        "resetSubUnit must run at BOTH watch start (startAndPoll) and settle (finishLive)"
+    assert "resetSubUnit();" in _start_and_poll_src(html), (
+        "resetSubUnit must run at watch start (startAndPoll)"
+    )
+    assert "resetSubUnit();" in _finish_live_src(html), (
+        "resetSubUnit must run at settle (finishLive)"
     )
 
 

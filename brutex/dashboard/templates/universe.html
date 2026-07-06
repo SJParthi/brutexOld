@@ -1639,7 +1639,10 @@ const PROGRESS_MS = 600;
 let pollTimer = null;
 
 /* Self-recovering poll + client staleness (DEC-PULL-UI-STALENESS-001). A rejected
-   fetch OR a non-ok response OR a malformed body is a FAILED poll: the first
+   fetch OR a non-ok response OR a malformed body OR a HUNG fetch (10 s abort,
+   armed through the BODY read — browsers have no body-read timeout, so a
+   headers-then-stalled-body response would otherwise hang `await r.json()`
+   forever with nothing scheduled) is a FAILED poll: the first
    POLL_MAX_FEED_RETRIES failures retry at the quick PROGRESS_MS cadence (a
    sub-second blip recovers in ~600 ms, unchanged), then the poll backs off
    exponentially (3 s doubling to a 30 s cap) and NEVER gives up — the page
@@ -1653,11 +1656,13 @@ const FEED_STALE_WARN_MS = 5000;
 const FEED_STALE_RED_MS = 15000;
 const FEED_BACKOFF_BASE_MS = 3000;
 const FEED_BACKOFF_MAX_MS = 30000;
+const FEED_FETCH_TIMEOUT_MS = 10000;  // hung-fetch abort bound (headers AND body) — mirrors the widget's
 const nowMs = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
 let pollGen = 0;              // re-entrancy generation: a superseded response never repaints
 let lastProgressOkMs = null;  // client clock of the last SUCCESSFUL progress poll
 let feedAgeTimer = null;      // the ~1 s ticker — runs ONLY while a live watch is active
 let lastPollLabel = null;
+let watchActive = false;      // true from watch start (startAndPoll) until settle (finishLive)
 
 /* DEC-PROGRESS-WINDOW-UNITS-001 + DEC-EMPTY-RESOLVED-REPORTING-001 +
    DEC-UNIVERSE-WINDOW-SEGMENTS-001: window-scale companion to the coarse unit
@@ -1721,7 +1726,15 @@ async function startAndPoll(path, label) {
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
   pullStarted = true;   // DEC-UNIVERSE-WINDOW-SEGMENTS-001: gate the all-segments line on a started pull
-  pollFeedRetries = 0; lastProgressOkMs = null; resetSubUnit();   // a new watch starts clean
+  pollFeedRetries = 0; lastProgressOkMs = null; lastPollLabel = null; resetSubUnit();   // a new watch starts clean
+  watchActive = true;   // opens the visibility re-poll gate for the whole watch (cleared in finishLive)
+  // Refuter-confirmed fix: start the staleness ticker BEFORE the start POST, so a
+  // hung/wedged POST escalates the #feedage chip amber → red STALE from the
+  // watch-start baseline instead of freezing "Starting …" with zero indication.
+  // (The POST itself is deliberately NOT aborted — a slow-but-successful start
+  // would be mislabelled failed; the route is single-flight, so a re-click safely
+  // attaches to the already-running pull. Indication, not auto-retry.)
+  startFeedAgeTicker();
   refreshWindowsLine();
   try {
     const r = await fetch(path, {method: 'POST'});
@@ -1944,8 +1957,12 @@ function stopFeedAgeTicker() {
 }
 document.addEventListener('visibilitychange', () => {
   // Background-tab throttling stretched the old 5x600 ms budget into minutes of
-  // silence; on tab return, re-poll NOW instead of waiting out a backoff.
-  if (!document.hidden && pollTimer && lastPollLabel !== null) pollProgress(lastPollLabel);
+  // silence; on tab return, re-poll NOW instead of waiting out a backoff. Gate on
+  // the watchActive FLAG, never pollTimer (refuter-confirmed fix: pollTimer is
+  // null exactly while a poll is IN FLIGHT, so the old gate blocked tab-return
+  // recovery for a poll wedged mid-flight); the pollGen token makes a re-poll
+  // during an in-flight fetch safe — the hung straggler drops on its gen check.
+  if (!document.hidden && watchActive && lastPollLabel !== null) pollProgress(lastPollLabel);
 });
 
 /* Per-expiry sub-unit progress (DEC-PULL-HEADER-SUBUNIT-001): one giant unit (a whole
@@ -2002,8 +2019,19 @@ async function pollProgress(label) {
   lastPollLabel = label;
   startFeedAgeTicker();
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  // Hung-fetch abort bound (refuter-confirmed fix — the same 10 s bound the widget
+  // carries): browsers have NO body-read timeout, so a headers-then-stalled-body
+  // response (or a half-open connection dying silently mid-response) could wedge
+  // BOTH awaits below forever with nothing scheduled. The killer stays ARMED
+  // through the BODY read — cleared in the finally, i.e. only after r.json()
+  // settles — so a wedged poll becomes a counted failure on the backoff path
+  // within FEED_FETCH_TIMEOUT_MS instead of wedging the chain permanently.
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;
+  const opts = {};
+  if (ctrl) opts.signal = ctrl.signal;
   try {
-    const r = await fetch('/api/v1/universe/pull-progress');
+    const r = await fetch('/api/v1/universe/pull-progress', opts);
     if (gen !== pollGen) return;                              // superseded — drop stale response
     if (!r.ok) throw new Error('HTTP ' + r.status);           // non-ok is a POLL failure, NEVER a settled snapshot
     const s = await r.json();
@@ -2047,11 +2075,14 @@ async function pollProgress(label) {
     pollFeedRetries += 1;
     renderFeedAge();
     pollTimer = setTimeout(() => pollProgress(label), feedRetryDelayMs());
+  } finally {
+    if (killer) clearTimeout(killer);   // cleared only AFTER r.json() settled — a stalled body aborts too
   }
 }
 
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  watchActive = false;   // the visibility re-poll gate closes with the watch (DEC-PULL-UI-STALENESS-001)
   pollGen += 1;          // invalidate any in-flight poll straggler (a settled page never repaints stale)
   stopFeedAgeTicker();   // a settled page never reads STALE (DEC-PULL-UI-STALENESS-001)
   resetSubUnit();        // DEC-PULL-HEADER-SUBUNIT-001: clear the per-watch tracker + note

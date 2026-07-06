@@ -602,10 +602,19 @@
     // ETA (DEC-PULL-PROGRESS-HONESTY-001): best-effort second read riding the SAME
     // tick (so it backs off with the main poll). On failure the ETA row HIDES
     // (renderEta(null)) instead of freezing a stale figure; it never drives
-    // scheduling/staleness — the main endpoint owns the widget's numbers.
+    // scheduling/staleness — the main endpoint owns the widget's numbers. Both
+    // callbacks are seq-guarded like the main chain (refuter-confirmed fix): a
+    // superseded out-of-order response can neither repaint an OLDER ETA over a
+    // fresher render nor hide the ETA row a fresher poll just painted.
     fetchJson(PROGRESS_ENDPOINT)
-      .then(function (progress) { renderEta(progress); })
-      .catch(function () { renderEta(null); });
+      .then(function (progress) {
+        if (seq !== pollSeq) { return; }
+        renderEta(progress);
+      })
+      .catch(function () {
+        if (seq !== pollSeq) { return; }
+        renderEta(null);
+      });
   }
 
   function start() {

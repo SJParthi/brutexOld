@@ -227,9 +227,16 @@ class TestPullRateRoute:
         assert "STALE_RED_MS" in js.text
         assert "backoffDelayMs" in js.text
         assert "visibilitychange" in js.text
+        # The abort signal is WIRED (refuter finding: without this line ctrl.abort()
+        # is a no-op) and the secondary ETA fetch is seq-guarded.
+        assert "opts.signal = ctrl.signal" in js.text
         assert uni.status_code == 200
         assert 'id="feedage"' in uni.text
         assert 'id="subunit"' in uni.text
+        # The universe poll carries the SAME hung-fetch abort bound + the
+        # watch-active visibility gate (refuter-confirmed fixes).
+        assert "FEED_FETCH_TIMEOUT_MS" in uni.text
+        assert "watchActive" in uni.text
 
 
 def test_widget_referenced_on_operator_and_universe_templates() -> None:
