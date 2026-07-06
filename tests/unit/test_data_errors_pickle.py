@@ -95,6 +95,14 @@ class TestConstructorArgReduce:
         assert isinstance(copy, GreeksEnrichPoolBroken)
         assert copy.detail == "a worker process died before completing its unit"
 
+    def test_lake_write_halt_worker_pool_broken(self) -> None:
+        """The DEC-HARDWARE-ENVELOPE-001 RESERVED token round-trips like any
+        other ``reason`` — pinned so a future process-pool stage adopting it
+        inherits the clean round-trip."""
+        copy = _roundtrip(LakeWriteHalt("worker_pool_broken"))
+        assert isinstance(copy, LakeWriteHalt)
+        assert copy.reason == "worker_pool_broken"
+
     def test_double_roundtrip_is_stable(self) -> None:
         """A second hop (paranoia: nested pools / re-pickled results) is a fixpoint."""
         exc = LakeWriteHalt("out_of_memory")
@@ -144,3 +152,8 @@ class TestParquetReadSkipErrors:
     def test_lake_write_halt_is_not_a_skip_error(self) -> None:
         skip = parquet_read_skip_errors()
         assert not isinstance(LakeWriteHalt("disk_full"), skip)
+
+    def test_narrow_a_value_error_is_not_in_the_set(self) -> None:
+        # NARROW on purpose (Golden Rule #1): a genuine code bug still propagates.
+        skip = parquet_read_skip_errors()
+        assert not issubclass(ValueError, skip)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -155,3 +156,79 @@ def test_default_timeout_resolves_common_partition_lock_knob(
     with derive_write_lock(tmp_path):
         pass
     assert resolved, "the COMMON bounded acquire (partition_lock) must run the flock"
+
+
+# ── process-local reentrancy (DEC-HARDWARE-ENVELOPE-001 fold) ───────────────
+
+
+def test_writer_reenters_same_thread_and_releases_only_at_outer_exit(tmp_path: Path) -> None:
+    """A nested acquire in the SAME process rides the outer flock (no self-deadlock)."""
+    with derive_write_lock(tmp_path, timeout_seconds=0.05):
+        with derive_write_lock(tmp_path, timeout_seconds=0.05):
+            assert derive_in_progress(tmp_path) is True
+        # Inner exit must NOT release the outer hold.
+        assert derive_in_progress(tmp_path) is True
+    assert derive_in_progress(tmp_path) is False
+
+
+def test_worker_thread_reenters_while_orchestrator_holds(tmp_path: Path) -> None:
+    """The parallel-prebuild pattern: a pool worker's per-symbol acquire nests
+    inside the orchestrator's whole-run hold instead of timing out (flock is per
+    open file description, so WITHOUT the registry this deadlocks/times out)."""
+    inner_ok: list[bool] = []
+
+    def _worker() -> None:
+        with derive_write_lock(tmp_path, timeout_seconds=0.05):
+            inner_ok.append(derive_in_progress(tmp_path))
+
+    with derive_write_lock(tmp_path, timeout_seconds=0.05):
+        worker = threading.Thread(target=_worker)
+        worker.start()
+        worker.join(timeout=5.0)
+        assert not worker.is_alive()
+    assert inner_ok == [True]
+    assert derive_in_progress(tmp_path) is False
+
+
+def test_nested_body_raise_still_balances_depth(tmp_path: Path) -> None:
+    """A raising nested block decrements its depth; the outer release still frees."""
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        derive_write_lock(tmp_path),
+        derive_write_lock(tmp_path),
+    ):
+        _boom()
+    assert derive_in_progress(tmp_path) is False
+    # Reusable afterwards (no stale depth entry wedging future acquires).
+    with derive_write_lock(tmp_path, timeout_seconds=0.05):
+        assert derive_in_progress(tmp_path) is True
+
+
+def test_outer_exit_with_live_nested_holder_keeps_registry_balanced(tmp_path: Path) -> None:
+    """DEFENSIVE branch: the outer holder exiting while a nested holder is still
+    inside (a contract violation — the pool must be joined first) must not
+    corrupt the depth registry: the outer decrement sees depth > 0 and leaves
+    the entry; the nested exit drains it to 0; the next acquire takes a REAL
+    flock again."""
+    entered = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+
+    def _nested() -> None:
+        with derive_write_lock(tmp_path, timeout_seconds=0.05):
+            entered.set()
+            release.wait(5.0)
+        done.set()
+
+    with derive_write_lock(tmp_path, timeout_seconds=0.05):
+        worker = threading.Thread(target=_nested)
+        worker.start()
+        assert entered.wait(5.0)
+    # Outer exited FIRST (the defensive ordering): flock already released.
+    release.set()
+    assert done.wait(5.0)
+    worker.join(timeout=5.0)
+    assert derive_in_progress(tmp_path) is False
+    # Registry drained — a fresh writer takes a real flock and works.
+    with derive_write_lock(tmp_path, timeout_seconds=0.05):
+        assert derive_in_progress(tmp_path) is True
