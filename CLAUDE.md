@@ -25,8 +25,10 @@ _Last updated: 2026-07-06 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
 writer-locked-rewrite → hash-chained-audit → one-alert-per-batch machinery,
 closing the DEC-LAKE-HEAL-001 #1175 named follow-up. Scanner: NEW
 `OptionForeignMonthRows` + pure `classify_option_keys` (UTC month routing —
-timestamp-only law, side is key payload; overlap via ONE memoised canonical-
-sibling read; clean file pays ZERO extra reads; `months=` scope now bounds the
+timestamp-only law, side is key payload; overlap via memoised canonical-
+sibling reads — ONE per affected month per series, so a multi-month stray
+costs one read per home month; clean file pays ZERO extra reads; `months=`
+scope now bounds the
 options tree BY FILENAME; NEW `include_bars=False` for the bounded L2 census;
 census OPTIONS row gains REAL foreign/overlap counts, drift stays honestly
 N/A). Writer: `OptionParquetWriter.heal_partition(remove_keys=…)` — RAW
@@ -73,6 +75,21 @@ the "zero reads out of scope" L2 claim + the "healer's own dup pass
 quarantines" comment + the `_merge_partition` "byte-for-byte" docstring
 reworded honestly, `is_foreign_timestamp` added to `__all__`, the
 option-foreign month split now the O(rows) dict-group (bars twin's shape).
+ROUND 3 (refuter-confirmed): MAJOR — a source truncated to ZERO rows in the
+scan→heal window crashed the WHOLE heal batch (empty row mask →
+`pl.Series([])` dtype Null → polars `filter` TypeError, NOT in the
+per-finding isolation set; remaining findings unhealed, no report/alert/
+audit-batch line); `_option_foreign_frame`'s mask is now explicitly
+`pl.Boolean`, so the stale finding takes the documented empty-foreign SKIP
+(regression + reverted-mutant verified). MINOR — the L2 census's
+`include_bars=False` was a SURVIVING MUTANT (flipping it to True passed all
+122 tests, silently rescanning the whole bars tree unbounded + inflating
+the mass-rail denominator); now pinned by a census call-shape spy AND an
+in-span NON-target bars poison that must stay unfound/unhealed/uncounted
+(mutant re-applied + verified killed). Docs honesty: the F&O seam
+docstring's THIRD copy of the round-2-refuted "zero reads out of scope"
+claim reworded to the honest lake_heal wording; this blurb's "ONE …
+sibling read" singular corrected (one per affected month per series).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -394,7 +411,8 @@ hostile-review pass._
   mass-heal rail (option files in the scanned-file DENOMINATOR), `LakeWriteHalt` re-raise, per-finding isolation all
   inherited. Scanner: `OptionForeignMonthRows` + pure `classify_option_keys` (timestamp-only routing law — side is
   key PAYLOAD so a null side rides verbatim and the scanner count can never diverge from the healable set; null ts
-  abstains); overlap via ONE memoised per-series canonical-sibling read; clean option file pays ZERO extra reads;
+  abstains); overlap via memoised canonical-sibling reads — ONE per affected month per series (a multi-month stray
+  costs one read per home month, never a literal single read); clean option file pays ZERO extra reads;
   `months=` bounds the options tree BY FILENAME; census OPTIONS row + `brutex lake audit-unique` + `/universe` chip
   carry REAL foreign/overlap numbers (drift stays `-`, honestly N/A). Wiring honesty: L1 reconcile-piggyback heal is
   STRUCTURALLY N/A for `options/` (the reconcile walks the CATALOG; the options tree is uncatalogued by design); L2
@@ -448,7 +466,28 @@ hostile-review pass._
   "zero-reads-out-of-scope" overclaim + the untrue "healer's own dup pass quarantines" comment + the
   `_merge_partition` "byte-for-byte" docstring all reworded honestly; `is_foreign_timestamp` added to
   `lake_invariants.__all__`; the option-foreign month split rewritten O(months × rows) → O(rows) dict-group (the
-  bars twin's shape). Remaining
+  bars twin's shape). HOSTILE-REVIEW FOLDS (round 3, refuter-confirmed; every fix reverted-mutant-verified):
+  (R3-1·MAJOR) a source file truncated to ZERO rows (schema preserved) in the scan→heal window crashed the WHOLE
+  heal batch: `_option_foreign_frame` built its row mask as a Python list, `mask == []` made `pl.Series([])` dtype
+  `Null`, and polars `filter` raised `TypeError` — NOT in `_PER_FINDING_HEAL_ERRORS` and not `LakeWriteHalt`, so it
+  escaped the per-finding isolation loop (remaining findings unhealed, no HealReport/stats/alert/AUDIT_HEAL_BATCH
+  line), violating the module's own "stale finding → empty-foreign skip" envelope (the bars twin `_heal_foreign` is
+  dict-based and immune — options-specific). FIXED: the mask Series is explicitly `dtype=pl.Boolean`, so the stale
+  finding takes the documented `foreign.height == 0` SKIP (`test_option_foreign_stale_zero_row_file_skipped` —
+  truncate-after-scan, asserts skipped=1/errors=0/no exception/read-only bytes; fails against the reverted mask).
+  (R3-2·MINOR surviving mutant) NOTHING pinned the L2 option census's `include_bars=False` — an independent probe
+  flipping it to `True` survived all 122 healer+seam tests while rescanning the WHOLE bars tree UNFILTERED from the
+  F&O seam (beyond the per-target-coordinates envelope, duplicating in-span bars findings + double-counting bars
+  files into the mass-rail denominator, diluting the >50% refusal rail). PINNED twice: a census call-shape spy
+  (`include_bars is False`, `include_options is True`, NO coordinate kwargs) + an in-span NON-target bars poison in
+  the heals-in-span test that must stay unfound/unhealed/uncounted (`files_scanned` stays 2) — the mutant re-applied
+  post-fix and verified KILLED by both. (R3-3·MINORs, docs honesty) the F&O seam docstring
+  (`historical_pull._heal_lake_after_pull`) still carried a THIRD verbatim copy of the "zero reads out of scope"
+  claim R2-2 had already retracted as overbroad — reworded to the `heal_after_pull` honest wording (clean
+  out-of-scope never read; a FLAGGED in-scope file costs sibling reads + auto-mode reassignment writes in its
+  foreign rows' HOME months, possibly outside the span); this blurb's "ONE memoised per-series canonical-sibling
+  read" singular was literally false for a multi-month stray — corrected to ONE read per affected month per series
+  (the ledger already said it right). Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (439/148) + `option_parquet_writer.py`
   (155/30) + `lake_heal.py` (589/164) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the

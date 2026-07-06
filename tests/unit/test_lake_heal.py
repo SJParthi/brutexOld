@@ -1642,6 +1642,37 @@ class TestOptionForeignHeal:
         assert report.skipped == 2
         assert report.errors == 0
 
+    def test_option_foreign_stale_zero_row_file_skipped(self, tmp_path: Path) -> None:
+        """Round-3 MAJOR regression: a source truncated to ZERO rows (schema
+        preserved) in the scan→heal window is a graceful SKIP — pre-fix the
+        empty Python mask made ``pl.Series([])`` dtype ``Null`` and
+        ``filter`` raised ``TypeError`` (NOT in ``_PER_FINDING_HEAL_ERRORS``),
+        aborting the WHOLE batch."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        june, _july = _poison_option_foreign(lake)
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        # The threat-model window: out-of-band truncation AFTER the scan.
+        pl.read_parquet(june).head(0).write_parquet(june)
+        truncated_bytes = june.read_bytes()
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 0
+        assert report.skipped == 1  # the stale finding — never an abort
+        assert report.errors == 0
+        assert report.actions == ()
+        assert report.quarantine_root is None
+        assert june.read_bytes() == truncated_bytes  # read-only skip
+
     def test_option_foreign_then_dup_same_file_single_quarantine(self, tmp_path: Path) -> None:
         """G7: one file carries BOTH findings — foreign heals first (its
         rewrite fully dedups), the dup heal reads changed=False, and exactly
@@ -2673,11 +2704,21 @@ class TestHealAfterPull:
         """``include_options=True``: a months-in-scope poisoned options file is
         healed; ``option_files_scanned`` folds into the mass-rail DENOMINATOR;
         the ``post_pull_scan`` event carries ``option_files``
-        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+        (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001). An in-span BARS poison for a
+        NON-target symbol stays invisible — the options census passes
+        ``include_bars=False``, so it must be neither found, healed, nor
+        counted into the denominator (round-3 mutant pin: flipping the census
+        to ``include_bars=True`` rescans the whole bars tree unbounded and
+        fails every count below)."""
         import polars as pl
 
         lake = tmp_path / "lake"
         june, july = _poison_option_foreign(lake)
+        # An IN-SPAN bars dup for a symbol that is NOT a pull target: only an
+        # unbounded (mutant) census could reach it.
+        non_target_bars = _dest(lake)  # NSE/INDEX/NIFTY 2024-06 — in span
+        _poison(non_target_bars, [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        non_target_bytes = non_target_bars.read_bytes()
         captured: list[dict[str, Any]] = []
         real_heal_findings = lake_heal.heal_findings
 
@@ -2695,16 +2736,58 @@ class TestHealAfterPull:
                 scope="pull:t4",
                 include_options=True,
             )
+        assert report.findings == 1  # ONLY the options finding — no bars leak
         assert report.healed == 1
         july_frame = pl.read_parquet(july).sort(["side", "timestamp"])
         assert july_frame["side"].to_list() == ["CE", "PE"]  # reassigned home
         assert pl.read_parquet(june).height == 1  # source cleaned
-        # The denominator folds the 2 scanned option files (0 bars files).
+        assert non_target_bars.read_bytes() == non_target_bytes  # never healed
+        # The denominator folds the 2 scanned option files (0 bars files —
+        # the non-target bars poison is EXCLUDED from the census count).
         assert captured[0]["files_scanned"] == 2
         (scan_event,) = _events(logs, "lake_heal.post_pull_scan")
         assert scan_event["option_files"] == 2
         assert scan_event["files"] == 2
         assert scan_event["findings"] == 1
+
+    def test_heal_after_pull_options_census_call_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spy pin on the census call itself: exactly ONE extra scan, options
+        tree ONLY (``include_bars is False`` — the round-3 surviving-mutant
+        pin), no coordinate filters (whole-tree, months-bounded)."""
+        calls: list[dict[str, Any]] = []
+
+        def _spy_scan(lake_root: Path, **kwargs: Any) -> LakeScanReport:
+            calls.append({"lake_root": lake_root, **kwargs})
+            return LakeScanReport(
+                findings=(),
+                files_scanned=0,
+                files_skipped=0,
+                series_scanned=0,
+                option_files_scanned=0,
+                option_files_skipped=0,
+                duration_s=0.0,
+            )
+
+        monkeypatch.setattr(lake_heal, "scan_lake_invariants", _spy_scan)
+        start, end = date(2024, 6, 1), date(2024, 7, 1)
+        heal_after_pull(
+            lake_root=tmp_path,
+            targets=[("NSE", "FNO", "NSE-NIFTY-27Jun24-24000-CE")],
+            start=start,
+            end=end,
+            scope="pull:t4b",
+            include_options=True,
+        )
+        assert len(calls) == 2  # one per-target scan + ONE options census
+        census = calls[1]
+        assert census["include_options"] is True
+        assert census["include_bars"] is False  # never rescans the bars tree
+        assert census["months"] == set(ist_span_partition_months(start, end))
+        assert "exchange" not in census
+        assert "segment" not in census
+        assert "symbol" not in census
 
     def test_heal_after_pull_include_options_is_month_bounded(self, tmp_path: Path) -> None:
         """An options poison OUTSIDE the pulled span is not even READ

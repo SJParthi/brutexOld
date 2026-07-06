@@ -1410,11 +1410,15 @@ def _heal_lake_after_pull(
     SUPERSET of every per-contract span — bounded, never the whole lake).
     This seam ALSO opts into the bounded ``options/`` expired-options-table
     census+heal (``include_options=True`` —
-    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001; months-scoped by FILENAME, zero reads
-    out of scope; the ONE seam owning the options wiring — the spot glue
-    stays ``False``). Honest bound: the existing zero-targets early-out also
-    skips the options census (a pull that rebuilt no contracts pulled no
-    months to bound by; L3 covers).
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001; months-scoped by FILENAME — a CLEAN
+    out-of-scope file is never read, but a FLAGGED in-scope file still costs
+    targeted canonical-sibling reads — and, in auto mode, reassignment
+    writes — in its foreign rows' HOME months, which may lie OUTSIDE the
+    span (anomaly-only cost, the :func:`~brutex.data.lake_heal.heal_after_pull`
+    round-2 honesty wording); the ONE seam owning the options wiring — the
+    spot glue stays ``False``). Honest bound: the existing zero-targets
+    early-out also skips the options census (a pull that rebuilt no
+    contracts pulled no months to bound by; L3 covers).
     Runs BEFORE :func:`_enrich_greeks_from_minute` (and before the pipeline's
     final prebuild phase — DEC-PIPELINE-AUTOPREBUILD-001 — which derives the
     intraday TFs + ``1day``) so every downstream derivation reads clean

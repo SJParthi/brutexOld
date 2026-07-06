@@ -881,13 +881,19 @@ def _option_foreign_frame(home: tuple[int, int], frame: pl.DataFrame) -> pl.Data
     (:func:`~brutex.data.lake_invariants.is_foreign_timestamp` — §11 COMMON).
     A null timestamp abstains (kept home, never moved) — the bars null-abstain
     twin. Side is NEVER consulted (the timestamp-only routing law,
-    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001). The mask Series is EXPLICITLY
+    ``pl.Boolean`` (round-3 fold): a source truncated to ZERO rows in the
+    scan→heal window yields ``mask == []`` and a bare ``pl.Series([])`` is
+    dtype ``Null`` — polars raises ``TypeError`` from ``filter``, which is
+    NOT in ``_PER_FINDING_HEAL_ERRORS`` and would abort the WHOLE batch; the
+    typed empty mask instead filters to an empty frame, so the stale finding
+    takes the documented ``foreign.height == 0`` skip.
     """
     import polars as pl
 
     deduped = frame.unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
     mask = [is_foreign_timestamp(home, ts) for ts in deduped.get_column("timestamp").to_list()]
-    return deduped.filter(pl.Series(mask))
+    return deduped.filter(pl.Series(mask, dtype=pl.Boolean))
 
 
 def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) -> bool:
