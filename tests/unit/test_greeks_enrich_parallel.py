@@ -18,7 +18,7 @@ from concurrent.futures.process import BrokenProcessPool
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from structlog.testing import capture_logs
@@ -493,10 +493,16 @@ class TestParallelDriver:
         counters still match parallel-vs-sequential."""
         real_spot = ge.read_spot_join_with_recovery
 
-        def _flaky_spot(root: Path, target: GreeksEnrichTarget, parts: FnoSymbolParts) -> SpotJoin:
+        def _flaky_spot(
+            root: Path,
+            target: GreeksEnrichTarget,
+            parts: FnoSymbolParts,
+            *,
+            stock_drift: dict[tuple[str, str], tuple[str, ...]] | None = None,
+        ) -> SpotJoin:
             if parts.underlying == "BANKNIFTY":
                 raise OSError("spot partition unreadable")
-            return real_spot(root, target, parts)
+            return real_spot(root, target, parts, stock_drift=stock_drift)
 
         monkeypatch.setattr(ge, "read_spot_join_with_recovery", _flaky_spot)
         lake_seq = tmp_path / "seq"
@@ -718,3 +724,91 @@ class TestPicklableCrossings:
         copy = pickle.loads(pickle.dumps(ctx))  # noqa: S301 — self-produced bytes
         assert copy.lake_root == tmp_path
         assert copy.rate_source == _RATE
+        assert copy.stock_drift is None  # the defaulted-LAST field
+
+    def test_worker_context_with_stock_drift_roundtrips(self, tmp_path: Path) -> None:
+        """DEC-GREEKS-SPOTJOIN-STOCK-001: the plain-dict drift map crosses the
+        spawn pickle boundary verbatim."""
+        import pickle
+
+        drift = {("NSE", "BAJAJAUTO"): ("BAJAJ-AUTO", "NSE-BAJAJ-AUTO")}
+        ctx = _GreeksWorkerContext(lake_root=tmp_path, rate_source=_RATE, stock_drift=drift)
+        copy = pickle.loads(pickle.dumps(ctx))  # noqa: S301 — self-produced bytes
+        assert copy.stock_drift == drift
+
+    def test_parallel_pickle_ok_probes_the_stock_drift_map(self, tmp_path: Path) -> None:
+        """The 3-arg probe rail: the production plain dict passes; an exotic
+        unpicklable Mapping degrades to sequential HONESTLY (warned)."""
+        from types import MappingProxyType
+
+        assert ge._parallel_pickle_ok(tmp_path, _RATE, {("NSE", "BAJAJAUTO"): ("BAJAJ-AUTO",)})
+        assert ge._parallel_pickle_ok(tmp_path, _RATE, None)
+        with capture_logs() as logs:
+            ok = ge._parallel_pickle_ok(tmp_path, _RATE, MappingProxyType({("NSE", "X"): ("Y",)}))
+        assert not ok
+        disabled = [e for e in logs if e["event"] == "greeks_enrich.parallel_disabled"]
+        assert len(disabled) == 1
+
+
+class TestStockDriftWorkerThreading:
+    """DEC-GREEKS-SPOTJOIN-STOCK-001: the map threads through the worker path."""
+
+    _BAJAJ_CE = "NSE-BAJAJAUTO-25Jan24-1500-CE"
+    _DRIFT: ClassVar[dict[tuple[str, str], tuple[str, ...]]] = {
+        ("NSE", "BAJAJAUTO"): ("BAJAJ-AUTO",)
+    }
+
+    def _build_drifted_stock_lake(self, lake: Path) -> list[GreeksEnrichTarget]:
+        """A REAL drifted-stock chain: option underlying BAJAJAUTO, spot dir
+        BAJAJ-AUTO (the master trading_symbol) — no instrument master needed,
+        the map is injected directly at the seam under test."""
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+        spot = [_bar(_BASE_TS + timedelta(minutes=i), "1500", oi=None) for i in range(2)]
+        sink.append(
+            exchange="NSE", segment="CASH", symbol="BAJAJ-AUTO", interval="1minute", bars=spot
+        )
+        ce = [_bar(_BASE_TS + timedelta(minutes=i), "40", oi=50) for i in range(2)]
+        sink.append(
+            exchange="NSE", segment="FNO", symbol=self._BAJAJ_CE, interval="1minute", bars=ce
+        )
+        return [_target(self._BAJAJ_CE)]
+
+    def test_run_unit_recovers_a_stock_spot_with_the_map(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        targets = self._build_drifted_stock_lake(lake)
+        units = _build_units(sorted(targets, key=ge._target_sort_key))
+        with capture_logs() as logs:
+            result = _run_unit(units[0], lake_root=lake, rate_source=_RATE, stock_drift=self._DRIFT)
+        assert [o.kind for o in result.outcomes] == ["enriched"]
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["recovered_key"] == "BAJAJ-AUTO"
+        assert recovered[0]["rung"] == "stock_drift"
+
+    def test_run_unit_without_the_map_stays_honest_no_spot(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        targets = self._build_drifted_stock_lake(lake)
+        units = _build_units(sorted(targets, key=ge._target_sort_key))
+        with capture_logs() as logs:
+            result = _run_unit(units[0], lake_root=lake, rate_source=_RATE)
+        assert [o.kind for o in result.outcomes] == ["enriched"]  # honest NULL stamps
+        assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+
+    def test_greeks_worker_binds_the_context_stock_drift(
+        self, worker_env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        lake = tmp_path / "lake"
+        targets = self._build_drifted_stock_lake(lake)
+        units = _build_units(sorted(targets, key=ge._target_sort_key))
+        _greeks_worker_init(
+            _GreeksWorkerContext(lake_root=lake, rate_source=_RATE, stock_drift=self._DRIFT)
+        )
+        with capture_logs() as logs:
+            result = _greeks_worker(units[0])
+        assert [o.kind for o in result.outcomes] == ["enriched"]
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["rung"] == "stock_drift"

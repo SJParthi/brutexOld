@@ -313,3 +313,57 @@ class TestEpochTimestampWarnOncePerPull:
             bars = parser.parse_candle_rows(payload)
         assert len(bars) == 3
         assert len(_epoch_warns(logs)) == 1
+
+
+class TestOhlcClampWarnPerWindow:
+    """The vendor-OHLC clamp is COUNTED + WARNed once per parsed window payload.
+
+    DEC-STORED-DATA-VALIDATION-001 (L1-gap-2). Fails-before: the
+    DEC-OHLC-VENDOR-NORMALIZE-001 high=max/low=min clamp fired with NO counter
+    and NO log, so a vendor systematically under-reporting highs never
+    surfaced. Parse output stays byte-identical (observe-only).
+    """
+
+    @staticmethod
+    def _clamp_warns(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+        return [e for e in logs if e["event"] == "groww.parse.ohlc_clamped"]
+
+    def test_one_warn_per_window_with_count(self) -> None:
+        payload = {
+            "candles": [
+                # close 105 > vendor high 101 → clamped.
+                ["2025-09-24T10:30:00", 100.0, 101.0, 90.0, 105.0, 10, None],
+                # consistent — not clamped.
+                ["2025-09-24T10:31:00", 100.0, 110.0, 90.0, 105.0, 10, None],
+                # open 100 < vendor low 102 → clamped.
+                ["2025-09-24T10:32:00", 100.0, 110.0, 102.0, 105.0, 10, None],
+            ]
+        }
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        warns = self._clamp_warns(logs)
+        assert len(warns) == 1
+        assert warns[0]["clamped_bars"] == 2
+        assert warns[0]["total_rows"] == 3
+        # Parse behavior unchanged: the bars are the clamped bars of before.
+        assert bars[0].high == Decimal("105.0")
+        assert bars[2].low == Decimal("100.0")
+
+    def test_clean_window_emits_no_warn(self) -> None:
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 110.0, 90.0, 105.0, 10, None]]}
+        with capture_logs() as logs:
+            parser.parse_candle_rows(payload)
+        assert self._clamp_warns(logs) == []
+
+    def test_two_windows_warn_independently(self) -> None:
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 101.0, 90.0, 105.0, 10, None]]}
+        with capture_logs() as logs:
+            parser.parse_candle_rows(payload)
+            parser.parse_candle_rows(payload)
+        assert len(self._clamp_warns(logs)) == 2  # one per window parse, never deduped away
+
+    def test_warn_carries_pull_id_when_bound(self) -> None:
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 101.0, 90.0, 105.0, 10, None]]}
+        with pull_id_scope("pullcccc0003"), capture_logs() as logs:
+            parser.parse_candle_rows(payload)
+        assert self._clamp_warns(logs)[0]["pull_id"] == "pullcccc0003"

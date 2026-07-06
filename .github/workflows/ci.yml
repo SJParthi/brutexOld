@@ -447,9 +447,12 @@ jobs:
           # global floor from 90% → 100% (per Golden Rule #12 #1+#2).
           # DEC-RUST-HARDENING-R2-001 (MIGRATION.md #1166) added the
           # `check_wheel_freshness` stage whose dedicated suite lives in
-          # `test_doctor_wheel_freshness.py` — the module's covering set
-          # is BOTH files (test_doctor.py alone reads 92% since that
-          # stage landed), so the gate runs them together.
+          # `test_doctor_wheel_freshness.py`; DEC-RUST-SOURCE-DIGEST-TWIN-001
+          # (MIGRATION.md #1258) added the `wheel_source_digest` stages whose
+          # dedicated suite lives in `test_doctor_wheel_source_digest.py` —
+          # the module's covering set is ALL THREE files (the first two alone
+          # read 96.78% since the digest stages landed), so the gate runs
+          # them together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
@@ -457,9 +460,27 @@ jobs:
               --cov-report=term-missing \
               --cov-fail-under=100 \
               tests/unit/test_doctor.py \
-              tests/unit/test_doctor_wheel_freshness.py
+              tests/unit/test_doctor_wheel_freshness.py \
+              tests/unit/test_doctor_wheel_source_digest.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
+          fi
+          # brutex.wheel_digest — DEC-RUST-SOURCE-DIGEST-TWIN-001
+          #       (MIGRATION.md #1258): the pure-Python twin of the Rust
+          #       crate-source BLAKE3 digest framing (source_digest_core.rs);
+          #       covering set = the dedicated unit suite + the shared golden
+          #       parity vector (composed, not duplicated — mirrors the 12e
+          #       greeks_enrich multi-file gate above).
+          if compgen -G "tests/unit/test_wheel_digest.py" > /dev/null; then
+            pytest \
+              --cov=brutex.wheel_digest \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_wheel_digest.py \
+              tests/golden/test_wheel_digest_golden.py
+          else
+            echo "(brutex.wheel_digest test file not present yet — gate inactive)"
           fi
           # DEC-COV-001 step 2 (2026-05-24, MIGRATION.md entry #211):
           # ratchet `brutex.universe` into the strict per-module 100%
@@ -1054,11 +1075,13 @@ jobs:
             echo "(brutex.vocabulary.describe test file not present yet — gate inactive)"
           fi
           # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests) — since
-          # DEC-RUST-HARDENING-R2-001 (#1166) the module's covering set is
-          # test_doctor.py + test_doctor_wheel_freshness.py (mirrors the
-          # DEC-COV-001 block above; test_doctor.py alone reads 92%).
+          # DEC-RUST-HARDENING-R2-001 (#1166) + DEC-RUST-SOURCE-DIGEST-TWIN-001
+          # (#1258) the module's covering set is test_doctor.py +
+          # test_doctor_wheel_freshness.py + test_doctor_wheel_source_digest.py
+          # (mirrors the DEC-COV-001 block above; the first two alone read
+          # 96.78% since the digest stages landed).
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
-            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py
+            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py tests/unit/test_doctor_wheel_source_digest.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
@@ -1508,6 +1531,15 @@ jobs:
           else
             echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
           fi
+          # DEC-STORED-DATA-VALIDATION-001: the frame-level stored-OHLC price-sanity
+          # checks (positivity + ordering) consumed by the prebuild 1-minute read
+          # boundary + the lake invariant scanner. Pure polars expressions,
+          # standalone-gateable at 100% line+branch.
+          if compgen -G "tests/unit/test_data_price_sanity.py" > /dev/null; then
+            pytest --cov=brutex.data.price_sanity --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_price_sanity.py
+          else
+            echo "(brutex.data.price_sanity test file not present yet — gate inactive)"
+          fi
           # DEC-FNO-CANDLE-LAKE-001: the canonical F&O contract-symbol parser + the
           # F&O candle logical-table descriptor/schema_meta registration — pure,
           # stdlib-only, standalone-gateable at 100% line+branch.
@@ -1629,11 +1661,6 @@ jobs:
             pytest --cov=brutex.data.lmdb_membership --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lmdb_membership.py
           else
             echo "(brutex.data.lmdb_membership test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_option_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.option_sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_sink.py
-          else
-            echo "(brutex.data.option_sink test file not present yet — gate inactive)"
           fi
           # DEC-COVERAGE-INCREMENTAL-001: modules taken to 100% line+branch.
           # HISTORICAL NOTE (resolved): orchestrator modules originally could

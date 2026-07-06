@@ -196,6 +196,42 @@ def _seed_lake_pair(
     )
 
 
+def _seed_master(lake: Path, *symbols: str) -> None:
+    """Write a REAL DuckDB instrument master at ``<lake>/instruments.duckdb``
+    holding one minimal NSE EQ row per symbol (the drift-map VOCABULARY —
+    DEC-GREEKS-SPOTJOIN-STOCK-001)."""
+    from brutex.data.instrument_store import Instrument, InstrumentStore
+    from brutex.models import Exchange, InstrumentType, Segment
+
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
+        store.upsert_many(
+            [
+                Instrument(
+                    exch_id=Exchange.NSE,
+                    security_id=abs(hash(symbol)) % 100_000,
+                    symbol_name=symbol,
+                    display_name=symbol,
+                    instrument=InstrumentType.EQ,
+                    segment=Segment.CASH,
+                    series="EQ",
+                    isin=None,
+                    underlying_symbol=None,
+                    underlying_security_id=None,
+                    lot_size=1,
+                    tick_size=Decimal("0.05"),
+                    sm_freeze_qty=None,
+                    sm_expiry_date=None,
+                    strike_price=None,
+                    asm_gsm_flag=False,
+                )
+                for symbol in symbols
+            ],
+            snapshot_date=date(2024, 1, 1),
+            run_id="test-stock-drift",
+            csv_source_sha256="0" * 64,
+        )
+
+
 class TestSpotKeyRecoveryLadder:
     """SPOTJOIN-2 (FIX-7): underlying-key drift no longer NO_SPOTs a whole chain.
 
@@ -323,6 +359,293 @@ class TestSpotKeyRecoveryLadder:
         status, _style, iv = self._stored_status_style(lake, _CE_SYMBOL)
         assert status == STATUS_NO_SPOT and iv is None
         assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+
+    # ── the evidence-grounded STOCK arm (DEC-GREEKS-SPOTJOIN-STOCK-001) ──
+
+    _BAJAJ_CE = "NSE-BAJAJAUTO-25Jan24-1500-CE"  # vendor F&O spelling, no hyphen
+
+    def test_stock_hyphen_drift_recovers_cash_chain(self, tmp_path: Path) -> None:
+        """The SPOTJOIN-2 stock follow-up CLOSED: a BAJAJAUTO chain over a
+        BAJAJ-AUTO spot dir solves once the instrument master verifies the
+        fold — pre-change the whole chain read NO_SPOT forever."""
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _seed_lake_pair(
+            lake,
+            spot_symbol="BAJAJ-AUTO",  # the master trading_symbol keyed dir
+            spot_segment="CASH",
+            option_symbol=self._BAJAJ_CE,
+            spot_close="1500",
+            option_close="40",
+        )
+        _seed_master(lake, "BAJAJ-AUTO")
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, self._BAJAJ_CE)
+        assert report.enriched == 1 and report.bars_solved == 1  # type: ignore[attr-defined]
+        status, style, iv = self._stored_status_style(lake, self._BAJAJ_CE)
+        assert status == STATUS_OK and iv is not None
+        assert style == STYLE_AMERICAN_APPROX  # CASH segment won the probe
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["underlying"] == "BAJAJAUTO"
+        assert recovered[0]["recovered_key"] == "BAJAJ-AUTO"
+        assert recovered[0]["rung"] == "stock_drift"
+
+    def test_trailing_space_fragment_recovers(self, tmp_path: Path) -> None:
+        """A legacy trailing-space spot dir (``"M&M "``) is recovered through
+        the stock rung — the base ladder has no whitespace-ADDING form."""
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        symbol = "NSE-M&M-25Jan24-1500-CE"
+        _seed_lake_pair(
+            lake,
+            spot_symbol="M&M ",  # the #911 trailing-space drift class
+            spot_segment="CASH",
+            option_symbol=symbol,
+            spot_close="1500",
+            option_close="40",
+        )
+        _seed_master(lake, "M&M")
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, symbol)
+        assert report.enriched == 1 and report.bars_solved == 1  # type: ignore[attr-defined]
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["recovered_key"] == "M&M "
+        assert recovered[0]["rung"] == "stock_drift"
+
+    def test_dataless_master_exact_dir_recovers_data_carrying_fragment(
+        self, tmp_path: Path
+    ) -> None:
+        """The multi-dir gap-closure regression: a DATALESS master-exact dir
+        never shadows a data-carrying drift fragment — every fragment is
+        offered in order and the PROBE decides."""
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _seed_lake_pair(
+            lake,
+            spot_symbol="NSE-BAJAJ-AUTO",  # the fragment CARRYING the bars
+            spot_segment="CASH",
+            option_symbol=self._BAJAJ_CE,
+            spot_close="1500",
+            option_close="40",
+        )
+        # The master-exact dir EXISTS but holds no data — offered first, probes
+        # empty, and the ladder moves on to the fragment.
+        (lake / "bars" / "NSE" / "CASH" / "BAJAJ-AUTO").mkdir(parents=True)
+        _seed_master(lake, "BAJAJ-AUTO")
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, self._BAJAJ_CE)
+        assert report.enriched == 1 and report.bars_solved == 1  # type: ignore[attr-defined]
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["recovered_key"] == "NSE-BAJAJ-AUTO"
+        assert recovered[0]["rung"] == "stock_drift"
+
+    def test_no_master_stays_honest_no_spot(self, tmp_path: Path) -> None:
+        """Without an instrument master there is NO stock arm — the drifted
+        chain stays the honest NO_SPOT (the pre-change behaviour, preserved
+        byte-identically when the map is None)."""
+        pytest.importorskip("polars")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _seed_lake_pair(
+            lake,
+            spot_symbol="BAJAJ-AUTO",
+            spot_segment="CASH",
+            option_symbol=self._BAJAJ_CE,
+            spot_close="1500",
+            option_close="40",
+        )
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, self._BAJAJ_CE)
+        assert report.enriched == 1 and report.bars_null == 1  # type: ignore[attr-defined]
+        status, _style, iv = self._stored_status_style(lake, self._BAJAJ_CE)
+        assert status == STATUS_NO_SPOT and iv is None
+        assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert [e for e in logs if e["event"] == "spot_drift.no_master"]
+
+    def test_poisoned_fold_stays_no_spot_with_one_warn(self, tmp_path: Path) -> None:
+        """≥2 master symbols sharing the fold POISON it — never guess between
+        real instruments; the chain stays NO_SPOT and the operator gets ONE
+        ``spot_drift.ambiguous_master`` WARN naming the evidence."""
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _seed_lake_pair(
+            lake,
+            spot_symbol="BAJAJ-AUTO",
+            spot_segment="CASH",
+            option_symbol=self._BAJAJ_CE,
+            spot_close="1500",
+            option_close="40",
+        )
+        _seed_master(lake, "BAJAJ-AUTO", "BAJAJAUTO")  # genuine fold collision
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, self._BAJAJ_CE)
+        assert report.enriched == 1 and report.bars_null == 1  # type: ignore[attr-defined]
+        status, _style, _iv = self._stored_status_style(lake, self._BAJAJ_CE)
+        assert status == STATUS_NO_SPOT
+        assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        warns = [e for e in logs if e["event"] == "spot_drift.ambiguous_master"]
+        assert len(warns) == 1 and warns[0]["fold"] == "BAJAJAUTO"
+
+    def test_index_alias_precedence_with_master_present(self, tmp_path: Path) -> None:
+        """Index behaviour UNCHANGED with a map present: the alias rungs run
+        FIRST and win — attributed ``rung="alias_ladder"``."""
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        symbol = "NSE-MIDCPNIFTY-25Jan24-10000-CE"
+        _seed_lake_pair(
+            lake,
+            spot_symbol="NIFTYMIDSELECT",
+            spot_segment="INDEX",
+            option_symbol=symbol,
+            spot_close="10000",
+            option_close="100",
+        )
+        _seed_master(lake, "NIFTYMIDSELECT")  # the map is truthy (identity entry)
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, symbol)
+        assert report.enriched == 1 and report.bars_solved == 1  # type: ignore[attr-defined]
+        _status, style, _iv = self._stored_status_style(lake, symbol)
+        assert style == STYLE_EUROPEAN_EXACT
+        recovered = [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+        assert len(recovered) == 1
+        assert recovered[0]["recovered_key"] == "NIFTYMIDSELECT"
+        assert recovered[0]["rung"] == "alias_ladder"
+
+    def test_primary_hit_with_master_present_emits_no_recovery_log(self, tmp_path: Path) -> None:
+        """The exact-probe-first contract survives the stock arm: a clean key
+        hits the primary probe with ZERO recovery log even with a map built."""
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        symbol = "NSE-RELIANCE-25Jan24-1500-CE"
+        _seed_lake_pair(
+            lake,
+            spot_symbol="RELIANCE",
+            spot_segment="CASH",
+            option_symbol=symbol,
+            spot_close="1500",
+            option_close="40",
+        )
+        _seed_master(lake, "RELIANCE")
+        with capture_logs() as logs:
+            report = self._enrich_target(lake, symbol)
+        assert report.enriched == 1  # type: ignore[attr-defined]
+        assert not [e for e in logs if e["event"] == "greeks_enrich.spot_key_recovered"]
+
+    def test_second_pass_after_stock_recovery_is_idempotent(self, tmp_path: Path) -> None:
+        """Golden Rule #7: the recovered chain's second pass is already_current
+        with byte-identical stored bytes."""
+        import hashlib
+
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _seed_lake_pair(
+            lake,
+            spot_symbol="BAJAJ-AUTO",
+            spot_segment="CASH",
+            option_symbol=self._BAJAJ_CE,
+            spot_close="1500",
+            option_close="40",
+        )
+        _seed_master(lake, "BAJAJ-AUTO")
+        report1 = self._enrich_target(lake, self._BAJAJ_CE)
+        assert report1.enriched == 1  # type: ignore[attr-defined]
+        part = lake / "bars" / "NSE" / "FNO" / self._BAJAJ_CE / "1minute" / "2024" / "01.parquet"
+        digest1 = hashlib.sha256(part.read_bytes()).hexdigest()
+        report2 = self._enrich_target(lake, self._BAJAJ_CE)
+        assert report2.already_current == 1 and report2.enriched == 0  # type: ignore[attr-defined]
+        assert hashlib.sha256(part.read_bytes()).hexdigest() == digest1
+
+
+class TestStockDriftBuildGate:
+    """The #1482 gated-build contract, mutation-pinned (fix-round MINOR).
+
+    ``stock_drift = load_stock_drift_map(lake_root) if (ordered and read_spot
+    is None) else None`` is a conditional EXPRESSION — coverage.py's branch
+    metric is structurally blind to its arms, and a gate-removal mutant
+    (unconditional build) survived the whole paired suite. Each arm is now
+    pinned with a raising spy: an injected ``read_spot`` seam and an empty
+    target list must both cost ZERO scans / store stats (design §3.5 +
+    MIGRATION.md #1482), while the default-spot-seam pass must REACH the
+    build (the positive control proving the spy guards the live call site,
+    killing gate-inversion mutants too).
+    """
+
+    @staticmethod
+    def _install_raising_spy(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data import greeks_enrich as greeks_enrich_module
+
+        def _must_not_build(
+            _lake_root: Path,
+        ) -> dict[tuple[str, str], tuple[str, ...]] | None:
+            raise AssertionError("the gated stock-drift build must not run here")
+
+        monkeypatch.setattr(greeks_enrich_module, "load_stock_drift_map", _must_not_build)
+
+    def _target(self) -> GreeksEnrichTarget:
+        return GreeksEnrichTarget(
+            exchange="NSE", symbol=_CE_SYMBOL, start=_WINDOW[0], end=_WINDOW[1]
+        )
+
+    def test_injected_read_spot_seam_never_builds_the_map(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An injected spot seam OWNS spot semantics — zero scans, zero
+        ``spot_drift.*`` log noise, the pass completes normally."""
+        self._install_raising_spy(monkeypatch)
+        with capture_logs() as logs:
+            report = enrich_greeks_for_targets(
+                targets=[self._target()],
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row()],
+                read_spot=lambda _t, _p: SpotJoin({_BAR_TS: _SPOT}, "INDEX"),
+                write_bars=lambda _t, _b: 0,
+            )
+        assert report.enriched == 1
+        assert not [e for e in logs if str(e["event"]).startswith("spot_drift.")]
+
+    def test_empty_targets_never_build_the_map(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install_raising_spy(monkeypatch)
+        with capture_logs() as logs:
+            report = enrich_greeks_for_targets(targets=[], lake_root=tmp_path, rate_source=_RATE)
+        assert report.targets == 0
+        assert not [e for e in logs if str(e["event"]).startswith("spot_drift.")]
+
+    def test_default_spot_seam_reaches_the_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Positive control: with the DEFAULT spot reader (``read_spot=None``)
+        and non-empty targets the build is the first thing the pass does —
+        the spy fires, proving it intercepts the live call site (so the two
+        never-builds tests above genuinely pin the gate, not a dead spy)."""
+        self._install_raising_spy(monkeypatch)
+        with pytest.raises(AssertionError, match="must not run here"):
+            enrich_greeks_for_targets(
+                targets=[self._target()],
+                lake_root=tmp_path,
+                rate_source=_RATE,
+                read_bars=lambda _t: [_row()],
+                write_bars=lambda _t, _b: 0,
+            )
 
 
 class TestFormulaV2Restamp:

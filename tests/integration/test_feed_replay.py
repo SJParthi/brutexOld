@@ -412,3 +412,159 @@ class TestFeedEvent:
         event = FeedEvent(symbol="NSE-A", bar=bar)
         assert event.timestamp == bar.timestamp
         assert event.symbol == "NSE-A"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Corrupt stored bars are refused LOUDLY (DEC-STORED-DATA-VALIDATION-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestCorruptStoredBarRefused:
+    """The engine bar-load read boundary rejects a corrupt stored bar.
+
+    Fails-before (round-2 audit, live-reproduced): a legacy pre-#912
+    partition holding zero/negative but internally-ORDERED prices passed
+    ``arrow_table_to_bars`` silently — a day_low of -1000 flowed into
+    Stage-1A + run identity. The #912 ``has_no_price`` screen is
+    ingest-parse-time only and is bypassed when READING stored bars.
+    """
+
+    @staticmethod
+    def _poisoned_table(*, open_: float, high: float, low: float, close: float) -> object:
+        import pyarrow as pa
+
+        t0 = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
+        return pa.table(
+            {
+                "timestamp": pa.array(
+                    [t0, t0 + timedelta(minutes=1)], type=pa.timestamp("us", tz="UTC")
+                ),
+                "open": pa.array([100.0, open_], type=pa.float64()),
+                "high": pa.array([101.0, high], type=pa.float64()),
+                "low": pa.array([99.0, low], type=pa.float64()),
+                "close": pa.array([100.5, close], type=pa.float64()),
+                "volume": pa.array([10, 11], type=pa.int64()),
+                "open_interest": pa.array([None, None], type=pa.int64()),
+            }
+        )
+
+    def test_negative_ordered_bar_raises_naming_source_and_ts(self) -> None:
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=-5.0, high=-1.0, low=-10.0, close=-2.0)
+        with pytest.raises(ValueError, match="corrupt stored bar") as excinfo:
+            arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        message = str(excinfo.value)
+        assert "NSE/INDEX/NSE-NIFTY/1minute" in message
+        assert "2024, 1, 2, 3, 46" in message  # the offending bar's timestamp
+        assert "positive price" in message  # the per-bar defect, chained
+
+    def test_without_source_still_raises_loudly(self) -> None:
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=0.0, high=0.0, low=0.0, close=0.0)
+        with pytest.raises(ValueError, match="corrupt stored bar at"):
+            arrow_table_to_bars(table)  # type: ignore[arg-type]
+
+    def test_all_positive_ordering_violation_raises_via_constructor(self) -> None:
+        # All prices POSITIVE but high < low → the positivity loop passes and
+        # the CONSTRUCTOR's ordering guard fires, re-wrapped as a corrupt-bar
+        # error (covers the try/except branch).
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=100.0, high=50.0, low=99.0, close=100.0)
+        with pytest.raises(ValueError, match="corrupt stored bar") as excinfo:
+            arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        message = str(excinfo.value)
+        assert "NSE/INDEX/NSE-NIFTY/1minute" in message
+        assert "positive price" not in message  # NOT a positivity defect
+        assert "high" in message  # the ordering defect, chained from the ctor
+
+    def test_ordering_violation_without_source_raises(self) -> None:
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=100.0, high=50.0, low=99.0, close=100.0)
+        with pytest.raises(ValueError, match="corrupt stored bar at"):
+            arrow_table_to_bars(table)  # type: ignore[arg-type]
+
+    def test_empty_table_returns_empty_list(self) -> None:
+        import pyarrow as pa
+        from brutex.feed.replay import arrow_table_to_bars
+
+        empty = pa.table(
+            {
+                "timestamp": pa.array([], type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array([], type=pa.float64()),
+                "high": pa.array([], type=pa.float64()),
+                "low": pa.array([], type=pa.float64()),
+                "close": pa.array([], type=pa.float64()),
+                "volume": pa.array([], type=pa.int64()),
+                "open_interest": pa.array([], type=pa.int64()),
+            }
+        )
+        assert arrow_table_to_bars(empty) == []  # type: ignore[arg-type]
+
+    def test_clean_table_round_trips_unchanged(self) -> None:
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=100.0, high=102.0, low=99.5, close=101.0)
+        bars = arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        assert [b.close for b in bars] == [Decimal("100.5"), Decimal("101.0")]
+
+    def test_replay_feed_names_the_partition_on_poisoned_lake(self, tmp_path: Path) -> None:
+        # Poison a REAL lake partition (raw pyarrow — the writer refuses
+        # corrupt bars, exactly like a legacy pre-#912 lake), then prove the
+        # feed's load raises naming the series it was reading.
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        symbol = "NSE-NIFTY"
+        lake_root = tmp_path / "lake"
+        dest = lake_root / "bars" / "NSE" / "INDEX" / symbol / "1minute" / "2024" / "01.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        t0 = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([t0], type=pa.timestamp("us", tz="UTC")),
+                    "open": pa.array([-5.0], type=pa.float64()),
+                    "high": pa.array([-1.0], type=pa.float64()),
+                    "low": pa.array([-1000.0], type=pa.float64()),
+                    "close": pa.array([-2.0], type=pa.float64()),
+                    "volume": pa.array([10], type=pa.int64()),
+                    "open_interest": pa.array([None], type=pa.int64()),
+                }
+            ),
+            dest,
+        )
+        catalog_path = tmp_path / "catalog.duckdb"
+        with Catalog.open(catalog_path) as cat:
+            from brutex.data.models import CatalogEntry
+
+            cat.upsert(
+                CatalogEntry(
+                    exchange="NSE",
+                    segment="INDEX",
+                    symbol=symbol,
+                    interval="1minute",
+                    year=2024,
+                    month=1,
+                    raw_hash="a" * 64,
+                    row_count=1,
+                    first_ts=t0,
+                    last_ts=t0,
+                    fetched_at=t0,
+                )
+            )
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="INDEX",
+                symbols=[symbol],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+            )
+            with pytest.raises(ValueError, match="NSE/INDEX/NSE-NIFTY/1minute"):
+                list(feed)

@@ -3678,15 +3678,12 @@ def cmd_fetch(
     # Golden Rule #8 audit trail (DEC-INGEST-AUDIT-CHAIN-001): a real live pull
     # writes a hash-chained JSONL trail under <lake>/audit/ (RUN_START → per-pair
     # → RUN_COMPLETE). --inspect / --dry-run write no real data, so they get a
-    # null context (no audit). # pragma: no cover — live path (the audit-write
-    # core is 100%-tested in test_groww_run_ingest.py).
-    audit_ctx: Any = contextlib.nullcontext(None)
-    if not (dry_run or inspect):  # pragma: no cover — live
-        from brutex.orchestrator.audit import AuditWriter
+    # null context (no audit). The path + resume semantics live in the ONE COMMON
+    # ``open_ingest_audit`` factory the dashboard pulls now bind too
+    # (DEC-INGEST-AUDIT-WIRING-001) — the CLI behaviour is byte-identical.
+    from brutex.orchestrator.audit import open_ingest_audit
 
-        _ingest_audit_path = resolved / "audit" / "spot-ingest.jsonl"
-        _ingest_audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_ctx = AuditWriter.open(_ingest_audit_path, resume=_ingest_audit_path.exists())
+    audit_ctx: Any = open_ingest_audit(resolved, enabled=not (dry_run or inspect))
     # Integration merge: keep BOTH the ingest-audit context (base-13,
     # DEC-INGEST-AUDIT-CHAIN-001) AND the retry-storm ExitStack (main, #533).
     # The dry-run temp-lake cleanup is OUTERMOST so it removes the ephemeral tree
@@ -4000,6 +3997,12 @@ def cmd_fetch(
                 raise
 
         until_outcome = None
+        # Success-path latch for the post-drain L2 lake heal in the ``finally``
+        # (DEC-LAKE-HEAL-001 / DEC-CLI-LAKE-HEAL-L2-001 — the CLI twin of
+        # pull_controller's ``fetch_phases_ok``): armed as the try body's LAST
+        # statement, so a pull-halt raise leaves it False and the heal never
+        # runs after an already-alerted halt (alert-once holds).
+        fetch_ok = False
         # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
         # whole fetch (including every until-clean round + the drain/persist
         # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
@@ -4045,6 +4048,8 @@ def cmd_fetch(
                     result = fetch_passes[0]
                 else:
                     result = _one_fetch_pass(do_retry)
+                # Fetch pass(es) returned without raising — arm the L2 heal.
+                fetch_ok = True
             finally:
                 # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
                 # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
@@ -4059,6 +4064,42 @@ def cmd_fetch(
                 # error is swallowed so the ledger persist still runs.
                 drain_fetch_pipeline(fetch_pipeline)
                 drain_write_consumer(write_consumer)
+                # DEC-LAKE-HEAL-001 L2 (CLI seam — DEC-CLI-LAKE-HEAL-L2-001, the #1175
+                # named follow-up): heal the just-pulled slice at the SAME post-drain
+                # seam the dashboard uses (the fetched 1-minute is durably in the lake
+                # only after BOTH drains above), BEFORE end_pull_ledger — mirroring
+                # pull_controller.py's drain → heal → ledger-persist ordering — via the
+                # SAME glue (CLAUDE.md §11 COMMON, the _build_pull_health_monitor
+                # private-import precedent; no copy). SUCCESS-path only (fetch_ok);
+                # --dry-run / --inspect stay inert via _no_persist (zero scan, zero
+                # writes; the ephemeral dry-run lake is structurally never healed —
+                # ``resolved`` is passed, and the gate is closed whenever they differ).
+                # The glue swallows every heal error EXCEPT LakeWriteHalt; the CLI has
+                # no BackgroundPullJob halt net above this seam, so a heal-raised
+                # LakeWriteHalt fires the CRITICAL pull-halt Telegram alert HERE
+                # (DEC-TELEGRAM-PULL-HALT-001) then RE-RAISES — non-zero exit via
+                # main's raw propagation, byte-identical to an ingest halt. The CLI
+                # runs NO Greeks enrichment and NO prebuild (#1145/#1188), so
+                # post-drain IS "before every downstream derivation" on this path.
+                # HONEST: the scan is O(files) over pulled-targets x span-months,
+                # NOT O(1) (MIGRATION.md #1175).
+                if fetch_ok and not _no_persist:
+                    from brutex.dashboard.pull_controller import (
+                        _heal_after_pull,  # pyright: ignore[reportPrivateUsage]
+                    )
+                    from brutex.observability.correlation import current_pull_id, new_pull_id
+
+                    try:
+                        _heal_after_pull(
+                            instruments=fetch_instruments,
+                            lake_root=resolved,
+                            start=start_dt.date(),
+                            end=end_dt.date(),
+                            pull_id=current_pull_id() or new_pull_id(),
+                        )
+                    except LakeWriteHalt as exc:
+                        _emit_pull_halt_alert(exc)
+                        raise
                 end_pull_ledger(ledger, resolved, dry_run=_no_persist)
                 # Final bridge publish (DEC-CLI-BRIDGE-PULL-ACTIVE-001): flip pull_active
                 # → False so the dashboard widget reads done/idle the moment the pull

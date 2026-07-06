@@ -314,7 +314,7 @@ class RegistryStore:
         read-side callers (``movers_options.load_registry_expiries``,
         ``registry_strikes``) catch it and DEGRADE gracefully; the pull-path
         callers deliberately do NOT — the metadata-pull SEED reads fail the job
-        fast + loud at pull start (intended fail-fast, MIGRATION.md #1493), and
+        fast + loud at pull start (intended fail-fast, MIGRATION.md #1522), and
         the composite's phase-(b) re-read is gated UPSTREAM on
         ``MetadataPullReport.store_write_deferrals`` (phase (b) is skipped with an
         honest note, so a phase-(a) wedge never reaches this raise as a whole-job

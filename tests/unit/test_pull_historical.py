@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 
@@ -3806,6 +3807,103 @@ def test_dry_run_pull_threads_empty_observed_holidays(
     )
     assert seen
     assert all(observed == frozenset() for observed in seen)
+
+
+# ── Golden Rule #8 — the F&O pull writes the hash-chained ingest audit trail ──
+# (DEC-INGEST-AUDIT-WIRING-001: the F&O spine was 100% unaudited on every path
+# before this — the Dhan-era DEC-OPTION-AUDIT-WIRE-001 wiring died in the
+# ADR-0009 Groww cutover.)
+
+
+def _walk_fno_chain(lake_root: Path) -> list[str]:
+    """Verify the F&O chain end-to-end + link-by-link; return the action list."""
+    from brutex.orchestrator.audit import GENESIS_PREV_HASH, read_entries, verify_chain
+
+    path = lake_root / "audit" / "fno-ingest.jsonl"
+    entries = read_entries(path)
+    assert verify_chain(path) == len(entries)
+    assert entries[0].prev_hash == GENESIS_PREV_HASH
+    for prev, cur in pairwise(entries):
+        assert cur.prev_hash == prev.entry_hash
+        assert cur.seq == prev.seq + 1
+    return [e.action for e in entries]
+
+
+def test_fno_pull_writes_verifiable_hash_chain(registry: RegistryStore, tmp_lake: Path) -> None:
+    """A LIVE-shaped F&O pull writes <lake>/audit/fno-ingest.jsonl and the chain verifies.
+
+    The NIFTY selection = 1 FUT + 2 options over 2 market buckets (groww-future runs
+    first, then groww-option — DEC-FNO-PULL-ORDER-LOOKBACK-001), so the trail carries
+    ONE RUN_START/RUN_COMPLETE pair per bucket + one PAIR_DONE per contract, all on
+    one continuous chain.
+    """
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert report.contracts_completed == 3
+    actions = _walk_fno_chain(tmp_lake)
+    assert actions.count("INGEST_RUN_START") == 2  # one per market bucket (FUT, then CE/PE)
+    assert actions.count("INGEST_RUN_COMPLETE") == 2
+    assert actions.count("INGEST_PAIR_DONE") == 3  # one per selected contract
+    assert "INGEST_PAIR_FAILED" not in actions
+
+
+def test_fno_pull_quarantine_lands_on_the_chain(registry: RegistryStore, tmp_lake: Path) -> None:
+    """A terminally-quarantined contract writes INGEST_PAIR_FAILED on the F&O chain."""
+    bad = "NSE-NIFTY-25Jan24-21000-PE"
+    sdk = _FakeSDK(raise_for={bad: GrowwAPIBadRequestException("nope")})
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert report.failed_pairs == 1
+    from brutex.orchestrator.audit import read_entries
+
+    entries = read_entries(tmp_lake / "audit" / "fno-ingest.jsonl")
+    failed = [e for e in entries if e.action == "INGEST_PAIR_FAILED"]
+    # F&O always fetches 1minute ONLY (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the
+    # requested ("1day",) is echoed in the report but never the fetch granularity.
+    assert [e.subject for e in failed] == [f"{bad}:1minute"]
+    assert failed[0].payload["auth_failure"] is False
+
+
+def test_fno_dry_run_writes_no_audit(registry: RegistryStore, tmp_path: Path) -> None:
+    """A dry-run F&O pull writes no real data → no audit file, no audit dir."""
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_path / "lake-dry",
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert not (tmp_path / "lake-dry" / "audit").exists()
 
 
 # ── _mark_complete store-write deferral (DEC-STORE-WRITE-DEADLINE-001) ────────
