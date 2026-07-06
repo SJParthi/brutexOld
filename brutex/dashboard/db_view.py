@@ -1712,8 +1712,8 @@ _OPTION_SEGMENT_SEP: Final = "__"
 
 #: The option series directory segment's part arity: the writer's partition
 #: key is ``<exchange_segment>|<security_id>|<expiry_flag>|<expiry_code>|
-#: <strike>|<drv_option_type>`` (``option_sink.append_option_bars``), so the
-#: on-disk segment splits into exactly 6 parts on ``__``.
+#: <strike>|<drv_option_type>`` (``option_parquet_writer.partition_key``), so
+#: the on-disk segment splits into exactly 6 parts on ``__``.
 _OPTION_SERIES_ARITY: Final = 6
 
 

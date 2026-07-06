@@ -308,3 +308,26 @@ class TestFetchUntilNonempty:
         fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=3, backoff=backoffs.append)
         # backoff runs before re-fetch on attempts 2 and 3 (not before the first call)
         assert backoffs == [2, 3]
+
+
+class TestMaybeAudit:
+    """`maybe_audit` — the ONE COMMON audit guard both ingest spines share
+    (DEC-INGEST-AUDIT-WIRING-001, Golden Rule #8)."""
+
+    def test_none_is_a_noop(self) -> None:
+        from brutex.adapters.ingest_common import maybe_audit
+
+        maybe_audit(None, "INGEST_RUN_START", "pull:x", {"jobs": 1})  # must not raise
+
+    def test_wired_writer_receives_one_hash_chained_line(self, tmp_path) -> None:
+        from brutex.adapters.ingest_common import maybe_audit
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(path) as writer:
+            maybe_audit(writer, "INGEST_PAIR_DONE", "NIFTY:1minute", {"bars_appended": 3})
+        assert verify_chain(path) == 1
+        entry = read_entries(path)[0]
+        assert entry.action == "INGEST_PAIR_DONE"
+        assert entry.subject == "NIFTY:1minute"
+        assert entry.payload == {"bars_appended": 3}

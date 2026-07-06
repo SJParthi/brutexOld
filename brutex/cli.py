@@ -3678,15 +3678,12 @@ def cmd_fetch(
     # Golden Rule #8 audit trail (DEC-INGEST-AUDIT-CHAIN-001): a real live pull
     # writes a hash-chained JSONL trail under <lake>/audit/ (RUN_START → per-pair
     # → RUN_COMPLETE). --inspect / --dry-run write no real data, so they get a
-    # null context (no audit). # pragma: no cover — live path (the audit-write
-    # core is 100%-tested in test_groww_run_ingest.py).
-    audit_ctx: Any = contextlib.nullcontext(None)
-    if not (dry_run or inspect):  # pragma: no cover — live
-        from brutex.orchestrator.audit import AuditWriter
+    # null context (no audit). The path + resume semantics live in the ONE COMMON
+    # ``open_ingest_audit`` factory the dashboard pulls now bind too
+    # (DEC-INGEST-AUDIT-WIRING-001) — the CLI behaviour is byte-identical.
+    from brutex.orchestrator.audit import open_ingest_audit
 
-        _ingest_audit_path = resolved / "audit" / "spot-ingest.jsonl"
-        _ingest_audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_ctx = AuditWriter.open(_ingest_audit_path, resume=_ingest_audit_path.exists())
+    audit_ctx: Any = open_ingest_audit(resolved, enabled=not (dry_run or inspect))
     # Integration merge: keep BOTH the ingest-audit context (base-13,
     # DEC-INGEST-AUDIT-CHAIN-001) AND the retry-storm ExitStack (main, #533).
     # The dry-run temp-lake cleanup is OUTERMOST so it removes the ephemeral tree
