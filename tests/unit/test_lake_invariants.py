@@ -923,6 +923,32 @@ class TestOptionForeignScan:
         assert len(skips) == 1
         assert skips[0]["path"] == str(lake / "options" / "LINKED")
 
+    def test_symlinked_options_root_skipped(self, tmp_path: Path) -> None:
+        """Round-2 MAJOR regression (Vector 1, empirically reproduced pre-fix):
+        ``is_dir()`` FOLLOWS a symlinked ``options/`` ROOT and the series dirs
+        inside its target are REAL dirs, so the per-series ``is_symlink()``
+        probe never fired — the whole OUTSIDE tree was scanned and its
+        findings handed to the default AUTO-ON healer (which then created
+        ``2024-07.parquet`` outside the lake root). Skipped loudly instead,
+        like a series-dir symlink; the outside poison stays untouched-and-
+        unseen (the writer's mutation-boundary containment is the second,
+        TOCTOU-safe rail)."""
+        outside = tmp_path / "outside" / "options"
+        _plant_option_raw(
+            outside / "SERIES" / "2024-06.parquet",
+            [("CE", _ts(1)), ("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))],
+        )
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        (lake / "options").symlink_to(outside, target_is_directory=True)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(lake)
+        assert report.findings == ()
+        assert report.option_files_scanned == 0
+        skips = _events(logs, "lake.invariant.symlink_skipped")
+        assert len(skips) == 1
+        assert skips[0]["path"] == str(lake / "options")
+
     def test_no_scope_unparsable_name_still_dup_scanned(self, tmp_path: Path) -> None:
         # Today's behaviour pinned: without a months scope an unparsable-name
         # file is still dup-scanned (home=None → foreign abstains).

@@ -979,3 +979,126 @@ class TestWriteByteParityAfterRefactor:
         expected_feb.write_parquet(scratch_feb)
         assert (series / "2021-01.parquet").read_bytes() == scratch_jan.read_bytes()
         assert (series / "2021-02.parquet").read_bytes() == scratch_feb.read_bytes()
+
+
+class TestMutationContainment:
+    """The round-2 mutation-boundary symlink rail (``_assert_options_containment``).
+
+    Hostile-review round-2 MAJOR (refuter-confirmed): the scanner's scan-time
+    ``is_symlink()`` probe was the ONLY control, defeated by (Vector 1) a
+    symlinked ``options/`` ROOT — its series dirs are real, so the per-series
+    probe never fired — and (Vector 2) a series dir swapped to a symlink
+    between scan and heal (TOCTOU). Both let the default AUTO-ON heal
+    create/unlink parquet files OUTSIDE the lake root. The rail runs at heal
+    time on the RESOLVED destination, inside both heal-side writer entries.
+    """
+
+    def _frame(self, rows: list[tuple[str, datetime, float]]) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "side": pl.Series([side for side, _, _ in rows], dtype=pl.Utf8),
+                "timestamp": pl.Series([ts for _, ts, _ in rows], dtype=pl.Datetime("us", "UTC")),
+                "close": pl.Series([close for _, _, close in rows], dtype=pl.Float64),
+            }
+        )
+
+    def _outside_series(self, tmp_path: Path) -> Path:
+        """A REAL series tree OUTSIDE the victim lake, seeded via the writer."""
+        outside_lake = tmp_path / "outside-lake"
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        OptionParquetWriter(lake_root=outside_lake).merge_partition_frame(
+            outside_lake / "options" / "SERIES" / "2021-01.parquet",
+            self._frame([("CE", ts0, 1.0)]),
+        )
+        return outside_lake / "options" / "SERIES"
+
+    def test_heal_refuses_symlinked_series_dir(self, tmp_path: Path) -> None:
+        """Vector 2 (scan→heal TOCTOU): ``heal_partition`` through a series dir
+        that is (now) a symlink is REFUSED before ANY read/unlink/rewrite —
+        the outside target file is byte-untouched. FAILS pre-fix: the heal
+        followed the link and mutated the outside file."""
+        outside_series = self._outside_series(tmp_path)
+        outside_file = outside_series / "2021-01.parquet"
+        outside_bytes = outside_file.read_bytes()
+        lake = tmp_path / "lake"
+        (lake / "options").mkdir(parents=True)
+        (lake / "options" / "SERIES").symlink_to(outside_series, target_is_directory=True)
+        dest = lake / "options" / "SERIES" / "2021-01.parquet"
+        with pytest.raises(OptionWriterError, match="outside the options tree"):
+            OptionParquetWriter(lake_root=lake).heal_partition(
+                dest, quarantine_to=lake / ".quarantine" / "ts" / "2021-01.parquet"
+            )
+        assert outside_file.read_bytes() == outside_bytes
+        assert not (lake / ".quarantine").exists()
+
+    def test_merge_refuses_symlinked_series_dir(self, tmp_path: Path) -> None:
+        """Vector 2, the write-home leg: ``merge_partition_frame`` must not
+        CREATE a file outside the lake through a swapped-in symlink."""
+        outside_series = self._outside_series(tmp_path)
+        lake = tmp_path / "lake"
+        (lake / "options").mkdir(parents=True)
+        (lake / "options" / "SERIES").symlink_to(outside_series, target_is_directory=True)
+        ts1 = datetime(2021, 2, 4, 4, 0, tzinfo=UTC)
+        dest = lake / "options" / "SERIES" / "2021-02.parquet"
+        with pytest.raises(OptionWriterError, match="outside the options tree"):
+            OptionParquetWriter(lake_root=lake).merge_partition_frame(
+                dest, self._frame([("CE", ts1, 2.0)])
+            )
+        assert not (outside_series / "2021-02.parquet").exists()  # nothing created outside
+
+    def test_merge_refuses_symlinked_options_root(self, tmp_path: Path) -> None:
+        """Vector 1: a symlinked ``options/`` ROOT re-anchors nothing — the
+        ``options`` path component is deliberately NOT symlink-resolved, so
+        the resolved destination falls outside ``<resolved lake>/options``
+        and the mutation is refused."""
+        outside_series = self._outside_series(tmp_path)
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        (lake / "options").symlink_to(outside_series.parent, target_is_directory=True)
+        ts1 = datetime(2021, 2, 4, 4, 0, tzinfo=UTC)
+        dest = lake / "options" / "SERIES" / "2021-02.parquet"
+        with pytest.raises(OptionWriterError, match="outside the options tree"):
+            OptionParquetWriter(lake_root=lake).merge_partition_frame(
+                dest, self._frame([("CE", ts1, 2.0)])
+            )
+        assert not (outside_series / "2021-02.parquet").exists()
+
+    def test_lake_root_reached_via_symlink_still_heals(self, tmp_path: Path) -> None:
+        """A lake ROOT addressed through a symlink (a legitimate mount shape,
+        e.g. the §8 external SSD behind a stable alias) PASSES: both sides of
+        the containment check resolve consistently — no false-positive
+        regression for real deployments."""
+        real = tmp_path / "real-lake"
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        ts1 = datetime(2021, 1, 4, 4, 1, tzinfo=UTC)
+        OptionParquetWriter(lake_root=real).merge_partition_frame(
+            real / "options" / "SERIES" / "2021-01.parquet", self._frame([("CE", ts0, 1.0)])
+        )
+        alias = tmp_path / "alias-lake"
+        alias.symlink_to(real, target_is_directory=True)
+        w = OptionParquetWriter(lake_root=alias)
+        dest = alias / "options" / "SERIES" / "2021-01.parquet"
+        added = w.merge_partition_frame(dest, self._frame([("PE", ts1, 2.0)]))
+        assert added == 1  # containment passed; the merge landed
+        result = w.heal_partition(
+            dest, quarantine_to=alias / ".quarantine" / "ts" / "2021-01.parquet"
+        )
+        assert result.changed is False  # clean file — containment passed, no-op heal
+        stored = pl.read_parquet(real / "options" / "SERIES" / "2021-01.parquet")
+        assert stored["side"].to_list() == ["CE", "PE"]
+
+    def test_heal_refuses_symlinked_partition_file(self, tmp_path: Path) -> None:
+        """A file-level symlink resolves to its target's parent — refused too
+        (``heal_partition`` unlinks/rewrites ``dest`` itself)."""
+        outside_series = self._outside_series(tmp_path)
+        outside_file = outside_series / "2021-01.parquet"
+        outside_bytes = outside_file.read_bytes()
+        lake = tmp_path / "lake"
+        (lake / "options" / "SERIES").mkdir(parents=True)
+        dest = lake / "options" / "SERIES" / "2021-01.parquet"
+        dest.symlink_to(outside_file)
+        with pytest.raises(OptionWriterError, match="outside the options tree"):
+            OptionParquetWriter(lake_root=lake).heal_partition(
+                dest, quarantine_to=lake / ".quarantine" / "ts" / "2021-01.parquet"
+            )
+        assert outside_file.read_bytes() == outside_bytes

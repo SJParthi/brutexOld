@@ -915,13 +915,25 @@ def scan_lake_invariants(
     option_files_skipped = 0
     if include_options:
         options_root = lake_root / OPTIONS_DIR_NAME
-        if options_root.is_dir():
+        if options_root.is_symlink():
+            # Round-2 MAJOR fold (Vector 1): ``is_dir()`` FOLLOWS a symlinked
+            # ``options/`` root, and the series dirs inside its target are
+            # REAL dirs, so the per-series probe below never fires — the
+            # whole outside tree would be scanned and its findings handed to
+            # the healer. Skipped loudly, like a series-dir symlink.
+            _LOG.warning("lake.invariant.symlink_skipped", path=str(options_root))
+        elif options_root.is_dir():
             # Any dir containing *.parquet is scanned — no regex gate, an
             # unrecognized series dir is still checked (Golden Rule #1). A
             # SYMLINKED series dir is skipped LOUDLY (hostile-review fold):
-            # the healer's primitives unlink/rmdir/create INSIDE a series dir,
-            # so findings under a followed symlink would let a heal mutate
-            # files OUTSIDE the lake root — never scanned, never healed.
+            # the healer's primitives unlink/rmdir/create INSIDE a series
+            # dir. HONEST (round-2): this scan-time probe is best-effort
+            # only — it is defeated by a symlinked options ROOT (guarded
+            # above) and by a dir swapped to a symlink AFTER the scan
+            # (TOCTOU). The ENFORCEMENT lives at the writer's mutation
+            # boundary: ``OptionParquetWriter._assert_options_containment``
+            # refuses any heal-side write/unlink whose RESOLVED destination
+            # escapes ``<lake_root>/options/``, at heal time.
             for series_dir in sorted(p for p in options_root.iterdir() if p.is_dir()):
                 if series_dir.is_symlink():
                     _LOG.warning("lake.invariant.symlink_skipped", path=str(series_dir))
@@ -1202,6 +1214,7 @@ __all__ = [
     "classify_bar_keys",
     "classify_option_keys",
     "detect_legacy_drift",
+    "is_foreign_timestamp",
     "log_lake_finding",
     "scan_lake_invariants",
     "utc_aware",

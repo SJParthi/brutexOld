@@ -909,15 +909,18 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     column routes as-if-UTC instead of crashing the batch —
     ``PartitionError`` is NOT in ``_PER_FINDING_HEAL_ERRORS``); removal keys
     are the RAW stored tuples. A wholly-foreign file is quarantine-MOVED by
-    the writer. No catalog (the options tree is uncatalogued), no
-    ``state.touch`` (NOTHING derives from ``options/`` — recall stays
-    ``None``), ``conflicts=0`` honestly (option vendor-drift detection is the
-    writer's own deferred follow-up — no ``BarConflict`` twin exists).
-    STRICTLY row-removing/row-reassigning — moved rows keep their stored
-    column values verbatim.
+    the writer. Both mutation legs run under the writer's symlink-containment
+    rail (``OptionParquetWriter._assert_options_containment``, the round-2
+    TOCTOU fold): a series dir swapped to a symlink between scan and heal is
+    REFUSED with :class:`OptionWriterError` — a member of
+    ``_PER_FINDING_HEAL_ERRORS``, so the refusal is an isolated counted error
+    and nothing outside the lake is ever mutated. No catalog (the options
+    tree is uncatalogued), no ``state.touch`` (NOTHING derives from
+    ``options/`` — recall stays ``None``), ``conflicts=0`` honestly (option
+    vendor-drift detection is the writer's own deferred follow-up — no
+    ``BarConflict`` twin exists). STRICTLY row-removing/row-reassigning —
+    moved rows keep their stored column values verbatim.
     """
-    import polars as pl
-
     src = finding.path
     if not src.exists():
         return False  # consumed earlier / vanished — skipped
@@ -929,11 +932,16 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     sides = foreign.get_column("side").to_list()
     stamps = foreign.get_column("timestamp").to_list()
     keys = frozenset(zip(sides, stamps, strict=True))  # RAW stored values
-    routes = [partition_for_timestamp(utc_aware(ts)) for ts in stamps]
+    # ONE-pass dict-group of row indices by home month (the bars twin's
+    # `_write_bars_grouped_by_month` O(rows) shape — review round-2 NIT: the
+    # prior per-month boolean-mask rebuild was O(months × rows)).
+    rows_by_month: dict[tuple[int, int], list[int]] = {}
+    for idx, ts in enumerate(stamps):
+        rows_by_month.setdefault(partition_for_timestamp(utc_aware(ts)), []).append(idx)
     added = 0
-    target_months = sorted(set(routes))
+    target_months = sorted(rows_by_month)
     for target in target_months:
-        group = foreign.filter(pl.Series([r == target for r in routes]))
+        group = foreign[rows_by_month[target]]
         dest = src.parent / f"{target[0]:04d}-{target[1]:02d}.parquet"
         added += state.option_writer.merge_partition_frame(dest, group)
     result = state.option_writer.heal_partition(
@@ -1473,11 +1481,17 @@ def heal_after_pull(
     (:func:`~brutex.data.spot_daily_resample.ist_span_partition_months` — the
     ±1-day pad already covers the midnight-IST 1day straddle). Options tree
     excluded by default; the F&O seam opts in (``include_options=True``,
-    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) — a bounded, months-scoped
-    (filename-parsed, zero reads out of scope) census+heal of the legacy
-    expired-options table, run ONCE (not per target — the whole tree would
-    otherwise be walked O(targets) times; no current production pull WRITES
-    ``options/``, so this is opportunistic — the always-on coverage is L3).
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) — a bounded, months-scoped census+heal
+    of the legacy expired-options table. HONEST scope bound (review round-2
+    NIT — the earlier "zero reads out of scope" claim was overbroad): the
+    bound is by FILENAME, an O(1) parse, so a CLEAN out-of-scope file is
+    never read; but a FLAGGED in-scope file still costs targeted
+    canonical-sibling reads — and, in auto mode, reassignment writes — in its
+    foreign rows' HOME months, which may lie OUTSIDE the span (anomaly-only
+    cost, mirroring the bars overlap classification). Run ONCE (not per
+    target — the whole tree would otherwise be walked O(targets) times; no
+    current production pull WRITES ``options/``, so this is opportunistic —
+    the always-on coverage is L3).
     Its ``option_files_scanned`` folds into the mass-heal denominator. Runs
     BEFORE the pull's own daily derive at the wiring seams, so the derive
     reads clean 1-minute.

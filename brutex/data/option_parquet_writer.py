@@ -33,7 +33,14 @@ RAW keyed removal + the wholly-removed quarantine-MOVE),
 :meth:`OptionParquetWriter.read_partition_frame` (the healer's truthful raw
 consistent read) and :meth:`OptionParquetWriter.merge_partition_frame` (the
 reassignment's keep-first write-home entry) — all through the SAME lock stack
-as :meth:`OptionParquetWriter.write`.
+as :meth:`OptionParquetWriter.write`. BOTH heal-side mutation entries enforce
+the symlink-containment rail (:meth:`OptionParquetWriter._assert_options_containment`,
+hostile-review round-2 MAJOR fold): the RESOLVED destination must stay inside
+``<lake_root>/options/`` or the mutation is REFUSED with
+:class:`OptionWriterError` — the scan-time symlink skip alone is bypassable
+(a symlinked ``options/`` root, or a series dir swapped to a symlink between
+scan and heal), and only a heal-time check on the resolved path closes that
+window.
 """
 
 from __future__ import annotations
@@ -236,9 +243,15 @@ class OptionParquetWriter:
 
         Thin delegate to :meth:`_merge_frame_locked` — the render callable runs
         INSIDE ``lake_write_guard`` (its allocation keeps the ENOSPC/OOM →
-        ``LakeWriteHalt`` mapping), preserving the pre-refactor contract
-        byte-for-byte (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, golden byte-parity
-        pinned).
+        ``LakeWriteHalt`` mapping). For a UNIQUE-keyed destination — the only
+        state ``write`` itself ever produces — the pre-refactor contract is
+        preserved byte-for-byte (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, golden
+        byte-parity pinned). A dup-POISONED destination (plantable only by
+        hand) deliberately DIVERGES from the pre-refactor behaviour: the F1
+        fold baselines ``added`` on the UNIQUE stored key count and
+        force-rewrites the keep-first collapse on touch (the pre-refactor
+        physical-row baseline could cancel new keys — review round-2 NIT:
+        the old "byte-for-byte" claim was overbroad).
         """
         return self._merge_frame_locked(dest, lambda: _render_df(coordinate, new_bars))
 
@@ -256,20 +269,70 @@ class OptionParquetWriter:
         set (a dup-poisoned destination can never cancel a genuinely-new moved
         key), and a poisoned destination is force-rewritten keep-first-deduped
         on touch (``lake.partition.dedup_healed`` — the bars twin's law).
+        Enforces the symlink-containment rail at the mutation boundary
+        (:meth:`_assert_options_containment` — heal-side entries only; the
+        production :meth:`write` path is deliberately unguarded, see there).
 
         Raises
         ------
         OptionWriterError
-            A corrupt existing destination partition.
+            A corrupt existing destination partition, or a *dest* whose
+            RESOLVED path escapes ``<lake_root>/options/`` (a symlinked
+            series dir / options root — the round-2 containment rail).
         LakeWriteHalt
             Disk-full / OOM anywhere inside the read-modify-write.
         PartitionLockTimeout
             The cross-process lock could not be acquired in time.
         """
-        return self._merge_frame_locked(dest, lambda: frame)
+        return self._merge_frame_locked(dest, lambda: frame, containment=True)
 
-    def _merge_frame_locked(self, dest: Path, render: Callable[[], pl.DataFrame]) -> int:
+    def _assert_options_containment(self, dest: Path) -> None:
+        """Refuse a heal-side mutation whose RESOLVED *dest* escapes ``<lake_root>/options/``.
+
+        The mutation-boundary symlink rail (hostile-review round-2 MAJOR,
+        DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): the scanner's ``is_symlink()``
+        skip is scan-TIME only and bypassable two ways — a symlinked
+        ``options/`` root (the series dirs inside the target are REAL dirs,
+        so the per-series probe never fires) and a scan→heal TOCTOU (a real
+        series dir swapped to a symlink after the scan) — both empirically
+        reproduced letting the default AUTO-ON heal create/unlink parquet
+        files OUTSIDE the lake root. Enforced HERE, at heal time, on the
+        RESOLVED path: ``dest``'s resolved parent must sit under
+        ``<resolved lake_root>/options``. The ``options`` component itself is
+        deliberately NOT symlink-resolved — resolving it would re-anchor the
+        containment root to wherever a swapped-in symlink points, re-opening
+        the hole; a lake ROOT reached via a symlink (a legitimate mount
+        shape) still passes because BOTH sides resolve consistently
+        (test-pinned). Raises the quarantinable :class:`OptionWriterError`
+        (a member of the healer's per-finding isolation set — the refusal is
+        counted + logged, the batch continues, nothing is mutated). Honest
+        envelope (Golden Rule #10): this closes the demonstrated scan→heal
+        window; a sub-microsecond swap between this check and the atomic
+        rename inside the SAME call would need dirfd-relative I/O to close —
+        out of scope, not claimed.
+        """
+        options_root = self._lake_root.resolve() / _OPTIONS_SUBDIR
+        resolved_parent = dest.resolve().parent
+        if not resolved_parent.is_relative_to(options_root):
+            raise OptionWriterError(
+                f"destination {dest} resolves outside the options tree "
+                f"({resolved_parent} is not under {options_root}) — refusing to mutate"
+            )
+
+    def _merge_frame_locked(
+        self, dest: Path, render: Callable[[], pl.DataFrame], *, containment: bool = False
+    ) -> int:
         """The ONE read-modify-write union core (locks → guard → render → union → write).
+
+        *containment* runs :meth:`_assert_options_containment` under the locks
+        before any read/write — ``True`` for the heal-side
+        :meth:`merge_partition_frame` entry, ``False`` (default) for the
+        production :meth:`write` → :meth:`_merge_partition` path, which is
+        deliberately unguarded: ``_safe_segment`` already rejects traversal
+        characters, the pull writes only paths it itself derives, and an
+        operator who symlinks the options tree to another volume on purpose
+        must keep a working pull (the healer refuses instead — scan-time skip
+        + this rail — so the auto-heal never mutates through that layout).
 
         The existence-check → read → union → atomic-rename below is a
         read-modify-write, so it runs under this partition's shared lock
@@ -300,6 +363,8 @@ class OptionParquetWriter:
             partition_write_lock(self._lake_root, dest),
             lake_write_guard(),
         ):
+            if containment:
+                self._assert_options_containment(dest)
             new_df = render()  # validates the polars import on the write path
             dedup_dropped = 0
             if dest.exists():
@@ -346,7 +411,15 @@ class OptionParquetWriter:
                 # self-heals on touch instead of silently returning poisoned bytes.
                 # Same pinned event as the bars writer; sanctioned no-quarantine
                 # self-heal (the merge is not a heal_partition call — the collapse is
-                # observable here, and the healer's own dup pass quarantines).
+                # observable here). HONEST (review round-2 NIT): in the reassignment
+                # flow this collapse is the ONLY dedup a dup-poisoned DESTINATION gets
+                # in that batch — option-foreign heals BEFORE option-dup, so a later
+                # same-file dup finding reads changed=False → counted skipped, and NO
+                # quarantine copy of the destination's pre-collapse bytes is taken
+                # (rows are keep-first-dropped, never value-edited; the next scan
+                # sees the file clean). Only a dup finding healed with NO same-batch
+                # reassignment touching its file goes through heal_partition's
+                # quarantine-copy path.
                 _LOG.warning(
                     "lake.partition.dedup_healed",
                     partition=str(dest),
@@ -443,7 +516,11 @@ class OptionParquetWriter:
         Raises
         ------
         OptionWriterError
-            Vanished/corrupt file, or a changing heal with no *quarantine_to*.
+            Vanished/corrupt file, a changing heal with no *quarantine_to*,
+            or a *dest* whose RESOLVED path escapes ``<lake_root>/options/``
+            (:meth:`_assert_options_containment` — the round-2 rail; this
+            method unlinks/rewrites, so it must never follow a symlink out
+            of the lake).
         LakeWriteHalt
             Disk-full / OOM during the quarantine copy or the rewrite.
         PartitionLockTimeout
@@ -458,6 +535,7 @@ class OptionParquetWriter:
             partition_write_lock(self._lake_root, dest),
             lake_write_guard(),
         ):
+            self._assert_options_containment(dest)
             try:
                 existing_bytes = dest.read_bytes()
                 existing = pl.read_parquet(io.BytesIO(existing_bytes))

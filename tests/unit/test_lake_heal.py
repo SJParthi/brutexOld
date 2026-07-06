@@ -1905,6 +1905,59 @@ class TestOptionForeignHeal:
         assert rescan.findings == ()  # the second sweep is clean
 
 
+class TestOptionSymlinkContainment:
+    """Round-2 MAJOR (refuter-confirmed): the scan→heal TOCTOU rail end-to-end.
+
+    The scanner's ``is_symlink()`` probe is scan-TIME only — pre-fix, a real
+    series dir swapped to a symlink AFTER the scan made the default AUTO-ON
+    heal write THROUGH the link (empirically reproduced: the heal created
+    ``2024-07.parquet`` OUTSIDE the lake and unlinked the outside source).
+    The writer's mutation-boundary containment (checked at heal time on the
+    RESOLVED destination) now refuses BOTH mutation legs as isolated counted
+    errors; nothing outside the lake is ever created, rewritten, or unlinked.
+    """
+
+    def test_toctou_series_dir_swap_refused_and_isolated(self, tmp_path: Path) -> None:
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        june, _july = _poison_option_foreign(lake)
+        # Add a physical dup of the home row too, so BOTH heal-side writer
+        # entries (merge_partition_frame + heal_partition) are driven.
+        june_df = pl.read_parquet(june)
+        pl.concat([june_df, june_df[0:1]]).write_parquet(june)
+        scan = scan_lake_invariants(lake)
+        assert {type(f).__name__ for f in scan.findings} == {
+            "OptionForeignMonthRows",
+            "OptionIntraFileDup",
+        }
+        # The TOCTOU swap: AFTER the scan, the real series dir moves outside
+        # and a symlink takes its place (the review's S2 probe, verbatim).
+        series_dir = june.parent
+        outside = tmp_path / "outside" / series_dir.name
+        outside.parent.mkdir(parents=True)
+        series_dir.rename(outside)
+        series_dir.symlink_to(outside, target_is_directory=True)
+        outside_before = _tree_state(outside)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned + scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 2  # foreign-reassign leg + dup leg, both refused
+        assert report.healed == 0
+        assert report.quarantine_root is None  # refused BEFORE any quarantine copy
+        assert not (lake / ".quarantine").exists()
+        assert _tree_state(outside) == outside_before  # outside tree byte-untouched
+        errors = _events(logs, "lake_heal.partition_error")
+        assert len(errors) == 2
+        assert all("outside the options tree" in str(e["error"]) for e in errors)
+
+
 # ── heal order + idempotent re-run + failure envelopes ─────────────────────
 
 
