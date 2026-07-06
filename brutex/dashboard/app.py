@@ -58,6 +58,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
+from brutex.calendars.nse import IST
 from brutex.config.credentials import groww_credentials_error
 from brutex.dashboard.completeness import (
     build_completeness_scoreboard,
@@ -162,6 +163,7 @@ from brutex.dashboard.pipeline_prebuild import (
 )
 from brutex.dashboard.pipeline_pull import run_full_pipeline
 from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
+from brutex.dashboard.prebuild_parallel import resolve_prebuild_workers
 from brutex.dashboard.preopen_report import (
     ReportBasis,
     ReportMode,
@@ -3544,6 +3546,13 @@ def build_app(
                 _pull_job.set_phase("prebuild")
                 _prebuild_gate.set_phase("prebuild")
 
+                # M1/m-4 (DEC-HARDWARE-ENVELOPE-001): resolve the forming-session
+                # daily cutoff ONCE per prebuild run and pin it into BOTH paths
+                # (the sequential closure below AND the threaded path via the
+                # guard) — so a run straddling midnight IST derives the same
+                # `1day` set regardless of path or symbol order.
+                prebuild_cutoff = datetime.now(UTC).astimezone(IST).date()
+
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
                         lake_root=lake_root,
@@ -3552,6 +3561,7 @@ def build_app(
                         symbol=target.symbol,
                         kind=target.kind,
                         include_daily=True,
+                        daily_before=prebuild_cutoff,
                         # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: per-session
                         # substitution WARNs only for a SPOT INDEX target
                         # (PrebuildTarget.dense = Instrument.is_index).
@@ -3559,6 +3569,14 @@ def build_app(
                     )
 
                 nonlocal prebuild_ok
+                # Parallelise the per-symbol derive across the host's CPU cores
+                # (DEC-HARDWARE-ENVELOPE-001): auto-detect the worker count at
+                # runtime (BRUTEX_PREBUILD_WORKERS=1 forces sequential). A
+                # ``> 1`` count routes the guard to the THREAD-pool path
+                # (byte-identical lake output); ``1`` keeps the sequential
+                # injected-callable path. This sizes CPU COMPUTE only — never the
+                # Groww fetch pool / rate ceiling (a real vendor limit).
+                prebuild_workers = resolve_prebuild_workers(target_count=len(targets))
                 try:
                     outcome = run_pipeline_prebuild_guarded(
                         instruments=targets,
@@ -3571,12 +3589,15 @@ def build_app(
                         # Allocation probe at the tiny-file writer's start
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
+                        workers=prebuild_workers,
+                        daily_before=prebuild_cutoff,
                         # PRE-RUN disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001):
                         # skip the whole prebuild gracefully when the lake
                         # volume can't hold the estimated derived writes
                         # (observed schema_meta multiplier, 6.5x fallback;
                         # BRUTEX_PREBUILD_DISK_GUARD=off to override). Fails
-                        # OPEN on any measurement error.
+                        # OPEN on any measurement error. Applied on BOTH the
+                        # sequential and the parallel (workers > 1) path.
                         disk_guard=make_disk_guard(
                             lake_root,
                             instrument_store.get_meta if instrument_store is not None else None,
