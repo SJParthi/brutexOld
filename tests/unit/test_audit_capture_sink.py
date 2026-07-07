@@ -837,6 +837,74 @@ def test_resolver_capture_lmdb_journal_is_persistent(
         assert key in membership
 
 
+def _spy_dedup_index_ctor(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Spy the resolver's ``OptionDedupIndex(**kwargs)`` construction kwargs.
+
+    The resolver imports ``OptionDedupIndex`` function-locally, so patching the
+    source-module attribute is exactly what the resolver sees — no white-box
+    private-attribute probe needed (round-2 review fix regression seam).
+    """
+    import brutex.data.option_dedup as option_dedup_mod
+
+    seen: dict[str, Any] = {}
+
+    class _SpyIndex(OptionDedupIndex):
+        def __init__(self, **kwargs: Any) -> None:
+            seen.update(kwargs)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(option_dedup_mod, "OptionDedupIndex", _SpyIndex)
+    return seen
+
+
+def test_resolver_capture_journal_bloom_is_right_sized_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-memory-journal branch sizes the Bloom to the forensic envelope.
+
+    Round-2 review fix (Golden Rule #10): the sweep-scale 100M-key/1e-7
+    default would silently allocate a FIXED ~419 MB bit array per capture-mode
+    pull regardless of run size; the journal is right-sized to
+    ``JOURNAL_BLOOM_CAPACITY``/``JOURNAL_BLOOM_FPR`` (~36 MB) instead, and the
+    loud enable WARN discloses the fixed allocation.
+    """
+    from brutex.data.audit_capture import JOURNAL_BLOOM_CAPACITY, JOURNAL_BLOOM_FPR
+
+    monkeypatch.setenv(CAPTURE_MODE_ENV, "capture")
+    seen = _spy_dedup_index_ctor(monkeypatch)
+    with capture_logs() as logs:
+        _resolved, capture = resolve_audit_capture(
+            RecordingSink(lake_root=tmp_path), lake_root=tmp_path, lmdb_dir=None
+        )
+    assert capture is not None and capture.journal is not None
+    assert seen["capacity"] == JOURNAL_BLOOM_CAPACITY == 10_000_000
+    assert seen["fpr_target"] == JOURNAL_BLOOM_FPR == 1e-6
+    assert "exact" not in seen  # the in-memory default exact tier
+    # The enable WARN discloses the fixed journal-Bloom allocation honestly.
+    (enabled,) = [e for e in logs if e["event"] == "audit_capture.enabled"]
+    assert "~36 MB L3-journal Bloom" in str(enabled["cost"])
+
+
+def test_resolver_capture_journal_bloom_is_right_sized_lmdb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The LMDB-journal branch sizes the Bloom to the SAME forensic envelope."""
+    from brutex.data.audit_capture import JOURNAL_BLOOM_CAPACITY, JOURNAL_BLOOM_FPR
+    from brutex.data.lmdb_membership import LmdbMembership
+
+    monkeypatch.setenv(CAPTURE_MODE_ENV, "capture")
+    seen = _spy_dedup_index_ctor(monkeypatch)
+    _resolved, capture = resolve_audit_capture(
+        RecordingSink(lake_root=tmp_path),
+        lake_root=tmp_path,
+        lmdb_dir=tmp_path / "audit" / "dedup-live.lmdb",
+    )
+    assert capture is not None and capture.journal is not None
+    assert seen["capacity"] == JOURNAL_BLOOM_CAPACITY
+    assert seen["fpr_target"] == JOURNAL_BLOOM_FPR
+    assert isinstance(seen["exact"], LmdbMembership)
+
+
 def test_resolver_junk_env_fails_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A junk env value propagates as AuditCaptureError (never a fallback)."""
     monkeypatch.setenv(CAPTURE_MODE_ENV, "forensics")

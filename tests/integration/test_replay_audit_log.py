@@ -412,7 +412,17 @@ class TestAuditReplayConsistency:
 
     def test_unaudited_extra_partition_is_flagged(self, tmp_path: Path) -> None:
         """A lake pair the audit log never recorded trips the oracle (Rule #8:
-        every material action must be audited — an extra live subject is a BUG)."""
+        every material action must be audited — an extra live subject is a BUG).
+
+        BOTH arms of the pair-level (``INGEST_PAIR_DONE``) oracle are asserted
+        (round-2 review fix — the capture-mode upgrade had kept only the
+        negative tooth, which a hollowed projection replaying ZERO subjects
+        would still pass, since EVERY live pair would then read
+        ``extra_in_live``): the POSITIVE arm pins that the real lake pair set
+        equals the chain's replayed ``INGEST_PAIR_DONE`` subjects — silence
+        iff consistent, with a genuinely non-zero ``replayed_count`` — before
+        the GHOST injection exercises the negative tooth.
+        """
         lake = tmp_path / "lake"
         audit_path = tmp_path / "audit" / "spot-ingest.jsonl"
         audit_path.parent.mkdir(parents=True)
@@ -424,10 +434,25 @@ class TestAuditReplayConsistency:
             start=_START,
             end=_END,
         )
-        live = _lake_pair_subjects(lake) | {"GHOST:1minute"}
+        # POSITIVE arm: lake pair set == the chain's PAIR_DONE subjects.
+        live = _lake_pair_subjects(lake)
+        assert live == frozenset({"NIFTY:1minute"})
+        assert_dedup_consistent(
+            audit_path=audit_path,
+            live_subjects=live,
+            action_filter="INGEST_PAIR_DONE",
+        )
+        diff = replay_audit_to_diff(
+            audit_path=audit_path,
+            live_subjects=live,
+            action_filter="INGEST_PAIR_DONE",
+        )
+        assert diff.is_consistent
+        assert diff.replayed_count == 1  # the projection genuinely replayed the pair
+        # NEGATIVE tooth: an extra live pair the chain never recorded is flagged.
         with pytest.raises(AuditError, match="extra_in_live"):
             assert_dedup_consistent(
                 audit_path=audit_path,
-                live_subjects=live,
+                live_subjects=live | {"GHOST:1minute"},
                 action_filter="INGEST_PAIR_DONE",
             )

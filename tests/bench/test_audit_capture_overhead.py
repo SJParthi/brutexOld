@@ -67,6 +67,35 @@ def _bars(*, day: int, start_minute: int, count: int, base: str) -> list[CandleB
     ]
 
 
+def _warm_up(sink: ParquetBarSink | AuditCaptureSink) -> None:
+    """TWO untimed throwaway appends through *sink* before its timed arm starts.
+
+    Round-2 review fix: the bare arm previously ran FIRST in a fresh bench
+    process, so the one-time initialization cost of the process's first
+    Parquet writes landed entirely inside ``bare_s`` — systematically
+    understating (even negating) the printed wrapped-vs-bare per-append delta
+    and flattering the ``BRUTEX_M4PRO_ABS`` assertion in the passing
+    direction. Each arm now pays untimed warm-up appends through its OWN sink
+    covering BOTH one-time paths (measured on this box: ~390 ms first FRESH
+    render — polars/pyarrow/zstd init — and ~250 ms first MERGE write — the
+    read-modify-write's first Parquet READ), on a distinct WARMUP partition
+    that never collides with the timed schedule, so the timed numbers measure
+    steady-state appends only. A warmed capture sink's buffered warm-up
+    records are drained immediately so the timed-arm record-count assertions
+    stay exact.
+    """
+    for start_minute in (0, 1):  # 2nd append = the MERGE (read-modify-write) path
+        sink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="WARMUP",
+            interval="1minute",
+            bars=_bars(day=1, start_minute=start_minute, count=1, base="99.00"),
+        )
+    if isinstance(sink, AuditCaptureSink):
+        sink.drain_pair("WARMUP", "1minute")
+
+
 def _run_schedule(sink: ParquetBarSink | AuditCaptureSink, *, symbol: str) -> float:
     """Append the fixed schedule through *sink*; return the wall seconds."""
     started = time.perf_counter()
@@ -89,6 +118,7 @@ def _run_schedule(sink: ParquetBarSink | AuditCaptureSink, *, symbol: str) -> fl
 def test_anchor_mode_append_overhead(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Measure wrapped-vs-bare append wall time (anchor mode, no journal)."""
     bare_sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path / "bare"))
+    _warm_up(bare_sink)
     bare_s = _run_schedule(bare_sink, symbol="NIFTY")
 
     wrapped_root = tmp_path / "wrapped"
@@ -97,6 +127,7 @@ def test_anchor_mode_append_overhead(tmp_path: Path, capsys: pytest.CaptureFixtu
         lake_root=wrapped_root,
         mode=CaptureMode.ANCHOR,
     )
+    _warm_up(capture)
     wrapped_s = _run_schedule(capture, symbol="NIFTY")
     records = capture.drain_remaining()
     assert len(records) == _APPENDS  # one anchor event per non-empty append
@@ -127,6 +158,7 @@ def test_cross_partition_lock_serialization(
             sink = AuditCaptureSink(base, lake_root=root, mode=CaptureMode.ANCHOR)
         else:
             sink = base
+        _warm_up(sink)
         threads = [
             threading.Thread(target=_run_schedule, args=(sink,), kwargs={"symbol": symbol})
             for symbol in ("NIFTY", "BANKNIFTY")

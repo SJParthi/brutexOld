@@ -107,6 +107,23 @@ CAPTURE_PAYLOAD_VERSION: Final[int] = 1
 #: Field count of one encoded bar tuple (the canonical 7-field candle).
 _ENCODED_FIELDS: Final[int] = 7
 
+#: L3 journal Bloom sizing — the bounded-forensic envelope, NOT the sweep's
+#: 100M-key ``DEFAULT_CAPACITY``/``DEFAULT_FPR`` (whose bit array is a FIXED
+#: ~419 MB allocation regardless of run size — the round-2 review's Golden
+#: Rule #10 gap). 10M keys @ 1e-6 → a fixed ~36 MB bit array. Correctness is
+#: unaffected either way: the Bloom is only the L1 prefilter and the exact
+#: tier confirms every positive, so the FPR is a cost knob, never a
+#: correctness knob. The FAIL_CLOSED trip at 10M insertions sits far beyond
+#: any capture run that can actually complete — each net-new bar also costs
+#: one audit-chain fsync on the drain, so ~10M net-new bars is structurally
+#: outside the documented CI/bounded-forensic envelope (and past it the
+#: journal fails LOUDLY per the Bloom's own FAIL_CLOSED contract, never
+#: silently).
+JOURNAL_BLOOM_CAPACITY: Final[int] = 10_000_000
+
+#: See :data:`JOURNAL_BLOOM_CAPACITY`.
+JOURNAL_BLOOM_FPR: Final[float] = 1e-6
+
 
 class AuditCaptureError(DataLakeError):
     """A loud capture refusal — junk env value, an :class:`FnoGreeksBar`
@@ -150,8 +167,10 @@ def _warn_enabled_once(mode: CaptureMode) -> None:
             "audit log grows O(appends) with +1 fsync per drained event on the "
             "controller thread, and ALL lake appends serialize through the "
             "capture lock while wired; 'capture' additionally records full bar "
-            "tuples + one 'add' row per net-new bar — a CI/forensic mode, "
-            "structurally NOT for a full production backfill"
+            "tuples + one 'add' row per net-new bar and allocates a FIXED "
+            "~36 MB L3-journal Bloom prefilter up front (10M-key forensic "
+            "envelope, fail-closed loudly past it) regardless of run size — a "
+            "CI/forensic mode, structurally NOT for a full production backfill"
         ),
     )
 
@@ -669,12 +688,21 @@ def resolve_audit_capture(
     if mode is CaptureMode.CAPTURE:
         from brutex.data.option_dedup import OptionDedupIndex
 
+        # Right-sized journal Bloom (round-2 review fix): the sweep-scale
+        # 100M-key default would allocate a fixed ~419 MB bit array per
+        # capture-mode pull regardless of run size; the journal is sized to
+        # the bounded-forensic envelope instead (~36 MB — see
+        # JOURNAL_BLOOM_CAPACITY for the honesty/fail-closed rationale).
         if lmdb_dir is None:
-            index = OptionDedupIndex()
+            index = OptionDedupIndex(capacity=JOURNAL_BLOOM_CAPACITY, fpr_target=JOURNAL_BLOOM_FPR)
         else:
             from brutex.data.lmdb_membership import LmdbMembership
 
-            index = OptionDedupIndex(exact=LmdbMembership.open(lmdb_dir))
+            index = OptionDedupIndex(
+                capacity=JOURNAL_BLOOM_CAPACITY,
+                fpr_target=JOURNAL_BLOOM_FPR,
+                exact=LmdbMembership.open(lmdb_dir),
+            )
         journal = DedupJournal(index)
     capture = AuditCaptureSink(sink, lake_root=lake_root, mode=mode, journal=journal)
     _LOG.info(
@@ -690,6 +718,8 @@ __all__ = [
     "CAPTURE_MODE_ENV",
     "CAPTURE_PAYLOAD_VERSION",
     "DEDUP_ADD_ACTION",
+    "JOURNAL_BLOOM_CAPACITY",
+    "JOURNAL_BLOOM_FPR",
     "LAKE_APPEND_ACTION",
     "AuditCaptureError",
     "AuditCaptureSink",

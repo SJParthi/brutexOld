@@ -3950,7 +3950,7 @@ def cmd_fetch(
         from brutex.data.audit_capture import AuditCaptureSink, resolve_audit_capture
 
         capture: AuditCaptureSink | None = None
-        if not _no_persist:  # pragma: no cover — live path (resolver + sink unit-covered)
+        if not _no_persist:
             sink, capture = resolve_audit_capture(
                 sink,
                 lake_root=sink_lake_root,
