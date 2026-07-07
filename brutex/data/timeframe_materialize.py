@@ -786,8 +786,22 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     O(affected-months), not O(symbol-history). The "no stored 1minute bars"
     :class:`ValueError` contract is kept in BOTH modes (a months set matching
     nothing on disk raises, mirroring the empty-tree raise).
+
+    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001): the collected frame is
+    validated by the COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (positivity
+    + OHLC ordering, one vectorized pass) BEFORE it reaches any resampler — a
+    corrupt 1m bar (e.g. ``high < low``) previously LAUNDERED into
+    self-consistent-looking derived buckets across all 19 TFs + ``1day``
+    (live-reproduced: an emitted derived ``low: 0.0``). The raised
+    :class:`~brutex.data.errors.ResampleInputError` is already in the
+    prebuild's per-symbol quarantine set, so the symbol is quarantined +
+    NAMED and its derived TFs are NOT written — rows are never silently
+    dropped or "fixed".
     """
     import polars as pl
+
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
     if with_open_interest:
@@ -822,7 +836,13 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
             missing_columns="insert",
             extra_columns="ignore",
         ).collect()
-        return df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
+        frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
+        # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
+        # frame to the resamplers (raises the quarantining ResampleInputError).
+        validate_frame_price_sanity(
+            frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+        )
+        return frame
 
     return _read
 

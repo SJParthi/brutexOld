@@ -211,6 +211,49 @@ class TestPullRateRoute:
         assert uni.status_code == 200
         assert "/static/bx-rate-monitor.js" in uni.text
 
+    def test_widget_serves_staleness_and_backoff(self) -> None:
+        """DEC-PULL-UI-STALENESS-001: the SERVED widget carries the client staleness
+        readout + the self-recovering backoff poll, and the SERVED /universe page
+        carries the #feedage staleness chip + the #subunit counter
+        (DEC-PULL-HEADER-SUBUNIT-001). HONEST envelope (Golden Rule #10): substring
+        asserts on the served bodies pin PRESENCE of the JS, not its execution —
+        this repo has no headless JS runner.
+        """
+        state = DashboardState()
+        with _client(state) as c:  # type: ignore[attr-defined]
+            js = c.get("/static/bx-rate-monitor.js")
+            uni = c.get("/universe")
+        assert js.status_code == 200
+        assert "bxrmAgeRow" in js.text
+        assert "STALE_RED_MS" in js.text
+        assert "backoffDelayMs" in js.text
+        assert "visibilitychange" in js.text
+        # The abort signal is WIRED (refuter finding: without this line ctrl.abort()
+        # is a no-op) and the secondary ETA fetch rides its OWN latest-settled-wins
+        # token pair (round 3: reusing the main chain's pollSeq starved the ETA row
+        # whenever progress latency exceeded the poll cadence).
+        assert "opts.signal = ctrl.signal" in js.text
+        assert "etaSettledSeq" in js.text
+        assert uni.status_code == 200
+        assert 'id="feedage"' in uni.text
+        assert 'id="subunit"' in uni.text
+        # The universe poll carries the SAME hung-fetch abort bound + the
+        # watch-active visibility gate (refuter-confirmed fixes), and the chip's
+        # wording is state-honest (round 3): "updated Xs ago" only after a real
+        # success this watch, and a not-yet-started poll chain never claims
+        # "retrying". Round 4: the hung-start-POST tail names the ACTIONABLE
+        # reload-then-re-click remedy (the one pipeline button is disabled while
+        # the POST is wedged, so the round-3 bare "re-click" advice was blocked
+        # by the page's own disable), and both surfaces carry the suspend-guard
+        # wall-clock twin (performance.now may pause across a system suspend).
+        assert "FEED_FETCH_TIMEOUT_MS" in uni.text
+        assert "watchActive" in uni.text
+        assert "hadProgressSuccess" in uni.text
+        assert "'start request pending — reload the page, then re-click to re-attach'" in uni.text
+        assert "'start request pending — re-click to re-attach'" not in uni.text
+        assert "lastProgressOkWallMs" in uni.text
+        assert "lastPollOkWallMs" in js.text
+
 
 def test_widget_referenced_on_operator_and_universe_templates() -> None:
     """Both the operator (v29) and /universe templates load the widget site-wide."""
@@ -676,7 +719,7 @@ class TestFailingVerdictEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# DEC-RATE-METER-LIFECYCLE-001 (MIGRATION.md #1482): the meter lifecycle + the
+# DEC-RATE-METER-LIFECYCLE-001 (MIGRATION.md #1534): the meter lifecycle + the
 # kind-aware rate probe, end to end through the REAL routes + REAL job.
 # ---------------------------------------------------------------------------
 
@@ -790,7 +833,7 @@ class TestSweepKindAwareRateProbe:
     def test_sweep_on_shared_job_reads_idle_not_stalled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The C5 repro pin (FAILS on pre-#1482 HEAD — it read a red ``stalled``).
+        """The C5 repro pin (FAILS on pre-#1534 HEAD — it read a red ``stalled``).
 
         MUTANTS KILLED: ``job_kind=JOB_KIND_SWEEP`` dropped from the sweep route's
         ``start`` (the default pull kind → stalled); the default rate probe left as
@@ -1185,7 +1228,7 @@ class TestDirectPullRouteMeterLifecycle:
 
         MUTANT KILLED: the pre-round-4 route-level unconditional
         ``finally: _session_rate.clear_meter()`` re-introduced — it evicted the live
-        meter here (there was no stale handle to shorten; the #1482 'only shortens
+        meter here (there was no stale handle to shorten; the #1534 'only shortens
         how long the stale handle lives' framing was false for this case).
         """
         import importlib

@@ -87,6 +87,30 @@ Honest envelope (Golden Rule #10 — stated, not hidden)
   invalidates (so a half-written manifest can never be served) and NEVER
   raises into the pull — the manifest is an accelerator, not a correctness
   surface. The lake's source of truth remains the ``bars/`` tree itself.
+
+Log-volume envelope (DEC-MANIFEST-LOG-FLOOD-001)
+------------------------------------------------
+:func:`record_dataset` fires once per CREATED dataset, and the prebuild
+creates ~10⁵ derived-TF datasets per run — at INFO the per-dataset
+``lake_manifest.dataset_recorded`` line was the EXACT
+DEC-PREBUILD-LOG-FLOOD-001 flood class re-introduced by this module's PR
+(measured on the operator's 2026-07-05 run: **94,190 lines at ~190 lines/s**,
+~95% of two 10 MiB rotation files in ~8 minutes, rotating away the
+prebuild-completion audit trail — the ``gate_released`` /
+``pipeline.prebuild.done`` evidence). So the per-dataset event rides
+**DEBUG** (same event name + fields — full detail one ``--log-level debug``
+away), and the surviving INFO record is the AGGREGATE
+``lake_manifest.record_summary`` (dataset count + elapsed + per-field
+histograms — see :func:`flush_record_summary`), emitted at most once per
+:data:`RECORD_SUMMARY_INTERVAL_S` of recording activity plus once at each
+natural manifest boundary (:func:`load_manifest_datasets` /
+:func:`rebuild_manifest` / :func:`invalidate_manifest` flush the pending
+window), so a full prebuild's manifest activity costs
+``≤ ceil(elapsed / interval) + boundary-flushes`` INFO lines — bounded by
+RUN DURATION, never O(datasets). HONEST: the pending window is per-PROCESS,
+best-effort state — a crash before a flush loses the trailing (≤ interval)
+window's aggregate line (the per-dataset DEBUG lines exist only in a
+deliberately-verbose session).
 """
 
 from __future__ import annotations
@@ -94,7 +118,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
+import time
 from collections.abc import Generator, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -146,6 +173,119 @@ _ROW_FIELDS: Final[tuple[str, str, str, str]] = ("exchange", "segment", "symbol"
 #: (DEC-HARDENING-LEFTOVERS-001).
 _LEDGER_DIRNAME: Final[str] = "window_ledger"
 _LEDGER_FILENAME: Final[str] = "ledger.parquet"
+
+#: Maximum recording-activity span (seconds) one pending aggregate window may
+#: cover before :func:`record_dataset` emits it inline
+#: (DEC-MANIFEST-LOG-FLOOD-001). Bounds the INFO volume of a sustained record
+#: stream to ``≤ ceil(elapsed / interval)`` lines per lake per process (the
+#: operator's measured 94,190-record / ~8-minute prebuild flood collapses to
+#: ≤ ~9 aggregate lines) AND bounds how long manifest activity can stay
+#: invisible at INFO in a process that never reaches a boundary flush.
+RECORD_SUMMARY_INTERVAL_S: Final[float] = 60.0
+
+
+@dataclass(slots=True)
+class _RecordSummaryWindow:
+    """One pending per-lake aggregate of :func:`record_dataset` successes.
+
+    Accumulates the per-dataset fields in AGGREGATE form (count histograms
+    for exchange/segment/interval, a distinct-symbol set) between flushes.
+    Memory is O(distinct coordinates per window) — bounded by the flush
+    interval / boundary flushes, and cleared on every emit.
+    """
+
+    started_monotonic: float
+    last_monotonic: float
+    count: int
+    exchanges: dict[str, int]
+    segments: dict[str, int]
+    intervals: dict[str, int]
+    symbols: set[str]
+
+
+#: Pending aggregate windows keyed by ``str(lake_root)``, guarded by
+#: :data:`_RECORD_SUMMARY_LOCK`. Process-local best-effort telemetry state —
+#: NEVER part of the on-disk manifest contract.
+_RECORD_SUMMARY_WINDOWS: dict[str, _RecordSummaryWindow] = {}
+_RECORD_SUMMARY_LOCK = threading.Lock()
+
+
+def _emit_record_summary(lake_root_key: str, window: _RecordSummaryWindow) -> None:
+    """Emit ONE aggregate INFO for a closed window (DEC-MANIFEST-LOG-FLOOD-001).
+
+    The aggregate form of the per-dataset ``lake_manifest.dataset_recorded``
+    DEBUG fields: every field survives as a count histogram (exchange /
+    segment / interval) or a distinct count (symbol), plus the window's
+    recording-activity span (first → LAST record, not flush time).
+    """
+    _LOG.info(
+        "lake_manifest.record_summary",
+        lake_root=lake_root_key,
+        datasets_recorded=window.count,
+        elapsed_s=round(window.last_monotonic - window.started_monotonic, 3),
+        exchanges=dict(sorted(window.exchanges.items())),
+        segments=dict(sorted(window.segments.items())),
+        intervals=dict(sorted(window.intervals.items())),
+        distinct_symbols=len(window.symbols),
+    )
+
+
+def _note_dataset_recorded(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, interval: str
+) -> None:
+    """Fold one successful :func:`record_dataset` into the pending window.
+
+    Opens the lake's window on the first record; emits + resets it inline
+    once the window's span reaches :data:`RECORD_SUMMARY_INTERVAL_S` (read at
+    call time so tests can patch it). The log call runs OUTSIDE the tiny
+    module lock; O(1) per record.
+    """
+    now = time.monotonic()
+    key = str(lake_root)
+    closed: _RecordSummaryWindow | None = None
+    with _RECORD_SUMMARY_LOCK:
+        window = _RECORD_SUMMARY_WINDOWS.get(key)
+        if window is None:
+            window = _RecordSummaryWindow(
+                started_monotonic=now,
+                last_monotonic=now,
+                count=0,
+                exchanges={},
+                segments={},
+                intervals={},
+                symbols=set(),
+            )
+            _RECORD_SUMMARY_WINDOWS[key] = window
+        window.last_monotonic = now
+        window.count += 1
+        window.exchanges[exchange] = window.exchanges.get(exchange, 0) + 1
+        window.segments[segment] = window.segments.get(segment, 0) + 1
+        window.intervals[interval] = window.intervals.get(interval, 0) + 1
+        window.symbols.add(symbol)
+        if now - window.started_monotonic >= RECORD_SUMMARY_INTERVAL_S:
+            closed = _RECORD_SUMMARY_WINDOWS.pop(key)
+    if closed is not None:
+        _emit_record_summary(key, closed)
+
+
+def flush_record_summary(lake_root: Path) -> int:
+    """Emit the pending aggregate INFO for *lake_root*, if any — O(1).
+
+    Returns the number of dataset recordings the flushed window covered
+    (``0`` when nothing was pending — nothing is logged then). Called at
+    every natural manifest boundary (:func:`load_manifest_datasets` /
+    :func:`rebuild_manifest` / :func:`invalidate_manifest`) so the trailing
+    sub-interval window — e.g. the tail of a prebuild's record burst — is
+    surfaced at INFO by the first post-run manifest touch instead of being
+    lost. Safe to call from any thread; never raises past the log call.
+    """
+    key = str(lake_root)
+    with _RECORD_SUMMARY_LOCK:
+        window = _RECORD_SUMMARY_WINDOWS.pop(key, None)
+    if window is None:
+        return 0
+    _emit_record_summary(key, window)
+    return window.count
 
 
 def ledger_file_path(lake_root: Path) -> Path:
@@ -318,6 +458,10 @@ def load_manifest_datasets(lake_root: Path) -> list[dict[str, str]] | None:
     literal O(1)-total). Returns rows sorted by
     ``(exchange, segment, symbol, interval)`` — the walk's order.
     """
+    # Boundary flush (DEC-MANIFEST-LOG-FLOOD-001): the first manifest read
+    # after a record burst (e.g. the prebuild) surfaces the trailing
+    # aggregate window at INFO; a no-burst read flushes (and logs) nothing.
+    flush_record_summary(lake_root)
     current_token = ledger_stat_token(lake_root)
     if current_token is None:
         return None
@@ -377,6 +521,9 @@ def rebuild_manifest(
     NEVER raises (the manifest is an accelerator; the caller's walk result is
     already correct).
     """
+    # Boundary flush (DEC-MANIFEST-LOG-FLOOD-001): a rebuild replaces the
+    # manifest — close out the prior record burst's aggregate first.
+    flush_record_summary(lake_root)
     now = datetime.now(tz=UTC).isoformat()
     try:
         with _manifest_lock(lake_root):
@@ -427,6 +574,11 @@ def record_dataset(
 
     Any failure logs + best-effort invalidates + returns ``False`` — never
     raises into the pull.
+
+    Success telemetry is per-dataset at DEBUG plus the aggregate
+    ``lake_manifest.record_summary`` INFO (DEC-MANIFEST-LOG-FLOOD-001 —
+    see the module docstring's log-volume envelope): recording N datasets
+    costs a BOUNDED number of INFO lines, never N.
     """
     try:
         with _manifest_lock(lake_root):
@@ -469,12 +621,21 @@ def record_dataset(
         )
         _unlink_manifest(lake_root)
         return False
-    _LOG.info(
+    # Per-dataset success telemetry at DEBUG (DEC-MANIFEST-LOG-FLOOD-001):
+    # the prebuild records ~10⁵ datasets per run — at INFO these lines
+    # (94,190 at ~190/s, measured 2026-07-05) rotated away the
+    # prebuild-completion audit trail, the exact DEC-PREBUILD-LOG-FLOOD-001
+    # class. Same event name + fields; the INFO record is the aggregate
+    # `lake_manifest.record_summary` (see the module docstring).
+    _LOG.debug(
         "lake_manifest.dataset_recorded",
         exchange=exchange,
         segment=segment,
         symbol=symbol,
         interval=interval,
+    )
+    _note_dataset_recorded(
+        lake_root, exchange=exchange, segment=segment, symbol=symbol, interval=interval
     )
     return True
 
@@ -507,6 +668,9 @@ def invalidate_manifest(lake_root: Path) -> None:
     proceeds (an interleaved append then fails the row-count check — safe).
     Idempotent, O(1), never raises.
     """
+    # Boundary flush (DEC-MANIFEST-LOG-FLOOD-001): an invalidation ends the
+    # manifest's life — close out the pending record aggregate first.
+    flush_record_summary(lake_root)
     try:
         with _manifest_lock(lake_root):
             _unlink_manifest(lake_root)
@@ -525,6 +689,8 @@ __all__ = [
     "MANIFEST_DIRNAME",
     "MANIFEST_META_FILENAME",
     "MANIFEST_VERSION",
+    "RECORD_SUMMARY_INTERVAL_S",
+    "flush_record_summary",
     "invalidate_manifest",
     "ledger_file_path",
     "ledger_stat_token",

@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import structlog
 
@@ -103,11 +103,14 @@ from brutex.adapters.groww.vendor_floor import (
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     GROWW_COVERAGE_MARKET,
+    PullStep,
     PullVerdict,
+    StepOrderMonitor,
     SyntheticSpotAdapter,
     UntilCleanRound,
     classify_pull,
     mark_synthetic,
+    partition_spot_steps,
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
@@ -130,6 +133,7 @@ from brutex.models import Instrument
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.correlation import pull_id_scope
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
+from brutex.orchestrator.audit import open_ingest_audit
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
@@ -648,6 +652,16 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     so the single-instrument / bulk builder seams stay shape-identical
     (the fan-out worklist still drives WHICH symbols are pulled).
     ``# pragma: no cover`` — needs real credentials + network, absent in CI.
+
+    Rate-controller hooks (DEC-SUSPICION-SWEEP-FIXES-001 D1): this builder wires
+    NO ``pace`` / ``on_rate_limit`` / ``on_success`` — the session controller does
+    not exist here yet. The FULL hook triple is bound downstream at the ONE COMMON
+    spine seam (``run_ingest.with_paced_client``, called by
+    ``run_groww_spot_ingest`` with the ``_live_rate_runtime`` quad), so every 429
+    the client's bounded fast-retry absorbs still decrements the shared AIMD
+    ladder — pinned by the production-wiring test in
+    ``tests/unit/test_groww_spot_rate_feedback.py`` (which monkeypatches NO
+    builders).
     """
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.auth import GrowwCredentials
@@ -1002,7 +1016,7 @@ class SessionRateController:
         #: means exactly "no meter registered: the pre-registration window at pull start,
         #: a dry-run, or after a finished pull's clear", and the sampler falls back to its
         #: honest ``meter_present=False``. A dead pull's meter can never linger into a
-        #: later pull / dry-run (the #1482 C0 fix + its round-2 direct-route residual).
+        #: later pull / dry-run (the #1534 C0 fix + its round-2 direct-route residual).
         self._meter: CallMeter | None = None
         self._lock = threading.Lock()
 
@@ -1085,7 +1099,7 @@ class SessionRateController:
         registered, success AND failure — round 4) — so "no in-process pull
         running ⇒ no meter registered" is a process invariant and a dead pull's
         never-evicted meter can never be sampled by a later dry-run / idle poll (the
-        #1482 C0 cross-pull leak fix + its round-2/round-4 direct-route residuals).
+        #1534 C0 cross-pull leak fix + its round-2/round-4 direct-route residuals).
 
         *expected* (round 4) makes the clear an identity-gated COMPARE-AND-CLEAR: with a
         non-``None`` handle the stored handle is evicted ONLY when it ``is`` that exact
@@ -1137,7 +1151,7 @@ GrowwClient` (its own ``.meter``) OR a :class:`~brutex.adapters.protocol.MarketA
 
     ``dry_run=True`` with a live *session_rate* now actively **DEREGISTERS**
     (:meth:`SessionRateController.clear_meter`) and never registers — NOT a no-op
-    (DEC-RATE-METER-LIFECYCLE-001, correcting the false pre-#1482 "silently a NO-OP"
+    (DEC-RATE-METER-LIFECYCLE-001, correcting the false pre-#1534 "silently a NO-OP"
     claim): the metadata / F&O dry-run ``GrowwClient``\\ s carry a REAL unpaced
     ``CallMeter`` (``client.py`` ``default_factory=CallMeter``), so registering it would
     fabricate a MEASURED "flowing" rate during a synthetic pull, and the clear also evicts
@@ -1305,6 +1319,68 @@ pull_health.PullHealthMonitor.observe` was fed ONLY at pull / instrument BOUNDAR
         _observe_rate(rate_observer, controller, adapter, monitor)
 
     return _on_window
+
+
+def make_step_write_observer(
+    inner: Callable[[], None],
+    monitor: StepOrderMonitor,
+    step: PullStep,
+) -> Callable[[], None]:
+    """Wrap a per-window callback so each processed window is step-attributed.
+
+    DEC-PULL-SIX-STEP-ORDER-001 — the spot arm of the observe-only ordering
+    oracle: the per-window callback is composed per step group, closing over
+    its group's :class:`~brutex.adapters.ingest_common.PullStep`.
+    ``monitor.observe_write`` WARNs ``pull.step.late_write`` + counts, never
+    raises, never blocks (the #907/#919 detect-and-warn pattern). *inner* (the
+    existing window observer chain) runs FIRST, byte-unchanged.
+
+    HONEST wiring envelope (Golden Rule #10): the wrapped ``on_window`` fires
+    on the PRODUCER side — the spine's fan-out drain loop invokes it when each
+    window's outcome is yielded, which in async-pipeline mode happens when the
+    DEFERRED outcome returns (the consumer tail's ``sink.append`` →
+    ``ledger.record`` never touches this callback). So this channel observes
+    the synchronous inline write path and any sequencer wiring regression (a
+    group's pass still running after a later ``begin_step``) — it structurally
+    CANNOT observe an async consumer tail draining past the step boundary
+    (consumer-side attribution needs a submit-time step stamp through
+    ``FetchPipeline`` — a named follow-up, NOT claimed). See the
+    :class:`~brutex.adapters.ingest_common.StepOrderMonitor` docstring.
+    """
+
+    def _on_window() -> None:
+        inner()
+        monitor.observe_write(step)
+
+    return _on_window
+
+
+class _GroupSettle(NamedTuple):
+    """One step group's producer-side settle counts for ``pull.step.settled``.
+
+    DEC-PULL-SIX-STEP-ORDER-001 (review round 2) — the spot settle event's
+    counting contract, aligned with the F&O twin in
+    :mod:`brutex.dashboard.historical_pull`:
+
+    - ``bars`` / ``windows`` SUM every completed until-clean pass of the group
+      (the F&O event sums its bucket passes), NOT the first-pass-only
+      ``phase_reports`` rollup convention — a synchronous round-2 recovery is
+      counted, so the event's "real counts on the sync path" claim holds.
+    - ``skipped`` is the FIRST pass's already-complete skips (the F&O
+      ``bucket_passes[0].skipped_windows`` convention — later rounds re-skip
+      the same settled windows, so summing would double-count).
+    - ``quarantined`` is the LAST pass's TERMINAL per-pair quarantine count
+      (``GrowwIngestReport.failed_pairs`` — the F&O ``failed_pairs`` term)
+      plus any synthesized auth-halt rows; folded into the event's ``clean``
+      so a terminally quarantined symbol can never settle ``clean=True``
+      (``still_failed`` counts only the PAIRS-side transient residual and is
+      structurally blind to quarantines — the round-2 repro).
+    """
+
+    bars: int
+    windows: int
+    skipped: int
+    quarantined: int
 
 
 def _build_pull_health_monitor(
@@ -1530,8 +1606,25 @@ def pull_all_spot(
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
     on_ledger_sync: OnLedgerSync | None = None,
     floor_store: VendorFloorMetaStore | None = None,
+    step_monitor: StepOrderMonitor | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
+
+    **Six-step pull order, steps 1-2 (DEC-PULL-SIX-STEP-ORDER-001):** the
+    instrument list is ALWAYS partitioned into ordered (INDICES-SPOT,
+    STOCKS-SPOT) groups via the COMMON
+    :func:`~brutex.adapters.ingest_common.partition_spot_steps` — every index
+    spot window is fetched before any stock spot window (empty groups skipped;
+    a homogeneous list is ONE group, byte-identical to the ungrouped pull).
+    The partition lives INSIDE this function — never at the caller — because
+    ``use_live_rate = adapter_factory is None and not dry_run`` means a
+    sequencer-level two-call split would have to inject an ``adapter_factory``
+    and silently DISABLE the live rate runtime. One adapter/pool/ledger/journal
+    build spans both groups; each group's until-clean loop settles (its
+    outstanding read is group-scoped via ``progress_counts(symbols=…)``) before
+    the next group's first vendor call; a global stop (dead token / spent quota
+    / mass-empty halt) in group k halts the remaining groups with
+    ``pull.step.halted``.
 
     The one-click "⤓ Pull ALL indices / stocks spot" button core: one
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
@@ -1614,6 +1707,12 @@ def pull_all_spot(
         full-range planning byte-identical and learns un-persisted (this pull's
         mass-settle still applies; the CLI ``brutex fetch`` path stays unwired —
         an explicit follow-up, mirroring DEC-PULL-HEALTH-WIRING-001's envelope).
+    step_monitor
+        Optional :class:`~brutex.adapters.ingest_common.StepOrderMonitor`
+        (DEC-PULL-SIX-STEP-ORDER-001). ``None`` (every production caller)
+        builds a fresh observe-only monitor — ordering violations are logged +
+        counted, never raised; tests inject ``raise_on_violation=True`` as the
+        hard ordering oracle.
 
     Returns
     -------
@@ -1655,7 +1754,16 @@ def pull_all_spot(
     # the ingest spine's ``ingest.*`` events, AND the already-lit transport
     # (``groww.call``) + rate (``rate.*``) events — shares one ``pull_id``
     # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
-    with pull_id_scope(pull_id) as pid:
+    # Golden Rule #8 hash-chained ingest audit (DEC-INGEST-AUDIT-WIRING-001): bind
+    # the SAME COMMON trail the CLI ``brutex fetch`` pull writes —
+    # ``<lake>/audit/spot-ingest.jsonl`` via the ONE ``open_ingest_audit`` factory
+    # (resume = continue the existing chain; a dry-run gets the null context — no
+    # real data, no audit). The spine appends RUN_START → per-pair → RUN_COMPLETE
+    # on its controller drain thread, O(1) per event, never on a fetch worker.
+    with (
+        pull_id_scope(pull_id) as pid,
+        open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
+    ):
         # DURABLE pull journal (G5, DEC-DOCTOR-LIVE-PROOF-KIT-001): a start record
         # that survives a mid-pull process death, paired with the finish record at
         # the bottom — ``brutex doctor --live`` stage 12 reads a start-without-finish
@@ -1883,14 +1991,26 @@ def pull_all_spot(
         # Per-phase FIRST-pass reports keyed by interval — the per-symbol rollup reads
         # each interval's 1-day/1-minute outcome from its own phase's report. Both
         # phases run over EVERY requested instrument (DEC-SPOT-INTERVAL-DECOUPLE-001 —
-        # the minute phase is no longer filtered by 1-day coverage).
+        # the minute phase is no longer filtered by 1-day coverage). Under the
+        # six-step order (DEC-PULL-SIX-STEP-ORDER-001) each phase now appends one
+        # report PER (interval-phase × step group); the rollup below needed ZERO
+        # change — ``merged_pairs.update`` dict-unions the disjoint symbol sets and
+        # ``windows_skipped`` sums correctly over disjoint groups (fold-parity pinned).
         phase_reports: list[GrowwIngestReport] = []
+        # Six-step pull order, steps 1-2 (DEC-PULL-SIX-STEP-ORDER-001): ALWAYS-ON
+        # ordered partition — indices spot before stock spot, empty groups omitted.
+        # Computed ONCE; PLANNING stays one pass over ALL instruments (ledger rows,
+        # zero vendor calls) — only EXECUTION order is the law's subject.
+        spot_groups = partition_spot_steps(instruments)
+        _step_monitor = step_monitor if step_monitor is not None else StepOrderMonitor()
 
         def _run_phase(
             phase_intervals: tuple[str, ...],
             phase_instruments: Sequence[Instrument],
             phase_windows: SpotWindows | None,
-        ) -> None:
+            *,
+            step: PullStep,
+        ) -> _GroupSettle:
             """Run ONE phase (1-day or 1-minute) over the SHARED ledger; fold its outcome.
 
             The single ingest call site (CLAUDE.md §11 COMMON) — both phases funnel
@@ -1904,10 +2024,30 @@ def pull_all_spot(
             Aggregates into the ``final_*`` outer state: ``still_failed`` SUMS across
             phases; ``auth_aborted`` / ``quota_exhausted`` are ANY phase's; the FIRST
             pass of each phase is appended to ``phase_reports`` for the rollup.
+
+            *step* (DEC-PULL-SIX-STEP-ORDER-001): the group's
+            :class:`~brutex.adapters.ingest_common.PullStep` — composes the
+            per-window observer with the step monitor's late-write observe and
+            scopes the until-clean outstanding read to the GROUP's own symbols
+            (``progress_counts(symbols=…)``) so the indices group exits
+            ``stop_clean`` honestly instead of burning a vendor-call-free
+            ``stop_no_progress`` round against the stock group's PLANNED rows.
+
+            Returns the group's :class:`_GroupSettle` for the caller's
+            ``pull.step.settled`` event — bars/windows summed across ALL
+            completed passes + the last pass's terminal quarantine count
+            (review round 2; the first-pass-only ``phase_reports`` rollup
+            convention above is deliberately NOT reused for the event).
             """
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
             nonlocal final_mass_empty_cause
             passes: list[SpotIngestWithRetry] = []
+            # Group-scoped until-clean + step-attributed writes
+            # (DEC-PULL-SIX-STEP-ORDER-001): the outstanding read below folds ONLY
+            # this group's symbols; the per-window observer also attributes each
+            # processed window to this group's step (late writes WARN + count).
+            group_symbols = frozenset(inst.symbol_name for inst in phase_instruments)
+            phase_observer = make_step_write_observer(window_observer, _step_monitor, step)
             # Synthesized quarantine rows for a TERMINAL mid-pass auth halt
             # (DEC-GROWW-AUTH-HALT-001): the spine now RAISES a dead-credential
             # auth error before returning its report, so the aborted pass never
@@ -1938,7 +2078,8 @@ def pull_all_spot(
                     ledger=ledger,
                     run_parallel=run_parallel,
                     auto_retry=do_retry,
-                    on_window=window_observer,
+                    audit=ingest_audit,
+                    on_window=phase_observer,
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
@@ -1978,14 +2119,27 @@ def pull_all_spot(
                         res = _one_pass(True)
                         outstanding = settled = streak = None
                         if ledger is not None:
-                            prog = ledger.progress_counts()
+                            # GROUP-scoped outstanding (DEC-PULL-SIX-STEP-ORDER-001):
+                            # fold ONLY this step group's symbols, so the indices
+                            # group exits ``stop_clean`` instead of reading the stock
+                            # group's still-PLANNED rows as its own residual (the
+                            # ledger-wide-pollution trap). The streak total is
+                            # GROUP-scoped too: in the default async-pipeline mode a
+                            # PRIOR group's/phase's consumer tails can still drain
+                            # while this loop runs (the pipeline drains only in the
+                            # outer finally), and a foreign late EMPTY tail bumps
+                            # another group's streak (+1) while a foreign late
+                            # SUCCESS tail RESETS one to 0 — so a ledger-wide fold
+                            # is NOT constant across this group's rounds (it could
+                            # mask a genuine stall or falsely end the loop early).
+                            prog = ledger.progress_counts(symbols=group_symbols)
                             outstanding = prog.total - prog.settled
                             settled = prog.settled
                             # Summed empty_streak — the secondary progress signal (an
                             # EMPTY window stepping toward SKIPPED advances this before
                             # ``settled`` rises). A dedicated single-lock O(N) fold (no
                             # sort), once per OUTER round, NOT the per-bar hot path.
-                            streak = ledger.streak_total()
+                            streak = ledger.streak_total(symbols=group_symbols)
                         return UntilCleanRound(
                             still_failed_windows=res.report.still_failed_windows,
                             auth_aborted=res.report.auth_aborted,
@@ -2134,6 +2288,134 @@ def pull_all_spot(
             phase_reports.append(
                 passes[0].report if passes else GrowwIngestReport(pairs={}, failures=auth_failures)
             )
+            # The step-settle counting contract (see :class:`_GroupSettle`):
+            # bars/windows sum EVERY completed pass (F&O-twin parity — a sync
+            # round-2 recovery is counted); ``quarantined`` reads the LAST
+            # pass's terminal per-pair failures (+ the synthesized auth rows,
+            # empty on every non-auth path) so the event's ``clean`` is not
+            # blind to a quarantined symbol.
+            return _GroupSettle(
+                bars=sum(p.report.bars_appended for p in passes),
+                windows=sum(p.report.windows for p in passes),
+                skipped=passes[0].report.skipped_windows if passes else 0,
+                quarantined=(
+                    (passes[-1].report.failed_pairs if passes else 0) + len(auth_failures)
+                ),
+            )
+
+        def _run_grouped(
+            phase_intervals: tuple[str, ...],
+            phase_windows: SpotWindows | None,
+        ) -> None:
+            """Run ONE phase over the ordered step groups (DEC-PULL-SIX-STEP-ORDER-001).
+
+            The COMMON group loop BOTH phase call sites (the dormant 1-day phase
+            + the 1-minute phase) funnel through: each non-empty step group runs
+            ``_run_phase`` to settlement (its until-clean loop drains) before the
+            next group's first vendor call — step-major by construction on the
+            producer side. A global stop latched by an earlier group (dead token
+            / spent quota / mass-empty halt) halts the remaining groups LOUDLY
+            (``pull.step.halted``) — the same `final_*` global-stop state the
+            phase-level minute guard reads.
+
+            Each grouped pass is ONE ordered 1→2 sequence, so the step cursor
+            is REWOUND first (``begin_phase``): the retained defensive
+            dual-interval path (``intervals=("1day", "1minute")``) runs this
+            loop once per interval phase, and the minute phase's
+            ``begin_step(INDICES_SPOT)`` after the daily phase's STOCKS_SPOT
+            is a LEGAL phase restart — without the rewind it logged a false
+            ``pull.step.order_violation`` ERROR (and raised under the test
+            oracle). A no-op on the single-phase production pull (the cursor
+            starts ``None``); the law stays enforced WITHIN each phase.
+
+            DISCLOSED envelope (round-3 review, Golden Rule #10 — the SPOT
+            twin of the F&O per-BUCKET narrowing disclosed in round 2): each
+            group's ``_run_phase`` pass resolves a FRESH mass-empty
+            ``EmptySettleBreaker`` inside ``run_groww_spot_ingest`` ("one
+            breaker per PASS"), so the trip-EVIDENCE population narrowed from
+            the whole ~750-underlying universe to ONE step group. The
+            ~4-series INDICES-SPOT group runs first and alone; on an
+            incremental pull it sits below every trip threshold, so a vendor
+            soft-throttle's clean empties can settle the ENGINE's index
+            windows SKIPPED (``EMPTY_TERMINAL_THRESHOLD``) with no halt
+            before the ~746-series stocks group's breaker trips (remediation:
+            ``brutex reopen-skipped``; the stocks-group trip still halts the
+            phase + alerts). Sharing one breaker across the groups is a
+            possible future tightening, deliberately NOT done — the groups
+            run sequentially to settlement, so cross-group evidence cannot
+            protect the FIRST group; see the resolve-seam comment in
+            :func:`brutex.adapters.groww.run_ingest.run_groww_spot_ingest` +
+            MIGRATION.md #1527 (R9).
+            """
+            _step_monitor.begin_phase()
+            for step, group in spot_groups:
+                if (
+                    final_auth_aborted
+                    or final_quota_exhausted
+                    or final_mass_empty_cause is not None
+                ):
+                    reason = (
+                        "auth_expired"
+                        if final_auth_aborted
+                        else "quota_exhausted"
+                        if final_quota_exhausted
+                        else "mass_empty_halt"
+                    )
+                    _LOG.warning(
+                        "pull.step.halted",
+                        step=step.label,
+                        ordinal=int(step),
+                        reason=reason,
+                        pull_id=pid,
+                    )
+                    break
+                _step_monitor.begin_step(step)
+                _LOG.info(
+                    "pull.step.started",
+                    step=step.label,
+                    ordinal=int(step),
+                    symbols=len(group),
+                    pull_id=pid,
+                )
+                before_failed = final_still_failed
+                group_settle = _run_phase(phase_intervals, group, phase_windows, step=step)
+                group_failed = final_still_failed - before_failed
+                # HONESTY (review fix, Golden Rule #1): the counts below are
+                # PRODUCER-side. In the DEFAULT async-pipeline mode every
+                # deferred per-pair report carries ``bars_appended == 0`` until
+                # the post-drain ``_reconcile_pairs_with_pipeline`` restores the
+                # real durable counts — so ``bars`` systematically reads 0 at
+                # this step boundary on a production pull, and ``clean`` /
+                # ``still_failed`` cannot see still-queued consumer tails. The
+                # explicit ``bars_deferred`` flag discloses that envelope on
+                # the event itself (never a fabricated number presented as a
+                # settled total); the SYNCHRONOUS path (pipeline off / dry-run)
+                # logs real counts with ``bars_deferred=False`` — SUMMED across
+                # ALL of the group's until-clean passes (round-2 review fix:
+                # the F&O twin's per-bucket sum, so a sync round-2 recovery is
+                # counted instead of the first-round-only undercount), and
+                # ``clean`` folds the group's TERMINAL quarantine count
+                # (``_GroupSettle.quarantined`` — the F&O ``failed_pairs``
+                # term; ``still_failed`` alone is the pairs-side transient
+                # residual and reads 0 over a quarantined symbol).
+                _LOG.info(
+                    "pull.step.settled",
+                    step=step.label,
+                    ordinal=int(step),
+                    clean=(
+                        group_failed == 0
+                        and group_settle.quarantined == 0
+                        and not final_auth_aborted
+                        and not final_quota_exhausted
+                        and final_mass_empty_cause is None
+                    ),
+                    bars=group_settle.bars,
+                    bars_deferred=_fetch_pipeline is not None,
+                    windows=group_settle.windows,
+                    still_failed=group_failed,
+                    skipped=group_settle.skipped,
+                    pull_id=pid,
+                )
 
         # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
         # captured at the minute phase's reconcile below — the SAME already-loaded
@@ -2147,8 +2429,10 @@ def pull_all_spot(
         fetch_phases_ok = False
         try:
             # ── Phase 1 — 1-day ONLY first (over EVERY symbol; full range) ──
+            # DEC-PULL-SIX-STEP-ORDER-001: the phase runs through the ordered
+            # step-group loop (indices group first, then stocks).
             if daily_requested:
-                _run_phase((_PHASE1_DAILY,), instruments, None)
+                _run_grouped((_PHASE1_DAILY,), None)
             # ── Phase 2 — 1-minute over EVERY symbol, full range (DECOUPLED) ──
             # DEC-SPOT-INTERVAL-DECOUPLE-001 (MIGRATION.md #851): the 1-minute pull is
             # FULLY DECOUPLED from the 1-day coverage — it pulls its full ``[start,
@@ -2237,7 +2521,9 @@ def pull_all_spot(
                     # ``max(GROWW_HISTORY_FLOOR, learned floor)`` — the SAME
                     # ``_floor_windows`` the plan above tiled, so planned keys ==
                     # fetched keys; ``None`` (no learned floors) is byte-identical.
-                    _run_phase(minute_intervals, instruments, _floor_windows)
+                    # DEC-PULL-SIX-STEP-ORDER-001: ordered step groups (indices
+                    # spot before stock spot) through the ONE ingest seam.
+                    _run_grouped(minute_intervals, _floor_windows)
             # Fetch phases done — arm the post-drain L2 lake heal in the finally.
             fetch_phases_ok = True
         finally:
@@ -2453,6 +2739,10 @@ def _heal_after_pull(  # pragma: no cover — raw lake I/O glue; heal core is 10
     pull. Marked ``no cover`` per the raw-lake-I/O-glue convention; the core
     is 100%-unit-tested and the glue contract is pinned by
     ``tests/integration/test_lake_heal_pull_seam.py``.
+
+    Also bound at the CLI ``brutex fetch`` post-drain seam (``brutex/cli.py``
+    ``cmd_fetch`` finally — DEC-CLI-LAKE-HEAL-L2-001); keep the signature
+    stable for both call sites.
     """
     from brutex.data.errors import LakeWriteHalt
     from brutex.data.lake_heal import heal_after_pull, lake_heal_audit, open_lake_catalog
@@ -2605,9 +2895,16 @@ def pull_candles(
     # summary, the ingest spine's ``ingest.*`` events, and the already-lit
     # transport (``groww.call``) + rate (``rate.*``) events all share one
     # ``pull_id``. Always unbinds on exit (no leak).
+    # Golden Rule #8 hash-chained ingest audit (DEC-INGEST-AUDIT-WIRING-001): bind
+    # the SAME COMMON trail the CLI ``brutex fetch`` pull writes —
+    # ``<lake>/audit/spot-ingest.jsonl`` via the ONE ``open_ingest_audit`` factory
+    # (resume = continue the existing chain; a dry-run gets the null context — no
+    # real data, no audit). The spine appends RUN_START → per-pair → RUN_COMPLETE
+    # on its controller drain thread, O(1) per event, never on a fetch worker.
     with (
         _pull_meter_scope(session_rate, adapter, dry_run=dry_run),
         pull_id_scope(pull_id) as pid,
+        open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
     ):
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
@@ -2789,6 +3086,7 @@ def pull_candles(
                     on_progress=_progress_then_flush,
                     ledger=ledger,
                     run_parallel=run_parallel,
+                    audit=ingest_audit,
                     on_window=window_observer,
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
@@ -2995,6 +3293,7 @@ __all__ = [
     "SessionRateController",
     "SymbolPullResult",
     "TimeframeResult",
+    "make_step_write_observer",
     "make_window_observer",
     "parse_symbol_list",
     "pull_all_spot",

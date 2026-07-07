@@ -41,7 +41,35 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final, Self
 
+import structlog
+
+from brutex.config.deadline import run_with_deadline
+from brutex.config.hardware_envelope import apply_duckdb_thread_bound
+from brutex.data.store_write_deadline import (
+    STORE_CLOSE_SKIPPED_EVENT,
+    StoreWriteDeadlineGuard,
+    resolve_store_write_deadline_seconds,
+)
 from brutex.models import BruteXError
+
+_LOG = structlog.get_logger(__name__)
+
+#: The three write statements — module-level constants so the batch methods and the
+#: single-row delegates share ONE SQL string each (DEC-STORE-WRITE-DEADLINE-001;
+#: CLAUDE.md §11 COMMON — zero duplication, byte-identical statements).
+_SQL_UPSERT_EXPIRY: Final[str] = (
+    "INSERT OR REPLACE INTO expiries "
+    "(exch, underlying, expiry_date, last_run_id, fetched_at) VALUES (?, ?, ?, ?, ?)"
+)
+_SQL_UPSERT_CONTRACT: Final[str] = (
+    "INSERT OR REPLACE INTO contracts "
+    "(exch, underlying, expiry_date, contract_symbol, strike, side, "
+    "candle_status, last_run_id, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_SQL_SET_CANDLE_STATUS: Final[str] = (
+    "UPDATE contracts SET candle_status = ? "
+    "WHERE exch = ? AND underlying = ? AND contract_symbol = ?"
+)
 
 #: Registry schema version — bump on any non-additive shape change (the cache is
 #: rebuildable, so an older version is simply dropped + recreated on open).
@@ -191,15 +219,32 @@ class RegistryStore:
         self._path = path
         self._lock = threading.RLock()
         self._closed = False
+        # Wall-clock deadline + wedge fail-fast latch for every DuckDB write batch
+        # (DEC-STORE-WRITE-DEADLINE-001). The guard runs ONLY raw ``self._conn``
+        # statements on its daemon thread — ``self._lock`` stays caller-held, so a
+        # breach releases it deterministically on the OWNING thread.
+        self._write_guard = StoreWriteDeadlineGuard(store_label="registry")
 
     @classmethod
-    def open(cls, path: Path) -> Self:
+    def open(cls, path: Path, *, threads: int | None = None) -> Self:
         """Open or create the registry cache at *path*.
+
+        *threads* bounds this connection's DuckDB thread pool (``None`` = the
+        envelope-derived
+        :func:`brutex.config.hardware_envelope.duckdb_thread_budget`;
+        DEC-THREAD-BUDGET-BOUNDS-001 — parallelism only, query results
+        byte-identical).
 
         Applies the schema idempotently (``CREATE ... IF NOT EXISTS``). An older
         recorded ``schema_version`` drops + recreates the data tables (the cache
         is rebuildable from a re-pull, so the drop is safe); a fresh or
         already-current store skips the drop.
+
+        The whole ``mkdir`` + connect + DDL + ``schema_meta`` stamp — REAL disk
+        writes on every open — runs under the store-write wall-clock deadline
+        (DEC-STORE-WRITE-DEADLINE-001), so a NEXT pull opening a fresh store on a
+        still-wedged volume fails LOUDLY with the terminal :class:`RegistryError`
+        after one deadline instead of freezing the job/request thread forever.
         """
         try:
             import duckdb
@@ -208,9 +253,16 @@ class RegistryStore:
                 "RegistryStore requires 'duckdb' — install with 'pip install -e .[data]'"
             ) from exc
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
+        def _connect() -> Any:
+            # The mkdir is a metadata WRITE syscall — on the exact targeted
+            # failure mode (a wedged external SSD / hard NFS mount) it blocks in
+            # uninterruptible sleep just like the wedged fsync of #999, so it
+            # MUST run inside the deadline with the rest of the open sequence
+            # (fix round 2 — pre-fix it ran on the caller thread, freezing a
+            # fresh open at the mkdir before any guard existed).
+            path.parent.mkdir(parents=True, exist_ok=True)
             conn = duckdb.connect(str(path))
+            apply_duckdb_thread_bound(conn, threads=threads)
             conn.execute(_DDL_SCHEMA_META)
             existing = conn.execute(
                 "SELECT value FROM schema_meta WHERE key = ?", ["schema_version"]
@@ -226,7 +278,19 @@ class RegistryStore:
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
                 ["schema_version", str(REGISTRY_SCHEMA_VERSION)],
             )
-        except Exception as exc:  # pragma: no cover - defensive open failure
+            return conn
+
+        try:
+            conn = run_with_deadline(
+                _connect,
+                resolve_store_write_deadline_seconds(),
+                what="registry open",
+                thread_name="registry-open-deadline",
+            )
+        except Exception as exc:
+            # Defensive open failure — a hung open's DeadlineExceeded lands here too
+            # (terminal by design: with no store there is no defer unit; the job
+            # fails loudly + honestly instead of freezing).
             raise RegistryError(f"failed to open RegistryStore at {path}: {exc}") from exc
         return cls(conn=conn, path=path)
 
@@ -240,11 +304,45 @@ class RegistryStore:
         if self._closed:
             raise RegistryError("RegistryStore is closed")
 
+    def _ensure_not_wedged(self) -> None:
+        """Raise :class:`RegistryError` while an abandoned write still wedges the conn.
+
+        DEC-STORE-WRITE-DEADLINE-001: after a write-deadline breach the zombie write
+        still holds the DuckDB connection's internal mutex, so a read would block on
+        it unboundedly. Reads therefore fail FAST + LOUD with the terminal
+        :class:`RegistryError`. Caller honesty (Golden Rule #10): the dashboard
+        read-side callers (``movers_options.load_registry_expiries``,
+        ``registry_strikes``) catch it and DEGRADE gracefully; the pull-path
+        callers deliberately do NOT — the metadata-pull SEED reads fail the job
+        fast + loud at pull start (intended fail-fast, MIGRATION.md #1523), and
+        the composite's phase-(b) re-read is gated UPSTREAM on
+        ``MetadataPullReport.store_write_deferrals`` (phase (b) is skipped with an
+        honest note, so a phase-(a) wedge never reaches this raise as a whole-job
+        crash). The check self-heals the moment the zombie completes (the guard's
+        token-matched latch clears). One boolean check on the healthy path.
+        """
+        if self._write_guard.wedged:
+            raise RegistryError(
+                f"RegistryStore write wedged ({self._path}); read refused until the volume recovers"
+            )
+
     def close(self) -> None:
-        """Close the underlying DuckDB connection (idempotent)."""
+        """Close the underlying DuckDB connection (idempotent).
+
+        When a write-deadline breach left a zombie write wedged inside the
+        connection, the raw ``conn.close()`` is SKIPPED (closing under a
+        mid-``execute`` zombie is the one call that could turn a bounded block into
+        a crash) and one :data:`~brutex.data.store_write_deadline.STORE_CLOSE_SKIPPED_EVENT`
+        WARN is emitted; the store is still marked closed, so the ``with`` exit can
+        never freeze (DEC-STORE-WRITE-DEADLINE-001). The orphaned connection dies
+        with the process (the zombie is a daemon thread).
+        """
         with self._lock:
             if not self._closed:
-                self._conn.close()
+                if self._write_guard.wedged:
+                    _LOG.warning(STORE_CLOSE_SKIPPED_EVENT, store="registry", path=str(self._path))
+                else:
+                    self._conn.close()
                 self._closed = True
 
     def __enter__(self) -> Self:
@@ -254,19 +352,156 @@ class RegistryStore:
         self.close()
 
     # ── writes ──────────────────────────────────────────────────────────────
+    #
+    # Every write runs as ONE deadline-guarded BATCH (DEC-STORE-WRITE-DEADLINE-001):
+    # the caller thread holds ``self._lock`` for the whole batch exactly as before
+    # (same serialization, byte-identical statements/order/parameters), while the raw
+    # ``self._conn.execute`` loop runs on the guard's daemon thread bounded by the
+    # wall-clock deadline. A wedged volume raises the TRANSIENT
+    # :class:`~brutex.data.errors.StoreWriteDeadlineExceeded` — the metadata/historical
+    # catch sites defer the underlying to the next pull. O(1) guard cost per BATCH
+    # (one thread + one Event), never per row.
+
+    def upsert_expiries(
+        self,
+        exch: str,
+        underlying: str,
+        expiry_dates: Sequence[date],
+        *,
+        run_id: str,
+        fetched_at: datetime,
+    ) -> int:
+        """Persist a batch of discovered expiry dates (idempotent on the PK).
+
+        Returns the number of rows written (``len(expiry_dates)``). One
+        deadline-guarded write batch; an empty batch executes zero statements.
+
+        Raises
+        ------
+        StoreWriteDeadlineExceeded
+            When the batch blows the store-write deadline (transient — the caller
+            defers the underlying's cell to the next pull) or the store is wedged
+            by a prior breach (``latched=True`` fail-fast).
+        """
+        _require_tzaware(fetched_at, "fetched_at")
+        with self._lock:
+            self._ensure_open()
+
+            def _write() -> None:
+                for expiry_date in expiry_dates:
+                    self._conn.execute(
+                        _SQL_UPSERT_EXPIRY, [exch, underlying, expiry_date, run_id, fetched_at]
+                    )
+
+            self._write_guard.run(_write, op="upsert_expiries")
+        return len(expiry_dates)
 
     def upsert_expiry(
         self, exch: str, underlying: str, expiry_date: date, *, run_id: str, fetched_at: datetime
     ) -> None:
-        """Persist one discovered expiry date (idempotent on the PK)."""
+        """Persist one discovered expiry date (idempotent on the PK).
+
+        A thin delegate to :meth:`upsert_expiries` (ONE statement + validation
+        shape — CLAUDE.md §11 COMMON); signature + behaviour byte-identical.
+        """
+        self.upsert_expiries(exch, underlying, [expiry_date], run_id=run_id, fetched_at=fetched_at)
+
+    def upsert_contracts(
+        self,
+        exch: str,
+        underlying: str,
+        expiry_date: date,
+        legs: Sequence[tuple[str, str, float | None]],
+        *,
+        run_id: str,
+        fetched_at: datetime,
+        candle_status: str = CANDLE_STATUS_NONE,
+    ) -> int:
+        """Persist a batch of contract legs for one expiry (idempotent on the PK).
+
+        *legs* is a sequence of ``(contract_symbol, side, strike)`` triples. Every
+        leg's ``side`` (:data:`CONTRACT_SIDES`), the shared ``candle_status``
+        (:data:`CANDLE_STATUSES`) and the ``fetched_at`` tz-awareness are validated
+        UPFRONT — before the lock and the guard — so an invalid mid-list leg
+        persists NOTHING instead of a prefix (a sanctioned micro-difference vs the
+        retired per-row interleaving on the ERROR path only: either way the job
+        fails + re-pulls idempotently; Golden Rule #1 — never store an
+        un-vocabularised value). Returns ``len(legs)``.
+
+        The batch is ATOMIC — one explicit DuckDB transaction around the per-leg
+        INSERTs (fix round 3). Without it each auto-committing statement made a
+        mid-batch deadline breach durable UP TO the wedged leg: if the abandoned
+        zombie then died with the process (the realistic operator response to a
+        wedged external SSD), the next pull's
+        :func:`~brutex.orchestrator.universe_phases.settled_contract_jobs` saw the
+        surviving prefix row, inferred the ``(exch, underlying, expiry)`` job
+        settled (ANY row settles it), and — for an already-EXPIRED expiry —
+        :func:`~brutex.orchestrator.universe_phases.contract_jobs_to_pull` skipped
+        it FOREVER: a silent permanent partial chain. With the transaction a
+        zombie that dies with the process commits NOTHING (DuckDB discards the
+        uncommitted transaction on the next open), so the settled-job inference
+        stays sound; a zombie that later completes IN-process commits the FULL
+        batch atomically (the honest recovery case). A real mid-batch statement
+        error rolls the transaction back and propagates unchanged — same
+        nothing-or-all contract as the upfront validation. Guard + transaction
+        cost is O(1) per BATCH (``BEGIN``/``COMMIT`` bracket the loop), never per
+        row.
+
+        Raises
+        ------
+        RegistryError
+            On an invalid leg ``side`` / ``candle_status`` / naive ``fetched_at``
+            (terminal validation, raised before any statement executes).
+        StoreWriteDeadlineExceeded
+            When the batch blows the store-write deadline (transient — the caller's
+            Phase-2 job fails + re-pulls next run) or the store is wedged by a
+            prior breach (``latched=True`` fail-fast).
+        """
+        for _symbol, side, _strike in legs:
+            if side not in CONTRACT_SIDES:
+                raise RegistryError(f"side must be one of {sorted(CONTRACT_SIDES)}, got {side!r}")
+        if candle_status not in CANDLE_STATUSES:
+            raise RegistryError(
+                f"candle_status must be one of {sorted(CANDLE_STATUSES)}, got {candle_status!r}"
+            )
         _require_tzaware(fetched_at, "fetched_at")
         with self._lock:
             self._ensure_open()
-            self._conn.execute(
-                "INSERT OR REPLACE INTO expiries "
-                "(exch, underlying, expiry_date, last_run_id, fetched_at) VALUES (?, ?, ?, ?, ?)",
-                [exch, underlying, expiry_date, run_id, fetched_at],
-            )
+
+            def _write() -> None:
+                # ATOMIC batch (fix round 3): the explicit transaction guarantees a
+                # mid-batch wedge whose zombie dies with the process persists ZERO
+                # legs — never a durable prefix that would wrongly settle the
+                # Phase-2 job (see the docstring). The wedge latch already
+                # serializes the conn, so no other statement can interleave with
+                # the open transaction.
+                self._conn.execute("BEGIN TRANSACTION")
+                try:
+                    for contract_symbol, side, strike in legs:
+                        self._conn.execute(
+                            _SQL_UPSERT_CONTRACT,
+                            [
+                                exch,
+                                underlying,
+                                expiry_date,
+                                contract_symbol,
+                                strike,
+                                side,
+                                candle_status,
+                                run_id,
+                                fetched_at,
+                            ],
+                        )
+                except BaseException:
+                    # A real statement error (not a breach — the breach abandons
+                    # this thread mid-wait, it never raises HERE): roll back so the
+                    # error path persists NOTHING, then propagate unchanged.
+                    self._conn.execute("ROLLBACK")
+                    raise
+                self._conn.execute("COMMIT")
+
+            self._write_guard.run(_write, op="upsert_contracts")
+        return len(legs)
 
     def upsert_contract(
         self,
@@ -285,33 +520,55 @@ class RegistryStore:
 
         ``side`` must be one of :data:`CONTRACT_SIDES`; ``candle_status`` one of
         :data:`CANDLE_STATUSES` — both are validated (Golden Rule #1: never store
-        an un-vocabularised value).
+        an un-vocabularised value). A thin delegate to :meth:`upsert_contracts`
+        (ONE statement + validation shape — CLAUDE.md §11 COMMON); signature +
+        behaviour byte-identical.
         """
-        if side not in CONTRACT_SIDES:
-            raise RegistryError(f"side must be one of {sorted(CONTRACT_SIDES)}, got {side!r}")
+        self.upsert_contracts(
+            exch,
+            underlying,
+            expiry_date,
+            [(contract_symbol, side, strike)],
+            run_id=run_id,
+            fetched_at=fetched_at,
+            candle_status=candle_status,
+        )
+
+    def mark_candle_statuses(self, rows: Sequence[tuple[str, str, str]], candle_status: str) -> int:
+        """Update a batch of contracts' ``candle_status`` in ONE guarded write batch.
+
+        *rows* is a sequence of ``(exch, underlying, contract_symbol)`` PK triples.
+        The historical pull's completion stamp — O(1) guard cost for the WHOLE loop
+        (DEC-STORE-WRITE-DEADLINE-001), not per contract. Returns ``len(rows)``
+        (the rows processed; an unknown contract's UPDATE is an honest 0-row no-op,
+        never an invented row).
+
+        Raises
+        ------
+        RegistryError
+            On an invalid ``candle_status`` (terminal validation, before any
+            statement executes).
+        StoreWriteDeadlineExceeded
+            When the batch blows the store-write deadline (transient — the caller
+            defers; the unmarked contracts re-mark idempotently on the next pull)
+            or the store is wedged by a prior breach (``latched=True``).
+        """
         if candle_status not in CANDLE_STATUSES:
             raise RegistryError(
                 f"candle_status must be one of {sorted(CANDLE_STATUSES)}, got {candle_status!r}"
             )
-        _require_tzaware(fetched_at, "fetched_at")
         with self._lock:
             self._ensure_open()
-            self._conn.execute(
-                "INSERT OR REPLACE INTO contracts "
-                "(exch, underlying, expiry_date, contract_symbol, strike, side, "
-                "candle_status, last_run_id, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    exch,
-                    underlying,
-                    expiry_date,
-                    contract_symbol,
-                    strike,
-                    side,
-                    candle_status,
-                    run_id,
-                    fetched_at,
-                ],
-            )
+
+            def _write() -> None:
+                for exch, underlying, contract_symbol in rows:
+                    self._conn.execute(
+                        _SQL_SET_CANDLE_STATUS,
+                        [candle_status, exch, underlying, contract_symbol],
+                    )
+
+            self._write_guard.run(_write, op="mark_candle_statuses")
+        return len(rows)
 
     def set_candle_status(
         self, exch: str, underlying: str, contract_symbol: str, candle_status: str
@@ -319,7 +576,9 @@ class RegistryStore:
         """Update one contract's ``candle_status`` (the historical pull's marker).
 
         Returns the number of rows updated (``0`` if the contract is unknown — an
-        honest no-op, never an invented row).
+        honest no-op, never an invented row). The UPDATE + its verification count
+        run as ONE guarded write batch (same-thread pair, byte-identical
+        statements; DEC-STORE-WRITE-DEADLINE-001).
         """
         if candle_status not in CANDLE_STATUSES:
             raise RegistryError(
@@ -327,16 +586,20 @@ class RegistryStore:
             )
         with self._lock:
             self._ensure_open()
-            self._conn.execute(
-                "UPDATE contracts SET candle_status = ? "
-                "WHERE exch = ? AND underlying = ? AND contract_symbol = ?",
-                [candle_status, exch, underlying, contract_symbol],
-            )
-            return self._scalar(
-                "SELECT count(*) FROM contracts "
-                "WHERE exch = ? AND underlying = ? AND contract_symbol = ? AND candle_status = ?",
-                [exch, underlying, contract_symbol, candle_status],
-            )
+
+            def _write() -> int:
+                self._conn.execute(
+                    _SQL_SET_CANDLE_STATUS,
+                    [candle_status, exch, underlying, contract_symbol],
+                )
+                return self._scalar(
+                    "SELECT count(*) FROM contracts "
+                    "WHERE exch = ? AND underlying = ? AND contract_symbol = ? "
+                    "AND candle_status = ?",
+                    [exch, underlying, contract_symbol, candle_status],
+                )
+
+            return self._write_guard.run(_write, op="set_candle_status")
 
     # ── reads ───────────────────────────────────────────────────────────────
 
@@ -356,6 +619,7 @@ class RegistryStore:
         """
         with self._lock:
             self._ensure_open()
+            self._ensure_not_wedged()
             return self._scalar(_COUNT_EXPIRIES, [exch, exch, underlying, underlying])
 
     def count_contracts(
@@ -372,6 +636,7 @@ class RegistryStore:
         """
         with self._lock:
             self._ensure_open()
+            self._ensure_not_wedged()
             return self._scalar(
                 _COUNT_CONTRACTS, [exch, exch, underlying, underlying, expiry_date, expiry_date]
             )
@@ -399,6 +664,7 @@ class RegistryStore:
             params = [*params, limit, offset]
         with self._lock:
             self._ensure_open()
+            self._ensure_not_wedged()
             rows = self._conn.execute(sql, params).fetchall()
         return [ExpiryRow(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
@@ -424,6 +690,7 @@ class RegistryStore:
             params = [*params, limit, offset]
         with self._lock:
             self._ensure_open()
+            self._ensure_not_wedged()
             rows = self._conn.execute(sql, params).fetchall()
         return [ContractRow(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]) for r in rows]
 
@@ -437,6 +704,7 @@ class RegistryStore:
         """
         with self._lock:
             self._ensure_open()
+            self._ensure_not_wedged()
             rows = self._conn.execute(
                 "SELECT DISTINCT exch, underlying, expiry_date FROM contracts "
                 "ORDER BY exch, underlying, expiry_date"

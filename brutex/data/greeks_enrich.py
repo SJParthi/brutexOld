@@ -99,6 +99,7 @@ from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
 from brutex.data.spot_daily_resample import ist_span_partition_files
+from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
@@ -116,6 +117,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from brutex.data.fno_symbol import FnoSymbolParts
+    from brutex.data.lake_keys import StockDriftMap
 
 _LOG = structlog.get_logger("brutex.data.greeks_enrich")
 
@@ -996,7 +998,11 @@ _spot_recovery_candidates = spot_recovery_candidates
 
 
 def read_spot_join_with_recovery(
-    lake_root: Path, target: GreeksEnrichTarget, parts: FnoSymbolParts
+    lake_root: Path,
+    target: GreeksEnrichTarget,
+    parts: FnoSymbolParts,
+    *,
+    stock_drift: StockDriftMap | None = None,
 ) -> SpotJoin:
     """The DEFAULT spot reader: exact key first, then the drift-recovery ladder.
 
@@ -1012,6 +1018,15 @@ def read_spot_join_with_recovery(
     :class:`~brutex.data.spot_join.SpotJoin` carries it). Ladder exhaustion
     returns the original empty join — the honest NO_SPOT, never a fabricated
     spot.
+
+    *stock_drift* (DEC-GREEKS-SPOTJOIN-STOCK-001) is the per-pass
+    evidence-grounded stock drift map (:mod:`brutex.data.spot_drift`); its
+    candidates ride the SAME ladder walk as the APPENDED last rung, so
+    ``None``/empty is byte-identical to the pre-stock reader. The one recovery
+    log gains an additive ``rung`` field — ``"stock_drift"`` when the winning
+    candidate came from the map, else ``"alias_ladder"`` — attributed via the
+    pinned prefix invariant (the stock rung can only APPEND, so indices past
+    the 2-arg ladder length are uniquely stock-sourced).
     """
 
     def _probe(underlying: str) -> SpotJoin:
@@ -1027,7 +1042,15 @@ def read_spot_join_with_recovery(
     join = _probe(parts.underlying)
     if join.close_by_ts:
         return join
-    for candidate in _spot_recovery_candidates(parts.underlying, target.exchange):
+    candidates = _spot_recovery_candidates(
+        parts.underlying, target.exchange, stock_drift=stock_drift
+    )
+    alias_count = len(candidates)
+    if stock_drift:
+        # The extra 2-arg call runs only on the already-cold exhausted-primary
+        # path with a truthy map — pure string ops, O(1)-bounded.
+        alias_count = len(_spot_recovery_candidates(parts.underlying, target.exchange))
+    for idx, candidate in enumerate(candidates):
         recovered = _probe(candidate)
         if recovered.close_by_ts:
             _LOG.info(
@@ -1036,6 +1059,7 @@ def read_spot_join_with_recovery(
                 underlying=parts.underlying,
                 recovered_key=candidate,
                 segment=recovered.segment,
+                rung="stock_drift" if idx >= alias_count else "alias_ladder",
             )
             return recovered
     return join
@@ -1192,8 +1216,11 @@ class _SpotJoinMemo:
     memoising INCLUDES the DEC-GREEKS-CORRECTNESS-AUDIT-001 drift-recovery
     ladder, which is safe because the ladder is a deterministic function of
     exactly the memo key (``(exchange, underlying, start, end)`` — the env
-    alias override is read per probe but stable within a pass), so a memoised
-    recovered join is the byte-identical join a fresh probe would return.
+    alias override is read per probe but stable within a pass, and the
+    ``stock_drift`` map (DEC-GREEKS-SPOTJOIN-STOCK-001) is built ONCE in
+    :func:`enrich_greeks_for_targets` before any target is processed and never
+    mutated, so it too is a per-pass constant), so a memoised recovered join
+    is the byte-identical join a fresh probe would return.
 
     Correctness-safe by construction: the enrich pass writes ONLY FNO option
     partitions — nothing writes SPOT partitions mid-pass — and a
@@ -1281,6 +1308,16 @@ def greeks_pool_workers(cpu_count: int | None) -> int:
     (``os.cpu_count()`` may return ``None`` on exotic platforms) resolves to
     1 — never guess parallelism on an undetectable machine. O(1).
 
+    Since DEC-HW-ENVELOPE-CONSOLIDATE-001 this DELEGATES to the COMMON
+    :func:`brutex.config.hardware_envelope.cpu_pool_workers`
+    (``reserve=_GREEKS_WORKERS_RESERVED_CPUS``, ``cap=_GREEKS_WORKERS_CAP``,
+    sized off the logical count with ``prefer_performance=False`` and an
+    empty env so no override applies) — the ONE sizing formula (CLAUDE.md
+    §11), the EXACT ``auto_sweep_workers`` delegation shape — with a
+    byte-unchanged result: ``min(max(1, n - 2), 8) == max(1, min(n - 2, 8))``
+    for the cap ``8 >= 1`` (regression-pinned across cpu counts in
+    ``tests/unit/test_greeks_enrich_parallel.py``).
+
     Parameters
     ----------
     cpu_count
@@ -1291,9 +1328,16 @@ def greeks_pool_workers(cpu_count: int | None) -> int:
     int
         The auto worker count (``>= 1``).
     """
-    if cpu_count is None:
-        cpu_count = 1
-    return max(1, min(cpu_count - _GREEKS_WORKERS_RESERVED_CPUS, _GREEKS_WORKERS_CAP))
+    from brutex.config.hardware_envelope import cpu_pool_workers, envelope_from
+
+    logical = cpu_count if cpu_count is not None and cpu_count >= 1 else 1
+    return cpu_pool_workers(
+        {},
+        reserve=_GREEKS_WORKERS_RESERVED_CPUS,
+        cap=_GREEKS_WORKERS_CAP,
+        prefer_performance=False,
+        envelope=envelope_from({"logical_cores": logical}),
+    )
 
 
 def resolve_greeks_workers(
@@ -1627,6 +1671,8 @@ def _build_units(ordered: Sequence[GreeksEnrichTarget]) -> list[_GreeksUnit]:
 
 def _default_seams(
     lake_root: Path,
+    *,
+    stock_drift: StockDriftMap | None = None,
 ) -> tuple[
     Callable[[GreeksEnrichTarget], list[dict[str, object]]],
     Callable[[GreeksEnrichTarget, FnoSymbolParts], SpotJoin],
@@ -1636,21 +1682,33 @@ def _default_seams(
 
     ONE binding site (CLAUDE.md §11 COMMON) used by the sequential driver's
     defaults AND rebuilt INSIDE each spawn worker from the picklable context
-    — the closures themselves never cross the process boundary.
+    — the closures themselves never cross the process boundary. The default
+    spot reader binds the per-pass *stock_drift* map
+    (DEC-GREEKS-SPOTJOIN-STOCK-001; ``None`` → byte-identical ladder).
     """
     return (
         lambda t: read_option_rows(lake_root, t),
-        lambda t, parts: read_spot_join_with_recovery(lake_root, t, parts),
+        lambda t, parts: read_spot_join_with_recovery(lake_root, t, parts, stock_drift=stock_drift),
         lambda t, b: write_option_greeks(lake_root, t, b),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class _GreeksWorkerContext:
-    """Immutable picklable per-pool context handed to workers via the initializer."""
+    """Immutable picklable per-pool context handed to workers via the initializer.
+
+    ``stock_drift`` (DEC-GREEKS-SPOTJOIN-STOCK-001) is the parent-built
+    evidence-grounded drift map — a PLAIN ``dict`` of tuples (treat as frozen;
+    never a ``MappingProxyType``, which is unpicklable and would silently
+    degrade every production run to sequential via the ``_parallel_pickle_ok``
+    rail). Declared LAST with a default so existing keyword constructions stay
+    valid; workers consume it verbatim and NEVER scan (no per-worker DuckDB
+    open), so sequential ≡ parallel bytes by construction.
+    """
 
     lake_root: Path
     rate_source: RiskFreeSource
+    stock_drift: dict[tuple[str, str], tuple[str, ...]] | None = None
 
 
 #: The per-worker-PROCESS context, set ONCE by :func:`_greeks_worker_init`. A
@@ -1679,7 +1737,11 @@ def _greeks_worker_init(ctx: _GreeksWorkerContext) -> None:
 
 
 def _run_unit(
-    unit: _GreeksUnit, *, lake_root: Path, rate_source: RiskFreeSource
+    unit: _GreeksUnit,
+    *,
+    lake_root: Path,
+    rate_source: RiskFreeSource,
+    stock_drift: StockDriftMap | None = None,
 ) -> _GreeksUnitResult:
     """Process one unit over the DEFAULT seams — the worker body, in-process testable.
 
@@ -1689,9 +1751,11 @@ def _run_unit(
     ``MemoryError`` propagates (whole-pass abort — the honest OOM signal;
     see :func:`_run_target` for the exact parent-side chain). The
     per-unit :class:`_SpotJoinMemo` counters ride the result and sum to the
-    sequential totals (see :func:`_build_units`).
+    sequential totals (see :func:`_build_units`). *stock_drift* is the
+    parent-built per-pass drift map (DEC-GREEKS-SPOTJOIN-STOCK-001) bound into
+    the default spot reader — a worker never scans.
     """
-    reader, spot_reader, writer = _default_seams(lake_root)
+    reader, spot_reader, writer = _default_seams(lake_root, stock_drift=stock_drift)
     memo = _SpotJoinMemo(spot_reader)
     outcomes: list[_TargetOutcome] = []
     halt_reason: str | None = None
@@ -1724,10 +1788,19 @@ def _greeks_worker(unit: _GreeksUnit) -> _GreeksUnitResult:
     if ctx is None:
         msg = "greeks worker context was not initialised"
         raise RuntimeError(msg)
-    return _run_unit(unit, lake_root=ctx.lake_root, rate_source=ctx.rate_source)
+    return _run_unit(
+        unit,
+        lake_root=ctx.lake_root,
+        rate_source=ctx.rate_source,
+        stock_drift=ctx.stock_drift,
+    )
 
 
-def _parallel_pickle_ok(lake_root: Path, rate_source: RiskFreeSource) -> bool:
+def _parallel_pickle_ok(
+    lake_root: Path,
+    rate_source: RiskFreeSource,
+    stock_drift: StockDriftMap | None = None,
+) -> bool:
     """True iff the worker context can cross the spawn boundary — probe, never crash.
 
     ``rate_source`` is only Protocol-typed: the production sources
@@ -1735,10 +1808,12 @@ def _parallel_pickle_ok(lake_root: Path, rate_source: RiskFreeSource) -> bool:
     :class:`~brutex.options.risk_free.CsvRateSource`) are frozen picklable
     dataclasses, but a caller-injected fake (a closure, a mock) would blow up
     pool startup with an opaque pickling error — probed here instead, WARNed,
-    and gracefully degraded to the sequential path.
+    and gracefully degraded to the sequential path. ``stock_drift`` rides the
+    probe tuple too (the production loader emits a plain picklable ``dict``;
+    the probe keeps the rail honest against any exotic ``Mapping``).
     """
     try:
-        pickle.dumps((lake_root, rate_source))
+        pickle.dumps((lake_root, rate_source, stock_drift))
     except (pickle.PicklingError, TypeError, AttributeError):
         _LOG.warning(
             "greeks_enrich.parallel_disabled",
@@ -1755,6 +1830,7 @@ def _run_parallel(
     lake_root: Path,
     rate_source: RiskFreeSource,
     max_workers: int,
+    stock_drift: dict[tuple[str, str], tuple[str, ...]] | None = None,
 ) -> GreeksEnrichReport:
     """The pool driver: dispatch units, fold results in sequential order.
 
@@ -1781,7 +1857,9 @@ def _run_parallel(
     ``shutdown(wait=True)``) and lands in the pull wrapper's blanket fence
     as ``greeks_enrich_ok=False`` — see :func:`_run_target`.
     """
-    ctx = _GreeksWorkerContext(lake_root=lake_root, rate_source=rate_source)
+    ctx = _GreeksWorkerContext(
+        lake_root=lake_root, rate_source=rate_source, stock_drift=stock_drift
+    )
     pool_size = min(max_workers, len(units))
     _LOG.info("greeks_enrich.parallel_start", units=len(units), workers=pool_size)
     emit_progress_beat()
@@ -1886,18 +1964,27 @@ def enrich_greeks_for_targets(
     pull's pass re-enriches the un-stamped remainder incrementally.
     """
     ordered = sorted(targets, key=_target_sort_key)
+    # The evidence-grounded stock drift map (DEC-GREEKS-SPOTJOIN-STOCK-001):
+    # built ONCE per pass, parent only, and ONLY when the default spot reader
+    # will actually run (an injected read_spot owns spot semantics — no scan,
+    # no store stat, no log noise; empty targets — no scan). Per-pass-stable,
+    # so the _SpotJoinMemo determinism invariant holds.
+    stock_drift = load_stock_drift_map(lake_root) if (ordered and read_spot is None) else None
     if read_bars is None and read_spot is None and write_bars is None:
         resolved = resolve_greeks_workers() if workers is None else max(1, workers)
         if resolved > 1:
             units = _build_units(ordered)
-            if len(units) > 1 and _parallel_pickle_ok(lake_root, rate_source):
+            if len(units) > 1 and _parallel_pickle_ok(lake_root, rate_source, stock_drift):
                 return _run_parallel(
                     units,
                     lake_root=lake_root,
                     rate_source=rate_source,
                     max_workers=resolved,
+                    stock_drift=stock_drift,
                 )
-    default_reader, default_spot_reader, default_writer = _default_seams(lake_root)
+    default_reader, default_spot_reader, default_writer = _default_seams(
+        lake_root, stock_drift=stock_drift
+    )
     reader = read_bars if read_bars is not None else default_reader
     spot_reader = read_spot if read_spot is not None else default_spot_reader
     writer = write_bars if write_bars is not None else default_writer
