@@ -22,8 +22,10 @@ _Last updated: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1522 — the
 preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
 cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
 interval-bounded at walk descent (sanctioned: F&O contract partitions no longer report symbols), the manifest
-rebuild stamps ONLY a post==pre ledger token (mid-walk race → explicit skip + one db_view INFO event, never a
-stale-on-arrival write), welcome.html + Golden Rule #5 reworded to the TRUE two-tier O(1) enforcement of
+rebuild always stamps the PRE-walk ledger token (mid-walk race → the stale-stamped base still LANDS — it is
+record_dataset's write-side convergence seed, the round-6 restore of an interim SKIP design — plus one
+observe-only db_view.manifest_rebuilt_stale INFO; the load-side token gate stays the freshness authority),
+welcome.html + Golden Rule #5 reworded to the TRUE two-tier O(1) enforcement of
 tests/bench/_o1_tiers.py (robust 3–10× shared-CI / strict 1.1× M4-Pro via BRUTEX_M4PRO_STRICT=1 / measured 3×
 cache-tier — words only, NO gate weakened), and two new bench pins (u128 two-limb mask + orchestrator audit
 append). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).

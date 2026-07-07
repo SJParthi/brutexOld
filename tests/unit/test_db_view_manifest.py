@@ -159,7 +159,15 @@ class TestManifestFirstDiscovery:
     def test_stale_manifest_falls_back_and_rebuilds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A ledger move (a pull) stales the manifest → one walk → served again."""
+        """A ledger move (a pull) stales the manifest → one walk → served again.
+
+        The ledger move happens BEFORE the rebuilding walk, so the walk itself
+        is quiescent (post-walk token == pre-walk token) and the observe-only
+        ``db_view.manifest_rebuilt_stale`` INFO must NOT fire — the event is
+        reserved for a genuine MID-walk race (DEC-O1-CLAIMS-HONESTY-001; an
+        always-fire regression would falsely report every clean rebuild as
+        raced and destroy the signal).
+        """
         writer = _seed_lake(tmp_path)
         db_view.list_candle_datasets(tmp_path)
         # A pull lands: new dataset + the ledger checkpoint moves.
@@ -169,8 +177,11 @@ class TestManifestFirstDiscovery:
         target = ledger_path(tmp_path)
         target.write_bytes(b"ledger-v2-moved")
         calls = _walk_spy(monkeypatch)
-        listed = db_view.list_candle_datasets(tmp_path)
+        with capture_logs() as logs:
+            listed = db_view.list_candle_datasets(tmp_path)
         assert calls["n"] == 1  # stale → exactly one walk + rebuild
+        # Quiescent walk → the mid-walk-race event must be ABSENT.
+        assert not [e for e in logs if e["event"] == "db_view.manifest_rebuilt_stale"]
         assert any(d["symbol"] == "SENSEX" for d in listed)
         assert db_view.list_candle_datasets(tmp_path) == listed
         assert calls["n"] == 1  # rebuilt → manifest-served again
