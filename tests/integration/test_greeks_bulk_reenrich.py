@@ -452,7 +452,9 @@ class TestDryRunInertness:
 
         class _CapturingAlerter:
             def __init__(self, **kwargs: Any) -> None:
-                del kwargs  # permissive stub ctor — accepted + ignored
+                # Permissive stub — accepts anything SweepAlerter() is given
+                # (attribute intentionally unread).
+                self.ctor_kwargs = dict(kwargs)
 
             def greeks_backfill_complete(self, report: Any) -> bool:
                 published.append(report)
@@ -491,7 +493,9 @@ class TestTelegramExactlyOnce:
 
         class _CapturingAlerter:
             def __init__(self, **kwargs: Any) -> None:
-                del kwargs  # permissive stub ctor — accepted + ignored
+                # Permissive stub — accepts anything SweepAlerter() is given
+                # (attribute intentionally unread).
+                self.ctor_kwargs = dict(kwargs)
 
             def greeks_backfill_complete(self, report: Any) -> bool:
                 published.append(report)
