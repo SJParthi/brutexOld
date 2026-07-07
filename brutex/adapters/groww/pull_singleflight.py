@@ -221,15 +221,24 @@ class PullAlreadyRunningError(BruteXError):
     dashboard pull) is mid-pull against the same Groww account / lake. The caller must
     REFUSE to start a second pull rather than double the account's request rate
     (CLAUDE.md Golden Rule #6). ``lock_path`` is the contended lock file (non-secret)
-    for the operator-facing message + the log.
+    for the operator-facing message + the log — this class is the ONE canonical
+    owner of the attribute (subclasses pass their contended path up, never
+    re-assign it; the :class:`ForeignPullActiveError` lease path rides the same
+    slot so every refusal handler reads one field).
     """
 
-    def __init__(self, lock_path: Path) -> None:
+    def __init__(self, lock_path: Path, message: str | None = None) -> None:
+        """*message* ``None`` composes the flock-flavoured default; a subclass
+        passes its own operator-facing wording (same refusal semantics)."""
         super().__init__(
-            "a pull is already running for this lake "
-            f"(account-wide single-flight lock held at {lock_path}); "
-            "refusing to start a second concurrent pull, which would double the "
-            "Groww account request rate"
+            message
+            if message is not None
+            else (
+                "a pull is already running for this lake "
+                f"(account-wide single-flight lock held at {lock_path}); "
+                "refusing to start a second concurrent pull, which would double the "
+                "Groww account request rate"
+            )
         )
         self.lock_path = lock_path
 
@@ -463,17 +472,17 @@ class ForeignPullActiveError(PullAlreadyRunningError):
     """
 
     def __init__(self, lease_path: Path, lease: PullLease, age_s: float) -> None:
-        # Deliberately NOT calling PullAlreadyRunningError.__init__ (it composes the
-        # flock-flavoured message); BruteXError.__init__ carries the message straight.
-        BruteXError.__init__(
-            self,
+        # Proper super() chain: the parent owns ``lock_path`` (one canonical
+        # definition) and carries this subclass's lease-flavoured message
+        # instead of composing its flock-flavoured default.
+        super().__init__(
+            lease_path,
             "a pull for this lake appears to be running on another host "
             f"({lease.host!r}, pid {lease.pid}; lease heartbeat {age_s:.0f}s old at "
             f"{lease_path}); refusing to start a concurrent pull, which would double "
             "the Groww account request rate. If that pull is genuinely dead, the lease "
             f"goes stale by itself within {PULL_LEASE_STALE_AFTER_S:.0f}s",
         )
-        self.lock_path = lease_path
         self.lease = lease
 
 

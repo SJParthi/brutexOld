@@ -3050,22 +3050,16 @@ class _TransientCliFloorStore:
         """Read one ``schema_meta`` value through a transient open→read→close."""
         from brutex.data.instrument_store import InstrumentStore
 
-        store = InstrumentStore.open(self._path)
-        try:
+        with InstrumentStore.open(self._path) as store:
             value: str | None = store.get_meta(key)
-        finally:
-            store.close()
         return value
 
     def set_meta(self, key: str, value: str) -> None:
         """Persist one ``schema_meta`` value through a transient open→write→close."""
         from brutex.data.instrument_store import InstrumentStore
 
-        store = InstrumentStore.open(self._path)
-        try:
+        with InstrumentStore.open(self._path) as store:
             store.set_meta(key, value)
-        finally:
-            store.close()
 
 
 def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK + network

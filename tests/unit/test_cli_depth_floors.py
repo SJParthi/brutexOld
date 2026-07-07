@@ -297,11 +297,8 @@ def test_cmd_fetch_live_builds_learner_over_paced_adapter_and_clamps_windows(
     # Pre-seed a learned floor in the SAME schema_meta sidecar the dashboard
     # writes — the cross-entrypoint contract (a dashboard-learned floor clamps
     # the CLI pull too).
-    seeded = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as seeded:
         seeded.set_meta(vendor_floor_key("NIFTY"), "2024-02-01")
-    finally:
-        seeded.close()
 
     raw = _groww_adapter()
     seen = _wire_live_fakes(monkeypatch, raw, object())
@@ -374,11 +371,8 @@ def test_cmd_fetch_live_floor_at_or_before_start_plans_full_range(
     from brutex.adapters.groww.vendor_floor import vendor_floor_key
     from brutex.data.instrument_store import InstrumentStore
 
-    seeded = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as seeded:
         seeded.set_meta(vendor_floor_key("NIFTY"), "2023-06-01")  # before the start
-    finally:
-        seeded.close()
 
     seen = _wire_live_fakes(monkeypatch, object(), object())
     rc = cli.cmd_fetch(

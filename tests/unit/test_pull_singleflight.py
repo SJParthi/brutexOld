@@ -588,11 +588,12 @@ def test_lease_guard_clears_lease_on_error_inside_block(tmp_path: Path) -> None:
     class _Boom(Exception):
         pass
 
-    with (
-        pytest.raises(_Boom),
-        pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0),
-    ):
-        raise _Boom
+    # Nested (not combined) so pytest.raises is the SOLE outer manager: the
+    # combined form hid the exception-swallow from static reachability analysis
+    # (CodeQL py/unreachable-statement on the assert below).
+    with pytest.raises(_Boom):  # noqa: SIM117 — the guard must wrap the raise
+        with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+            raise _Boom
     assert read_pull_lease(tmp_path) is None  # finally cleared
 
 
