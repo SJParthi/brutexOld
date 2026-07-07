@@ -47,7 +47,9 @@ wall-clock runner:
 
 1. **PR / unit tier** — the pure `brutex/observability/soak_drift.py` drift
    detector is unit-tested to 100% line+branch on synthetic RSS/fd/latency
-   series (rising / flat / spiky / leak). No wall-clock.
+   series (rising / flat / spiky / leak). No full-budget wall-clock; the
+   per-PR ci.yml gate (`pytest tests/stress -m 'not soak'`) additionally runs
+   the few-second short driver `test_soak_short`.
 2. **ubuntu nightly tier** — `stress-nightly.yml`, honestly reclassified as a
    ~5-min regression gate, runs `pytest tests/stress -m stress` (including the
    SHORT real soak driver `test_soak_short`, so no long-only path is dishonestly
@@ -177,7 +179,9 @@ named follow-up.
 **Honest limits (Golden Rule #10)**
 
 * This is NOT a claim that a 24h run happens in PR CI. The PR tier proves the
-  drift LOGIC; the ubuntu tier is a ~5-min regression gate; only the scheduled
+  drift LOGIC (plus a few-second `test_soak_short` real driver run via the
+  per-PR `-m 'not soak'` step); the ubuntu tier is a ~5-min regression gate;
+  only the scheduled
   self-hosted job runs the multi-hour wall-clock, and only for the dispatched
   `soak_minutes` (default weekly = 6 h; max 20 h per dispatch — the SEC9-1
   token bound, see §2 and Consequences).

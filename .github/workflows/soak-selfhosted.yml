@@ -237,6 +237,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # SEC13-1: never persist the job-scoped issues:write GITHUB_TOKEN
+          # into .git/config — later steps run third-party code (pip build
+          # backends + cargo build.rs/proc-macros) on the persistent
+          # self-hosted M4-Pro for up to 20 h, and a malicious dependency
+          # reading .git/config could close/tamper the watchdog issue this
+          # workflow declares its PRIMARY failure signal. Nothing after
+          # checkout uses authenticated git (the watchdog authenticates via
+          # `github.token` inside actions/github-script). Same convention as
+          # doctor-daily.yml / auto-merge.yml / pre-merge-gate.yml
+          # (DEC-CI-FORK-PR-HARDEN-001).
+          persist-credentials: false
 
       - name: Show runner identity (real hardware proof)
         # Never interpolate the dispatch input into the script text: pass it via

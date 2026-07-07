@@ -14,7 +14,9 @@ Execution model (three tiers — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1537)
 -------------------------------------------------------------------------
 * **PR / unit run** — the pure soak-drift LOGIC
   (:mod:`brutex.observability.soak_drift`) is unit-tested to 100% line+branch on
-  synthetic RSS/fd/latency series; the wall-clock driver is NOT run.
+  synthetic RSS/fd/latency series; the per-PR ci.yml step additionally runs the
+  whole directory via ``-m 'not soak'`` (a few-second ``test_soak_short`` real
+  driver run) — the FULL-budget wall-clock driver is NOT run.
 
 * **CI nightly cron (light regression, ~5 min budget)** — runs in
   `.github/workflows/stress-nightly.yml` daily 03:00 UTC on ubuntu-24.04
