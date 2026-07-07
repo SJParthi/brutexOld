@@ -286,8 +286,11 @@ def _head_own_start(first_expiry: date) -> date | None:
     The previous month's holiday-shifted expiry + 1 day, computed from the
     first day of the month BEFORE *first_expiry*'s month (monthly expiries
     always fall after the 1st, so the calendar resolves the previous month's
-    contract). ``None`` on a coverage abstain (e.g. a Dec-2019 computation
-    under a Jan-2020 first expiry — the pre-floor edge).
+    contract). ``None`` on a coverage abstain — the pre-floor edge (a
+    Dec-2019 computation under a Jan-2020 first expiry) AND the 2027+
+    holiday-table horizon; the caller then bounds ownership at
+    ``expiry - MAX_MONTHLY_EXPIRY_GAP_DAYS`` instead of ever extending it to
+    the window start (review round-2 finding 8).
     """
     first_of_month = first_expiry.replace(day=1)
     first_of_prev_month = (first_of_month - timedelta(days=1)).replace(day=1)
@@ -416,10 +419,23 @@ def resolve_futures_series(
             own_start = ordered[idx - 1][0] + timedelta(days=1)
         else:
             fallback = _head_own_start(expiry)
-            # A None fallback is the coverage abstain (pre-floor edge): clamp
-            # to the window start. Factually harmless at the 2020 floor — no
-            # earlier bars exist to mis-own (GROWW_HISTORY_FLOOR = 2020-01-01).
-            own_start = start if fallback is None else fallback
+            # A None fallback is a calendar-coverage ABSTAIN — the pre-2020
+            # floor edge AND the 2027+ horizon both land here. NEVER adopt the
+            # window start (review round-2 finding 8): that silently extended
+            # the first contract's ownership arbitrarily backwards over dates
+            # truly owned by MISSING predecessor contracts, so its far-month
+            # bars loaded as series bars across un-reset roll gaps (a silent
+            # D11 violation with zero head_unowned WARN). Bound the abstain at
+            # the maximum monthly span instead — the resolver cannot vouch for
+            # anything earlier, so an earlier window span stays UNOWNED and
+            # the head law below WARNs it. Byte-identical at the 2020 floor
+            # (the bound predates the floor, so the intersection clamp lands
+            # on the window start exactly as before — regression-pinned).
+            own_start = (
+                expiry - timedelta(days=MAX_MONTHLY_EXPIRY_GAP_DAYS)
+                if fallback is None
+                else fallback
+            )
         if own_start > end or expiry < start:
             continue  # window does not intersect this contract's ownership
         selected.append(

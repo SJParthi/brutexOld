@@ -20,7 +20,7 @@ from __future__ import annotations
 import itertools
 import os
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -468,15 +468,59 @@ class TestHeadLaw:
 
     def test_pre_floor_calendar_abstain_clamps_silently(self, tmp_path: Path) -> None:
         # The Jan-2020 pre-floor edge: the previous-month (Dec-2019) calendar
-        # computation abstains → own_start clamps to the window start WITHOUT
-        # a head_unowned WARN (there is no KNOWN unowned span to report;
-        # factually harmless at the GROWW_HISTORY_FLOOR = 2020-01-01).
+        # computation abstains → ownership is bounded at
+        # expiry − MAX_MONTHLY_EXPIRY_GAP_DAYS (2019-12-21), which PRECEDES the
+        # 2020-01-01 floor start, so the intersection clamp lands on the window
+        # start WITHOUT a head_unowned WARN — byte-identical to the pre-fix
+        # behaviour at the GROWW_HISTORY_FLOOR (the review round-2 finding-8
+        # byte-identity pin).
         root = _mk_lake(tmp_path, "NSE-NIFTY-30Jan20-FUT")
         with capture_logs() as logs:
             res = resolve_futures_series(root, start=date(2020, 1, 1), end=date(2020, 1, 30))
         assert res.segments[0].own_start == date(2020, 1, 1)
         assert res.head_clamped is False
         assert _events(logs, "futures_series.head_unowned") == []
+
+    def test_calendar_abstain_never_extends_ownership_to_the_window_start(
+        self, tmp_path: Path
+    ) -> None:
+        # Review round-2 finding 8 (MAJOR, fails-before/passes-after): a lake
+        # whose earliest dirs sit BEYOND the holiday-table horizon (2027+ —
+        # `_head_own_start` abstains on HolidayDataUnavailableError, not just
+        # the pre-floor ValueError) must NEVER own the arbitrary window start.
+        # Pre-fix, own_start = start silently owned 2026-10-01 → 2027-02-25
+        # with head_clamped=False and ZERO WARN, serving the Feb-27 contract's
+        # far-month bars across the missing Dec-26/Jan-27 roll gaps with no
+        # Stage-1A hard reset (the exact D11 violation class). Post-fix the
+        # abstain is bounded at expiry − MAX_MONTHLY_EXPIRY_GAP_DAYS and the
+        # earlier span stays UNOWNED + WARNed.
+        root = _mk_lake(tmp_path, "NSE-NIFTY-25Feb27-FUT", "NSE-NIFTY-25Mar27-FUT")
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2026, 10, 1), end=date(2027, 3, 25))
+        bound = date(2027, 2, 25) - timedelta(days=MAX_MONTHLY_EXPIRY_GAP_DAYS)
+        assert res.segments[0].own_start == bound  # 2027-01-16, NOT 2026-10-01
+        assert res.head_clamped is True
+        warned = _events(logs, "futures_series.head_unowned")
+        assert len(warned) == 1
+        assert warned[0]["window_start"] == "2026-10-01"
+        assert warned[0]["first_owned"] == bound.isoformat()
+        # The 2027+ horizon also abstains the observe-only cross-check.
+        assert {check.status for check in res.cross_checks} == {"abstain"}
+
+    def test_pre_floor_abstain_bounds_a_deeper_window_with_a_warn(self, tmp_path: Path) -> None:
+        # The same bound on the pre-floor edge: a window reaching deeper than
+        # expiry − MAX_MONTHLY_EXPIRY_GAP_DAYS is no longer silently owned —
+        # the span before the bound stays UNOWNED and WARNs (pre-fix it was
+        # silently adopted with no evidence).
+        root = _mk_lake(tmp_path, "NSE-NIFTY-30Jan20-FUT")
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2019, 12, 1), end=date(2020, 1, 30))
+        bound = date(2020, 1, 30) - timedelta(days=MAX_MONTHLY_EXPIRY_GAP_DAYS)
+        assert res.segments[0].own_start == bound  # 2019-12-21
+        assert res.head_clamped is True
+        warned = _events(logs, "futures_series.head_unowned")
+        assert len(warned) == 1
+        assert warned[0]["unowned_days"] == (bound - date(2019, 12, 1)).days
 
     def test_vendor_predecessor_beats_the_calendar(self, tmp_path: Path) -> None:
         # A junk-dated predecessor DIR is still vendor truth: the successor's
