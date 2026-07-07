@@ -1691,7 +1691,7 @@ class TestOptionsPcr:
         # Edge 19 / Golden Rule #5: PCR rides INSIDE the cached OptionsCandidates
         # — a repeat poll at one generation computes ONCE (O(1) LRU handoff, the
         # warm-parity guarantee), and a pull (mark_dirty) recomputes.
-        import brutex.dashboard.app as app_module
+        from brutex.dashboard import app as app_module
         from brutex.dashboard.summary_cache import SummaryCache
 
         _seed_pcr_lake(tmp_path)
@@ -1729,7 +1729,7 @@ class TestOptionsPcr:
         # `compute_options_candidates` at `latest_movers_date` and the live
         # generation — then poll the route at that coordinate: a PURE cache hit
         # (compute never re-invoked) whose payload carries the warmed PCR rows.
-        import brutex.dashboard.app as app_module
+        from brutex.dashboard import app as app_module
         from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
         from brutex.dashboard.movers_snapshot import DEFAULT_INTERVAL
         from brutex.dashboard.movers_warm import latest_movers_date, options_warm_grid
@@ -1832,7 +1832,7 @@ class TestOptionsPcr:
         # added a read through _prev_day_close / _prev_day_oi /
         # _underlying_spot_ltp): the candidate scan performs EXACTLY one read
         # per tier contract through EACH reader — the PCR fold adds none.
-        import brutex.dashboard.movers_options as mo_module
+        from brutex.dashboard import movers_options as mo_module
 
         from tests.fakes.movers_spies import spy_all_movers_readers
 
@@ -1864,7 +1864,7 @@ class TestOptionsPcr:
         # only; (c) the two coordinates occupy DISTINCT MoversSnapshotCache
         # keys — computed independently, repeat-served from their own entries,
         # never cross-contaminated.
-        import brutex.dashboard.app as app_module
+        from brutex.dashboard import app as app_module
 
         # NSE (whole-day: CE oi 1200 / vol 175 · PE oi 1080 / vol 290)…
         _seed_pcr_lake(tmp_path)

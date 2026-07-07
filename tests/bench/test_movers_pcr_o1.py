@@ -135,7 +135,7 @@ class TestPcrFoldOnceEndToEnd:
         # cache-primitive timing arm AND the integration compute-spy, but trips
         # HERE.
         pytest.importorskip("fastapi")
-        import brutex.dashboard.movers_options as mo_module
+        from brutex.dashboard import movers_options as mo_module
         from brutex.dashboard.app import DashboardState, build_app
         from brutex.data.instrument_store import InstrumentStore
         from fastapi.testclient import TestClient
@@ -158,13 +158,10 @@ class TestPcrFoldOnceEndToEnd:
             return real_rows(*args, **kwargs)
 
         monkeypatch.setattr(mo_module, "compute_pcr_rows", _counting)
-        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        try:
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
             client = TestClient(build_app(DashboardState(), instrument_store=store))
             params = {"asset": "options", "interval": "1day", "date": _DAY.isoformat()}
             bodies = [client.get("/api/v1/movers", params=params).json() for _ in range(5)]
-        finally:
-            store.close()
         assert folds["n"] == 1, "the PCR fold must run once per (coordinate, generation)"
         assert bodies[0]["pcr"] != []
         assert all(body["pcr"] == bodies[0]["pcr"] for body in bodies)
@@ -190,7 +187,7 @@ class TestPcrColdScanAddsNoRead:
         # Seed a 6-leg chain (3 strikes × CE/PE) and count reads through the
         # real scan across ALL FOUR reader seams: exactly one per contract per
         # reader — the PCR fold adds ZERO through any of them.
-        import brutex.dashboard.movers_options as mo_module
+        from brutex.dashboard import movers_options as mo_module
 
         writer = ParquetWriter(lake_root=tmp_path)
         symbols = [
