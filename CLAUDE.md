@@ -24,12 +24,18 @@ pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
 `dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL
 unpaced CallMeter, so the old "no `.meter` no-op" claims were FALSE), (b)
 `BackgroundPullJob(on_run_end=SessionRateController.clear_meter)` in the job's
-identity-gated finally, and (c) the direct OFF-job `POST /api/v1/universe/pull`
-route's paired `finally` clear (round 2 — that route bypasses the single-flight
-job; its dry-run arm passes NO holder so it can never evict a live pull's
-meter) — so "no in-process pull running ⇒ no meter registered" is a process
-invariant covering every registration path (the 96-agent audit's C0 cross-pull
-leak + the dry-run fabricated "flowing" closed). Plus: per-spine mutant-killing wiring tests (all four
+identity-gated finally, and (c) the OFF-job `pull_candles` spine's OWN paired,
+identity-gated clear (round 4 — `clear_meter(expected=)` compare-and-clear via
+`_pull_meter_scope`; supersedes round 2's route-level unconditional `finally`
+clear, which a round-4 reviewer proved evicted a concurrent JOB pull's LIVE
+meter whenever the direct route 400'd before registering — a malformed date;
+the route's dry-run arm still passes NO holder) — so "no in-process pull
+running ⇒ no meter registered" is a process invariant covering every
+registration path, a raise-before-register clears nothing, and a concurrent
+pull's later registration is never evicted (the 96-agent audit's C0 cross-pull
+leak + the dry-run fabricated "flowing" closed; the dry-run gate's clear stays
+unconditional with its concurrent-off-job-live-pull blast radius now honestly
+DISCLOSED, not denied — round-4 MINOR x2). Plus: per-spine mutant-killing wiring tests (all four
 register sites — the audit's C1/C2 surviving-mutant gap); a kind-aware
 `/api/v1/pull/rate` probe (`BackgroundPullJob.start(job_kind=)` — a 2-4-day
 dashboard SWEEP reads honest idle, never a site-wide red "stalled"; the
@@ -346,19 +352,25 @@ hostile-review pass._
   pull-rate CallMeter LIFECYCLE + rate-widget truth pack, the 96-agent hostile-audit fixes as ONE observe-only change
   set (ZERO pacing change, fetch behavior byte-identical): (a) C0 — NEW `SessionRateController.clear_meter` fired by
   `BackgroundPullJob(on_run_end=…)` inside the identity-gated finally (after `on_finally`, own try/except, before the
-  single-flight release; job-lock → controller-lock order pinned), PLUS (round 2) the direct OFF-job
-  `POST /api/v1/universe/pull` route pairing its own build-site registration with a `finally` clear (success AND
-  failure — the route bypasses the single-flight job, the reviewer-proven C0 residual) so "no in-process pull
+  single-flight release; job-lock → controller-lock order pinned), PLUS the OFF-job `pull_candles` spine pairing its
+  own build-site registration with an identity-gated clear (round 4 — `clear_meter(expected=)` compare-and-clear via
+  `_pull_meter_scope`, success AND raise; supersedes round 2's route-level unconditional `finally` clear on
+  `POST /api/v1/universe/pull`, which a round-4 reviewer REPRODUCED evicting a concurrent JOB pull's LIVE meter
+  whenever the route 400'd before `pull_candles` ever registered — registration is once per phase START, so the
+  job's F&O phase ran meterless and an issued-but-all-failing pull read FLOWING again) so "no in-process pull
   running ⇒ no meter registered" is a process invariant covering every registration path — a dead pull's meter is
-  unreadable in every later process state; the intra-pull
+  unreadable in every later process state, a raise-before-register clears nothing, and a concurrent pull's later
+  registration is never evicted; the intra-pull
   `register_meter(None)`-keeps-prior guard byte-unchanged + re-pinned. (b) the dry-run finding —
   `register_pull_meter(…, dry_run=)` clears-and-never-registers at ALL FOUR build sites (the metadata/F&O dry-run
   GrowwClients carry a REAL unpaced CallMeter, `client.py` `default_factory=CallMeter`, so the #1056 "no `.meter`
   silent no-op" in-code/ledger claims were FALSE and are rewritten); a warm-process dry-run reads the same honest
   `meter_present=False` as a cold one, never a fabricated MEASURED "flowing"; round 2 — the direct route's dry-run
   arm passes `session_rate=None`, so an operator's concurrent `?dry_run=true` on the off-job route can never evict a
-  LIVE pull's registered meter (the gate's eviction-safety premise rescoped: single-flight job-run sites OR no
-  holder). (c) C1/C2 — per-spine mutant-killing
+  LIVE pull's registered meter; round 4 — the gate's clear stays UNCONDITIONAL (no handle to compare) and its
+  reverse blast radius is now honestly DISCLOSED, not denied: a JOB dry-run started while a direct off-job REAL pull
+  is in flight evicts that pull's meter for its remainder (degrades to `meter_present=False`, never fabricates — the
+  false "no live pull can be concurrent with it in-process" premise rewritten, round-4 MINOR x2). (c) C1/C2 — per-spine mutant-killing
   wiring tests drive the REAL `pull_all_spot`/`pull_candles`/`pull_expiries_contracts`/`pull_contract_candles` and
   assert `peek_meter() is` the exact injected CallMeter + dry-run eviction twins (every severed site / dropped kwarg
   now fails a named test; each mutant re-applied + captured failing). (d) C5 — `BackgroundPullJob.start(job_kind=)`

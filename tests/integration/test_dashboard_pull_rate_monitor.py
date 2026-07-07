@@ -1038,64 +1038,100 @@ class TestMeterLifecycleAppWiring:
 
 
 class TestDirectPullRouteMeterLifecycle:
-    """Round 2: the DIRECT (off-job) single-symbol route ``POST /api/v1/universe/pull``.
+    """Rounds 2/4: the DIRECT (off-job) single-symbol route ``POST /api/v1/universe/pull``.
 
     It bypasses the single-flight ``BackgroundPullJob`` (no ``on_run_end`` ever fires
-    for it), so it must pair its OWN meter lifecycle: a REAL pull clears its build-site
-    registration in the route's ``finally`` (success AND failure — the C0 residual),
+    for it), so the meter lifecycle is paired INSIDE ``pull_candles`` (round 4 —
+    ``_pull_meter_scope``): the spine registers at its build site and compare-and-clears
+    the EXACT handle it registered on exit (success AND failure), a raise BEFORE the
+    registration clears NOTHING (a concurrent job pull's live meter survives the 400 —
+    the round-4 MAJOR the prior route-level unconditional ``finally`` clear violated),
     and a DRY-RUN passes NO holder so it can never evict a LIVE pull's meter through
-    ``register_pull_meter``'s dry-run gate.
+    ``register_pull_meter``'s dry-run gate (round 2). Every test here drives the REAL
+    ``pull_candles`` spine end to end through the route.
     """
 
     @staticmethod
-    def _metered_source() -> Any:
-        """A stand-in for the live adapter: carries a real ``.meter`` CallMeter."""
+    def _metered_adapter(*, fetch_raises: Exception | None = None) -> tuple[Any, Any]:
+        """A real synthetic spot adapter carrying the live ``.client.meter`` shape.
+
+        With *fetch_raises*, every fetch dies with that exception AFTER the build-site
+        registration already happened (the registered-then-raised failure arm).
+        """
         from brutex.adapters.call_meter import CallMeter
+        from brutex.adapters.ingest_common import SyntheticSpotAdapter
 
-        class _Source:
+        meter = CallMeter()
+
+        class _Client:
             def __init__(self) -> None:
-                self.meter = CallMeter()
+                self.meter = meter
 
-        return _Source()
+        class _Adapter:
+            def __init__(self) -> None:
+                self._inner = SyntheticSpotAdapter()
+                self.client = _Client()
+
+            def fetch_ohlcv(self, **kwargs: Any) -> Any:
+                if fetch_raises is not None:
+                    raise fetch_raises
+                return self._inner.fetch_ohlcv(**kwargs)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        return _Adapter(), meter
+
+    @staticmethod
+    def _route_real_pull_candles(monkeypatch: pytest.MonkeyPatch, adapter: Any) -> None:
+        """Point the route at the REAL ``pull_candles`` with *adapter* injected.
+
+        The route never threads an ``adapter_factory`` (production builds the live
+        Groww pool), so the injection wraps the real spine with the factory bound —
+        everything else (session_rate threading, the paired ``_pull_meter_scope``,
+        the ledger, the drains) is the production code path.
+        """
+        import functools
+        import importlib
+
+        from brutex.dashboard import pull_controller
+        from brutex.data.sink import NullBarSink
+
+        app_module = importlib.import_module("brutex.dashboard.app")
+        monkeypatch.setattr(
+            app_module,
+            "pull_candles",
+            functools.partial(
+                pull_controller.pull_candles,
+                adapter_factory=lambda _root, _inst: (adapter, NullBarSink()),
+            ),
+        )
 
     def test_direct_real_pull_clears_meter_after_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """MUTANT KILLED: the route's ``finally: _session_rate.clear_meter()`` omitted —
-        a finished single-symbol pull's meter stayed registered with NO pull running
+        """MUTANT KILLED: ``_pull_meter_scope`` dropped from ``pull_candles`` — a
+        finished single-symbol pull's meter stayed registered with NO pull running
         (readable by the next sampler-wrapped run's pre-registration ticks)."""
         import importlib
 
-        from brutex.dashboard.pull_controller import (
-            PullCandlesReport,
-            SessionRateController,
-            register_pull_meter,
-        )
+        from brutex.dashboard.pull_controller import SessionRateController
 
         app_module = importlib.import_module("brutex.dashboard.app")
         monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
         injected = SessionRateController()
-        seen: dict[str, object] = {}
-        source = self._metered_source()
-
-        def _fake_pull_candles(instrument: Any, **kwargs: Any) -> Any:
-            seen["session_rate"] = kwargs["session_rate"]
-            # Simulate the REAL build-site registration inside pull_candles.
-            register_pull_meter(kwargs["session_rate"], source, dry_run=False)
-            assert injected.peek_meter() is source.meter
-            return PullCandlesReport(symbol=instrument.symbol_name, year=2024, dry_run=False)
-
-        monkeypatch.setattr(app_module, "pull_candles", _fake_pull_candles)
+        adapter, _meter = self._metered_adapter()
+        self._route_real_pull_candles(monkeypatch, adapter)
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
         try:
             with client:
-                resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY"})
+                resp = client.post(
+                    "/api/v1/universe/pull", params={"symbol": "NIFTY", "year": "2024"}
+                )
                 assert resp.status_code == 200
                 assert resp.json()["dry_run"] is False
-                # The REAL arm threads the app's injected holder (never None).
-                assert seen["session_rate"] is injected
                 assert injected.peek_meter() is None, (
-                    "the direct route's finally must clear its build-site registration "
+                    "pull_candles' paired scope must clear its build-site registration "
                     "— no in-process pull running ⇒ no meter registered"
                 )
         finally:
@@ -1104,31 +1140,77 @@ class TestDirectPullRouteMeterLifecycle:
     def test_direct_real_pull_failure_still_clears_meter(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The ``finally`` covers the FAILURE arm too: a pull that registered its meter
-        then raised (the route's 400 path) must not leave the dead meter registered."""
+        """The paired scope covers the FAILURE arm too: a pull that registered its meter
+        then died (the route's 400 path) must not leave the dead meter registered."""
         import importlib
 
-        from brutex.dashboard.pull_controller import SessionRateController, register_pull_meter
+        from brutex.dashboard.pull_controller import SessionRateController
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 
         app_module = importlib.import_module("brutex.dashboard.app")
         monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
         injected = SessionRateController()
-        source = self._metered_source()
-
-        def _registering_boom(instrument: Any, **kwargs: Any) -> Any:
-            register_pull_meter(kwargs["session_rate"], source, dry_run=False)
-            assert injected.peek_meter() is source.meter
-            raise RuntimeError("vendor exploded mid-pull")
-
-        monkeypatch.setattr(app_module, "pull_candles", _registering_boom)
+        # Registered at the build site, then every fetch dies on the quota stop.
+        adapter, _meter = self._metered_adapter(
+            fetch_raises=DailyQuotaExceeded("daily quota spent mid-pull")
+        )
+        self._route_real_pull_candles(monkeypatch, adapter)
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
         try:
             with client:
-                resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY"})
+                resp = client.post(
+                    "/api/v1/universe/pull", params={"symbol": "NIFTY", "year": "2024"}
+                )
                 assert resp.status_code == 400
-                assert "RuntimeError" in resp.json()["detail"]
+                assert "DailyQuotaExceeded" in resp.json()["detail"]
                 assert injected.peek_meter() is None, (
-                    "the finally must clear the dead pull's meter on the failure arm too"
+                    "the paired scope must clear the dead pull's meter on the failure arm"
+                )
+        finally:
+            store.close()
+
+    def test_malformed_date_400_keeps_live_job_meter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The round-4 MAJOR, end to end (the reviewer's exact repro): a concurrent
+        JOB pull's LIVE registered meter survives this route's raise-before-register
+        400.
+
+        A job pull is mid-F&O-phase (its build site registered the pool meter ONCE at
+        phase start — registration is never periodic); an operator fires this route
+        with a malformed date. The REAL ``pull_candles`` raises in
+        ``resolve_candle_range`` BEFORE it ever registers, the route 400s — and the
+        job's meter must still be registered, so the sampler keeps pushing the
+        MEASURED ``meter_present=True`` verdict for the phase's remainder.
+
+        MUTANT KILLED: the pre-round-4 route-level unconditional
+        ``finally: _session_rate.clear_meter()`` re-introduced — it evicted the live
+        meter here (there was no stale handle to shorten; the #1482 'only shortens
+        how long the stale handle lives' framing was false for this case).
+        """
+        import importlib
+
+        from brutex.adapters.call_meter import CallMeter
+        from brutex.dashboard.pull_controller import SessionRateController
+
+        app_module = importlib.import_module("brutex.dashboard.app")
+        monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
+        injected = SessionRateController()
+        job_meter = CallMeter()
+        # The concurrent JOB pull's once-per-phase build-site registration
+        # (historical_pull.pull_contract_candles → register_pull_meter).
+        injected.register_meter(job_meter)
+        client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
+        try:
+            with client:
+                resp = client.post(
+                    "/api/v1/universe/pull",
+                    params={"symbol": "NIFTY", "from_date": "2026-13-99"},
+                )
+                assert resp.status_code == 400
+                assert injected.peek_meter() is job_meter, (
+                    "EVICTED: a 400 raised BEFORE pull_candles ever registered must "
+                    "never clear a LIVE job pull's registered meter (round-4 MAJOR)"
                 )
         finally:
             store.close()

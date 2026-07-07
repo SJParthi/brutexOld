@@ -343,9 +343,11 @@ class BackgroundPullJob:
         job → controller, pinned) — the JOB-RUN arm of the meter-lifecycle law: for
         pulls run ON this job, run end clears the registered meter. The direct
         (off-job) ``POST /api/v1/universe/pull`` route never fires this hook and is
-        covered by its OWN paired ``finally`` clear (+ a no-holder dry-run arm), so
+        covered by ``pull_candles``' OWN paired identity-gated clear (the spine
+        compare-and-clears the exact handle it registered — rounds 2/4 — plus a
+        no-holder dry-run arm), so
         only TOGETHER do the arms make "no in-process pull running ⇒ no meter
-        registered" hold (DEC-RATE-METER-LIFECYCLE-001 round 2). ``None`` (the
+        registered" hold (DEC-RATE-METER-LIFECYCLE-001 rounds 2/4). ``None`` (the
         default) disables it.
 
     journal_heartbeat_interval_s

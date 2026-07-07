@@ -47,9 +47,9 @@ covering everything the spot per-window seam does not.
   phases too. When no meter is registered (the pre-registration window / a dry-run / after a
   finished pull) it falls back to the honest ``meter_present=False`` sentinel; a dry-run
   explicitly DEREGISTERS at the build sites, the job-finish hook clears a job pull's
-  meter, and the direct (off-job) single-symbol route pairs its own ``finally`` clear, so
+  meter, and the off-job ``pull_candles`` spine pairs its own identity-gated clear, so
   ``peek_meter()`` with no in-process pull running is ``None`` by invariant
-  (DEC-RATE-METER-LIFECYCLE-001 round 2) — so
+  (DEC-RATE-METER-LIFECYCLE-001 rounds 2/4) — so
   "achieved" stays an
   HONEST 0 (never the old ``recent_minute / 60`` fabrication, which both OVER-reported —
   admissions ≥ completions — and BLINDED the ``stalled`` verdict to an issued-but-all-failing
@@ -172,9 +172,10 @@ class RatePanelSampler:
         the observer, since a real snapshot carries no such key). When NO meter is
         registered — the pre-registration window at pull start, a dry-run (which explicitly
         DEREGISTERS at the build sites), or after a finished pull (the job's ``on_run_end``
-        hook / the direct off-job route's paired ``finally`` clears the meter, so
+        hook / the off-job ``pull_candles`` spine's paired identity-gated clear evicts the
+        meter, so
         ``peek_meter()`` with no in-process pull running is ``None`` by invariant —
-        DEC-RATE-METER-LIFECYCLE-001 round 2) — it falls back to the
+        DEC-RATE-METER-LIFECYCLE-001 rounds 2/4) — it falls back to the
         honest ``{"meter_present": False}`` sentinel of DEC-RATE-WIDGET-FNO-HONEST-001 — NO
         fabricated ``effective_rps`` (never the old ``recent_minute / 60`` admission-derived
         figure the removed sampler poured into the "achieved" slot, which over-reported AND

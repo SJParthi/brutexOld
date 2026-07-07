@@ -2201,7 +2201,17 @@ def build_app(
                 # gate. The synthetic dry-run needs no session controller either
                 # (``_live_rate_runtime`` ignores it when ``use_live_rate`` is
                 # False), so the ``None`` arm is byte-identical apart from the
-                # eviction it avoids.
+                # eviction it avoids. The REAL arm's register/clear pairing lives
+                # INSIDE ``pull_candles`` (round 4 — ``_pull_meter_scope``): the
+                # spine compare-and-clears the EXACT handle it registered, success
+                # AND failure, so this route needs NO clear of its own. The prior
+                # route-level unconditional ``finally: clear_meter()`` is REMOVED —
+                # it evicted a concurrent JOB pull's LIVE meter whenever this route
+                # 400'd BEFORE ``pull_candles`` ever registered (a malformed date),
+                # leaving the job's F&O phase meterless for its remainder (the
+                # round-4 MAJOR; its "a concurrent job pull re-registers at its own
+                # build sites" claim was false — registration is once per phase
+                # START, never periodic).
                 session_rate=None if dry_run else _session_rate,
                 floor_store=instrument_store,
             )
@@ -2224,19 +2234,6 @@ def build_app(
                 status_code=400,
                 detail=f"{type(exc).__name__}: {exc}",
             ) from exc
-        finally:
-            if not dry_run:
-                # Pair the live build-site registration (``register_pull_meter``
-                # inside ``pull_candles``) with its CLEAR — success AND failure.
-                # This route runs OFF-job (no ``on_run_end`` fires for it), so
-                # without this a dead single-symbol pull's meter stayed registered
-                # with NO pull running until the NEXT job run ended — the round-2
-                # C0 residual. "No in-process pull running ⇒ no meter registered"
-                # must hold for EVERY registration path. Safe: a concurrent job
-                # pull re-registers at its own build sites (spot/metadata/F&O),
-                # and ``clear_meter`` is an idempotent O(1) leaf
-                # (DEC-RATE-METER-LIFECYCLE-001 round 2).
-                _session_rate.clear_meter()
         _LOG.info(
             "universe.pull.ok",
             symbol=symbol,
@@ -2281,8 +2278,10 @@ def build_app(
     # CoverageCounters that back the O(1) coverage headline
     # (DEC-DASHBOARD-FASTREAD-001). ``on_run_end`` clears the session's registered
     # CallMeter in the worker's identity-gated finally (DEC-RATE-METER-LIFECYCLE-001 —
-    # the C0 cross-pull leak fix); together with the direct ``/universe/pull`` route's
-    # own paired ``finally`` clear (that route runs OFF-job — round 2), "no in-process
+    # the C0 cross-pull leak fix); together with ``pull_candles``' own paired
+    # identity-gated clear (the direct ``/universe/pull`` route runs OFF-job — the
+    # spine compare-and-clears the exact handle it registered, rounds 2/4),
+    # "no in-process
     # pull running ⇒ no meter registered" is a process invariant, so a dead pull's
     # meter can never feed a later sampler tick.
     _pull_job = BackgroundPullJob(

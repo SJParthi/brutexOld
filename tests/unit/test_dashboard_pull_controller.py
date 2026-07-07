@@ -1091,6 +1091,49 @@ class TestSessionRateControllerMeter:
         holder.register_meter(meter)
         assert holder.peek_meter() is meter
 
+    def test_clear_meter_expected_match_clears(self) -> None:
+        """``clear_meter(expected=…)`` with the EXACT stored handle evicts it (round 4)."""
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        meter = CallMeter()
+        holder.register_meter(meter)
+        holder.clear_meter(expected=meter)
+        assert holder.peek_meter() is None
+
+    def test_clear_meter_expected_mismatch_keeps_stored_meter(self) -> None:
+        """The identity-gated compare-and-clear NEVER evicts a handle it did not register.
+
+        DEC-RATE-METER-LIFECYCLE-001 round 4. MUTANT KILLED: the ``expected is None or
+        self._meter is expected`` gate severed back to the unconditional clear — a
+        finished pull's exit would then evict a CONCURRENT pull's later registration
+        (the round-4 MAJOR's eviction class).
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        mine = CallMeter()
+        concurrent = CallMeter()
+        holder.register_meter(mine)
+        holder.register_meter(concurrent)  # a concurrent pull re-registered LATER
+        holder.clear_meter(expected=mine)  # my exit must NOT evict the newer handle
+        assert holder.peek_meter() is concurrent, (
+            "compare-and-clear must keep a concurrent pull's later registration"
+        )
+        # …and the expected-gated clear on an EMPTY holder is an idempotent no-op.
+        holder.clear_meter(expected=mine)
+        assert holder.peek_meter() is concurrent
+
+    def test_clear_meter_default_stays_unconditional(self) -> None:
+        """``expected=None`` (the job-end hook / dry-run gate shape) clears whatever
+        is stored — the pre-round-4 contract those zero-arg callers rely on."""
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        holder.register_meter(CallMeter())
+        holder.clear_meter()  # no handle to compare → unconditional
+        assert holder.peek_meter() is None
+
     def test_concurrent_register_peek_and_meter_writes_never_tear(self) -> None:
         """Racing register_meter/peek_meter against live meter start/stop is torn-read-free.
 
@@ -1299,6 +1342,24 @@ class _MeteredSpotAdapter:
         return getattr(self._inner, name)
 
 
+class _RecordingHolder(SessionRateController):
+    """A :class:`SessionRateController` spy recording every non-``None`` registration.
+
+    Round 4: ``pull_candles`` pairs its registration with an identity-gated clear on
+    exit, so the post-return ``peek_meter()`` is honestly ``None`` — the C1 wiring
+    oracle therefore observes the IN-pull registration through this spy instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.registered: list[object] = []
+
+    def register_meter(self, meter: object) -> None:  # type: ignore[override]
+        if meter is not None:
+            self.registered.append(meter)
+        super().register_meter(meter)  # type: ignore[arg-type]
+
+
 class TestPullMeterWiring:
     """The spot spines' ``register_pull_meter`` call sites, driven END-TO-END."""
 
@@ -1323,12 +1384,18 @@ class TestPullMeterWiring:
         )
 
     def test_pull_candles_registers_exact_adapter_meter(self, tmp_path: Path) -> None:
-        """MUTANT KILLED: the ``pull_candles`` build-site call severed (C1 spine 2)."""
+        """MUTANT KILLED: the ``pull_candles`` build-site call severed (C1 spine 2).
+
+        Round 4 moved the spine onto the PAIRED ``_pull_meter_scope`` (register on
+        enter, identity-gated clear on exit), so the registration is observed DURING
+        the pull via a recording holder — the exact adapter meter must be registered
+        mid-run — and the post-return state asserts the paired clear (below).
+        """
         from brutex.adapters.call_meter import CallMeter
 
         meter = CallMeter()
         adapter = cast(MarketAdapter, _MeteredSpotAdapter(meter))
-        holder = SessionRateController()
+        holder = _RecordingHolder()
         pull_candles(
             _index(),
             lake_root=tmp_path,
@@ -1337,7 +1404,117 @@ class TestPullMeterWiring:
             adapter_factory=lambda _root, _inst: (adapter, NullBarSink()),
             session_rate=holder,
         )
-        assert holder.peek_meter() is meter
+        assert holder.registered == [meter], (
+            "the pull_candles build site must register the adapter's EXACT client meter"
+        )
+        # Round 4: the spine's paired identity-gated clear — no in-process pull
+        # running ⇒ no meter registered (MUTANT KILLED: `_pull_meter_scope` dropped
+        # from the `with` → the finished off-job pull's meter stays readable).
+        assert holder.peek_meter() is None, (
+            "pull_candles must clear its OWN registration on exit (round 4)"
+        )
+
+    def test_pull_candles_raise_before_register_keeps_foreign_meter(self, tmp_path: Path) -> None:
+        """The round-4 MAJOR, at the spine: a raise BEFORE registration clears NOTHING.
+
+        A malformed ``from_date`` raises in ``resolve_candle_range`` before the
+        adapter factory / registration ever run — a concurrent JOB pull's LIVE
+        registered meter must survive this pull's failure. MUTANT KILLED: any
+        register-site-independent unconditional clear on the failure path (the
+        pre-round-4 route-level ``finally: clear_meter()`` shape).
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        job_meter = CallMeter()
+        holder.register_meter(job_meter)  # a mid-F&O-phase job pull's live meter
+
+        def _never_called(_root: Path, _inst: Instrument) -> tuple[MarketAdapter, BarSink]:
+            raise AssertionError("the factory must never run — the date raises first")
+
+        with pytest.raises(ValueError):
+            pull_candles(
+                _index(),
+                lake_root=tmp_path,
+                from_date="2026-13-99",
+                dry_run=False,
+                adapter_factory=_never_called,
+                session_rate=holder,
+            )
+        assert holder.peek_meter() is job_meter, (
+            "a raise BEFORE registration must never evict a concurrent job pull's "
+            "LIVE registered meter (round-4 MAJOR)"
+        )
+
+    def test_pull_candles_raise_after_register_still_clears_own_meter(self, tmp_path: Path) -> None:
+        """The failure arm of the paired scope: registered-then-raised clears its own.
+
+        The adapter registers its meter at the build site, then the 1-minute phase
+        dies on ``DailyQuotaExceeded`` (a global stop ``pull_candles`` re-raises).
+        The dead pull's meter must NOT linger (the C0 residual, now spine-paired).
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        class _QuotaDeath(_MeteredSpotAdapter):
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                del symbol, exchange, interval, start, end
+                raise DailyQuotaExceeded("daily quota spent mid-pull")
+
+        meter = CallMeter()
+        adapter = cast(MarketAdapter, _QuotaDeath(meter))
+        holder = SessionRateController()
+        with pytest.raises(DailyQuotaExceeded):
+            pull_candles(
+                _index(),
+                lake_root=tmp_path,
+                year=2024,
+                dry_run=False,
+                adapter_factory=lambda _root, _inst: (adapter, NullBarSink()),
+                session_rate=holder,
+            )
+        assert holder.peek_meter() is None, (
+            "the paired scope must clear the dead pull's OWN registration on a raise"
+        )
+
+    def test_pull_candles_exit_never_evicts_a_later_registration(self, tmp_path: Path) -> None:
+        """The compare-and-clear at the spine: a CONCURRENT pull's later registration
+        survives this pull's exit.
+
+        The adapter's first fetch simulates a concurrent pull's build site firing
+        mid-run (it overwrites the holder with a FOREIGN meter). MUTANT KILLED: the
+        scope's ``clear_meter(expected=…)`` degraded to an unconditional clear —
+        the foreign live meter would be evicted by the finished pull's exit.
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        foreign = CallMeter()
+        holder = SessionRateController()
+
+        class _ConcurrentRegistration(_MeteredSpotAdapter):
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                # A concurrent pull's build site re-registers mid-run.
+                holder.register_meter(foreign)
+                return self._inner.fetch_ohlcv(
+                    symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
+                )
+
+        adapter = cast(MarketAdapter, _ConcurrentRegistration(CallMeter()))
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            year=2024,
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (adapter, NullBarSink()),
+            session_rate=holder,
+        )
+        assert holder.peek_meter() is foreign, (
+            "the identity-gated exit clear must keep a concurrent pull's later "
+            "registration (compare-and-clear, round 4)"
+        )
 
     def test_spot_dry_run_clears_stale_meter(self, tmp_path: Path) -> None:
         """The C0 headline pin (FAILS on pre-#1482 HEAD): a spot dry-run with the
