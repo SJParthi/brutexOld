@@ -981,58 +981,7 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
         # isolated the last committed (newline-terminated) NON-BLANK line. The
         # committed prefix ends at the last "\n"; the tail line we want is the
         # last non-blank line ending in (or terminated by) that "\n".
-        # Equivalent-mutant pragmas (next three lines): a newline-free seed sits
-        # AFTER the file's last byte where the committed-line scanner (which only
-        # returns "\n"-terminated candidates) provably ignores it; and both
-        # initial values are dead stores — size > 0 here, so the walk always
-        # yields >= 1 chunk and reassigns them before any read (the local
-        # annotation is never evaluated at runtime).
-        buf = b""  # pragma: no mutate
-        pos = size  # pragma: no mutate
-        last_committed_line: bytes | None = None  # pragma: no mutate
-        for chunk_start, block in _iter_reverse_chunks(f, size):
-            # Equivalent-mutant pragma: pos's only read is the post-loop rescue
-            # guard, a no-op twin of the for-else (see its pragma below).
-            pos = chunk_start  # pragma: no mutate — how far back the walk reached
-            buf = block + buf
-            # Split into physical lines. Because we always prepend, only the
-            # FIRST fragment can be incomplete (more bytes may precede it), so
-            # we only consider lines AFTER the first newline as fully-known.
-            # partition() carries no -1 sentinel, so the find()-shape's
-            # equivalent `-1 → -2` numeric-mutant class disappears
-            # STRUCTURALLY and NO pragma is needed: every remaining mutant on
-            # these lines degrades the early exit into extra reverse-chunk
-            # reads, which test_tail_read_consumes_only_the_final_chunk pins
-            # (the -003 fixer round 2 measured the prior line-scoped pragma
-            # hiding exactly that suite-killable comparison flip).
-            _incomplete_head, sep, complete = buf.partition(b"\n")
-            if not sep:
-                # No newline yet in the accumulated buffer — keep reading back.
-                continue
-            # Everything after the first newline is complete; scan its lines
-            # from the end for the last non-blank committed line.
-            candidate = _last_nonblank_committed_line(complete)
-            if candidate is not None:
-                last_committed_line = candidate
-                break
-            # No non-blank committed line in the known-complete region yet;
-            # if we have already reached the file start, the first fragment is
-            # itself the only remaining candidate — handled after the loop.
-        else:
-            # Loop exhausted the file (pos reached 0) with buf holding the whole
-            # file: the first fragment is a complete line too.
-            # Equivalent-mutant pragma: a None planted here is repaired by the
-            # post-loop rescue below recomputing this exact expression.
-            last_committed_line = _last_nonblank_committed_line(buf)  # pragma: no mutate
-
-        # Equivalent-mutant pragmas (guard + body): a redundant defensive rescue
-        # — it is reachable only from the for-else path, where pos == 0 always
-        # holds and last_committed_line already equals this recompute, so every
-        # guard mutant and a None-assigning body are output-equivalent.
-        if last_committed_line is None and pos == 0:  # pragma: no mutate
-            # We broke on a newline but found no non-blank line after it; the
-            # first fragment (bytes before that newline) is still a candidate.
-            last_committed_line = _last_nonblank_committed_line(buf)  # pragma: no mutate
+        last_committed_line = _isolate_last_committed_line(f, size)
 
         if last_committed_line is None:
             return None, torn_tail
@@ -1041,6 +990,55 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
     if not line:  # pragma: no cover - _last_nonblank_committed_line excludes blanks
         return None, torn_tail
     return AuditEntry.from_json_line(line), torn_tail
+
+
+def _isolate_last_committed_line(f: BinaryIO, size: int) -> bytes | None:
+    """Reverse-walk *f* and return its last committed NON-BLANK line, or ``None``.
+
+    The accumulate-and-scan half of :func:`_read_tail_entry`: prepend
+    reverse-seek blocks (:func:`_iter_reverse_chunks`) until the last
+    ``"\\n"``-terminated non-blank line is isolated, reading O(1) tail bytes in
+    the common case (the chunk-consumption pin
+    ``test_tail_read_consumes_only_the_final_chunk``). *size* must be the
+    file's byte length and MUST be ``> 0`` — the walk then always yields at
+    least one block, so the accumulator is seeded from the FIRST block instead
+    of a ``b""`` literal. PRAGMA-FREE by construction (DEC-MUTATION-RUNTIME-003
+    fixer round 3): the prior in-line loop's seed pragma hid a suite-killable
+    ``buf = None`` crash mutant behind its equivalent ``b"XXXX"`` twin (the
+    seed was NOT a dead store — the first iteration read it via
+    ``block + buf``); with the first-block seed there is no seed literal, no
+    ``pos = size`` / ``= None`` dead store, no for-else, and no redundant
+    post-loop rescue left to justify.
+    """
+    walk = _iter_reverse_chunks(f, size)
+    pos, buf = next(walk)
+    while True:
+        # Split into physical lines. Because we always prepend, only the FIRST
+        # fragment can be incomplete (more bytes may precede it), so only lines
+        # AFTER the first newline are fully-known. partition() carries no -1
+        # sentinel, so the find()-shape's equivalent `-1 → -2` numeric-mutant
+        # class disappears STRUCTURALLY and NO pragma is needed: every
+        # remaining mutant on these lines either degrades the early exit into
+        # extra reverse-chunk reads (pinned by the chunk-consumption test; the
+        # -003 fixer round 2 measured the prior line-scoped pragma hiding
+        # exactly that suite-killable comparison flip) or over-runs the walk
+        # into a loud StopIteration past the file start.
+        _incomplete_head, sep, complete = buf.partition(b"\n")
+        if sep:
+            # Everything after the first newline is complete; scan its lines
+            # from the end for the last non-blank committed line.
+            candidate = _last_nonblank_committed_line(complete)
+            if candidate is not None:
+                return candidate
+        if pos == 0:
+            # The walk reached the file start with no committed non-blank line
+            # found in the known-complete region: buf now holds the WHOLE
+            # file, so the first fragment is a complete line too.
+            return _last_nonblank_committed_line(buf)
+        # No answer yet — accumulate the next block back and re-scan.
+        chunk_start, block = next(walk)
+        pos = chunk_start
+        buf = block + buf
 
 
 def _last_nonblank_committed_line(chunk: bytes) -> bytes | None:
