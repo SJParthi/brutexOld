@@ -3822,6 +3822,9 @@ def build_app(
             # Best-effort write (a failed write is logged, never blocks the
             # pull); the clear hook is wired for EVERY real pull regardless —
             # a completing real pull supersedes any lingering older intent.
+            # This call ALSO auto-clears any stale resume red banner
+            # (DEC-RESUME-BANNER-AUTOCLEAR-001): the banner told the operator
+            # to re-launch manually, and this IS that launch.
             persist_intent_for_launch(
                 pull_intent_store,
                 dry_run=dry_run,

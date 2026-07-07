@@ -138,9 +138,9 @@ def test_banner_starts_unset_and_set_clear_roundtrip() -> None:
     assert banner.snapshot() is None
     banner.set(level="critical", message="boom")
     assert banner.snapshot() == {"level": "critical", "message": "boom"}
-    banner.clear()
+    assert banner.clear() is True, "a REAL clear reports the payload it dropped"
     assert banner.snapshot() is None
-    banner.clear()  # idempotent
+    assert banner.clear() is False, "an idempotent no-op clear reports nothing dropped"
     assert banner.snapshot() is None
 
 
@@ -310,6 +310,96 @@ def test_real_launch_persists_quadruple_and_restarts(tmp_path: Path) -> None:
     )
     assert loaded.restarts == 2, "the resume path's bumped counter must survive the re-write"
     assert loaded.created_at != ""
+
+
+# ── resume-banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001) ────────────────
+
+
+def test_real_launch_autoclears_a_stale_resume_banner(tmp_path: Path) -> None:
+    # The banner's own remediation is "start the pull manually from /universe";
+    # following it must retire the banner instead of leaving a stale CRITICAL
+    # up for the rest of the process lifetime.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=False,
+        symbols="NIFTY",
+        symbol=None,
+        from_date=None,
+        to_date=None,
+    )
+    assert wrote is True
+    assert store.banner.snapshot() is None, "the manual real launch retires the banner"
+
+
+def test_dry_run_never_clears_the_resume_banner(tmp_path: Path) -> None:
+    # Byte-identity pin: a synthetic pull resolves no crash loop — the dry-run
+    # early return touches neither the intent file nor the banner.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=True,
+        symbols="NIFTY",
+        symbol=None,
+        from_date=None,
+        to_date=None,
+    )
+    assert wrote is False
+    assert not store.path.exists()
+    assert store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }
+
+
+def test_real_launch_autoclear_is_independent_of_a_failed_intent_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The operative fact is "a real pull is launching NOW" — the banner drops
+    # even when the best-effort intent write fails (which never blocks the pull).
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+
+    def _boom(dest: Path, write_to: Any, **kwargs: Any) -> None:
+        raise OSError("disk exploded mid-write")
+
+    monkeypatch.setattr(pull_intent_module, "atomic_write_simple", _boom)
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=False,
+        symbols=None,
+        symbol="NIFTY",
+        from_date=None,
+        to_date=None,
+    )
+    assert wrote is False
+    assert store.banner.snapshot() is None
+
+
+def test_real_launch_with_no_banner_stays_silent_and_unchanged(tmp_path: Path) -> None:
+    # The no-op branch: an unset banner is a silent False clear — the launch's
+    # persisted intent is byte-identical to the pre-change behaviour.
+    store = PullIntentStore(tmp_path)
+    assert store.banner.snapshot() is None
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=False,
+        symbols="NIFTY",
+        symbol=None,
+        from_date="2024-01-01",
+        to_date="2024-02-01",
+    )
+    assert wrote is True
+    assert store.banner.snapshot() is None
+    loaded = store.load()
+    assert loaded is not None
+    assert (loaded.symbols, loaded.from_date, loaded.to_date) == (
+        "NIFTY",
+        "2024-01-01",
+        "2024-02-01",
+    )
 
 
 # ── probe_pull_singleflight (the REAL flock against a tmp lake root) ──────────

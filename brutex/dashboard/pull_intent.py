@@ -205,9 +205,13 @@ class ResumeBanner:
     Set by :func:`run_auto_resume` on an over-cap refusal / failed launch and
     served by the ``/api/v1/liveproof`` route as a ``resume`` section, which the
     site-wide ``bx-liveproof.js`` pill renders as the existing red top banner
-    (§11 COMMON — reuse the ONE banner surface, no second pill script). O(1)
-    set / snapshot under a :class:`threading.Lock` (the boot daemon thread
-    writes, request threads read).
+    (§11 COMMON — reuse the ONE banner surface, no second pill script).
+    AUTO-CLEARED by the next REAL pull launch through
+    :func:`persist_intent_for_launch` (DEC-RESUME-BANNER-AUTOCLEAR-001) — the
+    banner's remediation is exactly that manual re-launch, so following it
+    retires the banner instead of leaving a stale CRITICAL up for the process
+    lifetime. O(1) set / clear / snapshot under a :class:`threading.Lock` (the
+    boot daemon thread writes, request threads read).
     """
 
     def __init__(self) -> None:
@@ -219,10 +223,17 @@ class ResumeBanner:
         with self._lock:
             self._payload = {"level": level, "message": message}
 
-    def clear(self) -> None:
-        """Drop the banner payload (idempotent)."""
+    def clear(self) -> bool:
+        """Drop the banner payload (idempotent); ``True`` iff one was present.
+
+        The return value lets the ONE auto-clear site
+        (:func:`persist_intent_for_launch`, DEC-RESUME-BANNER-AUTOCLEAR-001)
+        log only a REAL clear — a no-op clear on an unset banner stays silent.
+        """
         with self._lock:
+            was_set = self._payload is not None
             self._payload = None
+            return was_set
 
     def snapshot(self) -> dict[str, str] | None:
         """Return a COPY of the current payload, or ``None`` when unset."""
@@ -372,9 +383,29 @@ def persist_intent_for_launch(
     intent. *restarts* threads the resume path's already-bumped counter through
     the re-fired launch (a fresh operator click passes the default ``0``) —
     without it a resumed launch would reset the cap and loop forever.
+
+    **Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001):** a REAL launch also
+    DROPS any stale resume red banner on ``store.banner`` — the banner's own
+    remediation is "start the pull manually from /universe", so the manual
+    re-launch it asked for must retire it instead of leaving a CRITICAL banner
+    up for the rest of the process lifetime (no production path ever cleared
+    it before). Deliberately independent of the intent-write outcome (a failed
+    best-effort write never blocks the pull, and the operative fact — a real
+    pull is launching NOW — supersedes the banner either way) and BEFORE the
+    write (so a crash between the two can only leave the honest state: banner
+    gone, fresh intent pending the crashed pull's next resume). A ``dry_run``
+    clears NOTHING (byte-identical early return — a synthetic pull resolves no
+    crash loop). A REAL clear logs ``pull_intent.banner_autocleared`` once; an
+    unset banner stays silent.
     """
     if dry_run:
         return False
+    if store.banner.clear():
+        _LOG.info(
+            "pull_intent.banner_autocleared",
+            path=str(store.path),
+            reason="real_pull_launched",
+        )
     intent = PullIntent(
         symbols=symbols,
         symbol=symbol,

@@ -280,6 +280,42 @@ def test_liveproof_carries_resume_banner_when_set(
     assert "resume" not in client.get("/api/v1/liveproof").json()
 
 
+def test_manual_real_pull_autoclears_the_resume_banner_end_to_end(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DEC-RESUME-BANNER-AUTOCLEAR-001: the banner's remediation is "start the
+    # pull manually from /universe" — following it through the REAL route must
+    # retire the banner (previously it stayed CRITICAL for the process lifetime).
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    intent_store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    assert client.get("/api/v1/liveproof").json()["resume"]["level"] == "critical"
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert intent_store.banner.snapshot() is None, "the manual launch retires the banner"
+    assert "resume" not in client.get("/api/v1/liveproof").json()
+    assert _wait_for_job(client)["state"] == "done"
+
+
+def test_dry_run_route_never_clears_the_resume_banner(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Byte-identity pin: a synthetic pull resolves no crash loop — the banner
+    # (and its liveproof section) survives a dry-run untouched.
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    intent_store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert intent_store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }
+    assert client.get("/api/v1/liveproof").json()["resume"]["level"] == "critical"
+
+
 def test_liveproof_without_intent_store_is_untouched(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
