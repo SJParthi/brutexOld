@@ -14,6 +14,10 @@ build/
 # Virtual envs
 .venv/
 .venv*/
+# File/symlink form too — `.venv*/` matches directories only, which let a
+# session-local `.venv-gates` SYMLINK get swept into a commit (removed in the
+# .venv-gates cleanup); the non-slash pattern covers symlinks + plain files.
+.venv*
 .venv312/
 .devvenv/
 venv/
