@@ -20,15 +20,15 @@ exactly ONE place each. This module IMPORTS:
   :func:`~brutex.dashboard.movers_snapshot.parse_snapshot_date`,
   :func:`~brutex.dashboard.movers_snapshot._cutoff_minute`,
   :data:`~brutex.dashboard.movers_snapshot._DAILY_MIN_FLOOR`, and the prior-day
-  1-day close reader :func:`~brutex.dashboard.movers_snapshot._prev_day_close`
+  1-day close resolver :func:`~brutex.dashboard.movers_snapshot.resolve_prev_close`
   (its canonical home — the Futures reader re-imports the same one);
 * from :mod:`brutex.dashboard.movers_futures` — the GENERIC raw-1-minute
   session reader :func:`~brutex.dashboard.movers_futures._read_future_session`
   (it returns ``(ltp, volume, value_paisa, oi)`` for ANY FNO contract, futures OR
   options — reused for an option contract; since DEC-MOVERS-OPTIONS-VALUE-DEDUP-001
   options uses the ``value_paisa`` field DIRECTLY, so the option's session frame is
-  read ONCE — no separate value reader), the prior-day OI reader
-  :func:`~brutex.dashboard.movers_futures._prev_day_oi`, and the underlying spot
+  read ONCE — no separate value reader), the prior-day OI resolver
+  :func:`~brutex.dashboard.movers_futures.resolve_prev_oi`, and the underlying spot
   resolver :func:`~brutex.dashboard.movers_futures._underlying_spot_ltp`.
 
 It adds only what options need: the contract-symbol parser (strike + CE/PE), the
@@ -101,7 +101,7 @@ mover.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date as date_cls
 from decimal import Decimal
 from pathlib import Path
@@ -110,21 +110,26 @@ from typing import Any, Final
 import structlog
 
 from brutex.dashboard.movers_futures import (
-    _prev_day_oi,
     _read_future_session,
     _underlying_spot_ltp,
     format_contract_date,
+    resolve_prev_oi,
 )
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
+    _calendar_exchange,
     _cutoff_minute,
-    _prev_day_close,
+    _NoncontiguousWarnState,
     interval_minutes,
+    make_expected_session_resolver,
     normalize_min_volume,
     parse_snapshot_date,
+    prev_baseline_provenance,
     resolve_candle_datasets,
+    resolve_prev_close,
     value_meets_volume_floor,
+    warn_prev_baseline_noncontiguous,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.moneyness import (
@@ -302,6 +307,16 @@ class OptionMover:
         lake-observed ladder did (the screen shows a low-confidence marker — the
         observed min gap can overestimate the true base step), or ``None`` when no
         step was presented at all.
+    prev_close_session, prev_close_contiguous
+        Calendar-contiguity provenance of the ``pct_change`` baseline
+        (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — the ISO session date the prior
+        close actually came from + whether it IS the immediately-preceding NSE
+        session (``None`` = no baseline / calendar abstained). Additive +
+        defaulted; the row projector emits the pair ONLY on ``False``.
+    oi_baseline_session, oi_baseline_contiguous
+        The INDEPENDENT OI twin — a null-OI 1-day bar makes the OI baseline
+        fall to the minute fallback on a possibly DIFFERENT day than the close
+        baseline, so the two flags never share a verdict.
     """
 
     underlying: str
@@ -325,6 +340,10 @@ class OptionMover:
     iv: float | None = None
     delta: float | None = None
     strike_step_confidence: StepConfidence | None = None
+    prev_close_session: str | None = None
+    prev_close_contiguous: bool | None = None
+    oi_baseline_session: str | None = None
+    oi_baseline_contiguous: bool | None = None
 
     @property
     def name(self) -> str:
@@ -558,7 +577,7 @@ def compute_option_mover(
 
 def _option_row(mover: OptionMover) -> dict[str, Any]:
     """Project one mover to a markets-screen Options row (money 2dp, metrics full-precision)."""
-    return {
+    row: dict[str, Any] = {
         "name": mover.name,
         "symbol": mover.symbol,
         "exchange": mover.exchange,
@@ -589,6 +608,16 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "iv": mover.iv,
         "delta": mover.delta,
     }
+    # EMIT-ON-FALSE, each baseline INDEPENDENT (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001):
+    # the additive provenance keys appear ONLY when the calendar PROVED that
+    # baseline non-contiguous — contiguous and abstained rows stay byte-identical.
+    if mover.prev_close_contiguous is False:
+        row["prev_close_session"] = mover.prev_close_session
+        row["prev_close_contiguous"] = mover.prev_close_contiguous
+    if mover.oi_baseline_contiguous is False:
+        row["oi_baseline_session"] = mover.oi_baseline_session
+        row["oi_baseline_contiguous"] = mover.oi_baseline_contiguous
+    return row
 
 
 def build_options_payload(
@@ -603,6 +632,7 @@ def build_options_payload(
     expiry_track: str = "all",
     min_volume: int | None = None,
     calendar_only_expiry: bool = False,
+    latest_time: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -641,6 +671,11 @@ def build_options_payload(
         valid tier expiry but NO contract candles were pulled for it, so the note
         honestly says "no data pulled for this expiry" instead of implying the expiry
         does not exist.
+    latest_time
+        The ADDITIVE display-only echo of the resolved latest intraday minute
+        (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
+        ``latest (HH:MM)`` while the default cut stays whole-day; ``None`` for an
+        explicit *time* / daily interval / empty lake. Never affects a number.
 
     Returns
     -------
@@ -703,6 +738,7 @@ def build_options_payload(
         "min_volume": floor,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
+        "latest_time": latest_time,
         "note": note,
         **ranked,
     }
@@ -1142,6 +1178,8 @@ def compute_options_candidates(
     movers: list[OptionMover] = []
     skipped = 0
     skip_errors = movers_read_skip_errors()
+    warn_state = _NoncontiguousWarnState()
+    expected_session_for = make_expected_session_resolver(day)
     for symbol, contract_exchange, underlying, expiry, strike, opt_type in contracts:
         try:
             read = _read_future_session(
@@ -1163,10 +1201,10 @@ def compute_options_candidates(
             # I/O, never recomputed at render; None for a legacy pre-Greeks partition
             # or a stamped-NULL bar (honest NA, Golden Rule #1).
             ltp, volume, value_paisa, oi, iv, delta = read
-            prev_close = _prev_day_close(
+            close_baseline = resolve_prev_close(
                 lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
             )
-            prev_oi = _prev_day_oi(
+            oi_baseline = resolve_prev_oi(
                 lake_root, exchange=contract_exchange, segment=_FNO_SEGMENT, symbol=symbol, day=day
             )
             # The underlying spot is probed under the PARSED underlying (NIFTY); the
@@ -1185,27 +1223,66 @@ def compute_options_candidates(
             log_movers_skip(source="options", symbol=symbol, error=str(exc))
             skipped += 1
             continue
-        movers.append(
-            compute_option_mover(
-                underlying=resolved_names.get(underlying, underlying),
-                expiry=expiry,
-                strike=strike,
-                opt_type=opt_type,
-                symbol=symbol,
-                exchange=contract_exchange,
-                ltp=ltp,
-                volume=volume,
-                value_paisa=value_paisa,
-                oi=oi,
-                prev_close=prev_close,
-                spot_ltp=spot_ltp,
-                prev_oi=prev_oi,
-                strike_step=step_by_key.get((underlying, expiry), _NO_STEP).step,
-                strike_step_confidence=step_by_key.get((underlying, expiry), _NO_STEP).confidence,
-                iv=iv,
-                delta=delta,
-            )
+        mover = compute_option_mover(
+            underlying=resolved_names.get(underlying, underlying),
+            expiry=expiry,
+            strike=strike,
+            opt_type=opt_type,
+            symbol=symbol,
+            exchange=contract_exchange,
+            ltp=ltp,
+            volume=volume,
+            value_paisa=value_paisa,
+            oi=oi,
+            prev_close=close_baseline.value,
+            spot_ltp=spot_ltp,
+            prev_oi=oi_baseline.value,
+            strike_step=step_by_key.get((underlying, expiry), _NO_STEP).step,
+            strike_step_confidence=step_by_key.get((underlying, expiry), _NO_STEP).confidence,
+            iv=iv,
+            delta=delta,
         )
+        # Baseline calendar-contiguity provenance, close + OI judged INDEPENDENTLY
+        # (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — mirrors the Futures loop). Served
+        # values are untouched; each strictly-False verdict gets ONE capped WARN.
+        cal_exchange = _calendar_exchange(contract_exchange)
+        expected_session = expected_session_for(cal_exchange)
+        close_iso, close_contig = prev_baseline_provenance(
+            close_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
+        )
+        oi_iso, oi_contig = prev_baseline_provenance(
+            oi_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
+        )
+        mover = replace(
+            mover,
+            prev_close_session=close_iso,
+            prev_close_contiguous=close_contig,
+            oi_baseline_session=oi_iso,
+            oi_baseline_contiguous=oi_contig,
+        )
+        if close_iso is not None and close_contig is False:
+            warn_prev_baseline_noncontiguous(
+                warn_state,
+                kind="prev_close",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=close_iso,
+                expected_session=expected_session,
+            )
+        if oi_iso is not None and oi_contig is False:
+            warn_prev_baseline_noncontiguous(
+                warn_state,
+                kind="oi",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=oi_iso,
+                expected_session=expected_session,
+            )
+        movers.append(mover)
 
     return OptionsCandidates(
         movers=tuple(movers),

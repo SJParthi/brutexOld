@@ -927,6 +927,9 @@ def _drive_with_fake(
                 later.tf.label,
                 "bull" if later.direction is Side.BUY else "bear",
                 tuple_cache_params(later, grid),
+                data_snapshot_hash=grid.data_snapshot_hash,
+                indicator_version=grid.indicator_version,
+                code_commit_sha=grid.code_commit_sha,
             )
         next_index = guards.checkpoint.next_index
     return acc, next_index, later_seen
@@ -981,6 +984,9 @@ class TestFailedTuplePrefixFreeze:
                 hit.tf.label,
                 "bull" if hit.direction is Side.BUY else "bear",
                 tuple_cache_params(hit, grid),
+                data_snapshot_hash=grid.data_snapshot_hash,
+                indicator_version=grid.indicator_version,
+                code_commit_sha=grid.code_commit_sha,
             )
             acc = mod._Accumulator()
             # Fail index 0; index 2 is then a cache-skip that occurs AFTER the failure.

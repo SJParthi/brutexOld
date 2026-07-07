@@ -62,6 +62,7 @@ __all__ = [
     "WindowLedgerRecord",
     "expired_window_settle_reason",
     "is_expired_window_settle_reason",
+    "ledger_record_row",
 ]
 
 #: A window the tiler will attempt this pull — upserted at pull start, no outcome
@@ -307,6 +308,40 @@ class WindowLedgerRecord:
     #: no sink result (a lake cold-start seed) — NEVER fabricated to ``0``
     #: (Golden Rule #1: ``0`` would falsely claim "that pull added nothing new").
     bars_net_new: int | None = None
+
+
+def ledger_record_row(
+    r: WindowLedgerRecord,
+) -> tuple[
+    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
+]:
+    """Serialise ONE record to the canonical 14-field ledger row tuple.
+
+    The single source of the row shape (CLAUDE.md §11 COMMON —
+    DEC-SUSPICION-SWEEP-FIXES-001): :meth:`WindowLedger.to_rows` delegates here,
+    and the ``/db`` window-ledger grid's cached projection
+    (:func:`brutex.dashboard.db_view.window_ledger_rows_cached`) reuses it over the
+    mtime-cached records, so the two can never drift. Field order matches the
+    durable store's :data:`~brutex.data.window_ledger_store.LedgerRow` —
+    ``in_pull_fetches`` then ``bars_net_new`` appended LAST for legacy-file
+    back-compat (see :meth:`WindowLedger.to_rows`).
+    """
+    return (
+        r.market,
+        r.security_id,
+        r.interval,
+        r.window_start,
+        r.window_end,
+        r.status,
+        r.bars,
+        r.attempts,
+        r.last_error,
+        r.first_seen_at,
+        r.last_attempt_at,
+        r.empty_streak,
+        r.in_pull_fetches,
+        r.bars_net_new,
+    )
 
 
 @dataclass(slots=True)
@@ -1131,6 +1166,7 @@ class WindowLedger:
         *,
         markets: Collection[str] | None = None,
         intervals: Collection[str] | None = None,
+        symbols: Collection[str] | None = None,
     ) -> LedgerProgress:
         """Return a live O(N) :class:`LedgerProgress` snapshot — thread-safe, idempotent.
 
@@ -1154,6 +1190,16 @@ class WindowLedger:
         pollute its denominator. ``None`` (the default) folds everything —
         byte-identical to the unfiltered snapshot. Still one bounded O(N) sweep
         (the filter is a per-record membership test, no extra pass).
+
+        *symbols* (DEC-PULL-SIX-STEP-ORDER-001): optional SYMBOL scope filter,
+        congruent with *markets* / *intervals* — a record is folded only when
+        its ``security_id`` (the engine ``symbol_name``) is a member. The
+        six-step spot pull runs its until-clean loop PER GROUP (indices, then
+        stocks) over the ONE shared ledger, so each group's outstanding read
+        must fold ONLY its own symbols — otherwise the indices group would
+        burn a vendor-call-free ``stop_no_progress`` round against the stock
+        group's still-PLANNED rows instead of exiting ``stop_clean`` honestly.
+        ``None`` (the default) folds everything — byte-identical to today.
         """
         with self._lock:
             records = list(self._by_window.values())
@@ -1165,6 +1211,8 @@ class WindowLedger:
             if markets is not None and record.market not in markets:
                 continue
             if intervals is not None and record.interval not in intervals:
+                continue
+            if symbols is not None and record.security_id not in symbols:
                 continue
             total += 1
             bars += record.bars
@@ -1205,23 +1253,14 @@ class WindowLedger:
     ) -> tuple[
         str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
     ]:
-        """One record → the canonical serialised 14-tuple (ONE shape — CLAUDE.md §11)."""
-        return (
-            r.market,
-            r.security_id,
-            r.interval,
-            r.window_start,
-            r.window_end,
-            r.status,
-            r.bars,
-            r.attempts,
-            r.last_error,
-            r.first_seen_at,
-            r.last_attempt_at,
-            r.empty_streak,
-            r.in_pull_fetches,
-            r.bars_net_new,
-        )
+        """One record → the canonical serialised 14-tuple (ONE shape — CLAUDE.md §11).
+
+        Delegates to the module-level :func:`ledger_record_row` — the SINGLE row-shape
+        source shared with the ``/db`` grid's cached projection
+        (DEC-SUSPICION-SWEEP-FIXES-001), so the delta flush
+        (DEC-LEDGER-DELTA-FLUSH-001) and every other serialiser can never drift.
+        """
+        return ledger_record_row(r)
 
     def dirty_rows(
         self,
@@ -1297,8 +1336,8 @@ class WindowLedger:
                 ),
             )
 
-    def streak_total(self) -> int:
-        """Sum of ``empty_streak`` across every recorded window — **O(N)**, one lock, no sort.
+    def streak_total(self, *, symbols: Collection[str] | None = None) -> int:
+        """Sum of ``empty_streak`` across the recorded windows — **O(N)**, one lock, no sort.
 
         The secondary progress signal for the outstanding-windows until-clean loop
         (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001): an EMPTY window stepping toward its
@@ -1308,9 +1347,24 @@ class WindowLedger:
         sorted :meth:`records` snapshot (which would be O(N log N) + a second lock) —
         called once per OUTER round (≤ ``AUTO_RESUME_MAX_ROUNDS``), never on the
         per-bar hot path; the bound is O(N) per round, NOT an O(1)-total claim.
+
+        *symbols* (DEC-PULL-SIX-STEP-ORDER-001): optional SYMBOL scope filter,
+        congruent with :meth:`progress_counts`'s — a record folds only when its
+        ``security_id`` is a member. The six-step spot pull's group-scoped
+        until-clean loop must read ONLY its own group's streaks: the ledger is
+        shared and in the default async-pipeline mode a PRIOR group's consumer
+        tails can still drain while this group's loop runs — a foreign late
+        EMPTY tail bumps another group's streak (+1) and a foreign late SUCCESS
+        tail RESETS one to 0, so a ledger-wide fold is NOT constant across the
+        group's rounds (it could mask a genuine stall or falsely read one).
+        ``None`` (the default) folds everything — byte-identical to today.
         """
         with self._lock:
-            return sum(record.empty_streak for record in self._by_window.values())
+            return sum(
+                record.empty_streak
+                for record in self._by_window.values()
+                if symbols is None or record.security_id in symbols
+            )
 
     def to_rows(
         self,
@@ -1339,8 +1393,12 @@ class WindowLedger:
         ``empty_streak`` exactly as that column was — so a legacy 12/13-tuple
         Parquet (written before either existed) still loads (the store fills the
         missing column per-row; an absent ``bars_net_new`` reads ``None``).
+
+        Delegates per-record to the module-level :func:`ledger_record_row` (ONE
+        source of the row shape — the ``/db`` grid's cached projection reuses it,
+        DEC-SUSPICION-SWEEP-FIXES-001).
         """
-        return [self._record_row(r) for r in self.records()]
+        return [ledger_record_row(r) for r in self.records()]
 
     @classmethod
     def from_rows(

@@ -37,10 +37,15 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.exit_index import build_ts_index, exit_indices_consistent
 from brutex.engine.rust_metrics import (
     FLAT_DRAWDOWN_STATS,
+    consume_self_check_sample,
+    disable_kernel,
+    drawdown_compare_key,
     drawdown_stats_via_kernel,
     exceeds_exact_equity_envelope,
+    self_check_pending,
     sweep_rust_metrics_enabled,
     warn_fallback_once,
 )
@@ -53,10 +58,20 @@ from brutex.engine.stage1a import (
     build_bar_bits,
     build_walk_forward_schedule,
 )
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import simulate_trades_with_exit_indices
 from brutex.feed.errors import LookAheadError
 from brutex.feed.lookahead import LookAheadBarrier, LookAheadReport, verify_with_barrier
-from brutex.metrics.compute import ResultMetrics, compute_metrics, compute_metrics_from_scalars
+
+# Intentional friend access (DEC-P0-017 per-site convention): `_drawdown_stats`
+# IS the Python drawdown oracle the burn-in self-check bit-compares the kernel
+# against — importing it (never copying) keeps ONE oracle source of truth
+# (CLAUDE.md §11 COMMON).
+from brutex.metrics.compute import (
+    ResultMetrics,
+    _drawdown_stats,  # pyright: ignore[reportPrivateUsage]
+    compute_metrics,
+    compute_metrics_from_scalars,
+)
 from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.ranking import MIN_TRADES, RankedCombo, passes_gates, rank_combos
 from brutex.strategies.types import Side
@@ -124,7 +139,7 @@ def build_equity_curve(
     if not bars:
         raise ValueError("build_equity_curve: bars must be non-empty")
 
-    ts_to_index = {bar.timestamp: i for i, bar in enumerate(bars)}
+    ts_to_index = build_ts_index(bars)
     realized_at_bar = [0] * len(bars)
     for trade in trades:
         idx = ts_to_index.get(trade.exit_ts)
@@ -238,9 +253,12 @@ def metrics_for_mask(
     :func:`sweep_masks` (many masks over ONE ``bar_bits`` build), and
     :func:`brutex.engine.validation.validate_out_of_sample` (one build, sliced into
     train/test) — so callers build the Stage-1A matrix once and reuse it. Public so
-    those callers need not duplicate the chain (CLAUDE.md §11 COMMON).
+    those callers need not duplicate the chain (CLAUDE.md §11 COMMON). The
+    walker's certified exit indices are threaded into the metrics tail
+    (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a pure fast-path hint, results
+    byte-identical with or without it.
     """
-    trades = _simulate_window(
+    trades, exit_indices = _simulate_window(
         bars,
         bar_bits,
         required_mask,
@@ -250,7 +268,11 @@ def metrics_for_mask(
         take_profit_paisa=take_profit_paisa,
     )
     return metrics_from_trades(
-        bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+        bars,
+        trades,
+        start_equity_paisa=start_equity_paisa,
+        tf_minutes=tf_minutes,
+        exit_indices=exit_indices,
     )
 
 
@@ -263,16 +285,19 @@ def _simulate_window(
     tf_minutes: int,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
-) -> list[ClosedTrade]:
+) -> tuple[list[ClosedTrade], list[int] | None]:
     """Project a mask onto ``bar_bits`` and simulate the trades (the shared seam).
 
     The signal→trade half of :func:`metrics_for_mask`, factored out so the
     walk-forward scorer can get a fold's realized trades (to run the P-06
     confinement guard over them) without duplicating the chain or re-simulating
-    (CLAUDE.md §11 COMMON).
+    (CLAUDE.md §11 COMMON). Returns ``(trades, exit_indices)`` — the walker's
+    certified exit-bar indices (``None`` for an uncertified window,
+    DEC-SWEEP-EXIT-INDEX-FASTPATH-001) so the metrics tail can skip its
+    per-mask ``exit_ts``→index dict build.
     """
     entry_signals = mask_to_entry_signals(bar_bits, required_mask)
-    return simulate_trades(
+    return simulate_trades_with_exit_indices(
         bars,
         entry_signals,
         direction=direction,
@@ -288,6 +313,7 @@ def metrics_from_trades(
     *,
     start_equity_paisa: int,
     tf_minutes: int,
+    exit_indices: Sequence[int] | None = None,
 ) -> ResultMetrics:
     """Build the equity curve from already-simulated trades and compute metrics.
 
@@ -300,22 +326,34 @@ def metrics_from_trades(
     the trades, then each mask's stream flows through THIS identical tail, so
     the wired chain is byte-identical to :func:`metrics_for_mask`'s).
 
-    **Flag-gated Rust metrics tail (DEC-SWEEP-RUST-METRICS-001, default
-    OFF).** With ``BRUTEX_SWEEP_RUST_METRICS`` set truthy, the drawdown
-    family is computed by the fused Rust equity-fold + scan
-    (``fno_math.sweep_drawdown_stats``) via
+    **Flag-gated Rust metrics tail (DEC-SWEEP-RUST-METRICS-001; the default
+    arm is the ONE constant**
+    :data:`~brutex.engine.rust_metrics.SWEEP_RUST_METRICS_DEFAULT`**).**
+    With the flag resolved ON, the drawdown family is computed by the fused
+    Rust equity-fold + scan (``fno_math.sweep_drawdown_stats``) via
     :func:`_metrics_from_trades_via_kernel`, bit-identical to this Python
     tail inside its exactness envelope; ANY envelope/kernel miss falls back
     to the verbatim path below (same results, same error contracts — wheel
     state and flag state can never change behaviour). Because this seam is
     COMMON, the flag arms EVERY consumer together (sweep, walk-forward,
     validation, Stage 3) — safe precisely because the arms are bit-identical
-    (golden + property pinned). OFF (the default) never touches the kernel
-    machinery: one env read, then the pre-#1186 path byte-for-byte.
+    (golden + property pinned). OFF never touches the kernel machinery: one
+    env read, then the pre-#1186 path byte-for-byte.
+
+    ``exit_indices`` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) is an OPTIONAL
+    fast-path hint — each trade's certified exit bar index, as the trade
+    simulators return alongside the trades. It is consumed ONLY by the
+    kernel arm (validated per trade, demoted to the historical dict build on
+    any inconsistency — never to the Python oracle); the OFF arm ignores it
+    entirely, so results are byte-identical with or without it on BOTH arms.
     """
     if sweep_rust_metrics_enabled():
         metrics = _metrics_from_trades_via_kernel(
-            bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+            bars,
+            trades,
+            start_equity_paisa=start_equity_paisa,
+            tf_minutes=tf_minutes,
+            exit_indices=exit_indices,
         )
         if metrics is not None:
             return metrics
@@ -325,26 +363,127 @@ def metrics_from_trades(
     return compute_metrics(trades, equity, total_bars=len(bars))
 
 
+def _exit_pairs(
+    bars: Sequence[CandleBar],
+    trades: Sequence[ClosedTrade],
+    exit_indices: Sequence[int] | None,
+) -> list[tuple[int, int]] | None:
+    """Map each trade to its ``(exit_idx, pnl_paisa)`` kernel pair.
+
+    The FAST PATH (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): a supplied,
+    :func:`~brutex.engine.exit_index.exit_indices_consistent`-validated
+    index stream is consumed directly — ``O(trades)`` per mask, NO
+    ``O(N_bars)`` dict build. An inconsistent stream (a producer/threading
+    bug) is DEMOTED — one warn-once ``exit_indices_demoted`` — to the
+    historical :func:`~brutex.engine.exit_index.build_ts_index` dict path,
+    NEVER to the Python oracle: the dict path computes the identical pairs,
+    so a demotion can never change results, only cost. Returns ``None`` iff
+    a trade's ``exit_ts`` is no bar timestamp — the Python tail then raises
+    ``build_equity_curve``'s exact ValueError (the ``_combo_error``
+    fingerprint feed), never a message duplicated here.
+    """
+    if exit_indices is not None:
+        if exit_indices_consistent(bars, trades, exit_indices):
+            return [(idx, trade.pnl_paisa) for idx, trade in zip(exit_indices, trades, strict=True)]
+        warn_fallback_once("exit_indices_demoted", n_trades=len(trades))
+    ts_to_index = build_ts_index(bars)
+    exits: list[tuple[int, int]] = []
+    for trade in trades:
+        idx = ts_to_index.get(trade.exit_ts)
+        if idx is None:
+            return None
+        exits.append((idx, trade.pnl_paisa))
+    return exits
+
+
+def _oracle_drawdown(
+    n_bars: int, start_equity_paisa: int, exits: list[tuple[int, int]]
+) -> tuple[int, float, int, float]:
+    """Python-oracle drawdown 4-tuple for a kernel-shaped exit scatter.
+
+    The burn-in self-check's reference arm: fold the exits into the
+    materialised equity curve and run the REAL
+    :func:`brutex.metrics.compute._drawdown_stats` scan over it — the exact
+    oracle the kernel is specified against (``span_years`` is not read by
+    the drawdown scan; ``1.0`` satisfies the curve invariant). ``O(N_bars)``
+    — paid only for the first
+    :data:`~brutex.engine.rust_metrics.SELF_CHECK_SAMPLES` kernel-served
+    masks per process.
+    """
+    realized = [0] * n_bars
+    for idx, pnl in exits:
+        realized[idx] += pnl
+    equity: list[int] = []
+    running = start_equity_paisa
+    for delta in realized:
+        running += delta
+        equity.append(running)
+    curve = EquityCurve(
+        equity_paisa=tuple(equity), start_equity_paisa=start_equity_paisa, span_years=1.0
+    )
+    return _drawdown_stats(curve)
+
+
+def _self_checked_drawdown(
+    n_bars: int, start_equity_paisa: int, exits: list[tuple[int, int]]
+) -> tuple[int, float, int, float] | None:
+    """Kernel drawdown with the burn-in bit-compare + autorevert latch.
+
+    Runs the kernel seam; while the process still owes burn-in samples
+    (:func:`~brutex.engine.rust_metrics.self_check_pending`), ALSO runs the
+    Python oracle and bit-compares the two 4-tuples
+    (:func:`~brutex.engine.rust_metrics.drawdown_compare_key` — ints exact,
+    floats by ``struct.pack`` bit pattern). On a MISMATCH — a kernel
+    numerical bug the domain validation cannot see — the kernel is latched
+    OFF for the rest of the process
+    (:func:`~brutex.engine.rust_metrics.disable_kernel`, one ERROR) and the
+    ORACLE value ships (correctness first: a wrong kernel number is never
+    persisted, not even the one that exposed the bug). A passed compare
+    consumes one sample. Returns ``None`` iff the kernel seam itself
+    declined (unavailable / raised / refused / latched) — the caller then
+    serves the mask through the full Python tail.
+    """
+    kernel_stats = drawdown_stats_via_kernel(n_bars, start_equity_paisa, exits)
+    if kernel_stats is None:
+        return None
+    if not self_check_pending():
+        return kernel_stats
+    oracle_stats = _oracle_drawdown(n_bars, start_equity_paisa, exits)
+    if drawdown_compare_key(kernel_stats) != drawdown_compare_key(oracle_stats):
+        disable_kernel(
+            "self_check_mismatch",
+            n_bars=n_bars,
+            kernel=repr(kernel_stats),
+            oracle=repr(oracle_stats),
+        )
+        return oracle_stats
+    consume_self_check_sample()
+    return kernel_stats
+
+
 def _metrics_from_trades_via_kernel(
     bars: Sequence[CandleBar],
     trades: Sequence[ClosedTrade],
     *,
     start_equity_paisa: int,
     tf_minutes: int,
+    exit_indices: Sequence[int] | None = None,
 ) -> ResultMetrics | None:
     """ON-arm metrics tail: fused Rust drawdown + curve-less compute_metrics.
 
     Mirrors :func:`build_equity_curve`'s semantics WITHOUT materialising the
-    ``O(N_bars)`` equity tuple: the SAME last-wins ``ts_to_index``
-    comprehension maps each trade's ``exit_ts`` to its bar index (bars have
-    unique timestamps by that function's contract — on a malformed duplicate
-    both arms use the identical dict, so they cannot diverge), the SAME span
-    expression computes ``span_years``, and the fused kernel folds
-    ``start + Σ realized`` while scanning the drawdown family — bit-identical
-    to ``_drawdown_stats`` inside the 2⁵² exactness envelope (see
-    :mod:`brutex.engine.rust_metrics`). A zero-trade mask short-circuits to
-    the analytically-exact :data:`~brutex.engine.rust_metrics.FLAT_DRAWDOWN_STATS`
-    with NO FFI call (the dominant share of the profiled fixture tail).
+    ``O(N_bars)`` equity tuple: each trade's exit bar index comes from the
+    certified fast path or the SAME last-wins dict
+    (:func:`_exit_pairs` — on a malformed duplicate-timestamp window the
+    producers withhold indices, so both arms use the identical dict and
+    cannot diverge), the SAME span expression computes ``span_years``, and
+    the fused kernel folds ``start + Σ realized`` while scanning the
+    drawdown family — bit-identical to ``_drawdown_stats`` inside the 2⁵²
+    exactness envelope (see :mod:`brutex.engine.rust_metrics`), burn-in
+    self-checked against it (:func:`_self_checked_drawdown`). A zero-trade
+    mask short-circuits to the analytically-exact
+    :data:`~brutex.engine.rust_metrics.FLAT_DRAWDOWN_STATS` with NO FFI call
+    (the dominant share of the profiled fixture tail).
 
     Returns ``None`` whenever the Python tail must serve instead:
 
@@ -353,15 +492,15 @@ def _metrics_from_trades_via_kernel(
       Python tail then raises its OWN exact error, so messages/types are
       byte-identical on both arms and are never duplicated here;
     * the exactness envelope is exceeded, or the kernel is
-      unavailable/raises/returns a refused result (each logged once by
-      :mod:`brutex.engine.rust_metrics`) — the Python tail then computes the
-      bit-identical result.
+      unavailable/raises/returns a refused result/is autorevert-latched
+      (each logged once by :mod:`brutex.engine.rust_metrics`) — the Python
+      tail then computes the bit-identical result.
 
-    Honest envelope (Golden Rule #10): the ``ts_to_index`` build keeps an
-    ``O(N_bars)`` Python dict per traded mask (``ClosedTrade`` carries
-    timestamps, not indices); the win is the equity fold + drawdown scan +
-    curve materialisation, a constant factor — the tail stays
-    ``O(kept · N_bars)`` per tuple.
+    Honest envelope (Golden Rule #10): the win is the equity fold + drawdown
+    scan + curve materialisation plus — on the certified fast path — the
+    removed per-mask ``O(N_bars)`` dict build (``O(trades)`` instead); a
+    demoted stream pays the historical dict build. All constant factors —
+    the tail stays ``O(kept · N_bars)`` per tuple.
     """
     if not bars or start_equity_paisa <= 0:
         return None
@@ -379,17 +518,13 @@ def _metrics_from_trades_via_kernel(
     if not trades:
         drawdown = FLAT_DRAWDOWN_STATS
     else:
-        ts_to_index = {bar.timestamp: i for i, bar in enumerate(bars)}
-        exits: list[tuple[int, int]] = []
-        for trade in trades:
-            idx = ts_to_index.get(trade.exit_ts)
-            if idx is None:
-                # The Python tail raises build_equity_curve's exact ValueError
-                # (whose message feeds _combo_error's fingerprint) — fall
-                # through rather than reproduce the message here.
-                return None
-            exits.append((idx, trade.pnl_paisa))
-        kernel_stats = drawdown_stats_via_kernel(len(bars), start_equity_paisa, exits)
+        exits = _exit_pairs(bars, trades, exit_indices)
+        if exits is None:
+            # The Python tail raises build_equity_curve's exact ValueError
+            # (whose message feeds _combo_error's fingerprint) — fall
+            # through rather than reproduce the message here.
+            return None
+        kernel_stats = _self_checked_drawdown(len(bars), start_equity_paisa, exits)
         if kernel_stats is None:
             return None
         drawdown = kernel_stats
@@ -823,7 +958,7 @@ def _assert_trades_confined(
         not chronologically ordered by exit.
     """
     barrier = LookAheadBarrier(record=False)
-    ts_to_index = {bar.timestamp: i for i, bar in enumerate(window_bars)}
+    ts_to_index = build_ts_index(window_bars)
     for trade in trades:
         exit_index = ts_to_index.get(trade.exit_ts)
         entry_index = ts_to_index.get(trade.entry_ts)
@@ -918,7 +1053,7 @@ def _score_fold(
         start_equity_paisa=start_equity_paisa,
     )
     test_bars = bars[fold.test_start_bar : fold.test_end_bar]
-    test_trades = _simulate_window(
+    test_trades, test_exit_indices = _simulate_window(
         test_bars,
         bar_bits[fold.test_start_bar : fold.test_end_bar],
         required_mask,
@@ -929,7 +1064,11 @@ def _score_fold(
     )
     _assert_trades_confined(test_bars, test_trades)
     test_metrics = metrics_from_trades(
-        test_bars, test_trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+        test_bars,
+        test_trades,
+        start_equity_paisa=start_equity_paisa,
+        tf_minutes=tf_minutes,
+        exit_indices=test_exit_indices,
     )
     return FoldResult(
         fold_index=fold.fold_index,

@@ -47,10 +47,12 @@ from brutex.calendars.nse import (
     is_trading_day_checked,
     is_weekend,
     nifty_rebalance_event_on,
+    previous_trading_session,
     session_minutes_per_day,
     trading_days_between,
     trading_days_between_checked,
 )
+from structlog.testing import capture_logs
 
 
 class TestHolidays:
@@ -1214,3 +1216,118 @@ class TestHolidays2026Complete:
     def test_coverage_span_still_2020_to_2026(self) -> None:
         assert HOLIDAY_COVERAGE_FIRST_YEAR == 2020
         assert HOLIDAY_COVERAGE_LAST_YEAR == 2026
+
+
+class TestMuhuratClampGuard:
+    """DEC-SUSPICION-SWEEP-FIXES-001 (G2) — the clamp_window_end partial-settle guard.
+
+    ``clamp_window_end`` allows an intraday window through ``today`` from the
+    15:30 IST regular close onward (DEC-DAILY-CANDLE-CLAMP-001). A CURRENT/FUTURE
+    Muhurat session that closes AFTER 15:30 (the historical evening sessions)
+    would let a post-15:30 pull settle that day's window SUCCESS BEFORE the
+    evening session traded — the keep-settled skip rule would then never
+    re-fetch the Muhurat bars (a silent partial settle). The 2025 session is
+    afternoon (13:45–14:45, the verified SEBI shift), so today no live entry
+    re-arms the hazard; this enumeration pins that a FUTURE evening entry cannot
+    land SILENTLY — adding one (e.g. the pending 2026-11-08 timings, if notified
+    as an evening session) fails this test and forces a conscious
+    clamp_window_end decision instead of a quiet re-arm.
+    """
+
+    #: The pivot: entries from 2025 onward are the "current/future" regime the
+    #: clamp hazard applies to (pre-2025 evening sessions are historical — any
+    #: pull today fetches them long after the fact, complete).
+    _PIVOT = date(2025, 1, 1)
+    #: The regular NSE close the intraday clamp keys on (15:30 IST).
+    _REGULAR_CLOSE = time(15, 30)
+
+    def test_no_current_or_future_muhurat_session_closes_after_1530(self) -> None:
+        offenders = {
+            d: (open_t, close_t)
+            for d, (open_t, close_t) in MUHURAT_SESSIONS.items()
+            if d >= self._PIVOT and close_t > self._REGULAR_CLOSE
+        }
+        assert offenders == {}, (
+            f"MUHURAT_SESSIONS entries on/after {self._PIVOT} close AFTER 15:30 IST: "
+            f"{offenders} — this re-arms the clamp_window_end partial-settle hazard "
+            "(a post-15:30 pull settles the day SUCCESS before the evening session "
+            "trades and the skip rule never re-fetches it). Before adding such an "
+            "entry, make clamp_window_end Muhurat-aware (defer the day's intraday "
+            "clamp past the special-session close) — see DEC-SUSPICION-SWEEP-FIXES-001."
+        )
+
+    def test_historical_evening_sessions_still_recorded(self) -> None:
+        """The guard must never be 'fixed' by deleting real history: the verified
+        2020–2024 evening sessions stay recorded (Golden Rule #1 — real data)."""
+        evening = [
+            d
+            for d, (_open_t, close_t) in MUHURAT_SESSIONS.items()
+            if d < self._PIVOT and close_t > self._REGULAR_CLOSE
+        ]
+        assert len(evening) == 5  # 2020–2024, all evening sessions
+
+
+class TestPreviousTradingSession:
+    """DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — the COMMON previous-session primitive."""
+
+    def test_plain_weekday_before(self) -> None:
+        # Wed 2024-07-10 → Tue 2024-07-09 (a plain trading Tuesday).
+        assert previous_trading_session(date(2024, 7, 10)) == date(2024, 7, 9)
+
+    def test_weekend_steps_back_to_friday(self) -> None:
+        # Mon 2025-09-29 → Fri 2025-09-26 (Sat/Sun stepped over) — the exact
+        # snapshot geometry of the confirmed /movers prev-close defect repro.
+        assert previous_trading_session(date(2025, 9, 29)) == date(2025, 9, 26)
+
+    def test_steps_over_a_listed_holiday(self) -> None:
+        # Mon 2024-03-25 is Holi (HOLIDAYS_2024); Tue 2024-03-26 walks over the
+        # holiday AND the weekend to Fri 2024-03-22.
+        assert previous_trading_session(date(2024, 3, 26)) == date(2024, 3, 22)
+
+    def test_special_weekend_budget_session_is_the_prior_session(self) -> None:
+        # Sat 2025-02-01 is a special Budget trading session — Mon 2025-02-03's
+        # previous session is that SATURDAY, not Fri 2025-01-31.
+        assert previous_trading_session(date(2025, 2, 3)) == date(2025, 2, 1)
+        # The 2026 Sunday Budget session twin (2026-02-01 → Mon 2026-02-02).
+        assert previous_trading_session(date(2026, 2, 2)) == date(2026, 2, 1)
+
+    def test_muhurat_day_is_a_non_session_honest_limit(self) -> None:
+        # HONEST LIMIT (Golden Rule #10): the 2025 Diwali Muhurat day
+        # (2025-10-21, a listed holiday carrying a ~1h special session) is a
+        # NON-session for this primitive — the walk from Thu 2025-10-23 steps
+        # over BOTH holiday days (10-22 Balipratipada + 10-21 Muhurat) to Mon
+        # 2025-10-20, never returning the Muhurat date.
+        got = previous_trading_session(date(2025, 10, 23))
+        assert got == date(2025, 10, 20)
+        assert got != date(2025, 10, 21)  # the Muhurat day is never returned
+
+    def test_out_of_coverage_abstains_none_with_one_warning(self) -> None:
+        # 2020-01-01's walk immediately probes 2019-12-31 — an out-of-coverage
+        # WEEKDAY — so the strict calendar refuses and the primitive ABSTAINS
+        # (None, never a guessed session) with ONE named warning.
+        with capture_logs() as logs:
+            assert previous_trading_session(date(2020, 1, 1)) is None
+        events = [e for e in logs if e["event"] == "calendar.previous_session_coverage_exhausted"]
+        assert len(events) == 1
+        assert events[0]["requested_date"] == "2020-01-01"
+        assert events[0]["probe_date"] == "2019-12-31"
+
+    def test_out_of_coverage_weekend_start_still_abstains(self) -> None:
+        # Mon 2019-06-03: the walk crosses Sun/Sat (data-complete non-sessions,
+        # no raise) then hits the out-of-coverage Friday weekday → abstain.
+        with capture_logs() as logs:
+            assert previous_trading_session(date(2019, 6, 3)) is None
+        events = [e for e in logs if e["event"] == "calendar.previous_session_coverage_exhausted"]
+        assert len(events) == 1
+        assert events[0]["probe_date"] == "2019-05-31"
+
+    @pytest.mark.parametrize("exchange", [None, "NSE", "BSE"])
+    def test_exchange_parity(self, exchange: str | None) -> None:
+        # NSE ≡ BSE ≡ None for every covered year (the holiday sets are
+        # identical 2020-2026), so the exchange arg is inert parity plumbing.
+        for d in (date(2024, 7, 10), date(2025, 9, 29), date(2024, 3, 26), date(2025, 2, 3)):
+            assert previous_trading_session(d, exchange=exchange) == previous_trading_session(d)
+
+    def test_bad_exchange_raises_value_error_eagerly(self) -> None:
+        with pytest.raises(ValueError, match="unknown exchange"):
+            previous_trading_session(date(2024, 7, 10), exchange="LSE")

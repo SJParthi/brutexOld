@@ -348,6 +348,16 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
     ``condition_bits`` / any knob computes a different key and is never falsely
     skipped (P0-1 of the §9 hostile review). Proximity is flattened to its three
     integer bps values (or ``None``) so equal effective proximity keys identically.
+
+    The three Golden-Rule-#4 reproducibility hashes (``data_snapshot_hash`` /
+    ``indicator_version`` / ``code_commit_sha``) are deliberately NOT in this
+    dict: they are structural keyword-only parameters of
+    :func:`~brutex.engine.sweep_cache.combo_digest` and of the
+    :class:`~brutex.engine.sweep_cache.SweepCache` ``seen`` / ``record``
+    convenience calls (DEC-COMBO-DIGEST-REPRO-HASHES-001 — the digest injects
+    them internally under the SAME legacy keys, byte-identical), so a caller
+    can no longer forget them and silently alias dedup entries across data
+    snapshots. Every call site passes them from the grid explicitly.
     """
     proximity_bps = (
         None
@@ -374,9 +384,6 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
         "prior_n": grid.prior_n,
         "start_equity_paisa": grid.start_equity_paisa,
         "mode": grid.mode,
-        "data_snapshot_hash": grid.data_snapshot_hash,
-        "indicator_version": grid.indicator_version,
-        "code_commit_sha": grid.code_commit_sha,
         "top_k": grid.top_k,
         "min_hits": grid.min_hits,
         "max_combos": grid.max_combos,
@@ -409,6 +416,9 @@ def tuple_cache_key(tuple_: SweepTuple, grid: SweepGridConfig) -> bytes:
         tuple_.tf.label,
         _direction_label(tuple_.direction),
         _tuple_cache_params(tuple_, grid),
+        data_snapshot_hash=grid.data_snapshot_hash,
+        indicator_version=grid.indicator_version,
+        code_commit_sha=grid.code_commit_sha,
     )
 
 
@@ -702,6 +712,9 @@ def run_supervised_grid(
                 tuple_.tf.label,
                 _direction_label(tuple_.direction),
                 _tuple_cache_params(tuple_, grid),
+                data_snapshot_hash=grid.data_snapshot_hash,
+                indicator_version=grid.indicator_version,
+                code_commit_sha=grid.code_commit_sha,
             ):
                 skipped_cache += 1
                 if not had_failure:
@@ -781,6 +794,9 @@ def run_supervised_grid(
                 tuple_.tf.label,
                 _direction_label(tuple_.direction),
                 _tuple_cache_params(tuple_, grid),
+                data_snapshot_hash=grid.data_snapshot_hash,
+                indicator_version=grid.indicator_version,
+                code_commit_sha=grid.code_commit_sha,
             )
             if not had_failure:
                 guards.checkpoint.record(index)

@@ -71,7 +71,6 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import math
 import os
 import threading
 import time
@@ -81,6 +80,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
+from brutex.config.deadline import resolve_env_seconds
 from brutex.data.atomic_io import lake_write_guard
 from brutex.data.errors import PartitionLockTimeout
 from brutex.observability.progress_beat import emit_progress_beat
@@ -143,18 +143,11 @@ def resolve_partition_lock_timeout_seconds() -> float:
     non-positive, OR non-finite (``nan`` / ``inf`` parse as floats but would defeat the
     bound — a ``nan`` deadline makes ``clock() >= deadline`` perpetually False, an ``inf``
     deadline never expires — re-introducing the infinite block this fix removes). A bad
-    value can therefore NEVER disable the bound. O(1).
+    value can therefore NEVER disable the bound. Delegates to the ONE COMMON validation
+    shape :func:`~brutex.config.deadline.resolve_env_seconds`
+    (DEC-STORE-WRITE-DEADLINE-001; CLAUDE.md §11 COMMON). O(1).
     """
-    raw = os.environ.get(PARTITION_LOCK_TIMEOUT_ENV)
-    if raw is None or not raw.strip():
-        return DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS
-    if not math.isfinite(value) or value <= 0.0:
-        return DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS
-    return value
+    return resolve_env_seconds(PARTITION_LOCK_TIMEOUT_ENV, DEFAULT_PARTITION_LOCK_TIMEOUT_SECONDS)
 
 
 def _acquire_bounded(

@@ -177,3 +177,67 @@ class TestWorkersToSaturate:
     def test_tiny_positive_product_floors_to_one(self) -> None:
         # ceil(0.5 x 0.5)=ceil(0.25)=1 — never zero, always makes progress.
         assert workers_to_saturate(0.5, 0.5) == 1
+
+
+class TestPoolContextPropagation:
+    """DEC-PULL-BEAT-PERRUN-001 fix round: every pool task runs in a COPY of the
+    SUBMITTING thread's contextvars context, so the driver's ambient ``pull_id``
+    reaches the workers (the metadata phase's pace/reauth seam beats then attribute
+    to the run's keyed channel instead of dropping) and no bind can leak across a
+    reused pool thread."""
+
+    def test_workers_inherit_the_drivers_pull_id(self) -> None:
+        from brutex.observability.correlation import current_pull_id, pull_id_scope
+
+        pool = PoolRunParallel(max_workers=4)
+        with pull_id_scope("abc123def456"):
+            results = list(pool(lambda _x: current_pull_id(), list(range(8))))
+        assert {r.result for r in results} == {"abc123def456"}
+
+    def test_no_ambient_context_propagates_empty(self) -> None:
+        from brutex.observability.correlation import current_pull_id
+
+        pool = PoolRunParallel(max_workers=2)
+        results = list(pool(lambda _x: current_pull_id(), [1, 2, 3]))
+        assert {r.result for r in results} == {""}
+
+    def test_task_raw_bind_never_leaks_across_tasks(self) -> None:
+        """A task that RAW-binds a pull_id inside its own context copy poisons only
+        itself — every other task keeps the driver's (empty) context, even on the
+        single reused worker thread."""
+        import structlog.contextvars
+        from brutex.observability.correlation import current_pull_id
+
+        pool = PoolRunParallel(max_workers=1)  # one reused thread — the leak shape
+
+        def fn(x: int) -> str:
+            if x == 0:
+                structlog.contextvars.bind_contextvars(pull_id="poisonpoison")
+            return current_pull_id()
+
+        by_item = {r.item: r.result for r in pool(fn, [0, 1, 2])}
+        assert by_item[0] == "poisonpoison"
+        assert by_item[1] == "" and by_item[2] == ""
+
+    def test_pool_worker_beat_reaches_the_runs_keyed_channel(self) -> None:
+        """The real anti-false-stall wire: a worker's ``emit_progress_beat`` (the
+        rate ``pace`` return shape) routes to the run's KEYED channel with zero
+        foreign drops — the metadata-phase mechanism pin."""
+        from brutex.observability.correlation import pull_id_scope
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+            reset_progress_beats,
+        )
+
+        reset_progress_beats()
+        beats: list[int] = []
+        register_progress_beat(lambda: beats.append(1), pull_id="abc123def456")
+        try:
+            pool = PoolRunParallel(max_workers=4)
+            with pull_id_scope("abc123def456"):
+                results = list(pool(lambda _x: emit_progress_beat(), list(range(6))))
+            assert all(r.ok for r in results)
+            assert beats == [1] * 6  # every worker beat was delivered, none dropped
+        finally:
+            reset_progress_beats()

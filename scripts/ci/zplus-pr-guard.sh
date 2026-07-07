@@ -46,7 +46,7 @@ OVERRIDE_LOG="${OVERRIDE_LOG_PATH:-$(dirname "$0")/pre-merge-overrides.log}"
 # `PR_HAS_SECURITY_LABEL` env var still accepted for backwards-compat
 # with any caller that sets it; the value is ignored.
 PR_AUTHOR="${PR_AUTHOR:-}"
-PR_AUTHOR_EXEMPT_PATTERN="${PR_AUTHOR_EXEMPT_PATTERN:-^(renovate\[bot\]|dependabot\[bot\])$}"
+PR_AUTHOR_EXEMPT_PATTERN="${PR_AUTHOR_EXEMPT_PATTERN:-^(renovate\[bot\]|dependabot\[bot\]|github-actions\[bot\])$}"
 
 if [[ "$OVERRIDE_FLAG" == "true" ]] && [[ -z "${OPERATOR_OVERRIDE_REASON:-}" ]]; then
     echo "ERROR: OPERATOR_OVERRIDE=true requires OPERATOR_OVERRIDE_REASON='<why>'" >&2

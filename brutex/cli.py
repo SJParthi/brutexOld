@@ -62,9 +62,13 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from brutex.data.greeks_enrich import GreeksEnrichTarget
 
 from brutex import __version__
+from brutex.config.hardware_envelope import apply_polars_thread_bound
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
@@ -805,6 +809,46 @@ def build_parser() -> argparse.ArgumentParser:
             "Telegram alert (never per window). Give-ups + the alert are stamped as "
             "hash-chained audit rows under <lake>/audit/. Omit to disable (default)."
         ),
+    )
+
+    # ── enrich-greeks (DEC-CLI-GREEKS-ENRICH-001) — bulk Greeks re-enrich ──
+    enrich = sub.add_parser(
+        "enrich-greeks",
+        help=(
+            "Bulk (re-)enrich stored F&O option candles with Greeks "
+            "(stamp-driven, idempotent — the #1188 bulk re-enrich)"
+        ),
+    )
+    enrich.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    enrich.add_argument(
+        "--underlying",
+        action="append",
+        default=None,
+        help=(
+            "Bare underlying token, repeatable (NIFTY, BAJAJ-AUTO); "
+            "matching is exact + case-sensitive; "
+            "default: every stored option underlying"
+        ),
+    )
+    enrich.add_argument(
+        "--start",
+        default=None,
+        help="IST window start YYYY-MM-DD (inclusive; default: all stored months)",
+    )
+    enrich.add_argument(
+        "--end",
+        default=None,
+        help="IST window end YYYY-MM-DD (INCLUSIVE; widened +1 day internally)",
+    )
+    enrich.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print discovery counts only; enrich nothing, take no lock",
     )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
@@ -2974,6 +3018,15 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     talks through its SDK client, not a urllib transport — and no preset
     instrument list: the adapter carries the whole master index and resolves
     each fetched symbol in O(1).
+
+    Rate-controller hooks (DEC-SUSPICION-SWEEP-FIXES-001 D1): this builder wires
+    NO ``pace`` / ``on_rate_limit`` / ``on_success`` — ``cmd_fetch`` constructs the
+    :class:`~brutex.adapters.rate_common.RateController` AFTER this build. The FULL
+    hook triple is bound downstream at the ONE COMMON spine seam
+    (``run_ingest.with_paced_client``, called by ``run_groww_spot_ingest`` with
+    the hooks ``cmd_fetch`` threads into ``run_groww_spot_ingest_with_retry``), so
+    every client-absorbed 429 still decrements the shared AIMD ladder — pinned by
+    the production-wiring test in ``tests/unit/test_groww_spot_rate_feedback.py``.
     """
     from brutex.adapters.groww.adapter import GrowwMarketAdapter
     from brutex.adapters.groww.auth import GrowwCredentials
@@ -3454,6 +3507,122 @@ def _publish_cli_pull_inactive(lake_root: Path, controller: Any, adapter: Any) -
         )
 
 
+def _next_day_saturating(day: date) -> date:
+    """Widen an inclusive end date to its half-open ``+1 day`` boundary, saturating.
+
+    ``date.max + timedelta(days=1)`` raises :class:`OverflowError`; the fetch
+    seam widens AFTER the pull completed, and its outcome must never be
+    replaced by a widening crash ("an enrich error NEVER fails the pull" —
+    DEC-CLI-GREEKS-ENRICH-001, review round-1 fix). Saturating at
+    ``date.max`` loses nothing: the widened value only clamps lake
+    discovery, and the canonical partition window ends at
+    ``MAX_PARTITION_YEAR`` (2100) — no stored bar can sit ON ``9999-12-31``
+    for the exclusive end to drop.
+
+    Parameters
+    ----------
+    day
+        The inclusive end date to widen.
+
+    Returns
+    -------
+    datetime.date
+        ``day + 1 day`` — or ``date.max`` unchanged when no later date exists.
+    """
+    if day == date.max:
+        return date.max
+    return day + timedelta(days=1)
+
+
+def _run_cli_greeks_enrich(
+    *, lake_root: Path, instruments: Sequence[Any], start: date, end: date
+) -> Any:  # -> GreeksEnrichOutcome
+    """Post-fetch Greeks enrich over the pulled-underlyings × pulled-window slice.
+
+    The CLI twin of the dashboard's post-drain enrich seam
+    (``historical_pull.pull_contract_candles``) via the COMMON
+    :func:`~brutex.data.greeks_enrich_pass.run_greeks_enrich_pass`
+    (DEC-CLI-GREEKS-ENRICH-001). Best-effort: a fenced failure never fails the
+    pull; a pull-wide halt (:class:`~brutex.data.errors.LakeWriteHalt` /
+    :class:`~brutex.data.errors.GreeksEnrichPoolBroken`) fires the CRITICAL
+    Telegram alert then re-raises (the ``_one_fetch_pass`` halt pattern). A
+    lake with no option candles skips in O(exchange dirs) with one DEBUG event
+    — no wheel import, no rate resolution, no prints (the dominant pure-spot
+    CLI case).
+
+    Parameters
+    ----------
+    lake_root
+        The resolved production lake root (targets + driver reads/writes).
+    instruments
+        The pulled instruments — their
+        :func:`~brutex.dashboard.gated_prebuild.underlying_match_tokens`
+        union scopes lake discovery to the pulled underlyings.
+    start
+        Half-open enrichment window start (the pulled start date, IST).
+    end
+        Half-open enrichment window end (exclusive — the pulled end + 1 day).
+
+    Returns
+    -------
+    Any
+        The pass's ``GreeksEnrichOutcome`` (``GREEKS_NOT_RUN`` on the
+        no-option-candles pre-gate skip).
+
+    Raises
+    ------
+    LakeWriteHalt
+        Re-raised after the halt alert — a pull-wide host condition.
+    GreeksEnrichPoolBroken
+        Re-raised after the halt alert — the parallel pool died.
+    """
+    import structlog
+
+    from brutex.data.greeks_enrich_pass import (
+        CLI_GREEKS_ENRICH_ENV,
+        GREEKS_NOT_RUN,
+        has_option_candles,
+        lake_target_builder,
+        run_greeks_enrich_pass,
+    )
+
+    if not has_option_candles(lake_root):
+        structlog.get_logger("brutex.cli").debug(
+            "cli.greeks_enrich.skipped_no_options", lake_root=str(lake_root)
+        )
+        return GREEKS_NOT_RUN
+
+    from brutex.dashboard.gated_prebuild import underlying_match_tokens
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+
+    tokens = frozenset[str]().union(*(underlying_match_tokens(i) for i in instruments))
+    print(
+        f"[brutex] greeks enrich — post-pull pass ({CLI_GREEKS_ENRICH_ENV}=0 skips)",
+        file=sys.stderr,
+    )
+    try:
+        outcome = run_greeks_enrich_pass(
+            build_targets=lake_target_builder(lake_root, underlyings=tokens, start=start, end=end),
+            lake_root=lake_root,
+        )
+    except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+        # Pull-wide HOST condition mid-enrich: CRITICAL alert then re-raise —
+        # exactly the _one_fetch_pass halt convention. emit_pull_halt_alert
+        # renders GreeksEnrichPoolBroken via its generic type-name branch —
+        # zero notifier changes (DEC-CLI-GREEKS-ENRICH-001).
+        _emit_pull_halt_alert(exc)
+        raise
+    if outcome.ok:
+        print(f"[brutex] greeks enrich — done, errored_targets={outcome.errored_targets}")
+    else:
+        print(
+            f"[brutex] greeks enrich FAILED ({outcome.error}) — overlay re-attempted "
+            "on the next pull / `brutex enrich-greeks`",
+            file=sys.stderr,
+        )
+    return outcome
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -3593,6 +3762,14 @@ def cmd_fetch(
     resolved = _resolve_lake_root(lake_root)
     try:
         intervals = _resolve_fetch_intervals(interval)
+        # Fail-loud env gate for the post-pull Greeks stage
+        # (DEC-CLI-GREEKS-ENRICH-001): resolved HERE — before any vendor work —
+        # so a junk BRUTEX_CLI_GREEKS_ENRICH value exits EXIT_USER_ERROR without
+        # burning a paced pull (the DEC-RAM-BUDGETS-001 fail-loud env
+        # convention; greeks_enrich_pass is wheel-free at import).
+        from brutex.data.greeks_enrich_pass import resolve_cli_greeks_enrich
+
+        greeks_enrich_enabled = resolve_cli_greeks_enrich()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -3668,15 +3845,12 @@ def cmd_fetch(
     # Golden Rule #8 audit trail (DEC-INGEST-AUDIT-CHAIN-001): a real live pull
     # writes a hash-chained JSONL trail under <lake>/audit/ (RUN_START → per-pair
     # → RUN_COMPLETE). --inspect / --dry-run write no real data, so they get a
-    # null context (no audit). # pragma: no cover — live path (the audit-write
-    # core is 100%-tested in test_groww_run_ingest.py).
-    audit_ctx: Any = contextlib.nullcontext(None)
-    if not (dry_run or inspect):  # pragma: no cover — live
-        from brutex.orchestrator.audit import AuditWriter
+    # null context (no audit). The path + resume semantics live in the ONE COMMON
+    # ``open_ingest_audit`` factory the dashboard pulls now bind too
+    # (DEC-INGEST-AUDIT-WIRING-001) — the CLI behaviour is byte-identical.
+    from brutex.orchestrator.audit import open_ingest_audit
 
-        _ingest_audit_path = resolved / "audit" / "spot-ingest.jsonl"
-        _ingest_audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_ctx = AuditWriter.open(_ingest_audit_path, resume=_ingest_audit_path.exists())
+    audit_ctx: Any = open_ingest_audit(resolved, enabled=not (dry_run or inspect))
     # Integration merge: keep BOTH the ingest-audit context (base-13,
     # DEC-INGEST-AUDIT-CHAIN-001) AND the retry-storm ExitStack (main, #533).
     # The dry-run temp-lake cleanup is OUTERMOST so it removes the ephemeral tree
@@ -3990,6 +4164,12 @@ def cmd_fetch(
                 raise
 
         until_outcome = None
+        # Success-path latch for the post-drain L2 lake heal in the ``finally``
+        # (DEC-LAKE-HEAL-001 / DEC-CLI-LAKE-HEAL-L2-001 — the CLI twin of
+        # pull_controller's ``fetch_phases_ok``): armed as the try body's LAST
+        # statement, so a pull-halt raise leaves it False and the heal never
+        # runs after an already-alerted halt (alert-once holds).
+        fetch_ok = False
         # keep_awake (DEC-PULL-KEEPAWAKE-001): hold the macOS host awake for the
         # whole fetch (including every until-clean round + the drain/persist
         # finally) — a sleeping Mac silently paused a real 6.5 h pull mid-flight.
@@ -4035,6 +4215,8 @@ def cmd_fetch(
                     result = fetch_passes[0]
                 else:
                     result = _one_fetch_pass(do_retry)
+                # Fetch pass(es) returned without raising — arm the L2 heal.
+                fetch_ok = True
             finally:
                 # Drain the FULL async fetch pipeline FIRST, then the batched write consumer —
                 # the SAME ordering the dashboard uses (DEC-CLI-FETCH-ISOLATION-001 mirroring
@@ -4049,6 +4231,44 @@ def cmd_fetch(
                 # error is swallowed so the ledger persist still runs.
                 drain_fetch_pipeline(fetch_pipeline)
                 drain_write_consumer(write_consumer)
+                # DEC-LAKE-HEAL-001 L2 (CLI seam — DEC-CLI-LAKE-HEAL-L2-001, the #1175
+                # named follow-up): heal the just-pulled slice at the SAME post-drain
+                # seam the dashboard uses (the fetched 1-minute is durably in the lake
+                # only after BOTH drains above), BEFORE end_pull_ledger — mirroring
+                # pull_controller.py's drain → heal → ledger-persist ordering — via the
+                # SAME glue (CLAUDE.md §11 COMMON, the _build_pull_health_monitor
+                # private-import precedent; no copy). SUCCESS-path only (fetch_ok);
+                # --dry-run / --inspect stay inert via _no_persist (zero scan, zero
+                # writes; the ephemeral dry-run lake is structurally never healed —
+                # ``resolved`` is passed, and the gate is closed whenever they differ).
+                # The glue swallows every heal error EXCEPT LakeWriteHalt; the CLI has
+                # no BackgroundPullJob halt net above this seam, so a heal-raised
+                # LakeWriteHalt fires the CRITICAL pull-halt Telegram alert HERE
+                # (DEC-TELEGRAM-PULL-HALT-001) then RE-RAISES — non-zero exit via
+                # main's raw propagation, byte-identical to an ingest halt. The CLI
+                # runs NO prebuild (#1145); its ONE downstream derivation — the
+                # post-pull Greeks enrichment (DEC-CLI-GREEKS-ENRICH-001) — runs
+                # AFTER this heal, below the `finally`, so the dashboard's
+                # heal-L2-BEFORE-Greeks-enrich ordering law holds on this path too.
+                # HONEST: the scan is O(files) over pulled-targets x span-months,
+                # NOT O(1) (MIGRATION.md #1175).
+                if fetch_ok and not _no_persist:
+                    from brutex.dashboard.pull_controller import (
+                        _heal_after_pull,  # pyright: ignore[reportPrivateUsage]
+                    )
+                    from brutex.observability.correlation import current_pull_id, new_pull_id
+
+                    try:
+                        _heal_after_pull(
+                            instruments=fetch_instruments,
+                            lake_root=resolved,
+                            start=start_dt.date(),
+                            end=end_dt.date(),
+                            pull_id=current_pull_id() or new_pull_id(),
+                        )
+                    except LakeWriteHalt as exc:
+                        _emit_pull_halt_alert(exc)
+                        raise
                 end_pull_ledger(ledger, resolved, dry_run=_no_persist)
                 # Final bridge publish (DEC-CLI-BRIDGE-PULL-ACTIVE-001): flip pull_active
                 # → False so the dashboard widget reads done/idle the moment the pull
@@ -4056,6 +4276,28 @@ def cmd_fetch(
                 # is already exiting and its real outcome must never be masked. A None
                 # controller (--dry-run / --inspect) is a no-op.
                 _publish_cli_pull_inactive(resolved, rate_controller, adapter)
+            # ── Post-pull Greeks enrichment (DEC-CLI-GREEKS-ENRICH-001, the #1188 CLI
+            # follow-up) ── Seam A: fetch lane fully drained, L2 lake heal already run
+            # (the `finally` above — DEC-CLI-LAKE-HEAL-L2-001; the dashboard's
+            # heal-BEFORE-enrich ordering law), ledger persisted (settle-after-durable
+            # holds), single-flight lock still HELD (no concurrent dashboard pull can
+            # start mid-enrich), keep_awake still active. Targets come
+            # from the LAKE (the CLI pull is spot-only — no in-memory contract list),
+            # bounded to the pulled underlyings × the pulled [start, end) span.
+            # DELIBERATELY NOT gated on bars_appended > 0: in async-pipeline mode the
+            # per-pair counts are only reconciled AFTER this seam (the
+            # reconcile_pairs_with_pipeline fold below), so any such gate would misread
+            # 0 — running unconditionally is stamp-idempotent-safe.
+            if greeks_enrich_enabled and not _no_persist:
+                _run_cli_greeks_enrich(
+                    lake_root=resolved,
+                    instruments=fetch_instruments,
+                    start=start_dt.date(),
+                    # Inclusive pull end → half-open, SATURATING at date.max so a
+                    # degenerate `--end 9999-12-31` pull can never crash the seam
+                    # after the pull completed (review round-1 fix).
+                    end=_next_day_saturating(end_dt.date()),
+                )
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -4105,6 +4347,193 @@ def cmd_fetch(
     if report.failed_pairs > 0 or residual > 0:
         return EXIT_INTERNAL_ERROR
     return EXIT_OK
+
+
+def cmd_enrich_greeks(
+    lake_root: Path | None,
+    *,
+    underlying: list[str] | None,
+    start: str | None,
+    end: str | None,
+    dry_run: bool,
+) -> int:
+    """Bulk (re-)enrich stored option contracts with Greeks — the #1188 follow-up.
+
+    Discovery =
+    :func:`~brutex.data.greeks_enrich_pass.discover_option_windows` over the
+    WHOLE lake (or the ``--underlying`` / ``--start``/``--end`` slice; dates
+    INCLUSIVE at the CLI, the end widened ``+1 day`` internally to the
+    half-open window). ``--dry-run`` prints discovery counts only — wheel-free,
+    zero writes, zero locks, zero ``fno.greeks_enrich.*`` events. Live: takes
+    the cross-process pull single-flight lock (deterministic refusal under a
+    peer pull), runs the COMMON fenced pass under ``keep_awake``, and alerts +
+    re-raises halts (the ``_one_fetch_pass`` pattern). The clean-done summary
+    echoes ``contracts=N`` (the fenced build's ACTUAL target count — captured
+    by wrapping the builder, never a second discovery walk; the ``?`` leg is
+    a DEFENSIVE belt only — with the real pass, ``ok=True`` implies the build
+    already ran, and a pre-build failure reads ``ok=False`` → the FAILED
+    branch, so ``?`` is production-unreachable and guards a future
+    pass-contract change, never fabricating a 0), and an explicit ``--underlying``
+    that matched ZERO stored option contracts prints a loud stderr WARNING
+    naming the tokens — matching is exact + case-sensitive, so ``nifty``
+    never matches stored ``NIFTY`` (review round-4 fix, the one-level-down
+    sibling of the typo'd ``--lake-root`` guard). Exit: :data:`EXIT_OK`
+    iff ``ok is True`` AND ``errored_targets == 0``; :data:`EXIT_INTERNAL_ERROR`
+    otherwise (the ``lake audit-unique`` cron-visible precedent — a DELIBERATE,
+    documented divergence from the never-fail ``fetch`` pull path).
+
+    Parameters
+    ----------
+    lake_root
+        ``--lake-root`` override; ``None`` resolves via ``$BRUTEX_LAKE_ROOT``
+        → ``~/.brutex/lake``.
+    underlying
+        Repeatable bare underlying tokens (``NIFTY``, ``BAJAJ-AUTO``);
+        ``None`` = every stored option underlying.
+    start
+        Optional inclusive IST window start, ``YYYY-MM-DD``.
+    end
+        Optional INCLUSIVE IST window end, ``YYYY-MM-DD`` (``+1 day``
+        internally; ``9999-12-31`` = ``date.max`` is refused as a clean
+        user error — the widening would overflow, review round-1 fix).
+    dry_run
+        Discovery-only counts; enrich nothing, take no lock.
+
+    Returns
+    -------
+    int
+        Process exit code (see above).
+
+    Raises
+    ------
+    CliUserError
+        If the resolved lake root is not an existing directory — the
+        DEC-CLI-USER-ERROR-HYGIENE-001 read-command guard (a typo'd
+        ``--lake-root`` must never read as a green zero-target run, nor
+        materialise a phantom ``.locks/`` tree; review round-1 fix).
+    """
+    from brutex.data.greeks_enrich_pass import (
+        discover_option_windows,
+        lake_target_builder,
+        run_greeks_enrich_pass,
+    )
+
+    resolved = _resolve_lake_root(lake_root)
+    # Refuse a nonexistent lake root LOUDLY (dry-run included): enrich-greeks
+    # READS an existing lake, and a typo'd --lake-root previously exited green
+    # ("errored_targets=0") while the live path even materialised the phantom
+    # lake's .locks/ dir — the exact silent-illusion class _require_lake_dir
+    # exists to prevent (review round-1 fix, DEC-CLI-USER-ERROR-HYGIENE-001).
+    _require_lake_dir(resolved, command="enrich-greeks")
+    try:
+        start_d = date.fromisoformat(start) if start else None
+        end_given = date.fromisoformat(end) if end else None
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if start_d is not None and end_given is not None and start_d > end_given:
+        print(
+            f"[brutex] --start {start_d} is after --end {end_given}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if end_given is not None and end_given == date.max:
+        # date.max is the ONE valid ISO date the +1-day widening below cannot
+        # represent (OverflowError) — refuse it as cleanly as every other
+        # malformed date instead of a raw traceback (review round-1 fix).
+        print(
+            f"[brutex] --end {end_given.isoformat()} is out of range: the "
+            "inclusive end is widened +1 day internally and no later date "
+            "exists — pass a real trading date",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    end_d = end_given + timedelta(days=1) if end_given is not None else None
+    tokens = frozenset(underlying) if underlying else None
+    span = f"[{start_d.isoformat() if start_d else 'lake-start'} → " + (
+        f"{end_d.isoformat()})" if end_d else "lake-end)"
+    )
+
+    if dry_run:
+        try:
+            windows = discover_option_windows(
+                resolved, underlyings=tokens, start=start_d, end=end_d
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            print(f"[brutex] enrich-greeks --dry-run discovery FAILED: {exc}", file=sys.stderr)
+            return EXIT_INTERNAL_ERROR
+        chains = len({(w.exchange, w.underlying, w.expiry) for w in windows})
+        print(
+            f"[brutex] enrich-greeks --dry-run — contracts={len(windows)} "
+            f"chains={chains} window={span} (nothing enriched)"
+        )
+        return EXIT_OK
+
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.observability.power_keepawake import keep_awake
+
+    build_targets = lake_target_builder(resolved, underlyings=tokens, start=start_d, end=end_d)
+    # contracts = how many targets the fenced build ACTUALLY put in scope,
+    # captured by wrapping the builder — NEVER a second discovery walk
+    # (discovery is O(option partition dirs); doubling it would be a hidden
+    # cost, Golden Rule #10). -1 = the build never ran. With the REAL pass
+    # this sentinel cannot survive to the clean-done render: ok=True is
+    # returned only AFTER list(build_targets()) completed, and a pre-build
+    # failure reads ok=False → the FAILED branch below. The "?" render is
+    # therefore a DEFENSIVE belt against a future pass-contract change —
+    # a count the pass did not produce is never fabricated as 0.
+    contracts = -1
+
+    def _counting_build() -> Sequence[GreeksEnrichTarget]:
+        """Delegate to the fence-safe builder, capturing the target count."""
+        nonlocal contracts
+        targets = build_targets()
+        contracts = len(targets)
+        return targets
+
+    with contextlib.ExitStack() as stack:
+        if not _enter_pull_singleflight(stack, resolved):
+            return EXIT_USER_ERROR
+        with keep_awake("brutex enrich-greeks"):
+            print(f"[brutex] enrich-greeks — window={span} lake: {resolved}", file=sys.stderr)
+            try:
+                outcome = run_greeks_enrich_pass(
+                    build_targets=_counting_build,
+                    lake_root=resolved,
+                )
+            except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+                # A pull-wide HOST condition (disk full / OOM / a dead pool
+                # worker): CRITICAL alert then re-raise — the _one_fetch_pass
+                # halt convention (DEC-CLI-GREEKS-ENRICH-001).
+                _emit_pull_halt_alert(exc)
+                raise
+    if outcome.ok is True and tokens is not None and contracts == 0:
+        # An explicit --underlying that matched NOTHING must never read as a
+        # silent green run — matching is exact + case-sensitive ("nifty" never
+        # matches stored NIFTY), the one-level-down sibling of the typo'd
+        # --lake-root guard (review round-4 fix, DEC-CLI-GREEKS-ENRICH-001).
+        # Exit code deliberately unchanged: the pass genuinely completed.
+        print(
+            "[brutex] WARNING: --underlying matched ZERO stored option contracts "
+            f"(tokens: {', '.join(sorted(tokens))}) — matching is exact and "
+            "case-sensitive ('NIFTY', not 'nifty'); check the spelling/case or "
+            "run --dry-run to inspect the scope",
+            file=sys.stderr,
+        )
+    if outcome.ok is True and outcome.errored_targets == 0:
+        shown = str(contracts) if contracts >= 0 else "?"
+        print(f"[brutex] enrich-greeks done — contracts={shown} errored_targets=0")
+        return EXIT_OK
+    if outcome.ok is True:
+        print(
+            f"[brutex] enrich-greeks completed with {outcome.errored_targets} quarantined "
+            "target(s) — see the greeks_enrich.target_errored logs; the stamp-driven pass "
+            "is idempotent, re-run after fixing",
+            file=sys.stderr,
+        )
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] enrich-greeks FAILED ({outcome.error})", file=sys.stderr)
+    return EXIT_INTERNAL_ERROR
 
 
 def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
@@ -4604,6 +5033,37 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"[brutex] WARNING: sweeping PARTIAL coverage (--allow-missing-slices): "
             f"{len(preflight.missing)} empty pairs will skip as no-bars: {missing_str}"
         )
+
+    # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
+    # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
+    # the last prebuild) would feed the engine stale bars AND hash them into the run
+    # identity as if canonical (Golden Rule #4) — refuse the launch loudly with the
+    # exact remedy instead. Verifiable pairs only (derived intraday TFs with BOTH a
+    # stored partition and a 1-minute base — the zero-bar preflight above owns the
+    # missing-data refusal; abstains never block). NO escape flag by design:
+    # Correctness > everything (the merge-readiness priority law) — the remedy is
+    # the pipeline's prebuild, never sweeping known-stale data.
+    from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
+    from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+    freshness = preflight_derived_freshness(
+        lake_derived_freshness_verdicts(
+            resolved_lake,
+            exchange=exchange,
+            segment=segment,
+            symbols=symbol_list,
+            intervals=interval_list,
+        )
+    )
+    if not freshness.ok:
+        stale_str = ", ".join(f"{s}/{i}" for s, i in freshness.stale)
+        print(
+            f"[brutex] REFUSED: {len(freshness.stale)} of {freshness.checked} verifiable "
+            f"derived (symbol, interval) pairs are STALE vs a fresh 1-minute "
+            f"re-derivation: {stale_str}. Remedy: {freshness.remediation()}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
 
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [
@@ -6429,10 +6889,14 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     )
 
 
-def _render_options_leaderboard(
-    row: Any, results: tuple[Any, ...]
-) -> str:  # pragma: no cover — formatting over real-run output
-    """Render the per-rule priced-options leaderboard for one winning spot run."""
+def _render_options_leaderboard(row: Any, results: tuple[Any, ...]) -> str:
+    """Render the per-rule priced-options leaderboard for one winning spot run.
+
+    A pure formatter over ``(row, OptionsRuleResult…)`` — no lake I/O — so it
+    is directly unit-tested (the former ``pragma: no cover`` was LIFTED when
+    the DEC-ETC-REGIME-HISTORY-001 honesty footer added real derivation logic;
+    tests/unit/test_cli_options_leaderboard.py).
+    """
     from brutex.money import format_inr
 
     lines = [
@@ -6444,6 +6908,24 @@ def _render_options_leaderboard(
             f"{res.rule_name:<22} {res.n_accepted:>7} {res.win_rate * 100:>5.1f}% "
             f"{format_inr(res.gross_pnl_paisa):>16} {format_inr(res.total_charges_paisa):>14} "
             f"{format_inr(res.net_pnl_paisa):>16}"
+        )
+    # DEC-ETC-REGIME-HISTORY-001 honesty footer: trades skipped on an
+    # UNVERIFIED cost-regime window are surfaced, never silently absorbed.
+    # The boundary date is derived from the regime-table DATA (the max
+    # refusal-window end across exchanges), never hardcoded.
+    # Direct attribute access, deliberately NOT getattr(..., 0): a future
+    # field rename on OptionsRuleResult must fail LOUD here, never silently
+    # render no footer forever (the honesty purpose would be defeated).
+    n_unverified = sum(r.n_rejected_cost_regime_unverified for r in results)
+    if n_unverified:
+        from brutex.costs.constants import etc_unverified_windows
+
+        ends = [end for spans in etc_unverified_windows().values() for _start, end in spans if end]
+        verified_from = max(ends).isoformat() if ends else "open"
+        lines.append(
+            f"⚠ {n_unverified} trade(s) fell in the UNVERIFIED pre-{verified_from} ETC "
+            f"window — skipped, never priced with a fabricated rate "
+            f"(COSTS_VERIFIED §20 row 1)"
         )
     return "\n".join(lines)
 
@@ -6636,6 +7118,18 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command is None or args.command == "version":
         return cmd_version()
+    # DEC-THREAD-BUDGET-BOUNDS-001 — bound the polars global thread pool ONCE
+    # per process, at the ONE entrypoint every BruteX process (CLI fetch AND
+    # the in-process uvicorn dashboard) enters, BEFORE the first lazy `import
+    # polars` any dispatch below can trigger (verified: importing brutex.cli
+    # pulls in neither polars nor duckdb; the polars-free `version` fast path
+    # above stays log-free — its byte-exact stdout contract is test-pinned).
+    # Runs AFTER bootstrap_env so a persisted BRUTEX_POLARS_THREADS /
+    # POLARS_MAX_THREADS in ~/.brutex/.env is honoured. Safe by construction:
+    # an operator-preset POLARS_MAX_THREADS is respected, and an
+    # already-imported polars logs one loud too-late warning per process
+    # instead of pretending a bound applied.
+    apply_polars_thread_bound()
     if args.command == "status":
         return cmd_status(run_id=args.run_id)
     if args.command == "audit":
@@ -6705,6 +7199,14 @@ def _dispatch(argv: list[str] | None) -> int:
             until_clean=args.until_clean,
             until_clean_rounds=args.until_clean_rounds,
             max_retry_minutes=args.max_retry_minutes,
+        )
+    if args.command == "enrich-greeks":
+        return cmd_enrich_greeks(
+            args.lake_root,
+            underlying=args.underlying,
+            start=args.start,
+            end=args.end,
+            dry_run=args.dry_run,
         )
     if args.command == "doctor":
         if args.live:

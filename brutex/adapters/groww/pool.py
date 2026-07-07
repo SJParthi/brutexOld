@@ -107,6 +107,26 @@ class ClientPool:
         """
         return all(leaf.self_paces for leaf in self._clients)
 
+    @property
+    def self_reports_rate_limits(self) -> bool:
+        """Whether EVERY leaf feeds its own 429 occurrences to a real ``on_rate_limit``.
+
+        The pool twin of :attr:`~brutex.adapters.groww.client.GrowwClient.\
+self_reports_rate_limits` (DEC-SUSPICION-SWEEP-FIXES-001): ``True`` only when ALL
+        leaves carry a bound decrement hook, so the ingest spines drop their own
+        429 feedback only when NO connection's occurrences can go unreported.
+        """
+        return all(leaf.self_reports_rate_limits for leaf in self._clients)
+
+    @property
+    def self_reports_successes(self) -> bool:
+        """Whether EVERY leaf feeds its own clean calls to a real ``on_success``.
+
+        The pool twin of :attr:`~brutex.adapters.groww.client.GrowwClient.\
+self_reports_successes` — same all-leaves rule as :attr:`self_paces`.
+        """
+        return all(leaf.self_reports_successes for leaf in self._clients)
+
     def _leaf(self) -> GrowwClient:
         """Return THIS thread's bound leaf, assigning one round-robin on first use (O(1)).
 
@@ -179,6 +199,32 @@ class ClientPool:
         fresh pool rebinds on first use) — harmless, the leaves are equivalent up to ``pace``.
         """
         return ClientPool([leaf.with_pace(pace) for leaf in self._clients])
+
+    def with_rate_hooks(
+        self,
+        *,
+        pace: Callable[[], None] | None = None,
+        on_rate_limit: Callable[[], None] | None = None,
+        on_success: Callable[[], None] | None = None,
+    ) -> ClientPool:
+        """Return a new pool with the FULL hook triple rebound on EVERY leaf.
+
+        The pool twin of :meth:`~brutex.adapters.groww.client.GrowwClient.\
+with_rate_hooks` (DEC-SUSPICION-SWEEP-FIXES-001) — the spot ingest seam
+        (:func:`~brutex.adapters.groww.run_ingest.with_paced_client`) re-fans the
+        shared controller's ``pace`` + ``on_rate_limit`` + ``on_success`` into ALL
+        K leaves, so no connection's absorbed 429s can bypass the AIMD ladder. A
+        ``None`` hook keeps each leaf's current binding; the shared ``meter`` is
+        carried through (``compare=False`` on the leaf dataclass). Thread bindings
+        reset (the fresh pool rebinds on first use) — harmless, mirroring
+        :meth:`with_pace`.
+        """
+        return ClientPool(
+            [
+                leaf.with_rate_hooks(pace=pace, on_rate_limit=on_rate_limit, on_success=on_success)
+                for leaf in self._clients
+            ]
+        )
 
 
 __all__ = ["ClientPool"]

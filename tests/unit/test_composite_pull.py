@@ -24,12 +24,16 @@ REAL temp :class:`RegistryStore`, a tiny in-memory coverage sink, a recording
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
+import structlog.testing
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.constants import OPTION_SEGMENT
 from brutex.dashboard import composite_pull as cp
@@ -37,6 +41,7 @@ from brutex.dashboard.composite_pull import (
     CompositePullReport,
     pull_historical_for_underlyings,
 )
+from brutex.dashboard.pipeline_pull import PriorStepsVerdict
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.registry_store import RegistryStore
 from brutex.data.sink import BarSink, SinkAppendResult
@@ -230,6 +235,7 @@ def _run(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: Callable[[int, int, int, int, str], None] | None = None,
+    prior_steps: PriorStepsVerdict | None = None,
 ) -> CompositePullReport:
     if lake_root is None:
         # Each test gets its OWN lake (so the persisted WindowLedger never bleeds across
@@ -260,6 +266,7 @@ def _run(
         scope_end=scope_end,
         on_bars=on_bars,
         on_ledger_sync=on_ledger_sync,
+        prior_steps=prior_steps,
     )
 
 
@@ -496,6 +503,45 @@ def test_registry_read_keys_resolve_alias_normalize_and_dedup() -> None:
     assert cp._registry_read_keys(instruments) == ("NIFTYNXT50", "BAJAJAUTO", "NIFTY")
 
 
+def test_underlying_kind_map_first_wins_on_key_collision() -> None:
+    """Two spot spellings sharing one F&O primary keep the FIRST row's kind.
+
+    ``_underlying_kind_map`` mirrors the read-key first-wins de-dup
+    (DEC-PULL-SIX-STEP-ORDER-001): a later row landing on an already-mapped
+    primary key must NEVER overwrite the classification (order decides).
+    """
+
+    def _kinded(symbol: str, security_id: int, kind: InstrumentType) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=security_id,
+            symbol_name=symbol,
+            display_name=symbol,
+            instrument=kind,
+            segment=Segment.INDEX if kind == InstrumentType.IDX else Segment.CASH,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=0 if kind == InstrumentType.IDX else 500,
+            tick_size=Decimal("0") if kind == InstrumentType.IDX else Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+
+    # Hyphen-normalized stock first, then a contrived IDX row on the SAME
+    # primary key — the collision arm must keep the FIRST row's kind.
+    stock_first = [
+        _kinded("BAJAJ-AUTO", 1, InstrumentType.EQ),
+        _kinded("BAJAJAUTO", 2, InstrumentType.IDX),
+    ]
+    assert cp._underlying_kind_map(stock_first) == {"BAJAJAUTO": False}
+    # Order flipped → the index classification wins instead (order decides).
+    assert cp._underlying_kind_map(list(reversed(stock_first))) == {"BAJAJAUTO": True}
+
+
 def test_aliased_underlying_chain_visible_to_candle_phase(tmp_path: Path) -> None:
     """FAILS-BEFORE regression: an aliased index's fresh chain must reach phase (b).
 
@@ -598,6 +644,113 @@ def test_composite_note_without_skips_has_no_breakdown(tmp_path: Path) -> None:
     assert report.historical.contracts_not_yet_in_window == 0
     assert "not yet in window" not in report.note
     assert "3/3 contract(s)" in report.note
+
+
+# ── wedged store: phase (b) is GATED, never a whole-job crash ───────────────────
+# DEC-STORE-WRITE-DEADLINE-001: a store-write deadline breach during phase (a)
+# leaves the SHARED registry WEDGED (the zombie write still holds the DuckDB
+# connection's internal mutex). Before the gate, phase (b)'s registry re-read
+# (``_select_fresh_contracts`` → ``list_contracts`` → ``_ensure_not_wedged``)
+# raised the TERMINAL ``RegistryError`` UNCAUGHT — the whole composite job (and
+# the pipeline's phase 3, which shares ONE registry across the composite) died
+# instead of the graceful per-underlying defer. The composite now consults
+# ``metadata.store_write_deferrals``, skips phase (b), and RETURNS an honest
+# report; the deferred underlyings re-attempt (and complete) on the next pull.
+
+
+class _RegistryGateConn:
+    """Proxy over the registry's DuckDB conn that HANGS on a matching statement.
+
+    The deterministic wedge (the #999 recipe, mirroring ``test_metadata_pull``):
+    ``entered`` proves the hang engaged; ``gate`` is released by the test's
+    ``finally`` (30 s safety so a crashed test never leaves a forever-daemon).
+    """
+
+    def __init__(self, real: object, *, hang_on: str) -> None:
+        self._real = real
+        self._hang_on = hang_on
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+
+    def execute(self, sql: str, params: list[object] | None = None) -> object:
+        if self._hang_on in sql:
+            self.entered.set()
+            self.gate.wait(timeout=30.0)
+        real: Any = self._real
+        if params is None:
+            return real.execute(sql)
+        return real.execute(sql, params)
+
+    def close(self) -> None:
+        real: Any = self._real
+        real.close()
+
+
+def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILS-BEFORE regression: a registry wedged DURING phase (a) — the zombie
+    still in flight when phase (b) starts — must yield an honest report with
+    ``historical=None`` (candle phase skipped, deferral surfaced), NEVER an
+    uncaught terminal ``RegistryError`` that kills the whole composite job."""
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    proxy = _RegistryGateConn(registry._conn, hang_on="INSERT OR REPLACE INTO expiries")
+    registry._conn = proxy
+    start = time.monotonic()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            report = _run(
+                [_instrument("NIFTY", 13)],
+                sdk=sdk,
+                sink=sink,
+                registry=registry,
+                coverage=coverage,
+            )
+        assert proxy.entered.is_set()  # the wedge genuinely engaged
+        assert time.monotonic() - start < 10.0  # completed within one small deadline
+        # The composite RETURNED (no raise) with the candle phase skipped honestly.
+        assert report.metadata is not None
+        assert report.metadata.store_write_deferrals == 1
+        assert report.historical is None
+        assert report.note == (
+            "metadata deferred 1 registry/coverage write batch(es) on a wedged "
+            "store volume — candle phase skipped; deferred underlyings re-attempt "
+            "next pull"
+        )
+        assert report.to_dict()["historical"] is None
+        # Phase (b) never ran: zero candle vendor calls, zero lake appends.
+        assert "get_historical_candles" not in sdk.calls
+        assert sink.appends == []
+        # The gate is LOUD.
+        deferred = [r for r in logs if r["event"] == "composite_pull.metadata_write_deferred"]
+        assert len(deferred) == 1
+        assert deferred[0]["tradable"] == ["NIFTY"]
+        assert deferred[0]["store_write_deferrals"] == 1
+    finally:
+        proxy.gate.set()
+    # RE-ATTEMPT ON THE NEXT PULL: the volume heals (the zombie's idempotent write
+    # completes, the wedge latch self-clears) and the SAME selection runs WHOLE —
+    # metadata re-pulled, candles pulled.
+    deadline_at = time.monotonic() + 10.0
+    while registry._write_guard.wedged:
+        if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
+            pytest.fail("registry did not self-heal within the watchdog bound")
+        time.sleep(0.005)
+    sdk2 = _nifty_sdk()
+    sink2 = _RecordingSink()
+    report2 = _run(
+        [_instrument("NIFTY", 13)], sdk=sdk2, sink=sink2, registry=registry, coverage=coverage
+    )
+    assert report2.metadata is not None
+    assert report2.metadata.store_write_deferrals == 0
+    assert report2.historical is not None
+    assert report2.historical.contracts_completed == 3
+    assert "get_historical_candles" in sdk2.calls
+    registry.close()
 
 
 # ── the module exposes exactly its public surface ──────────────────────────────
@@ -790,3 +943,143 @@ def test_composite_note_has_no_greeks_clause_on_a_clean_pass(
     assert report.historical is not None
     assert report.historical.greeks_enrich_ok is True
     assert "Greeks enrichment FAILED" not in report.note
+
+
+def test_prior_steps_threaded_to_candle_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``prior_steps`` reaches ``pull_contract_candles`` (DEC-PULL-SIX-STEP-ORDER-001).
+
+    A capture spy on the candle spine proves the composite forwards a verdict
+    EQUAL to the sequencer's when its own phase (a) enumerates cleanly (the
+    inner-metadata fold is an AND with ``True`` — see
+    ``test_prior_steps_folds_inner_metadata_failure`` for the unclean arm) —
+    and that the DEFAULT is ``None`` (every non-pipeline caller keeps today's
+    behavior byte-identical).
+    """
+    captured: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> object:
+        captured.append(dict(kwargs))
+        from brutex.dashboard.historical_pull import HistoricalPullReport
+
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1day",),
+            contracts_selected=0,
+            contracts_completed=0,
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="spy",
+            phase1_clean=True,
+            phase1_complete=(),
+            start_dates={},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    monkeypatch.setattr(cp, "pull_contract_candles", _spy)
+    registry = _registry(tmp_path)
+    verdict = PriorStepsVerdict(spot_clean=False, metadata_clean=True, strict=True)
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_nifty_sdk(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+        prior_steps=verdict,
+    )
+    assert len(captured) == 1
+    assert captured[0]["prior_steps"] == verdict
+    # And the DEFAULT threads None (regression pin — non-pipeline callers untouched).
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_nifty_sdk(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+    )
+    assert captured[1]["prior_steps"] is None
+
+
+def test_prior_steps_folds_inner_metadata_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phase-(a) enumeration failure folds into the forwarded ``metadata_clean``.
+
+    Review fix (DEC-PULL-SIX-STEP-ORDER-001 round 1): the sequencer builds
+    :class:`PriorStepsVerdict` from the phase-2 metadata gate BEFORE the
+    composite re-enumerates; a phase-(a) expiry failure here (a transient
+    ``get_expiries`` raise on an open cell) previously left the Greeks seam
+    reading ``metadata_clean=True`` — the enrichment RAN while the sequencer's
+    post-step barrier withheld the prebuild + movers on the SAME signal. The
+    composite now ANDs its own inner re-run gate into the verdict, so all
+    three post-steps agree.
+    """
+
+    class _RaisingExpiriesSDK(_FakeSDK):
+        def get_expiries(self, **kw: object) -> Mapping[str, object]:
+            self.calls.append("get_expiries")
+            raise RuntimeError("transient enumeration failure")
+
+    captured: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> object:
+        captured.append(dict(kwargs))
+        from brutex.dashboard.historical_pull import HistoricalPullReport
+
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1day",),
+            contracts_selected=0,
+            contracts_completed=0,
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="spy",
+            phase1_clean=True,
+            phase1_complete=(),
+            start_dates={},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    monkeypatch.setattr(cp, "pull_contract_candles", _spy)
+    registry = _registry(tmp_path)
+    # Pre-seed the registry so phase (b) still has cached contracts to select
+    # (the exact production shape: an earlier pull cached the chain; today's
+    # phase-(a) re-run fails transiently but the candle phase proceeds).
+    registry.upsert_contract(
+        "NSE",
+        "NIFTY",
+        date(2024, 1, 25),
+        "NSE-NIFTY-25Jan24-21000-CE",
+        side="CE",
+        strike=21000.0,
+        run_id="r",
+        fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    verdict = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=True)
+    report = _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_RaisingExpiriesSDK(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+        prior_steps=verdict,
+    )
+    assert report.metadata is not None
+    assert report.metadata.expiry_failures > 0
+    assert len(captured) == 1
+    forwarded = captured[0]["prior_steps"]
+    assert isinstance(forwarded, PriorStepsVerdict)
+    # The fold flips ONLY the metadata arm; spot + strict thread through intact.
+    assert forwarded.metadata_clean is False
+    assert forwarded.spot_clean is True
+    assert forwarded.strict is True
+    assert forwarded.prior_clean is False

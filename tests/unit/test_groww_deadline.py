@@ -5,7 +5,9 @@ DEC-GROWW-PULL-CALL-DEADLINE-001 + MINOR-1 of DEC-GROWW-TOKEN-REAUTH-001. The
 candles OR the token re-mint) by a wall-clock deadline. These cover all three
 branches with NO ``growwapi`` / ``pyotp`` and no network — the fast success path, the
 inner-exception re-raise, and the TIMEOUT path (a fn that blocks on a
-:class:`threading.Event` past a short deadline → :class:`TimeoutError`).
+:class:`threading.Event` past a short deadline → :class:`TimeoutError`) — plus the
+caller-context propagation contract (DEC-PULL-BEAT-PERRUN-001 fix round: the daemon
+worker runs in a COPY of the caller's contextvars context, one fresh copy per call).
 """
 
 from __future__ import annotations
@@ -15,7 +17,9 @@ import time
 from collections.abc import Callable, Mapping
 
 import pytest
+import structlog.contextvars
 from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
+from brutex.observability.correlation import current_pull_id, pull_id_scope
 
 
 def test_returns_the_value_when_fast() -> None:
@@ -99,6 +103,45 @@ def test_is_generic_over_the_return_type() -> None:
     assert out == ("a", "b", "c")
 
 
+class TestCallerContextPropagation:
+    """The daemon worker runs inside a COPY of the CALLER's contextvars context.
+
+    DEC-PULL-BEAT-PERRUN-001 fix round. A fresh :class:`threading.Thread` starts with an
+    EMPTY contextvars context, so before the fix the wrapped *fn* — including the
+    partition-flock lock-wait ``emit_progress_beat`` inside a deadline-wrapped
+    ``sink.append`` in BOTH spine tails — resolved the ambient ``pull_id`` to ``""`` and
+    its beats DROPPED as foreign instead of feeding the run's keyed watchdog channel.
+    Fails-before / passes-after: ``test_worker_inherits_the_callers_ambient_pull_id``
+    returned ``""`` on the pre-fix empty-context worker.
+    """
+
+    def test_worker_inherits_the_callers_ambient_pull_id(self) -> None:
+        """The wrapped fn sees the caller's ambient run id (the keyed-beat prerequisite)."""
+        with pull_id_scope("abc123def456"):
+            assert run_with_deadline(current_pull_id, 5.0) == "abc123def456"
+
+    def test_scopeless_caller_propagates_an_empty_context(self) -> None:
+        """No caller scope → the worker's ambient id stays "" (the CLI path, byte-identical)."""
+        assert run_with_deadline(current_pull_id, 5.0) == ""
+
+    def test_per_call_copy_never_leaks_binds_across_calls_or_into_the_caller(self) -> None:
+        """A bind made INSIDE the worker dies with its per-call context copy.
+
+        The ``PoolRunParallel`` per-task-copy precedent: *fn* poisons its own copy with a
+        raw (never-unbound) ``bind_contextvars``; the poison must be visible to that call
+        only — a later call starts from a fresh copy of the caller's (clean) context, and
+        the caller itself is untouched.
+        """
+
+        def _poison() -> str:
+            structlog.contextvars.bind_contextvars(pull_id="deadbeefbad1")  # deliberately raw
+            return current_pull_id()
+
+        assert run_with_deadline(_poison, 5.0) == "deadbeefbad1"
+        assert run_with_deadline(current_pull_id, 5.0) == ""  # no cross-call leak
+        assert current_pull_id() == ""  # the caller's own context is untouched
+
+
 def test_daemon_threads_drain_after_a_timeout_storm() -> None:
     """A timeout storm leaves no daemon backlog once the simulated sockets fire.
 
@@ -139,3 +182,14 @@ def test_daemon_threads_drain_after_a_timeout_storm() -> None:
     finally:
         for event in releases:
             event.set()  # belt-and-suspenders: never leave a daemon blocked
+
+
+def test_shim_reexports_the_common_config_primitive() -> None:
+    """DEC-STORE-WRITE-DEADLINE-001 relocation pin: this module is a byte-compatible
+    re-export of the ONE COMMON primitive at :mod:`brutex.config.deadline` — the
+    exception CLASS is the SAME object on both import paths, so an ``except
+    DeadlineExceeded`` caller catches identically regardless of which path raised."""
+    from brutex.config import deadline as config_deadline
+
+    assert DeadlineExceeded is config_deadline.DeadlineExceeded
+    assert run_with_deadline is config_deadline.run_with_deadline

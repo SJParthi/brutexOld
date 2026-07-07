@@ -174,6 +174,15 @@
     </div>
   </div>
 
+<!-- Shared half-up 2dp display formatter (DEC-STORED-DATA-VALIDATION-001):
+     deliberately NON-defer so bxFixed2 is defined before the inline script
+     below parses — the pinned ROUND_HALF_UP display law
+     (preopen_report._round2 / the #1154 half-up cells). -->
+<script src="/static/bx-format.js"></script>
+<!-- The shared as-of TIME default/persist primitives (DEC-MOVERS-ASOF-LATEST-DEFAULT-001).
+     Loaded SYNCHRONOUSLY (like bx-format.js) so BXMoversTime is defined before the inline
+     script below runs fillTimes() — a deferred script would execute AFTER this inline block. -->
+<script src="/static/bx-movers-time.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -243,6 +252,10 @@ let lastGatedKey = null;
    round-trip (DEC-MOVERS-O1-LATENCY-001). Reset to null on a failed/preview fetch
    so a pill switch then falls back to a real fetch. */
 let lastPayload = null;
+/* The last real server note (j.note) — stored so applyCategory() can rebuild the
+   baseline-contiguity legend on a cached pill switch WITHOUT a refetch
+   (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 legend-desync fix). */
+let baseNote = "";
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): "params|bodyText"
    signature of the last fully-rendered NON-gated payload. A repeat fetch that
    round-trips to the byte-identical body for the SAME coordinate (repeat
@@ -272,19 +285,43 @@ const SAMPLE = {
   ],
 };
 
+/* Auto-fill the as-of TIME dropdown for the chosen timeframe
+   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): a "Latest" default ("" ⇒ the backend
+   whole-day cut ⇒ the latest traded minute, IDENTICAL across every timeframe)
+   + the intraday grid, PRESERVING a retained explicit pick across TF switches
+   only when it is still a valid slot. NO first-slot pin (the pre-fix bug that
+   froze a coarse TF at a partial-bucket close). Grid strings come from
+   BXMoversTime.defaultTimeOptions — numeric-generated "HH:MM" + one static
+   literal, so the innerHTML stays XSS-safe (DEC-DASHBOARD-XSS-HARDENING-001). */
 function fillTimes() {
   const m = TF_MIN[$("interval").value] || 375, sel = $("time");
   if (m >= 375) { sel.innerHTML = '<option value="">(daily)</option>'; sel.disabled = true; state.time=""; return; }
-  sel.disabled = false; let opts = "", t = 9*60+15;
-  while (t < 15*60+30) { opts += `<option>${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}</option>`; t += m; }
-  sel.innerHTML = opts; state.time = sel.value;
+  sel.disabled = false;
+  let opts = '<option value="">Latest</option>';
+  for (const hhmm of BXMoversTime.defaultTimeOptions(m)) opts += `<option>${hhmm}</option>`;
+  sel.innerHTML = opts;
+  const resolved = BXMoversTime.resolveTime(state.time, m);   // "" (Latest) or a retained valid pick
+  sel.value = resolved;
+  state.time = resolved;   // NOT the selected first slot — the resolved default/retained pick
+}
+/* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 + the hostile-review
+   legend-desync fix): recompute the " *" legend from the CURRENT rowsData every time
+   the rendered rows change — load() AND the cached applyCategory() pill switch — so
+   switching to a category whose cached rows carry a strictly-false contiguity flag
+   always shows the legend, and switching away always drops it (previously the legend
+   was computed only inside load(), so a cached pill switch showed " *" markers with
+   NO legend / a stale legend). textContent only — never innerHTML for server strings
+   (DEC-DASHBOARD-XSS-HARDENING-001). */
+function refreshBaselineLegend(note) {
+  const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
+  $("noteText").textContent = (note||"") + (staleBaseline ? " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)" : "");
 }
 /* Sub-filter (pill) switch: re-render the already-fetched payload's other category
    list IN THE BROWSER — the server returned every category for this coordinate, so
    no round-trip is needed (DEC-MOVERS-O1-LATENCY-001). Only falls back to a fetch
    when no payload is cached yet (first paint, or after a failed/preview fetch). */
 function applyCategory() {
-  if (lastPayload) { rowsData = lastPayload[state.category] || lastPayload.gainers || []; renderRows(); }
+  if (lastPayload) { rowsData = lastPayload[state.category] || lastPayload.gainers || []; renderRows(); refreshBaselineLegend(baseNote); }
   else { load(); }
 }
 function renderPills() {
@@ -353,17 +390,20 @@ function renderRows() {
     let v = row[field]; if (v===undefined||v===null) v = "—";
     let cls = i===0 ? "name" : "";
     /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
-       num → 2dp, int → grouped. Cells that already arrive as formatted strings
+       num → 2dp via the SHARED half-up bxFixed2 (DEC-STORED-DATA-VALIDATION-001
+       — the IEEE toFixed rounder diverged from the pinned ROUND_HALF_UP display
+       law at exact half-boundaries: 1.005 rendered "1.00", pinned law "1.01"),
+       int → grouped. Cells that already arrive as formatted strings
        (typeof !== "number") pass through unchanged. */
     if (typeof v === "number") {
       if (type === "int") v = v.toLocaleString("en-IN");
       else if (type === "money") v = "₹" + v.toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
-      else if (type === "num") v = v.toFixed(2);
+      else if (type === "num") v = bxFixed2(v);
       else if (type === "num4") v = v.toFixed(4);  /* Greeks (iv/delta) — display-only 4dp, payload stays full precision */
     }
     if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
       const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";
-      if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + n.toFixed(2) + "%";
+      if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + bxFixed2(n) + "%";
     }
     /* Moneyness chip (DEC-FNO-MONEYNESS-001): the cell reads "ITM -1" / "OTM +10" /
        "ATM" / "?" — tint by the leading bucket (ITM green, OTM red, else muted).
@@ -377,6 +417,15 @@ function renderRows() {
       else if (v==="?"||v==="—") cls = "muted";
       if (row.strike_step_confidence === "observed" && v!=="?" && v!=="—") v += " ~";
     }
+    /* Baseline-contiguity HONESTY MARKER (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001),
+       the " ~" precedent's twin: when the backend PROVED the row's prev-close /
+       prev-OI baseline is NOT the immediately-preceding NSE session (a lake
+       hole — the EMIT-ON-FALSE keys arrive only then, STRICT === false), the
+       change/%-change (and OI-change) cells gain a trailing " *" so the number
+       is never presented as an ordinary day-over-day move. Appended BEFORE the
+       esc(v) return — the marker rides the same escape as the value. */
+    if ((field==="change"||field==="pct_change") && row.prev_close_contiguous === false && v!=="—" && v!=="?") v += " *";
+    if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_contiguous === false && v!=="—" && v!=="?") v += " *";
     return `<td class="${cls}">${esc(v)}</td>`;
   }).join("") + "</tr>").join("");
 }
@@ -464,15 +513,48 @@ async function load() {
        view never takes this path (DEC-DASHBOARD-JS-PERF-001). */
     const sig = p.toString() + "|" + bodyText;
     if (state.sort.idx === null && sig === lastRenderSig) {
-      $("noteText").textContent = (j.note||"");
+      /* rowsData is unchanged (the DOM already shows this snapshot) — restore the
+         note THROUGH the legend helper so the " *" legend survives the "Loading…"
+         overwrite too (the same desync class as the pill switch). */
+      baseNote = j.note || "";
+      refreshBaselineLegend(baseNote);
       return;
     }
     lastRenderSig = sig;
     lastPayload = j;  /* cache: sub-filter switches now re-render from this, no refetch. */
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
-    $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
-    $("noteText").textContent = (j.note||"");
+    /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): an intraday DEFAULT
+       (blank time) reads "latest (HH:MM)" from the additive latest_time echo — NOT
+       the wrong "(daily)" it used to print — while the CUT stays whole-day; an
+       explicit pick shows its minute; a daily TF reads "(daily)". */
+    const isDaily = (TF_MIN[j.interval] || 375) >= 375;
+    const asofTime = j.time ? j.time
+                   : isDaily ? "(daily)"
+                   : (j.latest_time ? `latest (${j.latest_time})` : "latest");
+    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}`;
+    /* Adopt an EXPLICIT echoed as-of so subsequent TF switches reuse the identical
+       minute — reflected via .value / .textContent (never innerHTML of server data),
+       injecting an off-grid minute as a selectable option (XSS-safe). */
+    if (j.time && state.time !== j.time) {
+      state.time = j.time;
+      const tsel = $("time");
+      if (tsel && !tsel.disabled) {
+        if (![...tsel.options].some(o => o.value === j.time)) {
+          const opt = document.createElement("option");
+          opt.value = j.time; opt.textContent = j.time;
+          tsel.appendChild(opt);
+        }
+        tsel.value = j.time;
+      }
+    }
+    /* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001): when any
+       rendered row carries a strictly-false contiguity flag (the EMIT-ON-FALSE
+       keys), explain the " *" marker in the note — via the SAME helper the cached
+       pill switch uses, recomputed from the CURRENT rowsData (the helper sets
+       #noteText from the note + legend, replacing the plain noteText assignment). */
+    baseNote = j.note || "";
+    refreshBaselineLegend(baseNote);
   } catch (e) {
     lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
     lastRenderSig = null;  /* a recovered fetch must always repaint over the preview. */
