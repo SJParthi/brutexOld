@@ -1398,7 +1398,11 @@ def _process_window_tail(
     # pull never feeds the breaker; a derived-1day window is never boundary-judged)
     # plus the session-exempt + raw-bars>0 conjuncts, so a genuine EMPTY window never
     # inflates the denominator and an exempt symbol (GIFTNIFTY) joins NEITHER the
-    # numerator NOR the denominator. Observe BEFORE the record below — the
+    # numerator NOR the denominator. The breaker's DEFAULT dedupe key
+    # ("<series>|<start>|<end>", review round 6) IS this spine's window ledger
+    # identity — series = "<symbol>:<interval>" — so a retry pass re-attempting
+    # the same still-FAILED window updates its verdict in place instead of
+    # re-counting it. Observe BEFORE the record below — the
     # trip-crossing window suppresses ITSELF through the record-time
     # ``allow_degraded_settle`` re-check (evaluated inside ``record()`` UNDER the
     # ledger lock, serialized with the trip's rescind — review round 1 TOCTOU

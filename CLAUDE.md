@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-STREAK-PROVENANCE-001 + DEC-ALLFILTERED-MASS-BREAKER-001 +
+_Last updated: 2026-07-07 (DEC-STREAK-PROVENANCE-001 + DEC-ALLFILTERED-MASS-BREAKER-001 +
 DEC-SEED-OBSERVED-OVERLAY-001, MIGRATION.md #1512–#1514 — the three #1294 ingest-boundary
 leftovers closed as ONE pack: **(c → #1512)** the window ledger gains the optional 15th/LAST
 `streak_provenance` column (`|`-separated `<channel>@<pull_id>` entries per genuine
@@ -55,7 +55,21 @@ resurrection, `newly_settled_skipped` decremented) and emits exactly ONE
 resolves ONE pull-scoped instance at each pull entrypoint and threads it through every
 retry pass / until-clean round / F&O market bucket, superseding the round-3 per-pass
 resolve whose fresh retry-pass breaker demonstrably settled a suppressed window SKIPPED
-post-alarm; the pull-scoped
+post-alarm; review round 5 ARMS the feed on the primary dashboard path —
+`detect_completeness_gaps=not dry_run` at BOTH dashboard spot entrypoints
+(`pull_all_spot` never passed it → the bulk-pull breaker was structurally INERT and the
+#1031/#1294 demotions unarmed there, a SANCTIONED behavior change: a real bulk pull's
+boundary-emptied/truncated-index window now demotes to re-pullable FAILED instead of
+settling SUCCESS-with-0-bars; `pull_candles` had it HARDCODED True so a dry-run fed the
+breaker — dry-run now explicitly False everywhere) + the F&O observe moved BELOW the
+write-defer early-return; review round 6 DEDUPES the counters per WINDOW (ledger-identity
+`window_key` — spot rides the default `<series>|<start>|<end>`, the F&O tail passes an
+explicit CONTRACT-scoped key; a re-attempt updates the verdict in place, latest wins with
+flip-aware tallies — the round-4 cumulative ATTEMPT counting was failure-biased: retry
+passes re-attempt only still-FAILED windows, so a 30%-of-unique-windows persistent event
+read 90/160 = 0.5625 by pass 3, tripped FRACTION at an effective ~0.25 floor, and the
+alarm sold attempt counts as windows, up to 3× inflated — counts are now unique-window
+literal); the pull-scoped
 dedupe key is defence-in-depth only, PHASE_BLOCKED is never notifier-coalesced) —
 deliberately NOT a global stop
 (settling is poisoned, never fetching/storage); genuine per-symbol bounded-terminal settles
@@ -590,7 +604,17 @@ hostile-review pass._
   until-clean round, superseding the round-3 per-pass resolve whose fresh retry-pass breaker was
   REPRODUCED settling a suppressed streak-2 window SKIPPED post-alarm whenever the sub-floor retry
   round's re-attempt set could not re-trip — the latch now spans passes, queued async-pipeline tails
-  included, and the counters are pull-CUMULATIVE across passes with a no-trip pull byte-unchanged);
+  included, with a no-trip pull byte-unchanged; review round 5: `detect_completeness_gaps=not
+  dry_run` threaded at BOTH dashboard spot entrypoints — the bulk pull's breaker feed + the
+  #1031/#1294 demotions ARMED for the first time on the primary production path, a SANCTIONED
+  behavior change (boundary-emptied/truncated-index windows now demote to re-pullable FAILED, not
+  SUCCESS-with-0-bars; dry-run explicitly False, `pull_candles`'s hardcoded True fixed) + the F&O
+  observe moved below the write-defer early-return; review round 6: the counters are per-WINDOW
+  DEDUPED on the ledger identity (`window_key`; latest verdict wins, flip-aware tallies) —
+  superseding the round-4 pull-cumulative ATTEMPT counting, whose failure-biased retry
+  re-observation tripped FRACTION at ~0.25 of unique windows and inflated the CRITICAL alarm's
+  window counts up to 3×; alarm counts are now unique-window literal, regression
+  `TestPerWindowDedup` + a counts-equal-the-unique-window-fold hypothesis property);
   deliberately NOT a global stop; below-threshold bounded-terminal
   byte-unchanged); and the observed-overlay threading into the cold-start seed gate (one hoisted load per
   pull = one consistent snapshot; the tolerance+1 refusal flip closed; the session filter deliberately

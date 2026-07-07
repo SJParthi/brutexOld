@@ -4912,9 +4912,9 @@ class TestOptionMassAllFilteredBreaker:
         # Review round 5 (spot-tail symmetry): the F&O observe used to run BEFORE
         # the durable write, so a window whose write DEFERS (PartitionLockTimeout /
         # WriteDeadlineExceeded → recorded FAILED, re-attempted next pass) was
-        # observed at the deferring attempt AND re-observed at the re-attempt — a
-        # within-pull double count in the pull-CUMULATIVE counters (numerator AND
-        # denominator for an all-filtered window). The observe now sits AFTER the
+        # observed at the deferring attempt — before round 6's per-window dedupe
+        # a within-pull double count, and even post-dedupe a deferring attempt
+        # never computed a durable verdict. The observe sits AFTER the
         # write-deferral early-return, so only the attempt that COMPLETES the tail
         # counts. FAIL-BEFORE: counts read (1, 1, 1) after the defer.
         breaker = self._tiny_breaker()

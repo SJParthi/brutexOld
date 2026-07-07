@@ -74,12 +74,14 @@ class TestTripRules:
         assert snap is not None and snap.trip_rule == "spread"
 
     def test_spread_repeat_series_never_trips(self) -> None:
-        # ONE genuinely-weird symbol (1-2 series) is structurally below the floor.
+        # ONE genuinely-weird symbol (1-2 series) is structurally below the
+        # floor, however many DISTINCT windows it empties.
         b = _breaker(spread=3, min_obs=1000)
-        for _ in range(50):
-            assert b.observe("A:1minute", all_filtered=True) is False
-            assert b.observe("A:1day", all_filtered=True) is False
+        for i in range(50):
+            assert b.observe("A:1minute", all_filtered=True, window_start=f"w{i}") is False
+            assert b.observe("A:1day", all_filtered=True, window_start=f"w{i}") is False
         assert not b.tripped
+        assert b.counts() == (100, 100, 2)
 
     def test_spread_zero_disables_the_rule(self) -> None:
         b = _breaker(spread=0, min_obs=1000)
@@ -95,8 +97,8 @@ class TestTripRules:
         # observation floor (the small-pull blind spot pinned below).
         b = _breaker(spread=10, min_obs=20, fraction_min_series=3)
         trips = [
-            b.observe(f"{sym}:1minute", all_filtered=True)
-            for _ in range(7)
+            b.observe(f"{sym}:1minute", all_filtered=True, window_start=f"w{i}")
+            for i in range(7)
             for sym in ("NIFTY", "BANKNIFTY", "SENSEX")
         ]
         assert trips.count(True) == 1
@@ -106,19 +108,20 @@ class TestTripRules:
         assert snap.distinct_series == 3
 
     def test_fraction_exactly_below_each_conjunct_never_trips(self) -> None:
-        # 19 observations (below min_obs=20) at 100% AF over 3 series → no trip.
+        # 19 distinct windows (below min_obs=20) at 100% AF over 3 series → no trip.
         b = _breaker(spread=100, min_obs=20, fraction_min_series=3)
         for i in range(19):
-            assert b.observe(f"S{i % 3}:1minute", all_filtered=True) is False
+            assert b.observe(f"S{i % 3}:1minute", all_filtered=True, window_start=f"w{i}") is False
         assert not b.tripped
 
     def test_fraction_below_rate_never_trips(self) -> None:
         # A steady ~33% AF rate over >= min_obs across >= 3 series stays below
         # the 0.5 limit at EVERY observation (the rules re-evaluate per observe,
         # so the interleaving keeps the running ratio under the rate throughout).
+        # Every observation is a DISTINCT window (per-window dedupe, round 6).
         b = _breaker(spread=100, min_obs=20, fraction_min_series=3)
         for i in range(33):
-            assert b.observe(f"S{i % 3}:1minute", all_filtered=True) is False
+            assert b.observe(f"S{i % 3}:1minute", all_filtered=True, window_start=f"w{i}") is False
             assert b.observe(f"D{i}:a", all_filtered=False) is False
             assert b.observe(f"D{i}:b", all_filtered=False) is False
         assert not b.tripped
@@ -136,10 +139,10 @@ class TestTripRules:
         # limit — the rules are evaluated on EVERY observation after counting.
         b = _breaker(spread=100, min_obs=20, fraction_min_series=3)
         for i in range(10):
-            b.observe(f"S{i % 3}:1minute", all_filtered=True)
-        for _ in range(9):
-            b.observe("D:1minute", all_filtered=False)
-        assert b.observe("D:1minute", all_filtered=False) is True  # 10/20 = 0.5
+            b.observe(f"S{i % 3}:1minute", all_filtered=True, window_start=f"w{i}")
+        for i in range(9):
+            b.observe("D:1minute", all_filtered=False, window_start=f"d{i}")
+        assert b.observe("D:1minute", all_filtered=False, window_start="d9") is True  # 10/20
         snap = b.trip_snapshot()
         assert snap is not None and snap.trip_rule == "fraction"
 
@@ -170,15 +173,17 @@ class TestTripRules:
         # HONEST-ENVELOPE PIN (review round 2): a LATE mass event spanning
         # 3-9 series (below SPREAD's 10) inside a LARGE pull whose whole-pull
         # all-filtered fraction stays < 0.5 escapes BOTH rules — the fraction
-        # is pull-CUMULATIVE, never windowed, so 91 clean windows dilute an
-        # 18-window burst across 9 series to 18/109 < 0.5. Broader than the
-        # documented <= 2-series hole; pinned so the envelope stays honest.
+        # is whole-pull over UNIQUE windows, never windowed, so 91 clean
+        # windows dilute an 18-window burst across 9 series to 18/109 < 0.5.
+        # Broader than the documented <= 2-series hole; pinned honest.
         b = _breaker()  # the documented defaults
         for i in range(91):
             assert b.observe(f"CLEAN{i}:1minute", all_filtered=False) is False
         for i in range(9):
-            for _ in range(2):
-                assert b.observe(f"BAD{i}:1minute", all_filtered=True) is False
+            for j in range(2):  # 2 DISTINCT windows per burst series
+                assert b.observe(f"BAD{i}:1minute", all_filtered=True, window_start=f"w{j}") is (
+                    False
+                )
         assert not b.tripped
         assert b.counts() == (109, 18, 9)
 
@@ -266,6 +271,150 @@ class TestLatchAndSurfaces:
         assert b.counts() == (16, 16, 16)
 
 
+class TestPerWindowDedup:
+    """Review round 6 — counters are per-WINDOW deduped, latest verdict wins.
+
+    Pre-fix ``observe()`` counted ATTEMPTS: retry passes re-attempt ONLY
+    still-FAILED windows, so a persistent event's all-filtered windows were
+    re-counted up to ``EMPTY_TERMINAL_THRESHOLD`` times while clean windows
+    counted once — FRACTION tripped at ~25% of unique windows (below the
+    documented 0.5 floor) and the CRITICAL alarm sold attempt counts as
+    windows (up to 3× inflation).
+    """
+
+    def test_failure_biased_retry_reobservation_cannot_trip_fraction(self) -> None:
+        # THE round-6 regression, at the PRODUCTION defaults: 30 persistent
+        # all-filtered windows of 100 unique across 3 series (30% < 0.5 —
+        # below the FRACTION floor; 3 series < SPREAD 10). Two retry passes
+        # re-attempt ONLY the 30 still-FAILED windows. FAIL-BEFORE: cumulative
+        # attempt counting read (160, 90, 3) after pass 3 — 90/160 = 0.5625
+        # TRIPPED at an effective ~0.25 unique-window floor and the alarm
+        # reported "90 of 160 windows" for a 30-of-100 event.
+        b = _breaker()  # the documented defaults
+        for i in range(70):
+            assert b.observe(f"CLEAN{i}:1minute", all_filtered=False) is False
+        for _pass in range(3):  # pass 1 + 2 failure-biased retry passes
+            for i in range(30):
+                assert (
+                    b.observe(f"BAD{i % 3}:1minute", all_filtered=True, window_start=f"w{i}")
+                    is False
+                )
+        assert not b.tripped
+        assert b.allow_settle()
+        assert b.counts() == (100, 30, 3)  # the unique-window truth, all passes
+
+    def test_same_window_reobservation_is_a_counter_noop(self) -> None:
+        b = _breaker(spread=100, min_obs=1000)
+        for _ in range(5):  # same verdict, same window — one count
+            b.observe("A:1m", all_filtered=True, window_start="s", window_end="e")
+        for _ in range(5):
+            b.observe("B:1m", all_filtered=False, window_start="s", window_end="e")
+        assert b.counts() == (2, 1, 1)
+
+    def test_verdict_flip_to_clean_decrements(self) -> None:
+        # A window all-filtered on pass 1 that comes back CLEAN on a retry
+        # (vendor recovered mid-pull) stops counting as evidence — latest wins.
+        b = _breaker(spread=100, min_obs=1000)
+        b.observe("A:1m", all_filtered=True, window_start="s")
+        assert b.counts() == (1, 1, 1)
+        b.observe("A:1m", all_filtered=False, window_start="s")
+        assert b.counts() == (1, 0, 0)
+
+    def test_verdict_flip_to_all_filtered_counts(self) -> None:
+        # The reverse flip (a mass event starting BETWEEN passes) is seen —
+        # first-verdict-wins would have been blind to it.
+        b = _breaker(spread=100, min_obs=1000)
+        b.observe("A:1m", all_filtered=False, window_start="s")
+        assert b.counts() == (1, 0, 0)
+        b.observe("A:1m", all_filtered=True, window_start="s")
+        assert b.counts() == (1, 1, 1)
+
+    def test_flip_keeps_series_while_other_af_windows_remain(self) -> None:
+        # Two AF windows share one series; flipping ONE clean keeps the series
+        # counted for the other (per-series tallies, not a bare set).
+        b = _breaker(spread=100, min_obs=1000)
+        b.observe("A:1m", all_filtered=True, window_start="w1")
+        b.observe("A:1m", all_filtered=True, window_start="w2")
+        assert b.counts() == (2, 2, 1)
+        b.observe("A:1m", all_filtered=False, window_start="w1")
+        assert b.counts() == (2, 1, 1)
+        b.observe("A:1m", all_filtered=False, window_start="w2")
+        assert b.counts() == (2, 0, 0)
+
+    def test_explicit_window_key_distinguishes_same_series_windows(self) -> None:
+        # The F&O tail's shape: the series is the UNDERLYING, shared by a whole
+        # CE/PE chain whose contracts are DISTINCT windows over the SAME span —
+        # the explicit contract-scoped window_key keeps each counted once.
+        b = _breaker(spread=100, min_obs=1000)
+        for strike in (100, 200):
+            b.observe(
+                "NIFTY:1minute",
+                all_filtered=True,
+                window_key=f"NSE-NIFTY-02Jan25-{strike}-CE:1minute|s|e",
+                window_start="s",
+                window_end="e",
+            )
+        assert b.counts() == (2, 2, 1)
+
+    def test_sample_not_duplicated_on_reflip(self) -> None:
+        # AF → clean → AF re-flip of one window keeps ONE sample (a flip never
+        # retracts a sample; a re-flip never duplicates one).
+        b = _breaker(spread=100, min_obs=1000)
+        for verdict in (True, False, True):
+            b.observe("A:1m", all_filtered=verdict, window_start="s", window_end="e")
+        snap_b = _breaker(spread=1, min_obs=1000)  # trip a sibling to read samples
+        for verdict in (True, False, True):
+            snap_b.observe("A:1m", all_filtered=verdict, window_start="s", window_end="e")
+        snap = snap_b.trip_snapshot()
+        assert snap is not None
+        assert snap.window_samples == ("A:1m s→e",)
+
+    def test_trip_latch_survives_a_flip_below_the_rule(self) -> None:
+        # The latch is one-way: flipping every AF window clean AFTER the trip
+        # keeps settles suppressed (counters honestly reflect the flips).
+        b = _breaker(spread=2, min_obs=1000)
+        b.observe("A:1m", all_filtered=True, window_start="s")
+        assert b.observe("B:1m", all_filtered=True, window_start="s") is True
+        b.observe("A:1m", all_filtered=False, window_start="s")
+        b.observe("B:1m", all_filtered=False, window_start="s")
+        assert b.tripped
+        assert not b.allow_settle()
+        assert b.counts() == (2, 0, 0)
+
+    @given(
+        observations=st.lists(
+            st.tuples(
+                st.integers(min_value=0, max_value=4),
+                st.integers(min_value=0, max_value=7),
+                st.booleans(),
+            ),
+            max_size=80,
+        )
+    )
+    def test_counts_equal_the_unique_window_fold(
+        self, observations: list[tuple[int, int, bool]]
+    ) -> None:
+        # For ANY interleaving of (series, window, verdict) observations —
+        # re-observations and flips in both directions included — the counters
+        # equal the naive latest-verdict-per-unique-window fold.
+        b = _breaker(spread=10**6, min_obs=10**6, fraction_min_series=3)
+        latest: dict[tuple[int, int], bool] = {}
+        for series_idx, window_idx, all_filtered in observations:
+            b.observe(
+                f"S{series_idx}:1m",
+                all_filtered=all_filtered,
+                window_start=f"w{window_idx}",
+            )
+            latest[(series_idx, window_idx)] = all_filtered
+        af_windows = {key for key, verdict in latest.items() if verdict}
+        assert b.counts() == (
+            len(latest),
+            len(af_windows),
+            len({series_idx for series_idx, _ in af_windows}),
+        )
+        assert not b.tripped
+
+
 class TestResolver:
     """resolve_all_filtered_breaker — env config, fail-safe fallbacks, kill switch."""
 
@@ -333,9 +482,13 @@ class TestNeverTripsBelowConjunctsProperty:
     ) -> None:
         # spread=3 / fraction over >=20 obs across >=3 series: feeding at most
         # TWO distinct series keeps BOTH rules structurally below their floors
-        # regardless of rate, count, or interleaving.
+        # regardless of rate, count, or interleaving (every observation a
+        # DISTINCT window, so the count genuinely grows past the floors).
         b = _breaker(spread=3, min_obs=20, fraction_min_series=3)
-        for series_idx, all_filtered in observations:
-            assert b.observe(f"S{series_idx}:1m", all_filtered=all_filtered) is False
+        for n, (series_idx, all_filtered) in enumerate(observations):
+            assert (
+                b.observe(f"S{series_idx}:1m", all_filtered=all_filtered, window_start=f"w{n}")
+                is False
+            )
         assert not b.tripped
         assert b.allow_settle()

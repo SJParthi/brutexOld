@@ -647,7 +647,10 @@ class SweepAlerter:
         suspected vendor-wide timestamp/session bug is emptying windows at the
         calendar boundary filter, so further ``ALL_FILTERED`` SKIPPED-settles are
         suppressed for the pull and the same-pull pre-trip settles were
-        auto-rescinded. The counts are non-secret integers; *series_sample* rides
+        auto-rescinded. The counts are non-secret integers and are UNIQUE-window
+        quantities (the breaker's per-window dedupe, review round 6 — a window
+        re-attempted by a retry pass updates its verdict in place, so "N of M
+        windows" is literal, never attempt-inflated); *series_sample* rides
         the structlog line (the message stays bounded — the window samples name
         the shape). HONEST (review round 1, Golden Rule #10): the once-per-pull
         guarantee is the BREAKER'S LATCH (``observe`` reports the trip

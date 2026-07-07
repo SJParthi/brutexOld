@@ -247,7 +247,12 @@ def test_below_conjunct_breaker_never_alters_ledger_outcomes(
             start=date(2024, 3, 1) + timedelta(days=i),
             end=date(2024, 3, 2) + timedelta(days=i),
         )
-        breaker.observe(f"SYM{series_idx}:1minute", all_filtered=all_filtered)
+        breaker.observe(
+            f"SYM{series_idx}:1minute",
+            all_filtered=all_filtered,
+            window_start=key.start.isoformat(),
+            window_end=key.end.isoformat(),
+        )
         # The EXACT tail wiring: the breaker's allow_settle is threaded as the
         # record-time re-check for an all-filtered record, never a pre-computed bool.
         allow = breaker.allow_settle if all_filtered else None

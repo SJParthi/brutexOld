@@ -988,8 +988,10 @@ def _process_option_window_tail(
     # ``raw_bars == 0`` makes a dry-run window ineligible by construction). Placed
     # AFTER the write-deferral early-return above — the spot-tail symmetry (review
     # round 5): a window whose durable write DEFERS is re-attempted by a later
-    # pass, so observing it here (only on the attempt that completes the tail)
-    # keeps the pull-CUMULATIVE counters from double-counting a defer — and
+    # pass, so only the attempt that COMPLETES the tail feeds the breaker (a
+    # deferring attempt never computed a durable verdict; the round-6 per-window
+    # dedupe would absorb the re-count anyway, but not-observing stays the
+    # cleaner contract) — and
     # BEFORE the record below, so the trip-crossing window suppresses ITSELF
     # through the record-time ``allow_degraded_settle`` re-check (evaluated inside
     # ``record()`` UNDER the ledger lock, serialized with the trip's rescind —
@@ -1000,13 +1002,20 @@ def _process_option_window_tail(
     # and fired the vendor-wide alarm off a single-underlying event; keyed per
     # underlying the whole chain is ONE series — structurally below the floor,
     # the selectivity the breaker documents for BOTH spines. A blank underlying
-    # falls back to the contract symbol so the key is never empty.
+    # falls back to the contract symbol so the key is never empty. The DEDUPE
+    # key (review round 6) is CONTRACT-scoped — the window's ledger identity:
+    # the underlying-keyed series is shared by the whole CE/PE chain, whose
+    # contracts are DISTINCT windows that must each count once (the breaker's
+    # default series-derived key would collapse a chain to one observation).
     af_eligible = interval != _DAILY and len(raw_bars) > 0
     if all_filtered_breaker is not None and af_eligible:
         af_series = f"{contract.underlying_symbol or contract.symbol}:{interval}"
         if all_filtered_breaker.observe(
             af_series,
             all_filtered=all_boundary_filtered,
+            window_key=(
+                f"{contract.symbol}:{interval}|{key.start.isoformat()}|{key.end.isoformat()}"
+            ),
             window_start=key.start.isoformat(),
             window_end=key.end.isoformat(),
         ):

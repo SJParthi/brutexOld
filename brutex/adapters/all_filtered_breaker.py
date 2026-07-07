@@ -50,10 +50,19 @@ instance through EVERY retry pass / until-clean round / market bucket of that
 pull's phase (review round 4 — a per-pass fresh resolve let a sub-floor retry
 pass, re-attempting exactly the FAILED windows a tripped prior pass had
 suppressed, bump one to threshold and settle it SKIPPED minutes AFTER the
-CRITICAL alarm promised settles were halted; the counters are therefore
-pull-CUMULATIVE across passes — a still-FAILED all-filtered window re-attempted
-by a later pass is re-observed, bounded below a trip by the bounded-terminal
-settle, and post-trip observations are telemetry only). The tripping caller
+CRITICAL alarm promised settles were halted). The counters are per-window
+DEDUPED (review round 6): each physical window — its ledger identity, the
+``window_key`` — is counted ONCE, and a re-attempt of the SAME window by a
+later pass UPDATES its verdict in place (latest wins, flips adjust the
+counters both ways) instead of re-counting it. Raw attempt counting was
+failure-BIASED — retry passes re-attempt ONLY still-FAILED windows, so a
+persistent event's all-filtered windows were re-counted up to
+``EMPTY_TERMINAL_THRESHOLD`` times while clean windows counted once:
+empirically 30 persistent all-filtered windows of 100 unique across 3 series
+(30 %, below the documented 0.5 floor) read ``90/160 = 0.5625`` by pass 3 and
+tripped FRACTION at an effective ~0.25 unique-window floor, with the CRITICAL
+alarm selling the inflated attempt counts as windows. Post-trip observations
+keep updating the deduped counters (telemetry only). The tripping caller
 then (i) RESCINDS the same-pull pre-trip ``ALL_FILTERED`` settles
 (:meth:`~brutex.data.window_ledger.WindowLedger.rescind_all_filtered_settles`),
 (ii) emits exactly ONE count-naming structlog ERROR + CRITICAL Telegram alarm
@@ -81,9 +90,10 @@ round 2 widened this list to the REAL envelope):
 * a SMALL pull — fewer than :data:`ALLFILTERED_BREAKER_MIN_OBSERVATIONS`
   eligible windows AND fewer than :data:`ALLFILTERED_BREAKER_SPREAD_SERIES`
   distinct series — can trip NEITHER rule. The ENGINE's own DAILY INCREMENTAL
-  pull is in this hole (~3 eligible windows per pass: 3 indexes × ``1minute``
-  × one open window — even pull-cumulatively across the bounded retry rounds
-  the re-observations stay below the 20-observation floor), so a persisting
+  pull is in this hole (~3 eligible windows: 3 indexes × ``1minute`` × one
+  open window — retry rounds re-attempt the SAME windows, which the round-6
+  per-window dedupe counts once, so the observation count can never crawl
+  toward the 20-window floor), so a persisting
   vendor-day bug settles those windows
   ``SKIPPED`` after ``EMPTY_TERMINAL_THRESHOLD`` such pulls with NO trip — the
   "engine pull trippable" claim above holds for the BACKFILL shape only
@@ -91,8 +101,8 @@ round 2 widened this list to the REAL envelope):
   small-sample false trips — a conscious operator env call, not the default;
 * a LATE mass event spanning 3-9 series inside a LARGE pull whose whole-pull
   all-filtered fraction stays below :data:`ALLFILTERED_BREAKER_FRACTION`
-  escapes both rules (the fraction is pull-CUMULATIVE, never windowed) —
-  broader than the ≤ 2-series hole above (test-pinned);
+  escapes both rules (the fraction is whole-pull over UNIQUE windows, never
+  windowed) — broader than the ≤ 2-series hole above (test-pinned);
 * evidence never pools ACROSS the pipeline's SPOT and F&O phases (each phase
   resolves its own pull-scoped breaker — deliberate, no cross-phase plumbing),
   so a vendor-day event split e.g. 5 spot series + 5 F&O underlyings trips
@@ -109,10 +119,12 @@ round 2 widened this list to the REAL envelope):
 In every blind-spot shape the per-window WARNs + the streak-provenance
 column (DEC-STREAK-PROVENANCE-001) keep any such settle visible + reversible
 via ``brutex reopen-skipped``. Every :meth:`AllFilteredBreaker.observe` /
-:meth:`~AllFilteredBreaker.allow_settle` is **O(1)** (fixed counter ops under
-one lock); the per-series set is O(series) memory bounded by the pull's
-worklist — the :class:`~brutex.adapters.empty_circuit_breaker.EmptySettleBreaker`
-envelope verbatim.
+:meth:`~AllFilteredBreaker.allow_settle` is **O(1)** (fixed counter + dict ops
+under one lock); the per-window verdict map + per-series counts are O(windows)
+memory bounded by the pull's worklist — the same envelope the pull's own
+window ledger already accepts per row (and the
+:class:`~brutex.adapters.empty_circuit_breaker.EmptySettleBreaker` per-series
+set's, one rung up).
 """
 
 from __future__ import annotations
@@ -201,6 +213,9 @@ class AllFilteredTrip:
     Carried to :func:`brutex.notifications.sweep_alerts.emit_mass_all_filtered_alert`
     so the ONE loud alarm NAMES the counts (the error-storm breaker's
     ``_emit_vendor_down_alert`` precedent — never a count-less halt message).
+    ``all_filtered_windows`` / ``observed_windows`` count UNIQUE windows
+    (per-window deduped, latest verdict — review round 6), never attempts, so
+    the alarm's "N of M windows" is literal.
     """
 
     trip_rule: str  # "spread" | "fraction"
@@ -219,8 +234,12 @@ class AllFilteredBreaker:
     fresh every pull, Golden Rule #7: state never leaks across pulls), shared by
     every window worker/consumer of EVERY retry pass / until-clean round of that
     pull's phase (review round 4 — the latch must span the passes or a sub-floor
-    retry pass leaks a post-alarm settle). All counter ops run under ONE lock,
-    each **O(1)**.
+    retry pass leaks a post-alarm settle). Counting is per-WINDOW deduped
+    (review round 6): each physical window is counted once by its
+    ``window_key``, a re-attempt updates its verdict in place (latest wins), so
+    the failure-biased retry re-observation of still-FAILED windows can neither
+    dilute the FRACTION floor nor inflate the alarm's window counts. All
+    counter ops run under ONE lock, each **O(1)**.
 
     Parameters
     ----------
@@ -249,12 +268,20 @@ class AllFilteredBreaker:
     fraction_min_series: int = ALLFILTERED_BREAKER_FRACTION_MIN_SERIES
     enabled: bool = True
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
-    _observed: int = field(default=0, repr=False)
+    #: Per-window latest ``(all_filtered, series)`` verdict keyed by the
+    #: window's ledger identity (review round 6 — the dedupe root).
+    #: ``observed == len(_windows)``; O(windows) memory bounded by the pull's
+    #: worklist. The series is captured at FIRST observation and pinned for the
+    #: key's whole life, so a flip decrements exactly the series it counted.
+    _windows: dict[str, tuple[bool, str]] = field(default_factory=dict, repr=False, compare=False)
+    #: Windows whose LATEST verdict is all-filtered.
     _all_filtered: int = field(default=0, repr=False)
-    #: Series (``"<symbol>:<interval>"``) that contributed ≥ 1 all-filtered
-    #: verdict this pull — BOTH rules' distinct-series evidence.
-    _series: set[str] = field(default_factory=set, repr=False, compare=False)
-    #: First ≤ :data:`_SAMPLE_CAP` all-filtered windows, ``"<series> <start>→<end>"``.
+    #: Series (``"<symbol>:<interval>"``) → count of currently-all-filtered
+    #: windows — BOTH rules' distinct-series evidence (``len``), flip-aware.
+    _af_series: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
+    #: First ≤ :data:`_SAMPLE_CAP` DISTINCT all-filtered window renderings,
+    #: ``"<series> <start>→<end>"`` (a verdict flip never retracts a sample —
+    #: illustrative only; a re-flip never duplicates one).
     _samples: list[str] = field(default_factory=list, repr=False, compare=False)
     _tripped: bool = field(default=False, repr=False)
     _trip_rule: str = field(default="", repr=False)
@@ -266,9 +293,14 @@ class AllFilteredBreaker:
             return self._tripped
 
     def counts(self) -> tuple[int, int, int]:
-        """``(observed, all_filtered, distinct_series)`` snapshot — **O(1)**, atomic."""
+        """``(observed, all_filtered, distinct_series)`` snapshot — **O(1)**, atomic.
+
+        All three are UNIQUE-window quantities (review round 6): observed =
+        distinct windows seen, all_filtered = windows whose LATEST verdict is
+        all-filtered, distinct_series = series carrying ≥ 1 such window.
+        """
         with self._lock:
-            return (self._observed, self._all_filtered, len(self._series))
+            return (len(self._windows), self._all_filtered, len(self._af_series))
 
     def allow_settle(self) -> bool:
         """``True`` while ``ALL_FILTERED`` windows may still settle ``SKIPPED`` — **O(1)**.
@@ -302,45 +334,90 @@ class AllFilteredBreaker:
         series: str,
         *,
         all_filtered: bool,
+        window_key: str = "",
         window_start: str = "",
         window_end: str = "",
     ) -> bool:
         """Count ONE eligible window's boundary verdict; report the trip TRANSITION.
 
+        Per-window DEDUPED (review round 6): the window is identified by
+        *window_key* — its ledger identity — defaulting to
+        ``"<series>|<start>|<end>"``, which IS that identity on the spot spine
+        (series = ``"<symbol>:<interval>"``); the F&O tail passes an explicit
+        CONTRACT-scoped key because its series is the UNDERLYING, shared by a
+        whole CE/PE chain whose contracts are DISTINCT windows. A key's first
+        observation counts it; a re-observation with the SAME verdict is a
+        no-op; a verdict FLIP updates in place — latest wins, adjusting the
+        all-filtered count and the flipped window's (first-pinned) series
+        tally both ways — so failure-biased retry re-attempts can never
+        inflate the counters (the pre-fix attempt counting tripped FRACTION at
+        ~0.25 of unique windows and the alarm sold attempts as windows).
+
         Returns ``True`` EXACTLY ONCE — on the observation that transitions the
         latch ``False`` → ``True`` (the caller then rescinds + alarms). A
         disabled breaker counts nothing and always returns ``False``; post-trip
-        observations keep counting (telemetry for :meth:`trip_snapshot`) but
-        never return ``True`` again. Both rules are evaluated under the lock
-        AFTER counting, so the trip-crossing window can suppress ITSELF at its
-        own record. **O(1)** per call.
+        observations keep updating the deduped counters (telemetry for
+        :meth:`trip_snapshot`) but never return ``True`` again — a flip that
+        would un-satisfy a rule never unlatches (one-way latch). Both rules are
+        evaluated under the lock AFTER counting, so the trip-crossing window
+        can suppress ITSELF at its own record. **O(1)** per call.
         """
         if not self.enabled:
             return False
+        key = window_key or f"{series}|{window_start}|{window_end}"
         with self._lock:
-            self._observed += 1
-            if all_filtered:
-                self._all_filtered += 1
-                self._series.add(series)
-                if len(self._samples) < _SAMPLE_CAP:
-                    self._samples.append(f"{series} {window_start}→{window_end}")
+            prior = self._windows.get(key)
+            if prior is None:
+                self._windows[key] = (all_filtered, series)
+                if all_filtered:
+                    self._count_all_filtered_locked(series, window_start, window_end)
+            elif prior[0] != all_filtered:
+                # A verdict FLIP on a re-attempted window: latest wins; the
+                # series pinned at first observation keeps the tallies exact.
+                self._windows[key] = (all_filtered, prior[1])
+                if all_filtered:
+                    self._count_all_filtered_locked(prior[1], window_start, window_end)
+                else:
+                    self._all_filtered -= 1
+                    remaining = self._af_series[prior[1]] - 1
+                    if remaining:
+                        self._af_series[prior[1]] = remaining
+                    else:
+                        del self._af_series[prior[1]]
             if self._tripped:
                 return False
             self._trip_rule = self._tripping_rule_locked()
             self._tripped = bool(self._trip_rule)
             return self._tripped
 
+    def _count_all_filtered_locked(self, series: str, window_start: str, window_end: str) -> None:
+        """Count one window's transition INTO all-filtered — caller holds ``_lock``.
+
+        The sample list keeps the first ≤ :data:`_SAMPLE_CAP` DISTINCT
+        renderings (the ``not in`` scan is O(:data:`_SAMPLE_CAP`) — constant);
+        an AF→clean→AF re-flip or an F&O chain sharing one
+        ``<series> <start>→<end>`` rendering never duplicates a sample.
+        """
+        self._all_filtered += 1
+        self._af_series[series] = self._af_series.get(series, 0) + 1
+        sample = f"{series} {window_start}→{window_end}"
+        if len(self._samples) < _SAMPLE_CAP and sample not in self._samples:
+            self._samples.append(sample)
+
     def trip_snapshot(self) -> AllFilteredTrip | None:
-        """The count-carrying trip snapshot — ``None`` until tripped, atomic."""
+        """The count-carrying trip snapshot — ``None`` until tripped, atomic.
+
+        Counts are the live UNIQUE-window tallies (see :meth:`counts`).
+        """
         with self._lock:
             if not self._tripped:
                 return None
             return AllFilteredTrip(
                 trip_rule=self._trip_rule,
                 all_filtered_windows=self._all_filtered,
-                observed_windows=self._observed,
-                distinct_series=len(self._series),
-                series_sample=tuple(sorted(self._series)[:_SAMPLE_CAP]),
+                observed_windows=len(self._windows),
+                distinct_series=len(self._af_series),
+                series_sample=tuple(sorted(self._af_series)[:_SAMPLE_CAP]),
                 window_samples=tuple(self._samples),
             )
 
@@ -351,12 +428,13 @@ class AllFilteredBreaker:
         first (the more specific vendor-day signature); each rule's gates are
         documented on its default constant.
         """
-        if 0 < self.spread_series_limit <= len(self._series):
+        if 0 < self.spread_series_limit <= len(self._af_series):
             return "spread"
+        observed = len(self._windows)
         if (
-            self._observed >= self.min_observations
-            and len(self._series) >= max(1, self.fraction_min_series)
-            and self._all_filtered / self._observed >= self.fraction_limit
+            observed >= self.min_observations
+            and len(self._af_series) >= max(1, self.fraction_min_series)
+            and self._all_filtered / observed >= self.fraction_limit
         ):
             return "fraction"
         return ""
