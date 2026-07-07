@@ -1284,3 +1284,91 @@ def test_compute_metrics_from_scalars_rejects_nonpositive_total_bars() -> None:
             span_years=1.0,
             drawdown=(0, 0.0, 0, 0.0),
         )
+
+
+# ── DEC-MUTATION-RUNTIME-003: scalars-entry mutation-survivor kills ──
+# (MIGRATION.md #1528.) The 8 mutmut survivors 203, 205-207, 212-215 all
+# live in compute_metrics_from_scalars (the #1186 scalars entry): its
+# raise-tests used `pytest.raises(match=)` — which is re.search, so the
+# XX-wrapped message mutants still matched — and no scalars call ever
+# SUCCEEDED at the exact guard boundaries (start_equity_paisa=1,
+# total_bars=1) or exercised the default benchmark_return_pct on a
+# traded path. These pins use exact-message equality + succeeding
+# boundary values + a curve-entry equality oracle (the same idiom that
+# already kills the curve entry's equivalents at test:916/:925).
+
+
+def test_compute_metrics_from_scalars_boundary_values_accepted() -> None:
+    """start_equity_paisa == 1 and total_bars == 1 are the valid lower bounds.
+
+    Kills mutants 205 (<= 0 -> <= 1), 213 (< 1 -> <= 1), 214 (< 1 -> < 2)
+    (DEC-MUTATION-RUNTIME-003).
+    """
+    m = compute_metrics_from_scalars(
+        [_trade(10)],
+        1,
+        start_equity_paisa=1,
+        span_years=1.0,
+        drawdown=(0, 0.0, 0, 0.0),
+    )
+    assert m.total_trades == 1
+    assert m.time_in_market_pct == 100.0
+
+
+def test_compute_metrics_from_scalars_start_equity_message_exact() -> None:
+    """The start-equity guard message is pinned byte-exact (kills 206, 207)."""
+    with pytest.raises(ValueError) as exc:
+        compute_metrics_from_scalars(
+            [],
+            1,
+            start_equity_paisa=0,
+            span_years=1.0,
+            drawdown=(0, 0.0, 0, 0.0),
+        )
+    assert str(exc.value) == ("compute_metrics_from_scalars: start_equity_paisa must be > 0, got 0")
+
+
+def test_compute_metrics_from_scalars_span_message_exact() -> None:
+    """The span guard message is pinned byte-exact (kills 212)."""
+    with pytest.raises(ValueError) as exc:
+        compute_metrics_from_scalars(
+            [],
+            1,
+            start_equity_paisa=1_000_000,
+            span_years=0.0,
+            drawdown=(0, 0.0, 0, 0.0),
+        )
+    assert str(exc.value) == "compute_metrics_from_scalars: span_years must be > 0, got 0.0"
+
+
+def test_compute_metrics_from_scalars_total_bars_message_exact() -> None:
+    """The total_bars guard message is pinned byte-exact (kills 215)."""
+    with pytest.raises(ValueError) as exc:
+        compute_metrics_from_scalars(
+            [],
+            0,
+            start_equity_paisa=1_000_000,
+            span_years=1.0,
+            drawdown=(0, 0.0, 0, 0.0),
+        )
+    assert str(exc.value) == "total_bars must be >= 1, got 0"
+
+
+def test_compute_metrics_from_scalars_default_benchmark_is_zero() -> None:
+    """The scalars entry's default benchmark is 0.0 — IR collapses to Sharpe.
+
+    Kills mutant 203 (default 0.0 -> 1.0): with a nonzero default the
+    information ratio would subtract a phantom per-trade benchmark.
+    """
+    trades = [_trade(20_000), _trade(-10_000), _trade(30_000)]
+    curve = _curve([1_020_000, 1_010_000, 1_040_000])
+    via_curve = compute_metrics(trades, curve, 10)
+    via_scalars = compute_metrics_from_scalars(
+        trades,
+        10,
+        start_equity_paisa=1_000_000,
+        span_years=1.0,
+        drawdown=_drawdown_stats(curve),
+    )
+    assert via_curve == via_scalars
+    assert via_scalars.information_ratio == via_scalars.sharpe_ratio
