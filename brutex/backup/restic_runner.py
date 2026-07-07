@@ -382,7 +382,7 @@ def _json_lines(stdout: str) -> list[dict[str, object]]:
     out: list[dict[str, object]] = []
     for line in stdout.splitlines():
         stripped = line.strip()
-        if not stripped or not stripped.startswith("{"):
+        if not stripped:
             continue
         try:
             parsed = json.loads(stripped)
