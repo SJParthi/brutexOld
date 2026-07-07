@@ -24,6 +24,7 @@ from brutex.dashboard.sweep_results_view import (
     RANKABLE_COLUMNS,
     SweepLeaderboard,
     build_sweep_leaderboard,
+    load_sweep_scan,
 )
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.money import format_inr
@@ -574,3 +575,23 @@ class TestRunIdConflicts:
         assert board.run_id_conflicts == 0
         assert board.total_rows == 1
         assert not [log for log in logs if log["event"] == "sweep_results.run_id_conflict"]
+
+
+def test_prescanned_scan_is_ranked_without_a_rescan(tmp_path: Path) -> None:
+    """An explicitly-passed ``scan=`` is ranked AS-IS — equal to scan-and-rank.
+
+    The /results route's cached-scan path (DEC-LEDGER-DELTA-O-PAGE-001 scan/rank
+    split); the discovery-gate standalone twin of the spy pins in
+    ``test_sweep_results_scan_split.py``.
+    """
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1, sharpe=0.5), _row(seed=2, sharpe=2.5)],
+    )
+    scan = load_sweep_scan(tmp_path)
+    board = build_sweep_leaderboard(tmp_path, scan=scan)
+    assert board == build_sweep_leaderboard(tmp_path)
+    assert [r["sharpe_ratio"] for r in board.rows] == [2.5, 0.5]

@@ -1978,3 +1978,76 @@ def test_second_pull_over_the_same_store_issues_the_winner_first(tmp_path: Path)
     sdk2 = _one_pull("pull-2")
     assert sdk2.expiry_underlying_forms == ["M%26M"]  # the winner led — zero waste
     assert sdk2.contract_underlying_forms == ["M%26M"]
+
+
+# ── metadata pool workers carry the run id (DEC-PULL-BEAT-PERRUN-001 fix round) ──
+
+
+def test_metadata_pool_pace_beat_reaches_the_runs_keyed_channel(tmp_path: Path) -> None:
+    """The DEFAULT :class:`PoolRunParallel` propagates the driver's ambient run id to
+    its workers (contextvars copy per task), so a paced fetcher's
+    ``emit_progress_beat`` during the metadata phase attributes to the run's KEYED
+    channel — zero ``foreign_beat_dropped`` WARNs on a healthy pipeline pull (the
+    fix-round regression: pre-fix these beats resolved to "" and DROPPED, re-opening
+    the DEC-PULL-CONTENTION-ANTISTALL-001 false-stall class)."""
+    import logging
+
+    from brutex.observability.correlation import pull_id_scope
+    from brutex.observability.progress_beat import (
+        register_progress_beat,
+        reset_progress_beats,
+    )
+
+    class _BeatingSDK(_FakeSDK):
+        """The fake SDK, emitting the pace-return-shaped beat per vendor call."""
+
+        def get_expiries(self, **kw: object) -> Mapping[str, object]:
+            from brutex.observability.progress_beat import emit_progress_beat
+
+            emit_progress_beat()  # the RateController.pace return shape
+            return super().get_expiries(**kw)
+
+        def get_contracts(self, **kw: object) -> Mapping[str, object]:
+            from brutex.observability.progress_beat import emit_progress_beat
+
+            emit_progress_beat()
+            return super().get_contracts(**kw)
+
+    drop_records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if "foreign_beat_dropped" in record.getMessage():
+                drop_records.append(record)
+
+    handler = _Capture()
+    beat_logger = logging.getLogger("brutex.observability.progress_beat")
+    beat_logger.addHandler(handler)
+    reset_progress_beats()
+    beats: list[int] = []
+    register_progress_beat(lambda: beats.append(1), pull_id="abc123def456")
+    sdk = _BeatingSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "NIFTY", "2026-06-25"): ["NIFTY26JUN25000CE"]},
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    try:
+        with pull_id_scope("abc123def456"):  # the job's run scope shape
+            report = pull_expiries_contracts(
+                [_instrument("NIFTY")],
+                registry=registry,
+                coverage_store=coverage,
+                years=[2026],
+                dry_run=False,
+                client_factory=_factory(sdk),  # DEFAULT run_parallel → the real pool
+                now=_NOW,
+                today=_TODAY,
+            )
+    finally:
+        reset_progress_beats()
+        beat_logger.removeHandler(handler)
+        registry.close()
+    assert report.expiries_persisted == 1
+    assert len(beats) >= 2  # one per vendor call — expiries + contracts, all delivered
+    assert drop_records == []  # a healthy metadata pull emits ZERO foreign-drop WARNs

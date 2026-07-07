@@ -1572,6 +1572,14 @@ jobs:
           else
             echo "(brutex.data.price_sanity test file not present yet — gate inactive)"
           fi
+          # DEC-BENCH-ABS-BASELINE-001: the absolute bench-baseline schema/
+          # comparator/capture/governance core — pure stdlib, standalone-gateable
+          # at 100% line+branch with its OWN unit+property+golden suites.
+          if compgen -G "tests/unit/test_bench_baseline.py" > /dev/null; then
+            pytest --cov=brutex.observability.bench_baseline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_bench_baseline.py tests/property/test_bench_baseline_property.py tests/golden/test_bench_baseline_golden.py
+          else
+            echo "(brutex.observability.bench_baseline test file not present yet — gate inactive)"
+          fi
           # DEC-FNO-CANDLE-LAKE-001: the canonical F&O contract-symbol parser + the
           # F&O candle logical-table descriptor/schema_meta registration — pure,
           # stdlib-only, standalone-gateable at 100% line+branch.
@@ -1866,11 +1874,18 @@ jobs:
           # (_build_revision_probe + _on_wedged) is covered by
           # tests/unit/test_pull_jobs_wedge.py (stem-matched for the discovery
           # gate), which MUST join this gate for the same reason.
+          # DEC-PULL-BEAT-PERRUN-001: the per-run keyed beat-channel wiring
+          # (the _run_beat identity/running guards + the foreign-beat
+          # warn-once drop in _beat) is covered by
+          # tests/unit/test_pull_jobs_beat_channel.py (stem-matched for the
+          # discovery gate), which MUST join this gate so its coverage of
+          # those lines registers (without it the module reads 96.95%).
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
               tests/unit/test_pull_jobs_singleflight.py \
               tests/unit/test_pull_jobs_wedge.py \
+              tests/unit/test_pull_jobs_beat_channel.py \
               tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
@@ -1906,8 +1921,15 @@ jobs:
           # `intervals` walk filter) is covered by
           # tests/unit/test_completeness_fno_skip.py, which MUST also join
           # this gate (without it the module reads 99.74% — lines 935/1241).
+          # DEC-LEDGER-DELTA-O-PAGE-001: the SQL-side ledger delta fold + the
+          # shared stamped ledger read cache (the _LEDGER_READ_CACHE seam, the
+          # _ledger_scan_source base-absent branch, the phase_progress
+          # second-failure `records` fallback, the base-absent probe skip) are
+          # covered by tests/unit/test_dashboard_db_view_ledger_delta_fold.py
+          # + tests/unit/test_dashboard_db_view_ledger_read_cache.py, which
+          # MUST join this gate (without them the module reads 99.34%).
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
@@ -2173,11 +2195,27 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # DEC-BENCH-ABS-BASELINE-001: baseline governance diffs vs base
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+      - name: Bench-baseline structural gate (schema + registry + governance fields)
+        # DEC-BENCH-ABS-BASELINE-001. Green on an EMPTY baselines dir (bootstrap
+        # state) with a loud notice; a committed baseline that fails schema (incl.
+        # tolerance_pct >= 100 — the 2x-must-fail structural cap) blocks merge here.
+        # stdlib-only: loads the core via spec_from_file_location, no pip install.
+        run: python3 scripts/ci/bench_baseline_gate.py validate --baselines-dir tests/bench/baselines
+      - name: Bench-baseline governance gate (no silent re-baseline)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GH_TOKEN: ${{ github.token }}   # read-only: live run verification via `gh api`
+        run: |
+          git fetch --no-tags origin "${BASE_REF}"
+          python3 scripts/ci/bench_baseline_gate.py govern --base "origin/${BASE_REF}"
       - name: Install deps (dev + data — the lake benches need polars/duckdb)
         # DEC-RESAMPLER-INPUT-GUARD-001 audit finding: `.[dev]` alone made every
         # polars/duckdb bench `importorskip` SILENTLY — the lake-write O(1)
