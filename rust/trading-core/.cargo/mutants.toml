@@ -1,0 +1,32 @@
+# DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1528) — the ONE cargo-mutants scope for
+# trading-core, resolved by BOTH the CI matrix jobs (.github/workflows/mutation.yml)
+# and any local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
+# COMMON; the empirically-INERT repo-root .cargo/mutants.toml was deleted —
+# cargo-mutants resolves config against the examined tree root, never parent
+# dirs, and its exclude_re contradicted this scope by excluding src/python.rs).
+#
+# Scope: evaluator.rs (60-condition decision core, gated since
+# DEC-TRADING-CORE-PROPTEST-MUTANTS-001) WIDENED to the Golden-Rule-#4
+# run-identity stamping surfaces: spec.rs (StrategySpec::canonical_bytes, LE
+# field encoding) and python.rs (spec_canonical_bytes_impl + the *_impl/check_*
+# boundary logic).
+# 619 mutants measured 2026-07-07 (`cargo mutants --list | wc -l`, run from this
+# dir with this config in place — the count also proves the `features` key parses
+# under cargo-mutants 27.1.0).
+examine_globs = ["src/evaluator.rs", "src/spec.rs", "src/python.rs"]
+
+# python.rs compiles ONLY under `python` (lib.rs:66) and spec.rs's mask_hex only
+# under `serde`; without them those mutants build a byte-identical crate and
+# trivially "survive" (3 mask_hex MISSED measured on default features). Features
+# apply to the baseline AND every mutant build. (Pre-decided fallback if a
+# future cargo-mutants rejects this key: move to the CLI as
+# `--features python,serde` — flag verified present.)
+features = ["python", "serde"]
+
+# GIL-only one-line #[pyfunction]/#[pymethods] delegation shims are excluded
+# per-function below (each with its reason): they cannot be executed by any
+# no-libpython Rust test, and their glue is exercised end-to-end by the Python
+# wheel suites in ci.yml. Populated by the DEC-MUTATION-RUNTIME-003 survivor
+# enumeration; NEVER a blanket python.rs exclude. A renamed wrapper makes its
+# mutants reappear as MISSED — the gate goes red loudly, never silently.
+# exclude_re = [ ... one commented entry per excluded wrapper fn ... ]

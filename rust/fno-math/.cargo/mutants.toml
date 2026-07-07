@@ -1,0 +1,30 @@
+# DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1528) — the ONE cargo-mutants scope for
+# fno-math, resolved by BOTH the CI matrix jobs (.github/workflows/mutation.yml)
+# and any local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
+# COMMON; cargo-mutants resolves config against the examined tree root, never
+# parent dirs — the empirically-INERT repo-root .cargo/mutants.toml was deleted).
+#
+# Scope = the ENGINE-critical surfaces:
+#   src/metrics.rs   — fused per-mask equity fold + drawdown scan
+#                      (DEC-SWEEP-RUST-METRICS-001)
+#   src/trade_sim.rs — resident Stage-2 trade-sim kernel
+#                      (DEC-SWEEP-RUST-TRADESIM-001)
+#   src/python.rs    — PyO3 bridge (popcount/supermask counting the sweep calls;
+#                      pyo3 is unconditional in this crate — no feature flag needed)
+#   src/lib.rs       — decl surface + the #1258 SOURCE_DIGEST stamp + the
+#                      below_parallel_threshold dispatch predicate extracted by
+#                      DEC-MUTATION-RUNTIME-003 (kept IN scope so the dispatch
+#                      boundary itself stays mutation-gated)
+# 556 mutants measured 2026-07-07 (`cargo mutants --list | wc -l`, run from this
+# dir; re-measured AFTER the below_parallel_threshold extraction + the .max()
+# reshapes landed — down from the pre-extraction 576 because the reshapes remove
+# tie-equivalent operator mutants by construction; the mutation.yml shard-budget
+# bands absorb any future small drift).
+#
+# DELIBERATELY OUT (documented, not silent — Golden Rule #10):
+#   compat/*    — 299 mutants; TickVault-compat surface (config defaults, NSE
+#                 calendar, domain types) NOT on the Track-1 engine execution
+#                 path; its known June/July survivors are enumerated in
+#                 MIGRATION.md #1528 and gating it is a NAMED follow-up.
+#   math/mod.rs — empty scaffold, 0 mutants.
+examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]
