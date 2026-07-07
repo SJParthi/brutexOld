@@ -34,6 +34,18 @@ Design (driven by the CLAUDE.md §9 4-agent hostile review)
   re-flushes the SAME finalist rows and produces a byte-identical file. Without
   this preload a resume against a populated dedup would flush an *empty* store
   over good results (the hostile review's P0 data-loss finding).
+  HONEST CARVE-OUT (DEC-VIX-STAMP-WIRE-001): byte-identity is guaranteed for
+  the run identity + every non-VIX column; the REFERENCE-ONLY nullable
+  ``vix_mean``/``vix_min``/``vix_max`` trio derives from the India-VIX *lake*,
+  which sits deliberately OUTSIDE the run identity — a re-run after the VIX
+  lake legitimately moved (a re-pull backfilled missing VIX bars, or the
+  derived ``1day`` partition was re-derived latest-wins) may DIRECTIONALLY
+  BACKFILL a ``None`` trio field (``results_store.vix_backfill``), and a
+  value-vs-value trio clash raises the typed
+  :class:`~brutex.engine.results_store.VixTrioConflictError`, which the grid
+  drivers demote to a #904 tuple-skip (that ONE tuple redoes after the
+  operator quarantines its store; the grid completes) — never a grid abort
+  and never a silent overwrite.
 * **Shared dedup + single audit chain across the grid.** The dedup is keyed on
   the 9-field run-identity (instrument/tf/direction/mode/params all participate),
   so two tuples never alias each other; sharing one
@@ -71,7 +83,7 @@ import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import ResultsStore, VixTrioConflictError
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
@@ -529,7 +541,10 @@ class SweepGridSummary:
         summed across every tuple that ran.
     tuples_failed
         Tuples whose combo evaluation raised a
-        :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep and were
+        :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep — or whose
+        store append raised the typed
+        :class:`~brutex.engine.results_store.VixTrioConflictError`
+        (DEC-VIX-STAMP-WIRE-001) — and were
         SKIPPED ("Resilient: skip + continue"): the remaining tuples still ran,
         but a non-zero count makes the grid verdict NON-ZERO and leaves each
         failed tuple un-sentineled / un-cached for a deterministic redo next run.
@@ -841,7 +856,11 @@ def run_one_tuple(
         (DEC-VIX-STAMP-WIRE-001), forwarded verbatim to
         :func:`~brutex.engine.sweep_run.run_persisted_sweep` — the run's
         stamper reaches the finalist projection through this ONE conduit.
-        REFERENCE ONLY; the persisted bytes are identical with or without it.
+        REFERENCE ONLY: the ``run_id`` and every non-VIX column are
+        byte-identical with or without it — ONLY the three nullable
+        ``vix_mean``/``vix_min``/``vix_max`` columns differ (Stage C persists
+        the trio; the pre-Stage-C "persisted bytes identical" wording was
+        reconciled by the round-2 panel, MINOR).
 
     Returns
     -------
@@ -915,12 +934,19 @@ def run_sweep_grid(
     (``skip_empty=False``) — never an opaque mid-grid traceback.
 
     "Resilient: skip + continue": a tuple whose combo evaluation raises a
-    :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep is SKIPPED (its
+    :class:`~brutex.engine.sweep_run.SweepComboError` mid-sweep — or whose
+    store append raises the typed
+    :class:`~brutex.engine.results_store.VixTrioConflictError` (a redo whose
+    REFERENCE-ONLY VIX trio disagrees because the VIX lake moved between
+    runs, DEC-VIX-STAMP-WIRE-001) — is SKIPPED (its
     store is left un-sentineled so it redoes next run), counted in
     ``tuples_failed``, and recorded as a ``TUPLE_FAILED`` audit line naming the
     exact offending combo; the grid finishes the remaining tuples and a non-zero
     ``tuples_failed`` makes the run's verdict NON-ZERO. Every OTHER exception
-    still propagates uncaught (global abort) — only ``SweepComboError`` is caught.
+    still propagates uncaught (global abort) — including the PLAIN
+    :class:`~brutex.engine.results_store.ResultsStoreError` run-identity
+    conflict (a genuine reproducibility breach); only the two typed
+    tuple-scoped errors above are caught.
 
     Honest envelope (Golden Rule #10): the loop is O(T) tuples, each O(N) masks;
     no part is O(1) total. This function's own memory is O(1) in ``T`` (scalar
@@ -1023,8 +1049,12 @@ def run_sweep_grid(
         # not a transient single combo), count it, audit the fingerprint, and
         # finish the remaining tuples; the failed tuple is left un-sentineled
         # (run_persisted_sweep raised before its flush/mark/sentinel writes) so
-        # it redoes deterministically next run. Only SweepComboError is caught —
-        # every other exception still propagates (global abort).
+        # it redoes deterministically next run. VixTrioConflictError rides the
+        # SAME skip (DEC-VIX-STAMP-WIRE-001): a redo whose REFERENCE-ONLY VIX
+        # trio disagrees with the stored one means the VIX lake moved between
+        # runs — tuple-scoped by construction, never grounds to abort the
+        # grid. Every other exception still propagates (global abort),
+        # including the PLAIN ResultsStoreError run-identity conflict.
         try:
             summary = run_one_tuple(
                 grid,
@@ -1037,7 +1067,7 @@ def run_sweep_grid(
                 kernel_cache=kernel_cache,
                 reference_stamper=reference_stamper,
             )
-        except SweepComboError as exc:
+        except (SweepComboError, VixTrioConflictError) as exc:
             tuples_failed += 1
             label = (
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"

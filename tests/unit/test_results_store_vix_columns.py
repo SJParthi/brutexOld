@@ -29,6 +29,7 @@ from brutex.engine.results_store import (
     ResultRow,
     ResultsStore,
     ResultsStoreError,
+    VixTrioConflictError,
 )
 from structlog.testing import capture_logs
 
@@ -189,32 +190,76 @@ class TestDirectionalAppendUpgrade:
         assert store.append(_row()) is False
         assert store.get(stamped.run_id) == stamped
 
-    def test_conflicting_known_values_raise(self, tmp_path: Path) -> None:
+    def test_conflicting_known_values_raise_the_typed_vix_conflict(self, tmp_path: Path) -> None:
         store = ResultsStore(path=tmp_path / "s.parquet")
         store.append(_row(**_TRIO))
         clash = dict(_TRIO, vix_mean=14.0)  # branch 3: two different known values
-        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+        with pytest.raises(VixTrioConflictError, match="VIX trio conflict"):
             store.append(_row(**clash))
 
-    def test_conflict_log_names_the_vix_field(self, tmp_path: Path) -> None:
+    def test_vix_conflict_is_a_results_store_error_subclass(self) -> None:
+        # Every existing store-error handler still catches the typed conflict.
+        assert issubclass(VixTrioConflictError, ResultsStoreError)
+
+    def test_vix_conflict_message_names_the_cause_and_the_remedy(self, tmp_path: Path) -> None:
+        """The raise diagnoses the VIX-lake movement, NEVER 'non-determinism'.
+
+        Round-2 panel MAJOR (DEC-VIX-STAMP-WIRE-001): VIX is deliberately
+        OUTSIDE the BLAKE3 run identity, so a redo whose trio disagrees after
+        a legitimate VIX re-pull / 1day re-derivation must not be misdiagnosed
+        as an upstream-non-determinism run-identity breach.
+        """
         store = ResultsStore(path=tmp_path / "s.parquet")
         store.append(_row(**_TRIO))
-        with capture_logs() as logs, pytest.raises(ResultsStoreError):
+        with pytest.raises(VixTrioConflictError) as exc:
+            store.append(_row(**dict(_TRIO, vix_mean=14.0)))
+        message = str(exc.value)
+        assert "NOT upstream non-determinism" in message
+        assert "India-VIX lake moved" in message
+        assert "re-pull" in message and "1day" in message  # the two lake-move causes
+        assert "tuple" in message and "remedy" in message  # skip contract + remediation
+        assert "run-identity conflict" not in message  # never the misdiagnosis
+
+    def test_vix_conflict_log_names_the_field_and_both_values(self, tmp_path: Path) -> None:
+        store = ResultsStore(path=tmp_path / "s.parquet")
+        store.append(_row(**_TRIO))
+        with capture_logs() as logs, pytest.raises(VixTrioConflictError):
             store.append(_row(**dict(_TRIO, vix_max=99.0)))
-        events = [e for e in logs if e["event"] == "results_store.conflict"]
+        events = [e for e in logs if e["event"] == "results_store.vix_conflict"]
         assert len(events) == 1
-        assert events[0]["differing_fields"] == ("vix_max",)
+        assert events[0]["conflicting_fields"] == ("vix_max",)
+        assert events[0]["stored"]["vix_max"] == 15.75
+        assert events[0]["incoming"]["vix_max"] == 99.0
+        # The generic run-identity conflict event never fires for a VIX-only clash.
+        assert not [e for e in logs if e["event"] == "results_store.conflict"]
 
     def test_non_vix_difference_still_raises_even_with_backfillable_vix(
         self, tmp_path: Path
     ) -> None:
         store = ResultsStore(path=tmp_path / "s.parquet")
         store.append(_row())
-        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+        with pytest.raises(ResultsStoreError, match="run-identity conflict") as exc:
             store.append(_row(sharpe_ratio=9.9, **_TRIO))  # metrics conflict wins
+        # A genuine (non-VIX) conflict is the PLAIN error — grid drivers must
+        # still ABORT on it, so it must never alias the tuple-skip subclass.
+        assert not isinstance(exc.value, VixTrioConflictError)
         stored = store.get(_rid(1))
         assert stored is not None
         assert stored.vix_mean is None  # the backfill never applied
+
+    def test_mixed_vix_and_non_vix_difference_is_the_plain_conflict(self, tmp_path: Path) -> None:
+        # BOTH a metric AND a known VIX value differ: the genuine run-identity
+        # conflict wins (and lists every differing field), never the VIX skip.
+        store = ResultsStore(path=tmp_path / "s.parquet")
+        store.append(_row(**_TRIO))
+        with (
+            capture_logs() as logs,
+            pytest.raises(ResultsStoreError, match="run-identity conflict") as exc,
+        ):
+            store.append(_row(sharpe_ratio=9.9, **dict(_TRIO, vix_max=99.0)))
+        assert not isinstance(exc.value, VixTrioConflictError)
+        (event,) = [e for e in logs if e["event"] == "results_store.conflict"]
+        assert set(event["differing_fields"]) == {"sharpe_ratio", "vix_max"}
 
     def test_mutually_inconsistent_backfill_raises_the_order_law(self, tmp_path: Path) -> None:
         # existing knows only vix_min=15; the redo knows only vix_mean=13 — the

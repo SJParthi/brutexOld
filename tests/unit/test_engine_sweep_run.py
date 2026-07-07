@@ -1719,7 +1719,11 @@ class TestSweepComboError:
         to a single-tuple skip, and — because the raise is BEFORE the trial-stats
         sidecar / mark / completion-sentinel writes — the tuple is left
         UN-sentineled and the dedup UN-marked, so a resume deterministically
-        REDOES the whole tuple (Golden Rule #7).
+        REDOES the whole tuple (Golden Rule #7). ONE typed carve-out
+        (DEC-VIX-STAMP-WIRE-001 round-2): a VIX-ONLY ``VixTrioConflictError``
+        (VIX sits outside the run identity — the VIX lake moved, not the
+        engine) IS demoted to a tuple-skip by the grid drivers; the PLAIN
+        ``ResultsStoreError`` exercised here stays a grid abort.
         """
         from brutex.engine.results_store import ResultsStoreError
         from brutex.engine.trial_stats import trial_stats_sidecar_path

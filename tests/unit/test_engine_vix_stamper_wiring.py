@@ -907,6 +907,175 @@ class TestParallelSeam:
         assert seq_tree and par_tree == seq_tree
 
 
+# ────────────────────────── VIX-conflict tuple-skip (round-2 MAJOR) ──────────────────────────
+
+
+def _alt_stamper() -> TradeReferenceStamper:
+    """A stamper over the SAME instants as ``_STAMPER_BIG`` at DIFFERENT levels.
+
+    Models the sanctioned VIX-lake movement between two runs of the same grid
+    (a re-pull backfilled bars / the derived 1day was re-derived latest-wins):
+    the redo re-aggregates a different trio under an UNCHANGED run identity.
+    """
+    vix_bars = [
+        CandleBar(
+            timestamp=bar.timestamp,
+            open=Decimal("20.00"),
+            high=Decimal("21.00"),
+            low=Decimal("19.00"),
+            close=Decimal("20.00") + Decimal(i % 5) / Decimal(100),
+            volume=0,
+            open_interest=None,
+        )
+        for i, bar in enumerate(_BARS_BIG)
+    ]
+    return TradeReferenceStamper.from_vix_bars(vix_bars)
+
+
+def _bars_for_big(_instrument: str, _tf: str) -> list[CandleBar]:
+    return _BARS_BIG
+
+
+class TestVixConflictTupleSkip:
+    """A VIX-lake-moved redo skips ONE tuple — never a whole-grid halt.
+
+    Round-2 panel MAJOR (DEC-VIX-STAMP-WIRE-001): a sanctioned redo over an
+    EXISTING per-tuple store (``make_store_for`` preloads it) after the VIX
+    lake legitimately moved recomputes a different trio under the SAME
+    ``run_id``. The typed :class:`VixTrioConflictError` must ride the #904
+    tuple-skip contract in ALL THREE grid drivers — a raw
+    ``ResultsStoreError`` sibling would escape ``except SweepComboError`` and
+    halt the entire grid over a REFERENCE-ONLY annotation.
+
+    Each test deletes the tuple's COMPLETION SENTINEL between the two runs:
+    a sentineled tuple short-circuits as ``resumed_complete`` without ever
+    re-simulating, so the genuine conflict window is the crash-window redo
+    (store flushed, sentinel not yet written — exactly the state a mid-sweep
+    kill leaves behind).
+    """
+
+    @staticmethod
+    def _unsentinel(root: Path) -> Path:
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        (store_path,) = sorted(root.rglob("*.parquet"))
+        completion_sentinel_path(store_path).unlink()
+        return store_path
+
+    def test_run_sweep_grid_skips_the_conflicted_tuple_and_completes(self, tmp_path: Path) -> None:
+        grid = _grid()
+        root = tmp_path / "out"
+
+        def _run(stamper: TradeReferenceStamper, audit_name: str) -> Any:
+            with AuditWriter.open(tmp_path / audit_name) as audit:
+                return orch_mod.run_sweep_grid(
+                    grid,
+                    bars_for=_bars_for_big,
+                    store_for=orch_mod.make_store_for(root, grid),
+                    dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                    audit=audit,
+                    reference_stamper=stamper,
+                )
+
+        first = _run(_STAMPER_BIG, "a1.jsonl")
+        assert first.tuples_failed == 0
+        assert first.persisted > 0
+        store_path = self._unsentinel(root)
+        before = store_path.read_bytes()
+
+        second = _run(_alt_stamper(), "a2.jsonl")
+        # The ONE tuple is skipped + counted; the grid COMPLETES (no raise).
+        assert second.tuples_failed == 1
+        assert second.tuples_run == 0
+        # The stored results are untouched (the raise precedes any flush).
+        assert store_path.read_bytes() == before
+        # The TUPLE_FAILED audit line names the typed error.
+        audit_text = (tmp_path / "a2.jsonl").read_text(encoding="utf-8")
+        assert "TUPLE_FAILED" in audit_text
+        assert "VixTrioConflictError" in audit_text
+
+    def test_run_supervised_grid_skips_the_conflicted_tuple(self, tmp_path: Path) -> None:
+        grid = _grid()
+        root = tmp_path / "out"
+
+        def _run(stamper: TradeReferenceStamper, leg: str) -> Any:
+            guards_tmp = tmp_path / leg
+            guards_tmp.mkdir()
+            with (
+                AuditWriter.open(guards_tmp / "ingest.jsonl") as ingest,
+                _guards(guards_tmp, grid) as guards,
+            ):
+                return run_supervised_grid(
+                    grid,
+                    bars_for=_bars_for_big,
+                    store_for=orch_mod.make_store_for(root, grid),
+                    dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                    ingest_audit=ingest,
+                    guards=guards,
+                    reference_stamper=stamper,
+                )
+
+        first = _run(_STAMPER_BIG, "g1")
+        assert first.tuples_failed == 0
+        assert first.persisted > 0
+        self._unsentinel(root)
+        # Fresh guards (fresh tuple cache/checkpoint) → the redo genuinely
+        # re-runs the tuple instead of skipping it as cached.
+        second = _run(_alt_stamper(), "g2")
+        assert second.tuples_failed == 1
+        assert second.tuples_run == 0
+
+    def test_run_tuple_in_worker_returns_the_failed_marker_on_vix_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        grid = _grid()
+        (tuple_,) = list(orch_mod.iter_sweep_tuples(grid))
+        ctx_first = parallel_mod._WorkerContext(
+            grid=grid, root=tmp_path / "out", reference_stamper=_STAMPER_BIG
+        )
+        monkeypatch.setattr(parallel_mod, "_WORKER_CTX", ctx_first)
+        first = parallel_mod._run_tuple_in_worker(0, tuple_, _BARS_BIG)
+        assert first.failed_error is None
+        assert first.summary is not None and first.summary.persisted > 0
+        self._unsentinel(tmp_path / "out")
+
+        ctx_redo = parallel_mod._WorkerContext(
+            grid=grid, root=tmp_path / "out", reference_stamper=_alt_stamper()
+        )
+        monkeypatch.setattr(parallel_mod, "_WORKER_CTX", ctx_redo)
+        second = parallel_mod._run_tuple_in_worker(1, tuple_, _BARS_BIG)
+        # The failed MARKER comes back — the future never breaks, so the
+        # parent pool skips this tuple instead of tearing the whole grid down.
+        assert second.summary is None
+        assert second.failed_error is not None
+        assert second.failed_error.startswith("VixTrioConflictError:")
+
+    def test_unstamped_redo_over_a_stamped_store_stays_a_clean_noop(self, tmp_path: Path) -> None:
+        """The directional law at the GRID level: value → None never conflicts."""
+        grid = _grid()
+        root = tmp_path / "out"
+
+        def _run(stamper: TradeReferenceStamper | None, audit_name: str) -> Any:
+            with AuditWriter.open(tmp_path / audit_name) as audit:
+                return orch_mod.run_sweep_grid(
+                    grid,
+                    bars_for=_bars_for_big,
+                    store_for=orch_mod.make_store_for(root, grid),
+                    dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                    audit=audit,
+                    reference_stamper=stamper,
+                )
+
+        first = _run(_STAMPER_BIG, "a1.jsonl")
+        assert first.persisted > 0
+        store_path = self._unsentinel(root)
+        before = store_path.read_bytes()
+        second = _run(None, "a2.jsonl")
+        assert second.tuples_failed == 0
+        assert second.tuples_run == 1
+        assert store_path.read_bytes() == before  # byte-identical re-flush
+
+
 # ────────────────────────── stage3_wire seam ──────────────────────────
 
 

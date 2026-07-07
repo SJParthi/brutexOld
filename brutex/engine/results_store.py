@@ -78,7 +78,13 @@ map to one result; a clash means upstream non-determinism, never a silent
 overwrite). The ONE sanctioned exception is DIRECTIONAL (DEC-VIX-STAMP-WIRE-001):
 the nullable REFERENCE-ONLY VIX trio may be backfilled ``None → value`` by a
 stamped redo of the same run (``None`` means *unknown*, not a conflicting fact);
-two DIFFERENT known VIX values for one identity still raise.
+two DIFFERENT known VIX values for one identity still raise — but as the
+DISTINCT :class:`VixTrioConflictError`, because VIX is deliberately OUTSIDE the
+run identity: a trio clash means the India-VIX *lake* moved between the two
+runs (a re-pull backfilled missing VIX bars, or the derived ``1day`` partition
+was legitimately re-derived latest-wins), NOT upstream non-determinism. The
+grid drivers treat it as a #904 tuple-skip (one tuple redoes, the grid
+completes) instead of a grid-wide abort.
 """
 
 from __future__ import annotations
@@ -205,6 +211,30 @@ class ResultsStoreError(BruteXError):
     different metrics — a reproducibility breach), a missing ``polars``
     dependency, an unknown leaderboard ranking field, or a read-back of a file
     that does not exist.
+    """
+
+
+class VixTrioConflictError(ResultsStoreError):
+    """A redo disagrees with the stored REFERENCE-ONLY VIX trio — and nothing else.
+
+    Raised by :meth:`ResultsStore.append` when the incoming row carries the
+    SAME ``run_id`` and byte-equal non-VIX fields, but one of
+    :data:`_VIX_FIELDS` holds two DIFFERENT known (non-``None``) values.
+    Because VIX is deliberately OUTSIDE the BLAKE3 run identity
+    (CLAUDE.md §2 Rule 3), this is **NOT evidence of upstream
+    non-determinism**: it means the India-VIX *lake* moved between the two
+    runs — a re-pull backfilled previously-missing VIX bars, or the derived
+    ``1day`` partition was legitimately re-derived latest-wins
+    (``spot_daily_resample``) — so the redo aggregated a different trio under
+    an unchanged identity (DEC-VIX-STAMP-WIRE-001 round-2 panel, MAJOR).
+
+    Kept a DISTINCT type so the grid drivers (``run_sweep_grid`` /
+    ``run_supervised_grid`` / ``_run_tuple_in_worker``) can ride the #904
+    "Resilient: skip + continue" tuple-skip contract — ONE tuple is skipped +
+    counted + audited ``TUPLE_FAILED`` and the grid completes — instead of
+    aborting the WHOLE grid over a reference-only annotation. Still a
+    :class:`ResultsStoreError` subclass, so every existing store-error handler
+    catches it unchanged.
     """
 
 
@@ -479,10 +509,15 @@ class ResultsStore:
            the union (a stamped redo may fill in what an unstamped run
            honestly didn't know; the reverse direction ``value → None`` never
            erases — an unstamped redo is *less* informed, not conflicting).
-        3. **Two different known values** → :class:`ResultsStoreError` (a
-           genuine run-identity conflict, exactly like any other field).
+        3. **Two different known values** → :class:`VixTrioConflictError` —
+           NOT a run-identity breach (VIX is deliberately outside the
+           identity): the India-VIX lake moved between the two runs, so the
+           typed raise names that cause + remedy and the grid drivers demote
+           it to a #904 tuple-skip instead of a grid abort.
 
-        Every NON-VIX field keeps the strict rule: any difference raises.
+        Every NON-VIX field keeps the strict rule: any difference raises the
+        plain :class:`ResultsStoreError` run-identity conflict (a genuine
+        reproducibility breach — the backfill never masks it).
 
         Parameters
         ----------
@@ -503,24 +538,27 @@ class ResultsStore:
             a run-identity collision means upstream non-determinism and is never
             silently overwritten (Golden Rule #4). The VIX backfill branch is
             the ONE sanctioned, directional exception described above.
+        VixTrioConflictError
+            If the ONLY difference is two different known values on a VIX
+            field — the VIX lake moved between runs (see the class docstring).
         """
         existing = self._rows.get(row.run_id)
         if existing is not None:
             if existing == row:
                 return False
-            merged = _merge_vix_backfill(existing, row)
-            if merged is None:
-                differing = tuple(
-                    f.name
-                    for f in fields(ResultRow)
-                    if getattr(existing, f.name) != getattr(row, f.name)
-                )
+            differing = tuple(
+                f.name
+                for f in fields(ResultRow)
+                if getattr(existing, f.name) != getattr(row, f.name)
+            )
+            if any(name not in _VIX_FIELDS for name in differing):
                 _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
                 raise ResultsStoreError(
                     f"run-identity conflict for {row.run_id}: a different result is already "
                     f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
                     f"map to one result (Golden Rule #4) — refusing to overwrite."
                 )
+            merged = _merge_vix_backfill(existing, row)
             if merged == existing:
                 # Directional no-op: the incoming row is strictly LESS informed
                 # (it only turns known VIX values into None) — the stored row
@@ -748,35 +786,64 @@ def _validate_run_id(run_id: str) -> None:
         raise ResultsStoreError(f"run_id {run_id!r} is not valid hex") from exc
 
 
-def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow | None:
-    """Merge two same-``run_id`` rows differing ONLY in the nullable VIX trio.
+def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
+    """Union-merge two same-``run_id`` rows differing ONLY in the nullable VIX trio.
 
     The resolution is a per-field UNION under the directional law of
     :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001): for each of
     :data:`_VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
     *honestly unknown*, never a conflicting fact — so a stamped redo backfills
-    an unstamped row and an unstamped redo never erases a stamp.
+    an unstamped row and an unstamped redo never erases a stamp. The caller
+    (:meth:`ResultsStore.append`) has ALREADY established that every non-VIX
+    field is equal — a non-VIX difference is the plain run-identity conflict
+    and never reaches this merge.
 
-    Returns
-    -------
-    ResultRow | None
-        The merged row, or ``None`` when the pair is a GENUINE run-identity
-        conflict: any non-VIX field differs, or one VIX field carries two
-        DIFFERENT known values. (A mutually-inconsistent backfill — e.g. a
-        merged trio violating ``min <= mean <= max`` — raises
-        :class:`ResultsStoreError` from the merged row's own construction.)
+    Raises
+    ------
+    VixTrioConflictError
+        When one VIX field carries two DIFFERENT known values — the India-VIX
+        lake moved between the two runs (see the class docstring); the raise
+        names the cause + the remedy so the operator is never misdirected at
+        "upstream non-determinism". (A mutually-inconsistent backfill — e.g.
+        a merged trio violating ``min <= mean <= max`` — still raises the
+        plain order-law :class:`ResultsStoreError` from the merged row's own
+        construction.)
     """
-    for f in fields(ResultRow):
-        if f.name in _VIX_FIELDS:
-            continue
-        if getattr(existing, f.name) != getattr(incoming, f.name):
-            return None
-    resolved: dict[str, float | None] = {}
-    for name in _VIX_FIELDS:
-        ours, theirs = getattr(existing, name), getattr(incoming, name)
-        if ours is not None and theirs is not None and ours != theirs:
-            return None
-        resolved[name] = ours if ours is not None else theirs
+    conflicting = tuple(
+        name
+        for name in _VIX_FIELDS
+        if getattr(existing, name) is not None
+        and getattr(incoming, name) is not None
+        and getattr(existing, name) != getattr(incoming, name)
+    )
+    if conflicting:
+        _LOG.error(
+            "results_store.vix_conflict",
+            run_id=existing.run_id,
+            conflicting_fields=conflicting,
+            stored={name: getattr(existing, name) for name in _VIX_FIELDS},
+            incoming={name: getattr(incoming, name) for name in _VIX_FIELDS},
+        )
+        raise VixTrioConflictError(
+            f"REFERENCE-ONLY VIX trio conflict for {existing.run_id}: the stored row and "
+            f"the redo carry different known values for {', '.join(conflicting)} while "
+            f"every non-VIX column is identical. VIX is deliberately OUTSIDE the BLAKE3 "
+            f"run identity (CLAUDE.md §2 Rule 3), so this is NOT upstream non-determinism "
+            f"— the India-VIX lake moved between the two runs (a re-pull backfilled "
+            f"missing VIX bars, or the derived 1day partition was re-derived "
+            f"latest-wins). Grid drivers skip this ONE tuple (the #904 contract) and the "
+            f"rest of the grid completes; remedy: quarantine/delete this tuple's results "
+            f"store so a redo re-persists it against the current VIX series, or re-run "
+            f"after the VIX lake settles."
+        )
+    resolved: dict[str, float | None] = {
+        name: (
+            getattr(existing, name)
+            if getattr(existing, name) is not None
+            else getattr(incoming, name)
+        )
+        for name in _VIX_FIELDS
+    }
     # Explicit keywords (not a **splat) so mypy checks each against its field type.
     return replace(
         existing,
@@ -903,4 +970,5 @@ __all__ = [
     "ResultRow",
     "ResultsStore",
     "ResultsStoreError",
+    "VixTrioConflictError",
 ]

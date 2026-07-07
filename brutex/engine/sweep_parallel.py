@@ -119,6 +119,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import structlog
 
+from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -580,9 +581,14 @@ def _run_tuple_in_worker(
     audit lines (the worker never opens the real chain), a ``_NoDedup`` proves the
     digest path never consults dedup, and the ``bars`` are passed IN (already in
     parent memory) via a trivial ``bars_for`` so no un-picklable loader crosses
-    the boundary. A ``SweepComboError`` is caught → returned as a failed marker
-    ("Resilient: skip + continue"); a ``MemoryError`` (OOM = global stop) and any
-    OTHER exception propagate → the future breaks → the parent tears the pool down.
+    the boundary. A ``SweepComboError`` — or a
+    :class:`~brutex.engine.results_store.VixTrioConflictError`
+    (DEC-VIX-STAMP-WIRE-001: a redo whose REFERENCE-ONLY VIX trio disagrees
+    because the VIX lake moved between runs) — is caught → returned as a failed
+    marker ("Resilient: skip + continue"); a ``MemoryError`` (OOM = global stop)
+    and any OTHER exception (including the PLAIN ``ResultsStoreError``
+    run-identity conflict) propagate → the future breaks → the parent tears the
+    pool down.
     """
     ctx = _WORKER_CTX
     if ctx is None:  # pragma: no cover — the initializer always runs before a task
@@ -602,7 +608,7 @@ def _run_tuple_in_worker(
             # binds the SAME pickled stamper, so parallel == sequential.
             reference_stamper=ctx.reference_stamper,
         )
-    except SweepComboError as exc:
+    except (SweepComboError, VixTrioConflictError) as exc:
         return TupleWorkResult(
             index=index,
             summary=None,
