@@ -11,7 +11,12 @@ DEC-FETCH-HUNG-WRITE-DEADLINE-001. 100% line+branch of :func:`append_with_deadli
 * a write that raises its OWN error (PartitionLockTimeout / LakeWriteHalt / a generic
   WriterError) propagates UNCHANGED — only a TIMEOUT is reclassified;
 * every env-resolution branch (unset / blank / good / non-numeric / non-finite /
-  non-positive) of :func:`resolve_write_deadline_seconds`.
+  non-positive) of :func:`resolve_write_deadline_seconds`;
+* the deadline-worker BEAT-ATTRIBUTION regression (DEC-PULL-BEAT-PERRUN-001 fix round):
+  the run's own deadline-wrapped write's ``emit_progress_beat`` calls land on the run's
+  KEYED channel with zero ``progress_beat.foreign_beat_dropped`` WARNs, and a later
+  genuinely-foreign beat still WARNs (the epoch throttle is not consumed by the run's
+  own writes).
 
 Driven by deterministic FAKE sinks (a blocking ``threading.Event`` that never sets, a
 slow-but-OK sleep, a raising sink) + small deadlines so the real timeout path runs fast.
@@ -19,9 +24,10 @@ slow-but-OK sleep, a raising sink) + small deadlines so the real timeout path ru
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -40,6 +46,12 @@ from brutex.data.errors import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
+from brutex.observability.correlation import pull_id_scope
+from brutex.observability.progress_beat import (
+    emit_progress_beat,
+    register_progress_beat,
+    reset_progress_beats,
+)
 
 
 def _result(n: int) -> SinkAppendResult:
@@ -256,6 +268,94 @@ class TestHungWriteTrips:
         finally:
             # Release the abandoned daemon worker so it exits cleanly (no orphan thread).
             sink.gate.set()
+
+
+class _BeatingSink:
+    """A sink whose ``append`` fires the REAL :func:`emit_progress_beat` — the flock shape.
+
+    Stands in for the partition-flock lock-wait poll inside a contended
+    ``ParquetWriter``-backed ``sink.append`` (``partition_lock._acquire_bounded`` fires
+    one beat per ``BlockingIOError`` retry) without a real contended ``flock``; the beat
+    call is the REAL seam function, so the FULL routing logic (ambient-id resolution on
+    the deadline worker → keyed channel / foreign drop) is exercised end-to-end.
+    """
+
+    def __init__(self, beats: int) -> None:
+        self._beats = beats
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval, merge_mode
+        for _ in range(self._beats):
+            emit_progress_beat()
+        return _result(len(bars))
+
+
+class TestDeadlineWorkerBeatAttribution:
+    """The run's OWN deadline-wrapped durable write beats its OWN keyed channel.
+
+    DEC-PULL-BEAT-PERRUN-001 fix round (the deadline-thread attribution gap): both spine
+    tails wrap ``sink.append`` in :func:`append_with_deadline`, whose
+    ``run_with_deadline`` daemon worker previously started with an EMPTY contextvars
+    context — the GAP-#15 antistall beats fired inside the flock poll resolved the
+    ambient ``pull_id`` to ``""``, found no legacy registrant, and DROPPED as foreign
+    (``progress_beat.foreign_beat_dropped``), so the run's own cross-process
+    write-contention liveness signal never fed its watchdog AND the once-per-epoch
+    foreign WARN was consumed by the run's own writes. Fails-before / passes-after:
+    with the pre-fix empty-context worker,
+    ``test_keyed_beats_land_from_a_deadline_wrapped_append`` observed ZERO keyed beats
+    plus ONE foreign-drop WARN.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self) -> Iterator[None]:
+        """The sanctioned seam reset, before AND after (never bleed a keyed channel)."""
+        reset_progress_beats()
+        yield
+        reset_progress_beats()
+
+    def test_keyed_beats_land_from_a_deadline_wrapped_append(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Beats fired inside the deadline worker reach the run's keyed channel, no WARN."""
+        beats: list[int] = []
+        register_progress_beat(lambda: beats.append(1), pull_id="abc123def456")
+        caplog.set_level(logging.WARNING, logger="brutex.observability.progress_beat")
+        with pull_id_scope("abc123def456"):
+            result = _call(_BeatingSink(beats=3), deadline_seconds=5.0)
+        assert result.bars_appended == 1
+        assert len(beats) == 3, "the run's own write-contention beats must feed its channel"
+        foreign = [r for r in caplog.records if "foreign_beat_dropped" in r.getMessage()]
+        assert foreign == [], "the run's OWN writes must never be misdiagnosed as foreign"
+
+    def test_genuine_foreign_beat_still_warns_after_the_runs_own_writes(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The run's own writes no longer consume the once-per-epoch foreign-drop WARN.
+
+        Before the fix the run's own deadline-wrapped beats fired the epoch's single
+        ``progress_beat.foreign_beat_dropped`` WARN, silencing a LATER genuine zombie's
+        WARN for the rest of the epoch. Now the zombie's WARN still fires — loud, naming
+        the zombie's channel, not the run's.
+        """
+        register_progress_beat(lambda: None, pull_id="abc123def456")
+        caplog.set_level(logging.WARNING, logger="brutex.observability.progress_beat")
+        with pull_id_scope("abc123def456"):
+            _call(_BeatingSink(beats=2), deadline_seconds=5.0)
+        # A genuinely-foreign beat (a stale run's id, no registrant) AFTER the run's own
+        # writes: the epoch WARN must still be armed and must name the ZOMBIE's channel.
+        emit_progress_beat("feedfacef00d")
+        foreign = [r for r in caplog.records if "foreign_beat_dropped" in r.getMessage()]
+        assert len(foreign) == 1
+        assert "feedfacef00d" in foreign[0].getMessage()
 
 
 class TestUnderlyingErrorsPropagate:

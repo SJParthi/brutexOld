@@ -188,3 +188,80 @@ class TestRunWorkItems:
         results = pp.run_work_items(items, workers=2, materialize_fn=_fn)
         assert results[0].error is None
         assert results[1].error == "ValueError: boom"
+
+
+# ─────────────────── per-TASK run-id binding (DEC-PULL-BEAT-PERRUN-001) ───────────────────
+
+
+class TestPoolTaskRunScope:
+    """Pool workers re-bind the driver's captured pull_id PER TASK (never per thread),
+    so their seam beats route to the run's keyed channel and a reused thread can
+    never leak an id into a later task."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_beats(self):  # type: ignore[no-untyped-def]
+        from brutex.observability.progress_beat import reset_progress_beats
+
+        reset_progress_beats()
+        yield
+        reset_progress_beats()
+
+    def test_pool_tasks_carry_driver_run_id_and_hit_keyed_channel(self) -> None:
+        """Every REAL pool worker task reads the DRIVER's ambient id and its seam beat
+        lands on the run's keyed channel (kills a silent bind regression)."""
+        from brutex.observability.correlation import current_pull_id, pull_id_scope
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+        )
+
+        beats: list[int] = []
+        register_progress_beat(lambda: beats.append(1), pull_id="prebuild0001")
+        seen: list[str] = []
+
+        def _fn(item: pp.PrebuildWorkItem) -> pp.PrebuildWorkResult:
+            seen.append(current_pull_id())
+            emit_progress_beat()
+            return _ok(item.symbol)
+
+        items = [_item(f"S{i}") for i in range(6)]
+        with pull_id_scope("prebuild0001"):
+            results = pp.run_work_items(items, workers=2, materialize_fn=_fn)
+        assert [r.symbol for r in results] == [f"S{i}" for i in range(6)]
+        assert seen == ["prebuild0001"] * 6
+        assert beats == [1] * 6
+
+    def test_binding_is_per_task_not_per_thread(self) -> None:
+        """A task that RAW-binds a poison pull_id (no restore) cannot leak it into a
+        later task on the SAME reused pool thread: each task re-binds the captured id,
+        so every task's entry read is the driver's run id, never the poison."""
+        import structlog.contextvars as cv
+        from brutex.observability.correlation import PULL_ID_KEY, current_pull_id, pull_id_scope
+
+        seen: list[str] = []
+
+        def _fn(item: pp.PrebuildWorkItem) -> pp.PrebuildWorkResult:
+            seen.append(current_pull_id())  # entry read: MUST be the captured run id
+            # Poison the THREAD's context without restoring (the leak a per-thread
+            # binding would propagate into every later task on this worker).
+            cv.bind_contextvars(**{PULL_ID_KEY: "poisonpoison"})
+            return _ok(item.symbol)
+
+        items = [_item(f"P{i}") for i in range(8)]
+        with pull_id_scope("prebuild0002"):
+            pp.run_work_items(items, workers=2, materialize_fn=_fn)
+        assert seen == ["prebuild0002"] * 8  # never the poison — per-TASK re-bind
+
+    def test_no_ambient_scope_binds_legacy_empty_id(self) -> None:
+        """With no driver scope the captured id is ``""`` — tasks read the honest
+        empty id (the legacy-channel routing; byte-identical behaviour)."""
+        from brutex.observability.correlation import current_pull_id
+
+        seen: list[str] = []
+
+        def _fn(item: pp.PrebuildWorkItem) -> pp.PrebuildWorkResult:
+            seen.append(current_pull_id())
+            return _ok(item.symbol)
+
+        pp.run_work_items([_item("A"), _item("B")], workers=2, materialize_fn=_fn)
+        assert seen == ["", ""]

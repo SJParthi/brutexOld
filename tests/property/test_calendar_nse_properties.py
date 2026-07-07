@@ -30,6 +30,7 @@ from brutex.calendars.nse import (
     is_holiday_checked,
     is_holiday_data_available,
     is_trading_day,
+    previous_trading_session,
 )
 from hypothesis import given
 from hypothesis import strategies as st
@@ -102,3 +103,24 @@ def test_forced_exit_is_monotone_in_open_time(t: time, tf_minutes: int) -> None:
     # a pure threshold so it never raises for tf>=1 and returns a bool.
     result = is_forced_exit_bar(t, tf_minutes=tf_minutes)
     assert isinstance(result, bool)
+
+
+@given(_DATES)
+def test_previous_trading_session_is_a_strictly_prior_trading_day(d: date) -> None:
+    # DEC-MOVERS-PREVCLOSE-CONTIGUITY-001: a non-None result is STRICTLY before
+    # d, is itself a trading day, and no trading day lies between the two (the
+    # "immediately preceding session" law); None only ever means the walk
+    # crossed the coverage floor (abstain, never a guess).
+    prev = previous_trading_session(d)
+    if prev is None:
+        # Abstain only when the back-walk exhausted coverage — at (or below)
+        # the coverage floor, or past the coverage ceiling. A date well INSIDE
+        # coverage always resolves (the walk never abstains mid-span).
+        assert d.year <= HOLIDAY_COVERAGE_FIRST_YEAR or d.year > HOLIDAY_COVERAGE_LAST_YEAR
+        return
+    assert prev < d
+    assert is_trading_day(prev) is True
+    probe = prev + timedelta(days=1)
+    while probe < d:
+        assert not is_trading_day(probe)
+        probe += timedelta(days=1)
