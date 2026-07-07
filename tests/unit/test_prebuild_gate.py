@@ -14,6 +14,9 @@ import threading
 
 import pytest
 from brutex.dashboard.prebuild_gate import (
+    CROSS_PROCESS_PHASE,
+    SOURCE_CROSS_PROCESS,
+    SOURCE_PIPELINE,
     STATE_BLOCKING,
     STATE_IDLE,
     GateSnapshot,
@@ -461,3 +464,173 @@ def test_live_gate_snapshot_feeds_phase_into_the_payload() -> None:
     assert payload["phase"] == "prebuild"
     assert "(current stage: prebuild)" in payload["note"]
     assert payload["elapsed_s"] is not None and payload["elapsed_s"] >= 0.0
+
+
+# ── cross-process derive-lock visibility (DEC-DERIVE-LOCK-VISIBILITY-001) ──
+
+
+class TestCrossProcessVisibility:
+    """The gate's optional ``cross_probe`` — a separate-process derive gates too.
+
+    Closes the named PrebuildGate follow-up of DEC-ENGINE-MISC-PACK-001: while
+    a SEPARATE process holds the lake's exclusive derive flock, the movers gate
+    honestly reads BLOCKING with ``source="cross_process"``. No probe wired
+    (every pre-existing construction site / injected test gate) stays
+    byte-identical to the pre-change behaviour.
+    """
+
+    def test_default_gate_has_no_probe_and_source_is_none(self) -> None:
+        # Back-compat pin: a probe-less gate is byte-identical to the old shape.
+        snap = PrebuildGate().snapshot()
+        assert snap.state == STATE_IDLE
+        assert snap.source is None
+        assert snap == GateSnapshot(state=STATE_IDLE, runs=0, last_ok=None)
+
+    def test_probe_false_keeps_idle_byte_identical_and_is_consulted(self) -> None:
+        calls: list[bool] = []
+
+        def probe() -> bool:
+            calls.append(True)
+            return False
+
+        gate = PrebuildGate(cross_probe=probe)
+        snap = gate.snapshot()
+        assert snap == GateSnapshot(state=STATE_IDLE, runs=0, last_ok=None)
+        assert calls == [True]  # consulted exactly once per snapshot while idle
+
+    def test_probe_true_gates_cross_process_with_honest_unknowns(self) -> None:
+        gate = PrebuildGate(cross_probe=lambda: True)
+        gate.begin()
+        gate.release(True)  # runs/last_ok provenance must survive the cross gate
+        snap = gate.snapshot()
+        assert snap.blocking is True
+        assert snap.state == STATE_BLOCKING
+        assert snap.source == SOURCE_CROSS_PROCESS
+        assert snap.phase == CROSS_PROCESS_PHASE == "derive"
+        # The foreign holder's start instant / progress are UNKNOWABLE from
+        # this process — every stamp stays None, never fabricated.
+        assert snap.started_at is None
+        assert snap.started_at_epoch is None
+        assert snap.elapsed_s is None
+        assert snap.gated_for_s is None
+        assert snap.progress_done is None and snap.progress_total is None
+        assert snap.progress_segment is None
+        assert snap.runs == 1
+        assert snap.last_ok is True
+
+    def test_local_pipeline_blocking_wins_and_probe_is_not_consulted(self) -> None:
+        calls: list[bool] = []
+
+        def probe() -> bool:
+            calls.append(True)
+            return True
+
+        gate = PrebuildGate(cross_probe=probe)
+        gate.begin()
+        snap = gate.snapshot()
+        assert snap.source == SOURCE_PIPELINE
+        assert snap.phase == "pull"
+        assert snap.started_at is not None  # the rich in-process echo survives
+        assert calls == []  # the probe is consulted ONLY while locally idle
+
+    def test_probe_oserror_fails_open_and_warns_once_per_outage(self) -> None:
+        mode = {"raise": True}
+
+        def probe() -> bool:
+            if mode["raise"]:
+                raise PermissionError("wedged lake volume")
+            return False
+
+        gate = PrebuildGate(cross_probe=probe)
+        with capture_logs() as logs:
+            assert gate.snapshot().blocking is False  # fails OPEN — never a 500
+            assert gate.snapshot().blocking is False
+        warns = [e for e in logs if e["event"] == "movers.gate.cross_probe_failed"]
+        assert len(warns) == 1  # ONE warn per outage, never a per-poll storm
+        assert warns[0]["error_type"] == "PermissionError"
+        # A successful probe RESETS the flag → the next outage warns again.
+        mode["raise"] = False
+        assert gate.snapshot().blocking is False
+        mode["raise"] = True
+        with capture_logs() as logs:
+            assert gate.snapshot().blocking is False
+        assert [e for e in logs if e["event"] == "movers.gate.cross_probe_failed"]
+
+    def test_non_oserror_probe_bug_propagates(self) -> None:
+        # A genuine code bug in the probe is never swallowed (no bare except).
+        def probe() -> bool:
+            raise ValueError("probe bug")
+
+        gate = PrebuildGate(cross_probe=probe)
+        with pytest.raises(ValueError, match="probe bug"):
+            gate.snapshot()
+
+    def test_gated_payload_cross_process_note_and_source(self) -> None:
+        gate = PrebuildGate(cross_probe=lambda: True)
+        payload = gated_movers_payload(
+            gate.snapshot(), asset="spot", interval="1day", date="2024-06-13", time=None, top_n=100
+        )
+        assert payload["gated"] is True
+        assert payload["source"] == SOURCE_CROSS_PROCESS
+        assert payload["phase"] == "derive"
+        # The cross-process note names the REAL release condition, stays STABLE
+        # (no ticking numbers — the paint-once shell key), and never claims the
+        # in-process pipeline is running.
+        assert "another process" in payload["note"]
+        assert "cross-process derive lock" in payload["note"]
+        assert "retries automatically" in payload["note"]
+        assert "pull pipeline running" not in payload["note"]
+        # Honest unknowns ride as None — never fabricated stamps.
+        assert payload["started_at"] is None
+        assert payload["elapsed_s"] is None
+        assert payload["gated_for_s"] is None
+        # Still ZERO ranked lists / no reflected asset (the gated contract).
+        assert "price_gainers" not in payload
+        assert "asset" not in payload
+
+    def test_gated_payload_pipeline_source_and_note_byte_unchanged(self) -> None:
+        gate = PrebuildGate()
+        gate.begin()
+        gate.set_phase("prebuild")
+        payload = gated_movers_payload(
+            gate.snapshot(), asset="spot", interval="1day", date="2024-06-13", time=None, top_n=100
+        )
+        assert payload["source"] == SOURCE_PIPELINE
+        # The pipeline note is BYTE-UNCHANGED by the cross-process branch.
+        assert payload["note"] == (
+            "pull pipeline running (current stage: prebuild) — movers stay gated "
+            "until the final prebuild finishes (the movers warm then continues "
+            "un-gated in the background), so a half-filled lake is never ranked "
+            "(this screen retries automatically; no action needed)."
+        )
+
+    def test_gated_payload_legacy_snapshot_without_source_keeps_pipeline_note(self) -> None:
+        # Back-compat: a snapshot constructed WITHOUT `source` (an old artifact
+        # shape) reads source=None and keeps the pipeline wording — an honest
+        # unknown, never a fabricated cross-process claim.
+        payload = gated_movers_payload(
+            _blocking_snapshot(),
+            asset="spot",
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+        )
+        assert payload["source"] is None
+        assert "movers stay gated until the final prebuild finishes" in payload["note"]
+
+    def test_blocked_log_carries_source(self) -> None:
+        snap = GateSnapshot(
+            state=STATE_BLOCKING,
+            runs=2,
+            last_ok=None,
+            phase=CROSS_PROCESS_PHASE,
+            source=SOURCE_CROSS_PROCESS,
+        )
+        with capture_logs() as logs:
+            gated_movers_payload(
+                snap, asset="futures", interval="1day", date="2024-06-13", time=None, top_n=10
+            )
+        events = [e for e in logs if e["event"] == "movers.gate.blocked"]
+        assert len(events) == 1
+        assert events[0]["source"] == SOURCE_CROSS_PROCESS

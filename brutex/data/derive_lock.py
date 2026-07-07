@@ -38,16 +38,18 @@ This module adds ONE advisory :func:`fcntl.flock` at the FIXED sidecar path
 flocks — only the WRITER holds both (derive → partition, always in that order);
 the reader probe never blocks and never takes a partition lock.
 
-**Honest envelope (Golden Rule #10):** this is the scoped FIRST STEP — writer +
-the ``/movers`` spot stored-first reader only. NAMED FOLLOW-UPS (not claimed):
-probing in the other stored-TF readers (the ``/db`` viewer, the doctor's
-derived-freshness compare) and teaching the process-local ``PrebuildGate`` to
-honor the cross-process lock (a ``gated:true`` payload for a CLI-process
-pipeline). The FUTURES/OPTIONS movers session readers need nothing — they are
-locked 1-minute-native (DEC-FNO-TF-DERIVE-OI-001). ``fcntl.flock`` is POSIX
-(Linux + macOS — the Track-1 envelope); Windows is out of scope, exactly as for
-DEC-LAKE-PARTITION-FLOCK-001. A crashed holder is released by the kernel on
-process death — no stale-lock recovery needed.
+**Honest envelope (Golden Rule #10):** writer + the ``/movers`` spot
+stored-first reader shipped first; the process-local ``PrebuildGate`` now ALSO
+honors the cross-process lock (DEC-DERIVE-LOCK-VISIBILITY-001 — the gate's
+optional ``cross_probe`` wires :func:`derive_in_progress` in ``build_app``, so
+a CLI-process derive yields the honest ``gated:true`` movers payload with
+``source="cross_process"``; that follow-up is CLOSED). STILL-NAMED FOLLOW-UPS
+(not claimed): probing in the other stored-TF readers (the ``/db`` viewer, the
+doctor's derived-freshness compare). The FUTURES/OPTIONS movers session readers
+need nothing — they are locked 1-minute-native (DEC-FNO-TF-DERIVE-OI-001).
+``fcntl.flock`` is POSIX (Linux + macOS — the Track-1 envelope); Windows is out
+of scope, exactly as for DEC-LAKE-PARTITION-FLOCK-001. A crashed holder is
+released by the kernel on process death — no stale-lock recovery needed.
 """
 
 from __future__ import annotations

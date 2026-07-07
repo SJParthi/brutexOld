@@ -190,3 +190,70 @@ class TestMoversGatePhaseNote:
         assert body["phase"] == "pull"
         assert "(current stage: pull)" in body["note"]
         assert "movers stay gated until the final prebuild finishes" in body["note"]
+
+
+class TestCrossProcessDeriveGate:
+    """Cross-process derive-lock VISIBILITY end-to-end (DEC-DERIVE-LOCK-VISIBILITY-001).
+
+    The DEFAULT (un-injected) gate built by ``build_app`` wires the
+    ``derive_in_progress`` probe over the store's lake root, so a derive
+    holding the fixed ``<lake_root>/.locks/derive.lock`` — e.g. a CLI-launched
+    pipeline / lake heal in a SEPARATE process — yields the honest
+    ``gated: true`` movers payload with ``source: "cross_process"`` and ZERO
+    candidate computation, then releases the moment the lock does. The
+    exclusive flock is held here from a second file description, which is
+    exactly what a foreign process's holder looks like to the probe
+    (``fcntl.flock`` is per open file description).
+    """
+
+    def test_held_derive_lock_gates_movers_then_releases(self, store: InstrumentStore) -> None:
+        from brutex.data.derive_lock import derive_write_lock
+
+        # NO injected gate — the production default (probe-wired) gate.
+        app = build_app(DashboardState(), instrument_store=store)
+        lake_root = store.path.parent
+        with TestClient(app) as client:
+            # The compute spies live ONLY inside the held-lock window (the
+            # post-release recovery request below computes legitimately).
+            with pytest.MonkeyPatch.context() as mp, derive_write_lock(lake_root):
+                calls = _spy_compute(mp)
+                body = client.get(
+                    "/api/v1/movers", params={"asset": "spot", "date": "2024-06-13"}
+                ).json()
+                assert body["gated"] is True
+                assert body["source"] == "cross_process"
+                assert body["phase"] == "derive"
+                assert "another process" in body["note"]
+                assert "cross-process derive lock" in body["note"]
+                # Honest unknowns — the foreign holder's start is unknowable.
+                assert body["started_at"] is None
+                assert body["gated_for_s"] is None
+                assert calls == []  # zero candidate computation while gated
+            # Lock released → the very next poll serves the normal payload.
+            body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+            assert "gated" not in body
+            assert "price_gainers" in body
+
+    def test_no_lake_root_store_never_probes_never_gates(self) -> None:
+        # The probe's no-real-Path arm: a store without a lake root has nothing
+        # to probe — the route serves the honest empty payload, never a gate.
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        with TestClient(build_app(DashboardState(), instrument_store=fake)) as client:
+            body = client.get("/api/v1/movers").json()
+            assert "gated" not in body
+            assert body["instrument_count"] == 0
+
+    def test_injected_gate_stays_purely_process_local(
+        self, store: InstrumentStore, gate: PrebuildGate
+    ) -> None:
+        # Back-compat pin: an INJECTED probe-less gate (every pre-existing
+        # test / caller) ignores a held derive lock — byte-identical behaviour.
+        from brutex.data.derive_lock import derive_write_lock
+
+        app = build_app(DashboardState(), instrument_store=store, prebuild_gate=gate)
+        with TestClient(app) as client, derive_write_lock(store.path.parent):
+            body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
+            assert "gated" not in body
+            assert "price_gainers" in body

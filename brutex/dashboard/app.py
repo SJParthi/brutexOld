@@ -227,6 +227,7 @@ from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revisi
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
+from brutex.data.derive_lock import derive_in_progress
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
@@ -1402,13 +1403,40 @@ def build_app(
     # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
+
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
     # partitions must never be ranked); the pipeline job releases it in a
     # try/finally so a failed/stopped pull can never wedge the movers shut. Owned
     # by this app instance (no module-global mutable state — CLAUDE.md §4).
-    _prebuild_gate = prebuild_gate if prebuild_gate is not None else PrebuildGate()
+    def _cross_derive_probe() -> bool:
+        """``True`` iff a derive holds this lake's cross-process derive lock — O(1).
+
+        The gate's cross-process visibility probe
+        (DEC-DERIVE-LOCK-VISIBILITY-001, closing the named PrebuildGate
+        follow-up of DEC-ENGINE-MISC-PACK-001): resolves the lake root lazily
+        from the injected instrument store (its DuckDB file lives at
+        ``<lake_root>/instruments.duckdb`` — the same ``store.path.parent``
+        the movers route reads from) and takes the NON-BLOCKING shared-flock
+        probe of the fixed ``<lake_root>/.locks/derive.lock``
+        (:func:`~brutex.data.derive_lock.derive_in_progress` — never waits,
+        never writes). No store / no real ``Path`` → ``False`` (a bare app has
+        nothing to probe). Lake-volume I/O: the gate only consults it off the
+        event loop (the movers route snapshots via ``run_in_threadpool``), and
+        a probe ``OSError`` fails OPEN inside the gate with one WARN per
+        outage.
+        """
+        path = getattr(instrument_store, "path", None)
+        if not isinstance(path, Path):
+            return False
+        return derive_in_progress(path.parent)
+
+    _prebuild_gate = (
+        prebuild_gate
+        if prebuild_gate is not None
+        else PrebuildGate(cross_probe=_cross_derive_probe)
+    )
 
     def _pull_live() -> bool:
         """``True`` iff a dashboard pull is running IN THIS PROCESS — O(1), never raises.
@@ -4939,7 +4967,12 @@ def build_app(
             # payload and ZERO lake reads — a half-filled lake / mid-overwrite
             # derived partitions must never be ranked. The page keeps polling and
             # recovers by itself the moment the pipeline job releases the gate.
-            gate = _prebuild_gate.snapshot()
+            # The snapshot ALSO consults the cross-process derive-lock probe
+            # (DEC-DERIVE-LOCK-VISIBILITY-001 — a CLI-process derive gates too),
+            # which is one flock syscall on the lake volume, so it runs on a
+            # threadpool worker — never on the event loop (the app.py offload
+            # doctrine, DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
+            gate = await run_in_threadpool(_prebuild_gate.snapshot)
             if gate.blocking:
                 return JSONResponse(
                     gated_movers_payload(
