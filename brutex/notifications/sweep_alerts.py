@@ -634,6 +634,13 @@ class SweepAlerter:
         ``PHASE_BLOCKED`` (0.0 s window) — the durable cross-run bound lives
         in the checker's ``deadman.json``, not the per-process dedupe cache.
 
+        The ``partial_streak`` reason gets its OWN body (round-4 NIT): on that
+        arm the snapshot succeeded and success WAS stamped before this fires
+        (run.py step 9 precedes the streak escalation), so the dead-man reads
+        FRESH and will NOT re-alert — the generic "keep re-alerting while
+        stale" claim would be false and steer the operator toward an hourly
+        escalation that never comes.
+
         Parameters
         ----------
         reason
@@ -642,11 +649,21 @@ class SweepAlerter:
             Optional appended context (non-secret).
         """
         extra = f" {detail}" if detail else ""
-        message = escape_markdown_v2(
-            f"🛑 Off-box BACKUP FAILED: {reason}.{extra} The lake/results are NOT freshly "
-            "backed up; the dead-man will keep re-alerting while stale. Run "
-            "`brutex backup status`, then check the backup log and re-run `brutex backup run`."
-        )
+        if reason == "partial_streak":
+            message = escape_markdown_v2(
+                f"🛑 Off-box BACKUP FAILED: {reason}.{extra} The snapshot itself SUCCEEDED "
+                "and was stamped (the dead-man stays quiet), but restic could not read some "
+                "source files for consecutive nights — those files are NOT in the snapshots. "
+                "Investigate reader permissions via the backup log, then re-run "
+                "`brutex backup run`."
+            )
+        else:
+            message = escape_markdown_v2(
+                f"🛑 Off-box BACKUP FAILED: {reason}.{extra} The lake/results are NOT freshly "
+                "backed up; the dead-man will keep re-alerting while stale. Run "
+                "`brutex backup status`, then check the backup log and re-run "
+                "`brutex backup run`."
+            )
         return self._publish(
             kind=TelegramEventKind.PHASE_BLOCKED,
             severity=TelegramSeverity.CRITICAL,

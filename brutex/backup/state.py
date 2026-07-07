@@ -329,14 +329,17 @@ def load_state(path: Path) -> BackupState | None:
     Raises
     ------
     BackupStateError
-        On an unreadable file (``OSError``) or ANY parse defect — the F13 hard
-        alarm; the corrupt file is never overwritten by the checker.
+        On an unreadable file (``OSError``), a non-UTF-8 byte (bit-rot —
+        ``UnicodeDecodeError``, a ``ValueError`` subclass the ``OSError`` arm
+        alone would let escape raw; round-4 MAJOR, the RF-3/#1188 precedent),
+        or ANY parse defect — the F13 hard alarm; the corrupt file is never
+        overwritten by the checker.
     """
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise BackupStateError(f"failed to read {path}: {exc}") from exc
     return BackupState.from_json(raw)
 
@@ -368,7 +371,10 @@ def load_deadman(path: Path) -> DeadmanState:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return DeadmanState()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError (bit-rot — a ValueError, NOT an OSError) must
+        # ride the same corrupt→EMPTY arm or it escapes the hourly checker
+        # raw, violating this docstring's own contract (round-4 MAJOR).
         _LOG.warning(
             "backup.deadman.sidecar_corrupt", path=str(path), error_type=type(exc).__name__
         )

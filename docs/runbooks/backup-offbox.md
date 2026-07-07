@@ -61,11 +61,19 @@ heals via the ledger-reconcile design of
    plan + WOULD-run argv (zero restic calls, zero state writes).
 6. **[MANUAL M4]** **First seed:** run `brutex backup run` manually under
    `screen`/`tmux` — an 8 TB lake over WAN takes days (~1 TB/day at
-   ~100 Mbit/s sustained — honest envelope). Optionally raise
-   `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` (default 48) for the seed window; the
-   dead-man reads **RUNNING** while the run is alive (no false page) and
-   HUNG only past that bound. The single-flight lock means overlapping
-   launchd fire times exit busy (code 5, no alert) while the seed runs.
+   ~100 Mbit/s sustained — honest envelope). For any seed expected to exceed
+   the default, raise `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` (default 48) for the
+   seed window — it is BOTH the restic runtime deadline and the RUNNING→HUNG
+   bound; the dead-man reads **RUNNING** while the run is alive (no false
+   page) and HUNG only past that bound. **Keep the raised value in place
+   until the NEXT nightly backup stamps a fresh success:** the daily deep
+   cross-check also uses it as the stamp-PLAUSIBILITY bound (a success stamp
+   landing more than one run-duration after the seed's start would otherwise
+   page as a forgery). A Ctrl-C abort of the foreground seed clears the
+   RUNNING marker before propagating, so the dead-man honestly reads
+   NEVER_SUCCEEDED/OVERDUE — never a stale quiet RUNNING. The single-flight
+   lock means overlapping launchd fire times exit busy (code 5, no alert)
+   while the seed runs.
 7. **[MANUAL M4]** Fill the `{{PLACEHOLDER}}`s in the three templates under
    `docs/runbooks/backup-templates/` (`com.brutex.backup.plist`,
    `com.brutex.backup-deadman.plist`, `com.brutex.backup-drill.plist` —
@@ -155,12 +163,18 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
   shallow dead-man verdict (0/1) with NO alert/ping/sidecar side effects.
 - `brutex backup check [--deep] [--dry-run]` — the dead-man tick. `--deep`
   forces the remote cross-check (`restic snapshots --json --latest 1 --tag
-  brutex` compared against the local stamp) this tick. Agreement = the
-  remote latest snapshot id matching the stamped `last_snapshot_id`; the
-  time-gap fallback (id-less state) is judged against the NEARER of the
-  attempt/success stamps — restic stamps a snapshot's time at backup START,
-  so a run longer than the dead-man threshold (the multi-day seed) never
-  reads as divergence.
+  brutex` compared against the local stamp) this tick. THREE tiers: (1) a
+  stamp-PLAUSIBILITY bound is screened FIRST — a `last_success_at` landing
+  more than `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` after the later of the run's
+  start and the remote latest snapshot's own time is CRITICAL divergence,
+  catching the bump-only stamp forgery that keeps the real snapshot id
+  (keep a seed-window `MAX_RUNTIME` raise in place until the next nightly
+  success restamps, step 6); (2) agreement = the remote latest snapshot id
+  matching the stamped `last_snapshot_id`; (3) the time-gap fallback
+  (id-less state) is judged against the NEARER of the attempt/success
+  stamps — restic stamps a snapshot's time at backup START, so a run longer
+  than the dead-man threshold (the multi-day seed) never reads as
+  divergence.
 - Exit codes (from `brutex/backup/errors.py`): 0 OK · 1 dead-man breach ·
   2 config · 3 preflight (unmounted/phantom/empty lake) · 4 restic/state
   failure · 5 busy (benign overlap, no alert) · 6 corruption

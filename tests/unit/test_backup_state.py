@@ -181,6 +181,15 @@ class TestLoadSaveState:
         with pytest.raises(BackupStateError, match="failed to read"):
             load_state(target)
 
+    def test_bit_rot_non_utf8_byte_raises_state_error(self, tmp_path: Path) -> None:
+        """Round-4 MAJOR: a single flipped high bit (0x80-0xFF) in the pure-ASCII
+        state.json raises UnicodeDecodeError — a ValueError, NOT an OSError —
+        which must map to BackupStateError, never escape raw (F13 bit-rot)."""
+        target = tmp_path / "state.json"
+        target.write_bytes(b'{"schema": 1\xff}')
+        with pytest.raises(BackupStateError, match="failed to read"):
+            load_state(target)
+
     def test_save_then_load_roundtrip(self, tmp_path: Path) -> None:
         target = tmp_path / "nested" / "state.json"
         save_state(target, _full_state())
@@ -244,6 +253,16 @@ class TestDeadmanState:
         with structlog.testing.capture_logs() as logs:
             assert load_deadman(target) == DeadmanState()
         assert [entry["event"] for entry in logs] == ["backup.deadman.sidecar_corrupt"]
+
+    def test_deadman_non_utf8_returns_empty_plus_warn(self, tmp_path: Path) -> None:
+        """Round-4 MAJOR: a non-UTF-8 sidecar byte (bit-rot) rides the same
+        corrupt→EMPTY (+ ONE WARN) arm — its own docstring contract."""
+        target = tmp_path / "deadman.json"
+        target.write_bytes(b'{"schema": 1\xfe}')
+        with structlog.testing.capture_logs() as logs:
+            assert load_deadman(target) == DeadmanState()
+        assert [entry["event"] for entry in logs] == ["backup.deadman.sidecar_corrupt"]
+        assert logs[0]["error_type"] == "UnicodeDecodeError"
 
     def test_deadman_bad_json_raises_in_from_json(self) -> None:
         with pytest.raises(BackupStateError, match="not valid JSON"):

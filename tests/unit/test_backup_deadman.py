@@ -372,6 +372,44 @@ class TestCheckerShell:
         assert code2 == EXIT_DEADMAN_BREACH
         assert fake2.published == []
 
+    def test_bit_rot_state_alarms_state_corrupt_never_crashes(self, tmp_path: Path) -> None:
+        """Round-4 MAJOR pin (F13's own named bit-rot vector): a single
+        non-UTF-8 byte in state.json (one flipped high bit — the classic
+        bit-rot/torn-sector shape on the pure-ASCII file) must yield the
+        STATE_CORRUPT triple — exit 1 + CRITICAL alert + /fail ping — not a
+        raw UnicodeDecodeError escaping the hourly checker forever."""
+        cfg = _shell_cfg(tmp_path, BRUTEX_BACKUP_HEALTHCHECK_URL="http://hc.local/p")
+        state_file = state_path(cfg)
+        state_file.parent.mkdir(parents=True)
+        poison = b'{"schema": 1\xff}'
+        state_file.write_bytes(poison)
+        fake = FakeNotifier()
+        pings: list[str] = []
+
+        def _ping(url: str) -> bool:
+            pings.append(url)
+            return True
+
+        code = run_deadman_check(cfg, alerter=SweepAlerter(notifier=fake), clock=_clock, ping=_ping)
+        assert code == EXIT_DEADMAN_BREACH
+        assert state_file.read_bytes() == poison  # forensics preserved
+        assert fake.published[0].dedupe_key == "backup-overdue:state_corrupt"
+        assert pings == ["http://hc.local/p/fail"]
+
+    def test_bit_rot_sidecar_loads_empty_plus_warn(self, tmp_path: Path) -> None:
+        """Round-4 MAJOR pin (sidecar arm): a non-UTF-8 deadman.json rides the
+        corrupt→EMPTY (+ ONE WARN) contract instead of raising raw."""
+        cfg = _shell_cfg(tmp_path)
+        sidecar_file = deadman_path(cfg)
+        sidecar_file.parent.mkdir(parents=True)
+        sidecar_file.write_bytes(b'{"schema": 1\xff}')
+        with structlog.testing.capture_logs() as logs:
+            sidecar = load_deadman(sidecar_file)
+        assert sidecar == DeadmanState()
+        corrupt = [e for e in logs if e["event"] == "backup.deadman.sidecar_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["error_type"] == "UnicodeDecodeError"
+
     def test_sidecar_write_failure_swallowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -625,9 +663,15 @@ class TestDeepTier:
         (seed start, 194 h ago) while last_success_at lands at run END (2 h
         ago) — the gap IS the run duration, and the remote latest id equals
         state.last_snapshot_id, so the deep tier must read AGREEMENT: exit 0,
-        plain healthcheck ping, deep gate stamped."""
+        plain healthcheck ping, deep gate stamped. The operator raised
+        MAX_RUNTIME_HOURS for the seed window (runbook step 6) — the round-4
+        stamp-plausibility bound uses the SAME knob, so the 192 h
+        success-after-start overshoot stays within the raised bound."""
         cfg = _shell_cfg(
-            tmp_path, BRUTEX_BACKUP_HEALTHCHECK_URL="http://hc.local/p", **_repo_env(tmp_path)
+            tmp_path,
+            BRUTEX_BACKUP_HEALTHCHECK_URL="http://hc.local/p",
+            BRUTEX_BACKUP_MAX_RUNTIME_HOURS="200",
+            **_repo_env(tmp_path),
         )
         save_state(
             state_path(cfg),
@@ -695,7 +739,9 @@ class TestDeepTier:
 
     def test_deep_divergence_idless_attemptless_state_still_fires(self, tmp_path: Path) -> None:
         """The forged/id-less state fallback keeps its teeth: no snapshot id,
-        no attempt stamp, remote latest 200 h away → still CRITICAL."""
+        no attempt stamp, remote latest 200 h away → still CRITICAL (since
+        round 4 this shape trips the stamp-plausibility tier: with no attempt
+        stamp the anchor is the remote snapshot time, 199 h before success)."""
         cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
         save_state(
             state_path(cfg),
@@ -709,6 +755,91 @@ class TestDeepTier:
             runner_factory=_factory(FakeDeepRunner(_diverging_snapshots_json())),
         )
         assert code == EXIT_DEADMAN_BREACH
+
+    def test_deep_bumped_success_forgery_kept_id_diverges(self, tmp_path: Path) -> None:
+        """Round-4 MAJOR pin (the F21 keystone): the SIMPLEST state poisoning
+        — bump last_success_at to 1 h ago while keeping the REAL old
+        last_snapshot_id + last_attempt_at (both ~40 d old, no remote
+        knowledge needed) — must read CRITICAL divergence, not the id-match
+        AGREE the round-3 short-circuit alone would give: the success stamp
+        post-dates the run anchor by ~959 h ≫ max_runtime_hours (48)."""
+        cfg = _shell_cfg(
+            tmp_path, BRUTEX_BACKUP_HEALTHCHECK_URL="http://hc.local/p", **_repo_env(tmp_path)
+        )
+        save_state(
+            state_path(cfg),
+            _state(
+                last_attempt_at=NOW - timedelta(days=40),
+                last_success_at=NOW - timedelta(hours=1),  # the forged bump
+                last_snapshot_id="deadbeef",  # the REAL old id, kept
+            ),
+        )
+        stamp = (NOW - timedelta(days=40)).isoformat().replace("+00:00", "Z")
+        runner = FakeDeepRunner(f'[{{"short_id": "deadbeef", "time": "{stamp}"}}]')
+        fake = FakeNotifier()
+        pings: list[str] = []
+
+        def _ping(url: str) -> bool:
+            pings.append(url)
+            return True
+
+        with structlog.testing.capture_logs() as logs:
+            code = run_deadman_check(
+                cfg,
+                deep=True,
+                alerter=SweepAlerter(notifier=fake),
+                clock=_clock,
+                runner_factory=_factory(runner),
+                ping=_ping,
+            )
+        assert code == EXIT_DEADMAN_BREACH
+        assert fake.published[0].dedupe_key == "backup-overdue:state_remote_divergence"
+        assert pings == ["http://hc.local/p/fail"]
+        diverged = [e for e in logs if e["event"] == "backup.deadman.remote_divergence"]
+        assert len(diverged) == 1
+        assert "plausible-stamp forgery" in diverged[0]["detail"]
+
+    def test_deep_bumped_success_forgery_idless_old_attempt_diverges(self, tmp_path: Path) -> None:
+        """Round-4 MAJOR pin (id-less variant): the same bump-only forgery
+        with the id blanked but the real old last_attempt_at preserved must
+        diverge too — pre-fix the nearer-stamp fallback read a 0.0 h gap
+        (attempt ≈ remote snapshot time) and AGREED."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        state = _state(
+            last_attempt_at=NOW - timedelta(days=40),
+            last_success_at=NOW - timedelta(hours=1),
+            last_snapshot_id=None,
+        )
+        stamp = (NOW - timedelta(days=40)).isoformat().replace("+00:00", "Z")
+        runner = cast(
+            "ResticRunner", FakeDeepRunner(f'[{{"short_id": "deadbeef", "time": "{stamp}"}}]')
+        )
+        diverged, completed, detail = _deep_divergence(cfg, state, runner)
+        assert diverged is True
+        assert completed is True
+        assert "plausible-stamp forgery" in detail
+
+    def test_deep_gap_arm_attemptless_state_within_plausibility_diverges(
+        self, tmp_path: Path
+    ) -> None:
+        """The id-less time-gap fallback still has its OWN teeth below the
+        plausibility bound: attempt-less + id-less, success 34 h after the
+        remote snapshot (< max_runtime 48 h, so tier 1 passes) but gap
+        34 h > deadman 30 h → divergence via the time-gap arm."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        state = _state(
+            last_attempt_at=None,
+            last_success_at=NOW - timedelta(hours=1),
+            last_snapshot_id=None,
+        )
+        stamp = (NOW - timedelta(hours=35)).isoformat().replace("+00:00", "Z")
+        runner = cast(
+            "ResticRunner", FakeDeepRunner(f'[{{"short_id": "run35h", "time": "{stamp}"}}]')
+        )
+        diverged, completed, detail = _deep_divergence(cfg, state, runner)
+        assert diverged is True
+        assert completed is True
+        assert "diverges from remote latest" in detail
 
     def test_snapshot_ids_match_prefix_both_directions(self) -> None:
         """short_id (remote) vs full id (state) match either way; id-less never."""
@@ -818,6 +949,28 @@ class TestDefaultPing:
         assert all(
             "secret-token-xyz" not in str(value) for entry in logs for value in entry.values()
         )
+
+    def test_ping_control_char_url_no_raise_token_redacted(self) -> None:
+        """Round-4 MINOR pin: an interior control char (a line-wrapped plist
+        URL) raises http.client.InvalidURL — NOT a URLError/OSError/ValueError
+        subclass — whose str() embeds the full capability token; _default_ping
+        must swallow it and log only the exception TYPE name."""
+        secret = "SECRET-UUID-TOKEN"
+        with structlog.testing.capture_logs() as logs:
+            assert _default_ping(f"https://hc.example/{secret}\n-more") is False
+        events = [entry for entry in logs if entry["event"] == "backup.deadman.ping_failed"]
+        assert len(events) == 1
+        assert events[0]["error"] == "InvalidURL"
+        assert all(secret not in str(value) for entry in logs for value in entry.values())
+
+    def test_ping_nonnumeric_port_url_no_raise(self) -> None:
+        """The InvalidURL port-typo shape is swallowed too (never a raise)."""
+        with structlog.testing.capture_logs() as logs:
+            assert _default_ping("https://hc.example:bad_port/tok-abc") is False
+        events = [entry for entry in logs if entry["event"] == "backup.deadman.ping_failed"]
+        assert len(events) == 1
+        assert events[0]["error"] == "InvalidURL"
+        assert all("tok-abc" not in str(value) for entry in logs for value in entry.values())
 
     def test_ping_unparseable_url_host_none(self) -> None:
         """urlsplit ValueError (invalid IPv6 netloc) → url_host=None, still no raise."""

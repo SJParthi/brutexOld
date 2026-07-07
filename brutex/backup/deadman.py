@@ -30,6 +30,7 @@ Fail-toward-alarm invariants:
 
 from __future__ import annotations
 
+import http.client
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -318,8 +319,14 @@ def _default_ping(url: str) -> bool:
         # derived from remote input.
         with urllib.request.urlopen(url, timeout=_PING_TIMEOUT_S):  # noqa: S310  # nosec B310
             return True
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        _LOG.warning("backup.deadman.ping_failed", url_host=_ping_url_host(url), error=str(exc))
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
+        # Round-4 MINOR: urlopen can ALSO raise http.client.InvalidURL (an
+        # HTTPException — NOT a URLError/OSError/ValueError subclass) on an
+        # interior control char (a line-wrapped plist URL) or a nonnumeric
+        # port; its str() EMBEDS the URL path (the WRITE-capability token),
+        # so HTTPException-class errors log only the type name.
+        error = type(exc).__name__ if isinstance(exc, http.client.HTTPException) else str(exc)
+        _LOG.warning("backup.deadman.ping_failed", url_host=_ping_url_host(url), error=error)
         return False
 
 
@@ -349,15 +356,29 @@ def _deep_divergence(
 ) -> tuple[bool, bool, str]:
     """Run the F21 deep cross-check against the remote trust root.
 
-    Agreement is judged FIRST by snapshot identity (the remote latest id
-    matching ``state.last_snapshot_id`` — proof the remote's newest data IS
-    the stamped last success), and only for an id-less/forged state by the
-    time gap — measured against the NEARER of ``last_success_at`` and
-    ``last_attempt_at``, because restic stamps a snapshot's ``time`` at
-    backup START (≈ ``last_attempt_at``) while the success stamp lands at run
-    END: a success-only gap would equal the RUN DURATION and false-CRITICAL
-    any run longer than ``deadman_hours`` — the documented multi-day 8 TB
-    seed (round-3 MAJOR).
+    THREE tiers, in order:
+
+    1. **Stamp-plausibility bound (round-4 MAJOR — the forgery keystone):**
+       a success stamp can legitimately land at most one bounded run-duration
+       (``cfg.max_runtime_hours`` — the SAME knob that deadlines the run
+       itself, ``timeout_s`` default = ``max_runtime_hours × 3600``) after
+       the LATER of the run's start (``last_attempt_at``) and the remote
+       latest snapshot's own time (restic stamps ``time`` at backup START).
+       The naive F21 poisoning — bump ``last_success_at`` to "now" while
+       keeping the real old id/attempt stamps (no remote knowledge needed) —
+       passes BOTH agreement arms below, so it is screened FIRST, before the
+       id short-circuit. A legit multi-day seed passes because the operator
+       raises ``max_runtime_hours`` for the seed window (runbook step 6) and
+       keeps it raised until the next nightly success restamps.
+       Fail-toward-alarm: a pathological verify tail longer than
+       ``max_runtime_hours`` would cost an extra page, never silence.
+    2. **Snapshot identity:** the remote latest id matching
+       ``state.last_snapshot_id`` — proof the remote's newest data IS the
+       stamped last success (run-duration-tolerant, round-3 MAJOR).
+    3. **Time gap (id-less state):** measured against the NEARER of
+       ``last_success_at`` and ``last_attempt_at``, because a success-only
+       gap would equal the RUN DURATION and false-CRITICAL any run longer
+       than ``deadman_hours`` — the documented multi-day 8 TB seed.
 
     Returns
     -------
@@ -386,6 +407,24 @@ def _deep_divergence(
         # Unreachable via the FRESH gate (FRESH implies a success stamp) —
         # kept as a defensive divergence, never an assert.
         return True, True, "state carries no success stamp to compare against"
+    # Tier 1 — stamp plausibility (must precede the id short-circuit: the
+    # bump-only forgery KEEPS the real old id, which the remote still holds).
+    anchor = info.time_utc
+    if state.last_attempt_at is not None and state.last_attempt_at > anchor:
+        anchor = state.last_attempt_at
+    overshoot_hours = (state.last_success_at - anchor).total_seconds() / _SECONDS_PER_HOUR
+    if overshoot_hours > cfg.max_runtime_hours:
+        return (
+            True,
+            True,
+            (
+                f"last_success_at {state.last_success_at.isoformat()} post-dates the run "
+                f"anchor {anchor.isoformat()} by {overshoot_hours:.1f} h > max_runtime_hours "
+                f"{cfg.max_runtime_hours:g} h — a success stamp cannot legitimately land "
+                "more than one bounded run-duration after the run started (plausible-stamp "
+                "forgery, F21)"
+            ),
+        )
     if _snapshot_ids_match(state.last_snapshot_id, info.snapshot_id):
         return (
             False,

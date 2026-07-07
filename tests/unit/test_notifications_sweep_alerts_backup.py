@@ -60,6 +60,26 @@ class TestBackupFailed:
     def test_backup_failed_disabled_returns_false(self) -> None:
         assert SweepAlerter(resolver=lambda: None).backup_failed(reason="config") is False
 
+    def test_backup_failed_partial_streak_body_is_honest(self) -> None:
+        """Round-4 NIT: on the partial_streak arm success was ALREADY stamped
+        (run.py step 9 precedes the escalation) so the dead-man reads FRESH —
+        the message must NOT claim the dead-man will keep re-alerting, and
+        must say the snapshot succeeded/was stamped."""
+        fake = FakeNotifier()
+        assert (
+            SweepAlerter(notifier=fake).backup_failed(
+                reason="partial_streak", detail="3 consecutive partial (rc-3) backups."
+            )
+            is True
+        )
+        event = fake.published[0]
+        assert event.dedupe_key == "backup-failed:partial_streak"
+        assert event.severity == TelegramSeverity.CRITICAL
+        assert "re\\-alerting" not in event.message
+        assert "SUCCEEDED" in event.message
+        assert "stays quiet" in event.message
+        assert "3 consecutive partial" in event.message
+
 
 class TestBackupDegraded:
     def test_backup_degraded_kind_severity_dedupe_and_escaped_message(self) -> None:

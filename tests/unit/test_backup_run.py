@@ -1014,4 +1014,55 @@ class TestLakeRootDefault:
         assert harness.ops() == []  # no restic verb ever ran
         events = [e for e in logs if e["event"] == "backup.config.malformed_path"]
         assert len(events) == 1
-        assert events[0]["env_var"] == "BRUTEX_LAKE_ROOT"
+        assert events[0]["source"] == "BRUTEX_LAKE_ROOT"
+
+    def test_lake_root_override_tilde_typo_exit_config(self, tmp_path: Path) -> None:
+        """Round-4 finding 3: an EXPLICIT `--lake-root ~nosuchuser/...` typo
+        (the CLI flag path, which skips resolve_lake_root entirely) must map
+        to the same deterministic config triple — pre-fix it flowed unguarded
+        to lake_root_identity's expanduser and raised a raw RuntimeError past
+        the OSError-only preflight guard."""
+        harness = Harness(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            assert harness.run(lake_root=Path("~nosuchuser123/lake")) == EXIT_CONFIG
+        assert harness.dedupe_keys() == ["backup-failed:config"]
+        assert harness.ops() == []  # no restic verb ever ran
+        events = [e for e in logs if e["event"] == "backup.config.malformed_path"]
+        assert len(events) == 1
+        assert events[0]["source"] == "--lake-root"
+
+
+class TestInterruptMidRun:
+    def test_keyboard_interrupt_clears_running_marker_and_propagates(self, tmp_path: Path) -> None:
+        """Round-4 finding 6: Ctrl-C on the runbook step-6 manual foreground
+        seed AFTER step 4 stamped running_since must clear the marker before
+        propagating — otherwise the dead-man reads a quiet RUNNING (success
+        pings, muted NEVER_SUCCEEDED) off the aborted run for up to 48 h."""
+        harness = Harness(tmp_path)
+
+        def _ki(key: str) -> None:
+            if key == "backup":
+                raise KeyboardInterrupt
+
+        harness.runner = ScriptedRunner(on_call=_ki)
+        with pytest.raises(KeyboardInterrupt):
+            harness.run()
+        state = load_state(state_path(harness.cfg))
+        assert state is not None
+        assert state.running_since is None  # F17b: cleared at EVERY exit
+        assert state.last_attempt_at == NOW  # the attempt stamp stands
+
+    def test_system_exit_clears_running_marker_and_propagates(self, tmp_path: Path) -> None:
+        """SystemExit rides the same arm (a signal-wrapped abort)."""
+        harness = Harness(tmp_path)
+
+        def _exit(key: str) -> None:
+            if key == "backup":
+                raise SystemExit(130)
+
+        harness.runner = ScriptedRunner(on_call=_exit)
+        with pytest.raises(SystemExit):
+            harness.run()
+        state = load_state(state_path(harness.cfg))
+        assert state is not None
+        assert state.running_since is None

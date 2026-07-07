@@ -291,6 +291,11 @@ def run_backup(
 ) -> int:
     """Run one nightly backup (§6 flow) — returns an exit code, raises nothing.
 
+    The ONE exception to "raises nothing": ``KeyboardInterrupt``/``SystemExit``
+    (an operator Ctrl-C on the manual foreground seed) propagate — after the
+    ``running_since`` marker is cleared best-effort so the dead-man never
+    reads a stale RUNNING off an aborted run.
+
     Parameters
     ----------
     cfg
@@ -317,17 +322,21 @@ def run_backup(
         The deterministic §1 exit code (0/2/3/4/5/6/7).
     """
     active_alerter = alerter if alerter is not None else SweepAlerter()
+    lake_source = "BRUTEX_LAKE_ROOT" if lake_root is None else "--lake-root"
     try:
-        lake = lake_root if lake_root is not None else resolve_lake_root()
+        # The EXPLICIT override is expanded HERE (inside the guard) too —
+        # otherwise a ``~nosuchuser`` --lake-root typo flowed unguarded to
+        # ``lake_root_identity``'s expanduser and raised a raw RuntimeError
+        # past the OSError-only preflight guard (round-4 MINOR; the env arm
+        # was already guarded in rounds 2/3).
+        lake = lake_root.expanduser() if lake_root is not None else resolve_lake_root()
     except (KeyError, RuntimeError) as exc:
-        # ``Path.expanduser()`` on a ``~nosuchuser`` BRUTEX_LAKE_ROOT typo
-        # raises RuntimeError — the same non-total surface _expand_user_path
-        # guards for the BRUTEX_BACKUP_* paths. Map to the deterministic
-        # config triple, never a raw nightly traceback.
-        _LOG.error("backup.config.malformed_path", env_var="BRUTEX_LAKE_ROOT", error=str(exc))
-        active_alerter.backup_failed(
-            reason="config", detail=f"BRUTEX_LAKE_ROOT unresolvable: {exc}"
-        )
+        # ``Path.expanduser()`` on a ``~nosuchuser`` typo raises RuntimeError
+        # — the same non-total surface _expand_user_path guards for the
+        # BRUTEX_BACKUP_* paths. Map to the deterministic config triple,
+        # never a raw nightly traceback.
+        _LOG.error("backup.config.malformed_path", source=lake_source, error=str(exc))
+        active_alerter.backup_failed(reason="config", detail=f"{lake_source} unresolvable: {exc}")
         return EXIT_CONFIG
     _LOG.info("backup.run.start", lake_root=str(lake), dry_run=dry_run)
 
@@ -383,6 +392,15 @@ def run_backup(
                 runner_factory=runner_factory,
                 plan_fn=plan_fn,
             )
+    except (KeyboardInterrupt, SystemExit):
+        # Ctrl-C on the runbook step-6 manual foreground seed (screen/tmux)
+        # after step 4 stamped running_since would otherwise leave a stale
+        # RUNNING marker muting the dead-man (quiet verdict + SUCCESS pings)
+        # for up to the 48 h HUNG bound — clear it best-effort, then
+        # propagate (the #1522 KI stance: release the flag, never swallow
+        # the interrupt; F17b: cleared at EVERY exit). Round-4 MINOR.
+        _clear_running_marker_best_effort(cfg)
+        raise
     except BackupBusyError:
         _LOG.info("backup.singleflight.busy", state_dir=str(cfg.state_dir))
         return EXIT_BUSY
