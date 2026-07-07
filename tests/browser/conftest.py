@@ -292,6 +292,7 @@ def new_page(
             base_url=base_url,
             expect_console_clean=expect_console_clean,
         )
+
         def _on_dialog(dialog: Any) -> None:
             session.dialogs.append(dialog.message)
             dialog.dismiss()
