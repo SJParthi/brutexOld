@@ -257,6 +257,157 @@ def _verify_kwargs(
     }
 
 
+# ────── the launch cascade + the manual replay (review round-2) ──────
+
+
+def test_launch_cascade_carries_schedules_and_scores_futures_pools(tmp_path: Path) -> None:
+    """Round-2 finding 6(a): the LAUNCH cascade genuinely cascades futures.
+
+    Pre-fix teeth: dropping the `roll_schedule_by_instrument=` argument at the
+    cmd_sweep_all call site (round-1 commit da461a99) degraded every futures
+    launch cascade to the loud-WARN pool skip while the whole suite stayed
+    green — nothing asserted the manifest carriage OR that the report scored
+    any futures pool. This pins both at the REAL launch mouth.
+    """
+    import json
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK
+    manifest = json.loads((results_root / "cascade" / "manifest.json").read_text(encoding="utf-8"))
+    expected_schedule = [_JUN[1].toordinal(), _JUL[1].toordinal(), _AUG[1].toordinal()]
+    assert manifest["roll_schedules"] == [[_ALIAS, expected_schedule]]
+    report = json.loads(
+        (results_root / "cascade" / "cascade-report.json").read_text(encoding="utf-8")
+    )
+    # >0 futures pools actually SCORED — the launch never silently degrades to
+    # the futures_pool_skipped_no_roll_schedule path.
+    assert report["groups"], "the launch cascade scored ZERO pools — schedule carriage broken"
+    assert {group["instrument"] for group in report["groups"]} == {_ALIAS}
+
+
+def test_manual_cascade_replays_then_refuses_a_drifted_lake(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 findings 1/4/9 (MAJOR, fails-before/passes-after): the manual
+    `brutex cascade` replay cross-checks the manifest's FROZEN roll_schedules
+    against the CURRENT lake's re-derivation. Unchanged lake → the golden
+    byte-identical report; a lake whose contract set CHANGED since the sweep →
+    a clean refusal naming BOTH schedules (pre-fix: EXIT_OK with a silently
+    diverged report rewritten under mismatched Stage-1A resets)."""
+    import shutil
+
+    from brutex.cli import cmd_cascade
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK
+    report_path = results_root / "cascade" / "cascade-report.json"
+    launch_report = report_path.read_bytes()
+    capsys.readouterr()
+
+    # Unchanged lake: the replay round-trips to the SAME report bytes.
+    rc = cmd_cascade(
+        lake_root=lake_root, results_root=results_root, catalog_path=catalog_path, run_id=None
+    )
+    assert rc == EXIT_OK
+    assert report_path.read_bytes() == launch_report
+
+    # The lake DRIFTS (loses its newest contract) → the replay REFUSES with
+    # both schedules named instead of silently rewriting the report.
+    shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _AUG[0])
+    capsys.readouterr()
+    rc = cmd_cascade(
+        lake_root=lake_root, results_root=results_root, catalog_path=catalog_path, run_id=None
+    )
+    err = capsys.readouterr().err
+    assert rc == EXIT_USER_ERROR
+    assert "cascade error" in err
+    assert "FROZEN" in err
+    assert str([_JUN[1].toordinal(), _JUL[1].toordinal(), _AUG[1].toordinal()]) in err
+    assert str([_JUN[1].toordinal(), _JUL[1].toordinal()]) in err
+    assert "contract set changed" in err
+    assert "sweep-all" in err  # the remediation
+    assert report_path.read_bytes() == launch_report  # the report is NOT rewritten
+
+
+def test_manual_cascade_interior_hole_is_a_clean_user_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 findings 10/12: a FuturesSeriesError out of the replay's
+    re-resolution (an interior hole that appeared since the launch) is a
+    one-line user error — never a raw traceback (the cmd_cascade net now
+    covers load_bars_for_manifest + run_and_write_from_manifest)."""
+    import shutil
+
+    from brutex.cli import cmd_cascade
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK
+    shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _JUL[0])  # Jun + Aug stay: interior hole
+    capsys.readouterr()
+    rc = cmd_cascade(
+        lake_root=lake_root, results_root=results_root, catalog_path=catalog_path, run_id=None
+    )
+    err = capsys.readouterr().err
+    assert rc == EXIT_USER_ERROR
+    assert "cascade error" in err
+    assert "INTERIOR hole" in err
+
+
+# ────── the resume-honesty gate (review round-2 finding 11) ──────
+
+#: Good-Friday adjacency (real 2026 NSE calendar): expiry Thu 2026-04-02, then
+#: Fri 2026-04-03 (Good Friday) + the weekend — a SESSIONLESS overhang.
+_APR26 = ("NSE-NIFTY-02Apr26-FUT", date(2026, 4, 2))
+_MAY26 = "NSE-NIFTY-30Apr26-FUT"
+
+
+def test_schedule_only_lake_drift_refuses_the_resume_up_front(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 finding 11: a SCHEDULE-ONLY drift (snapshot byte-identical, the
+    successor contract's in-window owned span sessionless) is refused UP FRONT
+    with both schedules named — instead of resuming rows minted under the
+    recorded schedule and crashing Stage-3/cascade recovery with a
+    misattributed grid-mismatch error."""
+    lake_root = tmp_path / "lake"
+    catalog_path = tmp_path / "catalog.duckdb"
+    writer = ParquetWriter(lake_root=lake_root)
+    sink = ParquetBarSink(writer=writer)
+    bars = [b for day in (date(2026, 4, 1), _APR26[1]) for b in _day_bars(day, 100.0)]
+    sink.append(exchange="NSE", segment="FNO", symbol=_APR26[0], interval="1minute", bars=bars)
+    results_root = tmp_path / "sweeps"
+    kwargs = _kwargs(
+        lake_root,
+        catalog_path,
+        results_root,
+        intervals="1minute",
+        start="2026-04-01",
+        end="2026-04-05",  # 3-day tail overhang past the Apr-2 expiry
+    )
+    rc = cmd_sweep_all(**kwargs)
+    assert rc == EXIT_OK
+
+    # The successor contract is pulled between launches. Its in-window owned
+    # span (Apr 3 → Apr 5) holds ZERO sessions, so it joins the roll schedule
+    # while contributing ZERO bars — the snapshot hash stays byte-identical.
+    (lake_root / "bars" / "NSE" / "FNO" / _MAY26).mkdir()
+    capsys.readouterr()
+    rc = cmd_sweep_all(**kwargs)
+    err = capsys.readouterr().err
+    assert rc == EXIT_USER_ERROR
+    assert "sweep-all REFUSED" in err
+    assert str([_APR26[1].toordinal()]) in err  # the RECORDED schedule
+    assert str([_APR26[1].toordinal(), date(2026, 4, 30).toordinal()]) in err  # the FRESH one
+    assert "UNCHANGED" in err
+    assert "contract set changed" in err
+
+
 def test_sweep_verify_recount_round_trips_a_futures_tree(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -306,6 +457,40 @@ def test_recount_names_a_recorded_vs_rederived_schedule_mismatch(
     assert f"roll_schedule[{_ALIAS}]: recorded" in out
     assert "re-derived" in out
     assert "recount REFUSED" in out
+
+
+def test_recount_without_audit_notes_the_absent_recorded_schedule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 finding 6(b/c): the recount's absent-recorded-schedule
+    informational note (round-1 finding 23's fix) is actually executed — an
+    audit-rotated futures tree recounted under explicit context overrides says
+    OUT LOUD that identities derive from the CURRENT lake's schedule only,
+    instead of leaving a bare snapshot diff."""
+    from brutex.cli import cmd_sweep_verify
+    from brutex.engine.sweep_verify import recorded_context_from_audit
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK
+    audit_path = results_root / "audit" / "sweep-all.jsonl"
+    recorded = recorded_context_from_audit(audit_path)
+    assert recorded is not None
+    audit_path.unlink()  # the rotated/absent-audit tree
+    capsys.readouterr()
+    kwargs = _verify_kwargs(lake_root, catalog_path, results_root, tmp_path / "scratch")
+    kwargs.update(
+        data_snapshot_hash=recorded.data_snapshot_hash,
+        indicator_version=recorded.indicator_version,
+        code_commit_sha=recorded.code_commit_sha,
+    )
+    rc = cmd_sweep_verify(**kwargs)
+    out = capsys.readouterr().out
+    assert f"no RECORDED roll_schedule for {_ALIAS}" in out
+    assert "CURRENT lake's schedule" in out
+    expected = [_JUN[1].toordinal(), _JUL[1].toordinal(), _AUG[1].toordinal()]
+    assert str(expected) in out  # the derived schedule is named in the note
 
 
 # ────── failure-mode matrix rows ──────
