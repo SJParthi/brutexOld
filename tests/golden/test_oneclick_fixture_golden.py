@@ -70,12 +70,17 @@ _EXPECTED_SHA256: dict[str, str] = {
 
 class TestCorpusPinned:
     def test_sha256_manifest_matches_the_committed_corpus(self) -> None:
+        # The corpus proper is the ``runs/`` tree the generator owns; the
+        # sibling ``.gitignore`` is git PLUMBING (the ``!runs/`` re-include —
+        # the root .gitignore ignores any runs/ dir), not fixture data, so it
+        # is excluded from the drift manifest (stage-3 fix: it was added
+        # after the manifest was pinned and failed this pin at HEAD).
         actual = {
             path.relative_to(_FIXTURE_ROOT).as_posix(): hashlib.sha256(
                 path.read_bytes()
             ).hexdigest()
             for path in sorted(_FIXTURE_ROOT.rglob("*"))
-            if path.is_file()
+            if path.is_file() and path.name != ".gitignore"
         }
         assert actual == _EXPECTED_SHA256
 

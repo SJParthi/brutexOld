@@ -142,8 +142,12 @@ function bxFunnelProvenance(source, runId) {
   var RUNS_URL = "/api/v1/oneclick/runs";
   var MANIFEST_URL = "/api/v1/oneclick/manifest";
   var EVENTS_URL = "/api/v1/oneclick/events";
+  var TOP100_URL = "/api/v1/oneclick/top100";
+  var TRADES_URL = "/api/v1/oneclick/trades";
+  var VERIFY_URL = "/api/v1/oneclick/verify";
   var PROGRESS_URL = "/api/v1/sweep-progress";
   var EVENTS_PAGE_LIMIT = 200;
+  var TRADES_PAGE_LIMIT = 100;
 
   var state = {
     selectedRunId: null,
@@ -163,6 +167,46 @@ function bxFunnelProvenance(source, runId) {
     if (n) {
       n.textContent = text; // textContent ONLY — the F-M2 rendering law
     }
+  }
+
+  /* Fill EVERY [data-oc="<key>"] node (the v29 re-feed hooks). textContent
+     only; a missing hook is a silent no-op so the widget stays inert on
+     pages that do not carry the card. */
+  function setOc(key, text) {
+    var nodes = document.querySelectorAll('[data-oc="' + key.replace(/[^a-z0-9_-]/gi, "") + '"]');
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].textContent = text;
+    }
+  }
+
+  /* Signed rupee display for an integer-paisa amount — EXACT via the shared
+     bx-explain.js integer converter (never float math); a non-safe-int
+     reads the honest em-dash, never a fabricated figure. */
+  function paisaText(paisa) {
+    if (!window.BXExplain) {
+      return "—";
+    }
+    var rupees = window.BXExplain.paisaToRupees(paisa);
+    if (rupees === null) {
+      return "—";
+    }
+    return (Number(paisa) >= 0 ? "+₹" : "−₹") + rupees.replace(/^-/, "");
+  }
+
+  /* Full-precision metric passthrough: numbers render via String() (never
+     rounded — money is the ONLY 2dp surface, R27/DEC-MONEY-2DP-001). */
+  function metricText(value) {
+    if (value === null || value === undefined) {
+      return "—";
+    }
+    return String(value);
+  }
+
+  function vixBandText(band) {
+    if (!band || typeof band !== "object" || band.lo === undefined || band.hi === undefined) {
+      return "no VIX band";
+    }
+    return "works when VIX between " + String(band.lo) + "–" + String(band.hi);
   }
 
   /* One-shot fetch failure law (F-M4): rejection AND non-ok AND malformed
@@ -228,6 +272,98 @@ function bxFunnelProvenance(source, runId) {
     }
     if (payload.status === "ok" || payload.status === "partial") {
       fillFunnelFromManifest(payload);
+      fillManifestSummary(payload);
+      renderProgressStrips(payload);
+    }
+  }
+
+  /* Manifest-fed card/summary hooks: selection · actual counts · suspect.
+     Every value comes from the CONTRACT manifest verbatim; a missing key
+     keeps the honest em-dash (never an invented default). */
+  function fillManifestSummary(payload) {
+    var m = payload.manifest;
+    if (!m || typeof m !== "object") {
+      return;
+    }
+    var sel = m.selection && typeof m.selection === "object" ? m.selection : {};
+    if (sel.from !== undefined && sel.to !== undefined) {
+      setOc("date_range", String(sel.from) + " → " + String(sel.to));
+    }
+    if (Array.isArray(sel.symbols)) {
+      setOc("sel_symbols", sel.symbols.join(", "));
+    }
+    var actual = m.actual && typeof m.actual === "object" ? m.actual : {};
+    if (actual.enumerated !== undefined) {
+      setOc("actual_enumerated", Number(actual.enumerated).toLocaleString("en-IN"));
+    }
+    if (actual.tested !== undefined) {
+      setOc("actual_tested", Number(actual.tested).toLocaleString("en-IN"));
+    }
+    if (actual.skipped !== undefined) {
+      setOc("actual_skipped", Number(actual.skipped).toLocaleString("en-IN"));
+    }
+    if (m.dedup_skips !== undefined) {
+      setOc("dedup_skips", Number(m.dedup_skips).toLocaleString("en-IN"));
+    }
+    setOc("run_id", String(m.run_id === undefined ? payload.run_id : m.run_id));
+    if (m.suspect === true) {
+      setOc("suspect", "SUSPECT — tripwire fired; treat this run's numbers as unverified");
+    } else if (m.suspect === false) {
+      setOc("suspect", "no tripwire fired");
+    }
+  }
+
+  /* Per-stage timing strips (R41 progress surface) from the manifest's
+     per_stage_timings (contract: [{stage, seconds}] — a dict form is
+     tolerated). Bar widths are proportions of the max stage; labels are
+     textContent; nothing is invented for a missing/malformed entry. */
+  function renderProgressStrips(payload) {
+    var host = byId("ocProgressStrips");
+    if (!host || !window.BXUI) {
+      return;
+    }
+    var m = payload.manifest;
+    var raw = m && typeof m === "object" ? m.per_stage_timings : null;
+    var entries = [];
+    var i;
+    if (Array.isArray(raw)) {
+      for (i = 0; i < raw.length; i++) {
+        var e = raw[i];
+        if (e && typeof e === "object" && typeof e.seconds === "number") {
+          entries.push({ stage: String(e.stage), seconds: e.seconds });
+        }
+      }
+    } else if (raw && typeof raw === "object") {
+      for (var k in raw) {
+        if (Object.prototype.hasOwnProperty.call(raw, k) && typeof raw[k] === "number") {
+          entries.push({ stage: k, seconds: raw[k] });
+        }
+      }
+    }
+    window.BXUI.clear(host);
+    if (!entries.length) {
+      host.appendChild(
+        window.BXUI.el("div", "oc-sub", "per-stage timings — awaiting real run artifact")
+      );
+      return;
+    }
+    var max = 0;
+    for (i = 0; i < entries.length; i++) {
+      if (entries[i].seconds > max) {
+        max = entries[i].seconds;
+      }
+    }
+    for (i = 0; i < entries.length; i++) {
+      var row = window.BXUI.el("div", "oc-strip-row", null);
+      row.appendChild(window.BXUI.el("span", "oc-strip-stage", entries[i].stage));
+      var bar = window.BXUI.el("div", "oc-strip-bar", null);
+      var fill = window.BXUI.el("div", "oc-strip-fill", null);
+      var pct = max > 0 ? (entries[i].seconds / max) * 100 : 0;
+      fill.style.width = pct.toFixed(1) + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      row.appendChild(window.BXUI.el("span", "oc-strip-secs", String(entries[i].seconds) + " s"));
+      host.appendChild(row);
     }
   }
 
@@ -275,6 +411,332 @@ function bxFunnelProvenance(source, runId) {
       }
       host.appendChild(chip);
     }
+  }
+
+  /* ── Top-100 re-feed: rank-1 story card + the combos table rows ── */
+
+  function conditionsText(row) {
+    return Array.isArray(row.conditions) ? row.conditions.join(" × ") : "—";
+  }
+
+  function fillRankOneCard(rows) {
+    if (!rows.length) {
+      // T-M2: an EMPTY-but-valid artifact keeps the awaiting em-dashes —
+      // the card NEVER indexes rows[0].
+      setOc("r1_name", "no winners stored for this run");
+      return;
+    }
+    var row = rows[0];
+    var m = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+    setOc("r1_rank", "#" + String(row.rank));
+    setOc("r1_name", conditionsText(row));
+    setOc("r1_tf", String(row.tf));
+    setOc("r1_direction", String(row.direction));
+    setOc("r1_arm", String(row.arm));
+    setOc("r1_net", m.net_pnl_paisa === undefined ? "—" : paisaText(m.net_pnl_paisa));
+    setOc("r1_max_dd", m.max_dd_paisa === undefined ? "—" : paisaText(m.max_dd_paisa));
+    setOc("r1_win_rate", metricText(m.win_rate));
+    setOc("r1_pf", metricText(m.profit_factor));
+    setOc("r1_sharpe", metricText(m.sharpe));
+    setOc("r1_dsr", metricText(m.dsr));
+    setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
+    setOc("r1_trades", metricText(m.trades));
+    setOc("r1_vix_band", vixBandText(row.vix_band));
+  }
+
+  /* Build the #combosBody rows from the top-100 artifact. Cells carry the
+     SAME data-sort convention the pre-existing v29 sort/filter JS reads;
+     every string reaches the DOM via textContent (F-M2). Columns with no
+     contract source (Gross P&L / Charges / Score) read the honest em-dash,
+     never a fabricated figure. */
+  function renderCombosRows(payload) {
+    var tbody = byId("combosBody");
+    if (!tbody || !window.BXUI) {
+      return;
+    }
+    window.BXUI.clear(tbody);
+    var rows = payload.rows || [];
+
+    function td(text, cls, sort) {
+      var cell = document.createElement("td");
+      if (cls) {
+        cell.className = cls;
+      }
+      if (sort !== undefined) {
+        cell.setAttribute("data-sort", String(sort));
+      }
+      cell.textContent = text;
+      return cell;
+    }
+
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var m = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+      var tr = document.createElement("tr");
+      tr.appendChild(td("#" + String(row.rank), null, row.rank));
+      tr.appendChild(td(String(row.mask_hex), null, undefined));
+      tr.appendChild(td(conditionsText(row), null, undefined));
+      tr.appendChild(td("—", null, undefined)); // Inst — instrument is not a top100 row field
+      tr.appendChild(td(String(row.tf), null, undefined));
+      tr.appendChild(td(String(row.direction), null, undefined));
+      tr.appendChild(td(metricText(m.trades), null, m.trades === undefined ? 0 : m.trades));
+      tr.appendChild(td("—", null, 0)); // Gross P&L — no contract source yet
+      tr.appendChild(td("—", null, 0)); // Charges — Track 1 is signal-only
+      var net = m.net_pnl_paisa;
+      tr.appendChild(
+        td(
+          net === undefined ? "—" : paisaText(net),
+          typeof net === "number" && net < 0 ? "neg" : "pos",
+          net === undefined ? 0 : net
+        )
+      );
+      tr.appendChild(td(metricText(m.sharpe), null, m.sharpe === undefined ? 0 : m.sharpe));
+      tr.appendChild(td(metricText(m.dsr), null, m.dsr === undefined ? 0 : m.dsr));
+      tr.appendChild(td("—", null, 0)); // Score — composite lands with P3
+      var act = document.createElement("td");
+      var link = document.createElement("a");
+      link.className = "combos-action";
+      link.textContent = "View";
+      link.setAttribute(
+        "href",
+        "/strategy?run_id=" +
+          encodeURIComponent(state.selectedRunId || "") +
+          "&rank=" +
+          encodeURIComponent(String(row.rank))
+      );
+      act.appendChild(link);
+      tr.appendChild(act);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function refreshTop100() {
+    if (!state.selectedRunId) {
+      return;
+    }
+    var url = TOP100_URL + "?run_id=" + encodeURIComponent(state.selectedRunId);
+    window.BXPoll.fetchJson(url, 12000)
+      .then(function (payload) {
+        if (!payload || typeof payload !== "object") {
+          return;
+        }
+        var note = byId("ocTop100Note");
+        if (note) {
+          if (payload.status === "ok" || payload.status === "partial") {
+            note.textContent =
+              String(payload.row_count) +
+              " winner(s) stored" +
+              (payload.empty_note ? " — " + String(payload.empty_note) : "") +
+              (payload.status === "partial" ? " — PARTIAL: " + String(payload.detail) : "");
+          } else {
+            note.textContent = String(payload.detail || "awaiting real run artifact");
+          }
+        }
+        if (payload.status === "ok" || payload.status === "partial") {
+          fillRankOneCard(payload.rows || []);
+          renderCombosRows(payload);
+          if (payload.rows && payload.rows.length && payload.row_count !== undefined) {
+            setOc("tested_rank_line", "#" + String(payload.rows[0].rank) + " of " + String(payload.row_count) + " stored winners");
+          }
+        }
+      })
+      .catch(function () {
+        var note = byId("ocTop100Note");
+        if (note) {
+          note.textContent = "top-100 read failed — retrying on the next run refresh";
+        }
+      });
+  }
+
+  /* ── Trades (rank-1 on the operator page) + the equity curve ── */
+
+  function renderTradeRows(tbody, rows) {
+    window.BXUI.clear(tbody);
+
+    function td(text, cls) {
+      var cell = document.createElement("td");
+      if (cls) {
+        cell.className = cls;
+      }
+      cell.textContent = text;
+      return cell;
+    }
+
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var tr = document.createElement("tr");
+      var pnl = typeof r.pnl_paisa === "number" ? r.pnl_paisa : null;
+      tr.className = pnl !== null && pnl >= 0 ? "win-row" : "loss-row";
+      tr.appendChild(td(String(r.direction).toUpperCase(), null));
+      tr.appendChild(td(String(r.entry_ts), "dim"));
+      tr.appendChild(td(metricText(r.entry_px), null));
+      tr.appendChild(td(String(r.exit_ts), "dim"));
+      tr.appendChild(td(metricText(r.exit_px), null));
+      tr.appendChild(td(metricText(r.lots), null));
+      tr.appendChild(td(String(r.exit_reason), null));
+      tr.appendChild(td(pnl === null ? "—" : paisaText(pnl), pnl !== null && pnl < 0 ? "neg" : "pos"));
+      tr.appendChild(td(r.costs_paisa === undefined ? "—" : paisaText(r.costs_paisa), "dim"));
+      tr.appendChild(td(metricText(r.mae), null));
+      tr.appendChild(td(metricText(r.mfe), null));
+      // R31 honest NULL: a missing VIX renders "null — not stamped", never 0.
+      tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? "null" : metricText(r.vix_entry), null));
+      tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? "null" : metricText(r.vix_exit), null));
+      tbody.appendChild(tr);
+    }
+  }
+
+  function renderEquity(rows) {
+    var host = byId("ocEquityHost");
+    if (!host || !window.BXUI || !window.BXChart) {
+      return;
+    }
+    window.BXUI.clear(host);
+    var series = window.BXChart.equitySeries(rows || []);
+    if (series.empty) {
+      host.appendChild(
+        window.BXUI.el("div", "oc-sub", "no trades yet — awaiting real run artifact")
+      );
+      return;
+    }
+    var svg = window.BXChart.svgEl("svg", { viewBox: "0 0 1000 220", preserveAspectRatio: "none" });
+    var path = window.BXChart.equityPathNode(series, 1000, 220, 8);
+    if (path) {
+      svg.appendChild(path);
+    }
+    host.appendChild(svg);
+    var noteBits = ["per-trade close equity — minute-path equity lands with P3"];
+    if (series.overflow) {
+      noteBits.push("OVERFLOW: cumulative paisa left the safe-integer range — curve truncated");
+    }
+    if (series.invalid_rows) {
+      noteBits.push(String(series.invalid_rows) + " invalid row(s) skipped");
+    }
+    noteBits.push("net " + paisaText(series.final_paisa));
+    host.appendChild(window.BXUI.el("div", "oc-sub", noteBits.join(" · ")));
+  }
+
+  function refreshTrades() {
+    if (!state.selectedRunId) {
+      return;
+    }
+    // Failures render into the SIBLING error host (never over the table),
+    // so Retry can rebuild without losing the static table skeleton.
+    var panel = byId("ocTradesError");
+    var url =
+      TRADES_URL +
+      "?run_id=" + encodeURIComponent(state.selectedRunId) +
+      "&rank=1&offset=0&limit=" + TRADES_PAGE_LIMIT;
+    window.BXPoll.fetchJson(url, 12000)
+      .then(function (payload) {
+        if (!payload || typeof payload !== "object") {
+          throw new Error("malformed payload");
+        }
+        if (panel && window.BXUI) {
+          window.BXUI.clear(panel); // a recovered poll clears the error card
+        }
+        var badge = byId("ocTradesSource");
+        if (badge) {
+          badge.textContent = "source: " + String(payload.source);
+        }
+        var note = byId("ocTradesNote");
+        var tbody = byId("ocTradesBody");
+        if (payload.status === "ok" || payload.status === "partial") {
+          if (tbody) {
+            renderTradeRows(tbody, payload.rows || []);
+          }
+          if (note) {
+            var total = payload.total === null || payload.total === undefined
+              ? "unknown total"
+              : "of " + String(payload.total);
+            note.textContent =
+              String((payload.rows || []).length) + " trade(s) shown " + total +
+              (payload.status === "partial" ? " — PARTIAL: " + String(payload.detail) : "");
+          }
+          renderEquity(payload.rows || []);
+        } else {
+          if (note) {
+            note.textContent = String(payload.detail || "awaiting real run artifact");
+          }
+          renderEquity([]);
+        }
+      })
+      .catch(function (err) {
+        if (panel && window.BXUI) {
+          window.BXUI.errorCard(panel, {
+            status: err && err.status,
+            offline: !!(err && err.name === "TypeError"),
+            retry: refreshTrades
+          });
+        }
+      });
+  }
+
+  /* ── R44 VERIFY-ME panel (7 checks, 5-state truth — server verdicts) ── */
+
+  function renderVerify(payload) {
+    var host = byId("ocVerifyChecks");
+    if (!host || !window.BXUI) {
+      return;
+    }
+    window.BXUI.clear(host);
+    var checks = payload.checks || [];
+    for (var i = 0; i < checks.length; i++) {
+      var check = checks[i];
+      var row = window.BXUI.el("div", "oc-verify-row", null);
+      row.appendChild(
+        window.BXUI.el("span", "oc-verify-state oc-verify-" + String(check.state), String(check.state))
+      );
+      row.appendChild(window.BXUI.el("span", "oc-verify-name", String(check.id) + " · " + String(check.name)));
+      row.appendChild(window.BXUI.el("span", "oc-verify-detail", String(check.detail)));
+      host.appendChild(row);
+    }
+    var fr = byId("ocVerifyFunnel");
+    if (fr && payload.funnel_reconcile) {
+      window.BXUI.clear(fr);
+      var lines = payload.funnel_reconcile.lines || [];
+      for (var j = 0; j < lines.length; j++) {
+        fr.appendChild(window.BXUI.el("div", "oc-verify-line", String(lines[j])));
+      }
+    }
+  }
+
+  function refreshVerify(check) {
+    if (!state.selectedRunId) {
+      return;
+    }
+    var panel = byId("ocVerifyError");
+    var url = VERIFY_URL + "?run_id=" + encodeURIComponent(state.selectedRunId);
+    if (check) {
+      url += "&check=" + encodeURIComponent(check); // O(file) chain replay — button-click ONLY
+    }
+    window.BXPoll.fetchJson(url, 20000)
+      .then(function (payload) {
+        if (!payload || typeof payload !== "object") {
+          throw new Error("malformed payload");
+        }
+        if (panel && window.BXUI) {
+          window.BXUI.clear(panel); // a recovered poll clears the error card
+        }
+        renderVerify(payload);
+      })
+      .catch(function (err) {
+        if (panel && window.BXUI) {
+          window.BXUI.errorCard(panel, {
+            status: err && err.status,
+            offline: !!(err && err.name === "TypeError"),
+            retry: function () {
+              refreshVerify(check);
+            }
+          });
+        }
+      });
+  }
+
+  /* One place refreshes every run-scoped one-shot surface. */
+  function loadRunScoped() {
+    refreshTop100();
+    refreshTrades();
+    refreshVerify(null);
   }
 
   /* ── Timeline: capped ring + window-scoped search + load-earlier pager ── */
@@ -436,6 +898,24 @@ function bxFunnelProvenance(source, runId) {
     if (searchBox) {
       searchBox.addEventListener("input", renderTimeline); // ring-scoped filter only
     }
+    var runSelect = byId("ocRunSelect");
+    if (runSelect) {
+      runSelect.addEventListener("change", function () {
+        window.BXOneclick.selectRun(runSelect.value);
+      });
+    }
+    var verifyChainBtn = byId("ocVerifyChainBtn");
+    if (verifyChainBtn) {
+      verifyChainBtn.addEventListener("click", function () {
+        refreshVerify("chain"); // the O(file) replay runs on CLICK only
+      });
+    }
+    var verifyRefreshBtn = byId("ocVerifyRefreshBtn");
+    if (verifyRefreshBtn) {
+      verifyRefreshBtn.addEventListener("click", function () {
+        refreshVerify(null);
+      });
+    }
 
     var lastProgress = null;
     var lastRuns = null;
@@ -451,13 +931,37 @@ function bxFunnelProvenance(source, runId) {
       }
     });
 
-    // Runs poller: run discovery + the ticker strip's run half.
+    // Runs poller: run discovery + the ticker strip's run half + the run
+    // selector options (textContent-built <option> nodes).
     var runsPoller = window.BXPoll.createPoller({
       url: RUNS_URL,
       onData: function (data) {
         lastRuns = data;
         if (!state.selectedRunId && data.latest_run_id) {
           state.selectedRunId = data.latest_run_id;
+          loadRunScoped(); // first selection: fetch the run-scoped one-shots
+        }
+        var select = byId("ocRunSelect");
+        if (select && data.runs) {
+          var ids = [];
+          for (var i = 0; i < data.runs.length; i++) {
+            ids.push(String(data.runs[i].run_id));
+          }
+          if (ids.join("|") !== select.getAttribute("data-oc-ids")) {
+            select.setAttribute("data-oc-ids", ids.join("|"));
+            while (select.firstChild) {
+              select.removeChild(select.firstChild);
+            }
+            for (var j = 0; j < ids.length; j++) {
+              var opt = document.createElement("option");
+              opt.value = ids[j];
+              opt.textContent = ids[j];
+              select.appendChild(opt);
+            }
+          }
+          if (state.selectedRunId) {
+            select.value = state.selectedRunId;
+          }
         }
         renderTicker(lastProgress, lastRuns);
       }
@@ -518,6 +1022,7 @@ function bxFunnelProvenance(source, runId) {
       state.eventsCursor = -1;
       state.earlierCursor = 0;
       renderTimeline();
+      loadRunScoped();
     }
   };
 

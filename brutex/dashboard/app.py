@@ -5780,7 +5780,7 @@ def build_app(
         and the full-precision Sharpe / profit-factor / win-rate — NEVER rounded).
 
         READ-ONLY (CLAUDE.md §3): ranks results the operator already produced; it
-        NEVER touches the brute-force engine or the 52-condition vocabulary (the
+        NEVER touches the brute-force engine or the 60-condition vocabulary (the
         ENGINE stays NIFTY/BANKNIFTY/SENSEX).
 
         Query parameters
@@ -6025,24 +6025,35 @@ def build_app(
                 oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
                 is not None
             )
-            has_events = (
-                oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
-                is not None
+            events_rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.EVENTS_FILENAME
             )
+            has_events = events_rev is not None
 
             def _fresh() -> dict[str, Any]:
-                return oneclick_view.build_manifest_payload(
+                manifest_result = oneclick_artifacts.load_manifest(run_dir)
+                payload = oneclick_view.build_manifest_payload(
                     rid,
-                    oneclick_artifacts.load_manifest(run_dir),
+                    manifest_result,
                     fixture_root_active=fixture_active,
                     info=oneclick_artifacts.probe_run_dir(run_dir),
                 )
+                # R41 chain map: link states derive from per_stage_timings +
+                # tripwires + the RECENT event kinds (one O(page) tail read —
+                # never a whole-file scan); an unknown stage reads "pending",
+                # never green (DEC-OPERATOR-PAGE-REAL-001).
+                recent = oneclick_artifacts.tail_events(run_dir, offset=-1, limit=200)
+                kinds = [str(rec.get("kind", "")) for rec in recent.records]
+                payload["chain_links"] = oneclick_view.chain_links(manifest_result, kinds)
+                return payload
 
             if rev is None:
                 return _fresh()
+            # The key folds the manifest revision AND the events revision (the
+            # chain-map input) — a growing events.jsonl refreshes the links.
             return _oneclick_cache.get_or_compute(
                 f"oc_manifest|{rid}|rev={rev}|files={int(has_top100)}{int(has_events)}"
-                f"|fx={fixture_active}",
+                f"|ev={events_rev}|fx={fixture_active}",
                 generation=0,
                 compute=_fresh,
             )
@@ -6959,6 +6970,35 @@ def build_app(
         """GET / — inline HTML dashboard with embedded JS WebSocket client."""
         return _render_index_html()
 
+    @app.get("/screener", response_class=HTMLResponse)
+    async def screener_page() -> str:
+        """GET /screener — the strategy screener over the top-100 artifact.
+
+        DEC-OPERATOR-PAGE-REAL-001 / R36: client-side filter/sort (win% · DD ·
+        PF · VIX band · TF · direction) over ONE ``/api/v1/oneclick/top100``
+        fetch; rows are createElement/textContent-built (never markup
+        interpolation); a row click opens ``/strategy?run_id=&rank=`` — the
+        ≤2-clicks law (Overview → Winners → strategy). Serves the static
+        template verbatim; every number arrives client-side from the artifact
+        contracts (loud "awaiting real run artifact" until a run exists).
+        """
+        return _render_screener_html()
+
+    @app.get("/strategy", response_class=HTMLResponse)
+    async def strategy_page() -> str:
+        """GET /strategy — the chart-first single-strategy page.
+
+        DEC-OPERATOR-PAGE-REAL-001 / R36: candle chart with entry/exit arrows
+        drawn ON it (candles from the EXISTING ``/api/v1/db/candles``; trades
+        from ``/api/v1/oneclick/trades`` — inline at load, never tab-gated),
+        equity curve below (client integer-paisa cumsum, labeled "per-trade
+        close equity — minute-path equity lands with P3"), hover-any-number
+        plain-English lines, Beginner/Pro toggle, ``vix_band`` on the story
+        card. ``run_id``/``rank``/``trade`` arrive as query params read
+        client-side; the template is served verbatim.
+        """
+        return _render_strategy_html()
+
     # WebSocket handler — defined at module scope below to sidestep
     # the `from __future__ import annotations` closure-annotation
     # resolution problem. We register it dynamically.
@@ -7284,6 +7324,50 @@ def _render_index_html() -> str:
         mockup values stay visible until the poller receives real data.
     """
     return _load_v29_template()
+
+
+_SCREENER_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "screener.html"
+_SCREENER_TEMPLATE_CACHE: str | None = None
+
+
+def _load_screener_template() -> str:
+    """Read ``templates/screener.html`` once and serve the cached text verbatim.
+
+    Same read-once module-cache pattern as every other page template
+    (DEC-OPERATOR-PAGE-REAL-001); the page is fully static — all data arrives
+    client-side from the ``/api/v1/oneclick/*`` artifact contracts.
+    """
+    global _SCREENER_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _SCREENER_TEMPLATE_CACHE is None:
+        _SCREENER_TEMPLATE_CACHE = _SCREENER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _SCREENER_TEMPLATE_CACHE
+
+
+def _render_screener_html() -> str:
+    """Render the ``/screener`` strategy-screener page (verbatim template)."""
+    return _load_screener_template()
+
+
+_STRATEGY_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "strategy.html"
+_STRATEGY_TEMPLATE_CACHE: str | None = None
+
+
+def _load_strategy_template() -> str:
+    """Read ``templates/strategy.html`` once and serve the cached text verbatim.
+
+    Same read-once module-cache pattern as every other page template
+    (DEC-OPERATOR-PAGE-REAL-001); query params (``run_id``/``rank``/``trade``)
+    are read client-side — no server-side substitution.
+    """
+    global _STRATEGY_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _STRATEGY_TEMPLATE_CACHE is None:
+        _STRATEGY_TEMPLATE_CACHE = _STRATEGY_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _STRATEGY_TEMPLATE_CACHE
+
+
+def _render_strategy_html() -> str:
+    """Render the ``/strategy`` chart-first strategy page (verbatim template)."""
+    return _load_strategy_template()
 
 
 _UNIVERSE_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "universe.html"
