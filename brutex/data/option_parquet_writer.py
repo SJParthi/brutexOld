@@ -37,12 +37,14 @@ as :meth:`OptionParquetWriter.write`. ALL THREE heal-side entries — the
 source read (:meth:`read_partition_frame`, round-4 fold) and both mutations —
 enforce the symlink-containment rail
 (:meth:`OptionParquetWriter._assert_options_containment`, hostile-review
-round-2 MAJOR fold): the RESOLVED path must stay inside
-``<lake_root>/options/`` or the call is REFUSED with
-:class:`OptionWriterError` — the scan-time symlink skip alone is bypassable
-(a symlinked ``options/`` root, a series dir OR partition file swapped to a
-symlink between scan and heal), and only a heal-time check on the resolved
-path closes that window.
+round-2 MAJOR + round-6 MINOR folds): the RESOLVED path must stay inside
+``<lake_root>/options/`` AND neither the partition file nor its series dir
+may itself be a symlink (a swap whose target stays INSIDE ``options/``
+passes resolved containment yet redirects the heal across series), or the
+call is REFUSED with :class:`OptionWriterError` — the scan-time symlink
+skip alone is bypassable (a symlinked ``options/`` root, a series dir OR
+partition file swapped to a symlink between scan and heal, in-lake or out),
+and only these heal-time checks close that window.
 """
 
 from __future__ import annotations
@@ -280,7 +282,9 @@ class OptionParquetWriter:
         OptionWriterError
             A corrupt existing destination partition, or a *dest* whose
             RESOLVED path escapes ``<lake_root>/options/`` (a symlinked
-            series dir / options root — the round-2 containment rail).
+            series dir / options root — the round-2 containment rail), or a
+            *dest* that is / sits behind a symlink even when its target
+            stays in-lake (the round-6 swap rail).
         LakeWriteHalt
             Disk-full / OOM anywhere inside the read-modify-write.
         PartitionLockTimeout
@@ -289,12 +293,22 @@ class OptionParquetWriter:
         return self._merge_frame_locked(dest, lambda: frame, containment=True)
 
     def _assert_options_containment(self, dest: Path) -> None:
-        """Refuse a heal-side call whose RESOLVED *dest* escapes ``<lake_root>/options/``.
+        """Refuse a heal-side call whose *dest* escapes ``<lake_root>/options/`` OR is symlinked.
 
         Guards BOTH the two heal-side mutation entries AND the healer's source
         consistent read (:meth:`read_partition_frame`, round-4 fold — a
         followed read imports outside rows into the lake via the copy-forward
         leg even when every WRITE stays contained).
+
+        TWO rails, both enforced at heal time under the partition locks:
+        the round-2 ESCAPE rail (resolved containment, below) and the
+        round-6 IN-LAKE swap rail — *dest* and its series-dir parent must
+        not themselves be symlinks, because a swap whose target stays
+        INSIDE ``options/`` (another series' file) passes resolved
+        containment yet redirects the heal across series (cross-series
+        contamination, refuter-reproduced). Together: a scan→heal swap of
+        the flagged file or its series dir to ANY symlink — in-lake or
+        out — is refused as the isolated :class:`OptionWriterError`.
 
         The mutation-boundary symlink rail (hostile-review round-2 MAJOR,
         DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): the scanner's ``is_symlink()``
@@ -324,9 +338,10 @@ class OptionParquetWriter:
         eliminated). An unresolvable *dest* now takes the SAME documented
         isolated refusal as an escaping one. Honest
         envelope (Golden Rule #10): this closes the demonstrated scan→heal
-        window; a sub-microsecond swap between this check and the atomic
-        rename inside the SAME call would need dirfd-relative I/O to close —
-        out of scope, not claimed.
+        windows — the escape-the-lake vectors (rounds 2/4) AND the round-6
+        in-lake swap; a sub-microsecond swap between these checks and the
+        atomic rename inside the SAME call would need dirfd-relative I/O to
+        close — out of scope, not claimed.
         """
         try:
             options_root = self._lake_root.resolve() / _OPTIONS_SUBDIR
@@ -343,6 +358,26 @@ class OptionParquetWriter:
             raise OptionWriterError(
                 f"destination {dest} resolves outside the options tree "
                 f"({resolved_parent} is not under {options_root}) — refusing to mutate"
+            )
+        if dest.is_symlink() or dest.parent.is_symlink():
+            # Round-6 IN-LAKE swap rail (refuter-confirmed MINOR): the escape
+            # check above cannot see a symlink whose TARGET sits INSIDE
+            # options/ — a flagged partition file (or its series dir) swapped
+            # post-scan to a symlink at ANOTHER series' file passed
+            # containment, so the heal read the other series' rows through
+            # the link and the copy-forward leg imported them into the
+            # flagged series (cross-series contamination — empirically
+            # reproduced). The healer only ever targets REAL partition files
+            # in REAL series dirs (the scanner symlink-skips both at scan
+            # time), so ANY symlink at either component is a swap — refused.
+            # Ancestors ABOVE the series dir are deliberately not probed: a
+            # symlinked lake ROOT (the legitimate mount shape) must keep
+            # passing, and an in-lake-redirected `options` component already
+            # fails the escape check (options_root pins the literal name).
+            raise OptionWriterError(
+                f"destination {dest} is or sits behind a symlink inside the "
+                f"options tree — the healer only targets real partition files "
+                f"in real series dirs; refusing to touch it"
             )
 
     def _merge_frame_locked(
@@ -474,7 +509,10 @@ class OptionParquetWriter:
         copy-forward leg IMPORTED the outside rows into an in-lake canonical
         file (``dest.parent`` is a REAL series dir, so the write-leg rail
         passed); refusing at the read (:class:`OptionWriterError`, isolated
-        counted error) keeps outside bytes out of the lake entirely.
+        counted error) keeps outside bytes out of the lake entirely. The
+        round-6 rail extends the SAME refusal to an IN-lake swap target (a
+        symlink at another series' file), keeping rows from crossing series
+        through a followed read.
         """
         import io
 
@@ -551,10 +589,11 @@ class OptionParquetWriter:
         ------
         OptionWriterError
             Vanished/corrupt file, a changing heal with no *quarantine_to*,
-            or a *dest* whose RESOLVED path escapes ``<lake_root>/options/``
-            (:meth:`_assert_options_containment` — the round-2 rail; this
-            method unlinks/rewrites, so it must never follow a symlink out
-            of the lake).
+            a *dest* whose RESOLVED path escapes ``<lake_root>/options/``,
+            or a symlinked *dest* / series dir even when the target stays
+            in-lake (:meth:`_assert_options_containment` — the round-2 +
+            round-6 rails; this method unlinks/rewrites, so it must never
+            follow a symlink out of the lake OR across series).
         LakeWriteHalt
             Disk-full / OOM during the quarantine copy or the rewrite.
         PartitionLockTimeout

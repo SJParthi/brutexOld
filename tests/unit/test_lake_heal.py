@@ -2101,6 +2101,77 @@ class TestOptionSymlinkContainment:
         assert len(errors) == 1
         assert "outside the options tree" in str(errors[0]["error"])
 
+    def test_in_lake_symlink_swap_refused_no_cross_series_contamination(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-6 MINOR (refuter-confirmed, empirically probed): the IN-LAKE
+        twin of the round-2/4 escape vectors. The scan flags
+        SERIES_A/2024-01.parquet carrying a foreign March row; between scan
+        and heal the flagged REAL file is swapped to a symlink pointing at
+        ``options/SERIES_B/2024-03.parquet`` — a DIFFERENT series still
+        INSIDE the lake, so the resolved-containment rail alone PASSED it.
+        Pre-fix the heal read SERIES_B's rows through the link, routed them
+        all to March, and the copy-forward leg CREATED
+        SERIES_A/2024-03.parquet permanently holding SERIES_B's rows
+        (cross-series contamination, healed=1 errors=0) before
+        quarantine-moving the symlink. Now the source READ refuses ANY
+        symlinked target — one isolated counted error, no new SERIES_A file,
+        SERIES_B byte-untouched, the symlink left in place."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        series_a = lake / "options" / "SERIES_A"
+        series_a.mkdir(parents=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "CE"], type=pa.string()),
+                    "timestamp": pa.array(
+                        [_ts(0, month=1, day=2), _ts(1, month=3, day=4)],
+                        type=pa.timestamp("us", tz="UTC"),
+                    ),
+                }
+            ),
+            series_a / "2024-01.parquet",
+        )
+        # SERIES_B is a REAL, clean series seeded through the writer.
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|14|WEEK|0|ATM|PUT",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(2, month=3, day=4), close="42.00")],
+        )
+        b_file = lake / "options" / "NSE_FNO__14__WEEK__0__ATM__PUT" / "2024-03.parquet"
+        b_bytes = b_file.read_bytes()
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.path == series_a / "2024-01.parquet"
+        # The TOCTOU swap: AFTER the scan the flagged file becomes a symlink
+        # to the OTHER series' canonical March file (in-lake — the round-2
+        # escape rail cannot see it).
+        (series_a / "2024-01.parquet").unlink()
+        (series_a / "2024-01.parquet").symlink_to(b_file)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 1  # refused at the READ — isolated, counted
+        assert report.healed == 0
+        assert not (series_a / "2024-03.parquet").exists()  # nothing imported cross-series
+        assert b_file.read_bytes() == b_bytes  # SERIES_B byte-untouched
+        assert (series_a / "2024-01.parquet").is_symlink()  # never unlinked/quarantine-moved
+        assert not (lake / ".quarantine").exists()
+        errors = _events(logs, "lake_heal.partition_error")
+        assert len(errors) == 1
+        assert "symlink inside the options tree" in str(errors[0]["error"])
+
     def test_symlink_loop_reassignment_target_isolated_not_batch_abort(
         self, tmp_path: Path
     ) -> None:

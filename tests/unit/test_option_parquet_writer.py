@@ -1122,6 +1122,70 @@ class TestMutationContainment:
             )
         assert outside_file.read_bytes() == outside_bytes
 
+    def _two_series_lake(self, tmp_path: Path) -> tuple[Path, Path]:
+        """ONE lake with two REAL series (A: Jan, B: Mar), seeded via the writer."""
+        lake = tmp_path / "lake"
+        w = OptionParquetWriter(lake_root=lake)
+        ts_jan = datetime(2024, 1, 2, 4, 0, tzinfo=UTC)
+        ts_mar = datetime(2024, 3, 4, 4, 0, tzinfo=UTC)
+        w.merge_partition_frame(
+            lake / "options" / "SERIES_A" / "2024-01.parquet", self._frame([("CE", ts_jan, 1.0)])
+        )
+        w.merge_partition_frame(
+            lake / "options" / "SERIES_B" / "2024-03.parquet", self._frame([("CE", ts_mar, 7.0)])
+        )
+        return lake, lake / "options" / "SERIES_B" / "2024-03.parquet"
+
+    def test_in_lake_symlinked_partition_file_refused(self, tmp_path: Path) -> None:
+        """Round-6 MINOR (refuter-confirmed): a partition FILE swapped to a
+        symlink pointing at ANOTHER series' file STILL INSIDE ``options/``
+        resolves inside the containment root, so the round-2 escape rail
+        alone PASSED it — pre-fix the heal read SERIES_B's rows through the
+        link and the copy-forward leg wrote them into a NEW SERIES_A month
+        file (cross-series contamination, healed=1 errors=0). All THREE
+        heal-side entries now refuse ANY symlinked dest outright — the
+        healer only ever targets real partition files."""
+        lake, b_file = self._two_series_lake(tmp_path)
+        b_bytes = b_file.read_bytes()
+        swapped = lake / "options" / "SERIES_A" / "2024-01.parquet"
+        swapped.unlink()
+        swapped.symlink_to(b_file)
+        w = OptionParquetWriter(lake_root=lake)
+        with pytest.raises(OptionWriterError, match="symlink inside the options tree"):
+            w.read_partition_frame(swapped)
+        with pytest.raises(OptionWriterError, match="symlink inside the options tree"):
+            w.heal_partition(swapped, quarantine_to=lake / ".quarantine" / "ts" / "2024-01.parquet")
+        ts_new = datetime(2024, 1, 2, 4, 1, tzinfo=UTC)
+        with pytest.raises(OptionWriterError, match="symlink inside the options tree"):
+            w.merge_partition_frame(swapped, self._frame([("PE", ts_new, 2.0)]))
+        assert b_file.read_bytes() == b_bytes  # the OTHER series is byte-untouched
+        assert swapped.is_symlink()  # refused before any unlink/rewrite
+        assert not (lake / ".quarantine").exists()
+
+    def test_in_lake_symlinked_series_dir_refused(self, tmp_path: Path) -> None:
+        """The series-DIR twin of the in-lake file swap: SERIES_A swapped to a
+        symlink at SERIES_B (still inside ``options/``) — the resolved parent
+        stays under the containment root, so only the parent-symlink probe
+        catches it; nothing is read from or written into SERIES_B."""
+        import shutil
+
+        lake, b_file = self._two_series_lake(tmp_path)
+        b_bytes = b_file.read_bytes()
+        a_dir = lake / "options" / "SERIES_A"
+        shutil.rmtree(a_dir)
+        a_dir.symlink_to(lake / "options" / "SERIES_B", target_is_directory=True)
+        w = OptionParquetWriter(lake_root=lake)
+        dest = a_dir / "2024-03.parquet"
+        with pytest.raises(OptionWriterError, match="symlink inside the options tree"):
+            w.read_partition_frame(dest)
+        with pytest.raises(OptionWriterError, match="symlink inside the options tree"):
+            w.heal_partition(dest, quarantine_to=lake / ".quarantine" / "ts" / "2024-03.parquet")
+        ts_new = datetime(2024, 3, 4, 4, 1, tzinfo=UTC)
+        with pytest.raises(OptionWriterError, match="symlink inside the options tree"):
+            w.merge_partition_frame(dest, self._frame([("PE", ts_new, 2.0)]))
+        assert b_file.read_bytes() == b_bytes
+        assert not (lake / ".quarantine").exists()
+
     def test_symlink_loop_dest_refused_as_writer_error(self, tmp_path: Path) -> None:
         """Round-5 MAJOR (refuter-confirmed): a symlink-LOOP ``dest`` made
         ``_assert_options_containment``'s ``dest.resolve()`` raise a bare

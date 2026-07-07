@@ -1344,6 +1344,49 @@ class TestCensus:
         assert options.drift_dirs == 0  # honestly N/A for series dirs
         assert census.engine_clean is True
 
+    def test_census_option_overlap_none_abstain_folds_without_raising(self, tmp_path: Path) -> None:
+        # Round-6 surviving-mutant kill (refuter-confirmed): the OPTIONS census
+        # fold guards `(finding.overlap_rows or 0) > 0` — `overlap_rows=None`
+        # is a REACHABLE production state (an unreadable/symlinked canonical
+        # sibling makes the scanner abstain honestly) and the census backs
+        # `brutex lake audit-unique`, the doctor check and the `/universe`
+        # chip. Dropping the `or 0` None-guard survived the full covering
+        # suite because every census fixture fed overlap_rows ∈ {0, 1}; under
+        # the mutant this fold TypeError-crashes. This pin kills it.
+        june = _opt_dest(tmp_path, "2024-06")
+        june.parent.mkdir(parents=True, exist_ok=True)
+        june.write_bytes(b"not a parquet file at all")
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("CE", _ts(3, month=7, day=1))]
+        )
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert [f.overlap_rows for f in foreigns] == [None]  # the abstain fixture holds
+        census = build_lake_census(report)  # mutant: TypeError right here
+        by_segment = {row.segment: row for row in census.segments}
+        options = by_segment["OPTIONS"]
+        assert options.foreign_files == 1
+        assert options.overlap_files == 0  # an honest abstain never counts as overlap
+        assert options.dup_files == 0
+
+    def test_census_bars_overlap_none_abstain_folds_without_raising(self, tmp_path: Path) -> None:
+        # The bars twin of the pin above — the pre-existing `or 0` guard on the
+        # bars census branch was equally unpinned against overlap_rows=None
+        # (an unreadable canonical bars sibling abstains the same way).
+        june = _dest(tmp_path)
+        june.parent.mkdir(parents=True, exist_ok=True)
+        june.write_bytes(b"not a parquet file at all")
+        _plant_raw(_dest(tmp_path, month=7), [_ts(1), _ts(2, month=7, day=1)])
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, ForeignMonthRows)]
+        assert [f.overlap_rows for f in foreigns] == [None]
+        census = build_lake_census(report)  # mutant: TypeError right here
+        by_segment = {row.segment: row for row in census.segments}
+        index = by_segment["INDEX"]
+        assert index.foreign_files == 1
+        assert index.overlap_files == 0
+        assert index.dup_files == 0
+
     def test_engine_relevant_option_foreign_is_false(self, tmp_path: Path) -> None:
         # The G5 totality pin: without the widened isinstance branch the
         # fall-through reads `.coords` and raises AttributeError.

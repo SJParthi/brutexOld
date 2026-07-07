@@ -128,6 +128,22 @@ canonical-sibling read takes the same symlink skip as the glob loop
 (warned, never read, overlap honestly None); a same-second second heal
 batch gets a `-NN`-serialed quarantine dir so the first batch's
 before-image is never overwritten (pre-existing #1175 machinery).
+ROUND 6 (refuter-confirmed): MINOR — the round-2 containment rail refused
+only a dest RESOLVING outside `<lake>/options/`, so a scan→heal swap of the
+flagged file (or its series dir) to a symlink targeting ANOTHER series'
+file STILL INSIDE the lake passed it — the heal read the other series' rows
+through the link and the copy-forward leg imported them into the flagged
+series (cross-series contamination, healed=1/errors=0, reproduced);
+`_assert_options_containment` now ALSO refuses a symlinked dest or series
+dir outright (all three heal-side entries; the lake-ROOT-via-symlink mount
+shape still passes — pinned; 3 regressions verified failing pre-fix).
+MINOR — the census `overlap_rows` None-guards (`(overlap_rows or 0) > 0`,
+options fold + bars twin) were SURVIVING MUTANTS (every census fixture fed
+0/1; None is reachable — an unreadable canonical sibling — and would have
+TypeError-crashed `brutex lake audit-unique` / doctor / the `/universe`
+chip); pinned by two garbage-canonical census folds, the mutant re-applied
+at both lines + verified killed. NITs: the ledger's `TestOptionForeignHeal`
+count corrected 13 → 17; §3's stale active-branch line reconciled to §1.
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -574,10 +590,34 @@ hostile-review pass._
   symlink skip as the main glob loop (warned loudly, spy-pinned never read, `overlap_rows=None` honest abstain);
   `heal_findings` serials a same-second quarantine dir (`<ts>-NN`) so a second batch under the second-granular stamp
   can never overwrite the first batch's forensic before-image (pre-existing DEC-LAKE-HEAL-001 machinery; honest:
-  a same-second cross-PROCESS exists()-then-use race remains theoretically possible, not claimed closed). Remaining
+  a same-second cross-PROCESS exists()-then-use race remains theoretically possible, not claimed closed).
+  HOSTILE-REVIEW FOLDS (round 6, refuter-confirmed; the containment regressions verified FAILING pre-fix —
+  cross-series contamination reproduced healed=1/errors=0; the census mutant re-applied at BOTH lines + verified
+  KILLED): (R6-1·MINOR) the round-2/4 rail refused only a dest whose RESOLVED parent ESCAPES `<lake_root>/options/`
+  — an IN-LAKE symlink swap passed it: post-scan, the flagged SERIES_A/2024-01.parquet swapped to a symlink at
+  `options/SERIES_B/2024-03.parquet` (a DIFFERENT series, still inside the lake) let the heal read SERIES_B's rows
+  through the link and the copy-forward leg CREATE SERIES_A/2024-03.parquet permanently holding SERIES_B's rows
+  (cross-series contamination; SERIES_B itself intact, nothing escaped the lake — hence MINOR). FIXED at the one
+  chokepoint: `_assert_options_containment` ALSO refuses when the dest or its series-dir parent `is_symlink()`
+  (the healer only ever targets REAL partition files in REAL series dirs — ANY symlink at either component is a
+  swap; ancestors above the series dir deliberately unprobed so the symlinked-lake-ROOT mount shape keeps passing,
+  pinned, and an in-lake-redirected `options` component already fails the escape check); covers all THREE
+  heal-side entries; the round-2 "closes the demonstrated scan→heal window" claim now covers the in-lake vector
+  too (residual: a sub-check race inside ONE call needs dirfd-relative I/O — out of scope, NOT claimed). 3
+  regressions (the writer file+dir in-lake twins + the end-to-end scan→swap→heal: errors=1 isolated, healed=0,
+  no SERIES_A/2024-03.parquet created, SERIES_B byte-identical, the symlink left in place), ALL verified failing
+  pre-fix. (R6-2·MINOR surviving mutant) the census `overlap_rows` None-guards — the options fold
+  `(finding.overlap_rows or 0) > 0` + the pre-existing bars twin — survived dropping the `or 0` across the whole
+  covering set (every census fixture fed only 0/1) while `overlap_rows=None` is a REACHABLE production state
+  (unreadable/symlinked canonical sibling → the honest abstain) and the census backs `brutex lake audit-unique` +
+  the doctor check + the `/universe` chip (one unreadable sibling would have TypeError-crashed all three under the
+  mutant); pinned by two garbage-canonical census-fold tests (foreign_files=1, overlap_files=0, no raise — options
+  + bars), the mutant re-applied at both lines + verified KILLED by each pin. (R6-3·NITs) the ledger #1482
+  `TestOptionForeignHeal` count corrected 13 → 17; the stale §3 "Active feature branch" line reconciled to this
+  §1 line (pre-existing drift). Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (446/152) + `option_parquet_writer.py`
-  (159/30) + `lake_heal.py` (594/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  (161/32) + `lake_heal.py` (594/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
@@ -1945,7 +1985,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/nice-wright-qmb2bz`
+- **Active feature branch:** `claude/cool-cerf-tq8c27`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
