@@ -625,6 +625,122 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def backup_failed(self, *, reason: str, detail: str = "") -> bool:
+        """Alert that the off-box backup run FAILED (CRITICAL; deduped by *reason*).
+
+        DEC-BACKUP-OFFBOX-001: fired by ``brutex backup run`` on any failure
+        that leaves the lake WITHOUT a fresh verified off-box snapshot
+        (config / preflight / restic / state-write / partial-streak). Rides
+        ``PHASE_BLOCKED`` (0.0 s window) — the durable cross-run bound lives
+        in the checker's ``deadman.json``, not the per-process dedupe cache.
+
+        Parameters
+        ----------
+        reason
+            Short, non-secret cause token (e.g. ``"restic_missing"``).
+        detail
+            Optional appended context (non-secret).
+        """
+        extra = f" {detail}" if detail else ""
+        message = escape_markdown_v2(
+            f"🛑 Off-box BACKUP FAILED: {reason}.{extra} The lake/results are NOT freshly "
+            "backed up; the dead-man will keep re-alerting while stale. Run "
+            "`brutex backup status`, then check the backup log and re-run `brutex backup run`."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"backup-failed:{reason}",
+        )
+
+    def backup_degraded(self, *, aspect: str, detail: str) -> bool:
+        """Alert that the backup DEGRADED without losing data protection (WARN).
+
+        DEC-BACKUP-OFFBOX-001: the snapshot itself succeeded and the data IS
+        off-box — a maintenance (``forget``/prune) failure or a partial rc-3
+        read, never a data-protection loss (F8/F23). Deduped by *aspect*.
+
+        Parameters
+        ----------
+        aspect
+            The degraded aspect token (``"partial"`` / ``"maintenance"``).
+        detail
+            Non-secret one-line context.
+        """
+        message = escape_markdown_v2(
+            f"⚠️ Off-box backup DEGRADED ({aspect}): {detail}. The snapshot itself succeeded "
+            "and the data IS off-box — this is a maintenance/partial-read warning, not a "
+            "data-protection loss. See `brutex backup status`."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.WARN,
+            message=message,
+            dedupe_key=f"backup-degraded:{aspect}",
+        )
+
+    def backup_overdue(
+        self,
+        *,
+        reason: str,
+        hours_since_success: float | None,
+        threshold_hours: float,
+    ) -> bool:
+        """Dead-man breach: no fresh verified off-box backup (CRITICAL; deduped by *reason*).
+
+        DEC-BACKUP-OFFBOX-001: fired by the hourly ``brutex backup check`` on
+        any alarm verdict (overdue / never_succeeded / state_corrupt /
+        clock_skew / hung / remote divergence). The caller stamps its durable
+        re-alert throttle IFF this returns ``True`` (only-stamp-on-success).
+
+        Parameters
+        ----------
+        reason
+            The alarm verdict token.
+        hours_since_success
+            Hours since the last stamped success (``None`` = never).
+        threshold_hours
+            The freshness threshold the verdict was judged against.
+        """
+        age_display = "never" if hours_since_success is None else f"{hours_since_success:.1f} h ago"
+        message = escape_markdown_v2(
+            f"🛑 BACKUP DEAD-MAN ({reason}): last successful off-box backup {age_display} "
+            f"(threshold {threshold_hours:.0f} h). Sweeps + hash-chained audit logs are NOT "
+            "re-pullable — their loss window is growing. Investigate now: "
+            "`brutex backup status`, then `brutex backup run`."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"backup-overdue:{reason}",
+        )
+
+    def backup_repo_corrupt(self, *, detail: str) -> bool:
+        """The backup repo failed verification / the restore drill found a byte mismatch (CRITICAL).
+
+        DEC-BACKUP-OFFBOX-001 (F11/F20): remediation is HUMAN — an automated
+        "repair" of a corrupt repo can destroy the last good copy, so the
+        alert points at the runbook instead.
+
+        Parameters
+        ----------
+        detail
+            Non-secret description of the corruption finding.
+        """
+        message = escape_markdown_v2(
+            f"🛑 BACKUP REPO CORRUPT: {detail}. Do NOT run automated repair — follow "
+            "docs/runbooks/backup-offbox.md (restore-from-older / re-seed). The dead-man "
+            "keeps escalating until a VERIFIED backup succeeds."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key="backup-repo-corrupt",
+        )
+
     def lake_heal_report(
         self,
         *,
@@ -913,6 +1029,33 @@ def emit_pull_halt_alert(exc: Exception) -> None:
     except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the halt
         structlog.get_logger("brutex.notifications.sweep_alerts").exception(
             "pull_halt_alert_failed"
+        )
+
+
+def emit_backup_failed_alert(reason: str, detail: str = "") -> None:
+    """Best-effort CRITICAL backup-failure push; NEVER raises into the caller.
+
+    DEC-BACKUP-OFFBOX-001 — the backup twin of :func:`emit_pull_halt_alert`
+    (same blanket-guard structure): the fire-and-forget contract is
+    STRUCTURAL, so even a future import-time or construction failure here is
+    swallowed + logged and can never replace the exit code the caller
+    returns. When Telegram is disabled (the default), the publish is a
+    silent no-op.
+
+    Parameters
+    ----------
+    reason
+        Short, non-secret cause token (mirrors :meth:`SweepAlerter.backup_failed`).
+    detail
+        Optional appended context (non-secret).
+    """
+    import structlog
+
+    try:
+        SweepAlerter().backup_failed(reason=reason, detail=detail)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the exit
+        structlog.get_logger("brutex.notifications.sweep_alerts").warning(
+            "backup_failed_alert_failed", reason=reason
         )
 
 
