@@ -517,7 +517,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
+- **Active branch:** `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
+  MIGRATION.md #1527** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
+  gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
+  `brutex/observability/bench_baseline.py` (schema/comparator/capture/govern + the ONE
+  hardware-key format law) + `hardware_envelope.py` gains `cpu_model_string`/`HardwareFingerprint`/
+  `hardware_key` (env overrides provably cannot move the key) + the 6-entry measurement registry
+  (`tests/bench/_abs_baseline_registry.py`, best-of-N-MIN per DEC-CANARY-MINTIME-001) + per-hardware
+  baselines at `tests/bench/baselines/<key>.json` (`tolerance_pct` capped `[0,100)` + its failure
+  multiplier `1 + t/100` float-exactly < 2.0 — a 2x slowdown can NEVER pass; strict-`>` boundary;
+  > 4x speedup FAILS) + `scripts/ci/bench_baseline_gate.py`
+  (validate/compare/capture/govern/key; 0 ok-or-LOUD-abstain / 1 numeric-retry-once / 2
+  structural-never-retried). bench-m4pro gains measure→compare→capture→artifact + the GitHub-hosted
+  `bless-baseline` bot-PR job (the ONLY write-token holder; main-ref + schedule/dispatch pinned);
+  ci.yml's required `bench` job gains the always-on schema validate + the PR governance diff gate
+  (a blessed-cell bump needs a NEW human-written ledger entry quoting the entry key + literal value
+  token + a LIVE-verified fresh run). BOOTSTRAP fabrication-free: ZERO numbers ship — the first
+  baseline is measured on the real M4 Pro and blessed via one operator nudge+merge; until then
+  compare ABSTAINS green-but-loud. Ratio tiers + the 50 M/s floor UNTOUCHED (complements). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; new brutex modules 100%
+  line+branch; ruff/ruff-format/mypy --strict/pyright clean).
+  Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
   carries its citation or its honest gap; import-time `validate_regime_table`); the ONE COMMON `rate_for_date`

@@ -1,0 +1,101 @@
+# Runbook — absolute benchmark baseline gate (bench-m4pro)
+
+**DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1527).** Operator procedures for
+the committed per-hardware absolute-benchmark compare gate.
+
+## Reading a RED absolute gate
+
+1. Open the failed `bench-m4pro` run → the compare step prints a table
+   (entry · blessed ns/op · measured ns/op · ops/s both sides · ratio ·
+   verdict) plus `::error::` lines naming each failing entry.
+2. **Soft-drift WARNs first**: `soft context drift on 'numpy'/'os_version'`
+   lines mean the STACK moved, not your code — the verdict still stands on
+   the numbers (a stack perf regression IS a regression of the shipped
+   stack), but the triage answer is one line away.
+3. **The bounded auto-retry already ran**: a numeric red (exit 1) triggers
+   ONE fresh-process re-measure inside the same job before failing — a
+   still-red scheduled run means the regression reproduced across two
+   independent process-level measurements. Treat it as real.
+4. Both measurement reports (fragments + retry) live in the run's
+   `abs-bench` artifact (90-day retention) — every raw round sample is
+   there for offline triage.
+5. If you suspect a hot/loaded machine anyway: quiet the runner and
+   re-dispatch the workflow ONCE more before escalating. A third red is a
+   code/stack regression — bisect the offending hot path.
+
+Verdict cheat-sheet:
+
+| Verdict | Meaning | Exit |
+|---|---|---|
+| `REGRESSION` | measured > blessed x (1 + tolerance/100) | 1 (retried once) |
+| `SUSPICIOUS_SPEEDUP` | > 4x faster than blessed — hollowed bench or a genuine win; re-bless required | 1 |
+| `STRUCTURAL` | fragment set ≠ registry / workload-hash drift / wheel missing / python-minor drift / schema | 2 (never retried) |
+| `ABSTAIN_*` | no (or partial) baseline for this hardware key | 0, loud |
+
+## The bless flow (first capture / new machine / new hot path)
+
+Fully automatic: an abstaining scheduled run captures 3 process-fresh
+measurement runs (capture REFUSES a noisy triple — cross-run spread >
+tolerance/2), uploads the candidate, and the GitHub-hosted `bless-baseline`
+job opens a bot PR committing the candidate VERBATIM. The operator:
+
+1. **Nudge CI**: GITHUB_TOKEN-created PRs do not trigger CI — close/reopen
+   the PR (or push an empty commit) so `CI OK (aggregate gate)` reports.
+2. Review the measured table in the PR body, then merge. The merge click
+   IS the bless sign-off (the bot is deliberately NOT auto-merge-trusted).
+
+## The re-bless flow (changing a blessed number)
+
+1. Dispatch `bench-m4pro` with `capture_candidate=true`, a NEW
+   `decision_id` (e.g. `DEC-BENCH-REBLESS-BARLOOKUP-002`), and
+   `replace_entries=bar_lookup` (comma-separated).
+2. The capture re-measures the FULL registry, folds, and the bless PR opens
+   with ONLY the baseline change: every blessed cell NOT in
+   `replace_entries` is CARRIED byte-identical (its fresh measurement is
+   ignored — never a refusal, never a quiet re-mint), so a single-entry
+   re-bless and an additive bless both just work. For a CONTEXT re-bless
+   (e.g. the runner's python minor moved — the `context.python` STRUCTURAL
+   red), list EVERY blessed entry in `replace_entries`: a FULL replace
+   refreshes the candidate's top-level context/fingerprint from the fresh
+   measurement, so the very next compare is green; a partial replace keeps
+   the old context (the carried cells were measured under it) and the
+   honest structural red stands until the full re-bless.
+3. **Write the MIGRATION.md entry yourself** (ledger entries are always
+   human-written) and push it onto the bless branch: the entry's added
+   lines MUST contain the new decision id, the literal entry key
+   (`bar_lookup`), and the literal new value token exactly as serialized in
+   the JSON (e.g. `55.0`). The governance gate names the exact required
+   tokens in its error message if you miss one.
+4. Nudge CI, merge. The gate live-verifies the cited run (exists on THIS
+   repository — the `$GITHUB_REPOSITORY` repo pin, so a run on a fork or
+   any foreign repo is a breach and is never even queried; is
+   bench-m4pro.yml; completed with conclusion `success`; head_sha == the
+   embedded commit) — a fabricated provenance is machine-refuted. The gate
+   fails CLOSED (exit 2) when `$GITHUB_REPOSITORY` is unset.
+
+## Workload-parameter change (S11 recipe)
+
+Changing any `ENTRY_WORKLOADS` value moves that entry's `workload_hash` and
+STRUCTURAL-fails its blessed cell. The SAME PR must:
+
+1. update the workload-hash golden in
+   `tests/bench/test_absolute_baseline.py` (it pins the literals), and
+2. REMOVE the affected baseline entries from every
+   `tests/bench/baselines/*.json`, with a MIGRATION.md added line naming
+   each removed entry key and a DEC id.
+
+The next scheduled run abstains on the removed entries and auto-blesses
+them additively under the bootstrap DEC — no multi-day red window. If the
+PR forgets step 2, the next m4pro compare STRUCTURAL-fails loudly; recovery
+= a follow-up PR doing step 2.
+
+## Escalation
+
+- Missing-baseline tracking issues are titled
+  `bench-m4pro: absolute baseline missing/incomplete for <key>` (label
+  `bench`, never `critical`) — bootstrap housekeeping, not an incident.
+- `bench-m4pro: bless-baseline job failed …` (labels `bug,bench,critical`)
+  means the bootstrap loop itself broke — fix before the gate can arm.
+- Retiring a machine: delete its `tests/bench/baselines/<key>.json` in a PR
+  whose MIGRATION.md entry names the filename (the governance gate enforces
+  it).
