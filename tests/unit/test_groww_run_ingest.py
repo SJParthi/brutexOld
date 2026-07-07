@@ -1539,3 +1539,69 @@ class TestReplayCaptureDrainSeams:
         assert len(seen) == 2
         assert seen[0] is injected
         assert seen[1] is injected
+
+
+class TestFlushCaptureToAudit:
+    """The FOURTH capture drain seam (round-1 review fix, BLOCKER).
+
+    Under the default-ON async fetch pipeline a window's ``sink.append`` runs
+    on a background consumer thread AFTER the run's own final drain, so the
+    pull owner flushes once more — after the pipeline/pool drains, while the
+    chain is still open — via :func:`flush_capture_to_audit`.
+    """
+
+    def test_none_capture_is_a_noop(self) -> None:
+        """The default OFF mode: nothing to flush, nothing touched."""
+        assert mod.flush_capture_to_audit(None, None) == 0
+
+    def test_empty_buffer_is_a_noop(self, tmp_path) -> None:
+        """Zero remaining records: no chain append, no WARN, returns 0."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries
+
+        capture = _FakeCapture()  # drain_remaining() returns ()
+        path = tmp_path / "ingest-audit.jsonl"
+        with capture_logs() as logs, AuditWriter.open(path) as audit:
+            flushed = mod.flush_capture_to_audit(capture, audit)  # type: ignore[arg-type]
+        assert flushed == 0
+        assert capture.remaining_calls == 1
+        assert _events(logs, "audit_capture.no_chain") == []
+        assert read_entries(path) == []
+
+    def test_remaining_records_land_on_the_open_chain(self, tmp_path) -> None:
+        """Records the async pipeline deferred past the run's final drain are
+        appended to the STILL-OPEN chain — the stranded-records regression."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        capture = _FakeCapture(
+            remaining=(
+                _capture_record("NSE:INDEX:NIFTY:1minute", seq=0),
+                _capture_record("NSE:INDEX:BANKNIFTY:1minute", seq=1),
+            ),
+        )
+        path = tmp_path / "ingest-audit.jsonl"
+        with (
+            capture_logs() as logs,
+            pull_id_scope("pull-flush"),
+            AuditWriter.open(path) as audit,
+        ):
+            flushed = mod.flush_capture_to_audit(capture, audit)  # type: ignore[arg-type]
+        assert flushed == 2
+        assert verify_chain(path) == 2
+        entries = read_entries(path)
+        assert [e.action for e in entries] == ["LAKE_APPEND_WRITTEN", "LAKE_APPEND_WRITTEN"]
+        assert [e.payload["capture_seq"] for e in entries] == [0, 1]
+        (info,) = _events(logs, "audit_capture.post_drain_flush")
+        assert info["pull_id"] == "pull-flush"
+        assert info["records"] == 2
+
+    def test_without_chain_warns_and_discards(self) -> None:
+        """capture wired with audit=None: the loud no_chain WARN, never silent."""
+        capture = _FakeCapture(
+            remaining=(_capture_record("NSE:INDEX:NIFTY:1minute", seq=0),),
+        )
+        with capture_logs() as logs, pull_id_scope("pull-flush-nochain"):
+            flushed = mod.flush_capture_to_audit(capture, None)  # type: ignore[arg-type]
+        assert flushed == 0
+        (warn,) = _events(logs, "audit_capture.no_chain")
+        assert warn["pull_id"] == "pull-flush-nochain"
+        assert warn["discarded"] == 1

@@ -572,6 +572,7 @@ def test_anchor_mode_payload_shape(tmp_path: Path) -> None:
     assert record.action == LAKE_APPEND_ACTION
     payload = record.payload
     assert payload["v"] == CAPTURE_PAYLOAD_VERSION
+    assert payload["capture_run"] == sink.run_nonce
     assert payload["capture_seq"] == 0
     assert payload["exchange"] == "NSE"
     assert payload["segment"] == "INDEX"
@@ -594,6 +595,30 @@ def test_anchor_mode_payload_shape(tmp_path: Path) -> None:
     assert "bars" not in payload
     assert "added_keys_digest" not in payload
     assert "added_count" not in payload
+
+
+def test_capture_run_nonce_is_per_sink_and_stamped_into_every_event(tmp_path: Path) -> None:
+    """Two sinks (two 'processes') carry DISTINCT ``capture_run`` nonces.
+
+    Round-1 review fix (capture_seq collision): ``capture_seq`` restarts at 0
+    per process while the production chain is resume-appended across pulls,
+    so every event must carry its sink's run nonce — the replay-side run
+    discriminator.
+    """
+    sink_a, _inner_a = _capture_sink(tmp_path / "a")
+    sink_b, _inner_b = _capture_sink(tmp_path / "b")
+    assert sink_a.run_nonce != sink_b.run_nonce
+    assert len(sink_a.run_nonce) == 32  # uuid4 hex
+    for sink in (sink_a, sink_b):
+        sink.append(
+            exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", bars=[_bar(0)]
+        )
+        sink.append(
+            exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", bars=[_bar(1)]
+        )
+        records = sink.drain_remaining()
+        # Both events of one sink share ITS nonce (one nonce per run).
+        assert [r.payload["capture_run"] for r in records] == [sink.run_nonce] * 2
 
 
 def test_capture_mode_payload_carries_bars_and_journal_fields(tmp_path: Path) -> None:

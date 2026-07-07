@@ -5,9 +5,11 @@ pair (the producer is :mod:`brutex.data.audit_capture`):
 
 * :func:`replay_lake_from_audit` streams a ``verify_chain``-verified audit
   log, selects the ``LAKE_APPEND_WRITTEN`` events, sorts them by
-  ``capture_seq`` (the true lake-apply order — the producer's ONE lock spans
-  the durable append and the stamp), decodes each event's captured bar
-  tuples, and re-drives the REAL
+  ``(capture run, capture_seq)`` — ``capture_seq`` is the true lake-apply
+  order WITHIN one run (the producer's ONE lock spans the durable append and
+  the stamp), and the per-run ``capture_run`` nonce segments the runs of a
+  resume-appended production chain, whose per-process seqs would otherwise
+  collide — decodes each event's captured bar tuples, and re-drives the REAL
   :class:`~brutex.data.sink.ParquetBarSink` →
   :class:`~brutex.data.parquet_writer.ParquetWriter` stack into a fresh
   replay root — ZERO re-implementation of partition grouping / tick-rounding
@@ -22,8 +24,9 @@ pair (the producer is :mod:`brutex.data.audit_capture`):
   nondeterminism".
 * :func:`check_capture_anchors` verifies an ANCHOR-mode log (no ``bars``
   payloads) against the live lake with no reconstruction claim: for each
-  partition the LAST anchor (by ``capture_seq``) must equal the sha256 of
-  the live file bytes — tamper-evident lake verification.
+  partition the LAST anchor (in ``(run, capture_seq)`` apply order) must
+  equal the sha256 of the live file bytes — tamper-evident lake
+  verification.
 
 **Honest envelope (Golden Rule #10).** Byte equality is a SAME-ENVIRONMENT
 guarantee (Parquet bytes are deterministic per environment, not warranted
@@ -67,7 +70,8 @@ class ReplayMismatchError(AuditError):
 
     Raised on a per-event anchor mismatch (naming the ``capture_seq`` and the
     partition), on a tampered payload (an empty ``bars`` array the producer
-    never emits, a junk ``capture_seq`` / ``partitions`` shape), on a full
+    never emits, a junk ``capture_seq`` / ``capture_run`` / ``partitions``
+    shape, a duplicate ``(capture_run, capture_seq)`` pair), on a full
     byte-compare divergence (naming the partition, both sizes, both sha256s,
     the FIRST divergent byte offset, and the three-way verdict), and — in
     strict mode — on a live ``*.parquet`` never named by any capture event
@@ -111,6 +115,7 @@ class LakeReplayReport:
 class _CaptureEvent:
     """One parsed ``LAKE_APPEND_WRITTEN`` event (validated payload projection)."""
 
+    capture_run: str
     capture_seq: int
     exchange: str
     segment: str
@@ -181,6 +186,7 @@ def _parse_event(entry: AuditEntry) -> _CaptureEvent:
             f"LAKE_APPEND_WRITTEN capture_seq={seq} has a malformed bars payload: {raw_bars!r}"
         )
     return _CaptureEvent(
+        capture_run=_require_str(payload, "capture_run", seq=seq),
         capture_seq=seq,
         exchange=_require_str(payload, "exchange", seq=seq),
         segment=_require_str(payload, "segment", seq=seq),
@@ -193,7 +199,7 @@ def _parse_event(entry: AuditEntry) -> _CaptureEvent:
 
 
 def _load_capture_events(audit_path: Path, *, verify: bool) -> list[_CaptureEvent]:
-    """Stream the log, verify the chain first (default), and sort by ``capture_seq``.
+    """Stream the log, verify the chain first (default), and sort into apply order.
 
     ``verify=True`` (the default) runs the existing
     :func:`~brutex.orchestrator.audit.verify_chain` FIRST — a tampered chain
@@ -204,9 +210,20 @@ def _load_capture_events(audit_path: Path, *, verify: bool) -> list[_CaptureEven
     bypass exists for diagnostic replays of a knowingly-broken chain.
 
     Foreign actions (the spine's coarse ``INGEST_*`` lines, the L3 ``add``
-    rows) are ignored; chain-line order across pairs varies run-to-run, so
-    the sort by ``capture_seq`` — the true lake-apply order — is what makes
-    replay order-insensitive.
+    rows) are ignored. The apply order is ``(run, capture_seq)``:
+
+    * WITHIN one run, chain-line order across pairs varies run-to-run
+      (pair completion order), so the sort by ``capture_seq`` — the true
+      lake-apply order under the producer's one lock — makes replay
+      order-insensitive;
+    * ACROSS runs, ``capture_seq`` restarts at 0 per process while the
+      production chain is resume-appended across pulls, so events are FIRST
+      grouped by their ``capture_run`` nonce in chain first-appearance order
+      (runs on one chain are strictly sequential — the CLI's cross-process
+      single-flight pull gate admits one pull per lake at a time), which IS
+      the run start order. A duplicate ``(capture_run, capture_seq)`` pair is
+      impossible from the producer (one monotonic stamp per sink), so its
+      presence is refused loudly instead of silently mis-ordering.
     """
     if verify:
         verify_chain(audit_path)
@@ -215,7 +232,19 @@ def _load_capture_events(audit_path: Path, *, verify: bool) -> list[_CaptureEven
         for entry in iter_entries(audit_path)
         if entry.action == "LAKE_APPEND_WRITTEN"
     ]
-    events.sort(key=lambda event: event.capture_seq)
+    run_order: dict[str, int] = {}
+    seen: set[tuple[str, int]] = set()
+    for event in events:
+        run_order.setdefault(event.capture_run, len(run_order))
+        key = (event.capture_run, event.capture_seq)
+        if key in seen:
+            raise ReplayMismatchError(
+                f"duplicate LAKE_APPEND_WRITTEN capture_seq={event.capture_seq} within "
+                f"capture run {event.capture_run!r} — the producer stamps each run's "
+                "seq exactly once, so this log is tampered (or two runs share a nonce)"
+            )
+        seen.add(key)
+    events.sort(key=lambda event: (run_order[event.capture_run], event.capture_seq))
     return events
 
 
@@ -227,8 +256,10 @@ def check_capture_anchors(
 ) -> LakeReplayReport:
     """Verify an anchor-mode log against the LIVE lake — no reconstruction.
 
-    For each audited partition, the LAST ``LAKE_APPEND_WRITTEN`` anchor (by
-    ``capture_seq``) must equal the sha256 of the live file bytes. Mismatches
+    For each audited partition, the LAST ``LAKE_APPEND_WRITTEN`` anchor (in
+    the ``(run, capture_seq)`` apply order — multi-pull resumed chains pick
+    the truly-last run's anchor) must equal the sha256 of the live file
+    bytes. Mismatches
     (including a missing live file) are COLLECTED into the report's
     ``anchor_mismatches``, never raised — the operator-sweep mode that names
     every drifted partition in one pass. Works on anchor AND capture logs
@@ -286,8 +317,8 @@ def replay_lake_from_audit(
 ) -> LakeReplayReport:
     """Rebuild a lake from a CAPTURE-mode audit log through the REAL writers.
 
-    Streams the verified log, sorts the ``LAKE_APPEND_WRITTEN`` events by
-    ``capture_seq``, decodes each event's bars
+    Streams the verified log, sorts the ``LAKE_APPEND_WRITTEN`` events into
+    ``(run, capture_seq)`` apply order, decodes each event's bars
     (:func:`~brutex.data.audit_capture.decode_bars`), and drives a fresh REAL
     :class:`~brutex.data.sink.ParquetBarSink` (no catalog) over
     :class:`~brutex.data.parquet_writer.ParquetWriter` rooted at
@@ -458,11 +489,19 @@ def assert_lake_byte_equal(
         The :class:`LakeReplayReport` from :func:`replay_lake_from_audit`
         (its ``partitions`` scope + ``partition_anchors`` cross-check input).
     strict
-        ``True`` (default) additionally walks *original_root* for
-        ``*.parquet`` files never named by any capture event and raises —
-        the "write bypassed audit" class. ``False`` scopes the compare to
-        audited datasets only — the honest mode for a lake that also holds
-        prebuild / heal / enrichment output.
+        ``True`` (default) additionally walks ``original_root / "bars"`` —
+        the :class:`~brutex.data.sink.ParquetBarSink` tree the capture sink
+        wraps, the ONLY tree a captured write can land in — for ``*.parquet``
+        files never named by any capture event and raises: the "write
+        bypassed audit" class. Deliberately NOT the whole lake root: every
+        real pull also writes non-bar parquet sidecars OUTSIDE ``bars/``
+        (``window_ledger/ledger.parquet`` + deltas, ``.quarantine/**`` heal
+        copies) that structurally never route through the capture sink —
+        walking them would false-flag every genuine production capture and
+        force ``strict=False``, losing the bypass-detection class entirely.
+        ``False`` scopes the compare to audited datasets only — the honest
+        mode for a lake whose ``bars/`` tree also holds prebuild / heal /
+        enrichment output.
 
     Raises
     ------
@@ -500,17 +539,20 @@ def assert_lake_byte_equal(
             f"byte offset {offset}; {verdict}"
         )
     if strict:
+        # Scope the bypass walk to the bars/ tree the capture sink wraps —
+        # the window-ledger + quarantine parquet sidecars outside it never
+        # route through a BarSink and would false-flag every real pull.
         unaudited = sorted(
             path.relative_to(original_root).as_posix()
-            for path in original_root.rglob("*.parquet")
+            for path in (original_root / "bars").rglob("*.parquet")
             if path.relative_to(original_root).as_posix() not in report.partitions
         )
         if unaudited:
             raise ReplayMismatchError(
-                f"{len(unaudited)} live parquet partition(s) were never named by "
-                f"any capture event (a write bypassed audit, or the lake holds "
-                f"un-audited derived output — use strict=False to scope to audited "
-                f"datasets): {unaudited[:10]!r}"
+                f"{len(unaudited)} live parquet partition(s) under bars/ were never "
+                f"named by any capture event (a write bypassed audit, or the lake "
+                f"holds un-audited derived output — use strict=False to scope to "
+                f"audited datasets): {unaudited[:10]!r}"
             )
     _LOG.info(
         "lake_replay.byte_equal",

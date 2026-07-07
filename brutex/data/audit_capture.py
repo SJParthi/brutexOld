@@ -7,6 +7,7 @@ sibling replay oracles:
   :class:`~brutex.data.sink.BarSink` and buffers ONE ``LAKE_APPEND_WRITTEN``
   :class:`~brutex.orchestrator.audit.BufferedAuditRecord` per non-empty
   ``append`` — coordinates + ``merge_mode`` + a monotonic ``capture_seq`` +
+  the per-run ``capture_run`` nonce +
   per-partition :class:`~brutex.data.parquet_writer.WriteResult` anchors
   (``raw_hash`` verbatim) + an :func:`input_blake3` digest of the canonically
   encoded input batch, plus (capture mode only) the full 7-field bar tuples
@@ -34,11 +35,20 @@ Records are buffered here under the sink's own lock (worker / shard threads)
 and appended to the real hash-chained
 :class:`~brutex.orchestrator.audit.AuditWriter` ONLY on the controller thread
 at the :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` drain
-seams. ONE critical section spans the durable inner append AND the
-``capture_seq`` stamp, so stamp order IS the lake-apply order — the
-parallel-window same-partition keep-first replay hazard is closed by
-construction. Honest cost: while wired (both modes are opt-in), ALL lake
-appends serialize through that one lock; OFF mode has no wrapper at all.
+seams — plus the pull owner's FOURTH seam
+(:func:`~brutex.adapters.groww.run_ingest.flush_capture_to_audit`, called
+AFTER the async fetch-pipeline / write-consumer drains), because under the
+default-ON async pipeline a window's ``sink.append`` runs on a background
+consumer thread and may buffer records AFTER the run's own final drain. ONE
+critical section spans the durable inner append AND the ``capture_seq``
+stamp, so stamp order IS the lake-apply order — the parallel-window
+same-partition keep-first replay hazard is closed by construction. Every
+event additionally carries this sink's ``capture_run`` nonce: ``capture_seq``
+restarts at 0 per process while the production chain is resume-appended
+across pulls, so replay orders events by ``(run first-appearance,
+capture_seq)`` — never a cross-run seq collision. Honest cost: while wired
+(both modes are opt-in), ALL lake appends serialize through that one lock;
+OFF mode has no wrapper at all.
 
 **Honest envelope (Golden Rule #10).** Full byte reconstruction is a
 CAPTURE-mode guarantee (CI / bounded forensic runs — a full production
@@ -57,6 +67,7 @@ from __future__ import annotations
 import enum
 import os
 import threading
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final, TypeGuard
@@ -439,6 +450,13 @@ class AuditCaptureSink:
         #: is held during its own ``append``).
         self._lock = threading.Lock()
         self._next_seq = 0
+        #: Per-sink run nonce stamped into every event as ``capture_run``:
+        #: ``capture_seq`` restarts at 0 per process while the production
+        #: chain (<lake>/audit/spot-ingest.jsonl) is resume-appended across
+        #: pulls, so without a run discriminator two pulls' events would
+        #: COLLIDE on capture_seq and replay would interleave them in the
+        #: wrong order (a false ReplayMismatchError on an honest log).
+        self._run_nonce = uuid.uuid4().hex
         self._buffer: list[tuple[tuple[str, str], BufferedAuditRecord]] = []
 
     @property
@@ -450,6 +468,11 @@ class AuditCaptureSink:
     def journal(self) -> DedupJournal | None:
         """The attached L3 journal, or ``None`` in anchor mode."""
         return self._journal
+
+    @property
+    def run_nonce(self) -> str:
+        """This sink's per-run ``capture_run`` nonce (one per process/pull)."""
+        return self._run_nonce
 
     def append(
         self,
@@ -496,6 +519,7 @@ class AuditCaptureSink:
             self._next_seq += 1
             payload: dict[str, Any] = {
                 "v": CAPTURE_PAYLOAD_VERSION,
+                "capture_run": self._run_nonce,
                 "capture_seq": seq,
                 "exchange": exchange,
                 "segment": segment,

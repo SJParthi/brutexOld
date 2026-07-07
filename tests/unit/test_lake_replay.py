@@ -236,6 +236,79 @@ def test_replay_sorts_by_capture_seq_not_chain_order(tmp_path: Path) -> None:
     )
 
 
+def test_multi_run_resumed_chain_replays_in_run_order(tmp_path: Path) -> None:
+    """Two pulls (fresh sink each — ``capture_seq`` restarts at 0) on ONE
+    resume-appended chain replay in run order, never interleaved by seq.
+
+    Round-1 review fix regression (the executed PoC shape): run 1 appends
+    NIFTY then BANKNIFTY; run 2 (a new process — a fresh
+    :class:`AuditCaptureSink`) appends BANKNIFTY then NIFTY, with a cross-run
+    keep-first CONFLICT on the BANKNIFTY partition. A GLOBAL ``capture_seq``
+    sort would apply run 2's BANKNIFTY (seq 0) BEFORE run 1's (seq 1) —
+    storing the conflicting close and false-raising on run 2's anchor (which
+    was captured over the merged live file). The ``(capture_run,
+    capture_seq)`` order replays the honest multi-pull log clean.
+    """
+    lake_root = tmp_path / "lake"
+    replay_root = tmp_path / "replay"
+    audit_path = tmp_path / "audit" / "spot-ingest.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _one_run(symbol_batches: list[tuple[str, list[CandleBar]]]) -> str:
+        """One 'process': a FRESH capture sink drained onto the shared chain."""
+        sink = AuditCaptureSink(
+            ParquetBarSink(writer=ParquetWriter(lake_root=lake_root)),
+            lake_root=lake_root,
+            mode=CaptureMode.CAPTURE,
+        )
+        for symbol, bars in symbol_batches:
+            sink.append(
+                exchange="NSE", segment="INDEX", symbol=symbol, interval="1minute", bars=bars
+            )
+        _write_records(audit_path, list(sink.drain_remaining()))
+        return sink.run_nonce
+
+    # Run 1: NIFTY (seq 0) then BANKNIFTY (seq 1) — BANKNIFTY stores 100.00.
+    _one_run(
+        [
+            ("NSE-NIFTY", [_bar(_JAN_TS, 0)]),
+            ("NSE-BANKNIFTY", [_bar(_JAN_TS, 0, close="100.00")]),
+        ]
+    )
+    # Run 2 (seq restarts at 0): BANKNIFTY FIRST — a keep-first conflict
+    # (999.99 must LOSE to run 1's stored 100.00) + one net-new bar — then NIFTY.
+    _one_run(
+        [
+            ("NSE-BANKNIFTY", [_bar(_JAN_TS, 0, close="999.99"), _bar(_JAN_TS, 1)]),
+            ("NSE-NIFTY", [_bar(_JAN_TS, 1)]),
+        ]
+    )
+    report = replay_lake_from_audit(audit_path, replay_root=replay_root)
+    assert report.appends_replayed == 4
+    assert report.anchor_matches == 4
+    assert_lake_byte_equal(original_root=lake_root, replay_root=replay_root, report=report)
+    # The anchor sweep picks each partition's truly-LAST anchor (run 2's) —
+    # the untampered live lake verifies clean.
+    anchors = check_capture_anchors(audit_path, lake_root=lake_root)
+    assert anchors.anchor_mismatches == ()
+    assert anchors.anchor_matches == 2
+
+
+def test_duplicate_capture_run_seq_pair_refused(tmp_path: Path) -> None:
+    """A duplicate ``(capture_run, capture_seq)`` pair is refused loudly —
+    the producer stamps each run's seq exactly once, so a collision must
+    never be silently mis-ordered."""
+    payload = _valid_payload(tmp_path)
+    audit_path = tmp_path / "audit.jsonl"
+    _write_event(audit_path, payload)
+    _write_event(audit_path, payload)  # same run nonce + same seq
+    with pytest.raises(ReplayMismatchError, match=r"duplicate LAKE_APPEND_WRITTEN capture_seq=0"):
+        replay_lake_from_audit(audit_path, replay_root=tmp_path / "replay")
+    # check_capture_anchors shares the loader — the sweep refuses too.
+    with pytest.raises(ReplayMismatchError, match=r"duplicate"):
+        check_capture_anchors(audit_path, lake_root=tmp_path / "lake")
+
+
 def test_foreign_actions_and_add_rows_ignored(tmp_path: Path) -> None:
     """Coarse ``INGEST_*`` lines and L3 ``add`` rows never reach replay."""
     journal = DedupJournal(OptionDedupIndex())
@@ -439,6 +512,8 @@ def _valid_payload(tmp_path: Path) -> dict[str, Any]:
     [
         ({"capture_seq": "0"}, r"no valid capture_seq"),
         ({"capture_seq": True}, r"no valid capture_seq"),
+        ({"capture_run": None}, r"no valid 'capture_run'"),
+        ({"capture_run": 7}, r"no valid 'capture_run'"),
         ({"partitions": "junk"}, r"no valid partitions"),
         ({"partitions": ["junk"]}, r"malformed partition anchor"),
         ({"partitions": [{"rel": 7, "raw_hash": "ab"}]}, r"malformed partition anchor"),
@@ -674,6 +749,42 @@ def test_strict_mode_flags_unaudited_live_partition(tmp_path: Path) -> None:
         report=report,
         strict=False,
     )
+
+
+def test_strict_mode_ignores_non_bars_sidecar_parquet(tmp_path: Path) -> None:
+    """strict=True stays GREEN on a real lake's non-bar parquet sidecars.
+
+    Round-1 review fix regression: every real CLI pull writes
+    ``window_ledger/ledger.parquet`` (+ delta parquets) and heal writes
+    ``.quarantine/**`` copies — none routes through the capture-wrapped
+    :class:`~brutex.data.sink.ParquetBarSink`, so the strict "write bypassed
+    audit" walk must scope to ``bars/`` or it false-flags every genuine
+    production capture (forcing strict=False and losing the bypass-detection
+    class entirely).
+    """
+    harness = _CaptureHarness(tmp_path)
+    harness.append([_bar(_JAN_TS, 0)])
+    harness.drain_to_chain()
+    report = harness.replay()
+    ledger = harness.lake_root / "window_ledger" / "ledger.parquet"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(b"window-ledger-parquet")
+    (harness.lake_root / "window_ledger" / "ledger-delta-000001.parquet").write_bytes(b"delta")
+    quarantine = harness.lake_root / ".quarantine" / "20260707T000000Z" / "01.parquet"
+    quarantine.parent.mkdir(parents=True, exist_ok=True)
+    quarantine.write_bytes(b"heal-copy")
+    # strict=True (the default): the sidecars are OUT of the bars/ scope.
+    assert_lake_byte_equal(
+        original_root=harness.lake_root, replay_root=harness.replay_root, report=report
+    )
+    # An un-audited stray UNDER bars/ is still flagged (the class is kept).
+    stray = harness.lake_root / "bars/NSE/INDEX/NSE-NIFTY/1day/2021/01.parquet"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_bytes(b"derived-output")
+    with pytest.raises(ReplayMismatchError, match=r"under bars/ .*1day/2021/01"):
+        assert_lake_byte_equal(
+            original_root=harness.lake_root, replay_root=harness.replay_root, report=report
+        )
 
 
 def test_encoded_bars_in_payload_round_trip_through_chain(tmp_path: Path) -> None:

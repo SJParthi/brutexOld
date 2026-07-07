@@ -249,6 +249,73 @@ def _resolve_spot_window(
     return symbol_windows.get(symbol, (start, end))
 
 
+def _append_capture_records(
+    records: tuple[BufferedAuditRecord, ...],
+    audit: AuditWriter,
+) -> None:
+    """Append drained capture records onto the hash-chained *audit* writer.
+
+    The ONE append loop every capture drain seam shares (CLAUDE.md §11
+    COMMON) — the in-run seams in :func:`run_groww_spot_ingest` and the pull
+    owner's post-pipeline-drain :func:`flush_capture_to_audit`. Controller
+    thread only (the ``AuditWriter`` is not thread-safe, Golden Rule #8).
+    """
+    for record in records:
+        audit.append(action=record.action, subject=record.subject, payload=record.payload)
+
+
+def flush_capture_to_audit(
+    capture: AuditCaptureSink | None,
+    audit: AuditWriter | None,
+) -> int:
+    """The FOURTH capture drain seam — flush records the async pipeline deferred.
+
+    DEC-AUDIT-LAKE-REPLAY-ORACLE-001 round-1 review fix (BLOCKER): under the
+    DEFAULT-ON async fetch pipeline (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) a
+    window's durable ``sink.append`` — the point the capture sink buffers its
+    ``LAKE_APPEND_WRITTEN`` / ``add`` records — runs on a background pipeline
+    consumer (or write-pool shard) thread, and the pipeline is only drained
+    by the pull owner AFTER :func:`run_groww_spot_ingest_with_retry` returns.
+    Records buffered after the run's own final ``drain_remaining()`` would
+    therefore be STRANDED — silently discarded with the sink — making the
+    capture log structurally incomplete (a false replay divergence + a
+    permanent L3 ``extra_in_live``, since the settled windows are never
+    re-pulled). The pull owner MUST call this on the controller thread AFTER
+    draining the fetch pipeline + write consumer, while the ingest ``audit``
+    writer is still open (``cli.py`` ``cmd_fetch``'s ``finally`` does).
+
+    Replay is order-insensitive to the resulting post-``INGEST_RUN_COMPLETE``
+    chain lines: events are applied in ``(capture_run, capture_seq)`` order,
+    not chain-line order.
+
+    Returns the number of records appended to the chain. ``capture is None``
+    (the default OFF mode) and an empty buffer both return ``0``; a non-empty
+    buffer with ``audit is None`` discards and logs the loud
+    ``audit_capture.no_chain`` WARN (capture without a chain is useless,
+    never silent).
+    """
+    if capture is None:
+        return 0
+    records = capture.drain_remaining()
+    if not records:
+        return 0
+    pull_id = current_pull_id()
+    if audit is None:
+        _LOG.warning(
+            "audit_capture.no_chain",
+            pull_id=pull_id,
+            discarded=len(records),
+        )
+        return 0
+    _append_capture_records(records, audit)
+    _LOG.info(
+        "audit_capture.post_drain_flush",
+        pull_id=pull_id,
+        records=len(records),
+    )
+    return len(records)
+
+
 @dataclass(frozen=True, slots=True)
 class PairFailure:
     """A ``(symbol, interval)`` pair that failed terminally (quarantined)."""
@@ -479,12 +546,25 @@ def run_groww_spot_ingest(
         ``INGEST_PAIR_DONE``, after each ``INGEST_PAIR_FAILED`` (a quarantined
         pair's already-durable windows MUST still be audited or replay is
         structurally incomplete), and once more before ``INGEST_RUN_COMPLETE``.
-        The chain stays literally single-writer (Golden Rule #8) — no worker
-        thread ever touches the :class:`~brutex.orchestrator.audit.AuditWriter`.
-        ``capture`` wired with ``audit is None`` discards the records and logs
-        ONE loud ``audit_capture.no_chain`` WARN per run (capture without a
-        chain is useless, never silent). ``None`` (the default) is
-        byte-identical to today.
+        HONEST async-mode envelope (Golden Rule #10): those in-run seams flush
+        everything ONLY on the synchronous path — when *fetch_pipeline* (the
+        production DEFAULT) or *write_pool* is wired, a window's durable
+        ``sink.append`` runs on a background consumer thread AFTER the
+        producer's deferred outcome resolves, so a pair's records may not yet
+        be buffered when its pair seam fires (the per-pair drain is then an
+        empty no-op) and records may still arrive after the final in-run
+        drain. The pull owner MUST therefore call
+        :func:`flush_capture_to_audit` (the FOURTH seam) after draining the
+        pipeline + write pool, while the chain is still open — ``cmd_fetch``'s
+        ``finally`` does. The chain stays literally single-writer (Golden
+        Rule #8) — no worker thread ever touches the
+        :class:`~brutex.orchestrator.audit.AuditWriter`; replay applies events
+        in ``(capture_run, capture_seq)`` order, so drain-seam chain-line
+        placement is forensically irrelevant. ``capture`` wired with ``audit
+        is None`` discards the records and logs ONE loud
+        ``audit_capture.no_chain`` WARN per run (capture without a chain is
+        useless, never silent). ``None`` (the default) is byte-identical to
+        today.
 
     Returns
     -------
@@ -602,8 +682,7 @@ def run_groww_spot_ingest(
                     discarded=len(records),
                 )
             return
-        for record in records:
-            audit.append(action=record.action, subject=record.subject, payload=record.payload)
+        _append_capture_records(records, audit)
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
@@ -742,7 +821,13 @@ def run_groww_spot_ingest(
         )
     # Final replay-capture drain: any records not claimed by a pair drain (e.g. a
     # pair whose fan-out outcome never arrived) land on the chain before the run
-    # closes — capture memory never outlives the run.
+    # closes. HONEST envelope: this bounds capture memory to the run ONLY on the
+    # synchronous path — under the default-ON async fetch pipeline / write pool a
+    # window's sink.append (where records are buffered) runs on a background
+    # consumer thread that may still be queued when this drain fires, so the pull
+    # owner MUST flush once more via `flush_capture_to_audit` AFTER draining the
+    # pipeline + write consumer (the fourth seam; cli.py cmd_fetch's finally) or
+    # those records are stranded and the capture log is structurally incomplete.
     if capture is not None:
         _drain_capture(capture.drain_remaining())
     maybe_audit(
@@ -890,7 +975,9 @@ def run_groww_spot_ingest_with_retry(
     :class:`~brutex.data.audit_capture.DedupJournal`) spans all retry rounds, so a
     retry pass's idempotent re-appends admit zero new ``add`` rows and every
     pass's replay records drain onto the same chain at the controller seams.
-    ``None`` (the default) is byte-identical to today.
+    In async-pipeline mode the caller additionally owns the post-drain
+    :func:`flush_capture_to_audit` seam (see :func:`run_groww_spot_ingest`'s
+    *capture* envelope). ``None`` (the default) is byte-identical to today.
 
     Returns
     -------
@@ -957,6 +1044,7 @@ __all__ = [
     "ProgressHook",
     "SpotIngestWithRetry",
     "SpotJob",
+    "flush_capture_to_audit",
     "run_groww_spot_ingest",
     "run_groww_spot_ingest_with_retry",
     "with_paced_client",

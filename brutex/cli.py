@@ -3566,7 +3566,10 @@ def cmd_fetch(
         drain_write_consumer,
         reconcile_pairs_with_pipeline,
     )
-    from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
+    from brutex.adapters.groww.run_ingest import (
+        flush_capture_to_audit,
+        run_groww_spot_ingest_with_retry,
+    )
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
     from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
@@ -4086,6 +4089,30 @@ def cmd_fetch(
                 # error is swallowed so the ledger persist still runs.
                 drain_fetch_pipeline(fetch_pipeline)
                 drain_write_consumer(write_consumer)
+                # FOURTH replay-capture drain seam (DEC-AUDIT-LAKE-REPLAY-ORACLE-001
+                # round-1 review fix, BLOCKER): under the default-ON async fetch
+                # pipeline a window's durable sink.append — where the capture sink
+                # buffers its LAKE_APPEND_WRITTEN / L3 'add' records — runs on a
+                # background consumer thread, so records buffered AFTER run_ingest's
+                # own final drain would be silently STRANDED (a structurally
+                # incomplete forensic log: false replay divergence + a permanent L3
+                # extra_in_live, since the settled windows are never re-pulled).
+                # Both drains above have completed every queued tail, so this flush —
+                # on the controller thread, while `ingest_audit` is still open —
+                # lands the last records on the chain. Replay is order-insensitive
+                # to the post-RUN_COMPLETE placement (events apply in
+                # (capture_run, capture_seq) order). A no-op when capture is None
+                # (the default OFF mode / --dry-run / --inspect). Best-effort at
+                # THIS seam (the drain_fetch_pipeline swallow pattern): a chain-write
+                # failure here must never mask the pull's real outcome nor skip the
+                # end_pull_ledger persist below — replay then honestly reports the
+                # gap (the torn-capture class), never a silent success.
+                try:
+                    flush_capture_to_audit(capture, ingest_audit)
+                except Exception:  # pragma: no cover — pylint: disable=broad-exception-caught
+                    import structlog
+
+                    structlog.get_logger("brutex.cli").exception("pull.capture_flush_failed")
                 # DEC-LAKE-HEAL-001 L2 (CLI seam — DEC-CLI-LAKE-HEAL-L2-001, the #1175
                 # named follow-up): heal the just-pulled slice at the SAME post-drain
                 # seam the dashboard uses (the fetched 1-minute is durably in the lake
