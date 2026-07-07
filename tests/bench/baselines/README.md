@@ -57,19 +57,35 @@ measure (bench-m4pro, 6 fragments)      no <key>.json?
 
 ## Governance (mechanical — no silent re-baseline)
 
-- A FIRST capture per cell is pre-authorized by `DEC-BENCH-ABS-BASELINE-001`
-  (this standing entry) — additive blesses need no new ledger entry.
-- ANY modification/removal of a blessed cell requires, in the SAME PR: a
-  NEW human-written `docs/MIGRATION.md` entry whose ADDED lines quote the
-  new decision id, the literal entry key, AND the literal new value token
-  (e.g. `55.0`); plus a FRESH provenance run that the gate LIVE-verifies
-  via the GitHub API (exists on THIS repository — the `$GITHUB_REPOSITORY`
-  repo pin, so a completed run on a fork/foreign repo is a breach and is
-  never queried; is bench-m4pro.yml; completed with conclusion `success`;
-  head_sha == the embedded commit). Enforced by
-  `scripts/ci/bench_baseline_gate.py govern` inside the required `bench`
-  CI job; a missing `$GITHUB_REPOSITORY` fails CLOSED. There is NO
-  override env.
+Each cell class has its OWN law (`bench_baseline.py` `govern` is the
+enforcing source of truth):
+
+- **ADDED cell** (first capture / new hot path / new machine): rides the
+  standing `DEC-BENCH-ABS-BASELINE-001` bootstrap authorization — no new
+  ledger entry needed (a NEW DEC id ledgered in the same PR's ADDED lines
+  is also accepted). The cell's provenance run is LIVE-verified either way.
+- **MODIFIED cell** (re-bless of a blessed number) requires, in the SAME
+  PR: a NEW human-written `docs/MIGRATION.md` entry whose ADDED lines
+  quote the new decision id (≠ the bootstrap id, ≠ the base cell's id),
+  the literal entry key, AND the literal new value token (e.g. `55.0`);
+  plus a FRESH provenance run (≠ the base cell's run URL) that the gate
+  LIVE-verifies via the GitHub API (exists on THIS repository — the
+  `$GITHUB_REPOSITORY` repo pin, so a completed run on a fork/foreign
+  repo is a breach and is never queried; is bench-m4pro.yml; completed
+  with conclusion `success`; head_sha == the embedded commit).
+- **REMOVED cell** requires only a ledgered note: the SAME PR's
+  `docs/MIGRATION.md` ADDED lines must NAME the removed entry key and
+  carry a DEC id (the S11 workload-change recipe rides this). A removal
+  ships no new number, so no value token and no fresh run apply — those
+  are MODIFIED-cell requirements a removal cannot (and need not) satisfy.
+- **Top-level change** (fingerprint / context / hardware_key): needs a
+  NEW non-bootstrap DEC id in the same PR's ADDED lines.
+- **DELETED file** (retiring a machine): the ADDED lines must name the
+  filename.
+
+Enforced by `scripts/ci/bench_baseline_gate.py govern` inside the required
+`bench` CI job; a missing `$GITHUB_REPOSITORY` fails CLOSED. There is NO
+override env.
 - Workload-param change recipe (S11): the SAME PR that edits
   `ENTRY_WORKLOADS` (and the hash golden in
   `tests/bench/test_absolute_baseline.py`) REMOVES the affected baseline

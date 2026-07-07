@@ -18,7 +18,45 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+_Last updated: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1531 —
+the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
+on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
+STANDARDS_100PCT.md §11 P1 "benchmark baseline JSON + `--benchmark-compare
+--fail` gate" backlog item, the deviation from the literal flag ledgered): NEW
+pure-stdlib zero-brutex-import `brutex/observability/bench_baseline.py` (the
+comparator/schema/capture/governance core + the ONE hardware-key format law) +
+`hardware_fingerprint`/`hardware_key` on the COMMON `config/hardware_envelope.py`
++ the env-gated 6-entry measurement suite (`tests/bench/test_absolute_baseline.py`
+over `_abs_baseline_registry.py`, house best-of-N-MIN idiom) + committed
+baselines at `tests/bench/baselines/<hardware_key>.json` (`tolerance_pct`
+structurally capped so a 2x slowdown can NEVER pass any governed config; a
+MORE-than-4x speedup FAILS as SUSPICIOUS_SPEEDUP, more-than-2x WARNs "baseline
+stale") + `scripts/ci/bench_baseline_gate.py` (validate/compare/capture/govern/
+key; exit 0 ok-or-LOUD-abstain / 1 numeric with ONE bounded fresh-process
+re-measure / 2 structural never-retried). bench-m4pro gains
+measure→compare→capture→artifact + a GitHub-hosted `bless-baseline` job (the
+ONLY contents/PR-write holder — the candidate travels runner→artifact→verbatim
+API commit with no edit surface); ci.yml's REQUIRED `bench` job gains schema
+`validate` on every run + the `govern` entry-cell diff gate on PRs with LIVE
+`gh api` provenance-run verification pinned to THIS repository. GOVERNANCE LAW
+per cell class: a MODIFIED cell needs a NEW ledgered DEC id + the literal entry
+key + the literal value token + a FRESH live-verified run; an ADDED cell rides
+the standing bootstrap authorization; a REMOVED cell / top-level change needs a
+ledgered note; a DELETED file needs its filename in the added lines; NO
+override env. BOOTSTRAP: ZERO measured numbers ship (`tests/bench/baselines/`
+holds only README.md); the first baseline is measured by the REAL M4 Pro and
+auto-blessed via a bot PR the operator nudges + merges (GITHUB_TOKEN PRs do not
+trigger CI; NO PAT). HONEST: bench-m4pro stays NON-required (a regression is
+caught post-merge as a red run + issue, not a merge blocker); the gate is
+dormant until the runner is online AND the first bless merges; the gate catches
+≥-tolerance drift ONLY — sub-tolerance drift accumulates until a ledgered
+re-bless (the 1.1x ratio tiers + the single-canary-op 50 M/s floor are
+complements, NOT a sub-tolerance net); a STANDING red — numeric
+SUSPICIOUS_SPEEDUP or STRUCTURAL alike — dies at compare before a dispatch
+capture can run, recovery is removal-first (`docs/runbooks/bench-baseline.md`).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
+`bench_baseline.py` + the touched `hardware_envelope.py` 100% line+branch).
+Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
 MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide
 `bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a

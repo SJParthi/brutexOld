@@ -31,12 +31,17 @@ Contract (CLAUDE.md §11 COMMON · DYNAMIC · AUTOMATED):
 
 Honest envelope (Golden Rule #10): the gate is dormant until the m4pro
 runner is online AND the first bless PR merges; until then compare ABSTAINS
-green-but-loud (never a fake pass, never a false red). Sub-tolerance drift
-(< ``tolerance_pct``, structurally capped so the failure multiplier
-``1 + tolerance/100`` stays FLOAT-EXACTLY below 2.0 and a 2x slowdown can
-NEVER pass) rides the existing 1.1x ratio tiers + the 50 M ops/s floor.
-These are micro-benchmarks of the keyed hot paths, not end-to-end sweep
-wall time.
+green-but-loud (never a fake pass, never a false red). This gate catches
+>= ``tolerance_pct`` drift ONLY: sub-tolerance drift passes and can
+ACCUMULATE across merges until a ledgered re-bless tightens the number —
+the complementary gates do NOT plug that hole (the 1.1x ratio tiers guard
+complexity shape, not constant factors, and the 50 M ops/s floor covers
+ONLY the mask-AND canary op — 5 of the 6 registry entries carry no
+absolute floor below this gate's tolerance). The structural cap on
+``tolerance_pct`` (failure multiplier ``1 + tolerance/100`` FLOAT-EXACTLY
+below 2.0) bounds the worst case: a 2x single-step slowdown can NEVER
+pass under any governable config. These are micro-benchmarks of the keyed
+hot paths, not end-to-end sweep wall time.
 """
 
 from __future__ import annotations
@@ -1032,7 +1037,13 @@ def render_report(report: CompareReport) -> str:
             "remediation: see docs/runbooks/bench-baseline.md — a numeric red is "
             "re-measured once in a fresh process before failing; a re-bless is the "
             "workflow_dispatch capture (capture_candidate=true + decision_id + "
-            "replace_entries) plus a human-written MIGRATION.md entry in the same PR"
+            "replace_entries) plus a human-written MIGRATION.md entry in the same PR. "
+            "KNOWN LIMITATION: a STANDING red — numeric (e.g. a reproducing "
+            "SUSPICIOUS_SPEEDUP) and STRUCTURAL alike — fails this compare step "
+            "BEFORE capture can run, so that dispatch cannot mint a candidate; "
+            "recover REMOVAL-FIRST (remove the affected cell(s)/file in a governed "
+            "PR whose MIGRATION.md added lines name them, then the next scheduled "
+            "run abstains and auto-blesses additively)"
         )
     if report.attestation_line:
         lines.append(report.attestation_line)
@@ -1244,10 +1255,17 @@ def render_pr_body(
         f"| `{entry_id}` | {rec.value_ns_per_op} | {rec.spread_pct:.2f}% | {rec.decision_id} |"
         for entry_id, rec in sorted(baseline.entries.items())
     ]
+    cited_ids = ", ".join(sorted({rec.decision_id for rec in baseline.entries.values()}))
     parts = [
         f"## Bless absolute benchmark baseline for `{baseline.hardware_key}`",
         "",
-        f"Decision ID: {BOOTSTRAP_DECISION_ID} (standing first-capture authorization).",
+        # Honest headline: name the id(s) the cells ACTUALLY cite — a re-bless
+        # under a NEW DEC id must not headline the bootstrap id alone.
+        (
+            f"Governing decision id(s): {cited_ids} (first captures ride the standing "
+            + f"{BOOTSTRAP_DECISION_ID} authorization; a replaced cell cites its own "
+            + "re-bless id — per cell in the table below)."
+        ),
         "",
         # One PR-body LINE deliberately wrapped across source lines —
         # EXPLICIT concatenation so a missing list comma can never silently

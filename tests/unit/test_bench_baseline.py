@@ -1092,6 +1092,20 @@ class TestDumpAndPrBody:
         assert "close/reopen this PR" in body
         assert "GOVERNANCE" not in body
 
+    def test_pr_body_headline_names_the_cited_rebless_id(self) -> None:
+        """A re-bless under a NEW DEC id headlines that id, never bootstrap alone."""
+        entries = {entry: make_entry_doc(entry) for entry in sorted(bb.REQUIRED_ENTRY_KEYS)}
+        entries["bar_lookup"] = make_entry_doc("bar_lookup", decision_id=NEW_DEC)
+        body = bb.render_pr_body(
+            parse_doc(make_baseline_doc(entries)),
+            added=[],
+            replaced=["bar_lookup"],
+            run_url=RUN_URL,
+        )
+        governing = next(line for line in body.splitlines() if line.startswith("Governing"))
+        assert NEW_DEC in governing
+        assert bb.BOOTSTRAP_DECISION_ID in governing
+
     def test_pr_body_replace_carries_governance_instruction(self) -> None:
         body = bb.render_pr_body(
             parse_doc(make_baseline_doc()),

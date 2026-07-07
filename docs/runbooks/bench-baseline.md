@@ -28,7 +28,7 @@ Verdict cheat-sheet:
 | Verdict | Meaning | Exit |
 |---|---|---|
 | `REGRESSION` | measured > blessed x (1 + tolerance/100) | 1 (retried once) |
-| `SUSPICIOUS_SPEEDUP` | > 4x faster than blessed — hollowed bench or a genuine win; re-bless required | 1 |
+| `SUSPICIOUS_SPEEDUP` | > 4x faster than blessed — hollowed bench or a genuine win; re-bless required (a STANDING one blocks the dispatch re-bless — see the cell-removal recovery below) | 1 |
 | `STRUCTURAL` | fragment set ≠ registry / workload-hash drift / wheel missing / python-minor drift / schema | 2 (never retried) |
 | `ABSTAIN_*` | no (or partial) baseline for this hardware key | 0, loud |
 
@@ -60,8 +60,10 @@ job opens a bot PR committing the candidate VERBATIM. The operator:
    context/fingerprint from the fresh measurement; a partial replace keeps
    the old context (the carried cells were measured under it). NOTE: this
    dispatch flow requires the run's own compare step to pass — a STANDING
-   STRUCTURAL red (e.g. `context.python` drift already in effect) dies at
-   compare before capture can run; use the removal-first recovery below.
+   red of EITHER exit class, STRUCTURAL (e.g. `context.python` drift
+   already in effect) or NUMERIC (e.g. a reproducing `SUSPICIOUS_SPEEDUP`
+   after a genuine > 4x hot-path win merged), dies at compare before
+   capture can run; use the matching removal-first recovery below.
 3. **Write the MIGRATION.md entry yourself** (ledger entries are always
    human-written) and push it onto the bless branch: the entry's added
    lines MUST contain the new decision id, the literal entry key
@@ -95,6 +97,29 @@ retiring a machine:
 
 The gate is honestly dormant between steps 1 and 3 (the abstain window) —
 one scheduled cycle on a healthy runner.
+
+## Recovering a STANDING `SUSPICIOUS_SPEEDUP` NUMERIC red (cell removal)
+
+KNOWN LIMITATION (same dispatch dead-end as the structural arm above): a
+`SUSPICIOUS_SPEEDUP` is exit 1, and once a genuine > 4x hot-path win has
+MERGED it reproduces on every run — scheduled or dispatched — so the
+compare step fails BEFORE capture on every attempt and the "re-bless flow"
+dispatch can NOT mint the ratchet candidate. There is deliberately no
+red-tolerant capture arm (a red run never mints a candidate); the honest
+operator recovery is cell-level removal-first:
+
+1. REMOVE the affected entry cell(s) from `tests/bench/baselines/<key>.json`
+   in a PR whose MIGRATION.md added lines name each removed entry key with
+   a DEC id (the governed REMOVED-cell law — no value token / fresh run is
+   required for a removal; the untouched cells keep gating).
+2. Merge. The next scheduled run ABSTAINS on the removed entries
+   (green-but-loud) and auto-blesses them additively at the new, faster
+   measured numbers under the bootstrap decision id.
+3. Nudge CI on the bless PR, review the measured table, merge.
+
+If the speedup was instead a HOLLOWED benchmark (the workload silently
+stopped doing the work), do NOT remove the cell — fix the benchmark;
+the red is doing its job.
 
 ## Workload-parameter change (S11 recipe)
 
