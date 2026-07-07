@@ -1,6 +1,6 @@
 # ADR-0013 — Shared AWS Parameter-Store token broker for the daily Groww token + creds
 
-**Decision ID:** `DEC-TOKEN-BROKER-AWS-001` (MIGRATION.md entry #1061)
+**Decision ID:** `DEC-TOKEN-BROKER-AWS-001` (MIGRATION.md entry #1064)
 **Date:** 2026-07-01
 **Status:** ACCEPTED — BruteX READ-side implemented; a separate PR owns the Lambda minter (`deploy/aws_token_minter/`); TickVault reads the same parameters (its code is in its own repo). SUPERSEDED-IN-PART (2026-07-06, DEC-BROKER-DOCS-AWSONLY-RECONCILE-001): the §4 opt-in flag (`BRUTEX_TOKEN_BROKER_READONLY`), local-mint fallback, and cold-start-only pickup consequences were superseded by DEC-AWS-ONLY-CREDS-001 (MIGRATION.md #1065) + DEC-BROKER-READONLY-REAUTH-REREAD-001 (#1072) + DEC-REAUTH-COLDSTART-READONLY-001 (#1092); body preserved as the historical record.
 **Author:** operator-directed

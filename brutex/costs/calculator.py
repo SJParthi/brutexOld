@@ -139,11 +139,13 @@ def _apply_slippage(
     For Track 2 (BUY-only, per DEC-EXEC-008), only the long branches
     fire. Short branches kept for forward-compat.
 
-    Every returned fill is floored at one tick (MINOR-3): a long exit on a
-    bar that opens at exactly one tick (₹0.05) would otherwise slip to a
-    ₹0.00 sell fill (a "free" sale), which is economically impossible —
-    nothing trades below one tick. The floor only affects that degenerate
-    tick-boundary case; the normal path (prices ≥ 2 ticks) is unchanged.
+    Every returned fill is floored at one tick (MINOR-3): a SELL leg on a
+    bar that opens at exactly one tick (₹0.05) — the long EXIT, or, since
+    the DEC-TRACK2-COSTS-SPEC-RECONCILE-001 adverse re-pin, the short
+    ENTRY — would otherwise slip to a ₹0.00 sell fill (a "free" sale),
+    which is economically impossible — nothing trades below one tick. The
+    floor only affects those degenerate tick-boundary cases; the normal
+    path (prices ≥ 2 ticks) is unchanged.
 
     ``realized_slippage_per_share`` is the slippage TRULY baked into the
     post-floor fills (NIT-1): the buy leg's adverse rise from its raw open

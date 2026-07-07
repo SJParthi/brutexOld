@@ -279,10 +279,16 @@ every box below is closed by supersession per the banner above.)*
       — ✅ both present and running (DEC-STRESS-001, MIGRATION.md #208).
 - [x] `rust/fno-math/fuzz/README.md` documents the 7 planned cargo-
       fuzz targets; per-target activation deferred to Phase 2
-      — ✅ EXCEEDED: **5** fuzz targets are LIVE (`fuzz_mask_and` +
-      `fuzz_supermask` here; pivot/fib + the 52-vocab evaluator in
-      `rust/trading-core/fuzz/`), 4 honestly ROADMAP ("kernel not yet
-      built") — DEC-FUZZ-HOTKERNEL-001 (MIGRATION.md #585c).
+      — ✅ EXCEEDED: **5** of the README's 7-planned rows are LIVE
+      (`fuzz_mask_and` + `fuzz_supermask` here; pivot/fib + the
+      52-vocab evaluator in `rust/trading-core/fuzz/`), 4 honestly
+      ROADMAP ("kernel not yet built") — DEC-FUZZ-HOTKERNEL-001
+      (MIGRATION.md #585c). Live-tree recount 2026-07-07: **8**
+      fuzz-target FILES exist in all — 4 further targets
+      (`fuzz_greeks` / `fuzz_market_structure` / `fuzz_metadata` /
+      `fuzz_spec`) landed in `rust/trading-core/fuzz/` after #585c,
+      outside the README's 7-planned map (the earlier "5 LIVE / 4
+      ROADMAP" line was the #585c row accounting, not a file count).
 - [x] `.cargo/mutants.toml` configured for the existing Rust modules;
       `mutation.yml` runs weekly
       — ✅ both present; HONEST caveat carried, not papered over: the
@@ -302,10 +308,11 @@ every box below is closed by supersession per the banner above.)*
 - [x] `docs/MIGRATION.md` has a fresh DEC entry citing this Phase 1
       sign-off
       — ✅ satisfied by DEC-PHASE1-SIGNOFF-RECONCILE-001 (MIGRATION.md
-      #1531) itself — the FIRST ledger entry ever to cite this
-      sign-off (an exhaustive DEC-PHASE1 grep of MIGRATION.md confirms
-      no earlier closure entry existed; this was the one
-      genuinely-open item).
+      #1531) itself — the FIRST ledger entry ever to CLOSE this
+      sign-off (the checklist's own creating entry #253 already cites
+      it; an exhaustive DEC-PHASE1 grep of MIGRATION.md confirms no
+      earlier CLOSURE entry existed; this was the one genuinely-open
+      item).
 
 If all 11 boxes check, Phase 1 closes. *(Count corrected 2026-07-06:
 the original trailer said "all 10 boxes" while the list above has

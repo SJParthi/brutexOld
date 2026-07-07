@@ -269,7 +269,7 @@ always sets `NORMAL_CLOSE`; the other 3 are forward-compat stubs.
 > guard raises `UnsupportedTradeOutcomeError` on any other outcome — that guard
 > is a fail-loud REFUSAL, **NOT** an implementation of this state machine
 > (MIGRATION.md #963 MAJOR-1: "CHANGE 1 is a fail-loud GUARD, NOT the §4.2
-> state machine (still deferred)"). The three `EXPIRY_*` charge paths below are
+> state machine (still deferred […])"). The three `EXPIRY_*` charge paths below are
 > SPEC-ONLY forward-compat stubs per DEC-RISK-011 (MIGRATION.md #108) /
 > DEC-EXEC-008 (#111), unreachable in Track 2 — the sole production caller
 > (`brutex/options/executor.py`, DEC-OPTIONS-EXECUTOR-001 #568) hard-codes
@@ -908,7 +908,11 @@ Determinism is the audit oracle (Golden Rule #7 idempotence).
 ## 16. Open items (block code-lock) — EXPANDED 2026-05-16
 
 Per `TRACK2_OPTIONS_SPEC.md §8b` + 2026-05-16 deep research, items
-still UNVERIFIED (3 original + 5 new):
+still UNVERIFIED — 13 rows: 3 original + 5 added 2026-05-16 (items
+4-8) + 3 further 2026-05-16 additions (items 15-17) + 2 §4.2
+drift registrations 2026-07-06 (items 18-19). *(Count corrected
+2026-07-07: the former "3 original + 5 new" intro predated items
+15-19.)*
 
 | # | Item | Source of uncertainty | Impact | Blocker? |
 |---|---|---|---|---|
@@ -934,9 +938,13 @@ asymmetry + freeze quantity + hidden costs.
 they are design questions for the (unauthorized, future) DEC that
 implements the `EXPIRY_*` branches, not operator-verification items.
 
-**All 8 items require operator manual verification.** Items 1, 2, 4
-materially affect calculator output. Items 3, 5-8 affect edge cases
-or related modules.
+**All 11 verification items (1-8, 15-17) require operator manual
+verification** — items 18-19 are registered design questions owned by
+the future DEC that implements the `EXPIRY_*` branches, NOT
+operator-verification items (see the note above). *(Count corrected
+2026-07-07: the former "All 8 items" trailer predated items 15-19.)*
+Items 1, 2, 4 materially affect calculator output. Items 3, 5-8
+affect edge cases or related modules.
 
 ### 16.1 Verification action checklist
 
