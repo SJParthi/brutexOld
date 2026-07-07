@@ -194,6 +194,12 @@ from brutex.dashboard.pull_intent import (
     run_auto_resume,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+from brutex.dashboard.rate_bridge_cache import (
+    BRIDGE_SOURCE_UNWIRED,
+    BridgeReadResult,
+    RateBridgeCache,
+    stamp_bridge_freshness,
+)
 from brutex.dashboard.rate_sampler import RatePanelSampler
 from brutex.dashboard.registry_strikes import make_registry_chain_loader
 from brutex.dashboard.request_logging import emit_request_log
@@ -1089,6 +1095,7 @@ def build_app(
     summary_cache: SummaryCache | None = None,
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
+    rate_bridge_cache: RateBridgeCache | None = None,
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
@@ -1137,6 +1144,17 @@ def build_app(
         repeat poll between two instrument loads is a dict handoff, not a re-scan.
         Injected so a test can assert the hit/invalidation behaviour; ``None``
         (the default) builds a fresh production cache.
+    rate_bridge_cache
+        Optional :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache`
+        backing the ``/api/v1/pull/rate`` CLI-bridge file read
+        (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001): a repeat poll within its
+        TTL is a zero-syscall O(1) memo hit, a post-TTL refresh is
+        deadline-guarded on a worker daemon, and a wedged lake volume serves
+        the last-known snapshot honestly labelled ``unverified`` — the event
+        loop never touches the lake volume on this route. Injected so tests
+        drive the slow-read / cache-hit / provenance behaviour
+        deterministically; ``None`` (the default) builds a fresh production
+        cache.
     prebuild_gate
         Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
         the ``/api/v1/movers`` screens while the one-click pull pipeline runs
@@ -1375,6 +1393,16 @@ def build_app(
     # load moves the token and rebuilds. Content-exact (never a stale illusion —
     # Golden Rule #1).
     _universe_cache = universe_cache if universe_cache is not None else UniverseSnapshotCache()
+    # The /api/v1/pull/rate CLI-bridge read memo (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001):
+    # the bridge file lives on the lake volume (an external SSD), so its per-poll
+    # synchronous read used to run ON the event loop and a slow/stalled disk froze
+    # the whole dashboard. The cache serves a repeat poll within its 2 s TTL as a
+    # zero-syscall O(1) memo hit, bounds every post-TTL refresh (stat + read) under
+    # the COMMON `run_with_deadline` freeze guard on a daemon, and never blocks a
+    # follower while a refresh is in flight — the served provenance is stamped onto
+    # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
+    # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
@@ -1602,17 +1630,29 @@ def build_app(
 
         When NO pull is running (no live tick within the staleness window) every live
         number is ZEROED and ``flow_state`` is ``idle`` — never a fabricated "live"
-        figure (Golden Rule #1). A pure in-memory read: never touches the lake / store
-        lock, never blocks the pull.
+        figure (Golden Rule #1). The PANEL half is a pure in-memory read (never touches
+        the lake / store lock, never blocks the pull); the BRIDGE half below is
+        TTL+token-memoised, deadline-guarded and threadpool-offloaded, with its
+        provenance disclosed via ``bridge_source`` — never an unbounded lake touch on
+        the event loop (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
 
         Cross-process bridge (DEC-CLI-RATE-BRIDGE-001): a CLI ``brutex fetch`` pull runs
         in a SEPARATE process and never touches this in-memory panel, so it ALSO publishes
         its rate to ``<lake_root>/.rate/pull_rate.json``. This route best-effort reads that
-        bridge file and surfaces whichever pull (dashboard OR CLI) ticked most recently, so
-        the widget reflects the active CLI pull's real measured rate too. A missing /
-        stale / unreadable bridge file is honestly ignored (the in-memory panel wins, or
-        IDLE). This is cross-process VISIBILITY, NOT shared rate accounting — the
-        per-process caps are unchanged.
+        bridge file — through the injected
+        :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache` on an AnyIO worker
+        (a TTL hit is a zero-syscall O(1) memo; a post-TTL refresh is bounded by the
+        freeze-guard deadline; a wedged lake volume serves the last-known snapshot
+        labelled ``unverified``) — and surfaces whichever pull (dashboard OR CLI) ticked
+        most recently, so the widget reflects the active CLI pull's real measured rate
+        too. A missing / stale / unreadable bridge file is honestly ignored (the
+        in-memory panel wins, or IDLE). Staleness stays honest under the memo: the
+        verdict ages derive from the snapshot's OWN ``wall_time``, recomputed per
+        request, so a cached serve can never fake freshness. This is cross-process
+        VISIBILITY, NOT shared rate accounting — the per-process caps are unchanged.
+        The payload carries two additive freshness keys — ``bridge_source`` ∈
+        {``live``, ``cached``, ``unverified``, ``unwired``} + ``bridge_probe_age_s`` —
+        stamped by the ONE :func:`~brutex.dashboard.rate_bridge_cache.stamp_bridge_freshness`.
         """
         from brutex.dashboard.pull_rate_view import build_pull_rate_view_merged
 
@@ -1637,7 +1677,11 @@ def build_app(
         # Best-effort cross-process bridge read (never raises, never blocks the pull): a
         # damaged / absent file degrades to None so the in-memory panel alone is projected
         # (byte-identical to the pre-bridge behaviour). The lake root is read off the wired
-        # instrument store; without one (no resolvable lake) the bridge is simply skipped.
+        # instrument store; without one (no resolvable lake) the bridge is simply skipped
+        # (an honest `unwired` provenance, ZERO cache/threadpool work). The read itself
+        # goes through the memoising, deadline-guarded RateBridgeCache on an AnyIO worker
+        # (the app.py fast-read offload doctrine) so the event loop NEVER sees the lake
+        # volume on any arm (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
         bridge_age: float | None = None
         bridge_effective_rps: float | None = None
         bridge_current_rps: float | None = None
@@ -1648,20 +1692,21 @@ def build_app(
         bridge_recent_3600s: int | None = None
         bridge_pull_active: bool | None = None
         bridge_lake_root = _rate_bridge_lake_root_or_none(instrument_store)
-        if bridge_lake_root is not None:
-            from brutex.data.rate_bridge import read_rate_snapshot
-
-            snapshot = read_rate_snapshot(bridge_lake_root)
-            if snapshot is not None:
-                bridge_age = max(0.0, time.time() - snapshot.wall_time)
-                bridge_effective_rps = snapshot.effective_rps
-                bridge_current_rps = snapshot.current_rps
-                bridge_recent_minute = snapshot.recent_minute
-                bridge_recent_429 = snapshot.recent_429
-                bridge_recent_1s = snapshot.recent_1s
-                bridge_recent_600s = snapshot.recent_600s
-                bridge_recent_3600s = snapshot.recent_3600s
-                bridge_pull_active = snapshot.pull_active
+        if bridge_lake_root is None:
+            bridge_result = BridgeReadResult(None, BRIDGE_SOURCE_UNWIRED, None)
+        else:
+            bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
+        snapshot = bridge_result.snapshot
+        if snapshot is not None:
+            bridge_age = max(0.0, time.time() - snapshot.wall_time)
+            bridge_effective_rps = snapshot.effective_rps
+            bridge_current_rps = snapshot.current_rps
+            bridge_recent_minute = snapshot.recent_minute
+            bridge_recent_429 = snapshot.recent_429
+            bridge_recent_1s = snapshot.recent_1s
+            bridge_recent_600s = snapshot.recent_600s
+            bridge_recent_3600s = snapshot.recent_3600s
+            bridge_pull_active = snapshot.pull_active
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
@@ -1699,7 +1744,11 @@ def build_app(
             bridge_recent_3600s=bridge_recent_3600s,
             bridge_pull_active=bridge_pull_active,
         )
-        return JSONResponse(view.to_dict())
+        # Two ADDITIVE honest-freshness keys (bridge_source / bridge_probe_age_s),
+        # written in exactly ONE place — every pre-existing key stays byte-identical.
+        payload = view.to_dict()
+        stamp_bridge_freshness(payload, bridge_result)
+        return JSONResponse(payload)
 
     @app.get("/api/v1/quota")
     async def api_quota() -> JSONResponse:

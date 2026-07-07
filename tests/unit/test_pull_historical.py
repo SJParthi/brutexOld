@@ -48,6 +48,7 @@ from brutex.dashboard.historical_pull import (
     HistoricalPullReport,
     pull_contract_candles,
 )
+from brutex.data.errors import StoreWriteDeadlineExceeded
 from brutex.data.registry_store import (
     CANDLE_STATUS_COMPLETE,
     CANDLE_STATUS_NONE,
@@ -3903,3 +3904,76 @@ def test_fno_dry_run_writes_no_audit(registry: RegistryStore, tmp_path: Path) ->
         now=_NOW,
     )
     assert not (tmp_path / "lake-dry" / "audit").exists()
+
+
+# ── _mark_complete store-write deferral (DEC-STORE-WRITE-DEADLINE-001) ────────
+#
+# The completion stamp runs as ONE deadline-guarded registry batch
+# (``mark_candle_statuses``); a wedged registry DEFERS the stamps — one loud
+# WARN, an honest 0 return — and NEVER raises past the seam (the candles already
+# landed durably; the next pull re-marks idempotently).
+
+
+class _DeferringRegistry:
+    """A registry stub whose batch stamp raises the TRANSIENT store-write defer."""
+
+    def __init__(self, *, defer: bool) -> None:
+        self._defer = defer
+        self.batches: list[tuple[list[tuple[str, str, str]], str]] = []
+
+    def mark_candle_statuses(self, rows: Sequence[tuple[str, str, str]], candle_status: str) -> int:
+        if self._defer:
+            raise StoreWriteDeadlineExceeded(0.2, "registry", "mark_candle_statuses")
+        self.batches.append((list(rows), candle_status))
+        return len(rows)
+
+
+def _rebuilt_row(symbol: str) -> tuple[ContractRow, DerivativeContract]:
+    fetched = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
+    row = ContractRow(
+        "NSE", "NIFTY", date(2024, 1, 25), symbol, 21000.0, "CE", "none", "r", fetched
+    )
+    contract = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 25),
+        symbol=symbol,
+        contract_type="CE",
+        strike=21000.0,
+    )
+    return (row, contract)
+
+
+class TestMarkCompleteStoreWriteDefer:
+    def test_healthy_batch_marks_and_returns_the_count(self) -> None:
+        registry = _DeferringRegistry(defer=False)
+        rebuilt = [_rebuilt_row("A-CE"), _rebuilt_row("B-CE"), _rebuilt_row("C-CE")]
+        marked = hp._mark_complete(
+            cast("RegistryStore", registry), rebuilt, frozenset({"A-CE", "C-CE"})
+        )
+        assert marked == 2
+        assert registry.batches == [
+            ([("NSE", "NIFTY", "A-CE"), ("NSE", "NIFTY", "C-CE")], CANDLE_STATUS_COMPLETE)
+        ]
+
+    def test_empty_completion_set_never_touches_the_registry(self) -> None:
+        registry = _DeferringRegistry(defer=False)
+        marked = hp._mark_complete(
+            cast("RegistryStore", registry), [_rebuilt_row("A-CE")], frozenset()
+        )
+        assert marked == 0
+        assert registry.batches == []
+
+    def test_deferred_stamp_warns_and_returns_zero_without_raising(self) -> None:
+        """A wedged registry must NEVER fail the pull whose candles already landed."""
+        registry = _DeferringRegistry(defer=True)
+        rebuilt = [_rebuilt_row("A-CE"), _rebuilt_row("B-CE")]
+        with capture_logs() as logs:
+            marked = hp._mark_complete(
+                cast("RegistryStore", registry), rebuilt, frozenset({"A-CE", "B-CE"})
+            )
+        assert marked == 0  # honest: the durably-marked count is unknown
+        deferred = [r for r in logs if r["event"] == hp.HISTORICAL_MARK_COMPLETE_DEFERRED_EVENT]
+        assert len(deferred) == 1
+        assert deferred[0]["contracts"] == 2
+        assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
+        assert deferred[0]["defer_seconds"] == 0.2

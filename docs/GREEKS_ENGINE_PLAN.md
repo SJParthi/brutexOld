@@ -854,7 +854,13 @@ skip price validation.
   `brutex/data/` helper (COMMON, per Golden Rule #11) — keyed on
   `(exchange, underlying, interval, ts)`, returning `{utc_instant → Decimal(close)}`,
   window-bounded via `ist_span_partition_files` (O(pulled-window), NOT
-  O(lake-depth)). Per bar: decode `(underlying, expiry, strike, option_type)` via
+  O(lake-depth)). The default reader additionally walks the verified spot-key
+  drift-recovery ladder on an empty primary join (DEC-GREEKS-CORRECTNESS-AUDIT-001
+  SPOTJOIN-2), including the evidence-grounded STOCK arm — the per-pass
+  `stock_drift` map built by `brutex/data/spot_drift.py` from the real on-disk
+  spot dirs verified against the instrument master
+  (DEC-GREEKS-SPOTJOIN-STOCK-001; no master → the honest NO_SPOT, never a
+  fabricated spot). Per bar: decode `(underlying, expiry, strike, option_type)` via
   `parse_fno_symbol`, `spot = spot_by_ts.get(bar_instant)` (EXACT `_utc_instant`
   join, NO nearest-fallback), `T = (expiry − bar_ist)/convention`,
   `forward = spot·e^((r−q)T)`, then `greeks(price=close, sigma=None, forward,

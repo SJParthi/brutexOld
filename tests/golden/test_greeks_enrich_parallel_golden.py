@@ -118,6 +118,115 @@ def _partition_hashes(lake: Path) -> dict[str, str]:
     }
 
 
+def _build_drifted_stock_lake(lake: Path) -> list[GreeksEnrichTarget]:
+    """Two DRIFTED stock chains + a REAL instrument master (the map's
+    vocabulary) at ``<lake>/instruments.duckdb`` — DEC-GREEKS-SPOTJOIN-STOCK-001.
+
+    Chain underlyings name the vendor F&O spelling (``BAJAJAUTO``) while the
+    spot dirs carry the master ``trading_symbol`` (``BAJAJ-AUTO``) / a legacy
+    trailing-space fragment (``"M&M "``) — both recoverable ONLY through the
+    evidence-grounded stock rung. Two underlyings ⇒ two work units ⇒ the real
+    pool genuinely fans out.
+    """
+    from datetime import date as date_type
+    from decimal import Decimal as Dec
+
+    from brutex.data.instrument_store import Instrument, InstrumentStore
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.models import Exchange, InstrumentType, Segment
+
+    def bar(ts: datetime, close: str, *, oi: int | None) -> CandleBar:
+        return CandleBar(
+            timestamp=ts,
+            open=Dec(close),
+            high=Dec(close) + 2,
+            low=Dec(close) - 2,
+            close=Dec(close),
+            volume=7,
+            open_interest=oi,
+        )
+
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+    for spot_symbol, close in (("BAJAJ-AUTO", "1500"), ("M&M ", "1500")):
+        bars = [bar(_BASE_TS + timedelta(minutes=i), close, oi=None) for i in range(2)]
+        sink.append(
+            exchange="NSE", segment="CASH", symbol=spot_symbol, interval="1minute", bars=bars
+        )
+    bajaj_ce = "NSE-BAJAJAUTO-25Jan24-1500-CE"
+    mm_ce = "NSE-M&M-25Jan24-1500-CE"
+    for option_symbol in (bajaj_ce, mm_ce):
+        bars = [bar(_BASE_TS + timedelta(minutes=i), "40", oi=50) for i in range(2)]
+        sink.append(
+            exchange="NSE", segment="FNO", symbol=option_symbol, interval="1minute", bars=bars
+        )
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
+        store.upsert_many(
+            [
+                Instrument(
+                    exch_id=Exchange.NSE,
+                    security_id=security_id,
+                    symbol_name=symbol,
+                    display_name=symbol,
+                    instrument=InstrumentType.EQ,
+                    segment=Segment.CASH,
+                    series="EQ",
+                    isin=None,
+                    underlying_symbol=None,
+                    underlying_security_id=None,
+                    lot_size=1,
+                    tick_size=Dec("0.05"),
+                    sm_freeze_qty=None,
+                    sm_expiry_date=None,
+                    strike_price=None,
+                    asm_gsm_flag=False,
+                )
+                for security_id, symbol in ((11, "BAJAJ-AUTO"), (12, "M&M"))
+            ],
+            snapshot_date=date_type(2024, 1, 1),
+            run_id="golden-stock-drift",
+            csv_source_sha256="0" * 64,
+        )
+    return [
+        GreeksEnrichTarget(exchange="NSE", symbol=bajaj_ce, start=_WINDOW_A[0], end=_WINDOW_A[1]),
+        GreeksEnrichTarget(exchange="NSE", symbol=mm_ce, start=_WINDOW_A[0], end=_WINDOW_A[1]),
+    ]
+
+
+def test_stock_drift_parallel_pass_is_byte_identical_to_sequential(tmp_path: Path) -> None:
+    """DEC-GREEKS-SPOTJOIN-STOCK-001: the parent-built drift map rides the
+    pickled worker context — a REAL spawn pool recovers the drifted stock
+    spots and stores bytes IDENTICAL to the sequential pass (workers never
+    scan; sequential and parallel consume the same per-pass map)."""
+    pytest.importorskip("duckdb", reason="the drift-map loader needs the instrument master")
+    lake_seq = tmp_path / "lake_seq"
+    lake_par = tmp_path / "lake_par"
+    targets_seq = _build_drifted_stock_lake(lake_seq)
+    targets_par = _build_drifted_stock_lake(lake_par)
+    assert _partition_hashes(lake_seq) == _partition_hashes(lake_par)
+
+    report_seq = enrich_greeks_for_targets(
+        targets=targets_seq, lake_root=lake_seq, rate_source=_RATE, workers=1
+    )
+    report_par = enrich_greeks_for_targets(
+        targets=targets_par, lake_root=lake_par, rate_source=_RATE, workers=2
+    )
+
+    assert report_par == report_seq
+    assert report_seq.enriched == 2
+    assert report_seq.errored == 0
+    # The recovery actually happened: a solved chain writes non-null IVs, which
+    # is only possible through the stock rung on this drifted lake.
+    import polars as pl
+
+    for symbol in ("NSE-BAJAJAUTO-25Jan24-1500-CE", "NSE-M&M-25Jan24-1500-CE"):
+        part = lake_par / "bars" / "NSE" / "FNO" / symbol / "1minute" / "2024" / "01.parquet"
+        assert pl.read_parquet(part)["iv"].null_count() == 0
+
+    assert _partition_hashes(lake_seq) == _partition_hashes(lake_par)
+
+
 def test_parallel_pass_is_byte_identical_to_sequential(tmp_path: Path) -> None:
     lake_seq = tmp_path / "lake_seq"
     lake_par = tmp_path / "lake_par"
