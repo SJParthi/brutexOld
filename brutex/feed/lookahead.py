@@ -9,8 +9,9 @@ from a ``pytest.skip`` ROADMAP stub into a *live* runtime guard.
 The no-look-ahead invariant is *already* enforced at runtime today by the
 **feed-boundary guard** :meth:`brutex.feed.replay.ReplayFeed.ensure_no_lookahead`
 (``brutex/feed/replay.py:184-208``) — a *timestamp*-based check wired into
-:class:`~brutex.strategies.runner.StrategyRunner` (``runner.py:181``) and
-:class:`~brutex.execution.driver.BacktestDriver` (``driver.py:184``).
+:class:`~brutex.strategies.runner.StrategyRunner` (``runner.py:181``; the
+deleted ``BacktestDriver`` wired the same guard pair until
+DEC-EXECUTION-TRIO-DELETE-001).
 
 :class:`LookAheadBarrier` is the **Phase-2 strengthening** of that guard, NOT
 a new performance path and NOT a replacement. It is an *index*-based instrumented
@@ -23,8 +24,8 @@ index ``> N``.
 timestamp guard (:meth:`~brutex.feed.replay.ReplayFeed.ensure_no_lookahead`,
 wired at ``runner.py:207``) is the guard that catches a future *strategy
 signal* — it is the real strategy-look-ahead defence. The barrier as wired into
-the runner/driver event loop asserts the **advance/access cursor invariant**:
-both sites ``advance_to(step)`` then ``guard(step, …)`` at the SAME ``step``, so
+the runner event loop asserts the **advance/access cursor invariant**:
+the site ``advance_to(step)`` then ``guard(step, …)`` at the SAME ``step``, so
 the barrier fires only if that index-vs-cursor relationship is ever violated (a
 feed/barrier desync or a wiring regression) — it does NOT interpose on the
 arbitrary bar reads a strategy performs off its own state, so a future-peeking
@@ -35,7 +36,7 @@ future index — done by the property tests and by the manual
 literally redundant coverage of the same failure at the same site.
 
 **The brute-force SWEEP path (DEC-SWEEP-LOOKAHEAD-GUARD-001):** the two guards
-above wire only the library-strategy path (runner/driver); the sweep spine
+above wire only the library-strategy path (the runner); the sweep spine
 (``run_persisted_sweep`` → Stage-1A → trade sim) historically had NO runtime
 guard. It now has three layers: (1) **structural causality** (audit-verified:
 Stage-1A updates prior-bar history only AFTER evaluation; the trade sim enters
@@ -63,7 +64,7 @@ and is meant only for the *bounded* manual-recheck slice and the property tests.
 
 ## No global mutable state
 
-The barrier is a plain dependency-injected instance. Each runner/driver owns
+The barrier is a plain dependency-injected instance. Each runner owns
 its own barrier (or one is injected for the manual recheck); nothing here
 touches module-level mutable state. :meth:`LookAheadBarrier.reset` returns an
 instance to its just-constructed form so a runner can reuse it across
