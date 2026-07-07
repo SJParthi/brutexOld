@@ -1084,6 +1084,6 @@ def _deterministic_sample(
 
     if k >= len(signals):
         return list(signals)
-    rng = random.Random(run_id)  # noqa: S311 — deterministic sampling, not crypto
+    rng = random.Random(run_id)  # noqa: S311  # nosec B311 — deterministic R45 sampling, non-crypto
     indices = sorted(rng.sample(range(len(signals)), k))
     return [signals[i] for i in indices]
