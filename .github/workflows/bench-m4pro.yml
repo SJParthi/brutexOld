@@ -137,7 +137,14 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           pip install --upgrade pip
-          pip install -e ".[dev]"
+          # [data] (polars/duckdb/pyarrow) is REQUIRED here, not optional:
+          # the sweep worker-scaling A/B bench drives the REAL
+          # run_parallel_grid -> run_persisted_sweep -> ResultsStore.flush(),
+          # which imports polars in the worker processes (mirrors ci.yml's
+          # bench job, which installs ".[dev,data,ui,optimize]"). Without it
+          # the bench fails with ModuleNotFoundError: polars (observed live,
+          # run 28850622113 — DEC-TEST-APPARATUS-DEBTS-001(i) follow-up fix).
+          pip install -e ".[dev,data]"
 
       - name: Build fno_math (Rust kernel)
         # Belt-and-suspenders crates.io flake guard (on top of the
