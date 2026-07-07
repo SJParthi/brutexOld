@@ -133,3 +133,7 @@ scratchpad/
 
 # Personal Claude Code local settings (not shared)
 .claude/settings.local.json
+
+# DEC-BENCH-ABS-BASELINE-001: runner-local absolute-bench fragments/candidate
+# working dir; committed baselines live ONLY under tests/bench/baselines/.
+abs-bench/
