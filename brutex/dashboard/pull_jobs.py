@@ -340,8 +340,13 @@ class BackgroundPullJob:
         (its own ``try/except`` — a raising hook never skips the single-flight release,
         and a raising ``on_finally`` never skips this hook). The production wiring is
         ``SessionRateController.clear_meter`` (a controller-lock LEAF; lock order
-        job → controller, pinned), so "no job running ⇒ no meter registered" holds.
-        ``None`` (the default) disables it.
+        job → controller, pinned) — the JOB-RUN arm of the meter-lifecycle law: for
+        pulls run ON this job, run end clears the registered meter. The direct
+        (off-job) ``POST /api/v1/universe/pull`` route never fires this hook and is
+        covered by its OWN paired ``finally`` clear (+ a no-holder dry-run arm), so
+        only TOGETHER do the arms make "no in-process pull running ⇒ no meter
+        registered" hold (DEC-RATE-METER-LIFECYCLE-001 round 2). ``None`` (the
+        default) disables it.
 
     journal_heartbeat_interval_s
         Minimum seconds between two DURABLE pull-journal heartbeat records

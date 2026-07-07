@@ -45,9 +45,11 @@ covering everything the spot per-window seam does not.
   :meth:`~brutex.dashboard.pull_controller.SessionRateController.peek_meter` and pushes the
   meter's REAL ``snapshot`` — the true MEASURED completed rate — during the metadata + F&O
   phases too. When no meter is registered (the pre-registration window / a dry-run / after a
-  finished job) it falls back to the honest ``meter_present=False`` sentinel; a dry-run
-  explicitly DEREGISTERS at the build sites and the job-finish hook clears the meter, so
-  ``peek_meter()`` between jobs is ``None`` by invariant (DEC-RATE-METER-LIFECYCLE-001) — so
+  finished pull) it falls back to the honest ``meter_present=False`` sentinel; a dry-run
+  explicitly DEREGISTERS at the build sites, the job-finish hook clears a job pull's
+  meter, and the direct (off-job) single-symbol route pairs its own ``finally`` clear, so
+  ``peek_meter()`` with no in-process pull running is ``None`` by invariant
+  (DEC-RATE-METER-LIFECYCLE-001 round 2) — so
   "achieved" stays an
   HONEST 0 (never the old ``recent_minute / 60`` fabrication, which both OVER-reported —
   admissions ≥ completions — and BLINDED the ``stalled`` verdict to an issued-but-all-failing
@@ -169,9 +171,10 @@ class RatePanelSampler:
         (the MEASURED completed ``effective_rps`` — ``meter_present`` then defaults ``True`` in
         the observer, since a real snapshot carries no such key). When NO meter is
         registered — the pre-registration window at pull start, a dry-run (which explicitly
-        DEREGISTERS at the build sites), or after a finished job (the ``on_run_end`` hook
-        clears the meter, so ``peek_meter()`` between jobs is ``None`` by invariant —
-        DEC-RATE-METER-LIFECYCLE-001) — it falls back to the
+        DEREGISTERS at the build sites), or after a finished pull (the job's ``on_run_end``
+        hook / the direct off-job route's paired ``finally`` clears the meter, so
+        ``peek_meter()`` with no in-process pull running is ``None`` by invariant —
+        DEC-RATE-METER-LIFECYCLE-001 round 2) — it falls back to the
         honest ``{"meter_present": False}`` sentinel of DEC-RATE-WIDGET-FNO-HONEST-001 — NO
         fabricated ``effective_rps`` (never the old ``recent_minute / 60`` admission-derived
         figure the removed sampler poured into the "achieved" slot, which over-reported AND

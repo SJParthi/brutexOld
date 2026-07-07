@@ -994,11 +994,13 @@ class SessionRateController:
         #: — the MEASURED completed-rate source (``effective_rps``) — with an explicit
         #: LIFECYCLE (DEC-RATE-METER-LIFECYCLE-001): REGISTERED by the pull build sites once
         #: they build the client pool (DEC-RATE-WIDGET-FNO-MEASURED-001) and CLEARED (a) by a
-        #: dry-run's :func:`register_pull_meter` gate and (b) by the ``BackgroundPullJob``'s
-        #: job-end hook (:meth:`clear_meter`) — so ``None`` means exactly "no meter registered:
-        #: the pre-registration window at pull start, a dry-run, or after the job-finish
-        #: clear", and the sampler falls back to its honest ``meter_present=False``. A dead
-        #: pull's meter can never linger into a later pull / dry-run (the #1482 C0 fix).
+        #: dry-run's :func:`register_pull_meter` gate, (b) by the ``BackgroundPullJob``'s
+        #: job-end hook (:meth:`clear_meter`), and (c) by the direct (off-job)
+        #: ``POST /api/v1/universe/pull`` route's paired ``finally`` clear — so ``None``
+        #: means exactly "no meter registered: the pre-registration window at pull start,
+        #: a dry-run, or after a finished pull's clear", and the sampler falls back to its
+        #: honest ``meter_present=False``. A dead pull's meter can never linger into a
+        #: later pull / dry-run (the #1482 C0 fix + its round-2 direct-route residual).
         self._meter: CallMeter | None = None
         self._lock = threading.Lock()
 
@@ -1073,11 +1075,14 @@ class SessionRateController:
         DEC-RATE-METER-LIFECYCLE-001 — the paired DEATH of the meter handle whose BIRTH is
         the build sites' :func:`register_pull_meter`. The LIFECYCLE LAW: the meter is
         registered by the pull build sites at pull start and cleared (a) by
-        :func:`register_pull_meter`'s dry-run gate and (b) by the
-        ``BackgroundPullJob(on_run_end=...)`` hook in the job's identity-gated ``finally``
-        — so "no job running ⇒ no meter registered" is a process invariant and a dead
-        pull's never-evicted meter can never be sampled by a later dry-run / idle poll
-        (the #1482 C0 cross-pull leak fix).
+        :func:`register_pull_meter`'s dry-run gate, (b) by the
+        ``BackgroundPullJob(on_run_end=...)`` hook in the job's identity-gated ``finally``,
+        and (c) by the direct (off-job) single-symbol route's paired ``finally``
+        (``POST /api/v1/universe/pull`` bypasses the single-flight job, so it clears its
+        OWN build-site registration — success AND failure) — so "no in-process pull
+        running ⇒ no meter registered" is a process invariant and a dead pull's
+        never-evicted meter can never be sampled by a later dry-run / idle poll (the
+        #1482 C0 cross-pull leak fix + its round-2 direct-route residual).
 
         This method is a LEAF and must stay so: one lock, one write, NO callbacks — it is
         invoked while ``BackgroundPullJob._lock`` is HELD (lock order: job ``_lock`` →
@@ -1113,9 +1118,15 @@ GrowwClient` (its own ``.meter``) OR a :class:`~brutex.adapters.protocol.MarketA
     ``CallMeter`` (``client.py`` ``default_factory=CallMeter``), so registering it would
     fabricate a MEASURED "flowing" rate during a synthetic pull, and the clear also evicts
     a DEAD prior pull's handle so a warm-process dry-run reads the same honest
-    ``meter_present=False`` as a cold one. The eviction is safe because the single-flight
-    ``BackgroundPullJob`` means no live pull can be concurrent in-process — a new call
-    site must never invoke ``dry_run=True`` while a live pull runs.
+    ``meter_present=False`` as a cold one. The eviction is safe because every
+    ``dry_run=True`` invocation that reaches this gate WITH a live *session_rate* comes
+    from a single-flight ``BackgroundPullJob`` run's build sites (no live pull can be
+    concurrent with it in-process); the ONE off-job call site — the direct
+    ``POST /api/v1/universe/pull`` route, which bypasses the single-flight job — passes
+    ``session_rate=None`` on a dry-run precisely so an operator's concurrent dry-run can
+    never evict a LIVE pull's registered meter (round 2). A NEW call site must preserve
+    one of those two shapes: run under the single-flight job, or pass no holder on a
+    dry-run.
 
     Mirrors :func:`_observe_rate`'s ``getattr`` probe: it looks for a ``meter`` directly on
     *source* (a client/pool) and, failing that, on ``source.client`` (an adapter). Only a

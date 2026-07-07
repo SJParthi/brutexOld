@@ -22,11 +22,14 @@ _Last updated: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1482 —
 the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
 pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
 `dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL
-unpaced CallMeter, so the old "no `.meter` no-op" claims were FALSE) and (b)
+unpaced CallMeter, so the old "no `.meter` no-op" claims were FALSE), (b)
 `BackgroundPullJob(on_run_end=SessionRateController.clear_meter)` in the job's
-identity-gated finally — so "no job running ⇒ no meter registered" is a process
-invariant (the 96-agent audit's C0 cross-pull leak + the dry-run fabricated
-"flowing" closed). Plus: per-spine mutant-killing wiring tests (all four
+identity-gated finally, and (c) the direct OFF-job `POST /api/v1/universe/pull`
+route's paired `finally` clear (round 2 — that route bypasses the single-flight
+job; its dry-run arm passes NO holder so it can never evict a live pull's
+meter) — so "no in-process pull running ⇒ no meter registered" is a process
+invariant covering every registration path (the 96-agent audit's C0 cross-pull
+leak + the dry-run fabricated "flowing" closed). Plus: per-spine mutant-killing wiring tests (all four
 register sites — the audit's C1/C2 surviving-mutant gap); a kind-aware
 `/api/v1/pull/rate` probe (`BackgroundPullJob.start(job_kind=)` — a 2-4-day
 dashboard SWEEP reads honest idle, never a site-wide red "stalled"; the
@@ -35,7 +38,9 @@ dashboard SWEEP reads honest idle, never a site-wide red "stalled"; the
 `pull_active=True` bridge file decays to idle instead of a permanent red; the
 12 s-900 s died-mid-run alert window preserved); the false bx-rate-monitor.js
 "obs rendered" claim + dead CSS removed; six stale pre-#1056 doc passages
-reconciled. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
+reconciled + (round 3) the scoped "no in-process pull running ⇒ no meter
+registered" wording swept across every remaining claim site and locked by a
+grep doc-pin test. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
 ruff/ruff-format/mypy --strict/pyright clean).
 Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
@@ -341,13 +346,19 @@ hostile-review pass._
   pull-rate CallMeter LIFECYCLE + rate-widget truth pack, the 96-agent hostile-audit fixes as ONE observe-only change
   set (ZERO pacing change, fetch behavior byte-identical): (a) C0 — NEW `SessionRateController.clear_meter` fired by
   `BackgroundPullJob(on_run_end=…)` inside the identity-gated finally (after `on_finally`, own try/except, before the
-  single-flight release; job-lock → controller-lock order pinned) so "no job running ⇒ no meter registered" is a
-  process invariant — a dead pull's meter is unreadable in every later process state; the intra-pull
+  single-flight release; job-lock → controller-lock order pinned), PLUS (round 2) the direct OFF-job
+  `POST /api/v1/universe/pull` route pairing its own build-site registration with a `finally` clear (success AND
+  failure — the route bypasses the single-flight job, the reviewer-proven C0 residual) so "no in-process pull
+  running ⇒ no meter registered" is a process invariant covering every registration path — a dead pull's meter is
+  unreadable in every later process state; the intra-pull
   `register_meter(None)`-keeps-prior guard byte-unchanged + re-pinned. (b) the dry-run finding —
   `register_pull_meter(…, dry_run=)` clears-and-never-registers at ALL FOUR build sites (the metadata/F&O dry-run
   GrowwClients carry a REAL unpaced CallMeter, `client.py` `default_factory=CallMeter`, so the #1056 "no `.meter`
   silent no-op" in-code/ledger claims were FALSE and are rewritten); a warm-process dry-run reads the same honest
-  `meter_present=False` as a cold one, never a fabricated MEASURED "flowing". (c) C1/C2 — per-spine mutant-killing
+  `meter_present=False` as a cold one, never a fabricated MEASURED "flowing"; round 2 — the direct route's dry-run
+  arm passes `session_rate=None`, so an operator's concurrent `?dry_run=true` on the off-job route can never evict a
+  LIVE pull's registered meter (the gate's eviction-safety premise rescoped: single-flight job-run sites OR no
+  holder). (c) C1/C2 — per-spine mutant-killing
   wiring tests drive the REAL `pull_all_spot`/`pull_candles`/`pull_expiries_contracts`/`pull_contract_candles` and
   assert `peek_meter() is` the exact injected CallMeter + dry-run eviction twins (every severed site / dropped kwarg
   now fails a named test; each mutant re-applied + captured failing). (d) C5 — `BackgroundPullJob.start(job_kind=)`
@@ -361,7 +372,10 @@ hostile-review pass._
   beside it" claim rewritten (`req_per_hour_observed` is wire-only back-compat, deliberately NOT rendered) + the dead
   `.bxrm-obs` CSS deleted. (g) C6 — six stale pre-#1056 doc passages + `register_pull_meter`'s "silent NO-OP"
   docstring rewritten to registered-meter-lifecycle semantics; `build_app` gains an injectable `session_rate` test
-  seam (default byte-identical, pinned). HONEST: the sampler stays contractually observe-only; a dry-run <60 s after
+  seam (default byte-identical, pinned); round 3 — the falsified "no job running ⇒ no meter registered" over-claim
+  swept from its three remaining committed sites (`rate_sampler` ×2 + `pull_jobs`' `on_run_end` doc) to the scoped
+  "no in-process pull running" law + a grep doc-pin (`TestMeterLifecycleInvariantDocPin`) over every
+  `brutex/dashboard/*.py` so it can never re-drift. HONEST: the sampler stays contractually observe-only; a dry-run <60 s after
   a real pull can still read the decaying `recent_minute` as "flowing" ≤60 s (admission fallback — documented, not
   mechanised); the job-finish clear can lose to at most ONE final ≤2 s sampler snapshot (pull_active flips False in
   the same path); a wedged-but-alive CLI beyond 900 s also decays to idle (Telegram pull-health + the pull journal

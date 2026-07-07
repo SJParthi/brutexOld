@@ -707,8 +707,18 @@ def _nifty_instrument() -> object:
     )
 
 
-def _wired_client(tmp_path: Path, **app_kwargs: Any) -> tuple[Any, Any]:
-    """Build a ``(TestClient, InstrumentStore)`` pair over a real temp store."""
+def _wired_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **app_kwargs: Any
+) -> tuple[Any, Any]:
+    """Build a ``(TestClient, InstrumentStore)`` pair over a real temp store.
+
+    ISOLATION (review round 2): pins ``BRUTEX_LAKE_ROOT`` to a per-test tmp dir so
+    the app's ``BackgroundPullJob`` (built with the DEFAULT lake-root resolver — the
+    production wiring these tests deliberately exercise) takes its cross-process
+    single-flight ``flock`` under ``tmp_path``, NEVER under the operator's real
+    ``~/.brutex/lake`` — so consecutive tests, xdist shards, or a genuinely-running
+    local pull can never collide on the global lock file.
+    """
     pytest.importorskip("duckdb")
     from datetime import date
 
@@ -716,6 +726,7 @@ def _wired_client(tmp_path: Path, **app_kwargs: Any) -> tuple[Any, Any]:
     from brutex.data.instrument_store import InstrumentStore
     from fastapi.testclient import TestClient
 
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(_job_lake_root(tmp_path)))
     store = InstrumentStore.open(tmp_path / "instruments.duckdb")
     store.upsert_many(
         [_nifty_instrument()],  # type: ignore[list-item]
@@ -727,16 +738,50 @@ def _wired_client(tmp_path: Path, **app_kwargs: Any) -> tuple[Any, Any]:
     return client, store
 
 
-def _wait_for_job_settled(client: Any, *, timeout: float = 20.0) -> dict[str, object]:
-    """Poll ``/pull-progress`` (bounded deadline, event-orchestrated) until settled."""
+def _job_lake_root(tmp_path: Path) -> Path:
+    """The per-test lake root the job's default resolver reads via ``BRUTEX_LAKE_ROOT``."""
+    return tmp_path / "job_lake"
+
+
+def _wait_for_job_settled(
+    client: Any, *, lake_root: Path, timeout: float = 20.0
+) -> dict[str, object]:
+    """Poll ``/pull-progress`` until settled, THEN wait for the single-flight release.
+
+    The job flips the progress state to ``done``/``error`` EARLY
+    (``BackgroundPullJob._run``'s try/else), and only LATER — inside the
+    identity-gated ``finally`` — fires ``on_finally`` + ``on_run_end`` (the meter
+    clear) and releases the cross-process ``flock``. A settle-only wait therefore
+    races BOTH the meter-clear assertions and the NEXT test's ``start`` (the
+    captured ``pull_job.singleflight_refused`` flake — review round 2). The second
+    phase polls until the lake-root single-flight lock is acquirable, which by the
+    ``finally``'s ordering guarantees ``on_run_end`` has already run.
+    """
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_singleflight_lock,
+    )
+
     deadline = time.monotonic() + timeout
+    snap: dict[str, object] | None = None
     while time.monotonic() < deadline:
-        snap = client.get("/api/v1/universe/pull-progress").json()  # type: ignore[attr-defined]
-        assert isinstance(snap, dict)
-        if snap["state"] in {"done", "error"}:
-            return snap
+        got = client.get("/api/v1/universe/pull-progress").json()  # type: ignore[attr-defined]
+        assert isinstance(got, dict)
+        if got["state"] in {"done", "error"}:
+            snap = got
+            break
         time.sleep(0.01)
-    raise AssertionError("the background job did not settle within the deadline")
+    if snap is None:
+        raise AssertionError("the background job did not settle within the deadline")
+    while time.monotonic() < deadline:
+        try:
+            with pull_singleflight_lock(lake_root):
+                pass
+        except PullAlreadyRunningError:
+            time.sleep(0.01)
+        else:
+            return snap
+    raise AssertionError("the settled job did not release the single-flight lock in time")
 
 
 class TestSweepKindAwareRateProbe:
@@ -765,7 +810,8 @@ class TestSweepKindAwareRateProbe:
             return 0
 
         monkeypatch.setattr(app_module, "run_sweep_from_request", _blocking_sweep)
-        client, store = _wired_client(tmp_path)  # DEFAULT probes — the production wiring
+        # DEFAULT probes — the production wiring
+        client, store = _wired_client(tmp_path, monkeypatch)
         try:
             with client:  # type: ignore[attr-defined]
                 resp = client.post("/api/v1/sweep/run")  # type: ignore[attr-defined]
@@ -779,7 +825,8 @@ class TestSweepKindAwareRateProbe:
                 assert body["stalled"] is False
                 assert body["active"] is False
                 release.set()
-                assert _wait_for_job_settled(client)["state"] == "done"
+                settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
+                assert settled["state"] == "done"
                 after = client.get("/api/v1/pull/rate").json()  # type: ignore[attr-defined]
                 assert after["flow_state"] == "idle"
         finally:
@@ -808,7 +855,7 @@ class TestSweepKindAwareRateProbe:
             raise RuntimeError("released — end the fake pull without a report")
 
         monkeypatch.setattr(app_module, "pull_expiries_contracts", _blocking_metadata_pull)
-        client, store = _wired_client(tmp_path)  # DEFAULT probes
+        client, store = _wired_client(tmp_path, monkeypatch)  # DEFAULT probes
         try:
             with client:  # type: ignore[attr-defined]
                 resp = client.post(
@@ -824,7 +871,8 @@ class TestSweepKindAwareRateProbe:
                 assert body["stalled"] is True
                 assert body["flow_state"] == "stalled"
                 release.set()
-                assert _wait_for_job_settled(client)["state"] == "error"
+                settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
+                assert settled["state"] == "error"
         finally:
             release.set()
             store.close()  # type: ignore[attr-defined]
@@ -855,20 +903,26 @@ class TestMeterLifecycleAppWiring:
             app_module, "run_sweep_from_request", lambda request, *, lake_root, results_root: 0
         )
         injected = SessionRateController()
-        client, store = _wired_client(tmp_path, session_rate=injected)
+        client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
         try:
             with client:  # type: ignore[attr-defined]
                 injected.register_meter(CallMeter())  # pull #1's meter (simulated)
                 assert injected.peek_meter() is not None
                 assert client.post("/api/v1/sweep/run").json()["started"] is True  # type: ignore[attr-defined]
-                assert _wait_for_job_settled(client)["state"] == "done"
+                # The release-aware settle wait is the ordering barrier: the flock is
+                # released strictly AFTER on_run_end in the same identity-gated
+                # finally, so the peek below can never race the clear it pins.
+                settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
+                assert settled["state"] == "done"
                 assert injected.peek_meter() is None, (
                     "the job's identity-gated finally must clear the registered meter"
                 )
         finally:
             store.close()  # type: ignore[attr-defined]
 
-    def test_warm_process_dry_run_stays_honest(self, tmp_path: Path) -> None:
+    def test_warm_process_dry_run_stays_honest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The D1/C0 END-TO-END ORACLE (vs the audit's captured `flowing achieved: 5.0`).
 
         A WARM process — an earlier real pull built the controller AND registered a
@@ -893,7 +947,7 @@ class TestMeterLifecycleAppWiring:
             ticked.stop(elapsed_ms=100.0, completed=True)
         warmed.register_meter(ticked)
 
-        client, store = _wired_client(tmp_path, session_rate=warmed)
+        client, store = _wired_client(tmp_path, monkeypatch, session_rate=warmed)
         try:
             with client:  # type: ignore[attr-defined]
                 resp = client.post(
@@ -902,7 +956,8 @@ class TestMeterLifecycleAppWiring:
                 )  # type: ignore[attr-defined]
                 assert resp.status_code == 200
                 assert resp.json()["started"] is True
-                assert _wait_for_job_settled(client)["state"] == "done"
+                settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
+                assert settled["state"] == "done"
                 # The dead pull's meter is gone (the dry-run gate cleared it at the
                 # build site, and the job-end hook cleared again — belt-and-braces).
                 assert warmed.peek_meter() is None
@@ -961,7 +1016,7 @@ class TestMeterLifecycleAppWiring:
                 super().set_pull_active_probe(probe)  # type: ignore[arg-type]
 
         cache = _ProbeCapturingCache()
-        client, store = _wired_client(tmp_path, summary_cache=cache)
+        client, store = _wired_client(tmp_path, monkeypatch, summary_cache=cache)
         try:
             with client:  # type: ignore[attr-defined]
                 probe = captured["probe"]
@@ -974,8 +1029,137 @@ class TestMeterLifecycleAppWiring:
                     "floors still engage (only the rate route is kind-aware)"
                 )
                 release.set()
-                assert _wait_for_job_settled(client)["state"] == "done"
+                settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
+                assert settled["state"] == "done"
                 assert probe() is False
         finally:
             release.set()
             store.close()  # type: ignore[attr-defined]
+
+
+class TestDirectPullRouteMeterLifecycle:
+    """Round 2: the DIRECT (off-job) single-symbol route ``POST /api/v1/universe/pull``.
+
+    It bypasses the single-flight ``BackgroundPullJob`` (no ``on_run_end`` ever fires
+    for it), so it must pair its OWN meter lifecycle: a REAL pull clears its build-site
+    registration in the route's ``finally`` (success AND failure — the C0 residual),
+    and a DRY-RUN passes NO holder so it can never evict a LIVE pull's meter through
+    ``register_pull_meter``'s dry-run gate.
+    """
+
+    @staticmethod
+    def _metered_source() -> Any:
+        """A stand-in for the live adapter: carries a real ``.meter`` CallMeter."""
+        from brutex.adapters.call_meter import CallMeter
+
+        class _Source:
+            def __init__(self) -> None:
+                self.meter = CallMeter()
+
+        return _Source()
+
+    def test_direct_real_pull_clears_meter_after_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MUTANT KILLED: the route's ``finally: _session_rate.clear_meter()`` omitted —
+        a finished single-symbol pull's meter stayed registered with NO pull running
+        (readable by the next sampler-wrapped run's pre-registration ticks)."""
+        import importlib
+
+        from brutex.dashboard.pull_controller import (
+            PullCandlesReport,
+            SessionRateController,
+            register_pull_meter,
+        )
+
+        app_module = importlib.import_module("brutex.dashboard.app")
+        monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
+        injected = SessionRateController()
+        seen: dict[str, object] = {}
+        source = self._metered_source()
+
+        def _fake_pull_candles(instrument: Any, **kwargs: Any) -> Any:
+            seen["session_rate"] = kwargs["session_rate"]
+            # Simulate the REAL build-site registration inside pull_candles.
+            register_pull_meter(kwargs["session_rate"], source, dry_run=False)
+            assert injected.peek_meter() is source.meter
+            return PullCandlesReport(symbol=instrument.symbol_name, year=2024, dry_run=False)
+
+        monkeypatch.setattr(app_module, "pull_candles", _fake_pull_candles)
+        client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
+        try:
+            with client:
+                resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY"})
+                assert resp.status_code == 200
+                assert resp.json()["dry_run"] is False
+                # The REAL arm threads the app's injected holder (never None).
+                assert seen["session_rate"] is injected
+                assert injected.peek_meter() is None, (
+                    "the direct route's finally must clear its build-site registration "
+                    "— no in-process pull running ⇒ no meter registered"
+                )
+        finally:
+            store.close()
+
+    def test_direct_real_pull_failure_still_clears_meter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``finally`` covers the FAILURE arm too: a pull that registered its meter
+        then raised (the route's 400 path) must not leave the dead meter registered."""
+        import importlib
+
+        from brutex.dashboard.pull_controller import SessionRateController, register_pull_meter
+
+        app_module = importlib.import_module("brutex.dashboard.app")
+        monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
+        injected = SessionRateController()
+        source = self._metered_source()
+
+        def _registering_boom(instrument: Any, **kwargs: Any) -> Any:
+            register_pull_meter(kwargs["session_rate"], source, dry_run=False)
+            assert injected.peek_meter() is source.meter
+            raise RuntimeError("vendor exploded mid-pull")
+
+        monkeypatch.setattr(app_module, "pull_candles", _registering_boom)
+        client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
+        try:
+            with client:
+                resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY"})
+                assert resp.status_code == 400
+                assert "RuntimeError" in resp.json()["detail"]
+                assert injected.peek_meter() is None, (
+                    "the finally must clear the dead pull's meter on the failure arm too"
+                )
+        finally:
+            store.close()
+
+    def test_direct_dry_run_never_evicts_live_meter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MUTANT KILLED: ``session_rate=_session_rate`` passed unconditionally (the
+        pre-round-2 shape) — a concurrent ``?dry_run=true`` on this route (which
+        bypasses the single-flight job) reached ``register_pull_meter``'s dry-run gate
+        and BLANKED a live pull's registered meter mid-phase. The dry-run arm now
+        passes NO holder, driven end to end through the REAL offline dry-run spine."""
+        from brutex.adapters.call_meter import CallMeter
+        from brutex.dashboard.pull_controller import SessionRateController
+
+        live = SessionRateController()
+        live_meter = CallMeter()
+        live.register_meter(live_meter)  # a LIVE job pull's registration (simulated)
+        client, store = _wired_client(tmp_path, monkeypatch, session_rate=live)
+        try:
+            with client:
+                resp = client.post(
+                    "/api/v1/universe/pull",
+                    params={"symbol": "NIFTY", "dry_run": "true"},
+                )
+                assert resp.status_code == 200
+                assert resp.json()["dry_run"] is True
+                assert live.peek_meter() is live_meter, (
+                    "an operator's concurrent dry-run on the off-job route must never "
+                    "evict a live pull's registered meter (and the finally clear is "
+                    "real-pull-only)"
+                )
+        finally:
+            store.close()

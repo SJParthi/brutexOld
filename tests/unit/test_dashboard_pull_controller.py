@@ -3383,3 +3383,65 @@ class TestObservedHolidaysArming:
         pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert captured
         assert all(observed == frozenset() for observed in captured)
+
+
+class TestMeterLifecycleInvariantDocPin:
+    """Grep-based doc pin (DEC-RATE-METER-LIFECYCLE-001 round 3, Golden Rule #1).
+
+    Review rounds 2-3 proved the ORIGINAL #1482 claim — "no job running ⇒ no meter
+    registered" — FALSE: the direct off-job ``POST /api/v1/universe/pull`` route
+    registers the session meter with no ``BackgroundPullJob`` involved, so "no job"
+    never implied "no meter". The corrected, route-clear-backed invariant is scoped
+    to "no in-process pull running ⇒ no meter registered". The false wording had
+    replicated across FIVE committed claim sites (``rate_sampler`` module +
+    ``sample_once`` docstrings, ``pull_jobs``' ``on_run_end`` param doc, ``app``'s
+    job-construction comment, ``pull_controller``'s holder field comment) beyond the
+    two the fix originally swept — this pin greps the WHOLE dashboard package so the
+    over-claim can never re-drift into any module.
+    """
+
+    @staticmethod
+    def _dashboard_sources() -> dict[str, str]:
+        """Each module's source, whitespace/comment-prefix NORMALIZED for phrase greps.
+
+        Docstring re-wraps and ``#``-prefixed comment continuations split the pinned
+        phrases across lines (e.g. ``no in-process pull\n        running``), so every
+        run of whitespace / ``#`` collapses to one space before matching — the pin is
+        wrap-robust in BOTH directions (a re-wrapped re-drift is still caught).
+        """
+        import brutex.dashboard as dashboard_pkg
+
+        pkg_dir = Path(dashboard_pkg.__file__).resolve().parent
+        sources = {
+            path.name: re.sub(r"[\s#]+", " ", path.read_text(encoding="utf-8"))
+            for path in pkg_dir.glob("*.py")
+        }
+        assert sources, "dashboard package sources must be readable"
+        return sources
+
+    def test_false_unscoped_invariant_absent_everywhere(self) -> None:
+        """No dashboard module may claim the falsified job-scoped invariant again."""
+        # Built by concatenation so this pin never matches its own docstring source.
+        false_job_claim = "no job running" + " ⇒ " + "no meter registered"
+        false_between_jobs_claim = "between jobs" + " is ``None`` by invariant"
+        offenders = {
+            name
+            for name, text in self._dashboard_sources().items()
+            if false_job_claim in text or false_between_jobs_claim in text
+        }
+        assert offenders == set(), (
+            f"falsified meter-lifecycle over-claim re-drifted into {sorted(offenders)}: "
+            "the off-job POST /api/v1/universe/pull route registers a meter with NO job "
+            "running — scope the claim to 'no in-process pull running ⇒ no meter "
+            "registered' (DEC-RATE-METER-LIFECYCLE-001 rounds 2-3)"
+        )
+
+    def test_scoped_invariant_present_at_every_claim_site(self) -> None:
+        """The corrected scoped wording anchors each of the swept claim sites."""
+        sources = self._dashboard_sources()
+        scoped = "no in-process pull running"
+        for name in ("pull_controller.py", "app.py", "pull_jobs.py", "rate_sampler.py"):
+            assert scoped in sources[name], (
+                f"{name} lost the corrected scoped meter-lifecycle invariant wording "
+                "(DEC-RATE-METER-LIFECYCLE-001 rounds 2-3)"
+            )
