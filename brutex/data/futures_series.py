@@ -471,6 +471,33 @@ def resolve_futures_series(
                 next_seg.contract_symbol,
                 next_seg.expiry,
             )
+        # Same-month poison gate (review round-5 finding 10): NIFTY futures
+        # are STRICTLY monthly — the vendor never lists two contracts expiring
+        # in one calendar month — so two SELECTED segments sharing
+        # (year, month) is always lake corruption (a hand-planted/foreign
+        # dir). The duplicate-expiry refusal above catches only an IDENTICAL
+        # parsed expiry and the continuity gates only a gap
+        # > MAX_MONTHLY_EXPIRY_GAP_DAYS, so a mid-month poison dir previously
+        # slid between them, minting a bogus mid-month ``roll_schedule`` entry
+        # (an extra Stage-1A D11 hard reset + a re-keyed run identity) with
+        # only the OBSERVE-only ``expiry_drift`` WARN — fully silent on a
+        # calendar-abstaining 2027+ window. Structurally vendor-impossible →
+        # this can never false-refuse a legitimate lake. A same-month dir
+        # OUTSIDE the selection cannot poison the schedule (ownership clamps
+        # to the window; the schedule folds SELECTED expiries only).
+        if (prev_seg.expiry.year, prev_seg.expiry.month) == (
+            next_seg.expiry.year,
+            next_seg.expiry.month,
+        ):
+            raise FuturesSeriesError(
+                f"ambiguous lake: contract dirs {prev_seg.contract_symbol!r} and "
+                f"{next_seg.contract_symbol!r} both expire in "
+                f"{prev_seg.expiry.year:04d}-{prev_seg.expiry.month:02d} "
+                f"({prev_seg.expiry.isoformat()} vs {next_seg.expiry.isoformat()}) — "
+                "NIFTY futures are strictly monthly, so a second same-month expiry "
+                "is lake corruption and would mint a bogus mid-month roll — "
+                "quarantine the foreign dir before launching"
+            )
 
     # Continuity gate, START side (review round-1 findings 1/10): the pairwise
     # gate above only sees SELECTED segments, so a window that STARTS inside a

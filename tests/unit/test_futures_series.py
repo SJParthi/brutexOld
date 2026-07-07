@@ -255,6 +255,38 @@ class TestRefusals:
         assert "2025-06-26 → 2025-07-31" in str(exc.value)
         assert "Pull · full pipeline" in str(exc.value)
 
+    def test_same_month_poison_contract_refused_naming_both_dirs(self, tmp_path: Path) -> None:
+        # Round-5 finding 10: NIFTY futures are STRICTLY monthly, so a second
+        # dir expiring in the SAME calendar month (a hand-planted/foreign dir
+        # with a DIFFERENT parsed expiry) is always lake corruption — yet it
+        # slid between the duplicate-expiry gate (identical expiry only) and
+        # the continuity gates (gap > 40 days only), minting a bogus mid-month
+        # roll_schedule entry (an extra Stage-1A D11 hard reset + a re-keyed
+        # run identity) with only the OBSERVE-only expiry_drift WARN — fully
+        # silent on a calendar-abstaining 2027+ window. Now: loud refusal.
+        poison = "NSE-NIFTY-15Sep25-FUT"
+        root = _mk_lake(tmp_path, _AUG, poison, "NSE-NIFTY-30Sep25-FUT")
+        with pytest.raises(FuturesSeriesError, match="strictly monthly") as exc:
+            resolve_futures_series(root, start=date(2025, 9, 1), end=date(2025, 9, 30))
+        message = str(exc.value)
+        assert "ambiguous lake" in message
+        assert poison in message
+        assert "NSE-NIFTY-30Sep25-FUT" in message
+        assert "2025-09" in message
+        assert "2025-09-15" in message and "2025-09-30" in message
+        assert "quarantine" in message  # the remediation
+
+    def test_same_month_poison_refused_on_a_calendar_abstaining_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The silent arm of finding 10: with the calendar cross-check
+        # abstaining (2027+ horizon), even the observe-only expiry_drift WARN
+        # vanished — the refusal must be calendar-INDEPENDENT.
+        monkeypatch.setattr(futures_series, "_calendar_active_expiry", _raise_holiday_unavailable)
+        root = _mk_lake(tmp_path, "NSE-NIFTY-10Sep27-FUT", "NSE-NIFTY-30Sep27-FUT")
+        with pytest.raises(FuturesSeriesError, match="strictly monthly"):
+            resolve_futures_series(root, start=date(2027, 9, 1), end=date(2027, 9, 30))
+
 
 class TestInteriorHoleGate:
     """F1 — the worst silent-corruption class ALWAYS refuses, naming months."""
