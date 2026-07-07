@@ -24,6 +24,8 @@ from brutex.dashboard.movers_snapshot import (
     build_snapshot_payload,
     compute_snapshot,
     interval_minutes,
+    is_intraday_interval,
+    minute_to_hhmm,
     normalize_min_volume,
     parse_snapshot_date,
     pending_asset_payload,
@@ -282,6 +284,58 @@ def test_cutoff_minute_wrong_arity_raises() -> None:
 def test_cutoff_minute_non_integer_raises() -> None:
     with pytest.raises(ValueError, match="malformed time"):
         _cutoff_minute("09:ab")
+
+
+# ── minute_to_hhmm (DEC-MOVERS-ASOF-LATEST-DEFAULT-001) ────────────────────
+
+
+def test_minute_to_hhmm_session_endpoints() -> None:
+    assert minute_to_hhmm(929) == "15:29"
+    assert minute_to_hhmm(555) == "09:15"
+    assert minute_to_hhmm(925) == "15:25"
+
+
+def test_minute_to_hhmm_zero_pads_both_fields() -> None:
+    # Single-digit hour AND minute both zero-pad → a valid two-field HH:MM.
+    assert minute_to_hhmm(9 * 60 + 5) == "09:05"
+
+
+def test_minute_to_hhmm_round_trips_through_cutoff_minute() -> None:
+    # The formatter output is always a valid `#time` option and its inverse
+    # `_cutoff_minute` recovers the original minute exactly (echo == cut in value).
+    for minute in (555, 556, 600, 925, 929):
+        assert _cutoff_minute(minute_to_hhmm(minute)) == minute
+
+
+def test_minute_to_hhmm_matches_session_bar_times_grid_strings() -> None:
+    # Every string the frontend grid would generate is `minute_to_hhmm` of its
+    # minute, so an injected latest minute is always a selectable option.
+    for offset, hhmm in enumerate(session_bar_times("1minute")):
+        assert hhmm == minute_to_hhmm(555 + offset)
+
+
+# ── is_intraday_interval (DEC-MOVERS-ASOF-LATEST-DEFAULT-001) ──────────────
+
+
+def test_is_intraday_interval_true_for_sub_session_timeframes() -> None:
+    assert is_intraday_interval("1minute")
+    assert is_intraday_interval("3minute")
+    assert is_intraday_interval("30minute")
+    assert is_intraday_interval("1hour")
+    assert is_intraday_interval("3hour")
+    assert is_intraday_interval("4hour")  # 240 min < the 375-min session
+
+
+def test_is_intraday_interval_false_for_daily_and_unknown() -> None:
+    assert not is_intraday_interval("1day")  # the bar IS the day
+    assert not is_intraday_interval("bogus")  # unknown label → not intraday
+
+
+def test_is_intraday_interval_agrees_with_session_bar_times() -> None:
+    # The predicate is the boolean twin of the non-empty session grid — ONE
+    # daily-vs-intraday rule (CLAUDE.md §11 COMMON).
+    for interval in ("1minute", "5minute", "3hour", "1day", "bogus"):
+        assert is_intraday_interval(interval) == bool(session_bar_times(interval))
 
 
 # ── _row_to_bar (both tz branches) ────────────────────────────────────────
