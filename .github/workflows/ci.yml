@@ -1778,6 +1778,20 @@ jobs:
           else
             echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
           fi
+          # DEC-SWEEP-PREFLIGHT-ESTIMATOR-001: the sweep data-preflight's two
+          # brutex.data adapters ship at 100% line+branch from the start —
+          # the READ-ONLY session-coverage/ledger-quarantine scanner and the
+          # sweep-vs-pull exclusion flock (write-free probes + the run guard).
+          if compgen -G "tests/unit/test_data_session_coverage.py" > /dev/null; then
+            pytest --cov=brutex.data.session_coverage --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_session_coverage.py
+          else
+            echo "(brutex.data.session_coverage test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_data_sweep_exclusion.py" > /dev/null; then
+            pytest --cov=brutex.data.sweep_exclusion --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sweep_exclusion.py
+          else
+            echo "(brutex.data.sweep_exclusion test file not present yet — gate inactive)"
+          fi
           # DEC-COVERAGE-LEDGER-001 (entry #165): strict gates on the two pure
           # completeness-ledger modules. Both are import-light (brutex.data /
           # brutex.dashboard package inits do NOT pull in fastbloom_rs), so they
@@ -1839,12 +1853,17 @@ jobs:
           # (_build_revision_probe + _on_wedged) is covered by
           # tests/unit/test_pull_jobs_wedge.py (stem-matched for the discovery
           # gate), which MUST join this gate for the same reason.
+          # DEC-SWEEP-PREFLIGHT-ESTIMATOR-001: the sweep-vs-pull exclusion
+          # pre-probe + post-acquire re-probe arms in _acquire_singleflight are
+          # covered by tests/unit/test_dashboard_pull_jobs_sweep_exclusion.py,
+          # which MUST join this gate for the same reason.
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
               tests/unit/test_pull_jobs_singleflight.py \
               tests/unit/test_pull_jobs_wedge.py \
               tests/unit/test_pull_jobs_progress_honesty.py \
+              tests/unit/test_dashboard_pull_jobs_sweep_exclusion.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
               tests/integration/test_dashboard_e2e.py

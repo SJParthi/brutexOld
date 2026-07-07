@@ -80,6 +80,17 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     # the sweep-preflight freshness gate) — the raw read feeds dedup_bars_frame
     # IMMEDIATELY, exactly as the superseded doctor.py entry did.
     "brutex/data/tf_autoderive.py": "wired: read_lake_bars_frame dedups",
+    # DEC-SWEEP-PREFLIGHT-ESTIMATOR-001: the sweep data-preflight's session-date
+    # coverage scanner reads ONLY the timestamp column (no bar values served) and
+    # folds it to a DISTINCT-date set intersected with the request span, so
+    # duplicated physical rows collapse by construction — the dedup identity is
+    # inherently satisfied without the lake_read gate (BUILD-SPEC §2.4:
+    # "physical rows ≠ bars — the distinct-date set dedups by construction").
+    "brutex/data/session_coverage.py": (
+        "timestamp-column-only presence scan folded to a DISTINCT-date set — "
+        "duplicate rows collapse by construction; no bar values served "
+        "(DEC-SWEEP-PREFLIGHT-ESTIMATOR-001)"
+    ),
     "brutex/engine/results_store.py": "results-tree Parquet (run_id-keyed), not the bar lake",
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "

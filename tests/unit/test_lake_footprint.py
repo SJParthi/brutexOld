@@ -13,15 +13,23 @@ need = estimate minus sunk on-disk bytes, the +10% margin), the
 ``None`` — a guard bug never blocks the pipeline's data stage).
 
 Pure filesystem + dict-backed meta fakes; no DuckDB / FastAPI / network.
+
+DEC-SWEEP-PREFLIGHT-ESTIMATOR-001 adds the ``volume_free_bytes`` extraction
+suite: the public nearest-existing-parent probe (the former
+``evaluate_disk_guard`` inline walk) plus the byte-identical delegation pin.
 """
 
 from __future__ import annotations
 
+import shutil
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
+from brutex.data import lake_footprint
 from brutex.data.lake_footprint import (
     DEFAULT_SAFETY_MARGIN,
     DISK_GUARD_ENV,
@@ -42,6 +50,7 @@ from brutex.data.lake_footprint import (
     measure_lake_footprint,
     persist_footprint,
     record_lake_footprint,
+    volume_free_bytes,
 )
 from structlog.testing import capture_logs
 
@@ -247,6 +256,88 @@ class TestEvaluateDiskGuard:
         assert "+10% margin" in detail
         assert "free 1.0 GiB" in detail
         assert f"{DISK_GUARD_ENV}=off" in detail
+
+
+@dataclass(frozen=True, slots=True)
+class _Usage:
+    """A ``shutil.disk_usage``-shaped stub (only ``free`` is read)."""
+
+    free: int
+
+
+class TestVolumeFreeBytes:
+    """The DEC-SWEEP-PREFLIGHT-ESTIMATOR-001 extraction of the inline probe."""
+
+    def test_existing_dir_probes_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        probed: list[Path] = []
+
+        def fake_usage(path: Any) -> _Usage:
+            probed.append(Path(path))
+            return _Usage(free=12_345)
+
+        monkeypatch.setattr(shutil, "disk_usage", fake_usage)
+        assert volume_free_bytes(tmp_path) == 12_345
+        assert probed == [tmp_path]
+
+    def test_missing_path_walks_to_nearest_existing_parent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        probed: list[Path] = []
+
+        def fake_usage(path: Any) -> _Usage:
+            probed.append(Path(path))
+            return _Usage(free=99)
+
+        monkeypatch.setattr(shutil, "disk_usage", fake_usage)
+        assert volume_free_bytes(tmp_path / "not" / "yet" / "created") == 99
+        assert probed == [tmp_path]  # the nearest EXISTING ancestor
+
+    def test_real_probe_returns_positive_free_bytes(self, tmp_path: Path) -> None:
+        assert volume_free_bytes(tmp_path) > 0
+
+    def test_evaluate_disk_guard_delegates_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Byte-identical delegation: the guard's free_bytes IS the probe's answer."""
+        calls: list[Path] = []
+
+        def fake_probe(root: Path) -> int:
+            calls.append(root)
+            return 777
+
+        monkeypatch.setattr(lake_footprint, "volume_free_bytes", fake_probe)
+        decision = evaluate_disk_guard(tmp_path, observed_multiplier=None)
+        assert decision.free_bytes == 777
+        assert calls == [tmp_path]
+
+    def test_injected_free_bytes_never_probes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def must_not_probe(root: Path) -> int:
+            raise AssertionError("injected free_bytes must short-circuit the probe")
+
+        monkeypatch.setattr(lake_footprint, "volume_free_bytes", must_not_probe)
+        decision = evaluate_disk_guard(tmp_path, observed_multiplier=None, free_bytes=5)
+        assert decision.free_bytes == 5
+
+    def test_extraction_parity_with_the_former_inline_walk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The extracted function and the guard produce the SAME number for the
+        SAME missing-lake path (the former inline nearest-parent walk)."""
+
+        def fake_usage(path: Any) -> _Usage:
+            return _Usage(free=4_242)
+
+        monkeypatch.setattr(shutil, "disk_usage", fake_usage)
+        missing = tmp_path / "no" / "lake" / "here"
+        assert (
+            volume_free_bytes(missing)
+            == evaluate_disk_guard(missing, observed_multiplier=None).free_bytes
+            == 4_242
+        )
 
 
 class TestMakeDiskGuard:

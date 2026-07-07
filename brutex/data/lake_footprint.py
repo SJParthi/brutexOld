@@ -367,6 +367,41 @@ class DiskGuardDecision:
         )
 
 
+def volume_free_bytes(root: Path) -> int:
+    """Free bytes on the volume that holds (or will hold) *root*.
+
+    The nearest-existing-parent probe EXTRACTED verbatim from
+    :func:`evaluate_disk_guard` (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001 — the
+    sweep's fail-CLOSED results-volume disk gate reuses it instead of copying
+    it; CLAUDE.md §11 COMMON): a not-yet-created *root* (a first-ever lake /
+    results dir) walks up to its nearest EXISTING ancestor — the volume the
+    directory would be created on — and reads ``shutil.disk_usage(...).free``
+    there. O(path-depth) stats + one ``statvfs``; never creates anything.
+
+    Parameters
+    ----------
+    root
+        The directory whose volume to probe (need not exist yet).
+
+    Returns
+    -------
+    int
+        Free bytes on the probed volume.
+
+    Raises
+    ------
+    OSError
+        If the ``disk_usage`` probe itself fails (an unreadable / vanished
+        mount) — the CALLER decides the policy (the prebuild guard fails
+        OPEN via :func:`make_disk_guard`; the sweep's ``check_results_disk``
+        maps it to a fail-CLOSED refusal).
+    """
+    probe = root
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
+
+
 def evaluate_disk_guard(
     lake_root: Path,
     *,
@@ -381,8 +416,9 @@ def evaluate_disk_guard(
     :data:`FALLBACK_MULTIPLIER`); the NEED subtracts everything already on
     disk (source + derived — sunk cost); the verdict blocks when
     ``free < need × (1 + margin)`` and the need is positive. *free_bytes* is
-    injectable for tests; production reads ``shutil.disk_usage(lake_root)``
-    (falling back to the nearest existing parent for a first-ever lake).
+    injectable for tests; production probes the lake volume via the public
+    :func:`volume_free_bytes` (byte-identical delegation of the former inline
+    nearest-existing-parent walk).
     """
     footprint = measure_lake_footprint(lake_root)
     overall = footprint.overall
@@ -391,10 +427,7 @@ def evaluate_disk_guard(
     estimated_total = int(Decimal(overall.source_1m_bytes) * multiplier)
     need = max(0, estimated_total - overall.total_bytes)
     if free_bytes is None:
-        probe = lake_root
-        while not probe.exists() and probe.parent != probe:
-            probe = probe.parent
-        free_bytes = shutil.disk_usage(probe).free
+        free_bytes = volume_free_bytes(lake_root)
     blocked = need > 0 and free_bytes < int(Decimal(need) * (Decimal(1) + margin))
     return DiskGuardDecision(
         blocked=blocked,
@@ -462,4 +495,5 @@ __all__ = [
     "measure_lake_footprint",
     "persist_footprint",
     "record_lake_footprint",
+    "volume_free_bytes",
 ]
