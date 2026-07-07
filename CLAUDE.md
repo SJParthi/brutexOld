@@ -2288,7 +2288,7 @@ hostile-review pass._
     deleted at a measured package-wide 100.00% line+branch; the one
     🟡 is row 3 pending DEC-MUTATION-RUNTIME-003's verification run
     (the first green SCHEDULED `mutation.yml` run; supersedes -002's
-    never-verified run — MIGRATION.md #1535).
+    never-verified run — MIGRATION.md #1536).
     Earlier: row 3 honestly re-classified 🟡 while the orchestrator
     mutation pass exceeded its weekly budget, DEC-MUTATION-RUNTIME-001;
     the prior "15/2 (~71%)" wording here was the pre-re-classification
