@@ -382,6 +382,20 @@ class TestMaterializeAcceptPath:
         )
         assert isinstance(out, MaterializedFuturesTrade)
 
+    def test_r15_pessimistic_leg_absent(self) -> None:
+        # [R15] the pessimistic/worst leg (buy=HIGH, sell=LOW) is DEFERRED —
+        # structurally ABSENT: no worst/pessimistic field exists on the trade
+        # record and no such knob exists on the fill/materialize surfaces.
+        import inspect
+
+        from brutex.costs.futures_costs import apply_futures_fill
+
+        field_names = set(MaterializedFuturesTrade.__dataclass_fields__)
+        assert not {f for f in field_names if "worst" in f or "pessimistic" in f}
+        for fn in (materialize_futures_trade, apply_futures_fill):
+            params = set(inspect.signature(fn).parameters)
+            assert not {p for p in params if "worst" in p or "pessimistic" in p}
+
     def test_r31_vix_stamped_on_trade(self) -> None:
         # [R31] VIX passes through verbatim; missing stays an honest None.
         out = materialize_futures_trade(
