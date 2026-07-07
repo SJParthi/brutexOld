@@ -507,7 +507,12 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
         )
     upper = symbol.upper()
     if upper != symbol and (
-        upper in _ENGINE_SWEEP_SPOT_SYMBOLS or upper in _REFERENCE_ONLY_SYMBOLS
+        upper in _ENGINE_SWEEP_SPOT_SYMBOLS
+        or upper in _REFERENCE_ONLY_SYMBOLS
+        # The futures series alias is in-scope too (review round-2 finding 3):
+        # a lower-cased `nse-nifty-fut` gets the same hint-never-admit case
+        # pointer instead of the generic out-of-scope refusal.
+        or upper == NIFTY_FUTURES_SERIES_SYMBOL
     ):
         return EngineSweepVerdict(
             allowed=False,
