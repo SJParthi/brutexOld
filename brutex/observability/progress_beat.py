@@ -80,8 +80,13 @@ _BEATS: dict[str, ProgressBeat] = {}
 #: Guarded by :data:`_BEAT_LOCK`.
 _EPOCH: int = 0
 
-#: The epoch the drop WARN last fired for (``-1`` = never). Guarded by :data:`_BEAT_LOCK`.
-_WARNED_EPOCH: int = -1
+#: The epoch the drop WARN last fired for (``"warned_epoch"``, ``-1`` = never) — a
+#: one-slot mutable holder rather than a bare ``global`` int, because CodeQL's
+#: ``py/unused-global-variable`` query cannot see a read that happens only inside a
+#: function via a ``global`` statement (repo CodeQL Trap 3 — the semantics are
+#: identical, the item write just never rebinds the module name). Guarded by
+#: :data:`_BEAT_LOCK`.
+_WARN_THROTTLE: Final[dict[str, int]] = {"warned_epoch": -1}
 
 #: Count of beats DROPPED in the current register-epoch (the once-per-epoch WARN alone
 #: cannot convey magnitude — one stray beat vs a systematically-unattributed emitter
@@ -89,7 +94,7 @@ _WARNED_EPOCH: int = -1
 #: closes (register / unregister / reset). Guarded by :data:`_BEAT_LOCK`.
 _DROPPED_IN_EPOCH: int = 0
 
-#: Guards every read / mutation of :data:`_BEATS` / :data:`_EPOCH` / :data:`_WARNED_EPOCH`
+#: Guards every read / mutation of :data:`_BEATS` / :data:`_EPOCH` / :data:`_WARN_THROTTLE`
 #: — register / unregister run on the dashboard control thread, while emit runs on the
 #: fetch worker threads.
 _BEAT_LOCK = threading.Lock()
@@ -185,11 +190,10 @@ def reset_progress_beats() -> None:
     channel, so a keyed registration leaked by a test would bleed into the next one.
     Production never calls this (each run pops only its own channel).
     """
-    global _WARNED_EPOCH  # noqa: PLW0603 — the sanctioned test reset, lock-guarded
     with _BEAT_LOCK:
         _BEATS.clear()
         dropped = _close_epoch_locked()
-        _WARNED_EPOCH = -1
+        _WARN_THROTTLE["warned_epoch"] = -1
     _log_drop_summary(dropped)
 
 
@@ -215,7 +219,7 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
     register/unregister/reset). A raising beat is swallowed + logged so it can never
     crash the worker that is merely signalling liveness (Golden Rule #10).
     """
-    global _WARNED_EPOCH, _DROPPED_IN_EPOCH  # noqa: PLW0603 — throttle stamps, lock-guarded
+    global _DROPPED_IN_EPOCH  # noqa: PLW0603 — the drop tally, lock-guarded
     # Empty-registry fast path (every CLI / unit-test caller): skip the contextvars
     # channel resolution entirely. The UNLOCKED truthiness read is a benign race — the
     # registry is best-effort liveness signal and a beat straddling a register boundary
@@ -240,9 +244,9 @@ def emit_progress_beat(pull_id: str | None = None) -> None:
                 return  # empty registry — the explicit-pull_id silent no-op (no warn)
             _DROPPED_IN_EPOCH += 1
             dropped_so_far = _DROPPED_IN_EPOCH
-            warn = _WARNED_EPOCH != _EPOCH
+            warn = _WARN_THROTTLE["warned_epoch"] != _EPOCH
             if warn:
-                _WARNED_EPOCH = _EPOCH
+                _WARN_THROTTLE["warned_epoch"] = _EPOCH
             channel_count = len(_BEATS)
     if beat is None:
         if warn:

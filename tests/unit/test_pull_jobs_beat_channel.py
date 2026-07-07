@@ -529,7 +529,10 @@ class TestDirectHookGate:
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
 
         a_ids: list[str] = []
-        assert job.start(lambda _h: a_ids.append(current_pull_id()), total=1) is True
+        # Side effect (the append inside the worker) kept OUT of the assert expression
+        # so `python -O` cannot strip it (CodeQL py/side-effect-in-assert).
+        started_a = job.start(lambda _h: a_ids.append(current_pull_id()), total=1)
+        assert started_a is True
         a_id = a_ids[0]
 
         stalled_mid_b: list[bool] = []
