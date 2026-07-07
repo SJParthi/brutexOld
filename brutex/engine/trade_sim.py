@@ -13,14 +13,15 @@ the rest of the result row.
 It is a **signal-only** spot simulator (``TRACK1_BACKTEST_SPEC.md`` lines
 640-657, §9 finding C2 of ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``):
 the index has no order book, so there is **no slippage, no brokerage, no STT**
-and money stays in **int64 paisa** end-to-end. It deliberately does **not**
-import :class:`brutex.execution.simulator.ExecutionSimulator` (which fills at
-bar CLOSE and applies 5 bps slippage + ₹20 brokerage in ``Decimal`` via the
-dormant, stale ``brutex.execution.costs`` model — wrong for spot, and NOT the
-Track-2 cost authority either: the authoritative options cost model is
-:func:`brutex.costs.calculator.compute_trade_cost` per DEC-COST-001; the stale
-execution-costs model is deprecated). P&L is the per-unit directional
-price move in paisa (no position sizing — spot is research, not execution).
+and money stays in **int64 paisa** end-to-end. Historical note: it
+deliberately never imported the old ``ExecutionSimulator`` (which filled at
+bar CLOSE and applied 5 bps slippage + ₹20 brokerage in ``Decimal`` via the
+dormant, stale ``execution.costs`` model — wrong for spot, and NOT the
+Track-2 cost authority either); that deprecated trio was DELETED per
+DEC-EXECUTION-TRIO-DELETE-001, and the authoritative options cost model is
+:func:`brutex.costs.calculator.compute_trade_cost` per DEC-COST-001. P&L is
+the per-unit directional price move in paisa (no position sizing — spot is
+research, not execution).
 
 ## Fill conventions (configurable — :class:`FillPolicy`)
 

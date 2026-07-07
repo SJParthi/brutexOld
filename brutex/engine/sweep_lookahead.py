@@ -3,8 +3,10 @@
 DEC-SWEEP-LOOKAHEAD-GUARD-001: both pre-existing runtime look-ahead guards
 protect only the library-strategy path — the timestamp-based feed-boundary
 guard (:meth:`brutex.feed.replay.ReplayFeed.ensure_no_lookahead`) and the
-runner/driver-wired :class:`~brutex.feed.lookahead.LookAheadBarrier` cursor
-invariant. The brute-force sweep spine (``run_persisted_sweep`` →
+runner-wired :class:`~brutex.feed.lookahead.LookAheadBarrier` cursor
+invariant (the deleted ``BacktestDriver`` was the historical second wiring
+site — DEC-EXECUTION-TRIO-DELETE-001). The brute-force sweep spine
+(``run_persisted_sweep`` →
 Stage-1A ``build_bar_bits`` → Stage-1B → ``metrics_for_mask`` /
 ``simulate_trades`` → ``ranked_combo_to_result_row``) had NO runtime guard;
 it is structurally causal today (verified: Stage-1A updates prior-bar history

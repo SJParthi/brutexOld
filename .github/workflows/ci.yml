@@ -580,15 +580,8 @@ jobs:
           else
             echo "(brutex.indicators.fib_levels test file not present yet — gate inactive)"
           fi
-          # DEC-COVERAGE-DRIVER-001 (2026-06-02): brutex.execution.driver
-          # un-omitted at 100% line+branch. Reaching 100% needs BOTH the
-          # edge-case unit tests (guard/error branches via light fakes) AND
-          # the integration test (happy-path run() over a real lake).
-          if compgen -G "tests/unit/test_execution_driver_edges.py" > /dev/null; then
-            pytest --cov=brutex.execution.driver --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_driver_edges.py tests/integration/test_execution_driver.py
-          else
-            echo "(brutex.execution.driver edge test file not present yet — gate inactive)"
-          fi
+          # DEC-EXECUTION-TRIO-DELETE-001: the brutex.execution.driver gate
+          # (DEC-COVERAGE-DRIVER-001) was removed with the deleted module.
           # DEC-LOOKAHEAD-BARRIER-001 (2026-06-07): brutex.feed.lookahead —
           # Property P-06's LIVE runtime enforcer (the instrumented bar
           # accessor). 100% line+branch is reachable wheel-free: the
@@ -1110,12 +1103,8 @@ jobs:
           else
             echo "(brutex.costs.calculator test file not present yet — gate inactive)"
           fi
-          # 19g · brutex.execution.costs (57 stmts, 20 branches, 27 tests)
-          if compgen -G "tests/unit/test_execution_costs.py" > /dev/null; then
-            pytest --cov=brutex.execution.costs --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_costs.py
-          else
-            echo "(brutex.execution.costs test file not present yet — gate inactive)"
-          fi
+          # 19g · brutex.execution.costs gate removed with the deleted module
+          #       (DEC-EXECUTION-TRIO-DELETE-001).
           # 19h · brutex.data.models (54 stmts, 24 branches, 21 tests)
           if compgen -G "tests/unit/test_data_models.py" > /dev/null; then
             pytest --cov=brutex.data.models --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_models.py
@@ -1396,28 +1385,9 @@ jobs:
           else
             echo "(brutex.config.runtime test file not present yet — gate inactive)"
           fi
-          # DEC-COV-BACKFILL-004 (entry #260, 2026-05-27): 1-module
-          # backfill — close execution/simulator gap via 2 source-level
-          # `# pragma: no cover — defensive` markers on structurally
-          # unreachable paths (line 247 + 312). Lifts strict-100% gate
-          # count 50 → 51.
-          # 23a · brutex.execution.simulator (114 stmts post-pragma, 36 branches,
-          #       25 tests). Closes 93.67→100% via 2 `# pragma: no cover
-          #       — defensive` markers:
-          #       - Line 247 (`if qty <= 0: raise InvalidLotSizeError`):
-          #         structurally unreachable from public API — __init__
-          #         validates default_qty > 0 at line 120-121; execute()
-          #         uses self._default_qty so qty <= 0 is impossible
-          #         without bypassing the constructor.
-          #       - Line 312 (`if pos.qty == 0: pos.avg_price = ...`)
-          #         inside the partial-close branch: unreachable because
-          #         partial close requires strict |signed_delta| < |pos.qty|,
-          #         so pos.qty cannot reach 0 after the += signed_delta.
-          if compgen -G "tests/unit/test_execution_simulator.py" > /dev/null; then
-            pytest --cov=brutex.execution.simulator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_simulator.py
-          else
-            echo "(brutex.execution.simulator test file not present yet — gate inactive)"
-          fi
+          # 23a · brutex.execution.simulator gate (DEC-COV-BACKFILL-004)
+          #       removed with the deleted module
+          #       (DEC-EXECUTION-TRIO-DELETE-001).
           # DEC-FETCH-WATERMARK-001 (entry #282): strict gate on the pure
           # per-chunk fetch-status tracker (the G-10 anti-loop core).
           if compgen -G "tests/unit/test_watermark.py" > /dev/null; then
@@ -2256,10 +2226,7 @@ jobs:
             sleep 10
           done
       - name: pytest golden tests
-        # Discovers every tests/golden/*.py oracle by placement, including
-        # test_execution_driver_golden.py (DEC-EXEC-GOLDEN-PIN-001) — the frozen
-        # byte-equality answer-key for the execution driver's slippage +
-        # fill/no-fill + cash/freeze boundary geometry (audit Gap #5).
+        # Discovers every tests/golden/*.py oracle by placement.
         run: |
           if [ -d tests/golden ]; then
             pytest tests/golden -x
